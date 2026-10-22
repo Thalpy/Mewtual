@@ -188,6 +188,17 @@ export function visualFixtureResponse(command: string, payload: InvokeArgs = {},
   const channel = String(args.channel ?? "general");
 
   switch (command) {
+    // The visual fixture has no router. It still explicitly models controller acquisition so
+    // unlocked App lifecycle cannot silently bypass a newly added native command.
+    case "prepare_call_mapping_controller":
+      return "fixture-call-controller";
+    case "prepare_call_mapping_owner":
+      return "fixture-call-owner";
+    case "activate_call_mapping_owner":
+      return String(args.candidate);
+    case "end_call_mapping_owner":
+    case "unmap_call_port":
+      return null;
     case "resume_session":
       return clone([
         {
@@ -311,8 +322,15 @@ export function visualFixtureResponse(command: string, payload: InvokeArgs = {},
           },
         ],
       });
+    case "get_private_downloads": return [];
+    case "get_storage_health":
+      return { listed_files: 2, unique_files: 2, referenced_chunks: 2, verified_chunks: 2,
+        missing_chunks: 0, unreadable_chunks: 0, invalid_manifests: 0, verified_bytes: 2048,
+        has_peers: true, checked_at_ms: VISUAL_FIXTURE_NOW, logical_bytes: 2048,
+        local_estimated_bytes: 2048, pinned_files: 0, pinned_logical_bytes: 0,
+        pinned_local_estimated_bytes: 0, categories: [], largest_files: [], local_files: [] };
     case "get_kept_files":
-      return { supported: true, allocated_bytes: 0, limit_bytes: 1073741824, files: [], error: null };
+      return { supported: true, allocated_bytes: 0, limit_bytes: 1073741824, files: [], transfers: [], error: null };
     case "file_available":
       return true;
     case "get_file_usage":
@@ -668,7 +686,7 @@ export function visualFixtureResponse(command: string, payload: InvokeArgs = {},
         relay_likely_required: true,
         router_maps: true,
         advice:
-          "This device is behind NAT and no member is offering to host. Calls to peers who are also behind NAT need a relay.",
+          "Voice tries its own direct connection checks. If voice cannot connect, configure TURN in Settings, Calls.",
       });
     case "get_debug_logging":
     case "test_debug_logging":

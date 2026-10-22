@@ -17,12 +17,15 @@ import { spawn, spawnSync } from "node:child_process";
 import { mkdtempSync, rmSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
+import { ownedDebuggerEndpoint, waitForOwnedVite } from "./flow-processes.mjs";
 import process from "node:process";
 import { gate7FlowExpression } from "./gate7-flow.mjs";
+import { keptFlowExpression } from "./kept-flow.mjs";
+import { privateDownloadFlowExpression } from "./private-download-flow.mjs";
 
 const PORT = Number(process.env.FLOW_PORT ?? 5177);
 const URL_UNDER_TEST = `http://localhost:${PORT}/?fixture=chat`;
-const CDP_PORT = Number(process.env.FLOW_CDP_PORT ?? 9341);
 
 const EDGE_CANDIDATES = [
   process.env.EDGE_PATH,
@@ -33,14 +36,13 @@ const EDGE_CANDIDATES = [
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const isWindows = process.platform === "win32";
 
-// vite runs behind a shell, so child.kill() reaps only the cmd.exe wrapper: the node process
-// holding the port and the esbuild helper it started both survive as orphans. Those orphans
-// keep node_modules/@esbuild/*/esbuild.exe open, which makes the next npm install abort
-// mid-unlink with EPERM and leaves a node_modules with no .bin directory at all.
+// Retire only process trees launched by this harness. Vite may own an esbuild helper and
+// the isolated Edge profile owns renderer children; stopping only a wrapper leaves them alive.
+// A bounded cleanup must not trap the test forever after an earlier browser startup failure.
 function killTree(pid) {
   if (!pid) return;
   if (isWindows) {
-    spawnSync("taskkill", ["/F", "/T", "/PID", String(pid)], { stdio: "ignore", windowsHide: true });
+    spawnSync("taskkill", ["/F", "/T", "/PID", String(pid)], { stdio: "ignore", windowsHide: true, timeout: 10_000 });
     return;
   }
   try {
@@ -48,23 +50,6 @@ function killTree(pid) {
   } catch {
     /* already gone */
   }
-}
-
-// Backstop for a vite that outlives its wrapper anyway. Only ever called once our own server
-// has answered on this port, so it cannot take down a stranger that happened to hold it.
-function killPortListener(port) {
-  if (!isWindows) {
-    const found = spawnSync("lsof", ["-ti", `tcp:${port}`], { encoding: "utf8" });
-    for (const pid of (found.stdout ?? "").split("\n").filter(Boolean)) killTree(Number(pid));
-    return;
-  }
-  const found = spawnSync("netstat", ["-ano", "-p", "TCP"], { encoding: "utf8", windowsHide: true });
-  const pids = new Set();
-  for (const line of (found.stdout ?? "").split("\n")) {
-    const m = line.match(/:(\d+)\s+\S+\s+LISTENING\s+(\d+)/i);
-    if (m && Number(m[1]) === port) pids.add(Number(m[2]));
-  }
-  for (const pid of pids) killTree(pid);
 }
 
 async function findEdge() {
@@ -80,34 +65,21 @@ async function findEdge() {
   throw new Error("msedge.exe not found; set EDGE_PATH");
 }
 
-async function waitForVite() {
-  const deadline = Date.now() + 20_000;
-  while (Date.now() < deadline) {
-    try {
-      const res = await fetch(`http://localhost:${PORT}/`, { signal: AbortSignal.timeout(5_000) });
-      if (res.ok) return;
-    } catch {
-      /* not up yet */
-    }
-    await sleep(250);
-  }
-  throw new Error(`vite dev server did not come up on port ${PORT}`);
-}
-
 /** Minimal CDP client over the WebSocket devtools endpoint (Node's global WebSocket). */
 class Cdp {
   #seq = 0;
   #pending = new Map();
   consoleErrors = [];
 
-  static async connect(browserFailure = () => null) {
+  static async connect(profileDir, browserFailure = () => null) {
+    const endpoint = await ownedDebuggerEndpoint(profileDir, browserFailure);
     let wsUrl = null;
     const deadline = Date.now() + 15_000;
     while (!wsUrl && Date.now() < deadline) {
       if (browserFailure()) throw browserFailure();
       try {
-        const list = await (await fetch(`http://127.0.0.1:${CDP_PORT}/json/list`, { signal: AbortSignal.timeout(2_000) })).json();
-        wsUrl = list.find((t) => t.type === "page" && t.url.includes("localhost"))?.webSocketDebuggerUrl ?? null;
+        const list = await (await fetch(`${endpoint}/json/list`, { signal: AbortSignal.timeout(2_000) })).json();
+        wsUrl = list.find((t) => t.type === "page" && t.url === "about:blank")?.webSocketDebuggerUrl ?? null;
       } catch {
         /* browser still starting */
       }
@@ -116,15 +88,32 @@ class Cdp {
     if (!wsUrl) throw new Error("no CDP page target appeared");
     const cdp = new Cdp();
     cdp.ws = new WebSocket(wsUrl);
-    cdp.ws.onmessage = (ev) => cdp.#onMessage(JSON.parse(ev.data));
+    cdp.ws.onmessage = (ev) => {
+      const msg = JSON.parse(ev.data);
+      if (process.env.FLOW_CDP_TRACE === "1") console.log(`CDP receive id=${msg.id ?? "event"} method=${msg.method ?? "reply"} error=${msg.error?.code ?? "none"}`);
+      cdp.#onMessage(msg);
+    };
+    cdp.ws.addEventListener("error", event => {
+      if (process.env.FLOW_CDP_TRACE === "1") console.log(`CDP socket error: ${event.message ?? event.type}`);
+    });
+    cdp.ws.addEventListener("close", event => {
+      if (process.env.FLOW_CDP_TRACE === "1") console.log(`CDP closed ${event.code}`);
+      for (const pending of cdp.#pending.values()) pending({ error: { message: `debugger connection closed (${event.code})` } });
+      cdp.#pending.clear();
+    });
     await new Promise((resolve, reject) => {
       const timer = setTimeout(() => reject(new Error("CDP WebSocket did not open within ten seconds")), 10_000);
       cdp.ws.onopen = () => { clearTimeout(timer); resolve(); };
       cdp.ws.onerror = (error) => { clearTimeout(timer); reject(error); };
     });
-    await cdp.send("Runtime.enable");
-    await cdp.send("Page.enable");
-    return cdp;
+    try {
+      await cdp.send("Runtime.enable");
+      await cdp.send("Page.enable");
+      return cdp;
+    } catch (error) {
+      cdp.close();
+      throw error;
+    }
   }
 
   #onMessage(msg) {
@@ -174,10 +163,17 @@ class Cdp {
         this.#pending.delete(id);
         reject(new Error(`CDP ${method} did not answer within sixty seconds`));
       }, 60_000);
-      this.#pending.set(id, (reply) => { clearTimeout(timer); resolve(reply); });
+      this.#pending.set(id, (reply) => {
+        clearTimeout(timer);
+        if (reply.error) reject(new Error(`CDP ${method}: ${reply.error.message}`));
+        else resolve(reply);
+      });
+      if (process.env.FLOW_CDP_TRACE === "1") console.log(`CDP send id=${id} method=${method} state=${this.ws.readyState}`);
       this.ws.send(JSON.stringify({ id, method, params }));
     });
   }
+
+  close() { this.ws?.close(); }
 
   async eval(expression) {
     const r = await this.send("Runtime.evaluate", { expression, awaitPromise: true, returnByValue: true });
@@ -188,7 +184,8 @@ class Cdp {
   }
 
   async navigate(url) {
-    await this.send("Page.navigate", { url });
+    const response = await this.send("Page.navigate", { url });
+    if (response.result?.errorText) throw new Error(`Fixture navigation failed: ${response.result.errorText}`);
   }
 
   /** Stop the browser fetching anything matching these patterns, or lift the block when given none. */
@@ -202,19 +199,21 @@ class Cdp {
    *  dependency pre-bundling and the App.svelte transform. */
   async waitReady(timeoutMs = 90000) {
     const deadline = Date.now() + timeoutMs;
+    let state = null;
     while (Date.now() < deadline) {
       // Polled inside a try, because a poll that lands mid-navigation finds no document at all and
       // throws on `documentElement`. That is the normal state of a page that has not arrived yet,
       // not a failure, and letting it escape turned an ordinary race into an intermittent red run
       // whose message pointed nowhere near the cause.
       try {
-        if (await this.eval("document.documentElement?.dataset.visualReady ?? ''")) return;
+        state = await this.eval("({ ready: document.documentElement?.dataset.visualReady ?? '', url: location.href, document: document.readyState, appChildren: document.getElementById('app')?.children.length ?? -1 })");
+        if (state?.ready === "chat") return;
       } catch {
         /* not navigated yet */
       }
       await sleep(250);
     }
-    throw new Error("visual fixture never became ready");
+    throw new Error(`visual fixture never became ready: ${JSON.stringify(state)}`);
   }
 }
 
@@ -594,30 +593,29 @@ function assertEqual(scenario, got, want) {
   return true;
 }
 
-const vite = spawn("npm", ["run", "dev", "--", "--port", String(PORT), "--strictPort"], {
-  cwd: new URL("..", import.meta.url),
-  stdio: "ignore",
-  shell: true,
-  windowsHide: true,
-});
-const profileDir = mkdtempSync(join(tmpdir(), "catcoms-flow-"));
+// All fallible startup belongs inside try/finally, including profile creation. Retain actual
+// children rather than shell wrappers or whoever happens to listen on a familiar port.
+let vite = null;
+let profileDir = null;
 let edge = null;
 let failed = false;
-let viteUp = false;
 let cleanedUp = false;
 
 function cleanup() {
   if (cleanedUp) return;
   cleanedUp = true;
-  edge?.kill();
-  killTree(vite.pid);
-  if (viteUp) killPortListener(PORT);
+  connected?.close();
+  for (const child of [edge, vite]) {
+    // An exited PID can be reused. Never terminate it after our ChildProcess saw its exit.
+    if (child && child.exitCode === null && child.signalCode === null) killTree(child.pid);
+  }
 }
 
 // Held outside the try so a failure on the way *in* can still say what the page complained about.
 // Without this, a module that will not parse reports only "visual fixture never became ready",
 // and the SyntaxError naming the line sits in a buffer nobody prints.
 let connected = null;
+let browserOutput = "";
 
 // Ctrl-C skips the finally block, which would leak exactly the orphans cleanup exists to
 // prevent. The temp profile is left behind on this path; it lives in tmpdir and is disposable.
@@ -629,30 +627,56 @@ for (const signal of ["SIGINT", "SIGTERM"]) {
 }
 
 try {
-  await waitForVite();
-  viteUp = true;
+  profileDir = mkdtempSync(join(tmpdir(), "catcoms-flow-"));
+  vite = spawn(process.execPath, [fileURLToPath(new URL("../node_modules/vite/bin/vite.js", import.meta.url)), "--port", String(PORT), "--strictPort"], {
+    cwd: new URL("..", import.meta.url), stdio: ["ignore", "pipe", "pipe"], windowsHide: true,
+  });
+  console.log(`flow processes: runner=${process.pid} vite=${vite.pid}`);
+  await waitForOwnedVite(vite, PORT);
   edge = spawn(
     await findEdge(),
     [
       "--headless=new",
       "--disable-gpu",
-      `--remote-debugging-port=${CDP_PORT}`,
+      "--remote-debugging-port=0",
       "--no-first-run",
       `--user-data-dir=${profileDir}`,
       "--window-size=1280,800",
-      URL_UNDER_TEST,
+      "about:blank",
     ],
-    { stdio: "ignore", windowsHide: true },
+    { stdio: ["ignore", "ignore", "pipe"], windowsHide: true },
   );
+  edge.stderr.on("data", chunk => { browserOutput = (browserOutput + chunk).slice(-8192); });
+  console.log(`flow browser process: ${edge.pid}`);
   let browserFailure = null;
   edge.once("error", error => { browserFailure = new Error("Edge launch failed: " + error.message); });
   edge.once("exit", (code, signal) => {
     if (!cleanedUp) browserFailure = new Error(`Edge exited before completion (code ${code}, signal ${signal})`);
   });
-  connected = await Cdp.connect(() => browserFailure);
+  connected = await Cdp.connect(profileDir, () => browserFailure);
   const cdp = connected;
+  // A private debugger endpoint plus our exact navigation prevents touching an existing app.
+  await cdp.navigate(URL_UNDER_TEST);
 
-  if (process.env.FLOW_SCENARIO === "gate7") {
+  if (process.env.FLOW_SCENARIO === "private-download") {
+    await cdp.send("Emulation.setDeviceMetricsOverride", { width: 900, height: 640, deviceScaleFactor: 1, mobile: false });
+    await cdp.waitReady();
+    const result = await cdp.eval(privateDownloadFlowExpression);
+    failed |= !assertEqual("private download resume, active Pause, exact Retry and completion", result,
+      { disclosure: true, duplicateDisabled: true, pauseAvailable: true, pausePreservesGrant: true, resumedSettles: true, retryExact: true });
+    const capture = await cdp.send("Page.captureScreenshot", { format: "png" });
+    if (capture.result?.data) writeFileSync(new URL("../../../target/pr48-private-downloads.png", import.meta.url), Buffer.from(capture.result.data, "base64"));
+  } else if (process.env.FLOW_SCENARIO === "kept") {
+    await cdp.send("Emulation.setDeviceMetricsOverride", { width: 900, height: 640, deviceScaleFactor: 1, mobile: false });
+    await cdp.waitReady();
+    const result = await cdp.eval(keptFlowExpression);
+    failed |= !assertEqual("retained-copy pause, resume, completed Retry and Stop checking", result, {
+      quotaCountsOwnersOnce: true, completedExhaustionOffersRetry: true, pauseKeepsGrant: true,
+      resumeUsesNativeAdmission: true, completedRetryIsLossless: true, stopPreservesCopy: true,
+    });
+    const capture = await cdp.send("Page.captureScreenshot", { format: "png" });
+    if (capture.result?.data) writeFileSync(new URL("../../../target/pr48-kept-copies.png", import.meta.url), Buffer.from(capture.result.data, "base64"));
+  } else if (process.env.FLOW_SCENARIO === "gate7") {
     await cdp.send("Runtime.addBinding", { name: "gate7Click" });
     await cdp.send("Runtime.addBinding", { name: "gate7Capture" });
     await cdp.send("Emulation.setDeviceMetricsOverride", { width: 900, height: 640, deviceScaleFactor: 1, mobile: false });
@@ -666,6 +690,11 @@ try {
   } else {
 
   await cdp.waitReady();
+  const qr = await cdp.eval(`(async () => {
+    const { verifyQrInterop } = await import("/scripts/qr-browser-check.mjs");
+    return verifyQrInterop();
+  })()`);
+  failed |= !assertEqual("browser QR encoder/decoder interop", qr, { png: true, decoded: "Mewtual" });
   const send = await cdp.eval(SEND_SCENARIO);
   failed |= !assertEqual("send flow", send, {
     composerFound: true,
@@ -805,8 +834,9 @@ try {
   }
 } catch (e) {
   console.error(`FAIL harness: ${e.message}`);
-  if (process.env.FLOW_SCENARIO === "gate7" && connected) {
-    try { const capture = await connected.send("Page.captureScreenshot", { format: "png" }); if (capture.result?.data) writeFileSync(new URL("../../../target/gate7-pixa-failure.png", import.meta.url), Buffer.from(capture.result.data, "base64")); } catch { /* preserve original failure */ }
+  if (!connected && process.env.FLOW_CDP_TRACE === "1" && browserOutput) console.error(`Edge setup: ${browserOutput}`);
+  if (["gate7", "kept", "private-download"].includes(process.env.FLOW_SCENARIO) && connected) {
+    try { const capture = await connected.send("Page.captureScreenshot", { format: "png" }); if (capture.result?.data) writeFileSync(new URL(`../../../target/${process.env.FLOW_SCENARIO === "private-download" ? "pr48-private-download-failure" : process.env.FLOW_SCENARIO === "kept" ? "pr48-kept-failure" : "gate7-pixa-failure"}.png`, import.meta.url), Buffer.from(capture.result.data, "base64")); } catch { /* preserve original failure */ }
   }
   // Whatever the page managed to say before it gave up. This is usually the actual diagnosis: a
   // "never became ready" is nearly always a module that threw or would not parse, and the browser
@@ -819,7 +849,7 @@ try {
   cleanup();
   await sleep(300);
   try {
-    rmSync(profileDir, { recursive: true, force: true });
+    if (profileDir) rmSync(profileDir, { recursive: true, force: true });
   } catch {
     /* the browser may still hold a lock for a moment; the temp dir is disposable */
   }

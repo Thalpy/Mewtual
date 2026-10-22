@@ -7,6 +7,21 @@ const item = { token, server: 77, channel: "9", expectedContext: "a".repeat(64),
   text: "Do not publish this unresolved request", replyTo: "", acceptance: "not_accepted" };
 const initial = () => ({ pendingSends: { [token]: item } });
 
+test("actual close retires the open video review before a held continuity save finishes", async () => {
+  const app = pendingManagerApp(initial()); await app.hydrate();
+  const answer = app.review(new File([new Uint8Array(1)], "clip.mp4", { type: "video/mp4" }));
+  assert.ok(app.state().videoReview);
+  const gate = deferred(); app.holdSave(gate.promise);
+  const saving = app.save(); await settle();
+  const closing = app.close(); await settle();
+  assert.equal(app.state().videoReview, null);
+  assert.equal(app.state().videoScopeEpoch, 1);
+  assert.deepEqual(await answer, { kind: "skip" });
+  assert.equal(app.state().closeCalls.length, 0, "native close is still behind the held save");
+  gate.resolve(); await Promise.all([saving, closing]);
+  app.done();
+});
+
 for (const action of ["cancel", "recover"] as const) {
   test(`actual close callback waits for ${action} save and memory commit before its final snapshot`, async () => {
     const app = pendingManagerApp(initial()); await app.hydrate();

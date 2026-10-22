@@ -98,6 +98,47 @@ test("a route never races the window-close sequence's own Save", async () => {
   assert.equal(await h.gate.release(), false); assert.equal(h.log.saves, 0);
 });
 
+test("window close holds no-work and off-Studio routes as well as pending Saves", async () => {
+  for (const [onStudio, pending] of [[true, 0], [false, 0], [false, 1]] as const) {
+    const h = fakeHost({ onStudio, pending, closing: true });
+    let went = false;
+    h.gate.leaveThen(() => { went = true; });
+    assert.equal(went, false, "the synchronous path cannot bypass the close owner");
+    assert.equal(await h.gate.release(), false);
+    assert.equal(await h.gate.begin().scope(), false);
+    assert.equal(h.log.saves, 0);
+  }
+});
+
+test("a synchronous route checks its claim even when nothing needs saving", () => {
+  let went = false;
+  const gate = createStudioExit({ onStudio: () => false, hasWork: () => false,
+    closing: () => false, claim: () => () => false, save: async () => true });
+  gate.leaveThen(() => { went = true; });
+  assert.equal(went, false, "a locked or replaced session cannot authorize a direct route");
+});
+
+test("leaveThen rechecks supersession and close at the actual async route mutation", async () => {
+  for (const interrupt of ["supersede", "close"] as const) {
+    const saved = deferred<boolean>();
+    let pending = true, closing = false, serial = 0, went = false;
+    const gate = createStudioExit({ onStudio: () => true, hasWork: () => {
+      // This read happens after settle's final current check. Queue an interruption after
+      // that decision, before the Promise continuation which actually changes App flags.
+      if (!pending) queueMicrotask(() => { if (interrupt === "close") closing = true; else serial++; });
+      return pending;
+    },
+      closing: () => closing,
+      claim: () => { const mine = ++serial; return () => mine === serial; },
+      save: () => saved.promise,
+    });
+    gate.leaveThen(() => { went = true; });
+    pending = false; saved.resolve(true);
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(went, false, interrupt);
+  }
+});
+
 // The review's reproduction on the real session and a mounted editor: the bounded draft queue is
 // full (512 records, saving blocked), a stroke is drawn, staging refuses it and the pixels stay on
 // the canvas. A route asking the gate must leave the editor, and those pixels, where they are.

@@ -13,6 +13,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::future::Future;
+use std::sync::Arc;
 use std::time::Duration;
 
 use catcoms_crypto::{DeviceCertificate, DeviceId};
@@ -35,6 +36,13 @@ mod fair;
 #[cfg(test)]
 mod fair_tests;
 mod file_transfers;
+mod member_maintenance;
+mod member_reconnect;
+mod voice_endpoint;
+pub use voice_endpoint::{
+    VoiceConfirmationBody, VoiceConfirmationCompletion, VoiceEndpointCommand, VoiceEndpointError,
+    VOICE_CONFIRMATION_BODY_METADATA_BYTES,
+};
 
 /// Per drive: how long to wait for a discovered record before concluding the queue is drained.
 const DISCOVERY_DRAIN_MS: u64 = 500;
@@ -48,15 +56,75 @@ const MAX_REPORTED_ARRIVALS: usize = 32;
 const DELIVERY_THROTTLE_MS: u64 = 1_000;
 /// Per-tick cap on discovered records ingested, so one tick can't block the actor unboundedly.
 const MAX_DISCOVERED_PER_TICK: usize = 16;
-/// Ceiling on a **single** member-PEX request (ms). Deliberately per request rather than per
-/// pass: a shared budget lets the first peer asked spend all of it, so a peer that accepts and
-/// never answers silently starves every peer behind it, on every tick, forever. Whatever misses
-/// its deadline is backed off (`note_pex_failure`) and retried on a later tick.
-const PEX_REQUEST_MS: u64 = 3_000;
-
 /// A fetched + decrypted file chunk: its plaintext bytes plus the provider that served it (or an
 /// error string). One chunk per command keeps the actor responsive during a large download.
 type ChunkResult = Result<(Vec<u8>, Option<String>), String>;
+
+/// Native-only export custody for a whole-file-verified private Download. This is deliberately
+/// not serializable: the renderer receives status, never saved manifests, keys or read leases.
+#[derive(Clone)]
+pub struct DownloadReady {
+    manifest: catcoms_storage::FileManifest,
+    lease: catcoms_storage::kept::DownloadExportLease,
+    root: Arc<dyn catcoms_rt::RequestAuthority>,
+    actor: tokio::sync::watch::Receiver<bool>,
+    export_custody: Option<catcoms_rt::SharedRequestKeepalive>,
+}
+/// One private plaintext reply retains the native whole-export slot even if its waiter was
+/// canceled while the actor was reading disk. The receiver must retain its DownloadReady owner
+/// while using `into_bytes`; the live native SaveSource does so through write/publication.
+pub struct DownloadChunk {
+    bytes: Vec<u8>,
+    _custody: catcoms_rt::SharedRequestKeepalive,
+}
+impl std::fmt::Debug for DownloadChunk {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("DownloadChunk { .. }")
+    }
+}
+impl DownloadChunk {
+    pub fn into_bytes(self) -> Vec<u8> {
+        self.bytes
+    }
+}
+impl std::fmt::Debug for DownloadReady {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("DownloadReady { .. }")
+    }
+}
+impl DownloadReady {
+    /// Attach native whole-export accounting before the first plaintext read. This is resource
+    /// custody only; it cannot change the original Root or storage permission.
+    pub fn with_export_custody(mut self, custody: catcoms_rt::SharedRequestKeepalive) -> Self {
+        self.export_custody = Some(custody);
+        self
+    }
+    pub fn id(&self) -> catcoms_storage::kept::DownloadId {
+        self.lease.id()
+    }
+    pub fn cid(&self) -> Cid {
+        self.manifest.plaintext_cid
+    }
+    pub fn total_size(&self) -> u64 {
+        self.manifest.total_size
+    }
+    pub fn chunks(&self) -> usize {
+        self.manifest.chunks.len()
+    }
+    pub fn mime(&self) -> &str {
+        &self.manifest.mime
+    }
+    /// Observe the ORIGINAL Root and mounted storage generations before plaintext effects.
+    /// Native invocation/session/entry and destination authorization remain caller obligations.
+    pub fn is_current(&self) -> bool {
+        self.invocation_current() && self.lease.is_current()
+    }
+    /// Original actor/Root observation without storage custody, used only to fence the final
+    /// native response after successful cleanup has intentionally retired the storage lease.
+    pub fn invocation_current(&self) -> bool {
+        *self.actor.borrow() && self.actor.has_changed().is_ok() && self.root.authorized()
+    }
+}
 
 /// Await one detached chunk request while retaining a native cancellation edge.
 ///
@@ -593,7 +661,16 @@ pub enum AppCommand {
     MemberRoutes {
         reply: oneshot::Sender<Vec<catcoms_sync::MemberRoute>>,
     },
+    /// Local scheduling observations only; this query never starts recovery work.
+    RecoveryProgress {
+        doc_type: crate::DocType,
+        doc_id: u128,
+        reply: oneshot::Sender<catcoms_sync::RecoveryProgress>,
+    },
     FinalizedMemberPeers {
+        reply: oneshot::Sender<Vec<PeerId>>,
+    },
+    MemberFinalizationReadyPeers {
         reply: oneshot::Sender<Vec<PeerId>>,
     },
     MemberMeshAllowed {
@@ -643,6 +720,26 @@ pub enum AppCommand {
         payload: Vec<u8>,
         reply: oneshot::Sender<Result<bool, String>>,
     },
+    /// Snapshot of current voice eligibility; not a retained call/delivery authorization.
+    VoiceV2Context {
+        room: u128,
+        reply: oneshot::Sender<Result<catcoms_sync::voice_v2::Context, String>>,
+    },
+    /// Native supplies the process registry and a ticket captured before authorization awaits.
+    /// The returned preparation cannot activate until native commits its exact registry row.
+    PrepareVoiceActor {
+        runtime: Arc<catcoms_sync::voice_v2::runtime::Runtime>,
+        ticket: catcoms_sync::voice_v2::runtime::SessionTicket,
+        reply: oneshot::Sender<Result<catcoms_sync::voice_v2::runtime::ActorRegistration, String>>,
+    },
+    /// Dropping the reply or caller revokes this exact actor/directory child grant.
+    VoiceCallGrant {
+        room: u128,
+        reply: oneshot::Sender<Result<catcoms_sync::voice_v2::CallGrant, String>>,
+    },
+    /// Opaque, body-free native V2 controls. No serialized ID or uncharged IPC payload is
+    /// authority; the sole Root recognizes actual call, watch and action allocations again.
+    VoiceEndpoint(VoiceEndpointCommand),
     /// This call's E2E media base key + epoch (derived from MLS; never sent on the wire).
     MediaKey {
         call_id: u128,
@@ -675,6 +772,8 @@ pub enum AppCommand {
         expected_manifest_version: [u8; 32],
         start: u64,
         max_len: usize,
+        /// Original native invoke/account/entry scope, captured before this command is queued.
+        cancel: Option<RequestCancellation>,
         reply: oneshot::Sender<Result<FileRange, String>>,
     },
     /// Whether the file's blob is already held locally (no network fetch needed to open it).
@@ -688,12 +787,63 @@ pub enum AppCommand {
         cancel: Option<RequestCancellation>,
         reply: oneshot::Sender<Result<(), String>>,
     },
+    /// Explicit private acquisition. Resume selects only its original saved manifest set.
+    AcquireDownload {
+        cid: Vec<u8>,
+        resume: Option<catcoms_storage::kept::DownloadId>,
+        cancel: RequestCancellation,
+        reply: oneshot::Sender<Result<DownloadReady, String>>,
+    },
+    ReadDownloadChunk {
+        ready: DownloadReady,
+        index: usize,
+        cancel: RequestCancellation,
+        reply: oneshot::Sender<Result<DownloadChunk, String>>,
+    },
+    FinishDownloadExport {
+        ready: DownloadReady,
+        reply: oneshot::Sender<Result<(), String>>,
+    },
+    Downloads {
+        reply: oneshot::Sender<Result<Vec<catcoms_storage::kept::DownloadStatus>, String>>,
+    },
+    SetDownloadPaused {
+        id: catcoms_storage::kept::DownloadId,
+        expected_intent: u64,
+        paused: bool,
+        reply: oneshot::Sender<Result<(), String>>,
+    },
+    RetryDownload {
+        id: catcoms_storage::kept::DownloadId,
+        request: catcoms_storage::kept::KeepRetry,
+        reply: oneshot::Sender<Result<catcoms_storage::kept::KeepRetryReceipt, String>>,
+    },
+    CancelDownload {
+        id: catcoms_storage::kept::DownloadId,
+        reply: oneshot::Sender<Result<(), String>>,
+    },
+    RequestKeptFile {
+        cid: Vec<u8>,
+        reply: oneshot::Sender<Result<(), String>>,
+    },
+    SetKeptPaused {
+        cid: Vec<u8>,
+        transfer: [u8; 32],
+        expected_intent: u64,
+        paused: bool,
+        reply: oneshot::Sender<Result<(), String>>,
+    },
     KeptFiles {
         reply: oneshot::Sender<catcoms_storage::kept::KeptFiles>,
     },
     ForgetKeptFile {
         cid: Vec<u8>,
         reply: oneshot::Sender<Result<(), String>>,
+    },
+    RetryKeptFile {
+        cid: Vec<u8>,
+        request: catcoms_storage::kept::KeepRetry,
+        reply: oneshot::Sender<Result<catcoms_storage::kept::KeepRetryReceipt, String>>,
     },
     /// Remove a file from the shared index by content address (owner/admin only).
     DeleteFile {
@@ -1201,6 +1351,12 @@ pub enum AppEvent {
 /// A handle to a running server actor: send commands, run queries.
 #[derive(Debug, Clone)]
 pub struct ServerActor {
+    /// Host-issued native unlock authority. Older jobs retain their original token when this
+    /// value changes; a fresh unlock cannot revive an irreversibly cancelled request.
+    keep_session: tokio::sync::watch::Sender<Option<RequestCancellation>>,
+    /// Weak test observer cannot keep the event channel alive after the real actor retires.
+    #[cfg(test)]
+    test_events: mpsc::WeakSender<TracedEvent>,
     cmd_tx: CommandSender,
     studio_pending: tokio::sync::watch::Receiver<bool>,
     studio_preview_reset: tokio::sync::watch::Sender<bool>,
@@ -1213,6 +1369,12 @@ pub struct ServerActor {
 }
 
 impl ServerActor {
+    /// Process-local handle identity only. Native registry owners use this before lending an
+    /// exact entry observer; equal UI ids or cloned state are not proof of the same actor.
+    pub fn same_instance(&self, other: &Self) -> bool {
+        self.cmd_tx.tx.same_channel(&other.cmd_tx.tx)
+    }
+
     #[cfg(test)]
     pub(crate) async fn studio_preparation_pools_for_test(
         &self,
@@ -1320,6 +1482,9 @@ impl ServerActor {
     /// in flight without either adopting the other's trace.
     pub fn with_trace(&self, trace: u64) -> ServerActor {
         ServerActor {
+            keep_session: self.keep_session.clone(),
+            #[cfg(test)]
+            test_events: self.test_events.clone(),
             studio_pending: self.studio_pending.clone(),
             studio_preview_reset: self.studio_preview_reset.clone(),
             #[cfg(test)]
@@ -2534,6 +2699,25 @@ impl ServerActor {
         rx.await.map_err(|_| "server stopped".to_string())
     }
 
+    /// Inspect recovery without changing its scheduling or substituting a successful empty
+    /// result when the actor stopped. There is no renderer/native command for this Rust seam.
+    pub async fn recovery_progress(
+        &self,
+        doc_type: crate::DocType,
+        doc_id: u128,
+    ) -> Result<catcoms_sync::RecoveryProgress, String> {
+        let (reply, result) = oneshot::channel();
+        self.cmd_tx
+            .send(AppCommand::RecoveryProgress {
+                doc_type,
+                doc_id,
+                reply,
+            })
+            .await
+            .map_err(|_| "server stopped".to_string())?;
+        result.await.map_err(|_| "server stopped".to_string())
+    }
+
     /// Request one explicit safety-bounded fallback redial pass.
     pub async fn manual_fallback_redial(
         &self,
@@ -2636,6 +2820,47 @@ impl ServerActor {
         rx.await.unwrap_or_else(|_| Err("server stopped".into()))
     }
 
+    pub async fn voice_v2_context(
+        &self,
+        room: u128,
+    ) -> Result<catcoms_sync::voice_v2::Context, String> {
+        let (reply, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(AppCommand::VoiceV2Context { room, reply })
+            .await
+            .map_err(|_| "server stopped")?;
+        rx.await.unwrap_or_else(|_| Err("server stopped".into()))
+    }
+
+    pub async fn prepare_voice_actor(
+        &self,
+        runtime: Arc<catcoms_sync::voice_v2::runtime::Runtime>,
+        ticket: catcoms_sync::voice_v2::runtime::SessionTicket,
+    ) -> Result<catcoms_sync::voice_v2::runtime::ActorRegistration, String> {
+        let (reply, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(AppCommand::PrepareVoiceActor {
+                runtime,
+                ticket,
+                reply,
+            })
+            .await
+            .map_err(|_| "server stopped")?;
+        rx.await.unwrap_or_else(|_| Err("server stopped".into()))
+    }
+
+    pub async fn voice_call_grant(
+        &self,
+        room: u128,
+    ) -> Result<catcoms_sync::voice_v2::CallGrant, String> {
+        let (reply, rx) = oneshot::channel();
+        self.cmd_tx
+            .send(AppCommand::VoiceCallGrant { room, reply })
+            .await
+            .map_err(|_| "server stopped")?;
+        rx.await.unwrap_or_else(|_| Err("server stopped".into()))
+    }
+
     /// This call's E2E media base key (raw bytes) + the epoch it's keyed to.
     pub async fn media_key(&self, call_id: u128) -> Result<(Vec<u8>, u64), String> {
         let (reply, rx) = oneshot::channel();
@@ -2717,6 +2942,20 @@ impl ServerActor {
         start: u64,
         max_len: usize,
     ) -> Result<FileRange, String> {
+        self.read_file_range_cancellable(cid, expected_manifest_version, start, max_len, None)
+            .await
+    }
+
+    /// Preserve the caller's ORIGINAL native account/entry generation through queueing, pages,
+    /// retries and route changes. A later unlock must never authorize an old queued range read.
+    pub async fn read_file_range_cancellable(
+        &self,
+        cid: Vec<u8>,
+        expected_manifest_version: [u8; 32],
+        start: u64,
+        max_len: usize,
+        cancel: Option<RequestCancellation>,
+    ) -> Result<FileRange, String> {
         let (reply, rx) = oneshot::channel();
         if self
             .cmd_tx
@@ -2725,6 +2964,7 @@ impl ServerActor {
                 expected_manifest_version,
                 start,
                 max_len,
+                cancel,
                 reply,
             })
             .await
@@ -2736,7 +2976,7 @@ impl ServerActor {
     }
 
     /// Explicitly reserve, fetch and verify one durable local copy, or check/repair its saved plan.
-    /// Cancellation abandons an unfinished reservation; completed copies require explicit release.
+    /// Runtime cancellation pauses durable work; explicit Cancel/release removes its ownership.
     pub async fn keep_file(
         &self,
         cid: Vec<u8>,
@@ -2752,6 +2992,42 @@ impl ServerActor {
             .unwrap_or_else(|_| Err("server stopped".into()))
     }
 
+    /// Native host only, after authenticated unlock/actor installation. The synchronous watch
+    /// avoids command backlog and wakes an idle owner; it supplies no durable execution budget.
+    pub fn set_keep_session(&self, session: Option<RequestCancellation>) {
+        self.keep_session.send_replace(session);
+    }
+    /// Return after local reservation/admission, not whole-file completion. Inventory/events
+    /// supply progress and verification; the caller's UI lifetime does not own this durable job.
+    pub async fn request_kept_file(&self, cid: Vec<u8>) -> Result<(), String> {
+        let (reply, receiver) = oneshot::channel();
+        self.cmd_tx
+            .send(AppCommand::RequestKeptFile { cid, reply })
+            .await
+            .map_err(|_| "server stopped".to_string())?;
+        receiver.await.map_err(|_| "server stopped".to_string())?
+    }
+    pub async fn set_kept_paused(
+        &self,
+        cid: Vec<u8>,
+        transfer: [u8; 32],
+        expected_intent: u64,
+        paused: bool,
+    ) -> Result<(), String> {
+        let (reply, receiver) = oneshot::channel();
+        self.cmd_tx
+            .send(AppCommand::SetKeptPaused {
+                cid,
+                transfer,
+                expected_intent,
+                paused,
+                reply,
+            })
+            .await
+            .map_err(|_| "server stopped".to_string())?;
+        receiver.await.map_err(|_| "server stopped".to_string())?
+    }
+
     pub async fn kept_files(&self) -> catcoms_storage::kept::KeptFiles {
         let (reply, receiver) = oneshot::channel();
         if self
@@ -2765,6 +3041,110 @@ impl ServerActor {
         receiver.await.unwrap_or_default()
     }
 
+    /// Acquire encrypted private progress before touching an external plaintext destination.
+    /// A saved ID selects its original plan; it never grants a new allowance or read authority.
+    pub async fn acquire_download(
+        &self,
+        cid: Vec<u8>,
+        resume: Option<catcoms_storage::kept::DownloadId>,
+        cancel: RequestCancellation,
+    ) -> Result<DownloadReady, String> {
+        let (reply, receiver) = oneshot::channel();
+        self.cmd_tx
+            .send(AppCommand::AcquireDownload {
+                cid,
+                resume,
+                cancel: cancel.clone(),
+                reply,
+            })
+            .await
+            .map_err(|_| "server stopped".to_string())?;
+        fetch_chunk_or_cancel(Some(cancel), async {
+            receiver.await.map_err(|_| "server stopped".to_string())?
+        })
+        .await
+    }
+    /// Read only the original completed private copy; no network or new file-index resolution.
+    pub async fn read_download_chunk(
+        &self,
+        ready: DownloadReady,
+        index: usize,
+        cancel: RequestCancellation,
+    ) -> Result<DownloadChunk, String> {
+        let (reply, receiver) = oneshot::channel();
+        self.cmd_tx
+            .send(AppCommand::ReadDownloadChunk {
+                ready,
+                index,
+                cancel: cancel.clone(),
+                reply,
+            })
+            .await
+            .map_err(|_| "server stopped".to_string())?;
+        fetch_chunk_or_cancel(Some(cancel), async {
+            receiver.await.map_err(|_| "server stopped".to_string())?
+        })
+        .await
+    }
+    /// Best-effort cleanup after publication, fenced to the exact completed export generation.
+    pub async fn finish_download_export(&self, ready: DownloadReady) -> Result<(), String> {
+        let (reply, receiver) = oneshot::channel();
+        self.cmd_tx
+            .send(AppCommand::FinishDownloadExport { ready, reply })
+            .await
+            .map_err(|_| "server stopped".to_string())?;
+        receiver.await.map_err(|_| "server stopped".to_string())?
+    }
+    pub async fn downloads(&self) -> Result<Vec<catcoms_storage::kept::DownloadStatus>, String> {
+        let (reply, receiver) = oneshot::channel();
+        self.cmd_tx
+            .send(AppCommand::Downloads { reply })
+            .await
+            .map_err(|_| "server stopped".to_string())?;
+        receiver.await.map_err(|_| "server stopped".to_string())?
+    }
+    pub async fn set_download_paused(
+        &self,
+        id: catcoms_storage::kept::DownloadId,
+        expected_intent: u64,
+        paused: bool,
+    ) -> Result<(), String> {
+        let (reply, receiver) = oneshot::channel();
+        self.cmd_tx
+            .send(AppCommand::SetDownloadPaused {
+                id,
+                expected_intent,
+                paused,
+                reply,
+            })
+            .await
+            .map_err(|_| "server stopped".to_string())?;
+        receiver.await.map_err(|_| "server stopped".to_string())?
+    }
+    pub async fn retry_download(
+        &self,
+        id: catcoms_storage::kept::DownloadId,
+        request: catcoms_storage::kept::KeepRetry,
+    ) -> Result<catcoms_storage::kept::KeepRetryReceipt, String> {
+        let (reply, receiver) = oneshot::channel();
+        self.cmd_tx
+            .send(AppCommand::RetryDownload { id, request, reply })
+            .await
+            .map_err(|_| "server stopped".to_string())?;
+        receiver.await.map_err(|_| "server stopped".to_string())?
+    }
+    pub async fn cancel_download(
+        &self,
+        id: catcoms_storage::kept::DownloadId,
+    ) -> Result<(), String> {
+        let (reply, receiver) = oneshot::channel();
+        self.cmd_tx
+            .send(AppCommand::CancelDownload { id, reply })
+            .await
+            .map_err(|_| "server stopped".to_string())?;
+        receiver.await.map_err(|_| "server stopped".to_string())?
+    }
+
     pub async fn forget_kept_file(&self, cid: Vec<u8>) -> Result<(), String> {
         let (reply, receiver) = oneshot::channel();
         self.cmd_tx
@@ -2774,6 +3154,24 @@ impl ServerActor {
         receiver
             .await
             .unwrap_or_else(|_| Err("server stopped".into()))
+    }
+    /// Explicit local CAS grant. Its receipt does not start a transfer, authorize export or
+    /// replenish anything on exact retry; the caller may separately resume the saved plan.
+    pub async fn retry_kept_file(
+        &self,
+        cid: Vec<u8>,
+        request: catcoms_storage::kept::KeepRetry,
+    ) -> Result<catcoms_storage::kept::KeepRetryReceipt, String> {
+        let (reply, receiver) = oneshot::channel();
+        self.cmd_tx
+            .send(AppCommand::RetryKeptFile {
+                cid,
+                request,
+                reply,
+            })
+            .await
+            .map_err(|_| "server stopped".to_string())?;
+        receiver.await.map_err(|_| "server stopped".to_string())?
     }
 
     /// Presence only, not an integrity scan or evidence of any remote copy.
@@ -3538,8 +3936,9 @@ impl ServerActor {
     }
 
     /// Stop before retiring a native incarnation. Already closed actors are safely stopped.
-    /// Dropping a queued request cancels it; a concurrent acknowledgement can still complete,
-    /// so a timed-out caller must keep local state and may retry this idempotent operation.
+    /// Dropping a queued request cancels it. Once the handler observes a live waiter, stopping
+    /// is irreversible even if the ACK is lost during teardown. A timed-out caller must keep
+    /// local state and may retry this idempotent operation; a closed mailbox is safely stopped.
     pub async fn stop_and_wait(&self) -> Result<(), String> {
         let (stopped, result) = oneshot::channel();
         if self
@@ -3582,6 +3981,16 @@ impl ServerActor {
         let (reply, result) = oneshot::channel();
         self.cmd_tx
             .send(AppCommand::FinalizedMemberPeers { reply })
+            .await
+            .map_err(|_| "server stopped".to_string())?;
+        result.await.map_err(|_| "server stopped".to_string())
+    }
+
+    /// Observe current-connection repair completion; historical identity proof is separate.
+    pub async fn member_finalization_ready_peers(&self) -> Result<Vec<PeerId>, String> {
+        let (reply, result) = oneshot::channel();
+        self.cmd_tx
+            .send(AppCommand::MemberFinalizationReadyPeers { reply })
             .await
             .map_err(|_| "server stopped".to_string())?;
         result.await.map_err(|_| "server stopped".to_string())
@@ -3784,6 +4193,20 @@ pub(crate) fn studio_pools_for_next_spawn(
     STUDIO_POOLS_FOR_NEXT_SPAWN.with(|pools| *pools.borrow_mut() = Some((shared, preview)));
 }
 
+/// Queued cancellation precedes irreversible teardown. Loss of the ACK after admission must
+/// never resume an actor whose original authority was just destroyed by `retire`.
+fn admit_terminal_stop(stopped: oneshot::Sender<()>, retire: impl FnOnce()) -> bool {
+    if stopped.is_closed() {
+        return false;
+    }
+    // This observation admits terminal teardown, not just an attempted ACK. Undoing teardown
+    // after a lost ACK would revive an actor whose original voice/file owners are already dead.
+    // Keep queued cancellation above, but complete stopping after this boundary in either case.
+    retire();
+    let _ = stopped.send(());
+    true
+}
+
 /// Move `server` into a background task. Returns a [`ServerActor`] handle, a receiver of
 /// [`AppEvent`]s, and the task's [`JoinHandle`].
 #[rustfmt::skip] // Preserve the existing command-table layout previously inside select! macro.
@@ -3796,7 +4219,10 @@ where
 {
     let (cmd_tx, mut cmd_rx) = mpsc::channel::<Envelope>(64);
     let (raw_events, event_rx) = mpsc::channel::<TracedEvent>(256);
+    #[cfg(test)]
+    let test_events = raw_events.downgrade();
     let event_tx = EventSink::new(raw_events);
+    let (keep_session, mut keep_sessions) = tokio::sync::watch::channel(None::<RequestCancellation>);
     let (studio_signal, studio_pending) = tokio::sync::watch::channel(false);
     let (studio_preview_reset, mut studio_preview_resets) = tokio::sync::watch::channel(false);
     #[cfg(test)]
@@ -3920,12 +4346,27 @@ where
         // coalesced here and revisited by an injected-clock timer even if the network goes idle.
         let mut delivery_dirty = HashSet::new();
         let mut file_transfers = file_transfers::FileTransfers::new();
+        let file_source_reads = crate::file_source::runtime();
+        let mut maintenance = member_maintenance::Maintenance::new();
+        let mut member_reconnect = member_reconnect::RetryWindow::default();
         let mut studio_preview_resets_open = true;
         // Startup persistence belongs to the host. Thereafter raw versions are independent of
         // the UI's change detector: an accepted signed operation can leave its projection equal.
         let mut snapshot_versions = SnapshotVersions::capture(&server);
         let mut ready_cursor = 0;
+        let mut keep_sessions_open = true;
         loop {
+            let keep_session = keep_sessions.borrow_and_update().clone();
+            // Current native account + exact entry scope comes from the host. Each source job
+            // captures it with this actor generation; healthy repeated attachments are harmless.
+            server.sync.set_native_file_service(keep_session.clone().map(|session| {
+                catcoms_sync::file_service::NativeFileService {
+                    reads: file_source_reads.clone(), session, actor: file_transfers.authority(),
+                }
+            }));
+            let automatic_keep_due = file_transfers.pump_automatic(&mut server, keep_session);
+            server.collect_expired_voice();
+            maintenance.pump(&mut server);
             // Check at the owner boundary, including after a command cancelled a sync tick that
             // already applied a valid prefix. No snapshot I/O belongs in this event channel.
             if snapshot_versions.update(&server) {
@@ -3937,6 +4378,9 @@ where
             // permit a handoff job is holding until unrelated work happens by.
             let delivery_clock = server.runtime_clock();
             let wake_sampled_at = delivery_clock.monotonic_ms();
+            if server.sync.take_local_reconnect_wake() {
+                member_reconnect.note_loss(wake_sampled_at);
+            }
             let studio_wake = studio_receiver.signal_and_wake(&server, &studio_signal);
             #[cfg(test)]
             studio_preparation_signal.send_replace(studio_receiver.preparing_for_test());
@@ -3953,10 +4397,40 @@ where
             };
             // Anchor before the selector's first poll. Clock advancement during another turn
             // must not arm a fresh full relative interval after the original deadline elapsed.
-            let delivery_due = delivery_delay.map(|delay| wake_sampled_at.saturating_add(delay));
-            let delivery_wake = deadline::wait(delivery_clock, delivery_due);
+            let delivery_due = match (delivery_delay.map(|delay| wake_sampled_at.saturating_add(delay)), automatic_keep_due) {
+                (Some(a), Some(b)) => Some(a.min(b)),
+                (only, None) | (None, only) => only,
+            };
+            let delivery_due = [delivery_due, member_reconnect.next_due()].into_iter().flatten().min();
+            let voice_wake = server.voice_housekeeping_wake();
+            let turn = {
+            let keep_session_changed = async {
+                if keep_sessions_open {
+                    if keep_sessions.changed().await.is_err() { keep_sessions_open = false; }
+                } else { std::future::pending::<()>().await; }
+            };
+            let delivery_wake = async move {
+                let delivery = deadline::wait(delivery_clock, delivery_due);
+                let voice = async move {
+                    if let Some((clock, due)) = voice_wake {
+                        deadline::wait(clock, Some(due)).await;
+                    } else {
+                        std::future::pending::<()>().await;
+                    }
+                };
+                tokio::pin!(delivery, voice, keep_session_changed);
+                // Both wakes enter the same fair turn; no clock-domain conversion or separate
+                // unbounded owner source is needed. Each future retains its absolute deadline.
+                std::future::poll_fn(|cx| {
+                    if delivery.as_mut().poll(cx).is_ready() || voice.as_mut().poll(cx).is_ready() {
+                        std::task::Poll::Ready(())
+                    } else {
+                        keep_session_changed.as_mut().poll(cx)
+                    }
+                }).await;
+            };
             tokio::pin!(delivery_wake);
-            let turn = fair::next(
+            fair::next(
                 &mut ready_cursor,
                 async {
                     if studio_preview_resets_open {
@@ -3981,9 +4455,11 @@ where
                     }
                 },
                 delivery_wake,
+                maintenance.next(),
                 server.sync_once(),
             )
-            .await;
+            .await
+            };
             match turn {
                 fair::Turn::Reset(reset) => {
                     event_tx.idle();
@@ -4620,8 +5096,14 @@ where
                     Some(AppCommand::MemberRoutes { reply }) => {
                         let _ = reply.send(server.member_routes());
                     }
+                    Some(AppCommand::RecoveryProgress { doc_type, doc_id, reply }) => {
+                        let _ = reply.send(server.sync().recovery_progress(doc_type, doc_id));
+                    }
                     Some(AppCommand::FinalizedMemberPeers { reply }) => {
                         let _ = reply.send(server.finalized_member_peers());
+                    }
+                    Some(AppCommand::MemberFinalizationReadyPeers { reply }) => {
+                        let _ = reply.send(server.member_finalization_ready_peers());
                     }
                     Some(AppCommand::MemberMeshAllowed { reply }) => {
                         let _ = reply.send(server.member_mesh_allowed());
@@ -4634,16 +5116,8 @@ where
                             let _ = reply.send(server.member_finalization_work(&observed));
                         }
                     }
-                    Some(AppCommand::FinalizeMemberConnection { peer, mut reply }) => {
-                        if reply.is_closed() {
-                            continue;
-                        }
-                        tokio::select! {
-                            result = server.finalize_member_connection(peer) => {
-                                let _ = reply.send(result.map_err(|e| e.to_string()));
-                            }
-                            _ = reply.closed() => {}
-                        }
+                    Some(AppCommand::FinalizeMemberConnection { peer, reply }) => {
+                        maintenance.finalize(peer, reply);
                     }
                     Some(AppCommand::JoinAttempts { reply }) => {
                         let _ = reply.send(server.join_attempts());
@@ -4682,6 +5156,16 @@ where
                             .map_err(|e| e.to_string());
                         let _ = reply.send(res);
                     }
+                    Some(AppCommand::VoiceV2Context { room, reply }) => {
+                        let _ = reply.send(server.voice_v2_context(room));
+                    }
+                    Some(AppCommand::PrepareVoiceActor { runtime, ticket, reply }) => {
+                        let _ = reply.send(server.prepare_voice_actor(&runtime, &ticket));
+                    }
+                    Some(AppCommand::VoiceCallGrant { room, reply }) => {
+                        let _ = reply.send(server.voice_call_grant(room));
+                    }
+                    Some(AppCommand::VoiceEndpoint(command)) => command.apply(&mut server),
                     Some(AppCommand::MediaKey { call_id, reply }) => {
                         let res = server
                             .media_key(call_id)
@@ -4711,9 +5195,10 @@ where
                         expected_manifest_version,
                         start,
                         max_len,
+                        cancel,
                         reply,
                     }) => {
-                        file_transfers.range(&mut server, cid, expected_manifest_version, start, max_len, reply);
+                        file_transfers.range_cancellable(&mut server, cid, expected_manifest_version, start, max_len, cancel, reply);
                     }
                     Some(AppCommand::FileAvailable { cid, reply }) => {
                         let avail = match <[u8; 32]>::try_from(cid.as_slice()) {
@@ -4725,7 +5210,47 @@ where
                     Some(AppCommand::KeepFile { cid, cancel, reply }) => {
                         file_transfers.keep(&mut server, cid, cancel, reply);
                     }
+                    Some(AppCommand::AcquireDownload { cid, resume, cancel, reply }) => {
+                        file_transfers.download(&mut server, cid, resume, cancel, reply);
+                        let _ = event_tx.send(AppEvent::FilesUpdated).await;
+                    }
+                    Some(AppCommand::ReadDownloadChunk { ready, index, cancel, reply }) => {
+                        let result = (|| {
+                            let valid = || ready.is_current() && !cancel.is_cancelled();
+                            if !valid() { return Err("The download is no longer active.".to_string()); }
+                            let custody = ready.export_custody.clone().ok_or("Download export has no resource owner.")?;
+                            let reference = ready.manifest.chunks.get(index).ok_or("Invalid download chunk.")?;
+                            let bound = file_transfers::kept_ciphertext_bound(reference)?;
+                            let bytes = server.sync.read_download_export(&ready.lease, &reference.ciphertext_cid, bound).map_err(|e| e.to_string())?;
+                            let plaintext = server.sync.open_file(&bytes, reference).map_err(|e| e.to_string())?;
+                            if !valid() { return Err("The download is no longer active.".to_string()); }
+                            Ok(DownloadChunk { bytes: plaintext, _custody: custody })
+                        })();
+                        let _ = reply.send(result);
+                    }
+                    Some(AppCommand::Downloads { reply }) => { let _ = reply.send(server.sync.downloads().map_err(|e| e.to_string())); }
+                    Some(AppCommand::FinishDownloadExport { ready, reply }) => { let _ = reply.send(server.sync.finish_download_export(&ready.lease).map_err(|e| e.to_string())); let _ = event_tx.send(AppEvent::FilesUpdated).await; }
+                    Some(AppCommand::SetDownloadPaused { id, expected_intent, paused, reply }) => { let _ = reply.send(server.sync.set_download_paused(id, expected_intent, paused).map_err(|e| e.to_string())); let _ = event_tx.send(AppEvent::FilesUpdated).await; }
+                    Some(AppCommand::RetryDownload { id, request, reply }) => { let _ = reply.send(server.sync.retry_download(id, request).map_err(|e| e.to_string())); let _ = event_tx.send(AppEvent::FilesUpdated).await; }
+                    Some(AppCommand::CancelDownload { id, reply }) => { let _ = reply.send(server.sync.cancel_download(id).map_err(|e| e.to_string())); let _ = event_tx.send(AppEvent::FilesUpdated).await; }
+                    Some(AppCommand::RequestKeptFile { cid, reply }) => {
+                        let session = keep_sessions.borrow().clone();
+                        let result = file_transfers.request_keep(&mut server, cid, session);
+                        let _ = reply.send(result);
+                        let _ = event_tx.send(AppEvent::FilesUpdated).await;
+                    }
+                    Some(AppCommand::SetKeptPaused { cid, transfer, expected_intent, paused, reply }) => {
+                        let result = cid.as_slice().try_into().map_err(|_| "bad content address".to_string())
+                            .and_then(|raw| server.sync.set_keep_paused(&Cid::from_bytes(raw), transfer, expected_intent, paused).map_err(|error| error.to_string()));
+                        let _ = reply.send(result);
+                        let _ = event_tx.send(AppEvent::FilesUpdated).await;
+                    }
                     Some(AppCommand::KeptFiles { reply }) => { let _ = reply.send(server.sync.kept_files()); }
+                    Some(AppCommand::RetryKeptFile { cid, request, reply }) => {
+                        let result = <[u8; 32]>::try_from(cid.as_slice()).map_err(|_| "bad content address".to_string())
+                            .and_then(|raw| server.sync.retry_kept(&Cid::from_bytes(raw), request).map_err(|error| error.to_string()));
+                        let _ = reply.send(result);
+                    }
                     Some(AppCommand::ForgetKeptFile { cid, reply }) => {
                         let result = <[u8; 32]>::try_from(cid.as_slice()).map_err(|_| "bad content address".to_string())
                             .and_then(|raw| server.sync.forget_kept(&Cid::from_bytes(raw)).map_err(|e| e.to_string()));
@@ -5162,54 +5687,15 @@ where
                             )
                             .await;
                         }
-                        // Member peer exchange, every pass and independent of rendezvous: this is
-                        // how `peer_records` fills, and with it presence, the cross-session
-                        // re-dial and the eclipse detector's reach term. Then offer the
-                        // cross-session cache's previously-proven members to the dial policy
-                        // (candidates only; the first-contact route past a hostile rendezvous),
-                        // and fold whatever we now know back into the cache for next launch.
-                        //
-                        // Each request carries its own deadline, not the pass as a whole. One
-                        // budget for the pass meant a peer that accepted the first request and
-                        // then went quiet consumed the entire tick, every tick, and the peers
-                        // behind it were never reached: a self-eclipse of the discovery layer
-                        // for the price of one idle connection. A peer that misses its deadline
-                        // is backed off, so it also stops being picked for a while.
-                        for peer in server.pex_targets() {
-                            match tokio::time::timeout(
-                                std::time::Duration::from_millis(PEX_REQUEST_MS),
-                                server.request_pex(peer),
-                            )
-                            .await
-                            {
-                                Ok(Ok(_)) => {
-                                    // PEX pulls descriptors in only one direction. This additive,
-                                    // connected-only exchange confirms both member endpoints so
-                                    // a reply callback can become a permitted restart route.
-                                    let _ = server.finalize_member_connection(peer).await;
-                                    // The role offer uses its own additive request kind so old
-                                    // peers remain PEX-compatible. It is best-effort and bounded
-                                    // by the same per-peer deadline as PEX.
-                                    let _ = tokio::time::timeout(
-                                        std::time::Duration::from_millis(PEX_REQUEST_MS),
-                                        server.request_switchboard_offer(peer),
-                                    )
-                                    .await;
-                                }
-                                Ok(Err(e)) => {
-                                    tracing::trace!(error = %e, "PEX request failed");
-                                    server.note_pex_failure(peer);
-                                }
-                                Err(_) => {
-                                    tracing::debug!("PEX request timed out; backing the peer off");
-                                    server.note_pex_failure(peer);
-                                }
-                            }
-                        }
-                        // Fold records learned by the PEX requests above into the passive view
-                        // before dialing it. The previous order delayed a newly learned member or
-                        // dynamic-IP epoch until the *next* minute tick, even though its fresh
-                        // signature is precisely the signal that should bypass retry backoff.
+                        // Queued connected-only stages keep inbound requests and controls live
+                        // while slow peers answer. Each stage prepares against fresh owner state.
+                        let record_targets = server.pex_targets();
+                        let poll_targets = server.sync.take_membership_poll_targets()
+                            .into_iter().filter(|peer| !record_targets.contains(peer)).collect();
+                        maintenance.discover(record_targets);
+                        maintenance.poll_membership(poll_targets);
+                        // Fold current records before dialing. Detached PEX completions repeat
+                        // this refresh when new records arrive during the same discovery pass.
                         server.cache_known_records();
                         // SWIM observations, reciprocal signalling and HyParView promotion share
                         // one bounded repair pass. Helpers inspect only live proven paths; all
@@ -5327,22 +5813,39 @@ where
                         let _ = reply.send(res);
                     }
                     Some(AppCommand::PrepareShutdown { ready }) => {
+                        // A frozen actor must not leave detached lower requests authorized while
+                        // native custody or the close decision waits. Cancellation resumes with
+                        // a NEW generation; saved Keep allowance and intent remain unchanged.
+                        file_transfers.retire();
                         if crate::shutdown::save_and_freeze(&mut server, ready).await {
+                            server.sync.retire_voice_actor();
+                            drop(cmd_rx);
                             let _ = event_tx.send(AppEvent::Closed).await;
                             break;
                         }
+                        file_transfers.resume();
                     }
                     Some(AppCommand::StopAndWait { stopped }) => {
-                        // A timed-out request which is still queued must not later stop a live
-                        // group unexpectedly. Once acknowledged this branch is terminal; close
-                        // the command receiver before awaiting the UI event consumer.
-                        if stopped.send(()).is_ok() {
+                        if admit_terminal_stop(stopped, || {
+                            file_transfers.retire();
+                            server.sync.retire_voice_actor();
+                            // Wake waiting producers and reject/drop already queued replies
+                            // before ACK. Drop the receiver itself below before the event await,
+                            // including permits acquired by a producer before close.
                             cmd_rx.close();
+                            while let Ok(command) = cmd_rx.try_recv() {
+                                drop(command);
+                            }
+                        }) {
+                            drop(cmd_rx);
                             let _ = event_tx.send(AppEvent::Closed).await;
                             break;
                         }
                     }
                     Some(AppCommand::Shutdown) | None => {
+                        file_transfers.retire();
+                        server.sync.retire_voice_actor();
+                        drop(cmd_rx);
                         let _ = event_tx.send(AppEvent::Closed).await;
                         break;
                     }
@@ -5354,7 +5857,59 @@ where
                 fair::Turn::File(completed) => {
                     event_tx.idle();
                     if let Some(completed) = completed {
+                        let progress = completed.saved_progress();
+                        let before = progress.as_ref().and_then(|p| p.observe(&server));
                         file_transfers.complete(&mut server, completed);
+                        let after = progress.as_ref().and_then(|p| p.observe(&server));
+                        if before != after { let _ = event_tx.send(AppEvent::FilesUpdated).await; }
+                    }
+                },
+                fair::Turn::Maintenance(completed) => {
+                    event_tx.idle();
+                    let Some(effects) = maintenance.complete(completed, &mut server) else {
+                        tracing::error!("member maintenance task panicked; stopping actor");
+                        return;
+                    };
+                    if effects.epoch_changed {
+                        // Quiet detached control recovery can change the full roster without a
+                        // Sync turn, including remove+add bundles with an unchanged count. Tell
+                        // consumers to re-read it now; the epoch independently dirties native
+                        // snapshot persistence and revokes captured protocol work.
+                        studio_receiver.signal(&server, &studio_signal);
+                        publish_recovered_membership(
+                            &mut server, &mut members, &mut versions, &mut last_roles,
+                            &mut last_moderation, &event_tx,
+                        ).await;
+                        delivery_dirty.extend(counts.keys().copied());
+                        for (channel, snapshot) in recompute_due_delivery(
+                            &mut server,
+                            &mut delivery,
+                            &mut delivery_dirty,
+                        ) {
+                            let _ = event_tx.send(AppEvent::DeliveryChanged { channel, snapshot }).await;
+                        }
+                        server.schedule_reconciliation();
+                    }
+                    if effects.records_ready {
+                        server.cache_known_records();
+                        server.drive_mesh_repair().await;
+                        server.dial_cached_peers().await;
+                        server.schedule_reconciliation();
+                    }
+                    let online = server.online_members();
+                    if online != last_online {
+                        last_online = online.clone();
+                        let _ = event_tx.send(AppEvent::ConnectivityChanged { online }).await;
+                    }
+                    let revision = server.member_route_revision();
+                    if revision != last_member_route_revision {
+                        last_member_route_revision = revision;
+                        let _ = event_tx.send(AppEvent::MemberRoutesChanged).await;
+                    }
+                    let switchboards = server.connected_switchboard_offers();
+                    if switchboards != last_switchboards {
+                        last_switchboards = switchboards;
+                        let _ = event_tx.send(AppEvent::SwitchboardsChanged).await;
                     }
                 },
                 // A receipt may be the final network event in a quiet room. Wake from the same
@@ -5362,6 +5917,16 @@ where
                 // surfaced without waiting for unrelated traffic.
                 fair::Turn::Delivery => {
                     event_tx.idle();
+                    if member_reconnect.take_due(server.runtime_clock().monotonic_ms())
+                        && server.member_mesh_allowed()
+                    {
+                        let clock = server.runtime_clock();
+                        // Preparation stays on this original owner. Advancing the finite retry
+                        // window above survives cancellation; the existing transport owns any
+                        // submitted permits through actual driver admission and cannot refund
+                        // them merely because this bounded local acknowledgement wait ends.
+                        member_reconnect::submit_bounded(clock, server.dial_local_reconnect_routes()).await;
+                    }
                     for (channel, snapshot) in recompute_due_delivery(
                         &mut server,
                         &mut delivery,
@@ -5579,6 +6144,9 @@ where
                         }
                     }
                     _ => {
+                        file_transfers.retire();
+                        server.sync.retire_voice_actor();
+                        drop(cmd_rx);
                         let _ = event_tx.send(AppEvent::Closed).await;
                         break;
                     }
@@ -5588,6 +6156,9 @@ where
     });
     (
         ServerActor {
+            keep_session,
+            #[cfg(test)]
+            test_events,
             studio_pending,
             studio_preview_reset,
             #[cfg(test)]
@@ -5602,6 +6173,30 @@ where
         event_rx,
         handle,
     )
+}
+
+/// Surface a recovered epoch even when remove+add leaves the count unchanged. This is shared by
+/// detached control completion and its projection regression; the caller separately schedules
+/// data reconciliation and revokes/saves protocol state through the normal epoch owners.
+async fn publish_recovered_membership<T: MeshTransport, R: CryptoRngCore>(
+    server: &mut Server<T, R>,
+    members: &mut usize,
+    versions: &mut DocVersions,
+    roles: &mut HashMap<String, String>,
+    moderation: &mut ModerationState,
+    events: &EventSink,
+) {
+    *members = server.member_count();
+    versions.epoch_moved(server);
+    let _ = events
+        .send(AppEvent::MembersChanged { count: *members })
+        .await;
+    if roles_changed(server, roles) {
+        let _ = events.send(AppEvent::RolesUpdated).await;
+    }
+    if moderation_changed(server, moderation) {
+        let _ = events.send(AppEvent::ModerationUpdated).await;
+    }
 }
 
 /// Notice channel-directory changes, subscribe newly-discovered channel documents, and recover
@@ -5662,6 +6257,7 @@ async fn sync_channels<T, R>(
 struct SnapshotVersions {
     epoch: u64,
     group_policy_revision: u64,
+    peer_record_revision: u64,
     documents: HashMap<(crate::DocType, u128), u64>,
 }
 
@@ -5670,6 +6266,7 @@ impl SnapshotVersions {
         Self {
             epoch: server.epoch(),
             group_policy_revision: server.sync().group_policy_revision(),
+            peer_record_revision: server.sync().peer_record_revision(),
             documents: server.sync().document_versions().collect(),
         }
     }
@@ -5678,6 +6275,7 @@ impl SnapshotVersions {
         let next = Self::capture(server);
         let changed = self.epoch != next.epoch
             || self.group_policy_revision != next.group_policy_revision
+            || self.peer_record_revision != next.peer_record_revision
             || self.documents != next.documents;
         *self = next;
         changed
@@ -6124,6 +6722,153 @@ mod tests {
     const GENERAL: u128 = 1;
 
     #[tokio::test]
+    async fn voice_housekeeping_wakes_quiet_actor_and_reclaims_watchers_even_while_locked() {
+        use catcoms_rt::Clock;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        #[derive(Clone, Debug)]
+        struct ObservedClock {
+            inner: ManualClock,
+            armed: Arc<AtomicUsize>,
+        }
+        impl Clock for ObservedClock {
+            fn now_ms(&self) -> u64 {
+                self.inner.now_ms()
+            }
+            fn monotonic_ms(&self) -> u64 {
+                self.inner.monotonic_ms()
+            }
+            fn sleep(
+                &self,
+                duration: Duration,
+            ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + '_>> {
+                Box::pin(async move {
+                    self.armed.fetch_add(1, Ordering::SeqCst);
+                    self.inner.sleep(duration).await;
+                })
+            }
+        }
+        for locked in [false, true] {
+            let clock = ManualClock::new(1000);
+            let armed = Arc::new(AtomicUsize::new(0));
+            let observed = ObservedClock {
+                inner: clock.clone(),
+                armed: armed.clone(),
+            };
+            let runtime = catcoms_sync::voice_v2::runtime::Runtime::new(Arc::new(observed.clone()));
+            let hub = Hub::new();
+            let mut server = Server::found(
+                hub.join(PeerId::from_u64(1)),
+                MlsDevice::generate().unwrap(),
+                ChaCha20Rng::seed_from_u64(1),
+                // Different monotonic origins catch comparing a Voice deadline with the
+                // ordinary actor Clock. Only the voice clock advances below.
+                Box::new(ObservedClock {
+                    inner: ManualClock::new(0),
+                    armed: armed.clone(),
+                }),
+                "alice",
+            )
+            .unwrap();
+            let ticket = runtime.session_ticket();
+            server
+                .prepare_voice_actor(&runtime, &ticket)
+                .unwrap()
+                .register()
+                .unwrap();
+            runtime.activate_session(&ticket).unwrap();
+            let parent = catcoms_sync::voice_v2::CallLease::default();
+            let grant = server
+                .sync
+                .start_voice_watch(crate::channel_id("general"), parent.clone())
+                .unwrap();
+            let charged = runtime.resources().counts().0;
+            let (actor, mut events, task) = spawn(server);
+            let drain = tokio::spawn(async move { while events.recv().await.is_some() {} });
+            timeout(Duration::from_secs(5), async {
+                while armed.load(Ordering::SeqCst) == 0 {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("quiet actor must arm the native voice Clock deadline");
+            // No actor command or network event follows. Neither parent/lock revocation is a
+            // substitute wake: only the captured Clock deadline can reclaim this Root owner.
+            if locked {
+                runtime.revoke_session();
+            } else {
+                parent.revoke();
+            }
+            clock.advance_ms(1000);
+            timeout(Duration::from_secs(5), async {
+                while runtime.resources().counts().0 >= charged {
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .expect("idle Root watcher must be collected without another command");
+            assert!(!grant.is_live());
+            actor.shutdown().await;
+            task.await.unwrap();
+            drain.await.unwrap();
+        }
+    }
+
+    #[tokio::test]
+    async fn voice_actor_command_lost_preparation_replies_do_not_hold_pending_capacity() {
+        let hub = Hub::new();
+        let server = founder(&hub, PeerId::from_u64(1), "alice", 1);
+        let runtime =
+            catcoms_sync::voice_v2::runtime::Runtime::new(Arc::new(ManualClock::new(1000)));
+        let ticket = runtime.session_ticket();
+        let (actor, mut events, task) = spawn(server);
+        let drain = tokio::spawn(async move { while events.recv().await.is_some() {} });
+        for _ in 0..12 {
+            let (reply, rx) = oneshot::channel();
+            drop(rx);
+            actor
+                .cmd_tx
+                .send(AppCommand::PrepareVoiceActor {
+                    runtime: runtime.clone(),
+                    ticket: ticket.clone(),
+                    reply,
+                })
+                .await
+                .unwrap();
+            actor.member_count().await;
+        }
+        let registration = actor
+            .prepare_voice_actor(runtime.clone(), ticket.clone())
+            .await
+            .unwrap();
+        registration.register().unwrap();
+        assert!(actor
+            .voice_call_grant(crate::channel_id("general"))
+            .await
+            .is_err());
+        runtime.activate_session(&ticket).unwrap();
+        let grant = actor
+            .voice_call_grant(crate::channel_id("general"))
+            .await
+            .unwrap();
+        let lease = grant.lease();
+        drop(grant);
+        assert!(!lease.is_live());
+        let grant = actor
+            .voice_call_grant(crate::channel_id("general"))
+            .await
+            .unwrap();
+        registration.revoke();
+        assert!(!grant.lease().is_live());
+        actor.shutdown().await;
+        task.await.unwrap();
+        drain.await.unwrap();
+        assert!(actor
+            .voice_call_grant(crate::channel_id("general"))
+            .await
+            .is_err());
+    }
+
+    #[tokio::test]
     async fn pixa_publication_actor_validates_promotes_and_returns_no_metadata() {
         let fixture: serde_json::Value = serde_json::from_str(include_str!(concat!(
             env!("CARGO_MANIFEST_DIR"),
@@ -6390,6 +7135,8 @@ mod tests {
         let (tx, rx) = mpsc::channel(1);
         drop(rx);
         let actor = ServerActor {
+            keep_session: tokio::sync::watch::channel(None).0,
+            test_events: mpsc::channel::<TracedEvent>(1).0.downgrade(),
             studio_hints: tokio::sync::watch::channel(None).1,
             studio_pending: tokio::sync::watch::channel(false).1,
             studio_preview_reset: tokio::sync::watch::channel(false).0,
@@ -6434,6 +7181,83 @@ mod tests {
             name,
         )
         .unwrap()
+    }
+
+    #[tokio::test]
+    async fn quiet_recovered_equal_count_membership_publishes_roster_and_role_changes() {
+        let hub = Hub::new();
+        let owner_peer = PeerId::from_u64(91);
+        let mut owner = founder(&hub, owner_peer, "owner", 91);
+        owner.subscribe_control().await.unwrap();
+
+        async fn join_member(
+            owner: &mut Server<MemNetwork, ChaCha20Rng>,
+            hub: &Arc<Hub>,
+            peer: u64,
+        ) -> Server<MemNetwork, ChaCha20Rng> {
+            let invite = owner.mint_invite([peer as u8; 16], 60_000, vec![]).unwrap();
+            let join = Server::join(
+                hub.join(PeerId::from_u64(peer)),
+                MlsDevice::generate().unwrap(),
+                ChaCha20Rng::seed_from_u64(peer),
+                Box::new(ManualClock::new(1_000)),
+                "member",
+                owner.local_peer(),
+                &invite,
+            );
+            tokio::pin!(join);
+            loop {
+                tokio::select! {
+                    joined = &mut join => return joined.unwrap(),
+                    result = owner.sync_once() => { result.unwrap(); }
+                }
+            }
+        }
+        let old = join_member(&mut owner, &hub, 92).await;
+        let mut members = owner.member_count();
+        let original_count = members;
+        let mut roles = owner.roles();
+        let mut moderation = owner.moderation_state();
+        let mut versions = DocVersions::default();
+        versions.epoch_moved(&owner);
+        let mut snapshot_versions = SnapshotVersions::capture(&owner);
+        owner.remove_member(&old.my_fingerprint()).await.unwrap();
+        drop(old);
+        let _new = join_member(&mut owner, &hub, 93).await;
+        assert_eq!(owner.member_count(), original_count);
+        assert!(
+            snapshot_versions.update(&owner),
+            "raw epoch is durably dirty despite equal count"
+        );
+        let (tx, mut rx) = mpsc::channel(8);
+        let events = EventSink::new(tx);
+        publish_recovered_membership(
+            &mut owner,
+            &mut members,
+            &mut versions,
+            &mut roles,
+            &mut moderation,
+            &events,
+        )
+        .await;
+        assert_eq!(members, original_count);
+        assert!(!versions.epoch_moved(&owner));
+        let mut roster = false;
+        let mut role = false;
+        while let Ok(event) = rx.try_recv() {
+            match event.event {
+                AppEvent::MembersChanged { count } => {
+                    assert_eq!(count, original_count);
+                    roster = true;
+                }
+                AppEvent::RolesUpdated => role = true,
+                _ => {}
+            }
+        }
+        assert!(
+            roster && role,
+            "quiet equal-count recovery must update both UI projections"
+        );
     }
 
     #[tokio::test]
@@ -7696,6 +8520,7 @@ mod tests {
         let alice_peer = PeerId::from_u64(1);
         let alice_clock = ManualClock::new(1_000);
         let mut alice_srv = founder_with_clock(&hub, alice_peer, "alice", 1, &alice_clock);
+        let alice_device = alice_srv.device_id();
         alice_srv.subscribe_control().await.unwrap();
         alice_srv.open_channel(GENERAL).await.unwrap();
         alice_srv
@@ -7756,6 +8581,31 @@ mod tests {
         })
         .await
         .expect("Bob did not learn Carol's membership");
+
+        // Detached automatic receipts require a live member path proved by an authenticated
+        // exchange. A self-signed descriptor plus a connection indication is only a claim;
+        // neither establishes that Alice answered at that endpoint. Exercise the actual signed
+        // empty-channel catch-up before this timer test starts, rather than seeding a proof or
+        // weakening the notification gate. All receipts below still come from the real actors.
+        timeout(Duration::from_secs(10), async {
+            for recipient in [&mut bob_srv, &mut carol_srv] {
+                recipient.open_channel(GENERAL).await.unwrap();
+                recipient
+                    .request_channel_catchup(alice_peer, GENERAL)
+                    .await
+                    .unwrap();
+                assert!(
+                    recipient
+                        .sync
+                        .voice_bound_routes()
+                        .iter()
+                        .any(|route| route.peer == alice_peer && route.device == alice_device),
+                    "an empty/unsupported response cannot substitute for endpoint proof"
+                );
+            }
+        })
+        .await
+        .expect("recipient endpoint proof was not established");
 
         let (bob, mut bob_events, bob_handle) = spawn(bob_srv);
         bob.open_channel(GENERAL).await;

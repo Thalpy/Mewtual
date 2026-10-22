@@ -4,23 +4,71 @@
 //! The adapter runs the shared production cadence and native worker/send/close/restore seams;
 //! platform interface sampling and the Tauri window/frontend are deliberately outside this test.
 use super::*;
-use catcoms_rt::ManualClock;
 use rand_chacha::ChaCha20Rng;
 use rand_core::SeedableRng;
 use std::collections::{BTreeMap, BTreeSet};
 
+mod chat_bubbles;
+mod chat_matrix;
+mod files;
 mod runtime;
+mod signed_history;
 mod transport;
+mod voice;
 use runtime::{mount, network, register, Running};
 use transport::{forbidden, NetworkRules, Trace, Transport};
 
-type History = BTreeMap<String, (String, String)>;
+/// Two independent oracles: the product projection and the exact original signed-operation
+/// union. Rendered equality alone cannot detect a helper re-authoring or dropping signed history.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+struct History {
+    messages: BTreeMap<String, (String, String)>,
+    operations: BTreeMap<[u8; 32], catcoms_replication::SignedOp>,
+}
+impl History {
+    fn new() -> Self {
+        Self::default()
+    }
+    fn extend(&mut self, other: Self) {
+        for (id, value) in other.messages {
+            if let Some(old) = self.messages.insert(id, value.clone()) {
+                assert_eq!(old, value, "partition overlap changed a message");
+            }
+        }
+        for (hash, op) in other.operations {
+            if let Some(old) = self.operations.insert(hash, op.clone()) {
+                assert_eq!(
+                    old, op,
+                    "partition overlap changed an original signed operation"
+                );
+            }
+        }
+    }
+}
 const ALL: &[usize] = &[0, 1, 2, 3, 4, 5];
 
 async fn bounded<F: Future>(label: &str, future: F) -> F::Output {
     tokio::select! {
         result = future => result,
         _ = SystemClock.sleep(Duration::from_secs(30)) => panic!("six-client operation exceeded its bound: {label}"),
+    }
+}
+
+// Automatic recovery can start just after an empty exchange and just after a cadence tick.
+// Account for the released source cooldown, worst-case discovery interval/start spread and
+// four bounded transport stages. Command responsiveness keeps its independent 30-second bound.
+// Real TCP uses production time: accelerating a shared clock also expires prepared jobs and
+// retained completions, even if no network future is currently waiting.
+const PERIODIC_RECOVERY_MS: u64 = catcoms_sync::CATCHUP_PEER_COOLDOWN_MS
+    + DISCOVERY_INTERVAL_SECS * 1_000
+    + DISCOVERY_JITTER_MS
+    + DISCOVERY_START_SPREAD_MS
+    + 4 * catcoms_rt::REQUEST_TIMEOUT_MS;
+
+async fn periodic_bounded<F: Future>(label: &str, future: F) -> F::Output {
+    tokio::select! {
+        result = future => result,
+        _ = SystemClock.sleep(Duration::from_millis(PERIODIC_RECOVERY_MS)) => panic!("six-client periodic recovery exceeded {PERIODIC_RECOVERY_MS} ms: {label}"),
     }
 }
 
@@ -43,15 +91,18 @@ struct Client {
 struct Scenario {
     clients: Vec<Client>,
     rules: Arc<NetworkRules>,
-    clock: ManualClock,
-    clock_step_ms: Arc<AtomicU64>,
-    _ticker: Option<AbortOnDrop>,
+    clock: SystemClock,
     reverse: bool,
     token: u128,
 }
 
 impl Scenario {
     fn new(reverse: bool) -> Self {
+        // Opt-in structured diagnostics keep the normal fixture quiet while making a failed
+        // stage reproducible without changing its schedule or manufacturing recovery work.
+        if std::env::var_os("RUST_LOG").is_some() {
+            catcoms_log::init_test();
+        }
         let clients: Vec<_> = (0..6)
             .map(|_| {
                 let mut net = new_server_net("", "", "");
@@ -81,25 +132,16 @@ impl Scenario {
             peers,
             libp2p_peers,
             drop_gossip: AtomicBool::new(false),
+            drop_next_call_signal: AtomicBool::new(false),
             delay_replies: AtomicBool::new(false),
+            file_reply: StdMutex::new(None),
             trace: StdMutex::new(Trace::default()),
         });
-        let clock = ManualClock::new(SystemClock.now_ms());
-        let clock_step_ms = Arc::new(AtomicU64::new(100));
-        let timer_clock = clock.clone();
-        let timer_step = clock_step_ms.clone();
-        let ticker = AbortOnDrop(tokio::spawn(async move {
-            loop {
-                SystemClock.sleep(Duration::from_millis(100)).await;
-                timer_clock.advance_ms(timer_step.load(Ordering::Acquire));
-            }
-        }));
+        let clock = SystemClock;
         Self {
             clients,
             rules,
             clock,
-            clock_step_ms,
-            _ticker: Some(ticker),
             reverse,
             token: 0,
         }
@@ -119,7 +161,19 @@ impl Scenario {
     }
 
     async fn admit(&mut self) {
-        for index in 0..6 {
+        self.admit_prefix(6).await;
+    }
+
+    /// Admit actual members through the native production path. The transport adapter's
+    /// three-member check needs one unambiguous helper and one blocked target; admitting and
+    /// then closing extra members would leave their valid descriptors eligible for probing.
+    async fn admit_prefix(&mut self, count: usize) {
+        self.admit_prefix_with_files(count, false).await;
+    }
+
+    async fn admit_prefix_with_files(&mut self, count: usize, files: bool) {
+        assert!(matches!(count, 3 | 6));
+        for index in 0..count {
             let state = mount(self.clients[index].root.path()).await;
             let transport =
                 Transport::new(index, &mut self.clients[index].net, self.rules.clone()).await;
@@ -130,7 +184,7 @@ impl Scenario {
                     transport,
                     MlsDevice::generate().unwrap(),
                     ChaCha20Rng::seed_from_u64(90),
-                    Box::new(self.clock.clone()),
+                    Box::new(self.clock),
                     "client 1",
                 )
                 .unwrap()
@@ -160,7 +214,7 @@ impl Scenario {
                         transport,
                         MlsDevice::generate().unwrap(),
                         ChaCha20Rng::seed_from_u64(90 + index as u64),
-                        Box::new(self.clock.clone()),
+                        Box::new(self.clock),
                         format!("client {}", index + 1),
                         self.rules.peers[0],
                         &invite,
@@ -193,6 +247,11 @@ impl Scenario {
             let device_id = server.device_id();
             self.clients[index].identity = Some((group_id.clone(), device_id));
             self.clients[index].generation += 1;
+            if files {
+                // The file scenario must use the same encrypted/retained native store factory
+                // as a real desktop, installed before any actor can create file bytes.
+                attach_blob_store(&state, &mut server).await;
+            }
             let (actor, events, task) = spawn(server);
             let restored = RestoredActor {
                 actor,
@@ -217,8 +276,8 @@ impl Scenario {
         bounded("all original admissions become visible", async {
             loop {
                 let mut complete = true;
-                for index in ALL {
-                    complete &= self.online(*index).actor.members().await.len() == 6;
+                for index in 0..count {
+                    complete &= self.online(index).actor.members().await.len() == count;
                 }
                 if complete {
                     break;
@@ -229,7 +288,7 @@ impl Scenario {
         .await;
         // Higher numbered clients retain outbound evidence to the earlier listeners. This makes
         // 2->1/3->1 and 5->4/6->4 available without pretending an inbound connection proves a dial.
-        for source in 1..6 {
+        for source in 1..count {
             for target in 0..source {
                 if !forbidden(source, target) {
                     self.online(source)
@@ -240,15 +299,14 @@ impl Scenario {
                 }
             }
         }
-        self.clock_step_ms.store(500, Ordering::Release);
-        self.wait_for_routes().await;
-        for index in ALL {
+        self.wait_for_routes(count).await;
+        for index in 0..count {
             assert_eq!(
-                self.online(*index).actor.group_mode().await.unwrap(),
+                self.online(index).actor.group_mode().await.unwrap(),
                 catcoms_app::GroupMode::PeerToPeer
             );
             assert!(
-                self.online(*index)
+                self.online(index)
                     .actor
                     .member_routes()
                     .await
@@ -260,13 +318,16 @@ impl Scenario {
         self.rules.assert_graph();
     }
 
-    async fn wait_for_routes(&self) {
-        let required = [(1, 0), (2, 0), (3, 0), (4, 3), (5, 3)];
+    async fn wait_for_routes(&self, count: usize) {
+        // dial() only queues an attempt. The missed-membership scenario later leaves only
+        // clients 1 and 3 online, so it also needs 3's authenticated, persisted route to 1.
+        // Establish that custody during original admission, never by injecting a restore hint.
+        let required = [(1, 0), (2, 0), (3, 0), (3, 1), (4, 3), (5, 3)];
         tokio::select! {
             _ = async {
                 loop {
                     let mut complete = true;
-                    for (source, target) in required {
+                    for (source, target) in required.into_iter().filter(|(source, target)| *source < count && *target < count) {
                         let net = network(&self.online(source).state).await;
                         complete &= net.reconnect_policy == ReconnectPolicy::MemberMesh && net.reconnect_routes.iter().any(|route| route.peer_id == *self.rules.peers[target].as_bytes());
                     }
@@ -276,13 +337,21 @@ impl Scenario {
             } => {},
             _ = SystemClock.sleep(Duration::from_secs(90)) => {
                 let mut actual = Vec::new();
-                for index in ALL { actual.push((*index + 1, network(&self.online(*index).state).await)); }
+                for index in 0..count {
+                    actual.push(self.recipient_diagnostic(index, channel_id("general"), &History::new()).await);
+                }
                 panic!("native workers did not retain authenticated bridge routes: {actual:?}");
             }
         }
     }
 
     async fn reopen(&mut self, indices: &[usize]) {
+        self.reopen_in(indices, true).await;
+    }
+
+    /// A changing-membership scenario checks its full roster after automatic recovery. Checking
+    /// a saved count after spawning would race a valid control commit from an already live peer.
+    async fn reopen_in(&mut self, indices: &[usize], fixed_membership: bool) {
         let mut order = indices.to_vec();
         if self.reverse {
             order.reverse();
@@ -320,7 +389,7 @@ impl Scenario {
                     ChaCha20Rng::seed_from_u64(
                         300 + index as u64 + self.clients[index].generation * 6,
                     ),
-                    Box::new(self.clock.clone()),
+                    Box::new(self.clock),
                     &[],
                     net.record_seq,
                     net.reconnect_policy,
@@ -351,11 +420,13 @@ impl Scenario {
                 )
                 .await,
             );
-            assert_eq!(
-                self.online(index).actor.members().await.len(),
-                6,
-                "membership is fixed across every restart"
-            );
+            if fixed_membership {
+                assert_eq!(
+                    self.online(index).actor.members().await.len(),
+                    6,
+                    "membership is fixed across every restart"
+                );
+            }
         }
     }
 
@@ -384,14 +455,52 @@ impl Scenario {
         phase: &str,
         history: &mut History,
     ) -> Vec<String> {
+        self.author_in(channel_id("general"), indices, phase, history)
+            .await
+    }
+
+    async fn author_in(
+        &mut self,
+        channel: u128,
+        indices: &[usize],
+        phase: &str,
+        history: &mut History,
+    ) -> Vec<String> {
         let mut accepted_ids = Vec::with_capacity(indices.len());
         for index in indices {
             self.token += 1;
             let text = format!("{phase}: original client {}", index + 1);
-            let id = self.online(*index).send(self.token, &text).await;
-            let author = fingerprint(&self.clients[*index].identity.as_ref().unwrap().1);
+            let before = self.online(*index).history_in(channel).await;
+            let id = self
+                .online(*index)
+                .send_in(channel, self.token, &text)
+                .await;
+            let device = self.clients[*index].identity.as_ref().unwrap().1;
+            let author = fingerprint(&device);
+            let after = self.online(*index).history_in(channel).await;
+            let original: Vec<_> = after
+                .operations
+                .iter()
+                .filter(|(hash, op)| {
+                    op.author_device == device && !before.operations.contains_key(*hash)
+                })
+                .collect();
+            assert_eq!(
+                original.len(),
+                1,
+                "one native durable send must retain one original device-signed operation"
+            );
+            let (hash, op) = original[0];
+            assert!(op.verify());
             assert!(
-                history.insert(id.clone(), (author, text)).is_none(),
+                history.operations.insert(*hash, op.clone()).is_none(),
+                "native acceptance reused an operation identity"
+            );
+            assert!(
+                history
+                    .messages
+                    .insert(id.clone(), (author, text))
+                    .is_none(),
                 "native acceptance reused an ID"
             );
             accepted_ids.push(id);
@@ -400,20 +509,115 @@ impl Scenario {
     }
 
     async fn converge(&self, indices: &[usize], expected: &History, phase: &str) {
+        self.converge_in(channel_id("general"), indices, expected, phase)
+            .await;
+    }
+
+    /// Failure observations have their own short bound: an unresponsive actor must not turn a
+    /// ninety-second recovery failure into an unbounded diagnostic wait. Never print ServerNet;
+    /// it contains the transport identity seed. Routes are projected to fixture indexes and an
+    /// equality check against each actual listener, with no raw addresses or secret material.
+    async fn recipient_diagnostic(
+        &self,
+        index: usize,
+        channel: u128,
+        expected: &History,
+    ) -> String {
+        async fn observe<F: Future>(future: F) -> Option<F::Output> {
+            tokio::select! {
+                value = future => Some(value),
+                _ = SystemClock.sleep(Duration::from_millis(500)) => None,
+            }
+        }
+        let running = self.online(index);
+        // Independent observations distinguish a busy actor from sealed-store contention. One
+        // slow read cannot erase the useful state returned by the other bounded probes.
+        let (history, net, recovery, routes) = tokio::join!(
+            observe(running.history_in(channel)),
+            observe(network(&running.state)),
+            observe(
+                running
+                    .actor
+                    .recovery_progress(catcoms_wire::DocType::Channel, channel)
+            ),
+            observe(running.actor.member_routes()),
+        );
+        let history = history.map_or_else(|| "history actor/snapshot probe exceeded 500ms".to_owned(), |history| {
+            // Fixed fixture labels/author identities identify which partition's operation is
+            // missing. Cap observations; never dump signed payloads or unbounded history.
+            let missing_messages: Vec<_> = expected.messages.iter().filter(|(id, _)| !history.messages.contains_key(*id))
+                .take(4).map(|(id, (author, label))| (id, author, label.chars().take(80).collect::<String>())).collect();
+            let unexpected_messages: Vec<_> = history.messages.keys().filter(|id| !expected.messages.contains_key(*id)).collect();
+            let changed_messages: Vec<_> = expected.messages.iter().filter(|(id, value)| history.messages.get(*id).is_some_and(|actual| actual != *value)).map(|(id, _)| id).collect();
+            let missing_operations: Vec<_> = expected.operations.keys().filter(|id| !history.operations.contains_key(*id)).map(hex::encode).collect();
+            let extra_operations: Vec<_> = history.operations.keys().filter(|id| !expected.operations.contains_key(*id)).map(hex::encode).collect();
+            format!("messages={} ops={} missing_messages={missing_messages:?} unexpected_messages={unexpected_messages:?} changed_messages={changed_messages:?} missing_operations={missing_operations:?} extra_operations={extra_operations:?}", history.messages.len(), history.operations.len())
+        });
+        let saved = self.sealed_route_diagnostic(net);
+        format!("client={} {history} cadence_submitted_passes={} network={saved} recovery={recovery:?} routes={routes:?}",
+            index + 1, running.passes.load(Ordering::Acquire))
+    }
+
+    /// Project only fixture identities and listener equality; ServerNet itself contains secrets.
+    /// Callers bound the store query separately from actor observations so one cannot hide the other.
+    fn sealed_route_diagnostic(&self, net: Option<ServerNet>) -> String {
+        net.map_or_else(
+            || "sealed network store probe exceeded 500ms".to_owned(),
+            |net| {
+                let targets: Vec<_> = net
+                    .reconnect_routes
+                    .iter()
+                    .map(|route| {
+                        let target = self
+                            .rules
+                            .peers
+                            .iter()
+                            .position(|peer| peer.as_bytes() == &route.peer_id);
+                        (
+                            target.map(|target| target + 1),
+                            target.is_some_and(|target| {
+                                route.address == self.address(target).to_string()
+                            }),
+                        )
+                    })
+                    .collect();
+                format!(
+                    "policy={:?} saved_targets_and_current_listener={targets:?}",
+                    net.reconnect_policy
+                )
+            },
+        )
+    }
+
+    async fn converge_in(&self, channel: u128, indices: &[usize], expected: &History, phase: &str) {
         eprintln!("six-client phase: {phase}");
+        self.rules.begin_phase(phase);
         tokio::select! {
             _ = async {
                 loop {
                     let mut complete = true;
-                    for index in indices { complete &= self.online(*index).history().await == *expected; }
+                    for index in indices {
+                        let history = self.online(*index).history_in(channel).await;
+                        self.rules.observe_history(*index, history.messages.len(), history.operations.len());
+                        complete &= history == *expected;
+                    }
                     if complete { break; }
                     SystemClock.sleep(Duration::from_millis(100)).await;
                 }
             } => {},
             _ = SystemClock.sleep(Duration::from_secs(90)) => {
                 let mut actual = Vec::new();
-                for index in indices { actual.push((*index + 1, self.online(*index).history().await)); }
-                panic!("{phase} failed exact ID/author/text convergence; expected={expected:?}; actual={actual:?}");
+                for index in indices {
+                    // Keep the exact equality oracle above. Diagnostics identify the failed
+                    // recipient and scheduler state without dumping entire signed payloads.
+                    actual.push(self.recipient_diagnostic(*index, channel, expected).await);
+                }
+                let trace = {
+                    let trace = self.rules.trace.lock().unwrap();
+                    format!("received_kinds={:?}; connected_maintenance_submissions={:?}; peer_dials={:?}; phases={:?}; history_samples_phase_client1_mono_messages_ops={:?}; ordinary_last_192_evicted={}; ordinary_requests={:?}", trace.received_kinds, trace.connected_submissions, trace.peer_dials, trace.phases, trace.history_samples, trace.ordinary_evicted, trace.ordinary)
+                }; // Release the diagnostic mutex before panic; secondary tasks retain usable logs.
+                panic!("{phase} failed exact ID/author/text/original-signed-operation convergence; expected_messages={} expected_ops={} recipients={actual:?}; {trace}",
+                    expected.messages.len(), expected.operations.len());
             }
         }
         self.rules.assert_graph();
@@ -498,7 +702,7 @@ async fn six_client_scenario(hostile: bool) {
         scenario.online(5).passes.load(Ordering::Acquire),
     ];
     // Observe a full periodic pass, not only the startup wake, while the forbidden pair is alone.
-    bounded("isolated discovery passes", async {
+    periodic_bounded("isolated discovery passes", async {
         while (4..6).any(|index| {
             scenario.online(index).passes.load(Ordering::Acquire)
                 < (starting_passes[index - 4] + 1).max(2)

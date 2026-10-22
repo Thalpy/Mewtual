@@ -7,6 +7,192 @@ use rand_chacha::ChaCha20Rng;
 type Member = ChannelSync<MemNetwork, ChaCha20Rng>;
 const CHANNEL: u128 = 913;
 
+/// Exercise real request/response signatures and import without transport scheduling. The
+/// rejected inner frame is still inside a valid current member's exact response transcript.
+fn signed_answer(
+    provider: &Member,
+    requester: &mut Member,
+    answer: Vec<u8>,
+) -> Result<Option<usize>, SyncError> {
+    let (_, auth) = requester
+        .build_authed_request(
+            KIND_CATCHUP_SINCE,
+            &encode_catchup_since_req(DocType::Channel, CHANNEL, &[], None),
+        )
+        .unwrap();
+    let response = provider
+        .sign_doc_catchup_answer(&requester.device.public_key_bytes(), &auth, answer)
+        .unwrap();
+    requester.apply_catchup_since_response(
+        provider.local_peer(),
+        DocType::Channel,
+        CHANNEL,
+        auth,
+        &response,
+    )
+}
+
+#[tokio::test]
+async fn rejected_chat_page_never_advances_past_unprocessed_history_and_retains_verified_prefix_work(
+) {
+    let (mut provider, mut requester, _) = pair().await;
+    let peer = provider.local_peer();
+    let mut good = Vec::new();
+    for index in 0..3 {
+        good.push(
+            provider
+                .docs
+                .get_mut(&(DocType::Channel, CHANNEL))
+                .unwrap()
+                .edit(
+                    &provider.device,
+                    &provider.group,
+                    &mut provider.rng,
+                    |doc| doc.put(ROOT, format!("message-{index}"), index as u64),
+                )
+                .unwrap(),
+        );
+    }
+    let key = provider
+        .group
+        .channel_secret(&provider.device, DocType::Channel, CHANNEL)
+        .unwrap();
+    let mut bad = good[1].open(&key).unwrap();
+    bad.signature[0] ^= 1;
+    let bad = SealedOp::seal(&bad, &provider.group, &provider.device, &mut provider.rng).unwrap();
+    let mut forged = automerge::AutoCommit::new().with_actor(automerge::ActorId::from(
+        provider.device.device_id().as_bytes().to_vec(),
+    ));
+    forged.put(ROOT, "forged-writer", true).unwrap();
+    forged.commit();
+    let forged = catcoms_replication::SignedOp::sign(
+        &requester.device,
+        DocType::Channel,
+        CHANNEL,
+        forged.get_last_local_change().unwrap().raw_bytes().to_vec(),
+    )
+    .unwrap();
+    let forged = SealedOp::seal(
+        &forged,
+        &provider.group,
+        &provider.device,
+        &mut provider.rng,
+    )
+    .unwrap();
+    let original = CatchupCursor {
+        provider: [91; 16],
+        position: 7,
+    };
+    let offered = CatchupCursor {
+        provider: original.provider,
+        position: 10,
+    };
+    for bad in [bad, forged] {
+        for marker in [
+            Some(CATCHUP_SINCE_PAGE),
+            Some(CATCHUP_SINCE_UNDERSTOOD),
+            Some(CATCHUP_SINCE_MORE),
+            None,
+        ] {
+            let saved = EncryptedDoc::new(DocType::Channel, CHANNEL, &requester.device.device_id());
+            requester.docs.insert((DocType::Channel, CHANNEL), saved);
+            requester.catchup_queue.clear();
+            requester
+                .catchup_cursors
+                .insert((DocType::Channel, CHANNEL, peer), original);
+            requester.note_source_checked(peer, DocType::Channel, CHANNEL);
+            requester
+                .catchup_stalls
+                .insert((DocType::Channel, CHANNEL, peer), 2);
+            let mut answer: Vec<u8> = marker.into_iter().collect();
+            if marker == Some(CATCHUP_SINCE_PAGE) {
+                answer.extend_from_slice(&offered.encode());
+            }
+            answer.extend_from_slice(&encode_bundle(&[
+                good[0].clone(),
+                bad.clone(),
+                good[1].clone(),
+            ]));
+            if marker.is_some() {
+                assert!(signed_answer(&provider, &mut requester, answer).is_err());
+            } else {
+                assert!(requester
+                    .apply_full_catchup_response(peer, DocType::Channel, CHANNEL, &answer)
+                    .is_err());
+            }
+            assert_eq!(
+                requester.doc(DocType::Channel, CHANNEL).unwrap().op_count(),
+                1
+            );
+            assert_eq!(
+                requester
+                    .catchup_cursors
+                    .get(&(DocType::Channel, CHANNEL, peer))
+                    .copied(),
+                Some(original),
+                "failed page/completion cannot skip its unprocessed tail or erase the prior walk"
+            );
+            assert!(
+                requester.catchup_queue.contains(&CatchupTask::Doc {
+                    doc_type: DocType::Channel,
+                    doc_id: CHANNEL
+                }),
+                "an accepted prefix must retain recovery work even when a later frame fails"
+            );
+            assert!(
+                !requester
+                    .catchup_sources_checked
+                    .contains_key(&(DocType::Channel, CHANNEL)),
+                "a verified prefix invalidates older completeness even on later rejection"
+            );
+            assert_eq!(
+                requester
+                    .catchup_stalls
+                    .get(&(DocType::Channel, CHANNEL, peer)),
+                Some(&2),
+                "a rejected completion cannot clear the provider's existing stall"
+            );
+            assert!(requester
+                .doc(DocType::Channel, CHANNEL)
+                .unwrap()
+                .doc()
+                .get(ROOT, "message-1")
+                .unwrap()
+                .is_none());
+            // A corrected response from the same original position, then a later page, can finish.
+            let mut corrected = vec![CATCHUP_SINCE_PAGE];
+            corrected.extend_from_slice(&offered.encode());
+            corrected.extend_from_slice(&encode_bundle(&good[..2]));
+            assert_eq!(
+                signed_answer(&provider, &mut requester, corrected).unwrap(),
+                Some(1)
+            );
+            let mut last = vec![CATCHUP_SINCE_UNDERSTOOD];
+            last.extend_from_slice(&encode_bundle(&good[2..]));
+            assert_eq!(
+                signed_answer(&provider, &mut requester, last).unwrap(),
+                Some(1)
+            );
+            assert_eq!(
+                requester
+                    .docs
+                    .get_mut(&(DocType::Channel, CHANNEL))
+                    .unwrap()
+                    .heads(),
+                provider
+                    .docs
+                    .get_mut(&(DocType::Channel, CHANNEL))
+                    .unwrap()
+                    .heads()
+            );
+            assert_eq!(
+                requester.doc(DocType::Channel, CHANNEL).unwrap().op_count(),
+                3
+            );
+        }
+    }
+}
+
 async fn pair() -> (Member, Member, ManualClock) {
     let (_hub, mut members, ids) = tests::build_members(2).await;
     tests::converge_and_publish_test_routes(&mut members);

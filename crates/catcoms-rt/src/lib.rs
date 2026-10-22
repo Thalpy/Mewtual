@@ -22,10 +22,14 @@ pub use clock::{Clock, ManualClock, SystemClock};
 pub use mem::{Hub, MemNetwork};
 pub use rng::{CryptoRng, CryptoRngCore, OsCryptoRng, RngCore};
 pub use transport::{
-    BoxedDialPermit, ConnectionDirection, ConnectionFamily, ConnectionPath, ConnectionTransport,
-    DialPermit, DialSubmission, DiscoveredPeer, MeshTransport, PeerConnectionSnapshot, PeerId,
-    ProtocolId, PublishOnceError, PublishSubmission, RendezvousRegistration, RequestCancellation,
-    RequestKeepalive, Responder, ResponderRx, SharedRequestKeepalive, Topic, TransportError,
-    TransportEvent, MAX_CONNECTED_PEER_SNAPSHOT, MAX_CONNECTION_PATH_SNAPSHOT, MAX_PEER_DIAL_BATCH,
-    MAX_PUBLISH_ONCE_BYTES, MAX_PUBLISH_ONCE_TOPIC_BYTES, REQUEST_TIMEOUT, REQUEST_TIMEOUT_MS,
+    BoxedDialPermit, ConnectionDirection, ConnectionFamily, ConnectionLease, ConnectionPath,
+    ConnectionTransport, DialPermit, DialSubmission, DiscoveredPeer, MeshTransport,
+    PeerConnectionSnapshot, PeerId, ProtocolId, PublishOnceError, PublishSubmission,
+    RendezvousRegistration, RequestAuthority, RequestCancellation, RequestKeepalive, Responder,
+    ResponderReply, ResponderRx, ResponseBudget, SharedRequestKeepalive, Topic, TransportError,
+    TransportEvent, FILE_BRIDGE_KIND, FILE_SERVICE_REQUEST_MAX_BYTES,
+    FILE_SERVICE_RESPONSE_MAX_BYTES, FILE_SOURCE_KIND, MAX_CONNECTED_PEER_SNAPSHOT,
+    MAX_CONNECTION_PATH_SNAPSHOT, MAX_PEER_DIAL_BATCH, MAX_PUBLISH_ONCE_BYTES,
+    MAX_PUBLISH_ONCE_TOPIC_BYTES, MAX_REQUEST_RESPONSE_FRAME_BYTES, REQUEST_TIMEOUT,
+    REQUEST_TIMEOUT_MS,
 };

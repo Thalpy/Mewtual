@@ -11,13 +11,12 @@ use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 use bytes::Bytes;
 use tokio::sync::mpsc::{self, UnboundedReceiver, UnboundedSender};
-use tokio::sync::oneshot;
 use tokio::sync::Mutex as AsyncMutex;
 
 use crate::transport::{
-    DialSubmission, MeshTransport, PeerConnectionSnapshot, PeerId, ProtocolId, PublishOnceError,
-    PublishSubmission, RequestCancellation, Responder, Topic, TransportError, TransportEvent,
-    MAX_CONNECTED_PEER_SNAPSHOT, MAX_PEER_DIAL_BATCH, MAX_PUBLISH_ONCE_BYTES,
+    ConnectionLease, DialSubmission, MeshTransport, PeerConnectionSnapshot, PeerId, ProtocolId,
+    PublishOnceError, PublishSubmission, RequestCancellation, Responder, Topic, TransportError,
+    TransportEvent, MAX_CONNECTED_PEER_SNAPSHOT, MAX_PEER_DIAL_BATCH, MAX_PUBLISH_ONCE_BYTES,
     MAX_PUBLISH_ONCE_TOPIC_BYTES,
 };
 
@@ -25,6 +24,7 @@ use crate::transport::{
 struct HubState {
     inboxes: HashMap<PeerId, UnboundedSender<TransportEvent>>,
     topics: HashMap<Topic, HashSet<PeerId>>,
+    connections: HashMap<PeerId, ConnectionLease>,
 }
 
 /// A shared in-memory broker connecting many [`MemNetwork`] nodes.
@@ -42,15 +42,21 @@ impl Hub {
     /// Register `peer` and return its transport handle.
     pub fn join(self: &Arc<Self>, peer: PeerId) -> MemNetwork {
         let (tx, rx) = mpsc::unbounded_channel();
-        self.state
-            .lock()
-            .expect("hub mutex poisoned")
-            .inboxes
-            .insert(peer, tx);
+        let mut state = self.state.lock().expect("hub mutex poisoned");
+        let lease = ConnectionLease::default();
+        if let Some(old) = state.connections.insert(peer, lease.clone()) {
+            old.revoke();
+        }
+        state.inboxes.insert(peer, tx);
+        drop(state);
         MemNetwork {
             hub: Arc::clone(self),
             local: peer,
             rx: Arc::new(AsyncMutex::new(rx)),
+            registration: Arc::new(Registration {
+                lease,
+                links: Mutex::new(HashMap::new()),
+            }),
         }
     }
 
@@ -66,8 +72,9 @@ impl Hub {
             .lock()
             .expect("hub mutex poisoned")
             .inboxes
-            .keys()
-            .copied()
+            .iter()
+            .filter(|(_, sender)| !sender.is_closed())
+            .map(|(peer, _)| *peer)
             .filter(|peer| *peer != local)
             .take(MAX_CONNECTED_PEER_SNAPSHOT)
             .map(|peer| PeerConnectionSnapshot {
@@ -103,6 +110,26 @@ pub struct MemNetwork {
     hub: Arc<Hub>,
     local: PeerId,
     rx: Arc<AsyncMutex<UnboundedReceiver<TransportEvent>>>,
+    registration: Arc<Registration>,
+}
+impl MemNetwork {
+    /// Start a fresh registration under the same peer identity in this deterministic harness.
+    /// Old captured connection owners revoke immediately, while an old event reader may still
+    /// retain its inbox. This models transport restart without consuming an application's events.
+    pub fn rejoin(&self) -> Self {
+        self.hub.join(self.local)
+    }
+}
+
+#[derive(Debug)]
+struct Registration {
+    lease: ConnectionLease,
+    links: Mutex<HashMap<PeerId, (ConnectionLease, ConnectionLease)>>,
+}
+impl Drop for Registration {
+    fn drop(&mut self) {
+        self.lease.revoke();
+    }
 }
 
 #[async_trait]
@@ -112,10 +139,51 @@ impl MeshTransport for MemNetwork {
     }
 
     fn connection_snapshot(&self) -> Vec<PeerConnectionSnapshot> {
+        if !self.registration.lease.is_live() {
+            return Vec::new();
+        }
         self.hub.connected(self.local)
+    }
+    fn connection_lease(&self, peer: PeerId) -> Option<ConnectionLease> {
+        if peer == self.local || !self.registration.lease.is_live() {
+            return None;
+        }
+        let state = self.hub.state.lock().expect("hub mutex poisoned");
+        state
+            .inboxes
+            .get(&peer)
+            .filter(|sender| !sender.is_closed())?;
+        let remote = state
+            .connections
+            .get(&peer)
+            .filter(|lease| lease.is_live())
+            .cloned()?;
+        let mut links = self
+            .registration
+            .links
+            .lock()
+            .expect("registration mutex poisoned");
+        if let Some((previous, current)) = links.get(&peer) {
+            if previous.is_same(&remote) && current.is_live() {
+                return Some(current.clone());
+            }
+        }
+        links.retain(|_, (_, lease)| lease.is_live());
+        if links.len() >= MAX_CONNECTED_PEER_SNAPSHOT {
+            return None;
+        }
+        let lease = ConnectionLease::dependent(&self.registration.lease, &remote);
+        links.insert(peer, (remote, lease.clone()));
+        Some(lease)
+    }
+    fn supports_connection_leases(&self) -> bool {
+        true
     }
 
     async fn subscribe(&self, topic: Topic) -> Result<(), TransportError> {
+        if !self.registration.lease.is_live() {
+            return Err(TransportError::Closed);
+        }
         self.hub
             .state
             .lock()
@@ -128,6 +196,9 @@ impl MeshTransport for MemNetwork {
     }
 
     async fn unsubscribe(&self, topic: Topic) -> Result<(), TransportError> {
+        if !self.registration.lease.is_live() {
+            return Err(TransportError::Closed);
+        }
         let mut state = self.hub.state.lock().expect("hub mutex poisoned");
         if let Some(set) = state.topics.get_mut(&topic) {
             set.remove(&self.local);
@@ -136,6 +207,9 @@ impl MeshTransport for MemNetwork {
     }
 
     async fn publish(&self, topic: Topic, data: Bytes) -> Result<(), TransportError> {
+        if !self.registration.lease.is_live() {
+            return Err(TransportError::Closed);
+        }
         for peer in self.hub.subscribers(&topic) {
             if peer == self.local {
                 continue; // gossip does not echo to the publisher
@@ -156,6 +230,9 @@ impl MeshTransport for MemNetwork {
         topic: Topic,
         data: Bytes,
     ) -> Result<PublishSubmission, PublishOnceError> {
+        if !self.registration.lease.is_live() {
+            return Err(PublishOnceError::Closed);
+        }
         if data.len() > MAX_PUBLISH_ONCE_BYTES
             || topic.as_bytes().len() > MAX_PUBLISH_ONCE_TOPIC_BYTES
         {
@@ -196,18 +273,18 @@ impl MeshTransport for MemNetwork {
         proto: ProtocolId,
         data: Bytes,
     ) -> Result<Bytes, TransportError> {
-        let (tx, rx) = oneshot::channel();
+        if !self.registration.lease.is_live() {
+            return Err(TransportError::Closed);
+        }
+        let (responder, rx) = Responder::channel();
         let event = TransportEvent::Request {
             from: self.local,
             proto,
             data,
-            responder: Responder {
-                reply: tx,
-                _keepalive: None,
-            },
+            responder,
         };
         self.hub.deliver(peer, event)?;
-        rx.await.map_err(|_| TransportError::NoResponse)
+        rx.recv().await.ok_or(TransportError::NoResponse)
     }
 
     async fn request_cancellable(
@@ -217,26 +294,24 @@ impl MeshTransport for MemNetwork {
         data: Bytes,
         mut cancellation: RequestCancellation,
     ) -> Result<Bytes, TransportError> {
-        if cancellation.is_cancelled() {
+        if !self.registration.lease.is_live() || cancellation.is_cancelled() {
             return Err(TransportError::Cancelled);
         }
-        let (reply, response) = oneshot::channel();
+        let (mut responder, response) = Responder::channel();
+        responder._keepalive = cancellation.keepalive();
         let event = TransportEvent::Request {
             from: self.local,
             proto,
             data,
             // The unbounded test inbox can outlive this waiting future just like libp2p's
             // outbound table. Keep accounting with the event/responder until it is handled.
-            responder: Responder {
-                reply,
-                _keepalive: cancellation.keepalive(),
-            },
+            responder,
         };
         self.hub.deliver(peer, event)?;
         tokio::select! {
             biased;
             _ = cancellation.cancelled() => Err(TransportError::Cancelled),
-            result = response => result.map_err(|_| TransportError::NoResponse),
+            result = response.recv() => result.ok_or(TransportError::NoResponse),
         }
     }
 
@@ -269,7 +344,38 @@ impl MeshTransport for MemNetwork {
         proto: ProtocolId,
         data: Bytes,
     ) -> Result<(), TransportError> {
+        if !self.registration.lease.is_live() {
+            return Err(TransportError::Closed);
+        }
         let (responder, _rx) = Responder::channel();
+        self.hub.deliver(
+            peer,
+            TransportEvent::Request {
+                from: self.local,
+                proto,
+                data,
+                responder,
+            },
+        )
+    }
+
+    async fn notify_connected_cancellable(
+        &self,
+        peer: PeerId,
+        proto: ProtocolId,
+        data: Bytes,
+        cancellation: RequestCancellation,
+    ) -> Result<(), TransportError> {
+        if cancellation.is_cancelled() {
+            return Err(TransportError::Cancelled);
+        }
+        if !self.registration.lease.is_live() {
+            return Err(TransportError::Closed);
+        }
+        let (mut responder, _rx) = Responder::channel();
+        // Hub delivery is the entire lower request. Its queued responder holds actual custody
+        // until the recipient consumes or discards it; no answer buffer is retained for callers.
+        responder._keepalive = cancellation.keepalive();
         self.hub.deliver(
             peer,
             TransportEvent::Request {
@@ -315,6 +421,114 @@ mod tests {
 
     fn bytes(s: &'static str) -> Bytes {
         Bytes::from_static(s.as_bytes())
+    }
+    #[derive(Debug)]
+    struct ResponseEffect(tokio::sync::watch::Receiver<bool>);
+    #[async_trait]
+    impl crate::RequestAuthority for ResponseEffect {
+        fn authorized(&self) -> bool {
+            *self.0.borrow() && self.0.has_changed().is_ok()
+        }
+        async fn revoked(&self) {
+            let mut signal = self.0.clone();
+            while self.authorized() {
+                if signal.changed().await.is_err() {
+                    return;
+                }
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn queued_mem_reply_rechecks_effect_after_handler_handoff() {
+        use std::future::Future;
+        let hub = Hub::new();
+        let a = hub.join(PeerId::from_u64(1));
+        let b = hub.join(PeerId::from_u64(2));
+        for retire in [false, true] {
+            let mut waiting =
+                Box::pin(a.request(b.local_peer(), ProtocolId("reply-scope"), bytes("request")));
+            std::future::poll_fn(|cx| {
+                assert!(waiting.as_mut().poll(cx).is_pending());
+                std::task::Poll::Ready(())
+            })
+            .await;
+            let TransportEvent::Request { responder, .. } = b.next_event().await.unwrap() else {
+                panic!("expected request")
+            };
+            let (owner, signal) = tokio::sync::watch::channel(true);
+            responder
+                .try_respond_with_authority(bytes("reply"), Arc::new(ResponseEffect(signal)))
+                .unwrap();
+            if retire {
+                drop(owner);
+            } else {
+                assert_eq!(waiting.await.unwrap(), bytes("reply"));
+                continue;
+            }
+            assert!(matches!(waiting.await, Err(TransportError::NoResponse)));
+        }
+    }
+
+    #[tokio::test]
+    async fn connection_lease_replacement_and_actual_last_handle_drop_are_irreversible() {
+        let hub = Hub::new();
+        let a = hub.join(PeerId::from_u64(1));
+        let b = hub.join(PeerId::from_u64(2));
+        let old = a.connection_lease(b.local_peer()).unwrap();
+        let replacement = hub.join(b.local_peer());
+        old.revoked().await;
+        assert!(!old.is_live());
+        let next = a.connection_lease(b.local_peer()).unwrap();
+        assert!(next.is_live() && !next.is_same(&old));
+        drop(b);
+        assert!(
+            next.is_live(),
+            "old registration drop cannot revoke replacement"
+        );
+        let retained = replacement.clone();
+        drop(replacement);
+        assert!(next.is_live());
+        drop(retained);
+        next.revoked().await;
+        assert!(a.connection_lease(PeerId::from_u64(2)).is_none());
+        assert!(a.connection_snapshot().is_empty());
+    }
+    #[tokio::test]
+    async fn connection_lease_local_retirement_refuses_old_worker_without_revoking_other_members() {
+        let hub = Hub::new();
+        let a = hub.join(PeerId::from_u64(1));
+        let b = hub.join(PeerId::from_u64(2));
+        let c = hub.join(PeerId::from_u64(3));
+        let ab = a.connection_lease(b.local_peer()).unwrap();
+        let cb = c.connection_lease(b.local_peer()).unwrap();
+        assert!(ab.is_same(&a.connection_lease(b.local_peer()).unwrap()));
+        let next = a.rejoin();
+        ab.revoked().await;
+        assert!(!ab.is_live() && cb.is_live());
+        assert!(a.connection_snapshot().is_empty());
+        assert!(a.connection_lease(b.local_peer()).is_none());
+        assert!(matches!(
+            a.request(b.local_peer(), ProtocolId("old"), Bytes::new())
+                .await,
+            Err(TransportError::Closed)
+        ));
+        let (_publisher, signal) = tokio::sync::watch::channel(false);
+        assert!(matches!(
+            a.request_connected_cancellable(
+                b.local_peer(),
+                ProtocolId("old"),
+                Bytes::new(),
+                RequestCancellation::new(signal, None)
+            )
+            .await,
+            Err(TransportError::Cancelled)
+        ));
+        let next_ab = next.connection_lease(b.local_peer()).unwrap();
+        assert!(next_ab.is_live() && !next_ab.is_same(&ab));
+        drop(next);
+        next_ab.revoked().await;
+        assert!(!next_ab.is_live() && cb.is_live());
     }
 
     #[tokio::test]
@@ -496,6 +710,55 @@ mod tests {
             "the queued request, not its cancelled waiter, owns the accounting lifetime"
         );
         responder.respond(bytes("late"));
+        assert_eq!(drops.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn abandoned_request_retires_reply_authority_before_queued_event_is_consumed() {
+        #[derive(Debug)]
+        struct DropObserved(Arc<AtomicUsize>);
+        impl Drop for DropObserved {
+            fn drop(&mut self) {
+                self.0.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+        use std::future::Future;
+
+        let hub = Hub::new();
+        let a = hub.join(PeerId::from_u64(1));
+        let b = hub.join(PeerId::from_u64(2));
+        let drops = Arc::new(AtomicUsize::new(0));
+        let (_cancel, signal) = tokio::sync::watch::channel(false);
+        let cancellation =
+            RequestCancellation::new(signal, Some(Arc::new(DropObserved(drops.clone()))));
+        let mut request = Box::pin(a.request_cancellable(
+            b.local_peer(),
+            ProtocolId("deferred"),
+            bytes("request"),
+            cancellation,
+        ));
+        std::future::poll_fn(|cx| {
+            assert!(request.as_mut().poll(cx).is_pending());
+            std::task::Poll::Ready(())
+        })
+        .await;
+        // The original caller disappears before its peer even dequeues the event. No observer
+        // or forwarding task runs between this drop and the driver's synchronous gate check.
+        drop(request);
+        assert_eq!(drops.load(Ordering::SeqCst), 0);
+        let responder = match b.next_event().await {
+            Some(TransportEvent::Request { responder, .. }) => responder,
+            other => panic!("expected queued request, got {other:?}"),
+        };
+        let authority = responder.cancellation_authority();
+        assert!(!authority.authorized());
+        authority.revoked().await;
+        assert_eq!(
+            drops.load(Ordering::SeqCst),
+            0,
+            "actual event still owns custody"
+        );
+        drop(responder);
         assert_eq!(drops.load(Ordering::SeqCst), 1);
     }
 

@@ -335,6 +335,7 @@ pub(super) async fn install(
     state.servers.lock().await.insert(
         7,
         ServerEntry {
+            files: keep_session::EntryOwner::new(),
             actor,
             instance,
             group_id,
@@ -349,6 +350,7 @@ pub(super) async fn install(
             is_dm: false,
             switchboard: false,
             record_seq: 0,
+            voice: None,
             persist: PersistCounters::default(),
         },
     );
@@ -1122,7 +1124,32 @@ async fn native_studio_running_worker_retains_fences_after_invoke_or_actor_abort
         let (actor, mut events, task) = spawn(server);
         let drain = tokio::spawn(async move { while events.recv().await.is_some() {} });
         install(&state, actor.clone(), group, device, 2).await;
-        state.session_lock_requested.store(false, Ordering::Release);
+        assert_eq!(
+            unlocked_ui_session_generation(&state).await.unwrap_err(),
+            "the vault is locked"
+        );
+        {
+            let _commit = state.ui_session_commit.lock().await;
+            state.session_lock_requested.store(false, Ordering::Release);
+            assert!(
+                ui_session_closed(&state),
+                "clearing a lock request must not authorize the newer UI generation"
+            );
+            // Model the authenticated unlock commit against this already-open test vault.
+            // Production publishes this floor only after unlock succeeds; the old worker's
+            // captured generation remains obsolete even though its durable save survived.
+            let current = state.ui_session_generation.load(Ordering::Acquire);
+            assert_ne!(current, generation);
+            state
+                .ui_authorized_generation
+                .store(current, Ordering::Release);
+        }
+        assert_eq!(
+            require_ui_session_generation(&state, generation)
+                .await
+                .unwrap_err(),
+            "the UI session changed while the operation was in progress"
+        );
         let reopened = invoke_read(&state).await;
         assert_eq!(
             reopened["content"]["title"]["selected"]["value"],

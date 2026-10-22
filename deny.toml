@@ -58,6 +58,18 @@ reason = "hickory-proto NSEC3 validation loop: DNSSEC features are not compiled 
 id = "RUSTSEC-2026-0119"
 reason = "hickory-proto O(n^2) encoding: client encodes only its own small queries; fix requires hickory 0.26 via a libp2p bump"
 
+# 0.26.11 is only a compatibility re-export: src/lib.rs contains
+# `pub use parent::TLS_SERVER_ROOTS`, with parent = webpki-roots ^1. Both locks now resolve
+# that parent to 1.0.10, which removes the affected root. The advisory nevertheless matches
+# the shim's old version. The bans below are REQUIRED with this exception: they reject every
+# affected published concrete root bundle, including the published prerelease family, so a downgrade cannot hide
+# behind this advisory-wide ignore. Remove the exception when libp2p drops the shim or the
+# upstream advisory classifies this forwarding version separately. No verifier exception:
+# rustls-webpki is independently updated to 0.103.16 in both workspaces.
+[[advisories.ignore]]
+id = "RUSTSEC-2026-0381"
+reason = "webpki-roots 0.26.11 only re-exports patched parent 1.0.10; mandatory bans below reject vulnerable stable bundles and the published 0.26.0 prereleases"
+
 [bans]
 # Flag duplicate versions of the same crate; tighten to "deny" as the tree stabilises.
 multiple-versions = "warn"
@@ -66,6 +78,17 @@ wildcards = "deny"
 # wildcard. That check exists to stop `foo = "*"` against a registry, which this is not: a path
 # dependency resolves to the tree in front of you, so there is no unpinned third party involved.
 allow-wildcard-paths = true
+
+# Preserve RUSTSEC-2026-0381 enforcement despite its compatibility-shim false positive. Only
+# the reviewed 0.26.11 forwarding crate and fixed >=1.0.10 bundles are permitted. Its parent
+# appears as a separate package in the graph, so resolving it to 1.0.9 fails these bans.
+deny = [
+    { name = "webpki-roots", version = "<0.26.11", reason = "RUSTSEC-2026-0381: vulnerable concrete root bundle" },
+    { name = "webpki-roots", version = ">0.26.11, <1.0.10", reason = "RUSTSEC-2026-0381: only exact 0.26.11 forwarding shim is exempt before fixed 1.0.10" },
+    # Ordinary semver ranges exclude prereleases. Explicitly cover the published alpha.0/.1/.2
+    # family; review this exception if another prerelease release-tuple is introduced upstream.
+    { name = "webpki-roots", version = ">=0.26.0-alpha.0, <0.26.0", reason = "RUSTSEC-2026-0381: published prerelease root bundles must not bypass stable-version bans" },
+]
 
 [licenses]
 # Permissive + the copyleft variants we expect from the crypto/p2p ecosystem.

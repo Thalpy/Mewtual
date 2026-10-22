@@ -21,6 +21,56 @@ separate work.
 
 ---
 
+## Chat history adversarial continuation (20 October)
+
+MLS key epochs do not reset the chat operation graph. The additive ledger, causal edit/delete
+rules, newly found message-addressing and failed-page cursor defects, compatibility-conscious
+writer check, and remaining audit/equivocation limits are traced in
+[CHAT-HISTORY-CONVERGENCE](communication-recovery/CHAT-HISTORY-CONVERGENCE.md).
+Its ten-epoch test explicitly delivers recovery; it is not new automatic network acceptance.
+The dated evidence in the acceptance ledger takes precedence over older coverage summaries here.
+
+## Quiet receipts and sole-owner responsiveness (19 October)
+
+A genuinely new bound member endpoint requests one coalesced reconciliation pass for documents
+already open at authentication. This is independent of the restore's first-source latch: its
+connection may have arrived before it was authorized as a source. The async owner drains that
+obligation through the existing rotating bounded queue. Scheduling and selection recheck current
+membership/connectivity; the flag itself grants no route or dial authority. Repeated proofs of
+the same binding create no new pass, and proofs before any document opens create no future wake.
+The 30-second owned fallback, original response waits, source cooldowns and cursors remain intact.
+
+Serving a current authenticated `KIND_CATCHUP_SINCE` request can also expose a reverse gap: its
+bounded frontier names changes this already-open document does not hold. One best-effort reverse
+read is admitted per document/full member per 30 seconds, under a 256-entry table. Known ancestors
+cause no wake; unknown hashes are hints, never evidence that valid operations exist. An unexpired
+full table refuses hints while normal serving continues. A full recovery queue likewise retains
+existing work and falls back to periodic reconciliation; prompt saturated admission is not claimed.
+Only that requester's previous completeness answer is forgotten. A pending older response retains
+a dirty-completeness bit, including through legacy Full fallback, so an old empty answer cannot
+close the newer obligation. Membership, current epoch and actual connectivity are rechecked;
+responses still pass the existing request binding, encryption and original signed-operation checks.
+
+
+A newly verified live or catch-up operation can queue its bounded exact author/document/change
+receipt. `queue_automatic_notifications` admits receipts and repair forwards into the existing
+bounded detached pool; it never waits for a local notification ACK before polling inbound work.
+Their persistent class turn changes only after successful admission, with at most four admissions
+per owner turn. Busy passes preserve the class owed capacity and the original outbox intents.
+This prevents continuous receipt traffic taking every newly released slot before repair forwards.
+
+The notification captures the current signed descriptor, roster/path evidence, original connection
+lease and deadline. The same Flight stays charged through actual lower retirement, including after
+outer cancellation. Queue admission and local driver ACK create no remote delivery evidence. Only
+an actual authenticated receipt matching a bounded recent target can change that evidence. These
+best-effort notifications add no dial authority and promise no delivery under unavailable paths.
+
+`RecoveryProgress` reports the retained catch-up kind, first-polled wait age and configured wait
+limit. Reading these observations starts no work and cannot renew a wait. They distinguish an
+unstarted preparation from an overdue unpolled response, without claiming remote wire receipt.
+The six-client fixture independently bounds history, sealed-store, recovery and route observations;
+a store timeout no longer hides an otherwise responsive actor.
+
 ## 1. Layer map
 
 | Layer | Crate / file | Owns |
@@ -92,6 +142,14 @@ barrier, bounded recovery storage and session/race checks.
 
 ## 3. Receiving live (gossip)
 
+The networking driver queues application delivery without awaiting its bounded application sink
+inside the swarm handler. Responses, connection retirement and local command acknowledgements
+therefore continue during application congestion. If gossip cannot be retained, or its original
+carrier connection retires while it waits, a coalesced `RecoveryNeeded` event schedules commit
+catch-up and document reconciliation. It is a local loss signal, not authenticated evidence of
+a particular sender, membership change or missing epoch. Payload, lifecycle and recovery delivery
+rotate fairly; ordinary signed/MLS checks below still decide what may be applied.
+
 [`on_gossip`](../crates/catcoms-sync/src/lib.rs) decodes the `SealedOp` and then:
 
 - **Document not open locally: dropped.** A node only ingests (and therefore only later relays)
@@ -138,6 +196,14 @@ received work can still be lost if the actor or process stops before a covering 
 ## 4. Receiving after a gap: the anti-entropy path
 
 This is the path that matters for micelles. Gossip only carries live edits; it replays nothing.
+
+Quiet connected discovery first requests missed MLS commits at its current epoch using the
+existing kind2 exchange. This exposes a lost removal broadcast before future chat is required to
+reveal the gap. Preparation and detached waiting use the same bounded maintenance scheduler as
+PEX/finalization; only the originating Root validates and applies the signed reply. Empty/failed
+probes continue ordinary discovery. Applied epochs publish member and role updates even when
+remove+add leaves the count unchanged, and request ordinary sealed snapshot persistence. A
+1024-record work cap is separate from the released 16 MiB byte cap; default logs hold 256.
 
 ### 4.1 The requester states what it holds
 
@@ -264,17 +330,25 @@ claimant or by real progress, so one member cannot end another's continuation by
   up ([actor.rs:5056-5070](../crates/catcoms-app/src/actor.rs#L5056-L5070)).
 - **The UI opens a channel.** `request_catchup_best`, which queues on failure rather than
   giving the channel one chance.
+- **The owner reaches its quiet reconciliation deadline.** A current local member with at least
+  one actual connected, both-ends-bound member source arms a thirty-second wake through its
+  injected monotonic Clock. It survives cancelled owner polls and cannot be renewed by UI reads.
+  The deadline gets one bounded local turn even while inbound events remain ready, then ordinary
+  event/response fairness continues. Removal, loss of eligible sources or clock-domain exhaustion
+  disables that wake; it grants no dial or membership authority.
 - **The discovery cadence or successful unlock wakes the actor.** `schedule_reconciliation`
   revisits completed exchanges with current connected members. A neighbor may have acquired
   older history from another member while our local document and their socket stayed unchanged.
   The sweep rotates through open documents within the existing queue limit and preserves active
   transfers and source cooldowns. Cooling queued work can also wake on the injected clock;
-  another live message is not required to resume it. Rotation can admit further documents when
-  queue capacity returns; a queue entirely occupied by unresolved obligations still blocks
-  admission of additional documents. Opposite peer-order directions use 30- and 31-second minimum
+  another live message is not required to resume it. A full queue can park one inactive open-document
+  task to give the next document a bounded turn; its source cursors, continuation claims and
+  cooldowns remain retained. Opposite peer-order directions use 30- and 31-second minimum
   retry delays to break simultaneous reciprocal timeout cycles. The source picker's live tier
   also checks a current transport snapshot so a delayed disconnect event cannot make a departed
-  source outrank a live alternative. This does not detach outbound waits from the sole actor.
+  source outrank a live alternative. The owner retains one original request/nonce/response wait
+  across cancelled polls and polls incoming events alongside it, so a suspended outbound catch-up
+  does not prevent answering another member's request.
 
 ### 4.5 Coverage
 
@@ -297,7 +371,7 @@ a user visiting a channel.
 | Original sender never returns | Authorship is carried in the op, not in the connection | Ops keep flowing |
 | Peers connect only briefly | The catch-up task outlives the attempt and is requeued on failure | Resumes |
 | Clocks disagree | Timestamps affect **display order only**, never which ops survive | Safe for convergence |
-| Membership or keys change during the partition | See section 8, H1 | **Not yet established** |
+| Membership or keys change during the partition | Current-key resealing/retained history tested across ten Adds and author removal; see the 20 October trace | Broad automatic network acceptance remains incomplete |
 
 The three-micelle case (B and C meet, then C and E meet, B and E never meet, several original
 authors gone) follows from the same property: every node's log is the union of what it has ever
@@ -381,7 +455,10 @@ guards, not merely by passing):
 
 **Still not covered by any test:**
 
-1. **Convergence across a membership change that happened inside one partition.** See section 8, P2.
+1. **The broader automatic network heal across a partition-local membership change.** The new
+   ten-epoch replication test covers unchanged signatures, retained branches, removal and restart
+   with explicitly delivered commits/history; it does not establish the automatic scheduler path.
+   See section 8, P2 and the dated acceptance ledger for scenario-specific network evidence.
 2. **Epidemic relay for the P1 document family**, which section 8 records as a deliberate scope
    limit rather than a defect. A test would pin the limit, not close it.
 3. **The remaining presentation surfaces downstream of the timestamp sort**: day dividers,
@@ -561,8 +638,11 @@ whether that is the intended product promise.
 ### P2. Membership change inside a partition
 
 If one micelle performs a removal while split, the two halves rotate labels independently and the
-control-plane semantics of the heal are not established anywhere I could find. Distinct from P0,
-which is about a member falling behind a *linear* commit chain. No test covers it.
+complete automatic control-plane heal is not established by the new replication test. That test
+crosses a linear ten-Add chain, removes an author and preserves their original signed history
+through current-key relay/restart, with explicit delivery. Independently conflicting membership
+branches and the broader automatic network matrix remain separate acceptance work. P0 concerns
+a member falling behind the available *linear* commit archive.
 
 ### P3. Ordering after a heal (was H5). Tested; better defended than expected.
 

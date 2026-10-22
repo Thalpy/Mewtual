@@ -316,6 +316,25 @@ pub(super) struct ProtectedBlobs {
     pub(super) protection: SharedProtection,
 }
 impl BlobStore for ProtectedBlobs {
+    fn private_downloads(&self) -> Option<&dyn catcoms_storage::kept::DownloadStore> {
+        self.inner.private_downloads()
+    }
+    fn private_downloads_mut(&mut self) -> Option<&mut dyn catcoms_storage::kept::DownloadStore> {
+        self.inner.private_downloads_mut()
+    }
+    fn configure_keep_scope(
+        &mut self,
+        scope: catcoms_storage::kept::KeepScope,
+    ) -> Result<(), StorageError> {
+        if scope.group != self.group {
+            self.inner.disable_retention();
+            return Err(StorageError::Malformed);
+        }
+        self.inner.configure_keep_scope(scope)
+    }
+    fn disable_retention(&mut self) {
+        self.inner.disable_retention();
+    }
     fn delete(&mut self, cid: &Cid) -> Result<bool, StorageError> {
         let mut guard = self
             .protection
@@ -343,17 +362,118 @@ impl BlobStore for ProtectedBlobs {
     fn kept_files(&self) -> KeptFiles {
         self.inner.kept_files()
     }
-    fn begin_keep(&mut self, p: KeepPlan) -> Result<u64, StorageError> {
+    fn begin_keep(&mut self, p: KeepPlan) -> Result<catcoms_storage::kept::KeepRun, StorageError> {
         self.inner.begin_keep(p)
     }
-    fn put_keep(&mut self, t: u64, b: &[u8]) -> Result<(), StorageError> {
+    fn kept_saved_plans(&self, cid: &Cid) -> Option<Vec<KeepPlan>> {
+        self.inner.kept_saved_plans(cid)
+    }
+    fn begin_keep_variants(
+        &mut self,
+        plans: Vec<KeepPlan>,
+        selected: usize,
+        listing: [u8; 32],
+    ) -> Result<catcoms_storage::kept::KeepRun, StorageError> {
+        self.inner.begin_keep_variants(plans, selected, listing)
+    }
+    fn fallback_keep(
+        &mut self,
+        run: catcoms_storage::kept::KeepRun,
+        expected: &[u8; 32],
+        tried: &[[u8; 32]],
+        bad_current: bool,
+    ) -> Result<Option<(catcoms_storage::kept::KeepRun, KeepPlan)>, StorageError> {
+        self.inner.fallback_keep(run, expected, tried, bad_current)
+    }
+    fn prepare_read_bounded(
+        &self,
+        cid: &Cid,
+        max: usize,
+    ) -> Result<catcoms_storage::BlobReadPlan, StorageError> {
+        self.inner.prepare_read_bounded(cid, max)
+    }
+    fn put_keep(
+        &mut self,
+        t: catcoms_storage::kept::KeepRun,
+        b: &[u8],
+    ) -> Result<(), StorageError> {
         self.inner.put_keep(t, b)
     }
-    fn finish_keep(&mut self, t: u64) -> Result<(), StorageError> {
+    fn finish_keep(&mut self, t: catcoms_storage::kept::KeepRun) -> Result<(), StorageError> {
         self.inner.finish_keep(t)
     }
-    fn abort_keep(&mut self, t: u64) -> Result<(), StorageError> {
+    fn abort_keep(&mut self, t: catcoms_storage::kept::KeepRun) -> Result<(), StorageError> {
         self.inner.abort_keep(t)
+    }
+    fn begin_keep_with_listing(
+        &mut self,
+        p: KeepPlan,
+        listing: [u8; 32],
+    ) -> Result<catcoms_storage::kept::KeepRun, StorageError> {
+        self.inner.begin_keep_with_listing(p, listing)
+    }
+    fn pause_keep(&mut self, t: catcoms_storage::kept::KeepRun) -> Result<(), StorageError> {
+        self.inner.pause_keep(t)
+    }
+    fn get_keep(
+        &self,
+        t: catcoms_storage::kept::KeepRun,
+        cid: &Cid,
+        max: usize,
+    ) -> Result<Option<Vec<u8>>, StorageError> {
+        self.inner.get_keep(t, cid, max)
+    }
+    fn keep_work(
+        &mut self,
+        t: catcoms_storage::kept::KeepRun,
+        network: Option<catcoms_storage::kept::KeepNetworkWork>,
+        mono: u64,
+    ) -> Result<catcoms_storage::kept::KeepWork, StorageError> {
+        self.inner.keep_work(t, network, mono)
+    }
+    fn validate_keep_work(
+        &self,
+        work: &catcoms_storage::kept::KeepWork,
+        mono: u64,
+    ) -> Result<(), StorageError> {
+        self.inner.validate_keep_work(work, mono)
+    }
+    fn set_keep_paused(
+        &mut self,
+        cid: &Cid,
+        transfer: [u8; 32],
+        expected_intent: u64,
+        paused: bool,
+    ) -> Result<(), StorageError> {
+        self.inner
+            .set_keep_paused(cid, transfer, expected_intent, paused)
+    }
+    fn block_keep(&mut self, run: catcoms_storage::kept::KeepRun) -> Result<(), StorageError> {
+        self.inner.block_keep(run)
+    }
+    fn keep_progress(&self, cid: &Cid) -> Option<catcoms_storage::kept::KeepProgress> {
+        self.inner.keep_progress(cid)
+    }
+    fn keep_run_current(
+        &self,
+        run: catcoms_storage::kept::KeepRun,
+        cid: &Cid,
+        version: &[u8; 32],
+    ) -> bool {
+        self.inner.keep_run_current(run, cid, version)
+    }
+    fn keep_plausibly_local(&self, cid: &Cid) -> bool {
+        self.inner.keep_plausibly_local(cid)
+    }
+    fn automatic_keep_candidate(&self, after: Option<Cid>) -> Option<Cid> {
+        self.inner.automatic_keep_candidate(after)
+    }
+    fn retry_kept(
+        &mut self,
+        cid: &Cid,
+        request: catcoms_storage::kept::KeepRetry,
+    ) -> Result<catcoms_storage::kept::KeepRetryReceipt, StorageError> {
+        self.inner.retry_kept(cid, request)
     }
     fn forget_kept(&mut self, c: &Cid) -> Result<(), StorageError> {
         self.inner.forget_kept(c)

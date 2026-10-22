@@ -1,12 +1,13 @@
 <script lang="ts">
   import { memberRole, identityForRoleLabel } from "./member-role.ts";
   import { invoke } from "@tauri-apps/api/core";
-  import { fileAvailability, keptCopyLabel, fileInventoryRequests, mutateFileInventory, type KeptFiles } from "./file-availability";
+  import { fileAvailability, keptCopyLabel, keptTransferLabel, keptAllocationCount, keptTransferRows, fileInventoryRequests, mutateFileInventory, type KeptFiles, type KeptTransfer } from "./file-availability";
   import { listen as tauriListen, type UnlistenFn } from "@tauri-apps/api/event";
   import { getCurrentWindow } from "@tauri-apps/api/window";
   import { check, type Update } from "@tauri-apps/plugin-updater";
   import { relaunch } from "@tauri-apps/plugin-process";
   import { onDestroy, onMount, tick, untrack } from "svelte";
+  import { CallMappingSession } from "./call-mappings.ts";
   import { renderMessage, renderTextDocument, renderWiki, parseRedirect, tocDirective } from "./render";
   import {
     TEXT_PREVIEW_MAX_BYTES, decodeTextFile, lineCountLabel, textFileKind,
@@ -93,8 +94,9 @@
     type StoredTone, type ToneOverride,
   } from "./notification-sounds";
   import {
-    completedDownload, downloadSavedNotice, guideSavedNotice, saveGroupFile, saveSpaceGuide,
+    completedDownload, downloadSavedNotice, guideSavedNotice, saveGroupFile, resumeGroupFile, saveSpaceGuide,
   } from "./native-download";
+  import { acceptSaveProgress, checkedPrivateDownloads, privateDownloadLabel, type PrivateDownload } from "./private-downloads";
   import {
     newVaultSecretError, vaultSecretChangeNotice, type VaultSecretChangeResult,
   } from "./vault-secret-change";
@@ -245,7 +247,7 @@
     withOrderedSwitchboardStatus,
   } from "./joinreply";
   import {
-    callBarStatus, mappableIcePort, mappingAddressPolicy, routerMappedCandidate,
+    callBarStatus, mappableIcePort, mappingAddressPolicy, routerMappedCandidate, mappedIceIsCurrent,
     shouldSignalHostCandidate, type MappedPort,
   } from "./callroutes";
   import { JamEngine, jamSequenceAccepted, type JamArchivalPlayback } from "./jam-engine";
@@ -3819,33 +3821,63 @@
   // availability hint refreshed with the file list). This is stricter than `onlineMembers`.
   let hasPeers = $state(false);
   let keptFiles = $state<KeptFiles | null>(null);
+  let privateDownloads = $state<PrivateDownload[]>([]);
+  let privateDownloadBusy = $state<symbol | null>(null);
+  let privateDownloadSaves = $state<Record<string, symbol>>({});
+  let privateDownloadError = $state("");
   const fileInventoryGate = fileInventoryRequests();
   let keptTransfer = $state<{ server: number; cid: string; cancellation: string } | null>(null);
+  // A primitive identity survives Svelte's deep state proxies unchanged.
+  let keptMutation = $state<symbol | null>(null);
 
+  // View teardown clears only pending UI ownership. The native requested job belongs to the
+  // unlocked account session; explicit Pause below changes durable intent separately.
   function cancelKeptTransfer() {
     const transfer = keptTransfer;
     keptTransfer = null;
-    if (transfer) void invoke("cancel_inline_download", { cancellation: transfer.cancellation }).catch(() => {});
+    if (transfer?.cancellation) void invoke("cancel_inline_download", { cancellation: transfer.cancellation }).catch(() => {});
   }
   $effect(() => {
     if (keptTransfer && (locked || keptTransfer.server !== activeServerId)) untrack(cancelKeptTransfer);
   });
 
   async function keepFileHere(cid: string) {
-    const server = activeServerId;
-    const gen = viewGeneration;
-    if (server === null || locked || keptTransfer) return;
-    const transfer = { server, cid, cancellation: `keep-${crypto.randomUUID()}` };
+    const server = activeServerId, gen = viewGeneration;
+    if (server === null || locked || keptTransfer || keptMutation) return;
+    const mutation = Symbol("kept admission");
+    keptMutation = mutation;
+    keptTransfer = { server, cid, cancellation: "" };
+    fileInventoryGate.invalidate();
+    try {
+      await mutateFileInventory(() => invoke("request_kept_file", { server, cid }), refreshFiles,
+        () => unlockedViewCurrent(gen, server));
+    } catch (e) {
+      if (unlockedViewCurrent(gen, server)) error = String(e);
+    } finally {
+      if (keptMutation === mutation) { keptMutation = null; keptTransfer = null; }
+    }
+  }
+
+  // Completed-copy checks keep their explicit cancelable runtime lease. Stopping a check
+  // never releases the saved copy, changes durable intent or creates automatic repair work.
+  async function checkKeptFile(cid: string) {
+    const server = activeServerId, gen = viewGeneration;
+    if (server === null || locked || keptTransfer || keptMutation) return;
+    const transfer = { server, cid, cancellation: `keep-check-${crypto.randomUUID()}` };
     keptTransfer = transfer;
     fileInventoryGate.invalidate();
     try {
+      const saved = keptFiles?.transfers.find(row => row.cid === cid && row.phase === "completed");
+      if (saved && (saved.user_paused || saved.blocked)) {
+        await invoke("set_kept_paused", { server, cid, transfer: saved.transfer, expectedIntent: saved.intent, paused: false });
+      }
+      if (keptTransfer?.cancellation !== transfer.cancellation || !unlockedViewCurrent(gen, server)) return;
       await invoke("begin_inline_download", { cancellation: transfer.cancellation });
       if (keptTransfer?.cancellation !== transfer.cancellation || !unlockedViewCurrent(gen, server)) {
         await invoke("cancel_inline_download", { cancellation: transfer.cancellation });
         return;
       }
       await invoke("keep_file", { server, cid, cancellation: transfer.cancellation });
-      if (unlockedViewCurrent(gen, server)) await refreshFiles();
     } catch (e) {
       if (keptTransfer?.cancellation === transfer.cancellation && unlockedViewCurrent(gen, server)) error = String(e);
     } finally {
@@ -3854,10 +3886,34 @@
     }
   }
 
+  async function setKeptPaused(copy: KeptTransfer, paused: boolean) {
+    const server = activeServerId, gen = viewGeneration;
+    if (server === null || locked || keptTransfer || keptMutation) return;
+    const mutation = Symbol("kept intent");
+    keptMutation = mutation;
+    fileInventoryGate.invalidate();
+    try {
+      await mutateFileInventory(() => invoke("set_kept_paused", {
+        server, cid: copy.cid, transfer: copy.transfer, expectedIntent: copy.intent, paused,
+      }), refreshFiles, () => unlockedViewCurrent(gen, server));
+      if (keptMutation === mutation) keptMutation = null;
+      if (!paused && unlockedViewCurrent(gen, server)) await keepFileHere(copy.cid);
+    } catch (e) {
+      if (unlockedViewCurrent(gen, server)) error = String(e);
+    } finally {
+      if (keptMutation === mutation) keptMutation = null;
+    }
+  }
+  async function resumeKeptFile(copy: KeptTransfer) {
+    await setKeptPaused(copy, false);
+  }
+
   async function forgetKeptFile(cid: string) {
     const server = activeServerId;
     const gen = viewGeneration;
-    if (server === null || locked || keptTransfer) return;
+    if (server === null || locked || keptTransfer || keptMutation) return;
+    const mutation = Symbol("kept mutation");
+    keptMutation = mutation;
     fileInventoryGate.invalidate();
     try {
       await mutateFileInventory(
@@ -3866,9 +3922,42 @@
       );
     } catch (e) {
       if (unlockedViewCurrent(gen, server)) error = String(e);
+    } finally {
+      if (keptMutation === mutation) keptMutation = null;
+    }
+  }
+  async function retryKeptFile(copy: KeptTransfer) {
+    const server = activeServerId;
+    const gen = viewGeneration;
+    if (server === null || locked || keptTransfer || keptMutation) return;
+    const mutation = Symbol("kept mutation");
+    keptMutation = mutation;
+    fileInventoryGate.invalidate();
+    // Native CAS binds this request to the saved transfer and exhausted grant. A lost reply
+    // cannot grant twice, even if a later inventory refresh or a new window retries the button.
+    const request = crypto.randomUUID().replaceAll("-", "");
+    try {
+      await mutateFileInventory(() => invoke("retry_kept_file", {
+        server, cid: copy.cid, transfer: copy.transfer, expectedGrant: copy.grant, request,
+      }), refreshFiles, () => unlockedViewCurrent(gen, server));
+      if (keptMutation === mutation) keptMutation = null;
+      if (unlockedViewCurrent(gen, server)) {
+        // Retry can migrate an older journal and change its explicit intent revision. Use the
+        // freshly read same native owner, never the pre-Retry projection or a replacement CID.
+        const current = keptFiles?.transfers.find(row => row.cid === copy.cid && row.transfer === copy.transfer);
+        if (current && !current.running && !current.exhausted) {
+          if (current.phase === "completed") await checkKeptFile(current.cid);
+          else if (current.phase === "paused") await resumeKeptFile(current);
+        }
+      }
+    } catch (e) {
+      if (unlockedViewCurrent(gen, server)) error = String(e);
+    } finally {
+      if (keptMutation === mutation) keptMutation = null;
     }
   }
   let uploading = $state(false);
+  let windowCloseInFlight = $state(false);
   let folder = $state(""); // current folder in the Files tab
   let newFolder = $state(""); // new-folder name input
   let dragOver = $state(false); // composer drag-over highlight
@@ -4480,7 +4569,8 @@
   }
   let wikiMeta = $state<Record<string, string>>({}); // name -> "md" | "wiki" (per-page format, shared)
   let activeWikiPage = $state("");
-  // Bumped by every assignment of activeWikiPage: see wikiPane().
+  // Exact displayed-page identity for delayed writes. A same-name reopen is a replacement too;
+  // server/view generation alone cannot distinguish it from the page an old rename captured.
   let wikiPaneSerial = 0;
   let wikiBody = $state("");
   let newWikiPage = $state("");
@@ -6290,18 +6380,23 @@
 
   // Upload an image as a custom emoji `:code:` (stored under the "emoji" folder).
   async function addEmoji(fileList: FileList | null) {
-    const code = newEmojiCode.trim().toLowerCase().replace(/[^a-z0-9_+-]/g, "");
+    const originalCode = newEmojiCode;
+    const code = originalCode.trim().toLowerCase().replace(/[^a-z0-9_+-]/g, "");
     const file = fileList?.[0];
-    if (!code || !file || activeServerId === null) return;
+    if (!code || !file || !canStartUpload(1)) return;
+    const session = uiStateLoadGeneration, gen = viewGeneration, server = activeServerId;
+    const current = () => !locked && uiStateReady && !windowCloseInFlight && session === uiStateLoadGeneration && viewCurrent(gen, server);
     uploading = true;
     try {
       // Encode an optional size into the file name (`code~px`) so it's shared with everyone.
       const sz = Math.min(Math.max(newEmojiSize, 0), EMOJI_MAX_SIZE);
       await addSharedFile(file, "emoji", sz ? `${code}~${sz}` : code, file.type || "image/png");
-      newEmojiCode = "";
-      await refreshFiles();
+      if (current()) {
+        if (newEmojiCode === originalCode) newEmojiCode = "";
+        await refreshFiles();
+      }
     } catch (e) {
-      error = String(e);
+      if (current()) error = String(e);
     } finally {
       uploading = false;
     }
@@ -6341,6 +6436,7 @@
       isDm: r.is_dm,
     }));
     locked = false;
+    void callMappingSession.claimController();
     const reconnectWarnings = reloaded.filter((r) => r.reconnect_warning);
     if (reconnectWarnings.length) {
       toast(reconnectWarnings.map((r) => `${r.name}: ${r.reconnect_warning}`).join("\n"), "warn", 0);
@@ -6421,6 +6517,7 @@
   // back the registered servers, so no actor or transport is duplicated.
   function lockScreen(nativeAlreadyLocked = false) {
     pendingSendRetry.cancel();
+    callMappingSession.resetController();
     // Lock also cancels calls still waiting on a native permission prompt; those have not yet set
     // `inCall`, so the ordinary leave path alone cannot see or invalidate them.
     callLifecycleSession.invalidate();
@@ -6998,6 +7095,10 @@
     files = [];
     hasPeers = false;
     keptFiles = null;
+    privateDownloads = [];
+    privateDownloadError = "";
+    privateDownloadBusy = null;
+    privateDownloadSaves = {};
     fileInventoryGate.invalidate();
     cancelKeptTransfer();
     wikiPinned = new Set();
@@ -7046,7 +7147,8 @@
     // The wiki editor and the chat/fileshare affordances below used to be reset only by
     // switchServer, so the paths that end with no active group (leaving your last server, empty
     // DM-home, locking) kept a page body and its drafts in memory as plaintext.
-    activeWikiPage = ""; wikiPaneSerial++;
+    activeWikiPage = "";
+    wikiPaneSerial++;
     wikiBody = "";
     wikiDirty = false;
     wikiEdit = false;
@@ -7095,6 +7197,7 @@
   async function switchServer(id: number, committed: () => void = () => {}, route: StudioRoute = studioExit.begin()): Promise<boolean> {
     if (windowCloseInFlight) return false;
     if ((!route.current() || studioHasWork?.()) && !(await route.scope())) return false;
+    if (!route.current() || windowCloseInFlight) return false;
     saveDraftFor(chanKey()); // stash the current channel's draft before switching servers
     const gen = beginViewSwitch(); // everything still in flight for the old group is now stale
     activeServerId = id;
@@ -7227,7 +7330,7 @@
   /// Servers whose native leave is in flight, each with whether its `server-closed` has arrived. The
   /// stopping actor emits that event before leave_server returns, and only leave_server's outcome
   /// says whether this was a leave, so the event waits for it (serverClosed).
-  const leavingServers = new Map<number, boolean>();
+  const leavingServers = new Map<number, { session: number; closed: boolean }>();
 
   /// The server a draft restored at unlock belongs to, read from App's copy without loading the
   /// Studio chunk (studio-draft.ts's `scope.server`). Null when unreadable: such a draft fails to
@@ -7238,7 +7341,10 @@
   }
 
   async function leaveServer(id: number) {
-    if (windowCloseInFlight || locked) return;
+    if (windowCloseInFlight || locked || !uiStateReady) return;
+    const session = uiStateLoadGeneration;
+    const current = () => !locked && uiStateReady && session === uiStateLoadGeneration;
+    if (leavingServers.get(id)?.session === session) return;
     // The Studio's unsaved work for this server is settled while its actor can still take it.
     // After leave_server nothing can, and serverGone drops whatever is left (review of d2548a37).
     // A restored draft for it installs only when its channel opens, so that is where the member
@@ -7252,27 +7358,36 @@
       const route = studioExit.begin();
       if (!(await route.scope())) {
         // A refused Save has said why. A newer action (a click, a lock) retiring this one has not.
-        if (!locked && !windowCloseInFlight && !route.current()) toast("Leaving the server was cancelled by a newer action. Leave again if you still want to.", "info", 5000);
+        if (current() && !windowCloseInFlight && !route.current()) toast("Leaving the server was cancelled by a newer action. Leave again if you still want to.", "info", 5000);
         return; // nothing has left
       }
     }
+    // A Save gate may have waited through lock/unlock. It cannot authorize a native leave in
+    // the replacement session, even if the same server is selected there again.
+    if (!current() || windowCloseInFlight || leavingServers.get(id)?.session === session) return;
     // Leaving a server is also a privacy boundary. End its independent WebRTC session before the
     // native request can hang or fail so a forgotten server can never retain a hot mic, display or
     // separately granted application-audio source.
     if (inCall && callServer === id) leaveVoice();
-    leavingServers.set(id, false);
+    const operation = { session, closed: false };
+    leavingServers.set(id, operation);
     try {
       await invoke("leave_server", { server: id });
     } catch (e) {
-      const closed = leavingServers.get(id) ?? false;
-      leavingServers.delete(id);
-      if (!locked) error = String(e); // never over the lock screen's own message
+      const owns = leavingServers.get(id) === operation;
+      if (owns) leavingServers.delete(id);
+      if (!owns || !current()) return;
+      error = String(e);
       // The leave failed after the actor had stopped: still a member, but the server is gone from
       // this session, so it is handled as a closure and its Studio edits are kept.
-      if (closed) serverGone(id, false);
+      if (operation.closed) serverGone(id, false);
       return;
     }
-    leavingServers.delete(id);
+    // The operation object also fences bookkeeping: an old completion cannot remove a new
+    // session's leave of the same server or retire its Studio draft and file-trust policy.
+    const owns = leavingServers.get(id) === operation;
+    if (owns) leavingServers.delete(id);
+    if (!owns || !current()) return;
     const { [id]: _removedTrust, ...remainingTrust } = fileTrustPolicies;
     fileTrustPolicies = remainingTrust;
     serverGone(id, true); // first, so the continuity saved next no longer carries its Studio work
@@ -7282,7 +7397,8 @@
   /// `server-closed`: the server's actor stopped. During this server's own leave the leave decides
   /// (it calls serverGone once it knows how leave_server ended); otherwise this is a closure.
   function serverClosed(id: number) {
-    if (leavingServers.has(id)) { leavingServers.set(id, true); return; }
+    const operation = leavingServers.get(id);
+    if (operation?.session === uiStateLoadGeneration) { operation.closed = true; return; }
     serverGone(id, false);
   }
 
@@ -7318,15 +7434,19 @@
 
   async function addChannel() {
     const name = newChannel.trim().replace(/^#/, "");
-    if (!name || activeServerId === null) return;
+    if (!name || activeServerId === null || windowCloseInFlight) return;
     newChannel = "";
     const route = studioExit.begin(); // a newer action taken while the channel opens wins
+    const gen = viewGeneration, server = activeServerId;
     try {
-      const id = await invoke<string>("open_channel", { server: activeServerId, name });
+      const id = await invoke<string>("open_channel", { server, name });
+      // Opening may finish after switching groups, locking or a newer navigation. Its native
+      // effect belongs to the original server; it must not seed the replacement sidebar.
+      if (!unlockedViewCurrent(gen, server) || !route.current() || windowCloseInFlight) return;
       if (cur && !cur.channels.some((c) => c.id === id)) cur.channels.push({ id, name });
       switchTo(id, false, route);
     } catch (e) {
-      error = String(e);
+      if (unlockedViewCurrent(gen, server) && route.current() && !windowCloseInFlight) error = String(e);
     }
   }
 
@@ -7362,6 +7482,7 @@
     if (windowCloseInFlight) return false;
     if (!cur) return false;
     if ((!route.current() || studioHasWork?.()) && !(await route.scope())) return false;
+    if (!route.current() || windowCloseInFlight) return false;
     saveDraftFor(chanKey()); // stash the current channel's draft before leaving it
     // Channel-scoped content, dropped before the move rather than when the read returns: the
     // group's own state (roster, files, branding) is unchanged by a channel hop and stays put.
@@ -7837,10 +7958,11 @@
       // Wiki-pinned content addresses are derived fresh from the wiki on the backend each call: a
       // file embedded in a live page never drops out of circulation, whatever its expiry says. It
       // is a second round-trip, so it rides alongside the listing rather than after it.
-      const [listing, pinned, kept] = await Promise.allSettled([
+      const [listing, pinned, kept, savedDownloads] = await Promise.allSettled([
         invoke<{ files: UiFile[]; has_peers: boolean }>("get_files", { server }),
         invoke<string[]>("get_wiki_pinned_cids", { server }),
         invoke<KeptFiles>("get_kept_files", { server }),
+        invoke<unknown>("get_private_downloads", { server }).then(checkedPrivateDownloads),
       ]);
       if (!fileInventoryGate.current(request, unlockedViewCurrent(gen, server))) return; // another group's shared files
       // Applied independently: a failing pin lookup must not blank the listing it only decorates.
@@ -7852,6 +7974,8 @@
       }
       if (pinned.status === "fulfilled") wikiPinned = new Set(pinned.value);
       keptFiles = kept.status === "fulfilled" ? kept.value : null;
+      privateDownloads = savedDownloads.status === "fulfilled" ? savedDownloads.value : [];
+      privateDownloadError = savedDownloads.status === "fulfilled" ? "" : "Download progress could not be read. Open Transfers again to retry.";
     } catch (e) {
       if (fileInventoryGate.current(request, unlockedViewCurrent(gen, server))) error = String(e);
     }
@@ -8430,17 +8554,19 @@
   // one that threw may still have posted), for "post now" to report; every other caller ignores it.
   async function postStatus(): Promise<SendOutcome> {
     const text = statusDraft.trim();
-    if (!text || activeServerId === null || statusPosting) return "refused";
+    if (!text || activeServerId === null || statusPosting || locked || !uiStateReady || windowCloseInFlight) return "refused";
+    const session = uiStateLoadGeneration, gen = viewGeneration, server = activeServerId;
+    const current = () => !locked && uiStateReady && !windowCloseInFlight && session === uiStateLoadGeneration && viewCurrent(gen, server);
     statusPosting = true;
     // Kept until the invoke returns, not cleared on the way in: a member posting into a feed that
     // is closed to them is now refused natively, and clearing first would take the words with it.
     // Cleared only if it is still what was posted: text typed meanwhile is the next announcement.
     try {
-      await invokeDebugged("post_status", { server: activeServerId, text });
-      if (statusDraft.trim() === text) statusDraft = "";
+      await invokeDebugged("post_status", { server, text });
+      if (current() && statusDraft.trim() === text) statusDraft = "";
       return "sent";
     } catch (e) {
-      error = errorText(e);
+      if (current()) error = errorText(e);
       return "failed";
     } finally {
       statusPosting = false;
@@ -8578,11 +8704,11 @@
   let restoredStudioDraft: string | null = null;
   let studioNavigation = 0;
   // Every route that takes the main pane away from the Studio asks a route from this gate BEFORE it
-  // changes `view`, opens the inbox or enters DM home: `releaseStudio` for a one-step action,
-  // `leaveStudioThen` for a synchronous one, `studioExit.begin()` for an action that awaits more
-  // than its own departure. That last kind carries its route across every await and asks
+  // changes `view`, opens the inbox or enters DM home: `leaveStudioThen` for a synchronous
+  // action, `studioExit.begin()` for an awaiting action. It carries its route across every await and asks
   // `route.leave()` again right before the screen changes (see studio-exit.ts for why a fresh
-  // claim there would be wrong). switchView, switchServer and switchTo take an optional route so
+  // claim there would be wrong), then rechecks currency/close in the mutation's own continuation.
+  // switchView, switchServer and switchTo take an optional route so
   // a composite action stays one owner. studio-exit-routes.test.ts audits this file.
   const studioExit = createStudioExit({
     onStudio: () => view === "studio",
@@ -8600,7 +8726,6 @@
     },
     exhausted: () => { if (!locked) toast("The Studio kept changing while it saved. Try again once you stop drawing.", "warn", 6000); },
   });
-  const releaseStudio = studioExit.release;
   const leaveStudioThen = studioExit.leaveThen;
   async function loadStudio() {
     if ((StudioSurface && StudioNav) || studioLoading) return;
@@ -8651,7 +8776,7 @@
     }
     view = v;
     if (v === "wiki") refreshWiki();
-    if (v === "files") refreshFiles(); // re-evaluate availability each time the tab opens
+    if (v === "files" || v === "downloads") refreshFiles(); // includes saved private progress after restart
     // The policy is read with the surface rather than with the server, because it is only ever
     // needed by the surface and a server switch already carries enough round-trips.
     if (v === "status") { refreshStatuses(); void refreshStatusPolicy(); } // a read that failed during the switch gets a retry here
@@ -8697,7 +8822,7 @@
       const page = el.getAttribute("data-wikilink") ?? "";
       if (page) {
         const route = studioExit.begin();
-        if (!(await route.leave())) return;
+        if (!(await route.leave()) || !route.current() || windowCloseInFlight) return;
         view = "wiki";
         await openWikiPage(page, {}, route);
       }
@@ -9391,7 +9516,8 @@
     saveDraftFor(chanKey());
     // The text is already in this channel's draft, so a refused Studio Save loses nothing: the
     // member stays with the work Save could not confirm and finds the text in Chat later.
-    if (!(await releaseStudio())) return;
+    const route = studioExit.begin();
+    if (!(await route.leave()) || !route.current() || windowCloseInFlight) return;
     view = "chat";
     await tick();
     composerEl?.focus();
@@ -9607,10 +9733,10 @@
   // changes nothing. The topic editor and the search open only once the move landed.
   async function editTopicOf(id: string) {
     const route = studioExit.begin();
-    if (!(await route.leave())) return;
+    if (!(await route.leave()) || !route.current() || windowCloseInFlight) return;
     if (view === "studio") view = "chat";
     if (cur?.active !== id && !(await switchTo(id, false, route))) return; // never edit the channel left on screen
-    if (!(await route.leave())) return;
+    if (!(await route.leave()) || !route.current() || windowCloseInFlight) return;
     view = "chat";
     await tick();
     if (!route.current()) return;
@@ -9619,10 +9745,10 @@
   }
   async function searchInChannel(id: string) {
     const route = studioExit.begin();
-    if (!(await route.leave())) return;
+    if (!(await route.leave()) || !route.current() || windowCloseInFlight) return;
     if (view === "studio") view = "chat";
     if (cur?.active !== id && !(await switchTo(id, false, route))) return;
-    if (!(await route.leave())) return;
+    if (!(await route.leave()) || !route.current() || windowCloseInFlight) return;
     view = "chat";
     openSearch();
   }
@@ -10123,7 +10249,7 @@
   /// redirect may have changed). A continuation that acts on "the open page" (rename, delete,
   /// edit) must check that, or a retired request would arm it on whatever page is still shown.
   async function openWikiPage(name: string, opts: { noRedirect?: boolean } = {}, route: StudioRoute = studioExit.begin()): Promise<boolean> {
-    if (!(await route.leave())) return false;
+    if (!(await route.leave()) || !route.current() || windowCloseInFlight) return false;
     const gen = viewGeneration;
     const server = activeServerId;
     if (server === null) return false;
@@ -10146,14 +10272,15 @@
       }
       // The same action, asked again (never a fresh claim, which would revive a retired request);
       // a superseded response is discarded here, before it can replace the screen.
-      if (!(await route.leave())) return false;
+      if (!(await route.leave()) || !route.current() || windowCloseInFlight) return false;
       // The whole point of the guard: without it this page's text lands in the editor of whatever
       // server you moved to, and because that server's wikiPages lacks the name it opens in EDIT
       // mode, one Ctrl+S from publishing one server's wiki content into another's.
       if (!viewCurrent(gen, server)) return false;
       wikiRedirectedFrom = from;
       wikiBody = body;
-      activeWikiPage = name; wikiPaneSerial++;
+      activeWikiPage = name;
+      wikiPaneSerial++;
       wikiDirty = false;
       wikiRenaming = false;
       wikiDeleteArmed = false;
@@ -10207,24 +10334,27 @@
     if (!to || to === activeWikiPage || activeServerId === null || !activeWikiPage) return;
     // One action: if the member moved on while the rename and the page list ran, the renamed page
     // does not pull them back (the rename itself has landed and the toast still says so).
-    // The page is the pane's captured identity, not its name (see wikiPane): Save writes the
-    // current server's page of the current name, so the pane is only touched while it is still
-    // the one this rename started from.
-    const route = studioExit.begin(), pane = wikiPane(), { server, gen, page: from } = pane;
+    const route = studioExit.begin(), from = activeWikiPage;
+    const gen = viewGeneration, server = activeServerId, pageGeneration = wikiPaneSerial;
+    // A retired navigation can still reconcile the exact original page's new name. It cannot
+    // adopt a same-name page opened later, another server or an authenticated replacement session.
+    const ownsPage = () => unlockedViewCurrent(gen, server) && !windowCloseInFlight &&
+      wikiPaneSerial === pageGeneration && activeWikiPage === from;
     try {
       await invoke("rename_wiki_page", { server, from, to });
-      if (viewCurrent(gen, server)) {
-        await refreshWiki();
-        // A retired open leaves the pane on a name that no longer exists, where Edit and Save would
-        // recreate the old page. The renamed page has the same body, so point the pane at it, but
-        // only if nothing has been opened into it since: native reads run in order, so a later
-        // open of the old name read the post-rename (empty) page, and that pane must stay as it is.
-        const opened = await openWikiPage(to, { noRedirect: true }, route);
-        if (!opened && wikiPaneCurrent(pane)) { activeWikiPage = to; wikiPaneSerial++; }
+      if (!ownsPage()) return;
+      await refreshWiki();
+      if (!ownsPage()) return;
+      // A retired open leaves the pane on a name that no longer exists, where Edit and Save would
+      // recreate the old page. Reconcile only the unchanged original page, preserving local edits.
+      if (!(await openWikiPage(to, { noRedirect: true }, route))) {
+        if (!ownsPage()) return;
+        activeWikiPage = to;
+        wikiPaneSerial++;
       }
-      toast(`Renamed to "${to}" · links to the old name go red`, "ok", 5000);
+      if (unlockedViewCurrent(gen, server) && !windowCloseInFlight) toast(`Renamed to "${to}" · links to the old name go red`, "ok", 5000);
     } catch (e) {
-      toast(`Rename failed: ${e}`, "err", 9000);
+      if (unlockedViewCurrent(gen, server) && !windowCloseInFlight) toast(`Rename failed: ${e}`, "err", 9000);
     }
   }
 
@@ -10409,13 +10539,16 @@
   // `embedMedia`: a file uploaded after the person moved on is shared under the page it was meant
   // for, but not inserted into whatever page is open now.
   async function wikiEmbed(fileList: FileList | null, asIs = false) {
-    if (!fileList || fileList.length === 0 || activeServerId === null || !activeWikiPage) return;
+    if (!fileList || !activeWikiPage || !canStartUpload(fileList.length)) return;
     const files = Array.from(fileList);
     const review = videoReviewPlan(files, asIs);
-    const page = activeWikiPage;
+    const pane = wikiPane(), page = pane.page;
+    const session = uiStateLoadGeneration;
+    const sessionCurrent = () => !locked && uiStateReady && !windowCloseInFlight && session === uiStateLoadGeneration;
     const scope = videoEditorScope;
     const epoch = videoScopeEpoch;
-    const here = () => videoEditorScope === scope && videoScopeEpoch === epoch && activeWikiPage === page;
+    // A page name can be opened again while a review waits. Only the original pane may receive it.
+    const here = () => sessionCurrent() && videoEditorScope === scope && videoScopeEpoch === epoch && wikiPaneCurrent(pane);
     let abandoned = 0;
     uploading = true;
     try {
@@ -10435,20 +10568,20 @@
         try {
           const cid = await addSharedFile(upload, `wiki/${page}`, uploadName);
           if (!here()) {
-            updateToast(tid, `Shared ${uploadName}, not embedded: the page changed`, "info", 7000);
+            if (sessionCurrent()) updateToast(tid, `Shared ${uploadName}, not embedded: the page changed`, "info", 7000);
             continue;
           }
           const alt = uploadName.replace(/[[\]]/g, " ");
           insertIntoWikiBody(`![${alt}](cid:${cid})`);
           updateToast(tid, `Embedded ${uploadName} · save the page to publish`, "ok", 5000);
         } catch (e) {
-          updateToast(tid, `Upload of ${uploadName} failed: ${e}`, "err", 9000);
+          if (sessionCurrent()) updateToast(tid, `Upload of ${uploadName} failed: ${e}`, "err", 9000);
         }
       }
-      if (abandoned > 0 && !locked) {
+      if (abandoned > 0 && sessionCurrent()) {
         toast(`${abandoned} file${abandoned === 1 ? " was" : "s were"} not embedded: the page changed`, "info", 7000);
       }
-      await refreshFiles();
+      if (sessionCurrent()) await refreshFiles();
     } finally {
       uploading = false;
     }
@@ -10470,11 +10603,15 @@
     try {
       const { value: queued } = await invokeDebugged<boolean>("save_wiki_page", { server, name: page, body });
       if (wikiPaneCurrent(pane)) {
-        // The pane owns this page's text, so any stash of it is older (openWikiPage restores a stash
-        // without removing it); leaving it would bring that older draft back over the saved page.
-        // Leaving the pane dirty again stashes its current text afresh.
-        if (wikiBody === body) wikiDirty = false;
-        wikiDrafts.delete(page);
+        if (wikiBody === body) {
+          wikiDirty = false;
+          wikiDrafts.delete(page); // the saved bytes cover both the pane and its older stash
+        } else {
+          // An outgoing page read may already have stashed newer typing while this pane remains
+          // visible. Preserve its current text now: that read can replace the pane as soon as
+          // this Save returns, without another opportunity to stash the edits it did not cover.
+          wikiDrafts.set(page, wikiBody);
+        }
       } else if (viewCurrent(gen, server) && wikiDrafts.get(page) === body) wikiDrafts.delete(page);
       if (queued) {
         // Review mode: the save became a proposal. The page itself is unchanged until an
@@ -10875,13 +11012,15 @@
   // `embedMedia` is: a review can take minutes, and a file should not land in whichever folder or
   // server happens to be open by the time it uploads.
   async function uploadFile(fileList: FileList | null, asIs = false) {
-    if (!fileList?.length || activeServerId === null) return;
+    if (!fileList || !canStartUpload(fileList.length)) return;
     const files = Array.from(fileList);
     const review = videoReviewPlan(files, asIs);
     const into = folder;
+    const session = uiStateLoadGeneration;
+    const sessionCurrent = () => !locked && uiStateReady && !windowCloseInFlight && session === uiStateLoadGeneration;
     const scope = videoEditorScope;
     const epoch = videoScopeEpoch;
-    const here = () => videoEditorScope === scope && videoScopeEpoch === epoch;
+    const here = () => sessionCurrent() && videoEditorScope === scope && videoScopeEpoch === epoch;
     let abandoned = 0;
     uploading = true;
     try {
@@ -10895,15 +11034,15 @@
         const tid = toast(`Sharing ${uploadName}…`, "info", 0);
         try {
           await addSharedFile(upload, into, uploadName);
-          updateToast(tid, `Shared ${uploadName}`, "ok");
+          if (sessionCurrent()) updateToast(tid, `Shared ${uploadName}`, "ok");
         } catch (e) {
-          updateToast(tid, `Sharing ${uploadName} failed: ${e}`, "err", 9000);
+          if (sessionCurrent()) updateToast(tid, `Sharing ${uploadName} failed: ${e}`, "err", 9000);
         }
       }
-      if (abandoned > 0 && !locked) {
+      if (abandoned > 0 && sessionCurrent()) {
         toast(`${abandoned} file${abandoned === 1 ? " was" : "s were"} not shared: you moved elsewhere`, "info", 7000);
       }
-      await refreshFiles();
+      if (sessionCurrent()) await refreshFiles();
     } finally {
       uploading = false;
     }
@@ -10927,7 +11066,8 @@
   // member's embed folder, then insert a `![name](cid:HEX)` marker into the draft for the
   // shared renderer to resolve inline. Non-media files are shared as plain attachments.
   async function embedFiles(target: "chat" | "status", fileList: FileList | null, asIs = false) {
-    if (!fileList) return;
+    // Refuse before Array.from retains an arbitrarily large FileList for a waiting batch.
+    if (!fileList || !canStartUpload(fileList.length)) return;
     await embedMedia(target, Array.from(fileList).map((file) => ({ file, name: file.name })), asIs);
   }
 
@@ -10949,13 +11089,15 @@
   // waits for that send to settle first: until it does, the send owns the composer, and a file
   // appended meanwhile would leave the sent text and video behind in the draft beside it.
   async function embedMedia(target: "chat" | "status", items: { file: File; name: string }[], asIs = false) {
-    if (items.length === 0 || activeServerId === null) return;
+    if (!canStartUpload(items.length)) return;
+    const session = uiStateLoadGeneration;
+    const sessionCurrent = () => !locked && uiStateReady && !windowCloseInFlight && session === uiStateLoadGeneration;
     const review = videoReviewPlan(items.map(({ file }) => file), asIs);
     const scope = videoEditorScope;
     // The epoch catches a round trip (channel A, B, then A again, or a lock and unlock) that the
     // key alone would miss: the batch was still interrupted, and its context may have changed.
     const epoch = videoScopeEpoch;
-    const here = () => videoEditorScope === scope && videoScopeEpoch === epoch;
+    const here = () => sessionCurrent() && videoEditorScope === scope && videoScopeEpoch === epoch;
     let abandoned = 0;
     uploading = true;
     try {
@@ -10978,7 +11120,7 @@
           const cid = await addSharedFile(upload, myEmbedFolder, uploadName);
           if (!here()) {
             // Shared where the batch started, but the composer on screen now belongs elsewhere.
-            updateToast(tid, `Shared ${uploadName}, not attached: you moved to another channel`, "info", 7000);
+            if (sessionCurrent()) updateToast(tid, `Shared ${uploadName}, not attached: you moved to another channel`, "info", 7000);
             continue;
           }
           const unchanged = post && composerState(target) === pressed;
@@ -11005,9 +11147,9 @@
               // telling the person to press Send then would send it twice (found in review). An
               // uncertain one must not be sent again either, and an announcement that threw may
               // have posted (it has no retry token to make a second post safe). Reported before a
-              // move away ends the batch, since the outcome is known either way, but not behind
-              // the lock screen, which explains itself (as the batch's own messages are not).
-              if (locked) { /* nothing shown while locked */ }
+              // move away ends the batch, since the outcome is known either way. The original
+              // UI session must still own the toast, including after a completed lock/unlock.
+              if (!sessionCurrent()) { /* the original session no longer owns this toast */ }
               else if (outcome === "sent") updateToast(tid, `Attached ${uploadName}, sent`, "ok");
               else if (outcome === "uncertain") updateToast(tid, `Attached ${uploadName}, not confirmed yet: don't send it again`, "info", 9000);
               else if (outcome === "failed" && target === "status") updateToast(tid, `Attached ${uploadName}, may not have posted: check the feed before posting again`, "err", 9000);
@@ -11017,13 +11159,13 @@
             }
           }
         } catch (e) {
-          updateToast(tid, `Upload of ${uploadName} failed: ${e}`, "err", 9000);
+          if (sessionCurrent()) updateToast(tid, `Upload of ${uploadName} failed: ${e}`, "err", 9000);
         }
       }
-      if (abandoned > 0 && !locked) {
+      if (abandoned > 0 && sessionCurrent()) {
         toast(`${abandoned} file${abandoned === 1 ? " was" : "s were"} not attached: you moved to another channel`, "info", 7000);
       }
-      await refreshFiles();
+      if (sessionCurrent()) await refreshFiles();
     } finally {
       uploading = false;
     }
@@ -11034,10 +11176,19 @@
   // they were asked of, and every request settled (as `skip` once its scope is gone).
   let videoEditor = $state.raw<OpenReview | null>(null);
   const videoReviews = new VideoReviewQueue((open) => { videoEditor = open; });
+  // One batch owns `uploading` until its real finally runs, including across lock and close.
+  // Do not reset it at those boundaries: an old completion must not release a newer batch.
+  const MAX_UPLOAD_BATCH_FILES = 32;
+  function canStartUpload(count: number): boolean {
+    if (count === 0 || activeServerId === null || locked || !uiStateReady || windowCloseInFlight) return false;
+    if (uploading) { toast("Wait for the current upload to finish before adding more files.", "info", 5000); return false; }
+    if (count > MAX_UPLOAD_BATCH_FILES) { toast(`Choose at most ${MAX_UPLOAD_BATCH_FILES} files at a time.`, "warn", 5000); return false; }
+    return true;
+  }
   // Everything a review is bound to, as one primitive so the effect below only reruns when it
   // actually changes. Reading `cur?.active` straight from an effect would rerun it whenever the
   // server list is replaced, and that would close an editor mid-edit for nothing.
-  const videoEditorScope = $derived(`${locked ? "locked" : "open"}|${activeServerId ?? ""}|${chanKey() ?? ""}`);
+  const videoEditorScope = $derived(`${locked ? "locked" : windowCloseInFlight ? "closing" : !uiStateReady ? "loading" : "open"}|${uiStateLoadGeneration}|${activeServerId ?? ""}|${chanKey() ?? ""}`);
   // The protocol ceiling on a single file (catcoms-app MAX_FILE_BYTES); the cap the editor uses
   // while this server's own limit has not been read. The native side enforces the real one.
   const VIDEO_EDITOR_FALLBACK_CAP = 1024 * 1024 * 1024;
@@ -11116,7 +11267,7 @@
       const { closedOpen, closedContext, dropped } = videoReviews.rescope(scope);
       const lost = (closedOpen ? 1 : 0) + dropped;
       // Not on lock: the lock screen is its own explanation, and a toast would sit behind it.
-      if (lost === 0 || scope.startsWith("locked")) return;
+      if (lost === 0 || !scope.startsWith("open|")) return;
       toast(closedOpen && dropped === 0 && closedContext
         ? `The video you were editing was not ${editorWords(closedContext).done}: you moved elsewhere`
         : `${lost} videos were not added: you moved elsewhere`, "info", 7000);
@@ -11159,7 +11310,9 @@
   // default on those would swallow ordinary text pastes, and copying a region of a web page puts
   // an HTML flavour on the clipboard beside the picture.
   function onComposerPaste(target: "chat" | "status", e: ClipboardEvent) {
-    const media = pastedMedia(e.clipboardData?.files);
+    const files = e.clipboardData?.files;
+    if (files?.length && !canStartUpload(files.length)) { e.preventDefault(); return; }
+    const media = pastedMedia(files);
     if (!media.length) return;
     e.preventDefault();
     // One instant for the whole paste, so a multi-image paste keeps its clipboard order in the
@@ -11878,6 +12031,17 @@
     if (activeServerId === null) return;
     const server = activeServerId;
     const key = dlKey(server, f.cid);
+    if (saveInProgress(f.cid)) return;
+    const existing = privateDownloads.find(row => row.cid === f.cid);
+    if (existing) {
+      if (existing.status === "exhausted") { switchView("downloads"); return; }
+      await resumePrivateDownload(existing);
+      return;
+    }
+    const gen = viewGeneration;
+    const operation = `save-${crypto.randomUUID()}`;
+    error = "";
+    activeSaves[key] = operation;
     const started = Date.now();
     const held = Math.min(f.held, f.total);
     downloads[key] = {
@@ -11885,6 +12049,7 @@
       cid: f.cid,
       name: f.name,
       author: f.author,
+      operation,
       status: "queued",
       progress: f.total > 0 ? held / f.total : 0,
       done: held,
@@ -11899,25 +12064,94 @@
       ts: started,
     };
     try {
-      const saved = await saveGroupFile(invoke, server, f.cid, f.name);
-      if (downloads[key]) {
+      const saved = await saveGroupFile(invoke, server, f.cid, f.name, { operation });
+      if (!unlockedViewCurrent(gen, server)) return;
+      if (downloads[key]?.operation === operation) {
         Object.assign(downloads[key], completedDownload(downloads[key], saved, Date.now()));
       }
       const notice = downloadSavedNotice(f.name, saved);
       toast(notice.text, notice.kind, notice.ms);
-      refreshFiles(); // the file's chunks are now held locally: update its availability
+      refreshFiles();
     } catch (e) {
+      if (!unlockedViewCurrent(gen, server)) return;
       error = String(e);
-      if (downloads[key]) {
+      if (downloads[key]?.operation === operation) {
         downloads[key].status = "failed";
         downloads[key].error = String(e);
         downloads[key].updatedAt = Date.now();
       }
+    } finally {
+      if (activeSaves[key] === operation) delete activeSaves[key];
+      if (!unlockedViewCurrent(gen, server) && downloads[key]?.operation === operation) delete downloads[key];
+      if (unlockedViewCurrent(gen, server)) void refreshFiles();
+    }
+  }
+
+  async function resumePrivateDownload(row: PrivateDownload) {
+    const server = activeServerId, gen = viewGeneration;
+    if (server === null || locked || privateDownloadBusy || privateDownloadSaves[row.id] || saveInProgress(row.cid) || row.status === "receiving" || row.status === "removing") return;
+    const mutation = Symbol("private download");
+    error = "";
+    privateDownloadBusy = mutation;
+    privateDownloadSaves[row.id] = mutation;
+    fileInventoryGate.invalidate();
+    const operation = `save-${crypto.randomUUID()}`;
+    const key = dlKey(server, row.cid);
+    try {
+      if (row.status === "exhausted") {
+        await invoke("retry_private_download", { server, download: row.id, expectedGrant: row.grant,
+          request: crypto.randomUUID().replaceAll("-", "") });
+        if (!unlockedViewCurrent(gen, server)) return;
+      }
+      const name = filesByCid.get(row.cid)?.name ?? `download-${row.cid.slice(0, 12)}`;
+      const file = filesByCid.get(row.cid), started = Date.now();
+      activeSaves[key] = operation;
+      downloads[key] = { server, cid: row.cid, name, operation, author: file?.author ?? "",
+        status: "queued", progress: row.verifiedChunks / row.totalChunks, done: row.verifiedChunks,
+        total: row.totalChunks, heldBefore: row.verifiedChunks, bytesDone: 0, bytesTotal: file?.size ?? 0,
+        networkBytesDone: 0, speed: 0, lastRateAt: started, updatedAt: started, ts: started };
+      // Acquisition may wait for a member. Keep Pause/Remove available during that wait;
+      // this separate token blocks only a duplicate Save of this same native owner.
+      if (privateDownloadBusy === mutation) privateDownloadBusy = null;
+      const saved = await resumeGroupFile(invoke, server, row.cid, name, row.id, row.intent, operation);
+      if (!unlockedViewCurrent(gen, server)) return;
+      if (downloads[key]?.operation === operation) Object.assign(downloads[key], completedDownload(downloads[key], saved, Date.now()));
+      const notice = downloadSavedNotice(name, saved);
+      toast(notice.text, notice.kind, notice.ms);
+    } catch (e) {
+      if (unlockedViewCurrent(gen, server)) {
+        error = String(e);
+        if (downloads[key]?.operation === operation) Object.assign(downloads[key], { status: "failed", error: String(e), updatedAt: Date.now() });
+      }
+    } finally {
+      if (activeSaves[key] === operation) delete activeSaves[key];
+      if (!unlockedViewCurrent(gen, server) && downloads[key]?.operation === operation) delete downloads[key];
+      if (privateDownloadBusy === mutation) privateDownloadBusy = null;
+      if (privateDownloadSaves[row.id] === mutation) delete privateDownloadSaves[row.id];
+      if (unlockedViewCurrent(gen, server)) await refreshFiles();
+    }
+  }
+  async function changePrivateDownload(row: PrivateDownload, remove: boolean) {
+    const server = activeServerId, gen = viewGeneration;
+    if (server === null || locked || privateDownloadBusy) return;
+    const mutation = Symbol("private download intent");
+    privateDownloadBusy = mutation;
+    fileInventoryGate.invalidate();
+    try {
+      if (remove) await invoke("cancel_private_download", { server, download: row.id });
+      else await invoke("set_private_download_paused", { server, download: row.id, expectedIntent: row.intent, paused: true });
+    } catch (e) { if (unlockedViewCurrent(gen, server)) error = String(e); }
+    finally {
+      if (privateDownloadBusy === mutation) privateDownloadBusy = null;
+      if (unlockedViewCurrent(gen, server)) await refreshFiles();
     }
   }
 
   // The file info pane: click a file to inspect it (preview, availability, uploader, delete).
   let fileInfo = $state<UiFile | null>(null);
+  let fileInfoKeptCopy = $derived(keptFiles?.files.find((copy) => copy.cid === fileInfo?.cid));
+  let fileInfoKeptRecord = $derived(keptFiles?.transfers.find((copy) => copy.cid === fileInfo?.cid));
+  let fileInfoKeptTransfer = $derived(fileInfoKeptCopy ? undefined : fileInfoKeptRecord);
   let fileInfoAvail = $state<boolean | null>(null); // null = still checking
   let fileInfoPreview = $state<string>(""); // a data: URL for image/video/audio previews
   let fileInfoPreviewError = $state(false); // the preview fetch failed (so "Loading…" doesn't hang)
@@ -12007,6 +12241,7 @@
     cid: string;
     name: string;
     author: string; // the uploader (the file's source)
+    operation: string; // native progress correlation, never an authority token
     provider?: string; // the live serving peer's fingerprint, when bytes came over the network
     status: "queued" | "waiting" | "downloading" | "verifying" | "done" | "failed";
     progress: number; // 0..1
@@ -12026,7 +12261,13 @@
   // Keyed by `${server}:${cid}` so a download is scoped to its server (the same content cid can
   // exist on two servers, and switching servers must not show the other's transfers).
   let downloads = $state<Record<string, DownloadInfo>>({});
+  // Actual invocation ownership is independent of historical display status. A completion in
+  // another view must retire its own busy token without publishing a stale path or notice.
+  let activeSaves = $state<Record<string, string>>({});
   const dlKey = (server: number, cid: string) => `${server}:${cid}`;
+  function saveInProgress(cid: string): boolean {
+    return activeServerId !== null && !!activeSaves[dlKey(activeServerId, cid)];
+  }
   type UploadInfo = {
     server: number;
     id: string;
@@ -12633,7 +12874,7 @@
       toast("Announcements are a server noticeboard; a DM does not have one", "info", 3500);
       return;
     }
-    if (!(await route.leave())) return; // nor through switchView's Studio Save, so it runs its own
+    if (!(await route.leave()) || !route.current() || windowCloseInFlight) return; // nor through switchView's Studio Save, so it runs its own
     view = "status";
     void refreshStatusPolicy(); // this route reaches the surface without going through switchView
     if (!statuses.some((s) => s.id === id)) await refreshStatuses();
@@ -12816,7 +13057,7 @@
       inboxView = false;
       // A refused or superseded switch leaves another server on screen; never jump within it.
       if (!(await arriveAtServer(it.server, route))) return;
-      if (!(await route.leave())) return; // the switch awaited the server's load
+      if (!(await route.leave()) || !route.current() || windowCloseInFlight) return; // the switch awaited the server's load
       view = "chat";
       // The entry's channel was scanned (so it's open in the backend) but may not be in this UI's
       // sidebar list: register it so it renders + selects, then switch to it.
@@ -12842,6 +13083,9 @@
     fp: string;
     server: number;
     channel: string;
+    // A channel name can be left and rejoined. RTC callbacks belong to this exact join,
+    // as well as this exact peer object; identity or room equality cannot renew them.
+    callLease: number;
     pc: RTCPeerConnection;
     dc: RTCDataChannel | null;
     polite: boolean;
@@ -12930,6 +13174,15 @@
   let localStream: MediaStream | null = null;
   const micCaptureSession = new MediaCaptureSession();
   const callLifecycleSession = new MediaCaptureSession();
+  const callMappingSession = new CallMappingSession(invoke);
+  function destroyVoiceOnUnmount() {
+    // HMR can replace this component without destroying the WebView. Revoke old callbacks
+    // before teardown, then close RTC/media and pending capture through the ordinary leave path.
+    callLifecycleSession.invalidate();
+    try { leaveVoice(); }
+    finally { callMappingSession.destroy(); }
+  }
+  onDestroy(destroyVoiceOnUnmount);
   const callPeers: Record<string, CallPeer> = {};
   // Trickle ICE may beat the offer over independent Tauri invokes. Hold it until that peer has a
   // remote description instead of throwing it away and making the call depend on event timing.
@@ -13152,7 +13405,7 @@
     // "every ice candidate failed while the offer got through".
     const kind = typeof msg.type === "string" ? msg.type : "unknown";
     try {
-      const { value: delivered } = await invokeDebugged<boolean>("send_call_signal", {
+      const { value: submitted } = await invokeDebugged<boolean>("send_call_signal", {
         server,
         target,
         payload: b64enc(JSON.stringify(msg)),
@@ -13160,7 +13413,7 @@
       // The incident this whole section exists for: the roster shows a claimed path and the
       // transport has nowhere to send to. A run of these is a call that is about to die, and it
       // used to be a console.warn nobody had open.
-      if (!delivered) {
+      if (!submitted) {
         diagRecord({
           section: "voice",
           code: "VOICE.SIGNAL.NO_MEMBER_ROUTE",
@@ -13168,7 +13421,7 @@
           fields: { kind },
         });
       }
-      return delivered;
+      return submitted;
     } catch (e) {
       diagRecord({
         section: "voice",
@@ -18425,11 +18678,22 @@
   );
   let focusCols = $derived(focusTiles.length <= 1 ? 1 : focusTiles.length <= 4 ? 2 : 3);
 
+  // Account lock and call invalidation can precede map cleanup. Check both owners, including
+  // after every RTC await; only the state-change handler may retain a closed PC for cleanup.
+  function isCurrentCallJoin(lease: number, server: number, channel: string): boolean {
+    return !locked && inCall && callServer === server && callChannel === channel &&
+      lease === activeCallLease && callLifecycleSession.isCurrent(lease);
+  }
+  function isCurrentCallPeer(peer: CallPeer, allowClosed = false): boolean {
+    return isCurrentCallJoin(peer.callLease, peer.server, peer.channel) &&
+      callPeers[peer.fp] === peer && (allowClosed || peer.pc.signalingState !== "closed");
+  }
   async function negotiatePeer(peer: CallPeer) {
-    if (callPeers[peer.fp] !== peer || peer.pc.signalingState === "closed") return;
+    if (!isCurrentCallPeer(peer)) return;
     try {
       peer.makingOffer = true;
       await peer.pc.setLocalDescription();
+      if (!isCurrentCallPeer(peer)) return;
       if (peer.pc.localDescription?.type === "offer") {
         void sendSignal(peer.server, peer.fp, {
           callId: peer.channel,
@@ -18444,10 +18708,11 @@
     }
   }
   async function flushWaitingIce(peer: CallPeer) {
-    if (!peer.pc.remoteDescription) return;
+    if (!isCurrentCallPeer(peer) || !peer.pc.remoteDescription) return;
     const queued = waitingIce[peer.fp] ?? [];
     delete waitingIce[peer.fp];
     for (const candidate of queued) {
+      if (!isCurrentCallPeer(peer)) return;
       try {
         await peer.pc.addIceCandidate(new RTCIceCandidate(candidate));
       } catch (e) {
@@ -18456,6 +18721,7 @@
     }
   }
   function recoverPeer(peer: CallPeer) {
+    if (!isCurrentCallPeer(peer)) return;
     const now = Date.now();
     if (now - peer.lastRetry < 4000) return;
     const action = heartbeatRecovery({
@@ -18485,9 +18751,12 @@
   // difference in what leaks and the room deserves to be told, so it is surfaced rather than
   // averaged away. Best-effort throughout: on any miss the badge stays unknown, which is an
   // honest answer, where guessing "direct" would not be.
-  async function sniffTransport(fp: string, pc: RTCPeerConnection) {
+  async function sniffTransport(peer: CallPeer) {
+    if (!isCurrentCallPeer(peer)) return;
+    const { fp, pc } = peer;
     try {
       const stats = await pc.getStats();
+      if (!isCurrentCallPeer(peer)) return;
       let codecId = "";
       stats.forEach((stat) => {
         const outbound = stat as RTCStats & {
@@ -18541,12 +18810,11 @@
   // UDP ports this call asked the router to open (bound-interface IGD on the native side, the
   // same path the invite reachability fix proved out). One mapping per local ICE port; the
   // granted public socket is signalled to the peer as an extra srflx candidate. A router mapping
-  // forwards from any source, so ONE mapped side connects the pair no matter how hostile the
-  // other side's NAT is: the same one-public-route-suffices shape as invites. `null` marks a
-  // port that was tried and refused, so renegotiations don't re-ask the router every time.
+  // forwards from any source, so ONE mapped side can help the pair traverse NAT. An empty
+  // grant marks a pending/refused attempt, so renegotiations do not repeatedly ask the router.
   // The eligibility rule, the candidate builder and the status phrasing live in callroutes.ts,
   // where they are unit-tested.
-  const mappedCallPorts = new Map<number, MappedPort | null>();
+  const mappedCallPorts = new Map<number, { granted: MappedPort | null; pending: Promise<MappedPort | null> | null }>();
   // Reactive shadow of how many router-mapped routes this call holds, for the status line: a
   // plain Map mutation is invisible to $derived.
   let callMappedRoutes = $state(0);
@@ -18558,37 +18826,53 @@
   // silently, because a filter nobody can see is indistinguishable from a bug when a call fails.
   let suppressedIceCandidates = $state(0);
   async function refreshDefaultRoute() {
+    const lease = activeCallLease, server = callServer, channel = callChannel;
+    if (server === null || !channel || !isCurrentCallJoin(lease, server, channel)) return;
+    // A prior call's interface is not evidence for this one, especially after a network change.
+    // Unknown route signals all candidates while lookup awaits; suppressed ICE is not replayed.
+    defaultRouteIpv4 = null;
     try {
-      defaultRouteIpv4 = await invoke<string | null>("default_route_address");
+      const address = await invoke<string | null>("default_route_address");
+      if (isCurrentCallJoin(lease, server, channel)) defaultRouteIpv4 = address;
     } catch {
-      defaultRouteIpv4 = null; // unknown route: signal everything, as before
+      if (isCurrentCallJoin(lease, server, channel)) defaultRouteIpv4 = null;
     }
   }
 
   async function signalMappedCandidate(peer: CallPeer, c: RTCIceCandidate) {
+    if (!isCurrentCallPeer(peer)) return;
     if (!mappableIcePort(c)) return;
     const policy = mappingAddressPolicy(c.address);
     if (!policy.map) return; // an IPv6/hostname socket is not what an IPv4 mapping reaches
     const port = c.port as number;
-    if (!mappedCallPorts.has(port)) {
-      mappedCallPorts.set(port, null); // claim before the await so a concurrent candidate doesn't double-map
-      try {
-        const granted = await invoke<MappedPort>("map_call_port", { port, address: policy.claim });
-        mappedCallPorts.set(port, granted);
-        callMappedRoutes += 1;
-        console.info("voice: router mapped the media port", {
-          port,
-          via: granted.mechanism,
-          confirmed: granted.confirmed,
-        });
-      } catch (e) {
-        // Advisory: STUN/TURN candidates still flow; the router simply couldn't help this call.
-        console.warn("voice: router would not map the media port", { port, error: String(e) });
-        return;
-      }
+    const localSdp = peer.pc.localDescription?.sdp ?? null;
+    let owned = mappedCallPorts.get(port);
+    if (!owned) {
+      // Mapping custody is call-wide, not peer-wide: a replaced peer must not strand a live
+      // call's grant. The owned slot additionally rejects a same-port clear/replacement ABA.
+      const slot = { granted: null as MappedPort | null, pending: null as Promise<MappedPort | null> | null };
+      mappedCallPorts.set(port, slot);
+      owned = slot;
+      // Every current peer using this port waits on the same acquisition. Its completion owns
+      // only call-wide mapping custody; each waiter supplies its own candidate and ICE generation.
+      slot.pending = (async () => {
+        try {
+          const granted = await callMappingSession.map(peer.callLease, port, policy.claim);
+          if (!granted || !isCurrentCallJoin(peer.callLease, peer.server, peer.channel) || mappedCallPorts.get(port) !== slot) return null;
+          slot.granted = granted;
+          callMappedRoutes += 1;
+          console.info("voice: router mapped the media port", { port, via: granted.mechanism, confirmed: granted.confirmed });
+          return granted;
+        } catch (e) {
+          // Advisory: STUN/TURN candidates still flow; the router simply couldn't help this call.
+          console.warn("voice: router would not map the media port", { port, error: String(e) });
+          return null;
+        }
+      })();
     }
-    const ext = mappedCallPorts.get(port);
-    if (!ext) return;
+    const ext = await owned.pending;
+    if (!ext || mappedCallPorts.get(port) !== owned || !isCurrentCallPeer(peer)
+      || !mappedIceIsCurrent(c, localSdp, peer.pc.localDescription?.sdp ?? null)) return;
     void sendSignal(peer.server, peer.fp, {
       callId: peer.channel,
       type: "ice",
@@ -18597,9 +18881,8 @@
   }
 
   function releaseMappedCallPorts() {
-    for (const [port, granted] of mappedCallPorts) {
-      if (granted) void invoke("unmap_call_port", { port }).catch(() => {});
-    }
+    // Revoke the native owner, including acquisitions that have not returned a grant yet.
+    callMappingSession.endCall();
     mappedCallPorts.clear();
     callMappedRoutes = 0;
   }
@@ -18608,12 +18891,13 @@
     if (callPeers[fp]) return callPeers[fp];
     const server = callServer;
     const channel = callChannel;
-    if (server === null || !channel || !callSelfId) return null;
+    if (locked || !inCall || server === null || !channel || !callSelfId || !callLifecycleSession.isCurrent(activeCallLease)) return null;
     const pc = new RTCPeerConnection({ iceServers: iceServers() });
     const peer: CallPeer = {
       fp,
       server,
       channel,
+      callLease: activeCallLease,
       pc,
       dc: null,
       polite: isPoliteTowards(callSelfId, fp),
@@ -18659,11 +18943,15 @@
       ensureJamEngine().setSourceLevel(fp, peerInstLevelFor(fp) / 100); // the trim you set for them last time
       const dc = peer.dc;
       dc.onopen = () => {
+        if (!isCurrentCallPeer(peer) || peer.dc !== dc || dc.readyState !== "open") return;
         pushInstState();
         void openJamOutboundEdge(dc); // publication barrier before this edge's first note/drum
         jamMetHello(dc); // and, if I anchor the grid, the running metronome
       };
-      dc.onmessage = (e) => handleJamFrame(fp, jamChan, jamDec, e.data);
+      dc.onmessage = (e) => {
+        if (!isCurrentCallPeer(peer) || peer.dc !== dc) return;
+        handleJamFrame(fp, jamChan, jamDec, e.data);
+      };
     } catch {
       /* data channels unavailable: voice still works */
     }
@@ -18672,7 +18960,7 @@
     const claims = drawClaims;
     if (claims) {
       peer.draw = openDrawEdge(pc, claims, fp, {
-        live: () => callPeers[fp] === peer,
+        live: () => isCurrentCallPeer(peer),
         changed: () => {
           if (drawClaims === claims) syncDrawClaims();
         },
@@ -18682,6 +18970,7 @@
     // later. The no-argument setLocalDescription picks offer/answer from the signaling state.
     pc.onnegotiationneeded = () => void negotiatePeer(peer);
     pc.onicecandidate = (e) => {
+      if (!isCurrentCallPeer(peer)) return;
       if (e.candidate) {
         // A candidate on one of this machine's virtual adapters can never be reached from
         // outside, and sending it costs the far end a connectivity check before ICE settles.
@@ -18693,13 +18982,17 @@
         void signalMappedCandidate(peer, e.candidate);
       }
     };
-    pc.onicecandidateerror = (e) => console.warn("voice ICE server/candidate error", {
-      peer: displayKey(fp),
-      code: e.errorCode,
-      text: e.errorText,
-      url: e.url,
-    });
+    pc.onicecandidateerror = (e) => {
+      if (!isCurrentCallPeer(peer)) return;
+      console.warn("voice ICE server/candidate error", {
+        peer: displayKey(fp),
+        code: e.errorCode,
+        text: e.errorText,
+        url: e.url,
+      });
+    };
     pc.ontrack = (e) => {
+      if (!isCurrentCallPeer(peer)) return;
       const stream = e.streams[0];
       if (!stream) return;
       if (e.track.kind === "audio") {
@@ -18713,19 +19006,22 @@
       // that arrived first, in which case that audio moves to the share chain.
       if (remoteAudioRouter.noteVideo(fp, stream.id)) regroupRemoteAudio(fp, stream.id);
       remoteStreams = { ...remoteStreams, [fp]: stream };
-      e.track.onended = () => dropRemoteVideo(fp, stream);
+      e.track.onended = () => { if (isCurrentCallPeer(peer)) dropRemoteVideo(fp, stream); };
       stream.onremovetrack = () => {
+        if (!isCurrentCallPeer(peer)) return;
         if (!stream.getVideoTracks().length) dropRemoteVideo(fp, stream);
       };
     };
     pc.onconnectionstatechange = () => {
+      // A current closed PC still owns its cleanup. A retired PC owns no replacement state.
+      if (!isCurrentCallPeer(peer, true)) return;
       callPeerStates = { ...callPeerStates, [fp]: pc.connectionState };
       // Claims never outlive a dead link, and an unreachable peer is absent until this side sees
       // it "connected" again (draw-wiring.ts).
       if (claims && callPeers[fp] === peer && drawClaims === claims) {
         drawConnectionState(claims, fp, pc.connectionState, peer.draw, syncDrawClaims);
       }
-      if (pc.connectionState === "connected") void sniffTransport(fp, pc);
+      if (pc.connectionState === "connected") void sniffTransport(peer);
       if (pc.connectionState === "failed") recoverPeer(peer);
       else if (pc.connectionState === "closed") removePeer(fp);
     };
@@ -18978,6 +19274,7 @@
     callServerName = servers.find((s) => s.id === server)?.name ?? "";
     inCall = true;
     activeCallLease = joinLease;
+    callMappingSession.start(joinLease, server, channel);
     ensureJamEngine(); // fresh engine, session nonce and sequence domain for this call
     void ensurePublishedJamPatch(); // local echo + every edge wait on the same verified recipe
     void refreshCallProfiles();
@@ -19011,7 +19308,7 @@
         // Re-read the winning candidate pair: an ICE restart can migrate a live call from
         // direct to relayed (or back) with no connection-state change to notice it by.
         for (const [fp, p] of Object.entries(callPeers)) {
-          if (p.pc.connectionState === "connected") void sniffTransport(fp, p.pc);
+          if (p.pc.connectionState === "connected") void sniffTransport(p);
         }
       }
     }, 5000);
@@ -19149,6 +19446,7 @@
     callSelfId = "";
     callSharedIds = new Set();
     activeCallLease = 0;
+    defaultRouteIpv4 = null;
     callProfiles = {};
     peerTransport = {};
     peerVideoCodec = {};
@@ -19366,7 +19664,7 @@
       createPeer(fromFp); // its tracks + data channel raise onnegotiationneeded, which sends the offer
     } else if (type === "offer") {
       const peer = callPeers[fromFp] ?? createPeer(fromFp);
-      if (!peer) return;
+      if (!peer || !isCurrentCallPeer(peer)) return;
       const pc = peer.pc;
       // Perfect negotiation, answer side: on a collision the impolite end ignores the incoming
       // offer (its own is in flight and will win); the polite end lets setRemoteDescription
@@ -19376,11 +19674,14 @@
       if (peer.ignoreOffer) return;
       try {
         await pc.setRemoteDescription(new RTCSessionDescription(msg.sdp as RTCSessionDescriptionInit));
+        if (!isCurrentCallPeer(peer)) return;
         for (const transceiver of pc.getTransceivers()) {
           if (transceiver.receiver.track.kind === "video") preferVideoCodecs(transceiver);
         }
         await flushWaitingIce(peer);
+        if (!isCurrentCallPeer(peer)) return;
         await pc.setLocalDescription(); // no-arg picks "answer" from the have-remote-offer state
+        if (!isCurrentCallPeer(peer)) return;
         void sendSignal(server, fromFp, { callId: cid, type: "answer", sdp: pc.localDescription });
       } catch (e) {
         console.warn("voice offer handling failed", { peer: displayKey(fromFp), error: String(e) });
@@ -19389,9 +19690,10 @@
       const peer = callPeers[fromFp];
       const pc = peer?.pc;
       // Guard against a stale answer landing after a rollback settled the state.
-      if (peer && pc && pc.signalingState === "have-local-offer") {
+      if (peer && pc && isCurrentCallPeer(peer) && pc.signalingState === "have-local-offer") {
         try {
           await pc.setRemoteDescription(new RTCSessionDescription(msg.sdp as RTCSessionDescriptionInit));
+          if (!isCurrentCallPeer(peer)) return;
           await flushWaitingIce(peer);
         } catch (e) {
           console.warn("voice answer handling failed", { peer: displayKey(fromFp), error: String(e) });
@@ -19593,10 +19895,12 @@
         if (locked || windowCloseInFlight || session !== uiStateLoadGeneration || pendingSendResolution !== null || (automatic && pendingManagerOpen)) return;
         if (!pendingSubmissionCurrent(intent, session)) continue;
         if (automatic && intent.retryBlock) continue;
+        // A refusal now cannot establish absence of an older invocation whose reply was lost.
+        const priorMayHaveGone = intent.acceptance !== "not_accepted";
         try {
           const result = await submitPendingSend(intent, session);
           if (locked || session !== uiStateLoadGeneration) return;
-          const warning = persistenceWarning(result);
+          const warning = persistenceWarning(result, priorMayHaveGone);
           if (warning) error = warning;
         } catch (failure) {
           if (locked || session !== uiStateLoadGeneration) return;
@@ -19625,14 +19929,15 @@
     const operation = ++pendingSendNonce;
     const pendingId = `pending:${operation}`;
     let intent: PendingSend | undefined;
-    // Whether this message's identity may have reached the native side, by this press or an
-    // earlier attempt that reused it. Kept here rather than read back from `pendingSends` after a
+    // Keep earlier-attempt uncertainty separately: a definite refusal of this press cannot
+    // disprove a previous invocation. Neither fact can be read from `pendingSends` after a
     // failure: the pending-message manager can recover or stop the entry while the request is
     // still out, and its absence then proves nothing about whether it committed (found in review).
     let mayHaveGone = false;
+    let priorMayHaveGone = false;
     try {
       intent = matchingPendingSend(pendingSends, server, channel, text, reply_to);
-      if (intent) mayHaveGone = intent.acceptance !== "not_accepted";
+      if (intent) priorMayHaveGone = intent.acceptance !== "not_accepted";
       if (!intent) {
         const expectedContext = await invoke<string>("durable_send_context", { server });
         if (!sessionCurrent() || pendingSendResolution !== null || pendingManagerOpen) return "refused";
@@ -19672,24 +19977,25 @@
           if (sessionCurrent() && activeServerId === server && cur?.active === channel) await refresh();
         },
       );
-      if (!sessionCurrent()) return sendOutcome(result);
-      const warning = persistenceWarning(result);
+      if (!sessionCurrent()) return sendOutcome(result, priorMayHaveGone);
+      const warning = persistenceWarning(result, priorMayHaveGone);
       if (warning) toast(warning, "warn", 12000);
       if (refreshError) error = `Message result saved, but the conversation could not refresh: ${errorText(refreshError)}`;
-      return sendOutcome(result);
+      return sendOutcome(result, priorMayHaveGone);
     } catch (e) {
       // A throw is not "failed" when the message may still go or may already have gone: native
       // errors do not prove absence. It is "uncertain" when its sealed identity stays pending
       // without a retry block (the quiet retry sends it by itself), when a lock kept it in the
       // vault to retry after unlock, or when it may have been dispatched (`mayHaveGone`) and the
       // error is not a definite native refusal, even if the pending-message manager has since
-      // recovered or stopped the entry. Calling those unsent invited a second send under a new
-      // token (found in review). Only a send that sealed nothing, never reached the native side,
-      // or was refused there for good, failed.
+      // recovered or stopped the entry. An older ambiguous attempt remains uncertain even when
+      // this invocation is definitely refused: only exact historical evidence could resolve it.
+      // Calling those unsent invited a second send under a new token (found in review).
       const kept = intent ? pendingSends[intent.token] : undefined;
       const refusedForGood = pendingSendRetryBlock(errorText(e)) !== undefined;
       const outcome: SendOutcome = !intent ? "failed"
         : !sessionCurrent() || (kept && !kept.retryBlock) ? "uncertain"
+        : priorMayHaveGone ? "uncertain"
         : mayHaveGone && !refusedForGood ? "uncertain"
         : "failed";
       if (!sessionCurrent()) return outcome;
@@ -20282,7 +20588,7 @@
     try {
       // One action from first step to last: each step after an await asks the same route again.
       const route = studioExit.begin();
-      if (!(await route.leave())) return false;
+      if (!(await route.leave()) || !route.current() || windowCloseInFlight) return false;
       if (loc.area === "inbox") {
         openInbox();
         return (applied = true);
@@ -20299,13 +20605,13 @@
         // included: Back from the Studio to a chat in another channel would otherwise move the
         // channel and then find itself retired before showing it. From anywhere else the channel
         // moves first, so a refused move changes nothing on screen.
-        if (!(await route.leave())) return false;
+        if (!(await route.leave()) || !route.current() || windowCloseInFlight) return false;
         const fromStudio = view === "studio";
         if (fromStudio) switchView("chat", route);
         if (loc.channel && cur?.active !== loc.channel && !(await switchTo(loc.channel, false, route))) return false;
         if (!fromStudio) switchView("chat", route);
       } else if (loc.view === "wiki" && loc.page) {
-        if (!(await route.leave())) return false; // the server switch awaited its load
+        if (!(await route.leave()) || !route.current() || windowCloseInFlight) return false; // the server switch awaited its load
         menu = null;
         view = "wiki";
         // Awaited, not left to switchView: openWikiPage reads the page list to decide read vs
@@ -20440,7 +20746,7 @@
     try {
       const route = studioExit.begin();
       if (!(await arriveAtServer(server, route))) return;
-      if (!(await route.leave())) return; // the switch awaited the server's load
+      if (!(await route.leave()) || !route.current() || windowCloseInFlight) return; // the switch awaited the server's load
       menu = null;
       view = "wiki";
       await refreshWiki();
@@ -20455,7 +20761,7 @@
       const route = studioExit.begin();
       inboxView = false;
       if (!(await arriveAtServer(server, route))) return;
-      if (!(await route.leave())) return;
+      if (!(await route.leave()) || !route.current() || windowCloseInFlight) return;
       view = "chat";
       // A channel update can arrive before its channel-list event. Register a readable fallback
       // so the click can still land instead of silently selecting an absent sidebar entry.
@@ -20745,7 +21051,7 @@
     try {
       // Save the Studio first; switchView's own deferred Save would otherwise race switchTo's.
       const route = studioExit.begin();
-      if (!(await route.leave())) return;
+      if (!(await route.leave()) || !route.current() || windowCloseInFlight) return;
       switchView("chat", route);
       await switchTo(channel, false, route);
     } finally {
@@ -20776,7 +21082,6 @@
     (uiStateJson) => invoke<NativeVaultLockOutcome>("lock_session", { uiStateJson }),
   );
   let winMaximized = $state(false);
-  let windowCloseInFlight = $state(false);
   $effect(() => { if (!windowCloseInFlight) studioEndClose?.(); });
   // The first continuity failure leaves a confirmed-locked window open with a warning. Repeating
   // close is the user's explicit acknowledgement that exiting without that latest snapshot is OK.
@@ -21020,6 +21325,10 @@
           return;
         }
         windowCloseInFlight = true;
+        // Cancel review ownership immediately, before Studio/native close can await or snapshot.
+        // A refused close cannot revive an earlier batch even if the derived key returns to open.
+        videoScopeEpoch++;
+        videoReviews.rescope(videoEditorScope);
         if (!locked) {
           try { studioBeginClose?.(); await studioSave?.(); }
           catch (e) { windowCloseInFlight = false; if (!locked) error = String(e); return; }
@@ -21284,7 +21593,7 @@
           jukeFetch = fetchPhase(e.payload);
         }
         const d = downloads[dlKey(e.payload.server, e.payload.cid)];
-        if (!d) return; // only track explicitly-initiated downloads
+        if (!d || activeSaves[dlKey(e.payload.server, e.payload.cid)] !== d.operation || !acceptSaveProgress(d, e.payload)) return;
         const now = Date.now();
         if (e.payload.network_bytes_done > d.networkBytesDone) {
           d.speed = sampleRate(
@@ -27186,9 +27495,9 @@
               {#if callTransport}
                 <ul class="conn-facts">
                   <li>
-                    <span class="stage-label">DIRECT ROUTE</span>
-                    <span class={callTransport.public_direct ? "ok-t" : "fail-t"}>
-                      {callTransport.public_direct ? "this device is directly reachable" : "behind NAT"}
+                    <span class="stage-label">MESH ADDRESS</span>
+                    <span class="muted small">
+                      {callTransport.public_direct ? "public mesh address advertised" : "no public mesh address advertised"}
                     </span>
                   </li>
                   <li><span class="stage-label">AUTONAT</span><span class="muted small">{callTransport.autonat}</span></li>
@@ -27196,8 +27505,8 @@
                     <span class="stage-label">ROUTER</span>
                     <span class={callTransport.router_maps ? "ok-t" : "muted small"}>
                       {callTransport.router_maps
-                        ? "opens ports on request; each call's media socket is offered a mapped route"
-                        : "has not granted a mapping; calls rely on STUN hole punching or TURN"}
+                        ? "mesh mapping granted; calls can try a separate UDP mapping"
+                        : "no mesh mapping reported; calls can still try STUN or TURN"}
                     </span>
                   </li>
                   {#if callTransport.public_ipv6.length}
@@ -27207,7 +27516,7 @@
                     <li><span class="stage-label">PUBLIC IPV4</span><span class="muted small">{callTransport.public_ipv4.join(", ")}</span></li>
                   {/if}
                   <li>
-                    <span class="stage-label">RELAY HOSTS</span>
+                    <span class="stage-label">MESH HELPERS</span>
                     <span class={callTransport.bridges.length ? "ok-t" : "muted small"}>
                       {callTransport.bridges.length
                         ? `${callTransport.bridges.length} member(s) offering, ${callTransport.bridges.filter((b) => b.direct).length} with a public route`
@@ -27298,17 +27607,30 @@
           </div>
           {#if keptFiles?.supported}
             <details class="kept-copies-panel">
-              <summary>Kept on this device ? {keptFiles.files.length}/32 ? {fmtSize(keptFiles.allocated_bytes)} of {fmtSize(keptFiles.limit_bytes)} allocated</summary>
+              <summary>Kept on this device · {keptAllocationCount(keptFiles)}/32 · {fmtSize(keptFiles.allocated_bytes)} of {fmtSize(keptFiles.limit_bytes)} allocated</summary>
               <p class="muted small">These encrypted copies survive ordinary cache cleanup and shared-list removal. Export still requires a shared listing. Releasing a copy frees its reserved storage; other cached bytes may remain.</p>
               {#if keptFiles.error}<p role="alert">{keptFiles.error}</p>{/if}
               {#each keptFiles.files as copy (copy.cid)}
+                {@const saved = keptFiles.transfers.find(row => row.cid === copy.cid)}
                 <div class="kept-copy-row">
-                  <span>{files.find((f) => f.cid === copy.cid)?.name ?? `${copy.cid.slice(0, 16)}? (unlisted)`} ? {keptCopyLabel(copy)}</span>
-                  <button class="ghost small" disabled={!!keptTransfer || !!keptFiles.error} onclick={() => keepFileHere(copy.cid)}>Check and repair</button>
-                  <button class="ghost small" disabled={!!keptTransfer || !!keptFiles.error} onclick={() => forgetKeptFile(copy.cid)}>Release kept copy</button>
+                  <span>{files.find((f) => f.cid === copy.cid)?.name ?? `${copy.cid.slice(0, 16)}… (unlisted)`} · {keptCopyLabel(copy)}</span>
+                  <button class="ghost small" disabled={!!keptTransfer || !!keptMutation || !!keptFiles.error} onclick={() => saved?.exhausted ? retryKeptFile(saved) : checkKeptFile(copy.cid)}>{saved?.exhausted ? "Retry check" : "Check and repair"}</button>
+                  <button class="ghost small" disabled={!!keptTransfer || !!keptMutation || !!keptFiles.error} onclick={() => forgetKeptFile(copy.cid)}>Release kept copy</button>
                 </div>
               {/each}
-              {#if keptTransfer}<button class="ghost small" onclick={cancelKeptTransfer}>Cancel keeping</button>{/if}
+              {#each keptTransferRows(keptFiles) as copy (copy.cid)}
+                <div class="kept-copy-row">
+                  <span>{files.find((file) => file.cid === copy.cid)?.name ?? copy.cid.slice(0, 16)} · {keptTransferLabel(copy)}</span>
+                  <button class="ghost small" disabled={!!keptTransfer || !!keptMutation || copy.running || copy.phase === "deleting" || !!keptFiles.error}
+                    onclick={() => copy.exhausted ? retryKeptFile(copy) : resumeKeptFile(copy)}>{copy.exhausted ? "Retry" : "Resume"}</button>
+                  {#if copy.running || (!copy.user_paused && !copy.exhausted && !copy.blocked && copy.phase === "paused")}
+                    <button class="ghost small" disabled={!!keptTransfer || !!keptMutation || !!keptFiles.error} onclick={() => setKeptPaused(copy, true)}>Pause</button>
+                  {/if}
+                  <button class="ghost small" disabled={!!keptTransfer || !!keptMutation || copy.phase === "deleting" || !!keptFiles.error}
+                    onclick={() => forgetKeptFile(copy.cid)}>Cancel transfer</button>
+                </div>
+              {/each}
+              {#if keptTransfer?.cancellation}<button class="ghost small" onclick={cancelKeptTransfer}>Stop checking</button>{/if}
             </details>
           {/if}
           <!-- svelte-ignore a11y_no_static_element_interactions -->
@@ -27864,6 +28186,25 @@
         {:else if view === "downloads"}
           <h2>Transfers</h2>
           <div class="downloads-tab tab-pane">
+            {#if privateDownloadError}<p class="muted" role="status">{privateDownloadError}</p>{/if}
+            {#if privateDownloads.length}
+              <h3>Saved download progress</h3>
+              <p class="muted small">If a save was interrupted, check Downloads before saving again. Saving again creates another copy.</p>
+              <ul class="dl-list">
+                {#each privateDownloads as saved (saved.id)}
+                  <li class="dl-item">
+                    <b>{filesByCid.get(saved.cid)?.name ?? `File ${saved.cid.slice(0, 12)}`}</b>
+                    <span>{privateDownloadLabel(saved)} · {saved.verifiedChunks}/{saved.totalChunks} chunks</span>
+                    <div>
+                      <button disabled={!!privateDownloadBusy || !!privateDownloadSaves[saved.id] || saveInProgress(saved.cid) || saved.status === "receiving" || saved.status === "removing"}
+                        onclick={() => resumePrivateDownload(saved)}>{saved.status === "exhausted" ? "Retry download" : saved.status === "ready" ? "Save to Downloads" : "Resume download"}</button>
+                      {#if saved.status === "receiving"}<button disabled={!!privateDownloadBusy} onclick={() => changePrivateDownload(saved, false)}>Pause</button>{/if}
+                      <button class="ghost" disabled={!!privateDownloadBusy} onclick={() => changePrivateDownload(saved, true)}>Remove progress</button>
+                    </div>
+                  </li>
+                {/each}
+              </ul>
+            {/if}
             <button class="transfer-health" onclick={() => switchView("storage")}>
               {@render icoStorage()}
               {#if storageHealth}
@@ -31098,12 +31439,16 @@
               </dd>
               <dt>Kept copy</dt>
               <dd>
-                <span>{keptCopyLabel(keptFiles?.files.find((copy) => copy.cid === fileInfo?.cid))}</span>
+                <span>{fileInfoKeptTransfer ? keptTransferLabel(fileInfoKeptTransfer) : keptCopyLabel(fileInfoKeptCopy)}</span>
                 {#if keptFiles?.supported && !keptFiles.error}
-                  <button class="ghost small" disabled={!!keptTransfer} onclick={() => fileInfo && keepFileHere(fileInfo.cid)}>
-                    {keptFiles.files.some((copy) => copy.cid === fileInfo?.cid) ? "Check and repair copy" : "Keep on this device"}
+                  <button class="ghost small" disabled={!!keptTransfer || !!keptMutation || !!fileInfoKeptTransfer?.running || fileInfoKeptTransfer?.phase === "deleting"}
+                    onclick={() => fileInfoKeptCopy && fileInfo ? (fileInfoKeptRecord?.exhausted ? retryKeptFile(fileInfoKeptRecord) : checkKeptFile(fileInfo.cid)) : fileInfoKeptTransfer ? (fileInfoKeptTransfer.exhausted ? retryKeptFile(fileInfoKeptTransfer) : resumeKeptFile(fileInfoKeptTransfer)) : fileInfo && keepFileHere(fileInfo.cid)}>
+                    {fileInfoKeptCopy ? (fileInfoKeptRecord?.exhausted ? "Retry check" : "Check and repair copy") : fileInfoKeptTransfer?.exhausted ? "Retry" : fileInfoKeptTransfer ? "Resume" : "Keep on this device"}
                   </button>
-                  {#if keptTransfer?.cid === fileInfo.cid}<button class="ghost small" onclick={cancelKeptTransfer}>Cancel keeping</button>{/if}
+                  {#if keptTransfer?.cid === fileInfo.cid && keptTransfer.cancellation}<button class="ghost small" onclick={cancelKeptTransfer}>Stop checking</button>{/if}
+                  {#if fileInfoKeptTransfer && !fileInfoKeptTransfer.user_paused && !fileInfoKeptTransfer.exhausted && !fileInfoKeptTransfer.blocked && fileInfoKeptTransfer.phase === "paused"}
+                    <button class="ghost small" disabled={!!keptMutation || !!keptTransfer} onclick={() => fileInfoKeptTransfer && setKeptPaused(fileInfoKeptTransfer, true)}>Pause</button>
+                  {/if}
                   <p class="muted small">Stores a verified encrypted copy within this server's 1 GiB / 32-file limit. Checking may fetch missing chunks. Remote copies remain unconfirmed.</p>
                 {:else if keptFiles?.error}<p class="muted small">{keptFiles.error}</p>{/if}
               </dd>

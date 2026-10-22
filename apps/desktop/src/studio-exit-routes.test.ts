@@ -13,7 +13,9 @@ import { CHANNEL, ME, SERVER, deferred, fakeIpc, flipnoteContent, id32, indexCon
 import { createStudioExit } from "./studio-exit.ts";
 import { decodeStudioDraft } from "./studio-draft.ts";
 
-const source = readFileSync(fileURLToPath(new URL("./App.svelte", import.meta.url)), "utf8");
+// Git may check out CRLF on Windows. Audit logical source lines identically on both platforms;
+// every guard, forced-edge count and negative probe below remains unchanged.
+const source = readFileSync(fileURLToPath(new URL("./App.svelte", import.meta.url)), "utf8").replaceAll("\r\n", "\n");
 // Every flag write that can take the Studio off screen: the main pane's `view`, the inbox and DM
 // home (which replace that pane), the active group, and the top-level screens that replace the
 // whole layout (add server, vault change, the unready and locked states). Calls of clearServerView
@@ -32,7 +34,7 @@ const ROUTE = new RegExp([
 // switchView's deferred `route.leave().then(...)` counts only inside switchView, which has no await.
 // Known limit: a guard in a sibling branch earlier in the same function also satisfies this.
 const LINE_GUARD = /leaveStudioThen\(/;
-const FUNCTION_GUARD = /leaveStudioThen\(|if \([^\n]*!\(await (?:route\.(?:leave|scope)|releaseStudio)\(\)\)\) return/g;
+const FUNCTION_GUARD = /leaveStudioThen\(|if \([^\n]*!\(await (?:route\.(?:leave|scope)|releaseStudio)\(\)\)(?: \|\| !route\.current\(\) \|\| windowCloseInFlight)?\) return/g;
 const FORCED = "studio-exit: forced edge";
 
 /** The function-level verdict for a site at the end of `body`, which starts at the declaration. */
@@ -186,6 +188,17 @@ test("switchServer and switchTo report a refused switch, and composite callers a
   assert.deepEqual([...source.matchAll(/arriveAtServer\(([^)]*)\)/g)].map(m => m[1]).filter(a => !/, route$/.test(a) && !a.includes(":")), []);
 });
 
+test("every awaited Studio route checks live ownership again before its continuation", () => {
+  const leaves = [...source.matchAll(/^.*if \(!\(await route\.leave\(\)\).*$/gm)];
+  assert.ok(leaves.length > 10);
+  for (const line of leaves) assert.match(line[0], /\|\| !route\.current\(\) \|\| windowCloseInFlight/, `App.svelte:${lineOf(line.index!)}`);
+  for (const name of ["switchServer", "switchTo"]) {
+    const fn = source.slice(source.indexOf(`async function ${name}(`));
+    assert.match(fn.slice(0, fn.indexOf("saveDraftFor(")), /await route\.scope\(\).*\n\s*if \(!route\.current\(\) \|\| windowCloseInFlight\) return false;/);
+  }
+  assert.equal(/await releaseStudio\(\)/.test(source), false, "awaiting callers retain their route for a mutation-time check");
+});
+
 /** The source of App's 2-space function `name`: its parameter list and body matched by bracket
  * depth, so one-line helpers and multi-line functions both come out whole. */
 function functionText(name: string): string {
@@ -206,6 +219,116 @@ function production<T>(names: string[], state: object): T {
   return new Function("state", `with (state) { ${parts.join("\n")} return { ${names.join(", ")} }; }`)(state) as T;
 }
 
+test("App's direct Inbox route stays put while window close is draining state", async () => {
+  for (const view of ["studio", "chat"]) {
+    let loads = 0;
+    const state = { view, windowCloseInFlight: true, inboxView: false, dmHome: true,
+      newsUnseen: false, inboxMode: "mentions", loadNews: () => { loads++; }, loadInbox: () => { loads++; },
+      leaveStudioThen: null as unknown as ReturnType<typeof createStudioExit>["leaveThen"] };
+    state.leaveStudioThen = createStudioExit({ onStudio: () => state.view === "studio", hasWork: () => false,
+      closing: () => state.windowCloseInFlight, claim: () => () => true, save: async () => true }).leaveThen;
+    const app = production<{ openInbox: () => void }>(["openInbox"], state);
+    app.openInbox(); await flush();
+    assert.equal(state.inboxView, false); assert.equal(state.dmHome, true); assert.equal(loads, 0);
+    state.windowCloseInFlight = false; app.openInbox();
+    assert.equal(state.inboxView, true); assert.equal(state.dmHome, false); assert.equal(loads, 1);
+  }
+});
+
+test("a delayed wiki rename never relabels a replacement page or session", async () => {
+  for (const replacement of ["server", "unlock", "page", "close"] as const) {
+    const renamed = deferred<void>();
+    let refreshes = 0;
+    const state = {
+      viewGeneration: 1, activeServerId: 7, locked: false, windowCloseInFlight: false,
+      activeWikiPage: "Home", wikiPaneSerial: 1, wikiBody: "original body", wikiRenameTo: "Renamed", wikiRenaming: true,
+      studioExit: createStudioExit({ onStudio: () => false, hasWork: () => false, closing: () => state.windowCloseInFlight,
+        claim: () => () => false, save: async () => true }),
+      unlockedViewCurrent: (gen: number, server: number) => !state.locked && gen === state.viewGeneration && server === state.activeServerId,
+      invoke: (name: string, args: { server: number; from: string; to: string }) => {
+        assert.equal(name, "rename_wiki_page"); assert.deepEqual(args, { server: 7, from: "Home", to: "Renamed" });
+        return renamed.promise;
+      },
+      refreshWiki: async () => { refreshes++; }, openWikiPage: async () => false, toast: () => {},
+    };
+    const app = production<{ commitWikiRename: () => Promise<void> }>(["commitWikiRename"], state);
+    const renaming = app.commitWikiRename();
+    if (replacement === "server") { state.activeServerId = 8; state.viewGeneration++; }
+    if (replacement === "unlock") state.viewGeneration += 2; // lock and authenticated reopen of the same server
+    if (replacement === "page") state.wikiPaneSerial++; // same server/name opened again
+    if (replacement === "close") state.windowCloseInFlight = true;
+    state.wikiBody = "replacement body";
+    renamed.resolve(); await renaming;
+    assert.equal(state.activeWikiPage, "Home", replacement);
+    assert.equal(state.wikiBody, "replacement body", replacement);
+    if (replacement !== "page") assert.equal(refreshes, 0, "a retired session does not refresh another scope");
+  }
+});
+
+test("a completed rename still updates its exact original displayed page after route retirement", async () => {
+  const state = {
+    viewGeneration: 1, activeServerId: 7, locked: false, windowCloseInFlight: false,
+    activeWikiPage: "Home", wikiPaneSerial: 1, wikiBody: "kept local body", wikiRenameTo: "Renamed", wikiRenaming: true,
+    studioExit: createStudioExit({ onStudio: () => false, hasWork: () => false, closing: () => false,
+      claim: () => () => false, save: async () => true }),
+    unlockedViewCurrent: (gen: number, server: number) => !state.locked && gen === state.viewGeneration && server === state.activeServerId,
+    invoke: async () => {}, refreshWiki: async () => {}, openWikiPage: async () => false, toast: () => {},
+  };
+  const app = production<{ commitWikiRename: () => Promise<void> }>(["commitWikiRename"], state);
+  await app.commitWikiRename();
+  assert.equal(state.activeWikiPage, "Renamed"); assert.equal(state.wikiBody, "kept local body");
+  assert.equal(state.wikiPaneSerial, 2, "reconciliation retires the old displayed-page identity");
+});
+
+test("wiki rename rechecks its original page after refresh and after the attempted open", async () => {
+  for (const phase of ["refresh", "open"] as const) {
+    const waiting = deferred<void>();
+    let entered = false;
+    const state = {
+      viewGeneration: 1, activeServerId: 7, locked: false, windowCloseInFlight: false,
+      activeWikiPage: "Home", wikiPaneSerial: 1, wikiBody: "old", wikiRenameTo: "Renamed", wikiRenaming: true,
+      studioExit: createStudioExit({ onStudio: () => false, hasWork: () => false, closing: () => false,
+        claim: () => () => false, save: async () => true }),
+      unlockedViewCurrent: (gen: number, server: number) => !state.locked && gen === state.viewGeneration && server === state.activeServerId,
+      invoke: async () => {},
+      refreshWiki: async () => { if (phase === "refresh") { entered = true; await waiting.promise; } },
+      openWikiPage: async () => { entered = true; await waiting.promise; return false; }, toast: () => {},
+    };
+    const app = production<{ commitWikiRename: () => Promise<void> }>(["commitWikiRename"], state);
+    const renaming = app.commitWikiRename(); await flush(); assert.equal(entered, true);
+    state.wikiPaneSerial++; state.wikiBody = "reopened Home";
+    waiting.resolve(); await renaming;
+    assert.equal(state.activeWikiPage, "Home", phase); assert.equal(state.wikiBody, "reopened Home", phase);
+  }
+});
+
+test("a channel-open completion cannot add its channel to a replacement server", async () => {
+  for (const replacement of ["server", "unlock", "route", "close"] as const) {
+    const opened = deferred<string>();
+    let current = true, switches = 0;
+    const state = { newChannel: "new-channel", activeServerId: 7, viewGeneration: 1, locked: false, windowCloseInFlight: false, error: "",
+      cur: { channels: [{ id: "original", name: "original" }] },
+      studioExit: createStudioExit({ onStudio: () => false, hasWork: () => false, closing: () => false,
+        claim: () => () => current, save: async () => true }),
+      unlockedViewCurrent: (gen: number, server: number) => !state.locked && gen === state.viewGeneration && server === state.activeServerId,
+      invoke: (name: string, args: { server: number; name: string }) => {
+        assert.equal(name, "open_channel"); assert.deepEqual(args, { server: 7, name: "new-channel" }); return opened.promise;
+      },
+      switchTo: () => { switches++; },
+    };
+    const app = production<{ addChannel: () => Promise<void> }>(["addChannel"], state);
+    const opening = app.addChannel();
+    if (replacement === "server") state.activeServerId = 8;
+    if (replacement === "server" || replacement === "unlock") state.viewGeneration++;
+    if (replacement === "close") state.windowCloseInFlight = true;
+    else current = false;
+    state.cur = { channels: [{ id: "replacement", name: "replacement" }] };
+    opened.resolve("created-in-original-server"); await opening;
+    assert.deepEqual(state.cur.channels, [{ id: "replacement", name: "replacement" }], replacement);
+    assert.equal(switches, 0);
+  }
+});
+
 // Re-review L5: a refused Back/Forward step left the cursor on the entry it never reached, so the
 // recording effect appended the place still on screen after it and dropped the forward trail.
 test("a refused Back step leaves the history cursor on the place still on screen", async () => {
@@ -214,7 +337,7 @@ test("a refused Back step leaves the history cursor on the place still on screen
   let release = false, work = true, cursorWhenRecordingResumed = -2;
   const views: string[] = [];
   const state = {
-    navStack: [chat, studioPlace], navAt: 1, applying: false,
+    navStack: [chat, studioPlace], navAt: 1, applying: false, windowCloseInFlight: false,
     get navApplying() { return state.applying; },
     set navApplying(on: boolean) { if (!on) cursorWhenRecordingResumed = state.navAt; state.applying = on; },
     sameLoc: (a: typeof chat, b: typeof chat) => JSON.stringify(a) === JSON.stringify(b),
@@ -255,7 +378,7 @@ test("Back from the Studio to a chat in another channel shows that chat in one s
   let serial = 0;
   const views: string[] = [];
   const state = {
-    navStack: [chat, studioPlace], navAt: 1, navApplying: false, view: "studio", inboxView: false, menu: null, folder: "",
+    navStack: [chat, studioPlace], navAt: 1, navApplying: false, view: "studio", inboxView: false, menu: null, folder: "", windowCloseInFlight: false,
     cur: { active: "X" },
     sameLoc: (a: typeof chat, b: typeof chat) => JSON.stringify(a) === JSON.stringify(b),
     studioExit: createStudioExit({ onStudio: () => state.view === "studio", hasWork: () => false, closing: () => false,
@@ -297,8 +420,9 @@ function productionRename(listing: Promise<void> = Promise.resolve()) {
   const renamed = deferred<void>();
   const studio = scriptedStudio(() => false);
   const state = {
-    wikiRenameTo: "Renamed", wikiRenaming: true, activeWikiPage: "Shared", activeServerId: 1 as number | null, viewGeneration: 1, wikiPaneSerial: 0, refreshes: 0,
+    wikiRenameTo: "Renamed", wikiRenaming: true, activeWikiPage: "Shared", activeServerId: 1 as number | null, viewGeneration: 1, wikiPaneSerial: 0, refreshes: 0, windowCloseInFlight: false,
     viewCurrent: (gen: number, server: number | null) => gen === state.viewGeneration && server === state.activeServerId,
+    unlockedViewCurrent: (gen: number, server: number | null): boolean => state.viewCurrent(gen, server),
     invoke: async (cmd: string) => { assert.equal(cmd, "rename_wiki_page"); await renamed.promise; },
     refreshWiki: async () => { state.refreshes++; await listing; },
     // openWikiPage's contract: true only when it opened the page (which bumps the pane serial), and
@@ -364,6 +488,32 @@ function productionWikiActions() {
   const switchServer = (id: number) => { state.activeServerId = id; state.viewGeneration++; };
   return { state, app, calls, openPage, switchServer, answer: async (ok: boolean) => { pending.resolve(ok); await flush(); }, history };
 }
+
+test("a wiki Save receipt keeps newer typing stashed by a page open that is still reading", async () => {
+  const saved = deferred<boolean>(), readY = deferred<string>();
+  const state = {
+    view: "wiki", activeServerId: 1 as number | null, viewGeneration: 1, wikiPaneSerial: 0, windowCloseInFlight: false, error: "",
+    activeWikiPage: "X", wikiBody: "saved C", wikiDirty: true, wikiEdit: true, wikiDrafts: new Map<string, string>(), wikiPages: ["X", "Y"],
+    wikiRenaming: false, wikiDeleteArmed: false, wikiRedirectedFrom: "", wikiReviewOpen: false, wikiHistorySel: "", showWikiHistory: false, wikiReviewDays: 3,
+    showInsert: false, insertTarget: "", closeInsert: () => {}, parseRedirect: () => null, revealWikiPage: () => {},
+    viewCurrent: (gen: number, server: number | null): boolean => gen === state.viewGeneration && server === state.activeServerId,
+    invokeDebugged: async () => ({ value: await saved.promise }),
+    invoke: async (_cmd: string, args: { name: string }) => args.name === "Y" ? readY.promise : "saved C",
+    refreshWiki: async () => {}, toast: () => {}, studioExit: scriptedStudio(() => false).exit,
+  };
+  const app = production<{ saveWikiPage: () => Promise<void>; openWikiPage: (name: string) => Promise<boolean> }>(
+    ["wikiPane", "wikiPaneCurrent", "saveWikiPage", "openWikiPage"], state);
+  const saving = app.saveWikiPage();
+  state.wikiBody = "newer N";
+  const openingY = app.openWikiPage("Y"); await flush();
+  assert.equal(state.wikiDrafts.get("X"), "newer N", "opening Y stashes the newer text while its read waits");
+  saved.resolve(false); await saving;
+  assert.equal(state.wikiDirty, true);
+  assert.equal(state.wikiDrafts.get("X"), "newer N", "saving C cannot delete the already stashed N");
+  readY.resolve("Y body"); assert.equal(await openingY, true);
+  assert.equal(await app.openWikiPage("X"), true);
+  assert.equal(state.wikiBody, "newer N"); assert.equal(state.wikiDirty, true); assert.equal(state.wikiEdit, true);
+});
 
 test("wiki save, delete, format and history act only on the page and server they began on", async () => {
   // Save X, then open Y and type before the receipt: Y stays dirty (its text was never sent).
@@ -485,8 +635,8 @@ test("server settings for another server open only once the switch to it committ
 function productionOpenWikiPage() {
   const read = deferred<string>();
   const state = {
-    view: "chat", viewGeneration: 1, activeServerId: 7 as number | null, error: "", wikiPaneSerial: 0,
-    wikiDirty: false, activeWikiPage: "", wikiDrafts: new Map<string, string>(), wikiBody: "studio was here", wikiPages: ["Page"],
+    view: "chat", viewGeneration: 1, activeServerId: 7 as number | null, error: "", windowCloseInFlight: false,
+    wikiDirty: false, activeWikiPage: "", wikiPaneSerial: 0, wikiDrafts: new Map<string, string>(), wikiBody: "studio was here", wikiPages: ["Page"],
     showInsert: false, insertTarget: "", closeInsert: () => {}, parseRedirect: () => null, revealWikiPage: () => {},
     wikiRedirectedFrom: "", wikiRenaming: false, wikiDeleteArmed: false, showWikiHistory: false, wikiReviewOpen: false, wikiHistorySel: "", wikiEdit: false,
     viewCurrent: (gen: number, server: number | null) => gen === state.viewGeneration && server === state.activeServerId,
@@ -521,6 +671,22 @@ test("a wiki response that arrives after the member went back to the Studio neve
   const plain = productionOpenWikiPage();
   const opened = plain.open("Page"); await plain.respond(); await opened;
   assert.equal(plain.state.view, "wiki"); assert.equal(plain.state.wikiBody, "# Page");
+  assert.equal(plain.state.wikiPaneSerial, 1, "each actual page open owns a fresh identity");
+});
+
+test("a wiki open loses permission if a newer action or close lands after its final Save decision", async () => {
+  for (const interrupt of ["supersede", "close"] as const) {
+    const f = productionOpenWikiPage();
+    let current = true, reads = 0;
+    f.state.studioExit = createStudioExit({ onStudio: () => true, hasWork: () => {
+      if (++reads === 2) queueMicrotask(() => { if (interrupt === "close") f.state.windowCloseInFlight = true; else current = false; });
+      return false;
+    }, closing: () => f.state.windowCloseInFlight, claim: () => () => current, save: async () => true });
+    const opened = f.open("Page"); await f.respond();
+    assert.equal(await opened, false, interrupt);
+    assert.equal(f.state.view, "chat"); assert.equal(f.state.wikiBody, "studio was here");
+    assert.equal(f.state.activeWikiPage, ""); assert.equal(f.state.wikiPaneSerial, 0);
+  }
 });
 
 /** A `with` scope for a large App function whose other dependencies do not matter to the test: the
@@ -572,7 +738,7 @@ test("lock keeps its warning that the latest Studio edits could not be captured"
 // leaveServer and serverGone over the real Studio session, studio-state and exit gate; the native
 // leave stops the actor and emits `server-closed` before it returns, as lib.rs does.
 const OTHER = SERVER + 1, DOC = id32(1);
-async function productionServerRemoval(opts: { applyFails?: boolean; whileLeaving?: () => void; leaveFailsAfterStop?: boolean } = {}) {
+async function productionServerRemoval(opts: { applyFails?: boolean; whileLeaving?: () => void; leaveFailsAfterStop?: boolean; reply?: Promise<void> } = {}) {
   const st = await import("./studio-state.svelte.ts");
   const ipc = fakeIpc(), calls: string[] = [], toasts: string[] = [];
   let stopped = false;
@@ -589,8 +755,8 @@ async function productionServerRemoval(opts: { applyFails?: boolean; whileLeavin
   st.setStudioScope(SERVER, CHANNEL); session.flush(); session.open(DOC); await settle(8);
   const state = {
     servers: [{ id: SERVER, name: "Alpha" }, { id: OTHER, name: "Beta" }], activeServerId: SERVER as number | null, view: "studio",
-    windowCloseInFlight: false, locked: false, inCall: false, callServer: null, error: "", fileTrustPolicies: {},
-    restoredStudioDraft: null as string | null, leavingServers: new Map<number, boolean>(),
+    windowCloseInFlight: false, locked: false, uiStateReady: true, uiStateLoadGeneration: 1, inCall: false, callServer: null, error: "", fileTrustPolicies: {},
+    restoredStudioDraft: null as string | null, leavingServers: new Map<number, { session: number; closed: boolean }>(),
     leaveVoice: () => {}, saveUiStateImmediately: async () => {}, beginViewSwitch: () => {},
     toast: (text: string) => { toasts.push(text); },
     clearServerView: () => { state.view = "chat"; },
@@ -608,6 +774,7 @@ async function productionServerRemoval(opts: { applyFails?: boolean; whileLeavin
       calls.push(cmd); assert.equal(cmd, "leave_server");
       opts.whileLeaving?.();
       stopped = true; app.serverClosed(SERVER); // the stopping actor's event, before leave_server returns
+      if (opts.reply) await opts.reply;
       if (opts.leaveFailsAfterStop) throw "could not remove the server's registry entry";
     },
   };
@@ -674,6 +841,60 @@ test("a removed server is moved off without a Save to its stopped actor, and the
     assert.match(restored.toasts.join("; "), /restored Studio edits/);
     assert.equal(restored.st.studioDraftSnapshot(), json, "the draft is untouched");
   } finally { disposeStudio(); }
+});
+
+test("an old leave reply cannot retire replacement Studio state or another session's leave operation", async () => {
+  const { disposeStudio } = await import("./studio-state.svelte.ts");
+  try {
+    for (const failed of [false, true]) {
+      for (const replacement of [false, true]) {
+        const reply = deferred<void>();
+        const h = await productionServerRemoval({ reply: reply.promise, leaveFailsAfterStop: failed });
+        const leaving = h.app.leaveServer(SERVER);
+        await settle(4);
+        assert.deepEqual(h.calls, ["leave_server"]);
+        h.state.locked = true; h.state.uiStateLoadGeneration++;
+        h.session.reset();
+        h.state.locked = false; h.state.uiStateLoadGeneration++;
+        h.st.setStudioScope(SERVER, CHANNEL); h.session.open(DOC); await settle(8);
+        h.session.setFps(DOC, 11);
+        h.state.error = "replacement session";
+        h.state.fileTrustPolicies = { [SERVER]: "replacement policy" };
+        const draft = h.st.studioDraftSnapshot();
+        const next = { session: h.state.uiStateLoadGeneration, closed: false };
+        if (replacement) h.state.leavingServers.set(SERVER, next);
+        reply.resolve(); await leaving; await settle(4);
+        assert.equal(h.state.activeServerId, SERVER, "old completion cannot force navigation");
+        assert.deepEqual(h.state.servers.map(s => s.id), [SERVER, OTHER]);
+        assert.equal(h.state.error, "replacement session");
+        assert.deepEqual(h.state.fileTrustPolicies, { [SERVER]: "replacement policy" });
+        assert.equal(h.st.studioDraftSnapshot(), draft, "new unsaved work is untouched");
+        assert.deepEqual(h.toasts, []);
+        if (replacement) assert.equal(h.state.leavingServers.get(SERVER), next, "original completion cannot delete a replacement operation");
+        else assert.equal(h.state.leavingServers.has(SERVER), false, "its own bookkeeping can retire");
+      }
+    }
+  } finally { disposeStudio(); }
+});
+
+test("an old pending leave cannot hide a server closure in the replacement unlocked session", async () => {
+  const { disposeStudio } = await import("./studio-state.svelte.ts");
+  const reply = deferred<void>();
+  try {
+    const h = await productionServerRemoval({ reply: reply.promise });
+    const leaving = h.app.leaveServer(SERVER); await settle(4);
+    h.state.uiStateLoadGeneration += 2; // lock, then unlock; old reply is still held
+    h.session.reset(); h.st.setStudioScope(SERVER, CHANNEL); h.session.open(DOC); await settle(8);
+    h.session.setFps(DOC, 13);
+    h.app.serverClosed(SERVER); await settle(4);
+    assert.equal(h.state.activeServerId, OTHER, "current closure is handled immediately");
+    assert.equal(h.session.scope, null);
+    const draft = h.st.studioDraftSnapshot();
+    assert.equal(decodeStudioDraft(draft!).scope.server, SERVER, "current unsaved work is retained");
+    const toasts = [...h.toasts];
+    reply.resolve(); await leaving; await settle(4);
+    assert.equal(h.st.studioDraftSnapshot(), draft); assert.deepEqual(h.toasts, toasts, "old reply remains inert");
+  } finally { reply.resolve(); disposeStudio(); }
 });
 
 // Re-review of the fix: the event's timing, a failed leave, a lock and a window close.

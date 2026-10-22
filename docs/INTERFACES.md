@@ -1,5 +1,873 @@
 # Mewtual; Interfaces & Hooks Schema
 
+## Native final snapshot and browser cleanup retry (22 October)
+
+`ResolvedRow::confirmation_status() -> Result<ConfirmationStatus, VoiceError>` reads the
+original Live Phase or the same final-intent Phase retained after local compaction. Unknown
+or removed IDs are errors; Pending/ClosedPending/ordinary continuation report NotRequested,
+never fabricated Root Drained. This native-only snapshot is absent from the 242-byte history
+wire schema. It is neither final issuance, authorization nor a notification API.
+
+Compaction preserves that original paid Phase before detaching Live. Channel closure and
+history GC separately require requested final retirement readiness. No observer clone,
+transfer gap or fresh reservation exists; existing layout guards include the retained pointer.
+
+Broker v12 automatically retries only already-started `settleSetup`/`collectChannel` cleanup
+after an actual rejected RPC. One original driver owns one injected-Clock wait, coalesced
+with availability on the same Signal. A completed refusal starts the next one-second
+interval; no missed-tick replay or pending-RPC overlap occurs. Success cancels the timer;
+stale callbacks cannot wake a successor. Older retained brokers through v11 refuse adoption.
+
+Actual SDK/read/linked-chain drainage still precedes cleanup. General action retries remain
+availability-driven. This does not implement authenticated post-End action/final exchange,
+final issuance/ACK or a production Actor/MLS/WebView action flow. HANDOVER owns test evidence.
+
+
+## Retained history transport (22 October)
+
+VoiceCryptoBroker.recoverChannelHistory(owner, channel, purpose, expectedRow=null) requires the
+actual retained owner allocation/channel handle and an already established original Session.
+It is deliberately non-async so identical pending queries return the SAME stored Promise.
+The exact peer/join/keyRef/epoch selector is copied/validated; null expectedRow is only first
+unknown-ID recovery. A canonical existing RowId pins subsequent metadata. Unready or occupied
+history returns busy without setup, ordinary admission or another queue/driver. Status during
+history returns uncertain. v11 retained brokers reject incompatible older HMR state.
+
+The private wire is Begin8, Control, zero logical header,106 plaintext/122 cipher bytes,
+retry=false. Only the application-context service admits it beside unchanged Status9; a server
+without that context refuses before counter/body admission. Native resolves the original paid
+purpose without a live-grant upgrade or factory rearm. Response is Control with3 or242 plaintext
+bytes (19/258 cipher); Rust/TypeScript share replies/vectors.json. Canonical exact u64 decimal
+strings, RowId, action/receipt identity, fixed padding/flags and native opaque receipt digest
+are checked. The digest is no browser-created Root receipt or ACK authority. localDrained means
+local Phase only. Other generic outcomes are codec compatibility, not enabled effect handlers.
+
+Original session MAC/AEAD/request binding and monotonic spent TX/RX apply. A malformed opened
+body still spends RX. End can resolve an observer retired while actual SDK/read cancellation,
+query/body/key and original paid position remain retained. History refusal closed/stopped/error
+never retires the channel, acknowledges setup or refunds its payment. No raw-key/frame API,
+replacement Session, factory/input/result/ACK/settlement/close/final request is exposed here.
+HANDOVER records focused evidence and pending complete gates; live V2/RTC remains incomplete.
+
+## Original variable Workflow observation (22 October)
+
+HandoffLoan::retire_confirmation_observed consumes the original loan, closes its original
+confirmation plan and returns a native-only non-Clone ConfirmationRetirement. The existing
+retire_confirmation unit API delegates and drops that observer; ordinary loan Drop still closes
+no plan. is_drained observes only the original VARIABLE Workflow's actual last-field retirement.
+It grants no key, engine, packet, call, RTC or replacement-plan authority. Fixed history and
+independent packet slots are outside this signal's scope.
+
+is_drained() -> bool is a monotonic snapshot only, with no waiter, wakeup or scheduling guarantee.
+OBSERVER_MEMORY_BYTES is pointer-sized caller witness storage, not wire size or a new reserve.
+The unchanged2KiB retained graph pays the flag and final publisher. Workflow and HistoryPlan
+borrow the SAME original pool from their binding's metadata credit; all pool-identity checks
+remain exact. Native must also count its enclosing state/task/output in existing paid control
+capacity and retain this SAME witness across cancellation. Missing proof cannot be recreated
+by handshake ID. The inactive native Phase retains the SAME witness in original paid State before publishing
+local completion. confirmation_status distinguishes no final intent (NotRequested), original
+closure still outstanding (Closing), stored witness not yet ready (Draining), and actual
+variable retirement (Drained). It allocates nothing and invokes no Clock/grant/Root callback.
+is_drained still reports only LOCAL16KiB return. Existing compaction may drop Phase/witness;
+absence is never full-retirement proof. Production consumption, final-proof capture/transfer
+and bounded native retry coordination remain unimplemented.
+
+## Native channel/action history collection (22 October)
+
+Registry::collect_retired receives the actual native action Ledger. When the original channel
+row is physically removable (closed, setup finished, dead lease, no independent Session/public
+or Row owners), it transfers a private CollectedChannel witness outside Registry locks. Only
+bootstrap can construct that witness; it has no renderer constructor or serialized identity.
+Ledger remembers it only for the same original grant allocation/executor/lease. A subsequent
+bounded sweep removes only Body::Drained or explicit ClosedPending, plus dead lease plus recorded proof plus sole indexed
+Row ownership. It runs on every collection hook, including an empty registry, so late metadata
+handles cannot strand the one-shot evidence. Missing history is still an error, not a drained
+status. Neither index serial resets when a slot is reused.
+
+Both explicit setup-failure cleanup and final channel collection hold the original UI commit
+across original-selection lookup, Ledger::channel_may_close and routing closure. Every matching
+action must already be compacted or explicitly closed as a native Pending; Capacity leaves Control available for its ACK/settlement/phase
+cleanup. This is not browser SDK or full Root Workflow drainage proof. Production action
+transport remains unfinished; the listener still serves Status only.
+
+The inactive Pending ClosePhase adapter checks the actual opened Incoming belongs to the Route
+Session, then resolves the SAME header RowId and complete decrypted purpose through the actual
+native Ledger. An active Registration refuses. PendingStatus::Closing fences Begin while
+actual local preparation retires outside native guards; Closed { actor_handoff } preserves
+that observed native handoff marker and never recreates a factory on retry. This local terminal
+has action=None, receipt=None, engine.settled=false, acknowledged=false and drained=false.
+wait_compacted may return that explicit local closure; callers MUST inspect its disposition
+instead of treating success as attached-Phase/Root compaction. Slot/serial/pointer checks reject
+removed native handles even on repeated closure. No renderer bool, grant upgrade, task, Clock
+or new variable loan is accepted. Actual retained-broker SDK/RPC drainage must precede the
+request; authentication alone does not prove it. Browser wiring and Root-independent cleanup
+still remain open.
+
+## App-owned public bootstrap and status channel (21 October)
+
+`setup_voice_channel({owner, executor})` requires the unlocked session and actual selected
+native owner/executor/generation. A failed/unstarted/finished service refuses before RNG or
+registry admission. It returns exactly Ready{owner,executor,kind,port,transcript},
+Pending{owner,executor,kind}, or Closed{owner,executor,kind,nativeSetupDrained}. IDs are the
+canonical voice- plus sixteen lowercase hex digits and 64 lowercase executor hex digits.
+The transcript is fixed public metadata; native ECDH/framing keys are never exported.
+
+`settle_voice_channel_setup({owner,executor})` and `collect_voice_channel({owner,executor})`
+are main-window-only, exact original-identity cleanup and remain usable after lock/End.
+Their void success requires native Closed and actually drained setup. Unknown retired no-work
+is decided under UI commit; active same-owner/wrong-executor requests cannot invent it. Neither
+command accepts a drain flag, caller-selected Session/port or replacement generation.
+
+`windowVoiceIpcNative(invoke)` retains the actual stateless adapter object across remounts.
+Use it with the retained `VoiceCryptoBroker.nativeChannel(owner,key,native)` and the original
+accepted selected-key handle. An incompatible retained invoke/adapter or v7/v8 broker refuses
+rather than installing another pool. `status()` coalesces its current physical attempt; later
+attempts spend fresh TX on the same allocator. `close()` waits for actual SDK/read/cancel work,
+then exact setup settlement, buffer disposal and final channel collection.
+
+Every successful public setup variant owns the same original Row projection guard through
+consuming IpcResponse conversion. JSON is written into one hard-capped 2,304-byte allocation;
+hex uses fixed 2,048-byte scratch. Delayed Closed/Pending replies remain paid after End/collection
+and cannot overlap Ready projections. Stock framework/WebView copies after handoff are excluded
+from this application-copy bound. Private/action bytes must use the authenticated channel.
+
+The app binds before window creation and adds only its exact http://127.0.0.1:port connect-src.
+The service accepts only the validated fixed native origin and literal Host, POST/OPTIONS
+`/voice/v2`, canonical framing and the original five-second connection deadline. HTTP 200 body
+starts with 144 lowercase admission bytes, then ciphertext; Status has 19 cipher bytes and
+Content-Length 163. Preflight 204 has neither body nor Content-Length. BYOB prefix authentication
+and RX debit precede body allocation. Browser IO expiry aborts, then awaits actual cancellation.
+
+The private native factory takes Context + the actual original SelectedHandoffOwner Arc and
+PairSelector. Context upgrades the nine actual state owners and reuses AppState's borrowed UI
+gate; it accepts no cached unlocked flag, serialized grant or alternate mutex. Its exact actor
+query is shared with ordinary native commands. Early/final supplied-selection checks are pure,
+including when no local selected snapshot exists. Broad upgraded context drops outside guards
+before the admitted worker spawns. The worker retains original actor/grant/commit/work/payment.
+The IO state's weak context and retained inline allocations are included in a32KiB process
+payment (8KiB more than before) within the same2MiB process ceiling. No command or opcode was
+added for this private factory. Final channel-closure, action delivery and browser drainage
+remain separate preconditions.
+
+Status plaintext is version1 + original 16-byte Session + 32-byte transcript hash. Its only
+reply is version1 + Ready1/Closed2 + native-setup-drained0/1. This grants no action, remote room,
+pair or RTC authority. Native routing is fenced before final closure; independent header/reply/
+public owners retain their capacity until actual drop, and a dead original lease precedes slot
+reuse. Factory/action delivery, receipt ACK, settlement and final phase collection remain open.
+
+## Internal channel bootstrap candidate (21 October)
+
+Native-only voice_handoff::bootstrap::ensure resolves the actual selected owner/executor and
+matching actor device before constructing one retained ECDH setup. It returns Pending, one
+shared immutable Ready output, or Closed with native_setup_drained. That last field describes
+native construction only, never browser/provider cleanup. No renderer command accepts it.
+The transcript uses closed version/suite1, exact big-endian fields and bounded UTF8/raw-group
+lengths; voice-ipc-bootstrap.ts validates public metadata against the original selection but
+creates no key, Session or counter. ECDH/framing keys remain private to their native owner.
+Actual renderer serialization, IO, browser crypto/ACK and action transfer are not implemented.
+
+## Process-only retained capacity (21 October)
+
+`Resources::charge_process_retained(bytes)` returns a noncloneable `ProcessRetainedCredit`
+for trusted native fixed process infrastructure. Zero, oversize and capacity refusal change
+no accounting. Bytes share the existing2MiB process cap with group credits; no group record
+or Crypto/Forward slot is created. The owner exposes no partition/conversion/early-release
+API. An adapter must prepay its measured infrastructure peak, including owner/task overhead,
+before allocation/bind and retain the credit through actual task/output collection. It cannot
+pay for group/member payloads or authorize protocol work. Aggregate `counts().0` includes it.
+
+## Disabled native handoff framing candidate (21 October)
+
+The private native codec in voice_handoff/channel and pure browser voice-ipc-frame.ts agree on
+40-byte headers,144 lowercase-hex admission characters, big-endian nonzero u64 sequences and
+the domain `Mewtual native voice handoff v1`. Directional HKDF labels separate header HMAC and
+AES-256-GCM body keys. A response authenticates responseHeader || exactOriginalRequestHeader.
+The local framing format is not a member wire packet or new room/signalling authority.
+
+Requests use operations Input1, Admit2, Result3, ReceiptAck4, Settle5, ClosePhase6, FinalAck7,
+BeginDerive8 and Status9. Only Result requests and Input responses may use Data (up to2064
+cipher bytes). Result requests require Data; all other bodies use Control (up to272 cipher
+bytes). Input responses may instead carry Control. The minimum body is the16-byte AEAD tag.
+Slot is1..64; magic/version/reserved bytes and HTTP Content-Length are exact. Unknown fields,
+classes and noncanonical values refuse before admission. TypeScript sequences remain bigint.
+
+Session owns one physical position from fixed header scratch to completed reply collection.
+Header MAC/class/length and data capacity precede RX/TX debit. Once admitted, either counter
+stays spent on body failure, cancellation or reply loss. Consuming PreparedReply prevents a
+second encryption under its issued response nonce. Actual data owns its original Phase; control
+uses separate paid capacity. The browser codec authenticates nothing and creates no Session.
+Session seed export, bootstrap ownership, actual IO deadlines and actor/browser transfer are
+still unimplemented; no listener/command/CSP/live dispatch is enabled by this candidate.
+
+## Validated protected native handoff loan (21 October)
+
+CryptoAction::protected_binding returns immutable native-selected metadata, including after
+input compaction. Its original fixed PlanBinding remains charged; projection equality supplies
+no engine/result/RTC authority. borrow_handoff(bytes) accepts a trusted adapter's measured peak
+and returns an affine HandoffLoan from its existing Workflow. Terminal/settled/expired work,
+unsupported budgets, bounds and occupied/capacity lanes refuse without spending identity.
+Retain the original loan across uncertain delivery; drop only after actual work/copies drain,
+outside Engine/Coordinator/final native guards. Historical retries cannot borrow fresh capacity.
+
+readVoiceIpcBody requires exclusive Response ownership, authenticated metadata and a prepaid
+enclosing flight. It returns an owned<=2064-byte buffer after exact BYOB intake, EOF checking
+and cancellation/release. The caller owns and charges that buffer until its own drainage.
+Errors are fixed metadata. No serialized action constructor or byte-bearing command was added.
+
+Native-only SelectedHandoffOwner comes from the actual published generation and retains Weak
+grant identity, fixed original lifecycle binding and a separate paid record. Ledger::begin
+reserves row and Phase metadata before pair/derivation factories; mark_handoff precedes the
+actor await. Lost/Stopped replies retain that exact counted purpose. attach verifies the actual
+Root Action and original pair binding and installs it before returning an ID. No renderer may
+register an action by copying fields. The pilot supports derivation only, with 32 total rows.
+
+Ledger::resolve(original_selected, complete_purpose, row_id) and the independent
+Ledger::lookup_original(original_selected, complete_purpose) are the cross-module native
+operational lookups. The latter scans only the finite32-row index after a lost Begin reply,
+when no caller-known RowId exists. It returns Option<ResolvedRow>; None is only absence of a
+retained matching row, never proof of drainage. ResolvedRow::id returns fixed reply metadata.
+Slot/serial is a hint, not authority: the actual Weak<CallGrant> allocation,
+executor, original CallLease allocation and entire peer/join/key/epoch selector must match.
+It returns a native-only ResolvedRow retaining the actual paid row; it is neither serialized
+nor a once-only worker token. Physical callers must bound simultaneous handles in their own
+existing payments. Raw ID-taking status/work/ACK/settle/cleanup helpers are module-private.
+Resolution deliberately works after End and actual grant destruction so exact history cleanup
+cannot be stranded. Work rechecks the original lease under State immediately before copy and
+worker admission; this does not replace final channel/UI/Root first-effect fences.
+Original-purpose lookup runs no Clock, charge, grant upgrade or factory admission and changes
+no Pending state. It must remain separate from a currently authorized retry through begin:
+an idle handed-off Pending factory can resume on the same row/serial, while history after End
+cannot re-arm work. No renderer command or channel opcode exposes either lookup yet.
+
+ResolvedRow::reconcile, acknowledge and settle are bounded metadata-only native operations, including
+after End/phase closure. They never reloan variable capacity or admit computation. settle and
+Phase::close require actual selected-browser/provider/RPC drainage established by the future
+authenticated adapter. No IPC accepts a boolean assertion of that proof. compact retains exact
+nonreusable historical evidence while removing strong Action/Phase/Grant owners. Independent
+terminal control/reply prepayment and final delivery ACK/collection are not implemented yet.
+
+## Selected join-key bootstrap (21 October, complete gates passed)
+
+Main-window commands `admit_voice_join_key(owner, executor)` and
+`publish_voice_join_key(owner, executor, permit, publicKey)` carry fixed public metadata only.
+The executor is a canonical 32-byte hex identity retained by one browser broker; publicKey is
+exactly 65 SEC1 bytes encoded as canonical hex. Admission returns the original native permit/
+join and either admitted or closed history. A different executor gets typed refused metadata
+with its requested owner/executor and empty permit/join; it owes no settlement and cannot touch
+the original generation. Browser selection returns unavailable so its driver can replace the
+join, rather than retaining an uncertain engine lane. A closed response cannot reconstruct private keys
+or authorize recomputation. Publication fixes its original point before actual actor handoff;
+successful exact retries return the same native key reference, including after settlement.
+
+`settle_voice_join_key(owner, executorId)` also works while locked. It closes one paid current-
+owner selection even if a delayed admission has not run, or recognizes an exact existing
+selection after retirement. An unknown retired owner allocates nothing. Its promise resolves
+only after any actual native publisher drains; it grants no engine, signing or RTC authority.
+The retained WebCrypto broker's `selectJoinKey` coalesces computation and uncertain replies,
+preserves the same key through temporary publication Capacity, and never uses generic fresh-
+token generate admission. Compatibility key APIs remain available for existing fixtures.
+Complete native/frontend gates, check/build/startup and rendered flows pass; the handover records
+exact source provenance and the unchanged-root evidence. Ordinary V2 dispatch and the application
+call driver remain disabled.
+
+## Accepted native voice activation retries (21 October, complete gates passed)
+
+`activate_voice_owner(candidate)` can recover that exact currently installed controller or call
+after a lost accepted reply. It returns the original owner/group/join metadata; it creates no
+new nonce, key, lease or protocol authority. Recovery checks actual retained controller/grant
+allocations, the original UI generation and server incarnation after actor/commit waits. It
+does not recover Ended, locked, replaced or otherwise revoked installations. A controller retry
+preserves its current call. Concurrent duplicates share the first accepted installation; they
+cannot replay activation side effects. Pending candidates keep their existing TTL/CAS refusal.
+Native admission borrows its temporary grant and consumes it only on success; all refusal and
+duplicate-recovery cleanup occurs after Coordinator/UI guards. Normal V2/RTC remains disabled.
+The cumulative source passes the complete root, native and frontend suites plus native build/
+startup, static and rendered-flow checks; see the current handover for counts and provenance.
+Pending validation descriptions in older sections below are historical.
+
+## Native protected pair factory (21 October, full gates pending)
+
+Root::prepare_voice_pair(&Arc<CallGrant>, PairSelector) and its typed ServerActor wrapper accept
+the expected peer device, remote join/key reference and epoch. They resolve original watch proof
+natively; callers cannot supply a FreshPeer or choose an unrelated explicit watcher. PairReceipt
+contains fixed handshake/peer/role metadata only. Exact retry retains original pair/deadline,
+including when discovery expired or a different join was proved. It cannot create browser keys.
+Only first publication emits a revision. A mismatched creation epoch refuses; automatic native
+join/phase replacement remains a separate driver obligation. Existing compatibility APIs and
+wire/storage formats are unchanged; no serialized commands, live dispatch or RTC are enabled.
+
+ActorOwner::source_context now reports retryable Capacity for native lock contention before
+returning a snapshot. Source batches preserve already-prepared jobs on that local refusal.
+All 426 focused Root voice tests,10 actor tests and the external API test pass, zero failures.
+Complete backend gates remain pending; no live V2 integration or enablement is claimed.
+
+## Body-free ServerActor voice API (21 October, full gates pending)
+
+ServerActor exposes start_voice_endpoint, start_voice_watch, voice_watch_peers,
+voice_endpoint_changes, prepare_voice_derivation, commit_voice_derivation_result,
+start_voice_confirmation and respond_voice_confirmation. These trusted Rust APIs retain actual
+affine grants/actions and return native charged owners, not renderer DTOs. VoiceEndpointCommand
+is an opaque public envelope with private variants; VoiceEndpointError exposes Protocol(error)
+and Stopped so callers can distinguish capacity from uncertain actor/reply loss without parsing
+text. A closed reply is skipped before effects; reply loss after admission never rolls back
+native history. A lost watch reply drops precisely its abandoned affine observer.
+
+The existing mailbox bounds admitted envelopes only. The future native IPC adapter must own
+bounded waiting requests, projections, copy accounting and exact retry/ACK/settlement custody.
+No Tauri commands or byte-bearing result requests are introduced. Existing Root derivation
+requires a proven native pair; production pair orchestration is still missing. Stop ACK now
+follows local voice revocation and queued-reply retirement, independently of Closed delivery.
+
+## Root derivation (21 October, focused checks passed)
+
+`Root::prepare_voice_derivation(grant, handshake)` returns the exact charged CryptoAction for
+row zero of an already proven native pair. `Root::commit_voice_derivation_result(grant, action,
+tag)` accepts only that action's empty output marker after actual engine admission. Both require
+the original registered CallGrant and current native actor/session/room/epoch. Equal IDs and
+replacement joins cannot adopt the action. Exact metadata recovery does not reconstruct input
+or browser keys; production orphan-history/ACK/settlement custody remains a separate adapter.
+These are native Rust APIs, not exposed serialized commands. Verification is recorded in handover.
+
+## Root confirmation results (21 October, validation pending)
+
+`Root::submit_voice_confirmation_result(grant, action, ciphertext, tag)` and
+`Root::commit_voice_confirmation_result(grant, action, plaintext, tag)` require actual native
+CallGrant and retained CryptoAction allocations. Equal serialized IDs cannot adopt another owner.
+Exact terminal recovery returns metadata; first effects cross the original actor/session/room/
+epoch boundary after fallible preparation. No command, wire format or persistence format changes.
+
+A private affine loan conserves the admitted engine charge through native preparation.
+`settle_engine` fences first effects immediately, while `is_settled` and terminal status remain
+false until the loan drains. Exact ACK and settlement remain independent. All 389 focused voice tests and unchanged layout guards pass; complete gates remain pending; production registration/IPC, derivation and SDP integration remain separate work.
+
+## Protected browser confirmation seam (21 October, not production IPC)
+
+`registerProtectedConfirmation(owner, chain, native, input)` accepts the exact native action,
+chain binding, immutable row, role/kind, decimal sequence, AAD/body and engine-byte allowance.
+An identical projection recovers its handle; changed inputs or a spent row refuse before native
+admission. The adapter must resolve the original native action and authorize first effects again.
+Handles expose terminal metadata, never plaintext or fresh RTC authority.
+
+`VoiceProtectedConfirmationNative` supplies exact admit/commit/settle. Tagged and tagless terminal
+admission replies are history only; they cannot settle an earlier browser's engine. Completed
+output remains owned through uncertain result replies. A future bounded driver must retry rows
+after derivation readiness and retry older uncertain handles as well as new follow-ups. Broker
+version6 refuses older retained pools. No production command or native IPC consumer is added.
+
+## Protected confirmation response (21 October, awaiting validation)
+
+`Root::respond_voice_confirmation(grant, handshake, trigger)` takes an actual retained
+`Arc<CryptoAction>`, not caller-supplied terminal fields. It repeats the same current native
+call/room/member/epoch boundary as start. The native-only LocalJoin factory chooses Proof or
+Finish from the exact accepted input and existing native response state. Cached output identities
+are recovered before current-trigger checks, allocations or RNG; they retain their original
+packet/action/chain gates. Unknown, rejected, foreign and unproduced superseded triggers refuse.
+Protected incoming Proof/Finish have distinct pair/chain inbox authority for bounded classification;
+no changed wire/storage format or exposed browser command is introduced. This increment is not
+yet through complete combined gates; all 365 focused voice tests pass. It does not enable V2
+dispatch or RTC.
+
+## Native protected local start (21 October, pending validation)
+
+`Root::start_voice_confirmation(&Arc<CallGrant>, handshake, predecessor)` recognizes the exact
+native affine call owner, current directory room, member/epoch view and original participant.
+It prepares protected capacity only for an already proven pristine pair. `predecessor = None`
+always identifies the first start; `Some(packet_id)` always identifies that exact predecessor's
+successor. Repeated requests recover the original registered action, including after terminal
+input compaction; no public payload or identifier manufactures fresh engine/send authority.
+
+`LocalJoin::start_protected_hello` is a native-only consumer. Its final local origin has no
+IngressTicket or incoming quota. Packet, action and fixed history publication occurs together;
+local refusal before admission leaves the candidate/sequence/nonce unchanged. Original packet,
+action and chain revocation occupy three bounded CryptoAuthority positions. Layout guards pass
+within the original row budget. No browser command or wire/storage format changed.
+
+This increment passes all 352 focused voice tests and read-only adversarial review; complete
+combined gates remain pending. It exposes no native IPC, browser protected seal or live V2
+dispatch. The earlier inactive checkpoints remain below.
+
+## Native streamed-upload publication (20 October)
+
+`begin_file_upload` captures the native UI-session generation before actor awaits. Each registered
+token retains that generation and the exact original server actor/registry instance. Chunk, tail
+and publication admission cannot adopt a replacement unlocked session or server with the same ID.
+No command arguments or saved formats changed.
+
+Final admission acquires the owned UI-session commit guard before removing the token and repeats
+the original generation/actor checks after waiting for the uploads map. Refusal discards sealed
+chunks through the original actor. An opaque admitted upload moves directly into a detached
+publication worker, without another await. Losing the invoke waiter does not cancel that worker
+or release its guard; lock waits for actual actor publication or its failure cleanup.
+
+The actor-event drain uses a separate short fence for Studio/Settlement emission. It never waits
+for the long publication guard. It captures the UI generation before awaiting native state and
+holds exact registry/event guards through synchronous emission. Lock revokes detached owners
+before awaiting that fence, crosses and releases it, then waits for publication. Thus a full
+actor event sink cannot deadlock an admitted upload against its own event consumer. An emission
+already admitted can finish after the request, but must finish before lock completion.
+An incoming close snapshot enters native pending custody and the session becomes nonresumable
+before either fence wait. Cancelling the native lock future there leaves the exact bytes for a
+later snapshot-less close; malformed state still refuses destruction until loss is acknowledged.
+
+The worker releases commit before ordinary exact-instance persistence. `leave_server` acquires the
+per-server persistence lock before commit, so holding commit through that persistence would invert
+the lock order. Persistence remains owned by the worker after caller loss. Publication admission
+does not claim crash-atomic storage or guaranteed receipt by another peer. Retiring stale/replaced
+uploads cleans their actual staged chunks on quota refusal as well as successful registration.
+
+## Chat writer and failed-page admission (20 October, continuation)
+
+Legacy replication now returns `ReplError::ActorMismatch` when a parsed change's 32-byte writer
+actor differs from its verified signed author. The refusal precedes graph/log mutation. Other
+historical actor lengths remain compatible; saved previously poisoned graphs are not migrated.
+The signed wire and persistence bytes are unchanged. Catch-up publishes a new page cursor or
+completion only after successful bundle import; an accepted prefix retains recovery work and
+invalidates earlier completeness answers even when a later frame is rejected. See
+[CHAT-HISTORY-CONVERGENCE](communication-recovery/CHAT-HISTORY-CONVERGENCE.md) for evidence and limits.
+
+## File route recovery observations (20 October)
+
+`CompletedBlobFetch::effect_scope` retains an opaque original bridge observation through AEAD.
+Only the original `ChannelSync::blob_effect_status` can classify it as Current, RouteChanged or
+Retired; callers cannot construct it or supply a replacement authority. Classification samples
+the injected clock before final original-origin checks and validates the Root instance, committed
+MLS view and helper identity. Full `RequestAuthority` remains false for both noncurrent states.
+`BlobPageOutcome::RouteChanged` carries no payload and is a local observation, not a wire status.
+`BridgeError::Unavailable` identifies proven pre-handoff route loss; no durable debit is refunded.
+The actor may retry a current parent operation, without accepting the old page or bad-key verdict.
+
+Inactive voice Root scheduling limits source/helper batches to its free route-registry positions
+before spending ledger attempts. Actual retained gates count even after revocation. This avoids
+registry-capacity attempt loss; it does not refund other preparation or ambiguous network failures.
+An exact authenticated target ACK from a still-current direct flight confirms its immutable packet
+even after a helper hedge. Old negative/helper responses cannot undo that confirmation; broadcast
+ACKs still establish only one recipient's admission. This does not enable live V2.
+
+## Upload batch and asynchronous UI ownership (19 October)
+
+`canStartUpload` admits one review/upload batch of at most32 files. Pick/drop/paste paths check
+before converting a FileList; the admitted batch sets `uploading` before its first await and owns
+it until its actual finally, including across lock/close. The generic `VideoReviewQueue` has a
+separate16-request total cap (open plus waiting); overflow immediately resolves `skip` without
+retaining a request. App's earlier admission provides the visible busy/size refusal.
+
+Chat, announcement, wiki and Files upload continuations retain the original UI-session generation
+and require unlocked, ready and no close in flight before uploading, attaching or reporting a
+completion. Wiki attachment additionally requires the original `wikiPane()` identity. The review
+scope includes session, close and readiness; native close also retires reviews synchronously before
+the first Save await, so abandoning a close cannot revive an earlier batch.
+
+`leaveServer` captures the UI-session generation before its Save gate and stores an exact operation
+object once native leave starts. A completion may clear only its own operation and may change
+trust/server/Studio state only in its original session. Moving between views alone does not cancel
+an authorized background-server leave. Announcement results similarly fence both their session and
+original view before clearing matching text or presenting an error. No wire or persistence change.
+
+## Browser protected derivation contract (19 October, inactive)
+
+`VoiceCryptoBroker.createJoinKeyHandle` creates an opaque, non-extractable-key handle on that
+exact surviving broker. `bindJoinKey` captures the accepted native local join/key/public point
+once; browser bookkeeping itself grants no native authority. `prepareChain` freezes the complete
+native binding and derivation setup, original browser deadline and combined row/byte/execution
+reservation. Exact live repulls return the same plan; closed pair stamps cannot reprepare.
+`registerProtectedDerivation` consumes only row0 and returns one continuing handle. Native engine
+admission receives exactly `3 * transcript.length + 4096 + 256`, independently of browser pricing.
+
+An accepted receipt exposes locally computed keys only while that exact plan/owner remains live.
+Historical native acceptance without those keys remains history-only. Ordinary crypto/confirmation
+entry points refuse protected pairs until their typed consumers exist. The browser transcript
+bound is987 bytes: both HKDF direction labels plus the transcript must fit the1024-byte info limit
+of the tested Node/OpenSSL WebCrypto implementation. The current native canonical pair transcript
+fits; this changes no signed wire format. Larger projections refuse before engine admission.
+
+Broker v5 refuses older HMR pools rather than creating overlapping engine budgets. The native
+adapter is still a contract exercised by simulated fault responses, not implemented action IPC.
+Any future serialized chain ID must resolve to the original native registered object/lease.
+
+## Voice action history checkpoint (19 October, Rust only)
+
+`LocalJoin::prepare_crypto_chain` returns an opaque inactive native plan for one proven pair.
+It reserves twelve local fixed rows/slots, a confirmation-only 96 KiB variable envelope and
+work lanes. It also protects packet positions from the actual ledger's existing 32-row tables:
+low-side 3 input/6 output, high-side 6 input/3 output. The actual native pair role selects this
+profile. Ordinary rows share these pools and cannot consume reserved positions. Close releases
+only unused claims; a retained actual loan keeps its position until retirement. These are
+capacity claims. The private high-side Hello consumer now uses its original packet/event claims;
+other protected roles still have no consumer.
+Repeated live preparation returns the same owner; after close that pair cannot
+prepare again. `chain_derivation_action` consumes row0; high-side Hello consumes one of rows1/4/7,
+at most once per candidate even if its plaintext is malformed. The fixed receipt owns no payload
+or Workflow and shares its row with the actual decrypt action, including its effect allocation.
+The Root's public and encrypted queues share issuer/MessageId/hash classification and 256 total
+entries. Exact Hello admission retries precede token/nonce-floor gates and return original custody,
+not a second action. Final Group -> Policy -> try-History refusal returns existing `Capacity`
+without origin debit; retry samples native time afresh. Unsupported encrypted roles still refuse.
+Selecting protection requires a pristine pair; a valid selection survives reservation refusal
+and ordinary confirmation APIs cannot process it. Both first-result directions require the
+captured chain epoch; exact stored terminal receipts are recovered before that pending check.
+Preparation grants no network/engine/browser/RTC readiness, candidate/origin debit or packet.
+`PreparedChain::close` revokes pending action eligibility, releases unused capacity and retires
+proven unstarted actions. Uncertain admitted work and actual input readers remain charged.
+Closed handles/row issues retain their shared 2 KiB fixed metadata charge through last drop,
+independently of the group progress owner. Exact history remains recoverable; a first derive
+result independently checks the captured epoch even without another prepare or pull.
+
+`CryptoAction::recover_result(bytes,tag)` rehashes the exact bounded engine output and returns
+only a previously recorded receipt. `terminal_status()` instead returns one action-fence snapshot
+of actual settlement and optional receipt, without requiring browser output that End may have
+destroyed. Neither operation can perform a first transition or grant signing/delivery/RTC access.
+Native callers must independently authorize the exact previously registered action. The native
+cfg(test) model retains at most32 combined pending/terminal rows across owner replacement; exact
+receipt ACK excludes dynamic retirement, latches before settlement and cannot recreate a removed
+terminal action. Production registration, IPC authorization and serialized reply-copy custody are
+still absent. See `communication-recovery/VOICE-NATIVE-RESULTS-NEXT.md` before exposing this seam.
+
+`CryptoAction::input()` returns an owned `CryptoInputLease`; borrowed inputs cannot outlive
+their paid buffers. Exact `acknowledge_result` plus actual engine settlement releases the
+action's input reference, in either order. Existing input leases retain the original bytes and
+credit until their last drop. Immutable operation/output bounds, serials, terminal history and
+engine fences remain in the original32-record table. Historical metadata recovery still works;
+the compatibility sending API refuses after compaction rather than reconstructing send bytes.
+This releases only input custody, not IPC copies, RTC strings or an unsettled engine permit.
+
+The pending engine lender is permanently removed by settlement. Proven unstarted retirement
+also removes unused input; an admitted uncertain engine cannot use that path. Settled work with
+no terminal result may compact its input because first-result publication is permanently fenced.
+Accepted/rejected terminal input still requires ACK. Exchange actions prepare fixed history
+without live phase custody and consume one affine per-direction issue permit at publication;
+only unpublished abandonment returns it. These are disabled Rust ownership boundaries, not
+whole-chain/native IPC/browser readiness.
+
+Confirmation token admission now binds its native Hello floor or actual attempt and original
+pair deadline in `PreparedInbound` before replay/token publication. `InboundAdmission::check_at`
+requires that binding for all three confirmation kinds, including inside the final origin check.
+The generic `PacketLedger::admit_inbound` consequently refuses confirmation packets; native
+confirmation callers use LocalJoin's bound preparation. Preparation grants no action/engine,
+consumes no replay/candidate/origin allowance, and does not reserve a complete continuation chain.
+
+## Private download commands (19 October, implementation in progress)
+
+`save_group_file(server,cid,name,resume?,expectedIntent?,operation?)` first acquires encrypted
+private progress and verifies the whole file, then exports natively to a freshly resolved
+Downloads destination. Resume selects a saved Download ID and exact intent CAS; it accepts no
+manifest, key, plaintext offset, absolute path or caller allowance. `operation` is only an inert
+bounded progress-correlation string echoed in `download-progress.cancellation`, never authority.
+`get_private_downloads` returns at most32 closed metadata rows: ID/CID, decimal-string intent and
+grant, phase label and whole-chunk counts. `set_private_download_paused`, `retry_private_download`
+and `cancel_private_download` mutate only that saved local owner under the original native session/
+entry fence. Retry uses the existing exact latest-receipt CAS contract. Metadata updates are
+owner-specific and coalesced around actual actor progress, so a same-CID Keep cannot mask them.
+Completed ciphertext is private; only native `DownloadReady`/export leases can read it. Successful
+external publication remains committed if encrypted cleanup fails, with a visible warning.
+
+## Native member catalog interface (19 October)
+
+`ServerGroup::observe_member_catalog` performs trusted native O(roster) observation once per
+committed epoch; existing `member_count` reuses it. It must not be called to repair a missing view
+on an untrusted page/request path. `current_member_catalog` returns only an already current view,
+without scanning. `MemberCatalogView::validate` checks exact group-object identity and epoch;
+`start` creates an opaque cursor. `page` proposes a new cursor plus at most four sorted distinct
+`MemberCatalogEntry` values after at most64 raw leaf positions. Its fixed exclusions are actual
+requester C and helper B. Count occupied leaves before exclusions, and treat empty/`!complete`
+as Yield. `MemberCatalogEntry::validate` rechecks its original leaf/key with the same bounded
+indexed accessor. Stale instance/epoch, unsupported copied shapes and inconsistent observations
+are typed errors. No wire or persistence format changes.
+
+Before `member_at` copies, the exact native observation must attest32-byte signature AND HPKE
+keys, and the borrowed credential must fit4KiB. The first native observation/load is not bounded
+by that page limit. These APIs grant no active-membership or file/route authority. Root
+preparation additionally preserves the original native/read/epoch scope and finite budget.
+The sync requester retains one exact proposal, scoped to one search identity and ticket, and at
+most16 helper/variant positions. `begin_file_bridge_catalog` requires captured native read/Root
+authority; trusted Rust reads without that origin remain direct-only. `next_file_bridge_choice`
+yields bounded helper/source catalog turns. `prepare_file_bridge_page` reserves route custody
+before durable work debit; `commit_file_bridge_page` consumes coverage afterward. Opaque choices
+cannot cross reads, become current after moving on, or revive across a helper PeerId cycle.
+`refresh_file_bridge_choice` preserves the retried source batch while minting a new route ticket.
+Returned response authority remains mandatory after AEAD on both accepted and rejected outcomes.
+
+## Connected file-source dispatch checkpoint (19 October)
+
+Kind30 now dispatches a bounded source read with `NativeFileService`: the native host supplies
+the original account/exact-entry cancellation and the actor supplies its current file generation.
+No attachment, inactive authenticated P2P policy, unbound sender or missing actual connection
+lease refuses service. The Root verifies immediate B and original C against their current MLS
+signature keys; only B needs the unique bound descriptor/Noise route. Forwarded C gains no route
+standing. Existing kinds5/27 and their direct-request authentication remain unchanged.
+
+The Root owns the pending proof/responder through cancellation of outer polls. Source completions
+have a fourth rotating turn alongside catch-up, events and recovery submissions. A prepared task
+exports the same opaque40MiB source reservation before native execution; task, deferred metadata,
+completion and actual lower response each retain it until their own retirement. A worker panic
+or timeout does not refund a still-owned response, and Root retirement does not refund a worker.
+Present replies retain the exact two-second read deadline and current storage fence at actual
+driver admission, independently of the reply-wait lifetime. Timeout/capacity responses are bounded
+signed Unavailable observations under the original eight-second scope; Absent describes a past
+read, not proof that the server has no copy. Helper29 also dispatches under the native/policy
+gates. It reserves one1MiB chain/full original C, at most4/group and8/process, plus a complete
+five-record route plan against128 slots/Root before nonce/work commit. Up to four named current
+sources are tried serially, with monotonic positions and exact selected-source key/signature
+checks. Final Found retains both parent C and selected A's two-second scope. Skipped, unsupported,
+invalid or temporary failures produce Unavailable unless a later source succeeds; only all
+actually checked signed Absent replies produce the helper's Absent observation. Original source
+Bytes clones and outgoing response inputs retain custody even when final admission refuses.
+The native requester now uses this bridge after direct-provider exhaustion for explicit reads,
+Keep and private Download acquisition. Four actual TCP/native scenarios cover those paths and
+interrupted helper replacement; the communication ledger records their exact restart boundary.
+
+## Congested transport delivery and automatic repair submissions (PR 48 revision)
+
+`EncryptedDoc::knows_changes` performs read-only exact change lookup, including ancestors; it
+neither imports changes nor treats unknown hashes as valid operations. Sync uses it only after
+existing authenticated Since decoding (at most 512 hashes), for a best-effort reciprocal recovery
+hint on an already-held document. The 256-entry hint table binds document/full DeviceId, preserving
+its 30-second budget across transport identity changes. Original pending waits retain a dirty
+completeness bit through compatibility fallback; older replies cannot retire newer admitted work.
+No wire encoding, signed transcript, import validation or dial permission changes.
+
+Automatic delivery receipts use the same bounded detached submission owner as repair forwards.
+No local notification ACK precedes owned inbound/response polling. A persistent class turn changes
+only after successful admission, with four new notification admissions per owner turn; a Busy
+pass preserves intents and priority. Queue admission proves neither wire submission nor delivery.
+`RecoveryProgress.pending_kind`, `pending_wait_age_ms` and `pending_wait_limit_ms` are read-only
+first-poll observations of the retained catch-up wait, independent of its preparation and receipt.
+
+The production driver dispatches application events without awaiting the application sink inside
+its swarm handler. A 64-payload queue and at most 640 last-announced/latest-actual lifecycle rows
+per driver reconcile connection generations. Payload, lifecycle and coalesced RecoveryNeeded
+wakes rotate fairly. Dropped/expired-carrier gossip requests ordinary reconciliation; this wake
+grants no membership, source, or missing-epoch authority. Never-announced transient connections
+may coalesce away. Announced disconnect/empty paths precede replacement connect/current paths;
+inbound requests remain bound to their original driver connection lease.
+
+Declared payload/response custody is capped at 64 MiB/driver and 128 MiB/process, with 1024 bytes
+metadata allowance per record, 320/1024 records, and 16/64 inbound requests. Each peer retains
+the released two ordinary owners plus one reserved owner shared by maintenance kinds 2/4/12/26.
+Ordinary requests include notifications and data recovery. A tag selects capacity only and cannot
+bypass the normal application authentication. Both classes retain their exact owner through
+actual payload/responder/lower retirement; neither is one allowance per message kind. This
+protects membership/finalization from two ordinary peer owners, not general request fairness.
+The per-peer count increases from two to three: six distinct Noise identities can occupy a
+driver's sixteen aggregate slots, compared with eight before. Aggregate request, byte and
+record limits remain unchanged; no delivery guarantee follows from local notification submission.
+Actual Bytes clones, responders, completed response futures and lower response sends retain their
+credits until last ownership ends. A legal 16 MiB request and its response copies fit. Overload
+drops/refuses a request honestly; it never invents an empty or signed successful response. These
+caps exclude existing libp2p framing/socket allocations and independent application allocations.
+Command batches are limited to 32 per driver turn so queued commands cannot starve swarm events.
+
+Server's cached-dial, mesh-repair and reciprocal wrappers now admit bounded immutable jobs;
+they return local job counts and do not await driver ACKs. The sync selector rotates their
+completions with inbound events and catch-up. Jobs capture exact Root epoch/policy revision,
+current descriptor references, expiry and (for notifications) connected proof/driver lease.
+Synchronous authority observation and driver admission reject stale work; a stale completion
+does not change peer health. Pre-commit refunds bind to an opaque planning-window owner, even
+for same-instant zero-length windows. Committed/uncertain lower submissions stay charged.
+
+There are 32 submission owners/server and 64/process. This bounds queued dial submission/ACK
+work, not sockets, which keep their existing driver limits. Notification owners additionally
+remain charged through actual lower response/failure. notify_connected_cancellable returns a
+local driver ACK only; the driver discards response payloads instead of retaining application
+answers. Unsupported transports refuse this seam. Busy outbox entries wait for actual shared
+retirement; stale entries are discarded without blocking unrelated helpers. Standalone immediate
+sync methods remain available. Local reconnect and explicit manual redial retain their existing
+immediate ACK paths; they are not part of this detachment claim.
+
+Blob provider selection admits four peers per search batch, independent of the existing four
+server/eight process/one peer attempt permits. Each chunk/round retains a tried set capped at
+320 peers, rotating beyond absent or busy preferred peers. Busy candidates stay queued while
+unused batches are searched. Actual transport connectivity is checked independently of ranking;
+whole/page preparation still requires a known or current-member candidate, and authenticated
+responses still bind requester, provider when known, group, epoch, request, CID and exact page.
+An opening failure rejects the exact FileRef encoding, preserving alternatives with different
+wrapped keys to the same ciphertext. Existing deadlines, retry rounds and page bounds remain.
+
+## Detached connected member maintenance (2026-10-18)
+
+`ChannelSync::prepare_member_maintenance(peer, kind)` returns an affine pending Commits, PEX,
+Finalize or Offer request, or None when current connected/policy eligibility is absent. `execute` accepts
+actual-retirement custody via `RequestCancellation`, uses connected-only transport admission and
+injected absolute deadlines (3 seconds Commits/PEX/Offer, 2 seconds Finalize), and caps a retained response
+before decoding. `complete_member_maintenance` authenticates on the exact original sync owner.
+Typed `Superseded` denotes local epoch/policy/descriptor/connection/incarnation change; `Failed`
+denotes transport/deadline/validation failure. Only the latter authorizes ordinary peer backoff.
+Negative empty-offer cache removal requires the same current owner checks as positive evidence.
+The transport's existing larger frame-allocation ceiling remains separate from these response caps.
+Production preparation captures `MeshTransport::connection_lease(peer)`, an opaque aggregate
+connection incarnation revoked by the driver before disconnect publication. A late ordered edge
+does not close a newly captured live lease. `supports_connection_leases()` distinguishes current
+disconnection from unsupported legacy transport seams; only the latter retain event-only fencing.
+
+The product actor queues each stage without awaiting its network response. Sixteen bounded peer
+chains, four waiters/chain, two lower flights/server and four/process are retained through actual
+lower release. Discovery coalesced onto explicit finalization survives waiter cancellation; later
+explicit callers receive a fresh exchange rather than a cached success. Original async sync-owner
+wrappers and released kind 2/4/12/26 grammars remain available. Commits uses the existing current-
+epoch request and exact request-bound response, with unchanged unbound signer evidence; kind26
+remains the separate endpoint-bound exchange. Commit responses retain the existing 16 MiB byte
+ceiling and now have a 1024-record work ceiling before per-record allocation/application/promotion; serving
+larger retained logs takes successive current-epoch polls. Empty/failed probes continue discovery.
+Actual epoch changes publish member/role/routing consequences even when roster count is unchanged.
+Two/four actual flights permit at most 32/64 MiB retained answers, plus bounded decoder scratch.
+Quiet membership selection is independent of PEX failure backoff. At most four currently
+connected, endpoint-bound current-member paths rotate in stable order every 30 monotonic
+seconds; a repeated command cannot accelerate it or forgive PEX failure. Poll-only work is
+autonomous, shares the existing flight/chain limits, and ends after Commits unless an explicit
+fresh finalization waiter exists. A pending new poll runs after the full chain's owed Offer;
+an upgrade past Commits preserves a full new discovery obligation.
+
+`member_finalization_ready_peers()` reports outbound kind26 completion for the original live
+connection lease, member/device, epoch and policy. Legacy transports without leases use existing
+event-fenced fallback. This session-only scheduling table has at most320 rows; serving alone does
+not mark readiness. Historical `finalized_member_peers()` retains its separate dual-key binding
+meaning for conflict protection and sealing authenticated outbound listener observations.
+`member_finalization_work()` also considers known members in the transport's actual connected
+snapshot, including inbound-only edges, without requiring outbound route evidence or starting a
+dial. It chooses at most two unmet targets per pass and preserves its fair cursor. The native
+capture worker uses current readiness for early skips and spaces its second try by at least the
+one-second serving interval on either peer order. Existing discovery capacity and rate gates apply.
+
+`take_local_reconnect_wake()` consumes one session-only scheduling hint from actual aggregate
+loss of a bound current P2P member. Unknown endpoints, duplicate consumed edges and stale edges
+while a replacement driver connection is live do not arm it. The product actor owns at most two
+additional local-route retry opportunities (+5s, +20s normally), with an original 25s expiry and
+60s re-arm cooldown; repeated hints neither extend nor replenish them. It spends each turn before
+awaiting and rechecks current member-mesh eligibility. The existing exact sealed-route/roster and
+shared endpoint budgets remain authoritative; no quota is reset. A local driver acknowledgement
+wait ends after 250ms, without reclaiming any permits already owned by a queued command. No file
+read, native session or retained manifest becomes dial authority. Ordinary native cadence remains
+the fallback, including when the endpoint's existing two-attempt/minute quota denies these turns.
+O(1) `peer_record_revision()` counts
+actual stored signed-descriptor changes and feeds `SnapshotNeeded`; ordinary liveness and exact
+duplicate descriptors do not increment it. The counter is ephemeral and adds no persistence field.
+
+## Native ephemeral voice ownership foundation (2026-10-18)
+
+Trusted Rust transport seams remain inert: `handle_voice_transport_request` and
+`verify_voice_transport_response` enforce closed role-bound kind28 frames/ACKs. The former binds
+its typed prepared reply to the original responder; raw response extraction exists only in unit
+oracles. Custody-backed Bytes and the actual driver's serialized copy retain the same original
+verification credit and exact helper/public admission receipt through final retirement. An
+observing five-second request gate and original route/epoch/proof/descriptor/connection gate
+remain distinct from reply-wait cancellation. A cached HelperQueued observation must retain its
+FIRST actor, issuer/helper, targeted member when applicable, room and effective permit lifetime.
+Replacement authority or a longer retry permit cannot adopt those bytes. Previously the inert
+test model reported cached status after actor replacement; it now refuses that positive receipt
+while preserving packet identity and spent allowance. `prepare_voice_forwards`
+and `prepare_voice_sources` return at most four affine requests each, subject to the same four-group/
+eight-process actual lower-flight pool; `execute` takes a cancellation receiver and owns the
+exact lower flight. `complete_voice_forward` authenticates on the original Root with current
+driver connection, actor/member/policy, room and packet authority. HelperQueued is custody only;
+EndpointAdmitted can come only from the original envelope's exact final endpoint. These functions
+are neither request dispatch nor WebView commands. Legacy kind8 is unchanged. See the V2 decision
+for buffer/work limits and the remaining scheduling/endpoint/browser integration requirements.
+
+`complete_voice_source` and `complete_voice_forward` return `VoiceCompletionFailure<T>` on
+failure. Capacity and RateLimited preserve the exact affine completion in `into_retry()`;
+retrying it does not submit another request or spend another Source attempt. Other failures are
+terminal. `into_error()` explicitly abandons retry custody. A retained native completion acquires
+its verification credit before rate debits, so a busy prepaid lane does not drain requester
+allowance. Fresh untrusted ingress still pays requester/process work before verification, and
+every retried completion repeats connection, Root, member, policy and packet authority checks.
+
+`LocalJoin::prepare_sdp_exchange` requires an established native pair, the actor's actual shared
+OriginLimits, and at most two fixed current helper identities. It prepays endpoint/helper records
+without spending or resetting traffic buckets, then reserves 224 KiB, one Crypto lane, two
+Forward lanes and two slots from the existing combined 32-action queue. Refusal precedes a local
+SDP nonce or incoming positive admission. The exchange permits one local and one remote SDP
+(8 KiB maximum each), one Source record and two actual lower holders. The first admitted Offer
+pins its OfferId and initiator/responder role; crossed Offers refuse before ACK or replay commit.
+Idle readiness lasts at most 30 seconds; the first SDP starts an immutable 20-second work window.
+Effect-bearing grants enforce those deadlines even if collection is delayed. Capacity loans and
+terminal records retain their actual bytes/slots after retirement. `Exchange` encryption/decryption
+budgets and its bounded native result owner confer capacity only; general SDP crypto-action
+factories, browser-copy custody, historical receipts and RTC dispatch remain unimplemented.
+
+Native Rust lifecycle seams now include `start_voice_watch(room, parent)`, `validate_voice_watch`,
+`start_voice_endpoint(Arc<CallGrant>, native_join, public_key)` and `voice_endpoint_changes`.
+They are not IPC commands. Watch grants are affine native custody; Root keeps no strong owner.
+Parent consent is bound before lending clones. An endpoint recognizes the actual actor/policy and
+room child registries, keeps only Weak call-grant identity plus revocation handles, and owns one
+LocalJoin/implicit watcher. Exact same-grant/key retries do not recreate its allocator. Last native
+grant drop revokes work without a Root turn. Metadata wakes coalesce through a watch channel;
+recoverable payload pull and encrypted ingress/confirmation/negotiation IPC remain unimplemented.
+`pump_voice_endpoint` and `voice_watch_peers` are trusted Rust public-control seams, also absent
+from normal dispatch/IPC. Their bounded queue captures exact original native recipients before
+origin allowance commits; cached retries cannot be adopted by replacement watchers. Announcements
+are candidates, not presence. Only fresh native challenge/proof validation returns `FreshPeer`.
+`Runtime::collect_expired` is independent of session authority and retains group membership/epoch
+evidence. `collect_expired_voice` runs at the actor's absolute housekeeping deadline. Neither
+collector resets packet replay/sequence state or releases credits held by actual lower work.
+
+Pending native crypto factories now return opaque `CryptoAuthority`: `pair_derivation_authority`,
+`confirmation_encryption_authority`, `packet_encryption_authority` and `incoming_crypto_authority`.
+They validate actual retained native pair/action/reservation/token state; PairSetup/CryptoFlight
+data alone is insufficient. Signing closes only the pending encryption lease, preserving exact
+cached submit/source eligibility. Token consume/expiry closes pending decrypt. Proof/Finish bind
+the admitting confirmation attempt; Hello binds a stable native accepted-sequence floor, allowing
+a queued newer Hello to survive earlier progress. The final native commit repeats these checks.
+These are trusted Rust pending-work seams, not IPC or historical-result receipt authority.
+The inert CryptoAction queue now stores small post-transition `CryptoResultReceipt` metadata:
+accepted derivation/seal/open or closed rejection, native SHA-256 output tag and retirement bit.
+Exact lookup precedes pending-token and engine-settlement checks. History captures the original
+clock, pair/attempt and deadlines; it creates no new dispatch authority. Endpoint/OfferId,
+continuation, native IPC and RTC integration remain unimplemented.
+
+The standalone browser broker v4 exposes registerConfirmation and an immutable attempt/inspect/
+retire handle. It retains exact owner/pair/action/version/native input and one computation across
+lost replies, within a combined 32-record cap and the ordinary broker's byte/engine budgets.
+Closed confirmation outcomes expose no plaintext and confer no fresh RTC/pair authority.
+Explicit owner retirement is irreversible and wakes observers; actual work drains before native
+settlement. Temporary shared queue pressure returns busy and permits a later exact attempt.
+Trusted LocalJoin factories now issue opaque CryptoAction owners for proven-pair derivation and
+exact native confirmation encryption/decryption. Their combined 32-record queue includes terminal
+identities and rotating non-dequeueing pulls of at most four. Native Coordinator registration
+and its admit/settle registry currently compile only for contract tests until the result owner
+and browser IPC adapter are integrated; they are not production native enforcement. That model
+requires the actual call lease, authenticated scope and exact process resource pool. Admission
+stores one actual engine permit before replying; repeated admission reuses it. Settlement
+permanently closes delayed admission, and first sign/closed-confirmation wrappers use that same
+fence. End closes unstarted actions without refunding admitted work. A ByteBudget reservation may
+close unused bytes only; outstanding loans retain actual bytes/slots through their own release.
+The sync typed-action factories remain inert production Rust seams. The required VoiceConfirmationNative admitAction/commitConfirmation/
+settleAction interface is not implemented native IPC. Small exact historical success/rejection
+receipts exist in the inert Rust seam; pre-ingress queue/origin transactions and their complete
+browser/native handoff remain outstanding. Never adapt through ordinary fresh-token
+admission or general Pair.open. Native/WebView and SDP/ICE result-lease integration remain open.
+
+Main-window-only commands, not yet used by the live call UI:
+
+| Command | Contract |
+| --- | --- |
+| `prepare_voice_controller()` | Unlocked UI generation; returns one expiring CAS candidate. |
+| `prepare_voice_owner({controller,server,room})` | Known directory room as canonical decimal u128; captures exact actor/group/policy/UI generation. |
+| `activate_voice_owner({candidate})` | Revalidates and CAS-activates; returns `{owner,group,join}`, with null group/join for a controller and 64 lowercase hex strings for a call. |
+| `end_voice_owner({owner})` | Exact idempotent revocation, including while locked; no existence bit or crypto refund. |
+| `admit_voice_crypto({owner,operation,bytes})` | `generate|derive|encrypt|decrypt`, bounded bytes and exact current owner; returns one process-retained operation token. |
+| `settle_voice_crypto({token})` | Exact actual-settlement report, including after lock; no existence bit and no replacement refund. |
+
+Controllers also own an irreversible parent lease for explicit observers; replacement, End, lock
+and native coordinator Drop revoke it synchronously. Starting a call preserves the controller.
+Eight prepared candidates expire after 30 monotonic seconds. The process admits eight active-or-
+uncertain crypto operations, four/group, with shared declared-byte limits of 2 MiB/process and
+256 KiB/group. Generate/derive/encrypt/decrypt declarations are bounded respectively to
+128/4352/36864/36880 bytes. These commands grant resources, not packet signatures, forwarding,
+microphone consent or decrypted delivery. A current actor query is only a snapshot; future
+protocol effects must check authority again in their actor turn. No live V2 request kind or
+delivery/confirmation IPC is implemented yet. See [the V2 contract](communication-recovery/VOICE-SIGNALLING-V2.md).
+
+Internal Rust `PrepareVoiceActor` returns an inactive registration tied to the exact process
+Runtime and captured session ticket. Native registers it under its exact row guard before
+publication; competing installation differs from optional expiry/capacity refusal. Retained
+actors receive fresh registrations on mounted unlock. Internal `VoiceCallGrant` returns affine
+reply custody tied to the current room/policy, so canceled replies revoke their child lease.
+Production grant custody retains the room owner and 256 declared bytes until its actual last
+holder drops, including after lock, actor replacement or room deletion.
+These handles are not serialized or supplied by the webview. The trusted Rust `CallGrant::from_lease`
+adapter adds custody only; it is not a membership authorization factory. Production IPC obtains
+grants from the actual product actor. Voice attachment failures leave that row unavailable for
+V2 and retry on a later unlock, while ordinary authenticated vault/chat access continues.
+
 ## Optional desktop invite refresh (2026-10-18)
 
 `get_invite(server)` returns `null` when there is no stored invite or this exact current device
@@ -83,7 +951,11 @@ that awaits anything carries its route across the await and asks `leave()` again
 the screen changes, so a response that outlived a newer action is discarded and work drawn
 meanwhile is saved first. Because moving the channel under a mounted Studio ends the lease, a
 composite action changes the surface before the channel. `release()` is `begin().leave()` and
-`leaveThen(go)` runs `go(route)` synchronously when nothing needs saving. A navigation call made
+`leaveThen(go)` runs `go(route)` synchronously when nothing needs saving, only while the claim
+is current and window close is not in progress. Close holds navigation even after all edits have
+saved. A successful awaited Save is a snapshot, not a reservation of the next microtask: both
+the gate's deferred callback and every App continuation recheck current ownership and close
+immediately before changing flags. A navigation call made
 without a route after an await is a new action of its own; `studio-exit-routes.test.ts` lists the
 few such calls (a completed join, channel reconciliation, a lost moderation permission) with their
 reasons, and every other one carries its function's route.
@@ -100,6 +972,13 @@ the committed turn for the requested, still-current request only. Like any newer
 retires other in-flight navigation (a pending sidebar open, a deferred tab change). `openWikiPage`
 resolves `true` only when it opened a page; Rename, Delete and new-page edit mode act only on the
 page their own request opened. No IPC, wire or persistence format changes.
+
+A delayed wiki rename captures the original unlocked server/view generation and exact displayed
+page generation. Clear, successful open (including the same name) and rename reconciliation each
+advance that page identity. Reconciliation may rename only the unchanged original page, even
+when its navigation action has retired; it cannot relabel a replacement page or expose an old
+rename result after lock/server replacement. Channel-open completions likewise check the original
+unlocked scope and current route before adding to the current sidebar or displaying an error.
 
 A server whose native session has ended accepts no Studio Save, so moving off it never waits on
 one. App's `serverGone(id, left)` handles both a leave and a closure:
@@ -414,6 +1293,7 @@ pub trait MeshTransport: Send + Sync {
     async fn request_connected_cancellable(&self, peer: PeerId, proto: ProtocolId, data: Bytes, cancellation: RequestCancellation) -> Result<Bytes, TransportError>; // fail-closed default
     async fn notify(&self, peer: PeerId, proto: ProtocolId, data: Bytes) -> Result<(), TransportError>;
     async fn notify_connected(&self, peer: PeerId, proto: ProtocolId, data: Bytes) -> Result<(), TransportError>; // fail-closed default
+    async fn notify_connected_cancellable(&self, peer: PeerId, proto: ProtocolId, data: Bytes, cancellation: RequestCancellation) -> Result<(), TransportError>; // fail-closed default; local ACK, actual lower custody, discard reply
     async fn next_event(&self) -> Option<TransportEvent>;   // single-consumer
     async fn rendezvous_register(&self, namespace:&str, rz_node:&[u8]) -> Result<(),TransportError>;
     async fn rendezvous_discover(&self, namespace:&str, rz_node:&[u8]) -> Result<(),TransportError>;
@@ -432,6 +1312,7 @@ pub struct PeerId([u8;32]);   fn from_u64(n)->Self; fn as_bytes()->&[u8;32];
 pub struct Topic(Bytes);      fn new(impl Into<Bytes>)->Self; fn as_bytes()->&[u8];
 pub struct ProtocolId(pub &'static str);
 pub enum TransportEvent {
+    RecoveryNeeded, // coalesced local loss/congestion wake; no remote authority
     Gossip { topic: Topic, from: PeerId, data: Bytes },
     Request { from: PeerId, proto: ProtocolId, data: Bytes, responder: Responder },
     PeerConnected(PeerId),
@@ -447,9 +1328,15 @@ pub const MAX_CONNECTION_PATH_SNAPSHOT: usize = 64;
 pub enum ConnectionFamily { Ipv4, Ipv6, Dns, Memory, Unknown }
 pub enum ConnectionTransport { Tcp, QuicV1, WebSocket, CircuitRelay, Memory, Unknown }
 pub enum ConnectionDirection { Dialer, Listener }
-pub struct Responder;  fn respond(self, Bytes);  fn channel() -> (Responder, ResponderRx);
-pub struct ResponderRx; async fn recv(self) -> Option<Bytes>;
-pub enum TransportError { Unreachable(PeerId), Timeout(PeerId), Closed, NoResponse, InvalidDialBatch }
+pub struct Responder;  fn respond(self, Bytes);  fn try_respond(self, Bytes) -> Result<(), TransportError>;
+    fn is_current(&self) -> bool;
+    fn cancellation_authority(&self) -> Arc<dyn RequestAuthority>; async fn cancelled(&self);
+    fn channel() -> (Responder, ResponderRx);
+    fn channel_owned(SharedRequestKeepalive, Arc<dyn RequestAuthority>, Arc<dyn ResponseBudget>) -> (Responder, ResponderRx);
+pub struct ResponderRx; async fn recv(self) -> Option<Bytes>; async fn recv_owned(self) -> Option<ResponderReply>;
+pub struct ResponderReply; fn data(&self) -> &Bytes; fn keepalive(&self) -> Option<SharedRequestKeepalive>; fn into_bytes(self) -> Bytes;
+pub trait ResponseBudget: Send + Sync + Debug { fn retain(self: Arc<Self>, actual_bytes: usize) -> Result<SharedRequestKeepalive, TransportError>; }
+pub enum TransportError { Unreachable(PeerId), Timeout(PeerId), Closed, Cancelled, NoResponse, InvalidDialBatch }
 pub enum PublishSubmission { Submitted, Duplicate } // local driver/cache evidence, NEVER delivery
 pub enum PublishOnceError { Unsupported, TooLarge, Busy, Closed, NoPeers, QueuesFull, Failed }
 pub trait DialPermit: Send + Debug { fn address(&self)->&str; fn commit_if_current(self:Box<Self>)->Option<String>; }
@@ -1758,7 +2645,7 @@ pub struct ChannelSync<T: MeshTransport, R: CryptoRngCore>;
   publish_self_record(addresses:Vec<String>, seq:u64) -> Result<()>;  ingest_peer_record(PeerDescriptor) -> bool;
   async request_pex(peer:PeerId) -> Result<usize>;  known_peer_records() -> Vec<PeerDescriptor>;  peer_record(&DeviceId) -> Option<&PeerDescriptor>;
   async request_pex_connected(peer:PeerId) -> Result<usize>; // same verification; never implicitly redial a temporary admission contact
-  schedule_reconciliation() -> usize; // paced, bounded sweep of open docs; preserves pending cursors/cooldowns
+  schedule_reconciliation() -> usize; // paced bounded sweep; owned run_once timer retries quiet docs every 30s; preserves pending cursors/cooldowns
   // Cross-session redial: newest roster-checked cached records are policy-ranked. Equal address
   // epochs retry with bounded monotonic exponential backoff+jitter; a newer signed seq or a live
   // connect/disconnect lifecycle resets the delay. Old public IPs are not unioned indefinitely.
@@ -2088,9 +2975,13 @@ All multi-byte ints big-endian; all variable fields length-prefixed (`catcoms-wi
       restore**, because a session that founded or joined has nothing older than itself to
       recover, and a whole node's documents in front of its discovery and presence work costs
       those the ticks they converge in.
-      **Known gap.** A source that quietly advances while staying connected and never changing
-      standing is still not re-swept. Closing that needs a bounded periodic anti-entropy pass,
-      spread across documents and peers.
+      **Quiet sources are revisited.** The owned `run_once` wait retains a monotonic 30-second
+      reconciliation deadline across caller cancellation. A due timer schedules one bounded turn
+      before ready network input, then ordinary event/response/submission rotation resumes. It
+      requires active local membership, an open document and an actually connected bound current
+      member. Read-only diagnostics cannot arm or renew it. Existing source cooldowns, cursors,
+      pending request identities and queue limits remain authoritative; clock overflow disables
+      the timer rather than creating a perpetually ready loop.
       One member device holds at most one proof, and one transport peer at most one device, so a
       device cannot manufacture sweep obligations or evict honest proofs by answering from many
       identities.
@@ -2172,6 +3063,11 @@ All multi-byte ints big-endian; all variable fields length-prefixed (`catcoms-wi
   - `17` KIND_INDIRECT_RESULT; separately authed exact target hash + echoed attempt + boolean. It
     is accepted only from the pending proven helper while the target descriptor remains current.
     Two distinct negatives are suspicion only; one positive may queue kind 14 through that helper.
+    Target scheduling remains one descriptor per pass with at most two helpers. After the initial
+    priority choice, a session-local full-device-ID cursor rotates through all eligible retained
+    records; only a confirmed local probe admission advances it, immediately before any later
+    helper await. No negative result or descriptor refresh resets it. Frame grammars, helper rate
+    allowances and the independent reciprocal-submission return count are unchanged.
   - `18` KIND_DELIVERY_RECEIPT; connected-only authed document type, document id, and 32-byte
     change hash. A receiver queues it only when that exact signed op is newly applied, and the
     sender accepts it only for one of its bounded recent targets. Duplicates are inert; unknown
@@ -3435,7 +4331,7 @@ files, and `local_files`, the deduplicated files whose complete encrypted chunk 
 installation. The Storage pane can pass one of those rows through the existing authenticated
 `save_group_file` path. That explicit “Unlock copy” action verifies/decrypts the managed chunks and
 creates a separate, non-overwriting plaintext Downloads file; it does not alter or remove the
-vault-encrypted copy. Its final staging-file rename and reveal are authorized by the exact unlock
+vault-encrypted copy. Its final no-replace publication and reveal are authorized by the exact unlock
 generation that began the export; locking, then unlocking again, cannot revive the old operation.
 Chunk health is keyed by the exact encoded `FileRef`, and the inventory joins
 that verdict to the exact manifest in one actor snapshot; a reused ciphertext or plaintext CID
@@ -3633,8 +4529,10 @@ things the CRDT does not do for us, both of which reached users:
   only one, leaving the other member's posts in the document and unreachable. This is the defect
   the status feed escaped by moving to distinct root keys; channels did not. Reads now take every
   conflicting list. Writes still use the one `get` returns, so writers converge on a single list
-  as soon as they have seen each other. **Known limit:** editing, deleting and reacting still
-  resolve through `get`, so a row stranded in a losing list is visible but not yet mutable.
+  as soon as they have seen each other. Editing, deleting, reacting and pinning now resolve a
+  unique visible ID across every list, including a losing first-writer list. Ambiguous duplicate
+  IDs are refused before product authorization or mutation. If a non-list root conflict wins,
+  appending reuses an existing valid list instead of replacing and hiding observed history.
 - A send appends at the end of the list *as the sending replica sees it*, so a member that is
   behind appends after the last row it knows about. When the missing history arrives, the two are
   concurrent insertions and the merge orders them by a rule that knows nothing about when anything
@@ -4108,13 +5006,37 @@ complete_blob_fetch}` split one opaque authenticated attempt from actor-owned va
 ranges above `CHUNK_BYTES` are rejected before I/O. See [limits and lifecycle](design-file-reliability.md).
 
 The local-only `get_kept_files(server)`, `keep_file(server,cid,cancellation)` and
-`forget_kept_file(server,cid)` commands expose explicit device ownership. Keep claims a native
-`begin_inline_download` registration; lock/cancel signals the exact lease. Inventory returns bounded
+`forget_kept_file(server,cid)` commands expose explicit device ownership. The new
+`retry_kept_file(server,cid,transfer,expected_grant,request)` grants a fixed native allowance only
+to the exact exhausted transfer. Identities are canonical fixed-length lowercase hex; grants and
+receipts are canonical decimal u64 strings, never JavaScript Numbers. Retry/Forget serialize with
+actor replacement and reject result publication after an intervening UI lock request.
+`request_kept_file(server,cid)` returns after local background admission, not verification; inventory
+and FilesUpdated report progress. `set_kept_paused(server,cid,transfer,expected_intent,paused)`
+changes only persistent user intent with a checked decimal u64 revision (zero only for old V2).
+A same-value explicit command still advances intent; stale CAS refuses. The native unlock generation
+and irreversible watch token follow background work to actual lower admission. No frontend view
+owns this token and a later unlock cannot revive it. The existing completion-oriented `keep_file`
+remains for completed-copy checks with a native `begin_inline_download` lease; lock/Stop checking
+cancels that exact runtime lease without releasing saved ownership. Inventory returns bounded
 CID/version/checked rows plus conservative allocated bytes and a fixed local limit, never saved
-wrapped manifests or keys. Existing copies load unchecked and can be explicitly checked/repaired
+wrapped manifests or keys. A separate `transfers` projection reports exact CID/version, transfer
+identity, phase, whole-part counts, running/exhausted/user-paused/blocked flags, decimal intent
+and grant identities; partial progress is
+never projected as a completed copy. Existing copies load unchecked and can be explicitly checked/repaired
 from their saved manifest after unlisting. They do not enter `files()` or authorize media heads.
 The additive `BlobStore` keep methods fail closed on unsupported stores. `KeptBlobStore` reserves,
 verifies, flushes and separately owns copies; ordinary put/delete/staging target primary storage.
+New-format stores require immutable native `KeepScope { group, device }` before retained effects.
+Opaque process-local `KeepRun` and prepaid `KeepWork` never cross IPC. Pause invalidates a run while
+retaining sealed progress/allowance; explicit release records Deleting before cleanup. Exact Retry
+receipts are historical metadata and cannot manufacture a runtime run or refill an active grant.
+The native-only `kept_saved_plans`, `begin_keep_variants` and `fallback_keep` seams carry opaque
+original candidate ownership; they do not cross IPC. The app validates all saved manifests and
+the original set before starting work. A successful fallback returns a fresh exact run/plan only
+after selection publication, preserving global intent/allowance and revoking old lower effects.
+Completed projections remain bound to the committed winner. Old exact-only records are not enriched.
+See the file contract for migration, directory barriers, execution ceilings and current resume limits.
 Remote confirmations and automated retention/eviction are not part of this interface.
 
 ### Pre-upload video editing (frontend only)
@@ -4145,14 +5067,16 @@ and every drop handler returns early on a drop that carries no files.
   batch the next file waits for `settled`, so it is attached to the emptied composer, not added to
   the message being sent; a move away while the send runs ends the batch there (2026-10-20
   review). `send()` and `postStatus()` resolve to a `SendOutcome` (`message-send.ts`): `refused`
-  (nothing submitted); `failed` (nothing sealed, or a sealed identity blocked from automatic
-  retry, including a not-accepted superseded result); `sent` (accepted and saved durably);
+  (nothing submitted); `failed` (nothing sealed, or a definite refusal with no earlier ambiguous
+  attempt, including a fresh not-accepted superseded result); `sent` (accepted and saved durably);
   `uncertain` (may have gone or will by itself: accepted without a durable save, a not-accepted
   pending result, a throw whose sealed identity stays pending and retries quietly, a throw after
   dispatch that is not a definite native refusal even if Pending messages resolved the entry
-  meanwhile, or an identity taken over by a lock or the pending-message work). `send()` keeps
-  that evidence itself (`mayHaveGone`, set by `submitPendingSend`'s `onDispatch` or by reusing an
-  identity not marked `not_accepted`), never reading it back from `pendingSends`. An
+  meanwhile, an earlier ambiguous attempt even when this retry is definitely refused, or an
+  identity taken over by a lock or the pending-message work). `send()` keeps this press's dispatch
+  evidence (`mayHaveGone`, set by `submitPendingSend`'s `onDispatch`) separate from its original
+  prior-attempt uncertainty (`priorMayHaveGone`), never reconstructing either from a later queue
+  lookup. Composer and background retry warnings retain that earlier uncertainty too. An
   announcement is never `uncertain`. The
   toast reports that outcome, before a move away ends the batch, and never the composer's
   contents, which cannot tell a sent message whose draft was kept from an unsent one: "sent",
@@ -4260,7 +5184,9 @@ already in the authenticated request, and the receiver derives `DeviceId` from i
   64 lowercase hex, and returns `Err` before queuing anything else.
 - **Bridge.** The `call-signal` event payload is `{server, from, from_fp, payload(base64)}`. Command
   `send_call_signal({server, target, payload, trace?}) -> bool` refuses a malformed `target` with
-  `VOICE.SIGNAL.FAILED`.
+  `VOICE.SIGNAL.FAILED`. `true` establishes local transport submission, not receipt or media
+  connectivity. Successful commands record `VOICE.SIGNAL.SUBMITTED`; the former
+  `VOICE.SIGNAL.DELIVERED` label in historical logs did not establish recipient delivery either.
 - **Frontend.** It refuses an event unless `from` is 64 lowercase hex and `from_fp ===
   from.slice(0, 8)` (diagnostic `VOICE.SIGNAL.BAD_SENDER`).
   - Every call authority, session, budget, consent, claim and slot key is `from`.
@@ -4270,6 +5196,36 @@ already in the authenticated request, and the receiver derives `DeviceId` from i
     their contract and golden behaviour are unchanged.
 - **Legacy route.** `peer_for_fingerprint` serves DM invites only and returns no route when more
   than one current member carries the fingerprint.
+
+**Optional router-mapped ICE routes (communication update, 18 October 2026).**
+`prepare_call_mapping_controller() -> candidate` followed by
+`activate_call_mapping_owner({candidate}) -> owner` claims one unlocked webview mount. After
+resume/unlock this retires its predecessor even if the new UI never joins a room.
+`prepare_call_mapping_owner({controller, server, room}) -> candidate` captures the current
+native revision and binds the UI generation, server actor incarnation, group and room. Activation
+compares that revision; a delayed prepare/activate cannot revoke a newer owner.
+`end_call_mapping_owner({owner})` revokes exactly that candidate/controller/call, including pending
+acquisitions. Its return is an authority barrier, not confirmed router deletion.
+
+`map_call_port({owner, port, address?}) -> {grant, ip, port, mechanism, confirmed}` reserves a
+physical port and native worker before router I/O. It revalidates the UI commit/session, registry
+incarnation and exact call owner before returning a grant. `unmap_call_port({owner, grant})`
+releases only that exact attempt; the old port-only command contract is unsupported. Lock and
+server leave revoke native ownership. IPC cancellation does not cancel the responsible worker.
+Frontend use additionally requires the exact call join, mapping slot and RTC peer; component
+destruction tears down the old call, peer connections and captured tracks.
+
+There are at most 8 prepared candidates (30-second monotonic expiry) and 64 process port slots.
+Acquisition, cleanup and uncertain retirement all retain their slots. Acknowledged IGD deletion
+at the original granting gateway refunds a slot; ambiguous IGD results and legacy PCP/NAT-PMP
+worker retirement quarantine the port and capacity until process exit. This survives lock,
+account changes and remount. At capacity, optional router mapping refuses while STUN/TURN still
+operate. A definite IGD Add refusal is also conservatively classified uncertain; fallback is only
+allowed after clean pre-mutation failure or acknowledged Add followed by successful deletion.
+PCP/NAT-PMP tries one advertised protocol, because Client drop exposes no joined shutdown.
+Router state can survive until lease expiry, including after process restart; no immediate
+physical closure, native audio route or kernel proof of WebRTC socket ownership is implied.
+See [the custody decision and evidence](communication-recovery/CALL-MAPPINGS.md).
 
 **`draw` data channel.** `pc.createDataChannel("draw", {negotiated: true, id: 8, ordered: true})`
 is created per peer connection beside `inst` (id 7), before the first offer. Older builds never open
@@ -4460,3 +5416,219 @@ whose entries contain `{removed,register}`; `removed` is not inferred from raw s
 Exposing these core types alone grants no request/wire authority; the candidate's explicit native
 family/custody path is described above. Unsupported adapters refuse rather than falling back to art.
 
+
+
+### Owned bounded blob-read preparation (19 October)
+
+`BlobStore::prepare_read_bounded(cid, max_bytes)` returns a native-only `BlobReadPlan`. The caller
+must reserve `BlobReadPlan::memory_bound(max_bytes)` **before** preparation, retain that exact
+credit through actual blocking execution/result/page construction, and revalidate its own original
+request/group/lifecycle authority and `BlobReadResult::is_current()` before any signing or effect.
+Preparation does no disk I/O; `run(self)` performs bounded blocking read, at-rest opening and CID
+verification. Results expose only borrowed bytes and their current storage fence. No paths, keys,
+serialization or clone API escape to the caller. A sealed worker holds only its zeroizing native
+at-rest key, never MLS/device/file-wrap keys or a store borrow.
+
+Bounds: max 16 MiB, 33 captured sources (primary plus completed retained owners), compact 4096-byte
+path capacity, eight parent fences, aggregate resident snapshots at most the declared maximum.
+The explicit buffer/metadata ceiling is `4 * (max_bytes + 41) + 256 KiB`; it excludes allocator/OS
+and unrelated process overhead. An 8 MiB + 44-byte file chunk needs more than 32 MiB. Captured
+errors use a closed no-heap representation. Store/winner loss, deletion, poisoning and scope loss
+retire pending/result fences; private partial candidates never enter public preparation.
+`ProtectedBlobs` forwards this and all three V4 Keep methods through the native store factory.
+These primitives alone start no worker and enable no indirect service.
+
+`Responder::cancellation_authority` is transport reply lifetime only. Receiver Drop revokes it
+synchronously; `cancelled` also observes original ingress loss. Successful receive/transfer retires
+it BEFORE the network response send. Drivers retain their original ingress authority for that send
+and retain all actual request/response credits independently. It grants no membership or deadline;
+deferred service must compose those checks. Fire-and-forget notifications can have no receiver and
+must not be rejected by a blanket reply-lifetime filter.
+
+
+`catcoms_sync::file_service::read::SourceReadRuntime` adds actual capacity custody around that
+primitive: `new(Arc<dyn FileReadExecutor>)`, `prepare(group, &dyn BlobStore, &Cid, max_bytes, Arc<dyn RequestAuthority>)` and
+`start(FileReadTask) -> FileReadFuture`. All public runtime constructors reuse the process-static
+pool. It reserves 40 MiB before preparation, at most one per full group and two process-wide;
+`max_bytes` is at most 8 MiB + 44 bytes. `FileReadTask::run(self)` transfers the same affine owner
+to `FileReadCompletion`, whose result is borrowed only. The app executor factory
+`catcoms_app::file_source::runtime()` uses real `spawn_blocking` and retains the whole task even
+when the returned observer disappears. These APIs are native-only, never serialized or exposed
+as commands. They grant no membership/request/session authority and activate no new service.
+
+
+Transport now reserves `FILE_BRIDGE_KIND = 29`, `FILE_SOURCE_KIND = 30`,
+`FILE_SERVICE_REQUEST_MAX_BYTES = 2 KiB` and `FILE_SERVICE_RESPONSE_MAX_BYTES = 72 KiB` in
+`catcoms-rt`. These are capacity classification, not handler registration or forwarding authority.
+`BytesCodec` captures a value-only limit on each pinned libp2p request/response substream, resets
+it for every request (including empty/legacy), rejects new requests after at most header + kind,
+and rejects response lengths before allocation. Oversized writes fail before header output. Old
+5/27 and other legacy reads keep the 16 MiB limit; local writes above that existing peer-readable
+limit now fail earlier rather than writing a frame every released reader would reject. Unknown
+new kinds still receive ordinary empty refusal from an application without the handler.
+
+
+Source read authority is now mandatory before reservation/snapshot and at the actual worker read
+admission. Task/completion retain that same observing authority, without retaining its revocation
+publisher, Root/store or signing keys. `SourceReadError::Revoked` is distinct from absent/error
+storage. A completion retains its result and credit after revocation; `result()` is a checked
+borrow and may return Revoked, but cannot recall a previously returned borrow. Fresh checks at the
+actual signing/send edge remain mandatory. Already-admitted blocking I/O cannot be recalled.
+
+
+The native-only `file_service::wire` types define four v1 signature domains: original grant,
+one-hop delivery, source page and helper wrapper. **The normative v1 grant hash is BLAKE3 over
+the complete raw signed kind 29 frame**, including its tag, canonical body, requester key and
+signature. Changing this digest or its input is a wire compatibility change. Each response binds
+that hash; the source/helper body need not repeat its original fields. Canonical maximum complete
+sizes are 707, 893, 65,691 and 65,842 bytes respectively. Parsed fields are immutable borrowed views;
+parsing does not verify a signature or authorize current service. Explicit signature verification
+still does not establish current membership, binding, replay/rate admission or a file read intent.
+No new kind is dispatched. The proposal records the remaining activation requirements.
+
+
+### Connected file-service admission policy (inert)
+
+`AdmissionRuntime::process()` is the sole production constructor; full-device/group quotas and
+replay rows survive Root/executor replacement. `admit_ingress` spends actual authenticated
+sender precrypto capacity and returns an affine exact-frame/native-scope ticket. `verify` checks
+closed shapes and C/B signatures, not current membership. `preflight` reserves nothing; acquire
+actual resources and revalidate current native scope before atomic `commit`. Commit either debits
+all identities/aggregates and records the original nonce or changes none of those work rows.
+Ingress charges are separate. No refund follows an ambiguous handoff. Clock sampling, pruning
+and commit share one mutex; deadlines use this runtime's monotonic clock. Exact limits and
+restart semantics are in [the bridge proposal](communication-recovery/FILE-BRIDGE-NEXT.md).
+This API does not activate kinds 29/30 or grant Root/native/member/connection authority.
+
+
+### Final response effect authority
+
+`Responder::try_respond_with_authority(bytes, observer)` adds an optional native effect gate,
+checked before response capacity admission, at receive, and again by the real driver's final
+copy/send admission. `ResponderReply::is_current()` is independent of original transport ingress;
+drivers check both. `data`/`into_bytes` and custody transfer do not grant authorization. Legacy
+`try_respond` keeps its behavior. The final observer must exclude reply-lifetime cancellation: that
+wait lifetime ends when the driver receives the response, before network sending. Deferred work
+uses scope plus reply lifetime; final response uses scope alone. Revocation cannot recall an
+already admitted send or refund still-owned byte clones, lower requests or response copies.
+
+
+### Existing file-job lifecycle observers
+
+`ChannelSync::file_effect_authority()` captures an observing Root/member/policy generation and
+refuses inactive membership. It grants no manifest, destination, peer standing, execution budget
+or new bridge permission. Observed MLS/policy transitions retire old observers before optional
+voice returns; Root Drop closes its first-field publisher. Existing legacy direct reads retain
+their current compatibility eligibility. File jobs retain the same observer through local steps,
+retries, lower admission and completion.
+
+The actor adds its own unique generation, retired before stop acknowledgement, terminal event
+wait or freeze Ready/lease wait. Nonterminal freeze/ack cancellation issues a fresh generation,
+never restoring old work. Native background Keep attachment additionally composes the exact
+registry entry with the full account-generation cancellation object. Entry replacement/removal
+retires under the checked row guard, before a removed row is returned across later awaits;
+Drop is a backstop. This native attachment is not yet used by every external/manual download
+command or the unimplemented connected file service. Actual lower credits are separate from
+all these effect observers and remain owned until actual retirement.
+
+
+### Actual service-response capacity and source observation
+
+`Responder::try_respond_with_custody(bytes, effect, service_owner)` preserves both independent
+driver response capacity and prepaid service ownership through original Bytes clones and the
+actual native pending response. Bytes ownership alone would end at the driver's Vec copy.
+The explicit service owner grants no authorization, refunds or additional transport capacity.
+
+`FileReadCompletion::storage_is_current()` observes only a verified positive result's weak
+store/winner fence; no bytes, native permission or wake are supplied. It ignores work authority
+by design: reply receive retires that lifetime before final send. A sender must compose this
+storage observation with its independent native/Root/member/deadline gate, while retaining the
+whole completion as actual response custody. Missing/error false is not an absence assertion.
+
+The inert `HelperCapacity::process()` singleton reserves at most4/full group,8/process and1 per
+original full device/group. A non-Clone HelperChain mints at most four affine HelperAttempt
+tokens; timeout/source rotation cannot reset them. The eventual pending-request builder must
+consume each token once; exported keepalive is accounting only, never submission authority.
+`into_response_custody` consumes the outer chain and transfers the same credit. A1MiB charge
+covers a conditional944KiB explicit-buffer envelope; active-handler allocation auditing remains
+required. These APIs do not enable kinds29/30 or establish indirect file availability.
+
+
+### Requested native file-read ownership (19 October checkpoint)
+
+Native inline download, streamed save and media requests capture the authorization generation
+before their first authorization await and retain the exact registry-row/account observer across
+actor queueing and every chunk. `read_file_range_cancellable` carries that scope through
+`ReadFileRange`; the compatibility `read_file_range` wrapper has no native authority and is for
+non-native callers. Composition preserves the complete caller cancellation and identical lower
+keepalive. Local/network AEAD opening rechecks the original scope before storage admission.
+Media head/cache and final scheme response, saved-file inspection/reveal, and progress retain
+that original scope. A later unlock or registry replacement never authorizes old work. Refusal
+after a saved file was already published does not delete that verified file.
+
+Separate whole-job custody admits at most4 read jobs/actor and8/process, without waiting, before
+staging/head/range allocation or durable Keep run/debit. Sleeps and local/network continuations
+retain the owner until all job buffers retire. Actual lower attempts keep their independent4/8
+custody through real transport retirement; upper cancellation does not refund them.
+
+### Owned native confirmation result bridge (22 October continuation)
+
+Trusted Rust only: `ServerActor::submit_voice_confirmation_result(grant, action, &body, tag)`
+and `commit_voice_confirmation_result(...)` forward sealed/opened results to the existing Root
+methods. `VoiceConfirmationBody::from_owner` accepts a trusted prepaid native owner, at most
+128 inline bytes/alignment64 and528 result bytes. It has no public Clone, serialization,
+mutable bytes or extraction API. The caller must fund the actual backing allocation and the
+4KiB fixed actor contribution for its entire lifetime; a size cap does not bound nested heaps.
+Construction invokes the owner's slice callback once, outside all guards. Root receives only
+the cached immutable slice and independently validates actual native grant/action/tag.
+
+A single body Flight refuses concurrent queueing or reuse while a completed output remains
+uncollected. `VoiceConfirmationCompletion::result()` returns small exact outcome metadata;
+the Completion retains its actual original body until collection. Capacity/Stopped does not
+consume the caller's body or permit recomputation. A receipt is never a drainage assertion.
+Native `Phase::result_body` prepays from the original Phase and returns the same Buffer on
+range, foreign-Phase or local capacity refusal. Detached task/physical Session ownership still
+needs its own bounded accounting in the unfinished dispatcher.
+
+`HandoffLoan::retire_confirmation(self)` closes only its ORIGINAL confirmation plan. It is a
+native capability, not a handshake-ID lookup or SDP transfer. Existing input/engine/lower/copy
+owners may still hold the96KiB Workflow. `Phase::close_confirmation` cannot relabel an ordinary
+already-draining close as full-plan retirement. A local phase-drained bit is not full Workflow
+release. This bridge adds no Tauri command, renderer result API or live dispatch.
+
+### Private action framing and native physical collection (22 October continuation)
+
+Native `Incoming::result_body` requires an actually opened Result/Data frame and an exact native
+output range within its plaintext. It pins the original Phase Buffer in VoiceConfirmationBody;
+range, foreign-Phase and local capacity refusals preserve the same allocation, bytes and request
+metadata. The remaining request retains its original one-use reply nonce. This API does not
+resolve purpose/action authority or fund a detached dispatcher task.
+
+The inactive `requests` codec and `voice-ipc-actions.ts` encode version1 plus the complete peer,
+join, key reference and u64 epoch. Input/Close are105 bytes; Begin106 (canonical retry flag);
+Admit157; Result187 plus at most528 output bytes; receipt ACK185; Settle153; FinalACK137.
+Action-bearing requests include original serial/version/input tag. All integers are big-endian;
+browser u64 values are canonical decimal strings, never numbers. Truncation, trailing bytes,
+unknown versions/flags and zero action serial/version refuse. Existing authenticated framing
+supplies operation and RowId; this decoder authenticates nothing. Begin's routing convention and
+full same-header/purpose/action enforcement are still dispatcher work. Receipt digests have a
+closed binary outcome/error encoding, omit retired and must match the retained native receipt.
+An ACK digest never constructs a Root receipt or grants new protocol authority.
+
+Service shutdown permanently closes Registry and physical Session admission, drops its listener,
+and waits for actual original physical owners, including detached work/completed replies found
+through retirement witnesses. No native guards or UIcommit cross that await. One existing
+process-paid service task supervises the fixed64 Session positions sequentially; no extra queue
+or per-Session task is spawned. This adds neither an action command nor browser drainage proof.
+
+`derivation_result::commit(context, route, incoming)` is an inactive trusted-native executor,
+not a Tauri command. It requires the actual already-opened Result/Data request from that Route's
+Session. Complete purpose and action identity resolve against its SAME authenticated header RowId.
+Nonempty output or a wrong empty-output digest refuses before Work. Existing receipt recovery
+takes no additional data/task contribution or grant upgrade. Current actor admission repeats
+the original UI-generation/selection/channel fences and owns UIcommit through actor completion.
+Its detached Worker/Response keeps the original Work,8KiB task contribution and inline request
+until actual collection; Work/task custody drops before the physical Header. `into_parts`
+returns fixed result metadata plus the still-owned original request for its single Control reply.
+No timeout, caller cancellation, receipt or native task completion acknowledges browser drainage.
+This executor has no listener consumer and does not implement the seal/open result path.

@@ -22,6 +22,7 @@
 //! the platform/keystore layer.
 
 pub mod blob;
+mod blob_read;
 pub mod cid;
 pub mod filecrypto;
 pub mod kept;
@@ -32,6 +33,7 @@ pub mod vault;
 use thiserror::Error;
 
 pub use blob::{BlobStore, FsBlobStore, MemoryBlobStore, SealingBlobStore};
+pub use blob_read::{BlobReadPlan, BlobReadResult};
 pub use cid::{Cid, CidHasher};
 pub use filecrypto::{open_file, seal_file, FileManifest, FileRef, MAX_CHUNKS};
 // `FileRef::wrapped_key` is a public field of this type, so a caller cannot read or build a
@@ -59,6 +61,12 @@ pub enum StorageError {
     /// The plaintext (or its fixed-overhead sealed frame) exceeds the caller's limit.
     #[error("blob exceeds declared size limit")]
     BlobSizeLimit,
+    /// The exact retained transfer needs an explicit compare-and-swap Retry grant. Restart,
+    /// another provider, UI refresh and automatic resume never replenish this allowance.
+    #[error("transfer paused: choose Retry to continue")]
+    KeepExhausted,
+    #[error("transfer paused: resume to continue")]
+    KeepWorkExpired,
     /// A sealing/opening error (wrong key or tampered ciphertext).
     #[error(transparent)]
     Crypto(#[from] catcoms_crypto::KeystoreError),

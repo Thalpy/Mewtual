@@ -50,26 +50,34 @@ type State = Record<string, unknown> & {
   folders: string[]; reviews: Array<[string, string]>; toasts: string[]; locked: boolean; uploading: boolean;
   sends: number; sentTexts: string[]; statusPosts: number; folder: string; wikiPage: string; wikiBody: string[];
   replyingTo: string; sending: boolean; statusPosting: boolean;
+  windowCloseInFlight: boolean; uiStateReady: boolean; uiStateLoadGeneration: number; wikiPaneSerial: number;
 };
 
 /** What App's rescope effect does on every scope change: a new key and a new epoch. */
 function move(s: State, scope: string) { s.scope = scope; s.epoch++; }
 
 /** The real App functions under test, each with its real review and posting helpers. */
-const UNDER_TEST = ["embedMedia", "wikiEmbed", "uploadFile", "videoReviewPlan", "reviewForUpload", "composerState", "postFromComposer"];
+const UNDER_TEST = ["canStartUpload", "embedMedia", "wikiEmbed", "uploadFile", "videoReviewPlan", "reviewForUpload", "composerState", "postFromComposer"];
 
 function harness(script: Scripted = {}) {
   const state: State = {
     scope: "open|1|1:general", epoch: 1, draft: "", statusDraft: "", uploads: [], folders: [], reviews: [], toasts: [],
     locked: false, uploading: false, sends: 0, sentTexts: [], statusPosts: 0, folder: "photos", wikiPage: "Home", wikiBody: [],
     replyingTo: "", sending: false, statusPosting: false,
+    windowCloseInFlight: false, uiStateReady: true, uiStateLoadGeneration: 1, wikiPaneSerial: 1,
   };
   let cid = 0;
   const scope = {
+    MAX_UPLOAD_BATCH_FILES: 32,
     get videoEditorScope() { return state.scope; },
     get videoScopeEpoch() { return state.epoch; },
     get activeServerId() { return 1; },
     get locked() { return state.locked; },
+    get windowCloseInFlight() { return state.windowCloseInFlight; },
+    get uiStateReady() { return state.uiStateReady; },
+    get uiStateLoadGeneration() { return state.uiStateLoadGeneration; },
+    wikiPane: () => ({ serial: state.wikiPaneSerial, page: state.wikiPage }),
+    wikiPaneCurrent: (pane: { serial: number; page: string }) => pane.serial === state.wikiPaneSerial && pane.page === state.wikiPage,
     get uploading() { return state.uploading; }, set uploading(v: boolean) { state.uploading = v; },
     get draft() { return state.draft; }, set draft(v: string) { state.draft = v; },
     get statusDraft() { return state.statusDraft; }, set statusDraft(v: string) { state.statusDraft = v; },
@@ -353,6 +361,31 @@ test("an ordinary attach does not send", async () => {
   assert.equal(state.sends, 0);
 });
 
+test("a post-now result cannot notify a replacement or closing UI session", async () => {
+  for (const target of ["chat", "status"] as const) {
+    for (const retire of ["session", "close", "loading"] as const) {
+      for (const outcome of ["sent", "failed", "uncertain"] as const) {
+        if (target === "status" && outcome === "uncertain") continue;
+        const settle = async (s: State): Promise<SendOutcome> => {
+          // A lock/unlock round trip can finish before this delayed result arrives. Testing
+          // only `locked` would then notify a new session about the old session's attachment.
+          if (retire === "session") { s.uiStateLoadGeneration += 2; s.locked = false; }
+          if (retire === "close") s.windowCloseInFlight = true;
+          if (retire === "loading") s.uiStateReady = false;
+          return outcome;
+        };
+        const { state, embedMedia } = harness({
+          review: async () => ({ kind: "original", post: true }),
+          send: settle, post: settle,
+        });
+        await embedMedia(target, items(video("a.mp4"), image("b.png")));
+        assert.equal(state.uploads.length, 1, `${target}/${retire}/${outcome}: no next upload`);
+        assert.equal(state.toasts.at(-1), "Attached a.mp4, sending", `${target}/${retire}/${outcome}: no stale result`);
+      }
+    }
+  }
+});
+
 test("post now does not send once the person has moved on", async () => {
   const { state, embedMedia } = harness({
     review: async () => ({ kind: "original", post: true }),
@@ -393,6 +426,68 @@ test("a wiki page change while the editor is open counts the reviewed file as no
   assert.ok(state.toasts.some((t) => /2 files were not embedded: the page changed/.test(t)), state.toasts.join(" | "));
 });
 
+test("a wiki name reused during review or upload does not receive the earlier pane's attachment", async () => {
+  for (const during of ["review", "upload"] as const) {
+    const replace = (s: State) => { s.wikiPaneSerial += 2; s.wikiPage = "Home"; };
+    const h = harness({
+      review: async (_file, s) => { if (during === "review") replace(s); return { kind: "original" }; },
+      upload: async (_file, _name, s) => { if (during === "upload") replace(s); },
+    });
+    await h.wikiEmbed([video("old.mp4"), image("next.png")]);
+    assert.deepEqual(h.state.wikiBody, [], `${during}: the replacement pane is untouched`);
+    assert.equal(h.state.uploads.length, during === "review" ? 0 : 1);
+  }
+});
+
+test("close, vault loading and a replacement unlocked session stop every pending upload continuation", async () => {
+  for (const path of ["chat", "status", "wiki", "files"] as const) {
+    for (const during of ["review", "upload"] as const) {
+      for (const retire of ["close", "loading", "session"] as const) {
+        const replace = (s: State) => {
+          if (retire === "close") s.windowCloseInFlight = true;
+          if (retire === "loading") s.uiStateReady = false;
+          if (retire === "session") s.uiStateLoadGeneration++;
+        };
+        const h = harness({
+          review: async (_file, s) => { if (during === "review") replace(s); return { kind: "original", post: true }; },
+          upload: async (_file, _name, s) => { if (during === "upload") replace(s); },
+        });
+        const files = [video("old.mp4"), image("next.png")];
+        if (path === "wiki") await h.wikiEmbed(files);
+        else if (path === "files") await h.uploadFile(files);
+        else await h.embedMedia(path, items(...files));
+        assert.deepEqual([h.state.draft, h.state.statusDraft, h.state.wikiBody, h.state.sends, h.state.statusPosts], ["", "", [], 0, 0], `${path}/${during}/${retire}`);
+        assert.equal(h.state.uploads.length, during === "review" ? 0 : 1, "no later file is sent");
+      }
+    }
+  }
+});
+
+test("repeated drops and oversized batches are refused before another review or upload", async () => {
+  let release!: () => void;
+  const held = new Promise<void>(resolve => { release = resolve; });
+  const h = harness({ review: async () => { await held; return { kind: "original" }; } });
+  const first = h.embedMedia("chat", items(video("first.mp4")));
+  await Promise.resolve();
+  await h.wikiEmbed([image("second.png")]);
+  await h.uploadFile([image("third.png")]);
+  await h.embedMedia("status", items(image("fourth.png")));
+  assert.deepEqual(h.state.uploads, [], "only the held first batch owns files");
+  assert.equal(h.state.uploading, true, "a rejected batch cannot clear the active batch's flag");
+  assert.equal(h.state.toasts.filter(text => /current upload/.test(text)).length, 3);
+  release(); await first;
+  assert.equal(h.state.uploading, false);
+  for (const path of ["chat", "wiki", "files"] as const) {
+    const large = harness();
+    const files = Array.from({ length: 33 }, (_, i) => image(`${i}.png`));
+    if (path === "wiki") await large.wikiEmbed(files);
+    else if (path === "files") await large.uploadFile(files);
+    else await large.embedMedia("chat", items(...files));
+    assert.deepEqual(large.state.uploads, []);
+    assert.ok(large.state.toasts.some(text => /32 files/.test(text)));
+  }
+});
+
 test("a Files video goes through the editor and every file lands in the folder it was dropped into", async () => {
   const { state, uploadFile } = harness({ upload: async (_file, _name, s) => { s.folder = "elsewhere"; } });
   await uploadFile([video("clip.mp4"), image("b.png")]);
@@ -413,6 +508,8 @@ test("an announcement is posted once even when post now and Enter overlap, and n
   const posted: string[] = [];
   const scope = {
     statusDraft: "news ![a.mp4](cid:1)", activeServerId: 1, statusPosting: false, error: "",
+    locked: false, uiStateReady: true, windowCloseInFlight: false, uiStateLoadGeneration: 1, viewGeneration: 1,
+    viewCurrent: () => true,
     invokeDebugged: async (_cmd: string, args: { text: string }) => {
       posted.push(args.text);
       await new Promise<void>((r) => { release = r; });
@@ -436,6 +533,75 @@ test("an announcement is posted once even when post now and Enter overlap, and n
   assert.equal(scope.error, "Error: members may not post here");
   scope.statusDraft = "   ";
   assert.equal(await postStatus(), "refused", "nothing to post");
+});
+
+test("status posting refuses close/loading and old replies cannot clear or expose a replacement draft", async () => {
+  for (const retire of ["close", "loading", "session", "view"] as const) {
+    for (const failed of [false, true]) {
+      let release!: () => void;
+      let posts = 0;
+      const scope = {
+        statusDraft: "same text", activeServerId: 1, statusPosting: false, error: "replacement message",
+        locked: false, uiStateReady: true, windowCloseInFlight: false, uiStateLoadGeneration: 1, viewGeneration: 1,
+        viewCurrent: (gen: number, server: number) => gen === scope.viewGeneration && server === scope.activeServerId,
+        invokeDebugged: async () => { posts++; await new Promise<void>(resolve => { release = resolve; }); if (failed) throw "old error"; },
+        errorText: String,
+      };
+      const js = stripTypeScriptTypes(functionText("postStatus"), { mode: "strip" }).trim();
+      const postStatus = new Function("state", `with (state) { return (${js}); }`)(scope) as () => Promise<void>;
+      scope.windowCloseInFlight = true; await postStatus();
+      scope.windowCloseInFlight = false; scope.uiStateReady = false; await postStatus();
+      scope.uiStateReady = true; scope.locked = true; await postStatus(); scope.locked = false;
+      assert.equal(posts, 0, "no native post starts from an unavailable session");
+      const first = postStatus();
+      if (retire === "close") scope.windowCloseInFlight = true;
+      if (retire === "loading") scope.uiStateReady = false;
+      if (retire === "session") scope.uiStateLoadGeneration += 2;
+      if (retire === "view") scope.viewGeneration++;
+      release(); await first;
+      assert.equal(scope.statusDraft, "same text", `${retire}/${failed}: equal text belongs to a different owner`);
+      assert.equal(scope.error, "replacement message");
+    }
+  }
+});
+
+test("emoji upload completion belongs to its original session and form", async () => {
+  for (const retire of ["session", "server", "close", "typing", "none"] as const) {
+    for (const failed of [false, true]) {
+      let release!: () => void;
+      let refreshed = 0;
+      const scope = {
+        newEmojiCode: "cat", newEmojiSize: 24, EMOJI_MAX_SIZE: 128, activeServerId: 1,
+        locked: false, uiStateReady: true, windowCloseInFlight: false, uiStateLoadGeneration: 1, viewGeneration: 1,
+        uploading: false, error: "replacement error", canStartUpload: () => true,
+        viewCurrent: (gen: number, server: number) => gen === scope.viewGeneration && server === scope.activeServerId,
+        addSharedFile: async () => { await new Promise<void>(resolve => { release = resolve; }); if (failed) throw "old upload error"; },
+        refreshFiles: async () => { refreshed++; },
+      };
+      const js = stripTypeScriptTypes(functionText("addEmoji"), { mode: "strip" }).trim();
+      const addEmoji = new Function("state", `with (state) { return (${js}); }`)(scope) as (files: File[]) => Promise<void>;
+      const pending = addEmoji([image("cat.png")]);
+      if (retire === "session") scope.uiStateLoadGeneration += 2;
+      if (retire === "server") { scope.activeServerId++; scope.viewGeneration++; }
+      if (retire === "close") scope.windowCloseInFlight = true;
+      if (retire === "typing") scope.newEmojiCode = "next";
+      release(); await pending;
+      const current = retire === "none" || retire === "typing";
+      assert.equal(scope.newEmojiCode, !failed && retire === "none" ? "" : retire === "typing" ? "next" : "cat");
+      assert.equal(refreshed, !failed && current ? 1 : 0);
+      assert.equal(scope.error, failed && current ? "old upload error" : "replacement error");
+      assert.equal(scope.uploading, false);
+    }
+  }
+});
+
+test("close retires reviews synchronously before the first save or native-close await", () => {
+  const close = source.slice(source.indexOf("appWindow.onCloseRequested(async (event) => {"));
+  const holding = close.indexOf("windowCloseInFlight = true;");
+  const epoch = close.indexOf("videoScopeEpoch++;", holding);
+  const retire = close.indexOf("videoReviews.rescope(videoEditorScope);", holding);
+  const firstAwait = close.indexOf("await studioSave?.();", holding);
+  assert.ok(holding > 0 && epoch > holding && retire > epoch && retire < firstAwait);
 });
 
 // --- Wiring the tests above cannot reach ---------------------------------------------------------

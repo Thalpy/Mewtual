@@ -2,6 +2,13 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { VISUAL_FIXTURE_NOW, visualFixtureResponse } from "./visual-fixture.ts";
 
+test("visual fixture explicitly supports native call controller lifecycle", () => {
+  const candidate = visualFixtureResponse("prepare_call_mapping_controller");
+  assert.equal(visualFixtureResponse("activate_call_mapping_owner", { candidate }), candidate);
+  assert.equal(visualFixtureResponse("end_call_mapping_owner", { owner: candidate }), null);
+  assert.equal(visualFixtureResponse("unmap_call_port", { owner: candidate, grant: "fixture-grant" }), null);
+});
+
 test("visual fixture resumes into a deterministic unlocked server", () => {
   const servers = visualFixtureResponse("resume_session") as Array<{
     server: number;
@@ -78,9 +85,13 @@ test("visual fixture fails loudly for an unsupported native dependency", () => {
 });
 
 test("file fixture separates cached bytes from explicitly kept copies", () => {
+  assert.deepEqual(visualFixtureResponse("get_private_downloads"), []);
+  const health = visualFixtureResponse("get_storage_health") as { referenced_chunks: number; verified_chunks: number; categories: unknown[] };
+  assert.equal(health.verified_chunks, health.referenced_chunks);
+  assert.deepEqual(health.categories, []);
   assert.equal(visualFixtureResponse("file_available"), true);
   assert.deepEqual(visualFixtureResponse("get_kept_files"), {
-    supported: true, allocated_bytes: 0, limit_bytes: 1073741824, files: [], error: null,
+    supported: true, allocated_bytes: 0, limit_bytes: 1073741824, files: [], transfers: [], error: null,
   });
   assert.deepEqual(visualFixtureResponse("get_file_usage"), {
     wiki_pages: [], status_count: 0, chat_count: 0, event_count: 0, pinned: false,

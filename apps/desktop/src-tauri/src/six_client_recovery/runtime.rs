@@ -1,6 +1,8 @@
 //! The headless native adapter: real sealed stores, actor workers, restore, send and close.
 use super::*;
 
+type ObservedCallSignals = Arc<StdMutex<Vec<(String, Vec<u8>)>>>;
+
 pub(super) const PASSWORD: &[u8] = b"six independent recovery vaults";
 
 pub(super) struct Running {
@@ -8,6 +10,9 @@ pub(super) struct Running {
     pub actor: ServerActor,
     pub mesh: MeshHandle,
     pub passes: Arc<AtomicU64>,
+    /// Bounded test-only observations of actual authenticated actor delivery, not submission.
+    pub call_signals: ObservedCallSignals,
+    membership_notices: Arc<[AtomicU64; 2]>,
     task: Option<tokio::task::JoinHandle<()>>,
     drain: Option<tokio::task::JoinHandle<()>>,
     background: Vec<tokio::task::JoinHandle<()>>,
@@ -52,7 +57,7 @@ pub(super) async fn register(
     mesh: MeshHandle,
     net: &ServerNet,
     instance: u64,
-    clock: &ManualClock,
+    clock: &SystemClock,
     index: usize,
 ) -> Running {
     let RestoredActor {
@@ -65,6 +70,7 @@ pub(super) async fn register(
     state.servers.lock().await.insert(
         1,
         ServerEntry {
+            files: keep_session::EntryOwner::new(),
             actor: actor.clone(),
             instance,
             group_id,
@@ -79,9 +85,14 @@ pub(super) async fn register(
             is_dm: false,
             switchboard: false,
             record_seq: net.record_seq,
+            voice: None,
             persist: PersistCounters::default(),
         },
     );
+    // Match native installation: neither the actor handle nor a fixture call supplies unlock
+    // authority. Capture the mounted account and exact registry row through the production seam.
+    let generation = state.ui_session_generation.load(Ordering::Acquire);
+    actor.set_keep_session(keep_session::for_actor(&state, 1, &actor, generation).await);
     assert_eq!(
         persist_server_net(&state, 1, net).await,
         PersistOutcome::Durable
@@ -93,8 +104,29 @@ pub(super) async fn register(
     let mut capture_wake =
         replace_reconnect_capture_signal(&state.reconnect_capture_signals, 1).unwrap();
     let drain_state = state.clone();
+    let call_signals = Arc::new(StdMutex::new(Vec::new()));
+    let observed_calls = call_signals.clone();
+    let membership_notices = Arc::new([AtomicU64::new(0), AtomicU64::new(0)]);
+    let observed_membership = membership_notices.clone();
     let drain = tokio::spawn(async move {
         while let Some(event) = events.recv().await {
+            match &event.event {
+                AppEvent::MembersChanged { .. } => {
+                    observed_membership[0].fetch_add(1, Ordering::Release);
+                }
+                AppEvent::RolesUpdated => {
+                    observed_membership[1].fetch_add(1, Ordering::Release);
+                }
+                _ => {}
+            }
+            if let AppEvent::CallSignal { from, payload, .. } = &event.event {
+                let mut observed = observed_calls.lock().unwrap();
+                assert!(
+                    observed.len() < 64,
+                    "native call observation bound exceeded"
+                );
+                observed.push((from.clone(), payload.clone()));
+            }
             note_event_for_persistence(&drain_state, 1, instance, &event.event).await;
             // Match the production event forwarder's capture wake; never await the actor here.
             if matches!(
@@ -133,7 +165,7 @@ pub(super) async fn register(
     let seen_passes = passes.clone();
     let cadence_state = state.clone();
     let cadence_actor = actor.clone();
-    let cadence_clock = clock.clone();
+    let cadence_clock = *clock;
     let changes = state.network_changes.subscribe();
     let cadence = tokio::spawn(async move {
         discovery_timer::run(
@@ -178,6 +210,8 @@ pub(super) async fn register(
         actor,
         mesh,
         passes,
+        call_signals,
+        membership_notices,
         task: Some(task),
         drain: Some(drain),
         background: vec![persist, capture, cadence],
@@ -185,6 +219,28 @@ pub(super) async fn register(
 }
 
 impl Running {
+    pub fn membership_notices(&self) -> (u64, u64) {
+        (
+            self.membership_notices[0].load(Ordering::Acquire),
+            self.membership_notices[1].load(Ordering::Acquire),
+        )
+    }
+    pub async fn expect_membership_notices_after(&self, before: (u64, u64)) {
+        bounded(
+            "actual member and role notifications after quiet recovery",
+            async {
+                loop {
+                    let now = self.membership_notices();
+                    if now.0 > before.0 && now.1 > before.1 {
+                        break;
+                    }
+                    SystemClock.sleep(Duration::from_millis(20)).await;
+                }
+            },
+        )
+        .await;
+    }
+
     pub async fn close(mut self) {
         // Production workers remain active during the native barrier. A contended lease must
         // resume the actor and report busy; retrying that result keeps the real close race here.
@@ -221,21 +277,32 @@ impl Running {
     }
 
     pub async fn history(&self) -> History {
-        let messages = bounded(
-            "native message projection",
-            self.actor.messages(channel_id("general")),
-        )
-        .await;
+        self.history_in(channel_id("general")).await
+    }
+
+    /// Observe an automatically discovered document without opening it through the UI command.
+    /// Recovery must retain and serve its original log even when this channel was never selected.
+    pub async fn history_in(&self, channel: u128) -> History {
+        let messages = bounded("native message projection", self.actor.messages(channel)).await;
         let mut history = History::new();
         for message in messages {
             assert!(!message.id.is_empty(), "accepted messages have stable IDs");
             assert!(
                 history
+                    .messages
                     .insert(message.id, (message.author, message.text))
                     .is_none(),
                 "duplicate message ID"
             );
         }
+        // The snapshot is a read-only observation of the real actor's log. No restored/private
+        // document or artificial operation is supplied to any running client's recovery path.
+        let snapshot = zeroize::Zeroizing::new(
+            bounded("native original signed history", self.actor.snapshot())
+                .await
+                .unwrap(),
+        );
+        history.operations = super::signed_history::channel_operations(&snapshot, channel);
         history
     }
 
@@ -273,8 +340,8 @@ impl Running {
         }
     }
 
-    pub async fn send(&self, token_number: u128, text: &str) -> String {
-        let channel = channel_id("general").to_string();
+    pub async fn send_in(&self, channel: u128, token_number: u128, text: &str) -> String {
+        let channel = channel.to_string();
         let token = hex::encode(token_number.to_be_bytes());
         let context = hex::encode(
             bounded("send authoring context", self.actor.durable_send_context())

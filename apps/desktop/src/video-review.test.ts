@@ -77,3 +77,19 @@ test("every opening gets a fresh id, even for the same file", () => {
   void q.request(same, { index: 1, count: 1 }, "s", "chat");
   assert.notEqual(q.current!.id, first);
 });
+
+test("review overflow retains only sixteen requests and teardown settles every accepted one", async () => {
+  const { q } = queue();
+  const requests = Array.from({ length: 40 }, (_, i) => q.request(file(`${i}.mp4`), { index: 1, count: 1 }, "old", "chat"));
+  try {
+    assert.equal(q.waiting, 15, "the open request and fifteen waiters are the full inventory");
+    assert.deepEqual(await requests[16], { kind: "skip" }, "overflow does not wait or retain its file");
+  } finally {
+    q.rescope("closed");
+  }
+  assert.equal(q.current, null); assert.equal(q.waiting, 0);
+  assert.ok((await Promise.all(requests)).every(result => result.kind === "skip"));
+  const next = q.request(file("after.mp4"), { index: 1, count: 1 }, "new", "chat");
+  q.finish(q.current!.id, { kind: "original" });
+  assert.deepEqual(await next, { kind: "original" });
+});

@@ -13,6 +13,7 @@ thiserror.workspace = true
 blake3 = "1"
 hex = "0.4"
 zeroize = "1"
+tokio = { workspace = true, features = ["sync"] }
 
 [dev-dependencies]
 rand_chacha = "0.3"

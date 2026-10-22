@@ -46,6 +46,20 @@ pub use epoch::{
 };
 pub use op::{SealedOp, SignedOp};
 
+/// Decode a bounded observer projection of an already parsed/authenticated legacy change. Raw
+/// bytes, action count and expanded RLE cells/predecessors/strings are capped BEFORE expansion.
+/// This does not change historical operation admission; callers must close their ephemeral
+/// authority on refusal and must never use this as an alternate signature/semantic validator.
+pub fn decode_change_projection(
+    change: &automerge::Change,
+) -> Result<automerge::ExpandedChange, ReplError> {
+    if change.raw_bytes().len() > 64 * 1024 || change.len() > 512 {
+        return Err(ReplError::EpochBound);
+    }
+    bounded_change::check_projection(change.raw_bytes(), 512)?;
+    Ok(change.decode())
+}
+
 /// Errors from the replication engine.
 #[derive(Debug, Error)]
 pub enum ReplError {
@@ -58,6 +72,10 @@ pub enum ReplError {
     /// An op's inner signature did not verify.
     #[error("op signature is invalid")]
     BadSignature,
+    /// A legacy change tried to use another device's modern 32-byte Automerge writer namespace.
+    /// Old implementation-generated actors remain compatible; see the admission rule in `doc`.
+    #[error("op writer does not match its signed author")]
+    ActorMismatch,
     /// An op was for a different document than the one ingesting it.
     #[error("op is for a different document")]
     WrongDocument,

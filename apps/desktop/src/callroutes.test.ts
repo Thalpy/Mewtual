@@ -5,6 +5,7 @@ import {
   mappableIcePort,
   mappingAddressPolicy,
   routerMappedCandidate,
+  mappedIceIsCurrent,
   shouldSignalHostCandidate,
 } from "./callroutes.ts";
 
@@ -20,6 +21,23 @@ const host = {
   sdpMLineIndex: 0,
   usernameFragment: "abcd",
 };
+
+test("pending mapped ICE binds the candidate's exact current media generation", () => {
+  const sdp = (audio: string, video: string) => `v=0\r\na=ice-ufrag:session\r\nm=audio 9 UDP/TLS/RTP/SAVPF 111\r\na=mid:0\r\na=ice-ufrag:${audio}\r\nm=video 9 UDP/TLS/RTP/SAVPF 96\r\na=mid:1\r\na=ice-ufrag:${video}\r\n`;
+  const before = sdp("old", "video"), after = sdp("new", "video");
+  assert.equal(mappedIceIsCurrent({ ...host, usernameFragment: "old" }, before, after), false);
+  assert.equal(mappedIceIsCurrent({ ...host, usernameFragment: "new" }, before, after), true);
+  assert.equal(mappedIceIsCurrent({ ...host, usernameFragment: "video", sdpMid: "1", sdpMLineIndex: 1 }, before, after), true);
+  assert.equal(mappedIceIsCurrent({ ...host, usernameFragment: "video", sdpMid: "missing" }, before, after), false);
+  assert.equal(mappedIceIsCurrent({ ...host, usernameFragment: "new", sdpMid: null }, before, after), true);
+  assert.equal(mappedIceIsCurrent({ ...host, usernameFragment: null }, before, after), false);
+  assert.equal(mappedIceIsCurrent({ ...host, usernameFragment: null }, before, before), true);
+  assert.equal(mappedIceIsCurrent(host, before, null), false);
+  assert.equal(mappedIceIsCurrent(host, null, null), false);
+  assert.equal(mappedIceIsCurrent({ ...host, usernameFragment: null }, null, null), false);
+  const session = "v=0\r\na=ice-ufrag:session\r\nm=audio 9 UDP/TLS/RTP/SAVPF 111\r\na=mid:0\r\n";
+  assert.equal(mappedIceIsCurrent({ ...host, usernameFragment: "session" }, session, session), true);
+});
 
 test("only a host UDP candidate with a port is worth a router mapping", () => {
   assert.ok(mappableIcePort(host));
@@ -128,17 +146,17 @@ test("a candidate's address decides whether and what to claim to the router", ()
   assert.deepEqual(mappingAddressPolicy("example.net"), { map: false, claim: null });
 });
 
-test("the call bar says which half of the path is missing", () => {
+test("the call bar distinguishes offered router candidates from successful connections", () => {
   assert.equal(callBarStatus(0, 0, false, 0), "waiting for others…");
   assert.equal(callBarStatus(2, 2, false, 0), "2 connected");
   assert.equal(callBarStatus(2, 1, false, 0), "1/2 · connecting…");
-  // A failure with a mapped route on offer blames the far side; without one, this side.
+  // Neither mapped nor unmapped state establishes why ICE failed or rules out host/STUN routes.
   assert.equal(
     callBarStatus(2, 1, true, 1),
-    "1/2 connected · direct route offered; their side may need TURN",
+    "1/2 connected · router-mapped candidate offered; check TURN settings",
   );
   assert.equal(
     callBarStatus(2, 1, true, 0),
-    "1/2 connected · no direct route; set a TURN server or allow router mapping",
+    "1/2 connected · no router-mapped candidate offered; check TURN settings",
   );
 });

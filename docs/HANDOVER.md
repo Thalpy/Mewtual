@@ -1,5 +1,1663 @@
 # Mewtual; Handover
 
+## Validated proof retention and automatic cleanup retry (22 October)
+
+Frozen runtime `edf923c107f3d11bf635a3e58a04e0b673edd7c1` passed the current native/frontend/static/build gates.
+Publication runtime/build inputs match it exactly; source-specific older evidence is preserved.
+The native/browser handoff remains incomplete and final dispatch remains disabled.
+Browser recovery requires its original owner to remain current. Native history survives End/lock,
+but a retired browser owner receives retired; authenticated browser cleanup exchange after End
+remains unfinished.
+
+Native final-intent compaction now retains the same already-paid Phase/original Root observer.
+Local compaction drops Live outside guards before requiring Root readiness. Channel closure and
+independent history GC retain unready proof; ordinary continuation and ClosedPending do not
+invent whole Workflow retirement. Existing Row/Phase/codec/listener caps are unchanged.
+
+Browser v12 retries exact setup/channel cleanup after an actual refused RPC using one original
+paid driver, one injected-Clock timer and the same availability Signal. Stale callbacks, early
+firing and large clock jumps cannot produce duplicate work or missed-tick bursts. Pending RPCs
+never overlap; actual SDK/read/linked-chain drainage precedes cleanup. General action retry
+behavior is unchanged. Old retained brokers through v11 refuse adoption. This cadence does not
+implement authenticated post-End final exchange, issuance or FinalACK.
+
+Validation, zero failures:
+
+- Native: **671 library plus five ACL tests passed**
+  (513.28s gate), including all **199 focused handoff tests**
+  (4.88s tests/56.53s focused gate). Formatting (8.8s), strict
+  all-target/all-feature Clippy (78.61s) and separate check
+  (51.84s) pass. No memory/copy/resource cap was raised.
+- Frontend: **2456 passed** (79.25s); Svelte zero errors/warnings
+  (63.98s), production build (45.81s)
+  and all ten Edge flows (57.28s) pass. Focused139/139 passes1.95s.
+- Root: **3,254 passed**, 24 existing ignored, 59 summaries on `e560d319fa72727b3298f96396307cfef4ea2ad1`
+  (2781.50s). Its Root workspace/dependency inputs are byte-identical to this native/browser-only
+  follow-up. The completed Root run and static/ambient/dependency policy retain that provenance;
+  Root validation retains that exact source and command record.
+- Development build (83.92s), actual startup
+  (6.09s), packaged build (122.72s)
+  and real packaged Windows document/reload/public-metadata/exact-CSP-CORS/normal-close probe
+  (2.94s) pass. Binary SHA256: `9919a4c1c9ae3e568a025fb3ec24bff121371dc0371f7a3cb53bf37895eafa2d`.
+
+Logs: frozen target/voice-final-proof-gates.jsonl, voice-final-proof-root-provenance.json,
+voice-final-proof-focused.jsonl and voice-final-proof-front-focused.jsonl. All heavy Cargo
+jobs ran serially. Actual-diff adversarial design/review/re-review has no remaining actionable
+blocker/high/medium. Initial focused failures are retained: native198/1 dropped the real
+LocalJoin revocation owner; browser137/1 expected one aggregate timer for two active channels.
+Corrected tests preserve production checks and distinguish the independent owners/deadlines.
+The first development build stopped with disk-full error112 on M:, not a code failure. Twelve
+older incremental cache folders (23.42GiB logical/3,381 files) were moved intact to
+G:/Mewtual-build-cache/CatComs-native-incremental-20261022 and verified; original paths remain
+junctions. Relocation preserved cache data and targeted only M: and G: paths. Only the failed build and subsequent
+gates were resumed. The relocation manifest is target/native-cache-relocation-summary.json.
+
+Still required: factory/input/admission/result/receipt ACK/settlement/phase/final adapters and
+dispatch, authenticated post-End final issuance/ACK/retry retaining original Session keys,
+normal Actor/MLS pair success and combined native/WebView action acceptance. History remains
+read-only Status9/Begin8(false). Local Phase drainage is not96KiB Workflow retirement. The8KiB
+browser wrapper inventory is structural, not arbitrary JS/SDK/GC heap, RSS or caller retention.
+
+The packaged probe requests no unlock/credentials and proves no selected crypto/action delivery
+or media. One desktop only: independent physical audio/network and Linux/macOS WebView evidence
+remain unavailable. Live V2/legacy isolation, member relay, combined rollout/rollback and separate
+native/experiment dependency audits remain open. Current hosted-head acceptance is unverified;
+the recorded hosted exact-union failure is not dismissed by local passes. Docker daemon is
+unavailable; no container pass is claimed. Separate upload fixes still require Gate7 integration.
+
+## Active final-proof retention and cleanup retry candidate (22 October)
+
+Isolated `target/communication-final-proof-worktree` follows frozen `e560d319`. Native
+compaction retains the same already-paid Phase only when final confirmation closure was
+requested. Its original affine Root observer survives caller loss and local compaction;
+ordinary continuation retains no Phase. No Action/Input/Workflow or fresh reservation is
+retained. `ResolvedRow::confirmation_status` is a native-only snapshot, including after
+compaction. Unknown/orphan rows remain errors; ClosedPending cannot invent Root retirement.
+
+Channel closure and independent history GC require a requested final proof to be ready.
+Compaction itself drops Live outside native locks before requiring Root readiness. Existing
+Row/Phase/codec/listener payments and layout limits are unchanged. Seven native regressions
+cover full-pool compaction, actual late Root input retirement, concurrent compaction, ordinary
+and orphan rows, independent real-registry collection and both actual bootstrap finish paths.
+All **199 focused native handoff tests pass** (4.88s tests;56.53s gate), including
+existing Row/Phase/codec/listener layout guards. Complete current native/frontend/static/build/startup gates now pass; see the source-specific evidence above.
+
+Browser broker v12 retries exact setup/channel cleanup after a rejected native RPC using one
+injected-Clock timer in the original paid driver. Timer and availability resolve the same
+Signal; stale callbacks cannot wake a later wait, and a large clock jump causes one retry.
+Pending RPCs never overlap. SDK/read cancellation and linked-chain drainage still precede
+cleanup. Ordinary action retries remain availability-driven. Old retained brokers through v11
+refuse HMR adoption. The existing 8 KiB structural inventory includes the cleanup wrapper;
+it does not measure arbitrary JavaScript/SDK/GC heaps or RSS.
+
+Focused browser/request/reply checks pass **139/139** (1.95s). One earlier assertion expected
+one aggregate timer for two channels; it now distinguishes cleanup from the other channel's
+IO deadline. The log is retained. The previous candidate's full Root suite passed **3,254**,
+zero failures, 24 existing ignored. Root workspace inputs/dependencies are unchanged here.
+Actual-diff adversarial design/review/re-review found no blocker/high/medium; final gates
+remain pending. Initial native focus198/1 is retained: that test dropped LocalJoin and correctly
+revoked the call lease; the corrected test keeps that real owner alive without weakening checks.
+
+Final wire dispatch remains disabled. This change does not implement authenticated post-End
+final exchange, issuance/ACK, action adapters or normal Actor/MLS/WebView action acceptance.
+The future final driver must compose its original Session/keys with this cleanup cadence.
+Live V2/RTC, relay, combined and independent physical acceptance remain unfinished.
+
+## Validated native/browser history checkpoint (22 October)
+
+Frozen Alpha runtime `e560d319fa72727b3298f96396307cfef4ea2ad1` passed all required local gates.
+Earlier publication `f42c8e5cbd8f40b6376c5d070d2ecf2901cebd18` has runtime/build inputs matching
+that source. These Alpha native/frontend/build gates predate Beta and do not validate Beta's
+changed ledger/cleanup code. The later source-specific section records Beta's own gates.
+This remains a partial handoff: Status9 and existing-history Begin8(false), no effect dispatch.
+
+Complete validation, zero failures:
+
+- Root: **3254 passed**, 24 existing ignored across 59 summaries
+  (2781.5s). New retirement sentinels are present in the rebuilt binary.
+  Formatting, strict all-target/all-feature Clippy, ambient scanner and dependency policy pass.
+- Native: **664 library plus five ACL tests passed**
+  (567.23s gate); all192 focused handoff tests are included.
+  Separate native check, strict all-target/all-feature Clippy and formatting pass.
+- Frontend: **2447 passed** (72.0s), Svelte check zero errors/
+  warnings (65.22s), production build
+  (52.92s) and all ten Edge flows
+  (64.75s) pass. Focused history/request/reply130/0 also passes.
+- Development build (235.83s), actual startup
+  (3.8s), packaged build
+  (139.8s) and real packaged Windows document/reload/
+  public-metadata/exact-CSP-CORS/normal-close probe (2.86s) pass.
+  Packaged binary SHA256: `7060f6e924865f8ea660399fbf9e40f54830e7acd59b5700f3df26d4af7ca9f3`.
+
+Exact commands/source/times: frozen target/voice-history-gates.jsonl and
+voice-retirement-static.jsonl. Heavy Cargo jobs ran serially. Read-only adversarial design/
+actual-diff review and re-review have no remaining blocker/high/medium. Failed prototype/fixture/
+compile attempts remain recorded; tests and limits were preserved. Docker daemon unavailable;
+no container pass claimed. Hosted acceptance for the current head remains unverified.
+
+Historical lookup recovers the SAME purpose/Row/action/result after End/lock without new
+factory/grant/Work/Phase/task or replacement keys/counters. Browser v11 uses the exact retained
+owner/handle and established Session, coalesces identical query Promises and retains real SDK/
+read/cancel custody through End. History refusal cannot acknowledge setup, close the channel or
+refund payment. Shared242B status/3B refusal vectors pin exactu64s, flags/padding and original
+receipt identity. Actual Derive reports Derived only; actor errors do not fabricate Rejected.
+
+At Alpha publication `f42c8e5c`, the original Workflow observer/native snapshot distinguished
+local16KiB return from96KiB variable retirement, but compaction could still drop its proof.
+Missing proof never meant retirement. Retaining the same paid final-intent Phase and adding
+bounded cleanup cadence were reviewed designs at that Alpha checkpoint. Beta implements them;
+its separate source-specific section records current implementation and validation status.
+
+Still unfinished: factory/input/admission/result/ACK/settlement/phase/final adapters and dispatch,
+final-proof retention/issuance/retry coordination, normal production Actor/MLS-pair success and
+combined native/WebView action acceptance. Retired browser cleanup needs a narrow original-
+Session continuation, retaining framing keys through final delivery before collection.
+The8KiB browser inventory is structural known payload/wrapper accounting, not arbitrary JS/SDK/
+GC heaps, RSS or caller-retained results. Native idle is not browser SDK/Workflow proof.
+
+The packaged probe requests no unlock or credentials and proves no selected-key/action delivery,
+SDP/RTC or physical audio/network acceptance. One desktop only; independent multi-network and
+Linux/macOS WebView acceptance remain unverified. Live V2/legacy isolation, relay, combined
+rollout/rollback and separate native/experiment dependency-audit findings remain open. The
+recorded hosted exact-union failure is not dismissed by local passes.
+
+## Retained native/browser history recovery candidate (22 October)
+
+The active isolated dispatch checkout follows unpublished39fb329c. Production native ingress
+now admits only the original authenticated Status9 and existing-history Begin8(retry=false).
+The latter resolves the full decrypted purpose against the SAME native grant allocation,
+executor and lease, with zero logical header. It can recover the authenticated original RowId
+when a Begin reply was lost, including after End/lock/grant destruction. It cannot create or
+rearm a factory, obtain a grant/Work/Phase or authorize an actor effect. Unknown history is a
+bounded refusal, never absence or Workflow drainage. Status9 retains its exact setup grammar;
+history does not implicitly acknowledge setup. A server without original Context stays Status-only.
+
+The retained browser broker's v11 recoverChannelHistory requires its EXACT owner allocation
+and channel handle BEFORE callbacks, established original keys/bootstrap, and canonical purpose
+and expected RowId (null only for first ID recovery). One query occupies the original driver
+and shared execution lane. Identical queries return the same stored promise; another query
+returns busy and Status during history returns uncertain, without a second flight/queue.
+No constructor/setup/derive/ordinary admission path exists in history. All TX/RX, keys, physical
+positions and deadline/cancellation ownership remain original. End can return retired early
+while the SAME query/driver stays paid until actual SDK/read cancellation and cleanup return.
+
+Shared Rust/TypeScript vectors pin the fixed242-byte status and3-byte refusal grammar, exact
+u64 strings, purpose/row identity, receipt digest and canonical flags/padding. Authenticated
+malformed bodies still spend RX. History closed/stopped/error are query refusals, never channel
+closure, setup ACK, Root readiness, new authorization or refund. localDrained means ONLY local
+Phase drainage; it is not the separate96KiB Workflow proof. Native Derive history returns only
+its actual Derived receipt; an actor authorization error is no receipt, not fabricated Rejected.
+The generic codec's other outcome variants do not imply their native adapters are implemented.
+
+Current focused native handoff PASSED192/0 (4.63s tests/98.84s gate), including full process/group
+pressure, real TCP after End/lock, malformed/refused/replayed/truncated requests and unchanged
+Status9. Exact adapter tests include actual accepted LocalJoin output and actual actor rejection
+with lost native observation; the accepted fixture is NOT normal production MLS-pair success.
+Browser/request/reply focused130/0 passes (1.56s), including coalescing after plaintext is
+zeroed while sign/decrypt is parked. Svelte check PASSES with zero errors/warnings (69.16s).
+Root/native formatting, strict all-target/all-feature Clippy, ambient/deny and native check
+pass. Read-only design/actual-diff review has no remaining blocker/high/medium; the8KiB
+inventory limitation is explicit. Fresh complete-suite/build/startup gates remain pending.
+Logs: target/voice-action-dispatch-native-focus-16.log, voice-action-dispatch-focused.jsonl,
+voice-history-front-focused-5.log, voice-history-front.jsonl and voice-retirement-static.jsonl. Failed fixture/compile attempts
+remain recorded and are not passing evidence. Header/codec/router/task caps remain unchanged.
+Browser payload accounting includes one bounded query and known concrete wire/metadata copies
+inside8KiB Control; it does not establish allocator/SDK/GC heap bounds or arbitrary caller retention.
+
+Still unfinished: actual factory/input/admission/result/ACK/settle/phase/final dispatch and browser
+adapters, final-proof capture across native compaction, bounded coordination, normal proven-pair
+Actor/browser success and complete delivery acceptance. The published fully gated PR48 remains
+7dfbb797. Live V2/RTC/isolation, relay and combined/physical acceptance have separate owners and
+remain open; only one physical desktop is available. Sections below retain checkpoint-specific
+history and do not supersede this current source/evidence scope.
+
+## Original Workflow retirement and native snapshot candidate (22 October)
+
+Unpublished commit39fb329c in target/communication-action-dispatch-worktree followscc7274b7.
+HandoffLoan::retire_confirmation_observed consumes the ORIGINAL loan and returns a non-Clone
+snapshot witness retaining only its paid fixed binding. Ordinary loan Drop still returns an
+individual16KiB phase to the OPEN96KiB Workflow; successful Derive continuation must use that
+ordinary path. Final retirement closes the whole original plan. The unit API remains compatible.
+
+A LAST Workflow field publishes readiness only after actual variable-capacity fields drop.
+Weak strong_count zero, End, missing history and returned local copies never prove this.
+Delayed actual input/lower/copy custody keeps readiness false. No waiter/watch/Notify allocation
+or scheduling guarantee exists. Two redundant Resources Arcs are replaced by borrowing the EXACT
+original pool through the immutable metadata credit; all identity checks remain intact.
+Root focus4 PASSED30/0fail,154.34s gate, including five new adversarial custody/pool regressions.
+Measured retained graph2040/2048 and caller witness8/8 preserve both original caps. Failed
+layout/watch prototypes remain recorded in focus1-3 and were never accepted as passing evidence.
+
+The inactive native Phase stores the SAME witness in original paid State before local completion.
+ConfirmationStatus separates NotRequested, Closing, Draining and Drained; is_drained remains ONLY
+local16KiB loan return. Snapshot reads invoke no grant, Clock, Root callback, task or allocation.
+Repeated closes cannot replace the witness; ordinary-close-wins refuses later relabelling.
+Focused native11 PASSED179/0fail,4.22s tests/292.38s gate; original native2KiB
+phase metadata and12KiB codec layout guards pass. Root strict all-target/all-feature Clippy
+PASSED66.92s, ambient0.98s, cargo deny11.30s; native strict Clippy48.92s and check48.16s
+pass. Root/native formatting and git diff --check pass. Exact commands/results are in
+target/voice-retirement-static.jsonl; these do not replace pending full-suite gates.
+Read-only design/actual-diff review of39fb329c has no actionable findings. The subsequent
+read-only history integration is described above; effect opcodes remain disabled.
+
+Existing ledger compaction may drop Phase/witness. Missing or compacted Phase is NOT full-variable
+retirement proof. Final-proof capture/transfer, bounded native retry coordination and browser
+effect-adapter wiring remain unfinished. Fresh complete
+root/native/build/startup/probe gates remain pending until the handoff implementation is coherent.
+No new live V2/SDP/RTC, relay, combined or independent physical acceptance follows.
+
+## Active explicit native Pending closure (22 October)
+
+Unpublished current work in target/communication-action-dispatch-worktree follows04803e07.
+The inactive ClosePhase adapter validates the actual opened Session, SAME header RowId and
+full original purpose through the actual native ledger. It takes no live grant, task, Clock
+or new variable loan. Actual broker SDK/RPC drainage remains a protocol precondition; AEAD
+alone cannot establish it. Production ingress remains authenticated Status only.
+
+Pending now has explicit Open/Closing/Closed { actor_handoff } metadata. Closing owns the
+actual PreparedPhase/selected values outside all native guards; only their actual destruction
+publishes Closed. Begin cannot restart Closing/Closed. Slot, serial and actual Row pointer are
+validated under Index -> State even for retained native handles, including repeated closure
+after proven-unstarted removal and slot reuse. ClosedPending is separate from Body::Drained:
+action/receipt absent, engine.settled=false, acknowledged=false and drained=false. Native
+local preparation closure must never be reported as Root absence/settlement/Workflow drainage.
+wait_compacted can return this explicit local disposition; inspect it rather than interpreting
+success as attached-Phase compaction. Physical history GC accepts either real Drained or
+ClosedPending, still requiring actual Session proof, dead lease and last indexed owner.
+
+Focused native handoff PASSED177/0fail (4.33s tests/93.30s gate); strict all-target/all-feature
+native Clippy PASSED42.09s, native fmt --check and git diff --check pass. Actual-diff adversarial
+review/re-review has no remaining findings after stale/orphan-handle correction. Tests cover
+both Closing/Begin orderings, repeated orphan use, exact/noncanonical/foreign MAC+AEAD requests,
+lock/unlock, End without grant, original uncollected factory/response owners, full2MiB pressure
+and historical local-closure status. Original caps are unchanged: codec10172/12288 (whole
+Pending response/retirement graph and fixed scratch counted), router19984/32768, result task
+4576/8192. Focus10 records hashes of all three then-new files in its JSONL provenance.
+
+Fresh complete root/native suites and build/startup/probe remain pending until the remaining
+handoff work is coherent. Do not call the unpublished changes fully validated or live-enabled.
+Next: authenticated factory/input/admission/result/receipt ACK/settlement/phase/final reply
+dispatch, actual browser adapter, channel unlink proof and normal proven-pair Actor success.
+The published fully validated checkpoint is still PR48 head7dfbb797. Only one physical desktop
+is available; live V2/RTC/relay/combined and independent physical acceptance are not established.
+
+## Active native action cleanup (22 October)
+
+Published PR48 remains7dfbb797 (fully validated ownership checkpoint, equivalent tree to
+4a606d70 plus c666f633 evidence). New local work is isolated in
+target/communication-action-dispatch-worktree, based on4a606d70: a8aa06b7 physical shutdown/
+in-place result transfer/inert grammar, f08db307 inactive derivation executor/original boxed
+header scratch, followed by the current reviewed native history collector and closure guard.
+Do not publish a8 alone: its production DeviceId import is corrected by f08 without adding a
+dependency. Combine those two when integrating. No active opcode is enabled by this work.
+
+Current focused native handoff run PASSED168 tests, zero failures (4.06s tests/75.05s gate),
+including36 completed generations on one actual resource pool, foreign equal-label isolation,
+late physical/public/metadata owners, full ordinary-group/2MiB process pressure and both
+explicit closure variants against an actual uncollected derivation Response. Strict native
+all-target/all-feature Clippy passes (34.50s); native formatting and git diff --check pass.
+Read-only adversarial actual-diff review and re-review have no remaining findings. Logs and
+exact commands: target/voice-action-dispatch-focused.jsonl and native-focus-8.log. Earlier
+failed import/fixture/layout runs are preserved and never counted as passes. The new fixture
+retains the actual LocalJoin because losing its PacketLedger intentionally revokes the lease;
+production pool binding and revocation checks were not changed to make the tests pass.
+
+Bootstrap now emits a private original-Row physical-collection witness outside its guards.
+The action ledger records only matching native grant allocation/executor/lease. Reclaiming
+requires actual Body::Drained, that proof, dead lease and sole indexed Row ownership. The
+proof survives late handles; every collection hook sweeps even without a new witness. Both
+serials remain monotonic. Explicit setup/final closure checks all original action records
+are compacted under the SAME UI commit used for factory admission, before closing Control.
+Capacity preserves the cleanup route and owners. Pending/Live records are not evicted.
+
+Unpublished current code has NOT completed fresh full root/native suites or native rebuild/
+startup/probe gates. Those must run once the remaining handoff implementation is coherent,
+with one heavy Cargo job at a time. Frontend has2367 tests/check/build/ten flows passing at a8;
+no TypeScript changed since. The earlier published ownership full gates retain their own
+provenance and must not be described as fresh validation of this new native code.
+
+Native/browser handoff remains incomplete: production listener serves Status only. Next is
+explicit truthful Pending closure, authenticated factory/input/admission/result/receipt ACK/
+settlement/phase close/final delivery, browser adapter and proven-pair Actor success. Pending
+may hide a published Root pair; native metadata cleanup must never invent Root settlement or
+full96KiB Workflow drainage. Root lower/input owners remain independent. Live V2/RTC/isolation,
+relay and combined acceptance have other owners; one desktop cannot establish independent
+physical audio/network acceptance. Preserve all worktrees/caches and unrelated Gate7 changes.
+
+## Native weak-context and lost-reply checkpoint (22 October)
+
+Frozen runtime source4db3f8249ef7960e11cc40febd2b81f6c3a6018e in
+target/communication-browser-action-worktree follows published PR48 checkpoint8773ac6b.
+The native/browser handoff remains this agent's assignment. This checkpoint does not enable
+an action opcode, live V2, SDP/ICE/RTC or member media relay.
+
+The paid application IO state now holds nine Weak references to the actual native owners.
+Per-call upgrade is all-or-nothing; ordinary commands and the native factory borrow the SAME
+UI session gate, real store, atomics and original commit mutex. Broad native state drops outside
+guards before detached work, which retains only actual actor/selected/grant/commit/work/payment.
+Factory selection accepts the original native Arc; pure early/final Coordinator checks cannot
+materialize a local snapshot when rejecting a foreign equal-label owner.
+
+Weak references retain original inline Arc allocations after value destruction. The fixed IO
+payment increased from24KiB to32KiB, within the same2MiB process limit. The current Windows
+layout is32,256 bytes, including11,352 bytes for weak-retained allocations and context wrappers;
+tail padding is measured using the pinned Arc layout. Context drops before its payment.
+Other platform layouts continue to refuse if the measured peak cannot fit.
+
+Ledger::lookup_original now recovers the same paid native row after a lost Begin reply supplied
+no RowId. It checks original grant allocation/executor/lease/full purpose, runs no Clock/charge/
+grant upgrade/factory action, and remains usable after End and actual grant destruction.
+None means no retained matching row, never drainage. This historical lookup is separate from
+currently authorized retry: idle handed-off Pending work still resumes on its original row/serial.
+No caller or transport uses historical metadata as permission to re-arm a factory.
+
+Focused current gates: all123 native handoff tests pass (2.06s); the preceding172 voice-filter
+tests pass before the three additional lookup tests. Nine actual native command-security tests
+and the full2,348 frontend tests pass (62.24s). Actual-diff adversarial design/review/re-review
+has no remaining findings. The earlier24KiB layout refusal and test-only Context name collision
+remain in failed logs; corrected focused runs and measured-layout check pass.
+The restricted browser-flow attempt lost CDP before flow assertions; the unchanged gate was
+rerun with normal Windows process access. Failed attempts are retained, never counted as passes.
+
+Complete fresh native passes600 tests including five ACL tests, zero failures
+(512.28s gate). Check27.17s, strict all-target/all-feature
+Clippy40.94s, format0.84s and the fresh Root construction
+scanner0.77s pass. Fresh complete Root passes3233 tests, zero failures,
+24 existing ignored across59 result summaries (1920.34s). Root Rust/Cargo/
+dependency-policy inputs remain byte-identical to validated f1c58519; prior Root static/ambient/
+dependency checks retain their own provenance. Native and Root full suites ran serially.
+
+Fresh frontend Svelte check57.41s has zero errors/warnings; production
+build45.14s and all ten rendered flows55.89s pass.
+Development executable build131.47s, actual startup3.62s,
+packaged custom-protocol debug build119.19s and actual packaged Windows
+document/reload/CSP/CORS/public-metadata/normal-close probe2.67s pass.
+Probe binary SHA256:32e07da86119b0cc764d719fb9ec0c3e172a5443d062096b9eafc969470be8ab. It requests no unlock/credentials and verifies
+only public metadata, exact-port policy and normal native collection. It does not establish
+selected crypto/action delivery or audible/physical networking. Only one desktop is available.
+Logs: target/voice-native-context-*; exact commands/times: voice-native-context-gates.jsonl.
+
+Still required: authenticated factory/action input/result/receipt ACK/settlement/phase closure
+and final delivery over the same Session; final actual-channel closure under the original UI
+commit; production proven-pair registration; full96KiB Workflow retirement and copy funding;
+sharing the original browser execution position; safe collection of the separate32-row action
+history. The existing16KiB Phase loan is not the whole Workflow. Live V2/RTC/isolation, relay,
+combined acceptance and independent physical audio/network acceptance remain open with their
+assigned owners. Separate native/experiment dependency-audit findings remain open.
+
+## Previous action-row ownership checkpoint (21 October)
+
+Source b0b303ebcc140f6414e89ae4b06ee8a46ece5175 follows the published edb00dda app-owned
+Status checkpoint in target/communication-browser-action-worktree. The native/browser handoff
+remains the active assignment. All raw RowId-taking operational helpers are now private;
+Ledger::resolve requires the original native-selected grant allocation, executor, lease and
+complete peer/join/key/epoch purpose. A native-only ResolvedRow retains the actual paid Row.
+Repeated resolution is not a once-only work permit; physical callers still must account and
+bound their handles. The complete layout remains inside the original2KiB Row payment.
+
+Historical lookup/receipt ACK/settlement remains usable after End and actual CallGrant drop.
+Data work checks the original lease under State before copy/worker admission, including when
+End won during a wait. Four new regressions cover foreign equal-field owners/all selector
+fields/invalid IDs, each key component, exact post-End recovery and the actual held-State race.
+All112 focused handoff tests pass (2.03s after49.66s compile). Actual-diff adversarial review/
+re-review has no remaining findings. Full frontend2,348 passes (68.32s). Full native583 library
+plus five ACL tests pass, zero failures (523.69s library;526.92s gate). Native check48.50s,
+strict all-target/all-feature Clippy50.34s, format0.76s and the fresh Root construction scanner
+(one test,0.97s gate) pass. These ran serially; no validation process remains active. Failed
+test-Barrier compile and interrupted focus3 are retained; the final barrier samples
+credits after End's legitimate independent generation retirement, without weakening work,
+receipt, copy or worker assertions. Logs: target/voice-scoped-row-*.
+
+This adds no action opcode, new command, live V2 driver or Root/wire/storage change. The passing
+packaged probe/build/startup evidence below belongs to unchanged bac90 application lifetime;
+it does not prove action delivery. Native/browser action/result/ACK/settlement/phase closure and
+final delivery remain open. Native context, full Workflow/copy funding, sharing the original
+browser execution position and safe32-row action-history collection still require integration.
+Root Rust/Cargo/policy and frontend/build inputs are unchanged; preserve their recorded exact
+provenance rather than treating previous gates as fresh runs. One physical desktop is available.
+
+## App-owned status checkpoint (21 October, preceding source)
+
+Source `bac90cfad185a6273c309cf2686d45cc28528fb1` is isolated in
+`target/communication-browser-action-worktree`, following published PR48 `9218d179`.
+The app now owns the Status listener, exact pre-window numeric-loopback CSP and three main-only
+fixed public metadata commands. Startup explicitly enters Tauri's IO runtime; the Exit callback
+collects the actual service before SDK cleanup/restart. Unavailable handoff does not block the
+rest of app startup. Normal V2 call dispatch and action bytes remain disabled.
+
+Browser v9 final cleanup waits for actual SDK/read/cancel work, exact setup settlement and buffer
+disposal before final native collection. Native closes routing first, tracks paid independent
+header/reply/public owners, and reuses a slot only after their actual drainage and permanent
+original-lease retirement. Serials remain monotonic across reuse. Six admission hooks collect
+eligible late drops outside Coordinator. A pressure test proves controller admission after
+reclamation; it does not claim a new room-call grant under full pressure.
+
+Ready, Pending and Closed setup replies share one original paid Row projection position. The
+actual JSON allocation is hard-capped at 2,304 bytes, with fixed 2,048-byte hex scratch inside
+the unchanged 8 KiB Row budget. Delayed Closed replies remain paid through End and collection;
+non-Ready replies cannot bypass the serialization gate. Stock framework/WebView public-metadata
+copies after body handoff are explicitly outside this application-copy bound. Private/action
+bytes must not use that exception. windowVoiceIpcNative retains the exact adapter across module
+and component remounts; selected-key adapters/owners must also retain their original identities.
+
+Current focused gates: 108 native handoff tests pass (2.05s), 35 browser adapter/Session checks
+and all nine command-security checks pass. Complete frontend passes 2,348, Svelte zero errors/
+warnings, production build37.61s and all ten rendered Edge flows pass. Strict native all-target/
+all-feature Clippy75.17s and native check48.33s pass. Complete native passes579 library plus
+five ACL tests, zero failures (530.02s library;644.28s gate). Native format1.03s, development
+executable build181.14s and real startup3.30s pass. Packaged custom-protocol debug build120.53s
+and the actual Windows document/reload/CSP/CORS/metadata/normal-close probe pass. Logs:
+target/voice-app-channel-*. Actual-diff review/re-review has
+no remaining blocker/high/medium finding after correcting security-ledger drift, serializer
+capacity accounting and non-Ready reply custody. One failed focus3 compile caught the missing
+close-first Row initializer; corrected focus4 passes, and the failed log remains retained.
+
+Root Rust, Cargo inputs and dependency policy are byte-identical to validated f1c58519; an exact
+Git diff verifies that. Its complete Root3,233 pass/zero failures/24 existing ignored/59 summaries
+(2,234.97s), format, strict Clippy, ambient and four deny categories are the existing evidence,
+not a newly repeated Root suite. The fresh Root construction gate also scans current native
+source and passes (one test,0.47s after4.11s compile). Prior status source de082d87/PR9218
+native553+5ACL/fullfrontend2,341 and preceding executable evidence belong to their own source;
+the current native gates above supersede them. Separate native/experiment audit findings remain open.
+
+The packaged app probe uses a fresh owned WebView profile and never requests vault unlock or
+supplies credentials. It checks only public metadata command access/refusal, actual exact-port
+CSP/CORS and normal app close with native task collection. Probe6 passes on binary SHA256
+4a0d9e65e3356793701eafa538de89c755e1aa6788188c588c975f26e5305eef. Probes1-4 failed because
+CDP did not expose synthetic CSP response headers, then the harness reloaded a pending blank
+document. The corrected probe first requires the committed app origin/title/root/complete/IPC,
+then verifies a distinct committed loader after reload and reads an actual enforced connect-src
+violation. No native
+runtime change or relaxed acceptance was needed. Exit code0, closed stdio and the actual
+VOICE.HANDOFF.STOPPED marker establish normal collection; fallback kill cannot pass. This does
+not prove selected-key crypto exchange, action delivery, audible RTC or independent networking.
+Only one physical desktop is available; Linux/macOS WebView compatibility is unverified.
+
+Next: original native factory/action input, result/receipt ACK/settlement, authenticated browser
+phase closure and final delivery collection over this same Session. Normal proven-pair Actor
+registration, complete Workflow/copy funding and separate 32-row action-history collection
+remain required. Live V2/SDP/ICE/RTC and legacy isolation belong to the next integration owner;
+relay and combined/physical acceptance remain open. Preserve unrelated main Gate7 UI/combo edits
+and all worktrees; keep one Cargo owner, and do not recursively delete target.
+
+Hosted prior f227b4f7 CI run39649824415/Linux job119394907283 failed reversed-reopen exact chat
+union (531 passes/1 failure): client5 had14/15 original operations while bridge4/client6 had15/15.
+Those diagnostics are not a fix. This is historical hosted evidence, not a current-head result;
+latest PR48 hosted acceptance remains unverified. Keep chat recovery with its assigned owner and
+preserve exact union/time bounds. No green hosted-head claim is made here.
+
+## Historical bootstrap checkpoint (21 October, preceding source)
+
+Published checkpoint is `c5c52fd8`; active work is isolated in
+target/communication-bootstrap-channel-worktree. Commits `dda602f3` and `a695470d` isolate the
+real process-wide source-custody scenario in its own executable and add fixed process-only
+infrastructure credit within the unchanged2MiB shared ceiling. The fresh complete Root suite
+passes3,233 tests, zero failures,24 existing ignored (2,055.81s). Root format, strict all-target/
+all-feature Clippy, ambient check and all four deny categories pass. This supersedes the earlier
+1209/1 app-library failure and running-Root notes below; no production source-pool limit changed.
+
+The internal ECDH bootstrap candidate retains Pending before native RNG and installs one
+immutable Session under the original UI generation and selected-owner Arc. Exact retries share
+the same paid public output, even after registry removal. Curve validation precedes native
+scalar work; canonical transcript/shared real-WebCrypto vectors pin role, owner, group, join,
+session and fixed-width leading-zero ECDH bindings. All61 focused native handoff tests pass,
+including13 new bootstrap cases. Complete native passes532 library plus five ACL tests,
+zero failures (517.09s library;676.16s gate). Native check60.72s, strict all-target/all-feature
+Clippy72.50s, format0.94s, executable build219.59s and real startup4.38s pass. Full frontend
+passes2,312 tests, Svelte zero errors/warnings, production build and all ten rendered flows pass.
+The cherry-picked publication source tree matches the validated tree exactly. Logs are retained
+under target/voice-bootstrap-* in the active checkout; no validation process remains running.
+
+The paid64-slot setup index has no uncertain-row eviction. Lifecycle collection remains an
+enablement requirement. Native computation drainage is not browser/provider drainage; actual
+browser crypto must retain its corresponding engine owner through setup and authenticated ACK.
+No renderer bootstrap command, application listener, CSP change, browser Session or live V2
+dispatch is enabled. The fresh p256 source-review limitations are recorded in
+communication-recovery/VOICE-NATIVE-RESULTS-NEXT.md. Root deny does not clear the separate
+native/experiment dependency-audit findings.
+
+Hosted `c5c52fd8` is not green. Linux exact-history recovery times out in the reversed-reopen
+scenario: client5 has14/15 original signed operations while bridge4 and client6 have15/15.
+Current diagnostics add bounded phase, ordinary request/lower-result/observer-loss and passive
+history-count timelines, plus missing-message author/labels. They preserve the original exact
+union, transport behavior and time bounds; they are not a fix or evidence of flakiness. Windows
+Root also times out in a file-range actor test while the old global custody fixture overlaps;
+isolation removes that known interference, but a hosted rerun is still required. Static
+adversarial re-review has no remaining findings; all four new diagnostic regressions pass in
+the complete native suite. Live V2, member media relay, combined and independent physical acceptance remain
+open. Only one physical desktop is available.
+
+Next local-channel slice has an ignored, uncompiled draft at
+target/voice-status-service-draft.rs. It is not application code or acceptance evidence.
+The internal Status-only IO design passed read-only review after fixing abort custody with
+an ordered ServerState and private RunningServer retaining shared process credit through task
+collection. Actual Registry routing, closed admit_status, runtime/socket tests and concrete
+layout guards still need implementation. Do not start the listener or change CSP/live dispatch
+from this draft. Keep native/browser handoff ownership separate from parallel RTC/media work.
+
+## Native framed handoff continuation (21 October, in progress)
+
+Published checkpoint is `71d11284`; the next file-fixture correction is `7609b66b`. Work is isolated in
+target/communication-framed-handoff-worktree; the validated activation worktree stays frozen.
+Native/frontend validation is complete on this source; fresh Root and hosted confirmation remain open.
+
+The disabled native framing candidate now uses a fresh injected RNG seed, directional HKDF/
+HMAC/AES-GCM, canonical40-byte headers and144-character admission values. One prepaid physical
+position survives body intake, reply sealing and completed-output collection. Capacity refusal
+before admission spends neither counter; admitted truncation, bad bodies and cancellation never
+refund either. Data uses the original Phase; independent control replies can outlive its closure.
+The12KiB control and2KiB bootstrap payments stay inside the existing group/process limits.
+There is no seed-export/bootstrap API, listener, CSP change or active browser Session.
+
+Thirteen actual-native framing tests pass, including correctly MACed malformed headers,
+wrong-pool/group/full-phase refusal, concurrent claims, partial-body drop, completed-output
+custody and counter exhaustion. A pure browser metadata codec adds eight passing tests using
+actual WebCrypto and shared fixed vectors (Control, wide u64 sequences, maximum Result Data,
+maximum Input Data). It has no key/session constructor or counter allocator. The full frontend
+passes2,305 tests, Svelte reports zero errors/warnings, and production build passes36.06s.
+
+The next internal factory consumer resolves the actual selected key/actor, repeats generation
+and Arc identity under final Coordinator, then carries owned UI commit through detached native
+Pair/Derive registration. Pending RowId is metadata only; failed or lost handed-off work retains
+the same counted purpose. A separately paid4KiB worker/output includes a pinned-Tokio task/reply
+allowance and retains its credit through actual output collection. Six actual-native lifecycle
+tests pass (0.78s after4m41s compile). Successful proven-pair Actor registration remains unproved
+while ordinary V2 ingress is disabled. Codec/factory read-only re-review has no remaining findings.
+The reviewer found a test-only readiness wait that could hang on panic; a oneshot now wakes it
+with an error. The corrected final Windows native suite passes515 library plus five ACL tests
+(518.49s library;521.62s gate), check19.73s, strict native Clippy10.42s and formatting0.78s pass.
+Executable build274.05s/startup6.20s passed on unchanged production runtime; all100 focused native voice tests pass.
+Strict native Clippy and formatting pass on the final fixture location and documented local
+lint attributes; no security or runtime behavior was changed to silence lint. All ten rendered
+flows pass with normal Windows access after the sandbox CDP connection failed. Root manifests,
+lockfile, crates, bins and scripts match the frozen3,226-pass checkpoint (621 files compared).
+Do not substitute any of this evidence for a working call or a green hosted revision.
+
+Hosted `dbb8d36b` fails Linux missed-membership acceptance and the native Studio inspection
+mutation gate. Initial fixture dial() only queued work; it did not establish the sealed3->1
+route needed when only those clients later reopen. The corrected admission barrier now requires
+that route, without restoring injected hints, changing deadlines or weakening history/member
+proofs. Timeout observations distinguish saved-route custody, requested/submitted dials and
+actor progress. Both focused chat-matrix scenarios pass on Windows (74.13s tests;146.60s gate).
+Static review confirms the prerequisite gap, but a Linux rerun is still required; it is not
+established as the only cause. The Studio mutation now recognizes the exact original-context
+diagnostic assertion as well as conversion failure, retaining strict failure-count checks and
+byte-for-byte restoration. Both injected failures and restored cases pass the mutation gate
+(389.75s). The subsequent full native run exposed another fixture ordering race: C's file
+directory could arrive before B applied its queued copy (B plan None vs expected150000 bytes).
+The existing30-second barrier now observes both exact catalogs before the unchanged bridge,
+private-storage, restart and byte oracles. All seven file scenarios pass44.56s; reviewed final
+native rerun passes as above. The failed514/1 run is retained, not accepted evidence.
+
+All24 final source hashes are frozen. A fresh complete Root run is now executing serially after
+native, with separate logs under target/voice-frame-root-*. Only three disposable construction-
+test fingerprint result markers were invalidated so that source-reading gate scans this checkout;
+no artifacts/worktrees were cleaned. Root formatting, ambient and all four dependency categories
+pass freshly. Sandboxed WSL/advisory-lock attempts failed; Git Bash/normal-access retries passed.
+The local Docker daemon is unavailable, but hosted71d11284 context audit passes. Hosted Linux
+native and full Root results remain pending. No complete-programme sign-off is made.
+
+Still open: native/browser bootstrap ownership and actual framed result/ACK/settlement delivery,
+whole-chain native/browser admission, confirmation-to-SDP capacity transfer, epoch replacement,
+SDP/ICE/RTC and legacy-mode isolation, media relay, external destination resume, combined
+acceptance and independent physical audio/network testing. Only one physical desktop is available.
+
+## Validated protected handoff checkpoint (21 October)
+
+Validated runtime source is `fef81f48`, isolated in
+target/communication-activation-recovery-worktree. It adds one serial HandoffLoan from an actual
+CryptoAction's existing96KiB Workflow. No budget or Crypto lane was added. Original Workflow
+custody survives settlement/End/expiry until the loan's actual last owner drops, and failed
+claims spend no lane. Fixed action history shares the original paid PlanBinding without
+retaining progress. Existing2KiB/1536-byte layout guards pass; an older metadata expectation
+now explicitly retains that charge while its action survives and asserts zero on final drop.
+
+All434 focused Root voice tests pass, including eight new handoff regressions. Formatting,
+strict whole-root Clippy, ambient and all four root deny categories pass. The complete root
+suite passes 3,226 with zero failures, 24 existing ignored and 58 summaries (4,815.7s), on the
+frozen current Root source. Complete native passes 496 library plus five ACL tests, zero failures
+(597.81s library; 600.73s gate). All 80 native voice tests pass (18.02s tests; 199.59s including
+compilation), native check47.79s, build191.16s and formatting pass. Full frontend passes 2,297 tests;
+Svelte has zero errors/warnings, production build and all ten rendered flows pass. Shared-cache fingerprints
+initially named another checkout: only affected sync/app/CLI marker files were invalidated,
+then current-source compilation and focused tests passed. Stale/failed attempts are not passes.
+No build artifacts or worktrees were cleaned.
+
+The new voice-ipc-body candidate helper passes ten regressions, with zero Svelte errors/warnings.
+It follows transferred BYOB buffers, caps intake at authenticated2064 bytes plus one EOF byte,
+refuses unsupported actual streams and awaits stalled-read/cancellation drainage. The disposable
+packaged Edg155.0.4283.62 experiment passes the exact transpiled helper on a second real17-byte
+loopback response plus existing framing/takeover checks. Updated native counters record both
+GETs. It uses the existing generated-data fixture binary, no account. Read-only cumulative
+Root/reader review has no remaining findings. The cleanup-fault repeat refuses success and
+preserves the prior successful evidence; all 17 experiment Node regressions pass.
+
+The disabled native pilot now has a process-owned 32-row ledger. Pending factory work and
+drained history share that bound, with row/phase metadata paid before factories. Actual selected
+key snapshots retain Weak grant identity, and attachment checks the actual action, original
+local join/key, exact remote selector and trusted pair receipt before input can be exposed.
+Lost native factory replies retain the same counted purpose. Copy/input/completed worker owners
+retain the original phase loan; the sole cleanup waiter sees worker retirement before notification.
+Metadata-only reconcile, exact receipt ACK and engine settlement remain possible after phase
+closure without another data loan. Compacted history retains no Action, Phase or strong Grant.
+No uncertain rows are evicted; 32 retained rows are an explicit pilot lifetime limit.
+
+All 60 actual-source native harness tests pass (29 phase/parser/ledger, two new selected-owner
+cases plus existing authority coverage). This lightweight harness is not the native-workspace
+gate or actual ServerActor/MLS/browser acceptance. Ledger implementation re-review has no
+remaining blocker/high/medium after the reviewed cleanup and observer wake defects were fixed.
+The sole bounded cleanup waiter subscribes before checking readiness; private quiet compaction
+cannot wake itself into a retry loop. Cancellation and late exact ACK have focused coverage.
+All nine command-policy extraction tests pass freshly on the final native source.
+The first actual native compile caught two test-only references to an undeclared futures
+helper that the standalone harness supplied. They now use std::task::Wake without a dependency
+change. That failed attempt is not accepted evidence. The corrected full native gates pass.
+The sandboxed startup attempt produced no output and timed out after20s. The identical rebuilt
+binary/unchanged startup gate passes with normal Windows access in2.00s. Neither timeout nor
+failed compile is recorded as a pass. All nine Root and ten native source hashes remain frozen.
+
+No application listener/CSP, byte-bearing command or V2 dispatch is enabled. Next: actual actor
+registration and framed derivation/result/ACK/settlement transport, independently prepaid
+terminal replies, authenticated browser closure and final delivery ACK/collection. Capacity alone
+supplies no action/effect authority. Measured96KiB-to224KiB phase transfer, epoch replacement, SDP/ICE/RTC/
+legacy isolation, media relay, external destination resume, combined acceptance and physical
+audio/network acceptance remain open. Only one physical desktop is available.
+
+## Validated selected V2 join-key checkpoint (21 October)
+
+Published checkpoint remains `f5ae59a3`; local frozen source is `451ecbaa` in this isolated
+checkout. It adds exact native join-key admission, public-key endpoint publication through the
+actual ServerActor, and selected-key computation on the retained WebCrypto broker. One paid
+generation is selected per actual native owner/executor. Lost replies recover the same permit,
+join and frozen point; another executor cannot adopt it. Settlement-before-admission creates a
+paid closed row, and retired unknown owners create none. Temporary publication Capacity retains
+the original generated key. A native worker owns UI commit across actor completion independently
+of a canceled IPC waiter. Settlement awaits actual publication drainage through a retained watch.
+
+The browser path shares the existing bounded queue, uses no second generic generate admission,
+and retains original crypto/publication/settlement work across End and HMR. Broker version 7
+refuses a retained older pool. Three fixed public-metadata commands are main-window only; no
+private key, confirmation plaintext, SDP or ICE crosses them. Application-owned record charges
+do not establish a stock-framework/SDK allocation bound. No listener or CSP change is introduced.
+
+Focused browser/security checks pass 28 tests (19 selected-key cases plus nine command security
+checks), including End during a failed settlement reply and bounded orphan cleanup on remount.
+The wake identity is sampled before each RPC, so retirement cannot be lost before a retry wait,
+and persistent failure cannot spin. Svelte reports zero errors/warnings. All nine new native
+regressions pass (four actual bridge/actor cases, five Coordinator cases; 0.35s after6m48s compile).
+Read-only implementation review resolved the lost-wake race and LOW permission-ledger wording.
+It also identified a foreign executor's definitive refusal being treated as uncertain. That
+correction now returns typed refused metadata with empty permit/join, without touching the
+original operation. Two brokers prove refusal both before and during End, with zero second
+computation/settlement. The corrected native focused run passes all nine tests (0.33s after
+2m16s compile). Complete native now passes 465 library plus five ACL tests, zero failures
+(586.76s library; 589.92s complete gate), and native check passes in27.8s. All49 native voice
+tests pass in19.71s. Current full frontend passes2,287 (70.61s tests/72.21s gate), Svelte zero
+errors/warnings, production build51.08s and all10 rendered Edge flows64.61s. Root source remains
+byte-identical to the completed3,218-case319db214 run; its native-source-reading construction
+gate passes freshly here in1.09s. Static Root checks retain their identical-source provenance.
+Final executable build (163s), native formatting (0.69s) and actual startup (2.55s) pass too.
+No validation process remains active. Earlier interrupted full attempts carry no pass claim.
+Read-only re-review finds no remaining blocker/high/medium in the corrected boundary.
+
+Normal V2 dispatch is still disabled. Native action registration and byte-bearing IPC custody,
+exact result/ACK/settlement delivery, SDP key/phase transfer, automatic epoch replacement,
+SDP/ICE/RTC and legacy-session isolation, media relay, external destination resume, combined acceptance and separate-device
+physical testing remain open. The selected-key adapter's gates are complete; no complete-call
+claim is made here. Logs: `target/voice-join-key-{native-focused-2,native-all-voice,native-full,
+native-check,native-build,native-format,startup,root-construction,frontend-focused-4,
+frontend-final,svelte-final,frontend-build,flows}.log` and the native/web results files.
+
+## Validated native activation checkpoint (21 October)
+
+Source through `23bbeac8` is validated in `target/communication-activation-recovery-worktree`.
+The complete root run passes 3,218 tests with zero failures and 24 existing ignored (58 summaries,
+5,304.73s) on frozen319db214; root manifests/lockfile/crates/bins/scripts are byte-identical here.
+The native-source construction gate also passes from this checkout (41.17s including compile).
+Session14577's older native build was deliberately interrupted during compilation, before tests,
+to validate this cumulative source instead. The cumulative native sequence has now passed:
+456 library tests plus five ACL tests, zero failures (579.06s library; 645.71s complete gate),
+native check (66.43s), executable build (338.48s), formatting (0.82s) and actual application
+startup (3.67s). No validation process remains active. Earlier pending/interrupted notes below
+are historical; this section supplies the cumulative evidence for the reviewed source.
+
+Accepted activation now recovers the original current controller/call before consumed-candidate
+lookup. Its original controller allocation, actor grant/child, UI generation and server entry
+are checked after actual actor/commit waits. Concurrent early misses repeat lookup before RNG;
+accepted retries do not retire an active call, create a nonce/grant or advance revision/expiry.
+End, lock/unlock, actor stop and replacement cannot recover a historical activation. Refused
+fresh admission leaves its borrowed affine grant with the bridge until native guards leave.
+
+All 40 focused native voice tests pass, including thirteen new regressions: five synthetic
+Coordinator identity/custody cases and eight native cases, including actual actor/bridge barriers
+and generation registration before delayed voice revocation. Tests take19.47s after10m01s compile;
+the script verifies that all thirteen new cases actually executed. Static read-only review/re-review
+has no remaining blocker/high/medium after correcting consume-on-refusal cleanup. Dedicated
+actual room/policy closure remains a coverage follow-up; actor-stop evidence does not establish
+that case. Full frontend passes2,268 (75.15s), native command-security9 pass (22.16s), Svelte has
+zero errors/warnings, production build48.69s and all ten rendered Edge flows pass. No
+generic crypto/broker contract, command registration, listener, CSP, wire or persistence changed.
+
+Publish this cumulative reviewed checkpoint and exact evidence to PR48. Exact key-generation
+admission, action registration/
+IPC copies, result/ACK/settlement drainage, authorized SDP phase transfer, normal V2/RTC and legacy
+isolation, media relay and combined/physical acceptance remain open. Only one desktop exists.
+The bounded encrypted loopback channel is the preferred transport candidate for a later disabled
+pilot; browser/bootstrap copy retirement and other platforms are still unproved. Do not enable
+a listener/CSP or stack the existing96KiB confirmation and224KiB SDP reserves on that basis.
+
+Evidence logs: this checkout's `target/voice-activation-{root-construction,native-focused,
+native-full,native-check,native-build,native-format,startup,frontend-final,svelte,frontend-build,
+flows}.log`; complete root and strict static checks are in
+`target/communication-pair-origin-worktree/target/voice-pair-*.log`.
+
+## Active production pair continuation (21 October, focused Root checks passed)
+
+Current next checkout: communication-pair-origin-worktree, based on local actor commit 7e19b948.
+The older derived-origin full run was deliberately interrupted after review found a reachable
+context Clock-under-lock defect. It has NO full-pass claim; native gates were not reached.
+Current pair source corrects that defect and passes 426 focused Root voice tests, zero failures
+(22.49s, target/voice-pair-root-focused-2.log). All10 focused actor tests and the external API
+test pass, zero failures (actor0.63s, compile4m39; API compile37.23s).
+Do not compile another Cargo target concurrently or attribute old results to this changed source.
+Published PR48 remains c1532331. The reviewed actor slice passes 10 actor, one external API and
+411 Root focused tests plus lint/format/ambient/deny; current complete backend gates are pending.
+
+This continuation implements native Root/ServerActor prepare_voice_pair with immutable
+peer/join/key_ref/epoch selection. New proof comes only from the actual participant's implicit
+watch. Exact cached recovery precedes discovery expiry/replacement and cannot self-wake revisions,
+extend the original window or allocate another pair. Prepared origin pin/credit/ledger owners
+precede final Group/Policy admission of both tables and serial. Protection is pinned to creation
+epoch before derivation. First output is fixed metadata, not transcript/key/RTC authority.
+
+Design review found an inherited source_context clock-under-lock deadlock through actual grant
+validation. Its clock samples now precede nonblocking locks and original atomic rechecks.
+SourceLedger preserves earlier spent jobs when a later context is temporarily busy. The new
+Root sweep covers every actual native Clock callback for call/room/session closure; other
+tests cover final deadline, post-pin real Group/Policy contention/rollback, both table
+counts/serial, origin burst conservation, cached closure, full-pool retry, live explicit-watch
+substitution, real same-device newly-proved rejoin, epoch-before-derive and both roles through
+the member bridge. Existing positive low Root fixtures now create pairs through production API.
+All 426 focused Root cases pass, including the 8-confirming/16-total/16-origin-pin limits and
+both-role bridged proof-to-Derive path. The first compile found two test fixture mistakes (a
+u64 callback return and a moved non-Copy Context); corrected rerun passes without changing
+runtime checks. Static read-only re-review has no remaining blocker/high/medium. Ordinary
+FreshPeer scope/membership ordering was restored and expanded across group/room/local/policy;
+foreign contexts cannot revoke original evidence. Dedicated sync-error injection and blocking-
+regression external watchdog remain test follow-ups. Complete frontend passes2,268 (73.48s),
+Svelte zero errors/warnings, production build51.22s and all10 rendered Edge flows pass. Strict
+whole-root Clippy passes with warnings denied (1m55s), formatting, ambient and root dependency
+policy pass. Logs: target/voice-pair-{actor-focused-2,public-api,frontend-full,svelte,frontend-build,
+flows,format,clippy,ambient,deny}.log. Complete current Rust/native/check/build/startup gates remain
+required. The root/native suites run sequentially with one compile job; no duplicate heavy run.
+
+Still disabled/open: production IPC registry/copy accounting, exact result/ACK/settlement retry
+custody, automatic join/phase replacement when a protected pair's epoch expires, authorized SDP
+key transfer, normal V2/RTC and legacy isolation, media relay, combined rollout and physical
+acceptance. Only one desktop is available. Preserve the unselected provider experiment, main
+Gate7 UI/combo changes and all actual worktrees under target. Do not cargo-clean that directory.
+
+## Active native actor and terminal lifecycle work (21 October, full gates pending)
+
+Published checkpoint remains `c1532331` on PR48. Local `fe9c1048` and `a5fc6e2a`
+add reviewed Root result/derivation/deadline corrections. The active continuation is
+communication-derived-origin-worktree. Its body-free ServerActor bridge now carries original
+native call/action/watch owners through the existing bounded mailbox with typed protocol versus
+uncertain-stop errors. It exposes no serialized commands or live V2/RTC. Root remains authoritative.
+
+Terminal stop now revokes Root-local voice and closes queued replies before its ACK, independent
+of a full Closed event sink. Once admitted, lost ACK cannot resume the actor. Queued cancellation
+and canceled/failed saved freezes preserve the original installation. Successful freeze, explicit
+shutdown and sync-error termination retire before Closed delivery. Shared Runtime groups remain
+live; externally held crypto/input/lower-work credits remain charged until actual owners drain.
+Final forward checks sample callback-bearing clocks/effects before pure route/connection/room
+checks, covering revocation or connection replacement during those callbacks.
+
+Focused execution passes **10 actor tests**, **one external public-API test**, and **411 Root voice
+tests**, zero failures (Root16.46s). The actor cases cover actual admitted lost replies, exact
+retries, foreign/equal-join owners, lock/unlock, queued stop cancellation, lost stop ACK, full
+event queues, explicit shutdown and saved freeze cancellation/completion. Root cases preserve
+actual engine/input custody after terminal teardown and reject final-clock Root/room/connection
+retirement. Logs: target/voice-actor-native-focused-3.log, voice-actor-public-api.log and
+voice-actor-root-focused.log. Earlier first actor run passed7; a second compile failed because
+a test tried to use a crate-private wait method. Tests now use actual queued reply disconnection;
+no production API was widened. The fresh rerun above passes. Static read-only re-review has no
+remaining blocker/high/medium. Its LOW wording correction is applied. Dedicated sync-error
+fault injection remains a test follow-up; normal shutdown tests do not establish that scenario.
+
+Strict whole-root Clippy passes with warnings denied (1m35s); formatting, Git Bash ambient
+checks and root dependency policy pass. The initial ambient invocation selected Windows WSL
+Bash and was denied before running the script; the explicit Git Bash rerun passes.
+Full frontend already passes 2,268 on identical frontend source. Current Root/native full gates
+are pending; the interrupted fe9 run is not a pass. Earlier complete root 3,146/native 443+5
+results below apply to c153, not these local changes. Keep one heavy Cargo job at a time.
+
+Next live-V2 gap: Root proves peer observations but production orchestration does not yet create
+the LocalJoin pair; positive fixtures do that privately. Then: registered native IPC/copy and
+exact result/ACK/settlement custody, authorized SDP/key phase transfer, normal V2/RTC and legacy
+isolation, media relay, combined rollout and physical audio/network acceptance. Only one physical
+desktop is available. Preserve the separate unselected native-provider experiment. Gate7 native
+upload HIGH fixes are separate reviewable PR48 commits; Gate7 integration remains separate.
+
+
+## Active Root derivation and deadline correction (21 October, focused checks passed)
+
+Latest pushed checkpoint remains `c1532331` on PR48. Local `fe9c1048` adds Root confirmation
+results and passes 389 focused voice tests, 2,268 frontend tests, strict Clippy, root dependency
+policy, formatting and ambient checks. Its sequential full root/native/check/build run was
+deliberately interrupted after static review found a later deadline gap; it has no full-pass
+claim. Logs and interrupted phase remain in communication-root-results-worktree/target.
+
+Active source is communication-derived-origin-worktree, based on fe9. It adds actual Root
+derivation factory/result admission for the original CallGrant, proven pair, actor/session and
+room. Row zero publishes under nonblocking Group/Policy/History checks; exact factory retries
+return the original action after ACK/compaction without recreating input or keys. First Derived
+results use the existing affine preparation loan and check the original chain against the last
+native time sample. Historical result lookup precedes pending authority; metadata cannot grant
+key, source or RTC authority.
+
+Review also found that a late confirmation packet's construction window can outlive its pair
+deadline. The shared first-seal fence now checks the minimum of construction, source and original
+SDP exchange deadlines; already-published compatibility lookup remains historical. Regressions
+reserve Hello/Proof/Finish at15s against a16s pair deadline and advance final native time to17s,
+before the20s construction bound. No expired Finish promotion, packet publication or terminal
+success is allowed. Lower tests isolate source/exchange deadlines. Derivation coverage includes
+both roles, Group/History/final Capacity, full ordinary bytes, exact compacted recovery, native
+session revocation blocked on Policy, last-Clock owner closure/expiry, settlement/unwind, wall
+rollback/epoch changes and actual Root allocation/replacement/room/session boundaries.
+
+Static read-only re-review has no remaining blocker/high/medium. It corrected test assumptions
+about idle Workflow lanes: an open chain still owns its prepaid lane after settlement. Tests now
+close the original chain before asserting zero; running preparation retains custody until its
+loan drains. No runtime limit or conservation rule was weakened. The first fresh focused run
+passed all 407 tests (17.07s, compile2m16). Two additional evidence cases then brought the rerun
+to **409 passed, zero failed** (18.62s, compile1m01). Full frontend passes **2,268**, zero failures
+(211.08s, two workers). Strict whole-root Clippy passes with warnings denied (37.86s), formatting,
+ambient and root dependency policy pass. The first sandboxed deny attempt could not lock Cargo's
+external advisory cache; the authorized normal-OS retry passes all four policy categories.
+Logs: target/voice-derived-origin-{focused-1,focused-2,frontend-full,clippy,format,ambient,deny-2}.log.
+Complete root/native tests/check/build/startup remain required for the final stable implementation;
+earlier full passes apply to the pushed checkpoint, not this increment.
+
+Next: production native registration/IPC, exact history/ACK/settlement retry custody, authorized
+confirmation-to-SDP phase/key transfer, normal V2/RTC and legacy isolation, media relay and
+combined/physical acceptance. Only one physical desktop exists. The two latest tests directly
+cover a separate thread holding the actual Policy mutex and actual signed compound room deletion/
+recreation through Root. Static re-review is clear of blocker/high/medium. Residual LOW harness
+follow-up: a regression from try-lock to blocking Policy acquisition could hang the contention
+test until an external suite watchdog; its real barrier ordering and unwind cleanup are covered.
+Preserve the isolated unselected native-provider experiment. Avoid duplicate heavy Cargo jobs.
+
+## Validated protected confirmation checkpoint (21 October)
+
+Published code through `9dc1b8d3` (`73c444a5` browser implementation) has identical Rust/native
+source to frozen `ecc8232f`. The sequential full validation in communication-proof-finish-worktree
+has completed: root **3,146 passed**, zero failures, 24 existing ignored across 57 summaries;
+native **443 library plus five ACL tests passed**, zero failures (874.42s for the library);
+native check passed (1m32s), debug build passed (6m26s), and actual startup passed with the
+original 20-second deadline. The native suite includes the previously failing onward channel
+discovery and authenticated automatic notification receipt, plus chat-bubble and durable
+Keep/private Download bridge-restart scenarios. Logs: voice-followup-root-full.log,
+voice-followup-native-full.log, voice-followup-native-check.log, voice-followup-native-build.log
+and voice-followup-startup.log in that frozen checkout's target directory.
+
+The selected browser code passes **2,268 full frontend tests**, zero failures (67.43s), 105 focused
+real-crypto/fault-seam tests, Svelte with zero errors/warnings, production build (36.24s) and all
+ten rendered Edge flows. Root strict Clippy, formatting, ambient checks and dependency policy pass;
+root/native formatting was rechecked. Read-only adversarial re-review has no remaining findings
+for the protected confirmation increments. This is a validated partial checkpoint, not live V2.
+Separate native/packaged-experiment dependency audit failures remain recorded; root cargo-deny
+passing does not clear them. Only one physical desktop is available.
+
+The newer Root result-safety code is committed locally as fe9c1048 in
+communication-root-results-worktree and is not included in this published checkpoint. The active
+continuation and interrupted full validation are recorded above; prior complete suites do not
+validate it. Production native registration/IPC/result settlement,
+SDP/key phase transfer, normal V2/RTC and legacy isolation, member media relay, combined rollout
+and physical audio/network acceptance remain unfinished.
+
+## Prepared Root results (21 October, focused verification passed)
+
+The current native result increment is in communication-root-results-worktree, based on published
+c1532331. It adds actual Root seal/open result admission, private signatures retained through
+local refusal, deferred consumed token/slot and older promotion cleanup, preconstructed attempt
+owners and an affine preparation hold. Compatibility seal/open/derivation also prepare cleanup
+before Engine. Settlement immediately fences first effects while actual custody stays charged
+until preparation drains, including unwind. Only Published signatures have source authority.
+
+All **389 focused voice tests pass**, zero failures (15.69s, voice-root-results-focused-2.log).
+This includes unchanged row/metadata/Pair size guards, all three protected flights, exact
+accepted/rejected history, Capacity without resigning or token effects, actual session revoke
+blocked on Policy with a live native child, last Clock owner closure, settlement during signing
+and RNG, competing settlement/unwind, actual Root call/action identity and epoch/equal-join
+replacement. The first actual run passed 388/failed 1: the synthetic End fixture's lease is
+independent of actor children, so runtime revoke alone did not mark its receipt retired. The
+fixture now also closes its original call; the retirement assertion remains. Actual Root tests
+use Directory's registered CallGrant. No runtime check or limit was weakened.
+
+Static adversarial re-review has no remaining blocker/high/medium, including derivation cleanup
+and the RNG-settlement addition. Formatting and ambient pass. Strict whole-root Clippy passes with warnings denied (2m25s), root dependency policy passes,
+and the complete frontend passes 2,268 tests with zero failures (216.25s, two workers).
+The full fe9 run was subsequently interrupted for the reviewed deadline correction above. The earlier
+complete 3,146-root/443-native/2,268-frontend evidence above belongs to c1532331, not this increment.
+Keep unpublished and retired owners outer, destroy them after all final guards, and recheck the
+original actor/session after the LAST injected callback. Child leases alone are insufficient.
+Short trusted watch notification is allowed; no extra Engine/control/resource acquisition or
+arbitrary callbacks belong in final native admission. Existing limits are unchanged.
+
+Still open: production registration/IPC and exact historical result/ACK/settlement recovery,
+complete Root derivation integration, authorized confirmation-to-SDP key/phase transfer,
+compatible helpers, normal V2/RTC and legacy isolation, member media relay, combined rollout and
+physical audio/network acceptance. Only one desktop is available. The native-provider experiment
+stays isolated and unselected.
+
+## Selected WebCrypto continuation (21 October)
+
+Local `ecc8232f` is frozen in `communication-proof-finish-worktree` for one sequential full
+root/native/check/build chain; startup follows. It passes 365 focused voice and 2,254 frontend
+tests. The full root suite is still running. Do not start duplicate Cargo jobs, edit that frozen
+Rust source or attribute earlier full suites to it. PR48 remains published at `d7d0586f`.
+
+Active implementation is `communication-browser-handoff-worktree`, based on `ecc8232f`.
+The selected WebCrypto broker now supports protected seal/open with unchanged prepaid rows/bytes,
+a serial execution lane, owned inputs and exact completed-output retries. All 105 focused crypto
+cases pass across their files, including all three candidate lanes at maximum headers/bodies.
+The complete frontend passes **2,268/2,268** (67.43s); Svelte reports zero errors/warnings,
+production build passes (36.24s), and all ten rendered Edge flows pass. Static re-review has no
+remaining blocker/high/medium. Full backend/native/startup gates remain pending. The first new run passed ten/failed
+one: a changed-length fixture met the correct exact engine-byte refusal before the intended
+identity check. The corrected fixture changes equal-length data. The first existing-test command
+did not run because its log directory was absent; the corrected rerun passes 91 existing cases.
+
+Read-only review caught aliasing TypedArray.slice copies and a tagless historical refusal that
+could settle an earlier browser's work. Both are corrected with regressions. The future driver
+must retry rows after derivation readiness and uncertain earlier results before they strand the
+serial lane. Production Root/IPC/RTC, phase transfer, media relay and combined/physical acceptance
+remain open. Only one physical desktop is available.
+
+The separate `communication-native-engine-worktree` preserves an unselected, uncompiled native
+provider/ownership experiment. It is NOT in this continuation. Review recommends retaining
+WebCrypto: switching providers adds key/build/audit/interop work without removing SDP/ICE IPC.
+No provider, dependency or ADR change is adopted. Do not accidentally include that experiment.
+
+## Active continuation (21 October)
+
+Reviewed low Hello is committed locally at `600186e5`, with 352 focused voice tests, 2,254 full
+frontend tests, strict root Clippy, root/native formatting and ambient checks passing. Its complete
+native suite passes **443 library plus five ACL tests**, zero failures (885.37s for the library,
+`voice-low-native-full.log` in frozen low checkout). Root deny also passes. The full root result
+of 3,096 belongs to earlier `53191c87`, not the low increment; combined full root and native
+check/build/startup remain pending.
+
+Active implementation is now `M:\Git (local)\CatComs\target\communication-proof-finish-worktree`,
+based on `600186e5`. It adds protected Proof/Finish inboxes, exact response factories and deferred
+response-engine retirement. Code/tests are uncommitted; static read-only re-review is clear.
+The first focused invocation reused a stale shared-target binary (352 tests, none of the new
+cases) and is **not accepted validation**. Only the catcoms-sync compiled fingerprint files were
+invalidated; no clean or source deletion was performed. Fresh execution ran 363 passed/two failed:
+the metadata guard caught a 40-byte excess; an old-Finish fixture simultaneously occupied the
+sole crypto lane while requesting new work. The correction relocates bounded pointers into paid
+input rows and fixes fixture scheduling without increasing limits. The final focused rerun passes
+**365/365**, zero failures in 15.67s, including the original layout guards. Strict whole-root
+Clippy passes (1m15s), as do root/native formatting, ambient and the full frontend suite
+(**2,254 passed**, zero failures, 69.50s). The unused-state warning is corrected with actual
+closed-state/input-pointer checks. Complete combined root/native/check/build/startup gates follow
+before publishing. Static adversarial re-review has no remaining blocker/high/medium finding.
+Do not push or attribute earlier suites to this work. Native crypto provider changes
+are only an unselected design investigation; the browser-provider ADR is unchanged. Remaining
+live dispatch, crypto/IPC/RTC, SDP transfer, relay and combined/physical acceptance stay open.
+
+## Previous low-side checkpoint (2026-10-21)
+
+**The communication programme is not finished.** Published branch `chat-update-implementation`
+is at `d7d0586f` (PR48 targets `Gate7`). Reviewed local checkpoint `53191c87` includes protected
+high-side Hello and TLS updates at `a611c6ad`; its full root suite passed **3,096 tests**, zero
+failures, 24 existing ignored across 57 summaries in the frozen
+`M:\Git (local)\CatComs\target\communication-atomic-intake-worktree`. Its unchanged frontend passed
+2,254 tests. Strict Clippy found an argument-count lint, corrected with a narrowly documented
+exception in the next checkout. Native gates are being consolidated with the low-side increment.
+The active next implementation is the separate checkout
+`M:\Git (local)\CatComs\target\communication-low-hello-worktree`, based on `53191c87`.
+Its low-side producer, source cancellation fixes and new tests pass all **352 focused voice tests**
+(final rerun 17.81s), including unchanged layout guards. Strict root Clippy, root/native formatting,
+ambient gate and the full frontend suite (2,254 passed, 75.82s) pass. Read-only re-review has no
+remaining code finding; complete combined root/native validation remains pending. The branch checkout remains
+`M:\Git (local)\CatComs\target\communication-review-worktree`; do not push unvalidated low-side work.
+
+The separately reviewed native upload/lock fix is `c4005b89`. Its required follow-up,
+`985c1f1d`, removes a production deadlock between admitted publication and the saturated actor
+event queue by using a short Studio-emission fence. Lock preserves immediate detached-owner
+revocation, captures pending continuity before either fence wait and cannot overtake an admitted
+emission or publication. Fourteen upload regressions plus actual cancelled-lock and owner-revocation
+cases pass; malformed continuity preserves prior saved bytes and refuses destruction on retry.
+Read-only re-review has no remaining findings. Gate7 still needs both native corrections integrated.
+
+Previous completed baseline (`985c1f1d`): root **3,079 passed**, zero failures, 24 existing ignored across 57 summaries;
+native **443 library plus five ACL passed**, zero failures (895.76s for the library); frontend
+**2,254 passed**, zero failures (84.44s). Root crates are unchanged by the native-only follow-up.
+The unchanged frontend also passes Svelte check (zero errors/warnings), production build (47.64s)
+and all ten rendered Edge flows. Strict whole-root Clippy, root/native formatting, ambient gate
+and root dependency policy pass. Native check passes in 43.62s, debug build in 1m55s and actual
+startup passes with the original 20-second deadline. The first sandboxed startup timed out;
+the retry with normal OS access passed against the same binary. These final gates supersede
+the earlier native 438+5/build/startup evidence for this correction.
+
+The [acceptance ledger](communication-recovery/CHAT-FILES-VOICE-ACCEPTANCE.md) records exact logs,
+intermediate failures and coverage limits. The first root run and native check failed allocation;
+the root retry above passed after competing full suites stopped. Earlier browser setup failures,
+the deliberately stopped first event-drain native run and corrected fixture-only failures remain
+recorded as failed/unaccepted attempts. No deadline or production rejection was loosened.
+The separate packaged IPC experiment's dependency audit still fails on its recorded pinned
+advisories; root cargo-deny passing does not clear it.
+
+The main checkout, `M:\Git (local)\CatComs`, remains on `Gate7` and contains
+separate UI/clip-editor work. Preserve that work and continue the communication fixes here.
+These are real Git worktrees inside `target/`: do not delete or clean that directory to reclaim
+build space. Logs below are local ignored files under this checkout's `target/`, unless a
+different checkout is named. Do not run duplicate full Cargo suites against a shared target.
+
+The user prioritizes useful recovery through delayed, duplicated/reordered messages and changing
+bridges. Recover quietly where possible, preserving original membership, authorization, deadlines
+and spent work. Prefer automatic recovery over unnecessary error prompts for valid network churn.
+
+Next steps, in order:
+
+1. Automatic three-bubble native TCP chat acceptance now passes twice, including one MLS removal,
+   conflicting edit/delete, a previously unseen original removed-author operation, replacement
+   bridge/onward service, exact signatures/heads/projection and solo saved reopen. This is six
+   devices, small unpaged history and graceful close; multiple transitions, paging and abrupt
+   crash custody remain broader coverage. Before claiming hostile-
+   member or moderator-audit correctness, design/review a versioned typed-message contract with
+   group/historical authorization and a writer-incarnation/equivocation rule. The documented
+   legacy limitations cannot safely be fixed by timestamp ordering or current-roster filtering.
+2. Continue live V2 implementation using
+   [VOICE-NATIVE-RESULTS-NEXT](communication-recovery/VOICE-NATIVE-RESULTS-NEXT.md).
+   Protected high-side `ConfirmHello` now has a private Root consumer: 315 focused voice-related
+   tests pass, including actual signed replies, epoch/room/call replacement, three malformed
+   candidates, ordinary pressure and final History contention. The frozen root and frontend suites
+   pass as recorded above. Low-side start/Hello encryption is implemented in the next worktree
+   and passes all 352 focused voice tests. It uses exact predecessor identities, an actual Root call/
+   room boundary and one local Group/Policy/History transaction, with no inbound origin debit.
+   New source checks retain original clocks and cancellation owners; a later busy effect no longer
+   discards an earlier prepared source job. Complete verification, Proof/Finish, SDP transfer and the
+   protected confirmation/SDP consumers, production native/browser IPC and RTC dispatch, compatible
+   helper selection and legacy/V2 session isolation before enabling V2. Keep unsupported roles
+   refused until their actual consumers exist.
+   The capacity prerequisite protects actual packet positions from ordinary pressure:
+   low-side 3-in/6-out or high-side 6-in/3-out, within the existing 32-row limits. Workflow close and
+   actual row retirement remain separate. The final origin transaction now samples time outside
+   nonblocking Group/Policy/History, and both first-result confirmation directions check the chain
+   epoch. Exact accepted/rejected terminal receipts remain recoverable. See the native-results
+   milestone for the remaining native/browser copy and phase-transfer boundaries.
+3. Implement and validate the member media relay and combined recovery/rollout scenarios in
+   [CHAT-FILES-VOICE-PLAN](communication-recovery/CHAT-FILES-VOICE-PLAN.md).
+   Only one physical desktop is available; independent native audio and separate-network
+   acceptance remain open, rather than being inferred from loopback or mocked RTC tests.
+
+File bridging and saved private Download resume are implemented. Resume retains verified encrypted
+acquisition progress and its execution allowance; external export chooses a fresh destination.
+Appending to an existing partly written external plaintext file is not implemented. Do not equate
+these two behaviors when describing completion.
+
+The standalone IPC feasibility probe passes its recorded functional checks, but its separate
+dependency audit still fails on the pinned Tauri maintenance/quick-xml/plist advisories. Passing
+root `cargo deny` does not clear that separate failure. No dependency exemption was added.
+The [acceptance ledger](communication-recovery/CHAT-FILES-VOICE-ACCEPTANCE.md) records the evidence.
+
+## Chat history adversarial checkpoint (2026-10-20)
+
+The latest user request is to explain/test additive chat history across MLS epochs, disconnected
+20–50-member activity bubbles, edits and deletions, and possible moderator audit. See
+[CHAT-HISTORY-CONVERGENCE](communication-recovery/CHAT-HISTORY-CONVERGENCE.md) for the trace,
+fixes, audit design constraints and explicit remaining security limits. The implementation and
+tests in this checkpoint are validated; broader chat acceptance, live V2 and media relay remain open.
+
+The first application run found six failures out of seven tests. The lookup correction then
+passed all 12 expanded cases in 4.63s (`chat-history-adversarial-after-1.log`), including actual
+Server edit/delete/op counts, 20/50 first writers, reordered duplicates, causal edit/delete
+conflicts and ten MLS epoch advances followed by author removal and orphan-save/reopen.
+The final focused application rerun passes all 15 cases in 3.54s
+(`chat-history-adversarial-after-2.log`), including malformed-root/ID cases, actual reaction/pin
+assertions and independent deletions with an unrelated addition. The writer-boundary suite passes
+four cases in 0.17s (`chat-history-writer-boundaries-after-1.log`); two explicitly demonstrate
+remaining legacy limitations. All 14 replication document cases pass in 61.35s
+(`chat-history-replication-doc-after-2.log`), and all four paging cases pass in 143.46s
+(`chat-history-pages-after-1.log`). These are semantic/crypto tests, not 50 physical peers or
+automatic ten-epoch network acceptance.
+
+A separate real-signed writer probe failed as expected before the fix: forged modern actor-first
+was accepted (`chat-history-writer-boundaries-before-2.log`, 3 pass/1 fail). A signed-page probe
+also failed before the fix because cursor 7 advanced to 10 despite an unprocessed tail
+(`chat-history-rejected-page-before-2.log`, 0 pass/1 fail). The fixes bind modern 32-byte actors to
+verified signers, preserve old actor-length compatibility, defer cursor/completion publication
+until import success, and retain verified-prefix recovery before propagating a later error.
+The broader replication run exposed old synthetic-actor fixtures incompatible with the new
+admission rule; their sibling graphs now use real independent signers with unchanged assertions.
+That already-failed broad run was stopped during unrelated Studio checks; it is not counted as
+a complete result. The subsequent document-only run initially passed 12/14; the two remaining
+provider fixtures were corrected to sign with their actual writer identities, then all 14 pass.
+
+First frontend run: 2,067 pass in 77.36s (`chat-history-frontend-full.log`). Root formatting, ambient
+gate, whitespace and root deny pass. The first root Clippy attempt selected stale shared metadata
+and could not see the new ActorMismatch variant. First-party fingerprint directories only were
+preserved under `target/chat-history-old-root-fingerprints` and invalidated to rebuild the exact
+current workspace; no target tree, app data or third-party cache was deleted. Its strict Clippy
+rerun passes in 2m51s (`chat-history-root-clippy-2.log`). The equivalent native first-party
+fingerprints are preserved in `target/chat-history-old-native-fingerprints`; native check passes
+in 1m28s and the debug build in 4m33s (`chat-history-native-check.log`,
+`chat-history-native-build.log`). Actual startup passes with its original 20-second deadline
+(`chat-history-native-startup.log`), and all ten rendered browser flows pass
+(`chat-history-frontend-flows.log`). Local ignored dependency/target junctions point this worktree
+at the existing frontend dependencies and native build output; startup tested that rebuilt binary.
+The first complete-root command stopped after the application binary: 1,199 passed, one failed,
+22 ignored, 4,432.38s (`chat-history-root-full.log`). The unchanged Studio archive-budget test
+`release_leaves_the_intent_budget_it_was_given_unusable` failed in setup at
+`store/epoch_studio/tests/rotation/overlay.rs:166`: `save_studio_closing_overlay` returned
+`Io("out of memory")`, before preservation, release or the budget assertions. The exact originating
+I/O call and resource cause are unknown; concurrent workloads are plausible contributors, not a
+proven cause. Read-only review finds no demonstrated code/security defect from this result.
+The same executable passes four exact standalone runs (26.34s, 47.55s, 82.20s, 109.16s;
+`chat-history-studio-budget-reproduction.log` and suffixes `-1` through `-3`). These do not make
+the failed full attempt green. No production limit or test assertion was changed.
+
+The second full attempt passed that archive case, but failed the new file-bridge test at its
+terminal drain (`chat-history-root-full-2.log`). An exact standalone run reproduced it in 10.35s
+(`chat-history-file-bridge-reproduction.log`): successful completion readied the reply and emptied
+the task queue, and an unbiased select could poll the empty queue first and unwrap `None`.
+Read-only review confirmed the fixture race. That already-failed run was stopped, not counted as
+complete. The final test drain now polls the terminal reply first; every prefix, deadline, budget,
+error and completed-byte assertion remains unchanged. No production behavior or limit changed.
+The corrected focused regression passes in 8.80s (`chat-history-file-bridge-after.log`), and its
+short re-review has no findings. Strict root Clippy passes again in 31.41s
+(`chat-history-root-clippy-3.log`); formatting, ambient and root deny pass. The first deny retry
+could not lock the advisory cache in the sandbox; its authorized rerun passes without an exemption
+(`chat-history-root-deny-2.log`).
+
+Root attempt three completed: 3,069 passed, four failed, 24 ignored across 57 result summaries
+(`chat-history-root-full-3.log`, two build jobs/eight test threads). All 1,200 application cases
+passed, including the previously failed archive-budget and file-bridge cases. The four failures
+are sync disconnect fixtures that delivered a loss event while retaining the actual remote
+transport. The production guard correctly ignores such stale events. These fixtures now drop
+the endpoint, assert its absence and revoked lease, then deliver the loss; reconnect cases hold
+a new registration and assert a distinct live lease. All original assertions are retained.
+All six focused fixture/stale-edge cases pass (`chat-history-disconnect-fixtures.log`), and
+strict whole-root Clippy passes again in 27.31s (`chat-history-root-clippy-4.log`). Static
+re-review has no findings. Separate existing regressions retain a live replacement while
+delivering old disconnect edges and check readiness and absence of artificial recovery work.
+
+Complete native testing passes 430 library cases in 569.80s plus five ACL cases
+(`chat-history-native-full.log`, two build jobs/four test threads). This includes all active-read
+bridge restart, automatic notification receipt and onward-directory scenarios. The final frontend
+repeat passes all 2,067 cases in 68.63s (`chat-history-frontend-full-final.log`).
+The corrected complete-root run passes 3,073 cases, zero failures and 24 existing ignored across
+57 target summaries (`chat-history-root-full-4.log`, two build jobs/eight test threads). Its
+application binary passes 1,200 in 1,775.19s; replication passes 403 in 269.38s and sync passes
+752 in 121.99s. The 10,000-operation cold-provider regression transfers one operation in one page,
+590 payload bytes. Both previously failed application cases and all four disconnect fixtures
+pass inside this complete run. Runtime source stayed unchanged across the full attempts; only
+the reviewed test fixtures changed. Tracked diff and all four new source fingerprints match the
+frozen full-run inputs. The latest four fixtures are absent from native dependency builds.
+Read-only review and re-reviews have no unresolved blocker/high findings in these changes;
+three stale documentation status lines were corrected. The low-priority wire-offset follow-up
+is recorded below. These are local results, separate from hosted CI.
+
+Do not claim full hostile-peer or moderator-audit convergence. Same-device equivocation, legacy
+actor collisions, raw channel semantic authorization (R6), original-group signature binding and
+repair of already poisoned snapshots remain open. The named `legacy_boundary_*` tests are
+characterizations of those remaining limitations, not successful security acceptance. Deleted
+content retained by all members is not moderator-only just because ordinary UI hides it.
+
+## Recovery robustness checkpoint (2026-10-20)
+
+The isolated continuation keeps admitted file reads pending under actual lower-capacity pressure,
+distinguishes helper-route churn from original invocation retirement, retains accepted encrypted
+prefixes at final AEAD and preserves original deadline/debit accounting. Disabled V2 work now
+parks before exhausting route-registry capacity and accepts an exact valid delayed endpoint ACK
+after selecting a helper hedge. Live V2 and member media relay are still unfinished.
+
+The first complete native run passed 426/429 library cases. Two new active-download restart cases
+exposed a real missing reconnect wake after the startup discovery tick; the third failure was an
+obsolete reconnect fixture that closed its purported connected endpoints. The fixture now retains
+connected unresponsive registrations and checks this owner's outbound readiness. A deterministic
+startup-tick-consumed reproduction fails 0/2 before the finite actor retry fix, with valid saved B
+routes but no new connection. With the finite retry fix, all three active-read restart cases pass
+(`communication-chaos-native-active-focused-7.log`, 14.53s). Both corrected reconnect-selection
+cases pass (`communication-chaos-native-capture-focused-2.log`, 5.92s). The final complete root,
+native and frontend suites now pass as recorded above.
+
+So far 27 focused finalization/loss regressions, three retry scheduling/deadline cases and two
+actual dial-command custody cases pass. The separate earlier 292 voice, 14 requester
+and actor file-transfer checks passed their recorded source increments. Current frontend: 2,067;
+Svelte: 0/0. Production build, ten rendered flows, root ambient/deny and prior strict Clippy pass;
+the latest actor retry additions are included in the final complete root/native passes. Current strict
+root Clippy, native check/build/startup and rendered flows now pass as recorded above. Root and
+native formatting, the diff whitespace check and the Git Bash ambient-dependency gate pass. The
+first frontend run lacked this worktree's dependency link; the configured rerun passed. The first
+flow browser could not retain its debugger connection in the sandbox; the authorized rerun passed.
+No physical two-device, external plaintext-offset resume, live V2 or media-relay completion follows.
+The remaining low-priority coverage follow-up is to record the next signed retry's wire offset
+in the actor bridge test. That test already checks retained prefix bytes, unchanged accounting
+and the exact completed file; requester tests separately check signed request/response windows.
+The late-return TCP case observes a real first local dial admission while B is absent. That
+does not prove terminal socket failure: an already admitted attempt may succeed after B returns.
+The second scheduled opportunity is checked separately with the injected clock. An actual first
+terminal dial failure followed by a second actual successful dial remains unverified by this case.
+
+## Previous combined checkpoint and recovery priority — `202c17f1` (2026-10-20)
+
+Complete root testing passes 3,035 cases, zero failures, 24 existing ignored; strict whole-root
+Clippy, formatting, ambient and root deny checks pass. Combined native 427+5 and frontend 2,067
+checks, native/frontend builds, actual startup, ten standard browser flows and three additional
+Download/Keep/Gate7 flows pass. The separate IPC probe passes 9 Rust/17 Node cases and real
+framing/takeover/cleanup acceptance, with its dependency-audit failure explicitly retained below.
+The communication ledger records exact source/log boundaries; this is separate from hosted CI.
+
+The user prioritizes graceful functional progress through delayed, duplicated/reordered traffic
+and changing member bridges. Routine disagreement must not gate usable chat or produce errors.
+New production file reconnect/capacity and disabled-V2 retry/late-positive-ACK findings are being
+addressed in an isolated continuation; this checkpoint does not contain or validate those fixes.
+Live V2, production media relay and independent physical audio/network acceptance remain open.
+
+## Packaged IPC feasibility probe (2026-10-19)
+
+The standalone loopback experiment passes on actual packaged Windows WebView2 with normal
+browser security: secure app origin, exact CSP listener, CORS rejection, restricted/remote ACL
+denial and finite stock-bootstrap fallback across reply loss and refresh. Native drain, output
+EOF and temporary-profile cleanup precede any success record; an actual cleanup-fault check
+correctly refuses publication. Three Rust and two Node unit tests pass, with no remaining
+read-only review finding. See the communication acceptance ledger and experiment README.
+The later fixture increment also passes8192-byte native/WebCrypto authenticated framing and
+actual keyless replacement at the old listener port, with the forged reply demonstrably rejected
+by HMAC. Nine Rust and17 Node tests, strict fixture Clippy and final cleanup-fault verification
+pass, with no remaining code-review finding. Its separate deny audit fails on existing pinned
+Tauri maintenance/quick-xml-plist advisories; no exemption is added. See the README for details.
+No Private Network Access preflight occurred. Production action IPC, complete copy/phase custody,
+live V2 and media relay remain unfinished; the harness changes no production listener or CSP.
+
+## Gate7 UI integration with communication recovery (2026-10-19)
+
+The communication branch integrates Gate7's video editor, native file drops, readability and
+Studio save/retirement changes. Both sets of interface and security notes are retained. Uploads
+now admit one batch of at most32 files; additional drops/pastes receive a visible refusal before
+another batch retains files. The review queue independently caps its inventory at16 requests.
+
+Each batch follows its original unlocked UI session and refuses upload/attachment after close
+starts. Close synchronously retires reviews before any save or continuity snapshot. Wiki inserts
+also require the original pane identity, including when the same page name opens again. Old
+leave-server and announcement replies cannot change a replacement session's drafts, errors,
+file-trust settings or leave bookkeeping. Focused regressions demonstrated the corresponding
+failures before correction. This integration does not enable live V2 or production media relay.
+
+Vite excludes `src-tauri` before watcher traversal, including its shared Cargo-target junction.
+Tauri continues to own native rebuilds. The regression exercises the actual configured Vite
+watcher predicate; OS file-notification delivery and the historical F-drive activity are not
+established by that test. The test fixture opens no HMR WebSocket listener.
+
+Integration validation passes2,067 frontend cases,427 native library +5 ACL cases, Svelte0/0,
+production frontend build, native check/build/startup, ten standard browser flows and the separate
+private-download, retained-copy and Gate7 Studio/playback/close flows. The root Rust sources are
+identical at the original UI merge to the 3,033-pass checkpoint. The subsequent native transaction
+prerequisite now has the 3,035-pass combined result above. Existing production bundle-size warnings remain.
+
+## Validated communication checkpoint 3691bd25 (2026-10-19)
+
+Complete root testing passes 3,033 cases with zero failures and 24 existing ignored; complete
+native testing passes 427 library + 5 ACL cases; complete frontend testing passes 1,903 cases.
+Strict all-target/all-feature Clippy, formatting, ambient-dependency and deny checks pass.
+Native check/build/startup, Svelte/build and ten rendered flows pass. The communication
+acceptance ledger records exact logs, prior corrected failures and what each check establishes.
+
+Live V2 and production media relay remain disabled/unimplemented. Protected confirmation intake,
+native/browser copy transport, agreed helpers, SDP/RTC dispatch and combined/physical acceptance
+still need completion. The atomic-intake work after this checkpoint is separate and not part of
+its validation. Only one physical desktop is available.
+
+## Inactive protected browser derivation (2026-10-19)
+
+Broker v5 now gives derivation the same continuing native-action/result lifecycle as confirmation.
+An opaque broker-generated join key and complete frozen native setup bind a twelve-row inactive
+plan; only row0 is consumed. It protects a real execution position from ordinary queue pressure,
+uses the existing combined32-row inventory, and separates24 KiB history,96 KiB variable custody
+and8 KiB metadata. Historical native acceptance without locally retained keys stays history-only.
+Protected keys refuse ordinary crypto/confirmation fallback; original deadlines and closed stamps
+cannot rearm the pair. All91 focused crypto/confirmation/derive cases and the complete1903-case
+frontend suite pass; Svelte, production build, ten rendered flows and real native startup pass.
+Read-only re-review has no remaining findings. The complete root run for the unchanged Rust
+continuation and the complete native427+5 run passed. The communication ledger
+records the exact scope and logs, including the earlier corrected failures.
+
+Production native action registration/IPC, protected confirmation/SDP consumers, atomic encrypted
+intake, agreed helpers, live dispatch/RTC and member media relay remain open. Pinned Tauri/Wry
+inspection also shows that app-level response serialization cannot prove final WebView/COM-copy
+retirement; see VOICE-NATIVE-RESULTS-NEXT before attempting native exposure. One desktop remains
+insufficient for independent physical-network/audible acceptance.
+
+## Inactive V2 confirmation capacity (2026-10-19, isolated continuation)
+
+LocalJoin now prepays twelve fixed local rows/slots plus a confirmation-only96 KiB Workflow;
+only derivation consumes a protected row. It permanently stamps the native pair and binds exact
+process/slot owners, epoch and both endpoint identities. End/expiry fences pending effects and
+releases unused capacity; real input/engine/lower owners retain their charges. Closed handles
+keep their shared2 KiB fixed metadata priced independently, without holding group progress busy.
+All287 focused voice cases and strict affected Clippy pass. Review found and corrected premature
+fixed-metadata release and a direct first-result epoch bypass. Current complete continuation
+checks are separate from the already pushed80927a85/b249bc71 checkpoint evidence below.
+Native/browser protected registration, atomic confirmation intake, measured SDP/IPC transfer,
+live dispatch/RTC, member media relay and physical acceptance remain open.
+
+## Prepared confirmation binding (2026-10-19, disabled continuation)
+
+Confirmation candidates/attempts and original pair deadlines are bound before replay/token
+publication. The ledger itself refuses unbound confirmation through generic admission. Final
+origin checks repeat the binding; replacement/expiry leave replay, serial and incoming rows
+unchanged.273 voice cases and strict affected Clippy pass; read-only re-review is clear. This
+does not compose complete native/browser continuation reservations or enable encrypted intake.
+
+## V2 exchange/history separation (2026-10-19, disabled continuation)
+
+The isolated continuation separates fixed Exchange history from variable phase custody and
+removes settled engine lenders permanently. Published seal/open direction identities cannot
+re-arm after input compaction. Terminal lost-ACK input is preserved; proven unstarted and
+no-terminal settled work compact while held readers retain actual bytes.269 voice,19 native
+authority and11 final action cases pass; strict affected Clippy passes. Read-only re-review is
+clear. Complete checkpoint80927a85 suites run independently against fixed sources and are not
+full-suite evidence for this later continuation. Live V2/native IPC/browser readiness, member
+media relay and physical audio/network acceptance remain open.
+
+## Current file/resume checkpoint80927a85 (2026-10-19)
+
+The native full suite passes427 library and5 ACL tests, including all four TCP file scenarios
+and onward channel-directory discovery. All1860 frontend cases, Svelte/static/build, ten rendered
+flows, separate native check/rebuild/startup, strict root Clippy, formatting, ambient-dependency
+and dependency audit checks pass. The complete root rerun passes2,993 cases across56 targets,
+with zero failures and24 existing ignored cases. The first attempt's registry-seed stack overflow
+was corrected by boxing its unchanged
+shared async fixture; four exact seed and all16 registry-ingress cases pass with default stacks.
+See the communication acceptance ledger and checkpoint logs for commands and honest boundaries.
+
+The isolated media feasibility probe also passes in that rebuilt host, with relay/relay,
+decoded generated audio and jam/drawing stop/resume. It exercises no production V2 signalling,
+membership/media consent or member relay, and does not establish physical audibility/network acceptance.
+
+Further V2 implementation is isolated in `target/communication-live-v2-worktree` so it cannot
+change the sources covered by that full run. Its targeted evidence is separate. Live V2, production
+member media relay, combined rollout and physical audio/network acceptance remain unfinished.
+
+## V2 result/reply checkpoint (2026-10-19, disabled transport)
+
+Exact Rust terminal-result recovery and metadata-only post-End status are implemented. The
+cfg(test) native32-row retention/ACK model passes three new history cases. Typed transport ACKs
+now retain original verification and first helper/public packet custody through byte clones and
+actual driver serialization. Final send checks share one original time sample, then observe all
+original requester/route/epoch/packet gates without further callbacks. Original responder lifetime
+also fences new/cached admission; an old queued request cannot adopt a replacement connection.
+The follow-up separates fixed terminal history from variable input custody. Exact ACK plus
+actual engine settlement can compact input, while existing owned input leases retain their byte
+charge. Protective rows/fences remain and metadata recovery survives; compatibility send refuses
+instead of reconstructing a compacted payload. All 263 relevant voice tests, all 19 native authority
+tests and strict affected sync Clippy pass. Read-only re-review has no remaining findings.
+Native production registry/IPC/copy prepayment, atomic encrypted intake with protected native
+and browser continuations, live scheduling/dispatch/RTC, and media relay remain unfinished.
+Only one physical desktop is available; these tests establish no separate-network or audible
+device acceptance. The communication ledger records commands, red runs and exact limitations.
+
+The endpoint TURN-gateway candidate has a passing one-desktop feasibility experiment in Edge
+and the existing native WebView2 host: relay/relay selected, generated audio decoded, jam/drawing
+messages received, and an acknowledged TCP bridge cut/resume stops/restores delivery. The retained
+experiment has bounded setup/cleanup, socket/handshake limits and injected failure checks.
+`communication-recovery/MEDIA-RELAY-NEXT.md` identifies the frozen artifacts, corrected harness
+failures and production gates. This is not an implemented member relay or physical acceptance.
+
+## Native requester follow-up in progress (2026-10-19)
+
+The continuing source search is now in the sync owner and connected to native explicit chunk,
+range and Keep reads after direct-provider exhaustion. Root preparation reserves route custody
+before durable Keep spend; exact-choice commitment happens afterward. Helpers and exact variants
+retain independent coverage, including bounded later sweeps after signed Unavailable. Original
+native/Root/caller/connection/deadline authority survives actual transport custody and both AEAD
+result paths. The actual 512-offline-member prefix regression and both native TCP Keep scenarios
+pass, including interrupted/reopened C recovering through replacement D with A–C blocked.
+
+Review also found and corrected an existing external-publication collision: final files are now
+created without replacement, and cancellation/failure cannot delete a destination another local
+action created during the transfer. Downloads now acquire into a separate sealed private owner
+before resolving a fresh external destination. Download and Keep share the conservative 32-record/
+1 GiB quota and engine, while keeping immutable purpose, paths, runs and cleanup authority separate.
+Completed Downloads remain unavailable to public blob/source reads. Restart keeps encrypted whole
+chunks and spent allowance, requires explicit Resume and complete revalidation, and never resumes
+plaintext publication automatically. Transfers exposes saved progress, Pause, Resume, explicit
+Retry after exhaustion, and removal. No external path/offset is persisted. Four native export
+slots follow queued plaintext replies through actual retirement. Original account/entry/actor/
+Root/storage generations fence reads, writes, publication and the post-cleanup response.
+Focused evidence: 53 storage cases, 45 worker cases, 15 native download cases and 37 frontend
+cases pass. All four actual TCP file scenarios pass, including private/Keep B bridges, solo
+reopen/export and interrupted native C reopen with explicit private Resume through D. A subsequent
+fixture-only sealed-D-route readiness assertion also passes all four cases. Strict storage/sync/app Clippy
+and Svelte checks pass. Rendered Transfers Pause/Resume/Retry/completion passes at900×640; screenshot
+is `target/pr48-private-downloads.png`. The isolated Edge process needs sandbox elevation because
+its GPU subprocess is otherwise denied before app load. These remain focused software checks.
+This implementation is committed in80927a85; it is not complete programme acceptance.
+Live V2, media relay, combined rollout and physical media acceptance remain open.
+Only one physical desktop is available. The complete-suite results below are historical for
+pushed ebdd8447; the current checkpoint validation is recorded at the top of this document.
+
+## Historical checkpoint ebdd8447 (2026-10-19)
+
+Indirect probe starvation now has a scalar circular target cursor after the initial priority
+selection, with one target/pass and unchanged helper limits. It advances on each confirmed local
+admission before another helper await. Three focused regressions pass, including authenticated
+negative/positive cycles, descriptor refresh, full outbox, missing cursor record and cancellation
+after the first real admission. Re-review has no blocker/high/medium; nine recovery-owner cases,
+the signed-negative and reciprocal neighbours, and strict sync Clippy pass. The full-suite/
+checkpoint results below apply to pushed b867c622, before this change.
+Requester integration remains unfinished. Its source search must use a bounded continuing current
+MLS catalog, not permanently truncate to320 connected-snapshot identities or512 cached descriptors.
+The catalog primitive and still-test-only Search now cover that correction and explicit local-C
+exclusion. Catalogs bind an opaque exact group instance/epoch and propose at most four keys after
+64 raw leaf positions, using a pre-copy bound on both keys and borrowed credentials. Native
+observation remains O(roster); no request path may silently invoke it. Source/helper/variant
+cursors and unstarted proposals remain separate from actual transport admission and durable
+spend. The requester is not connected to downloads yet. MLS catalog review has no blocker/high/
+medium; the revision ledger records focused evidence and remaining requester design constraints.
+
+Final local follow-up verification: the fresh root suite passes2949 cases with24 unchanged
+existing ignored cases; the complete native suite passes420 and frontend suite1851. All ten
+browser flows, static/frontend build, strict root Clippy, formatting, ambient-dependency and
+dependency-audit gates pass. Native voice acceptance now injects one lost heartbeat per helper
+and requires original sealed endpoint routes before closing its replacement helper; both exact
+routes must survive the actual native close/reopen. Recovery and receipt deadlines are unchanged.
+See the revision ledger for commands, executed red controls, failed historical runs and limits.
+
+## Communication follow-up in progress (2026-10-19)
+
+Native requested reads now retain their original account/exact registry-row scope through queued
+ranges, all chunks and final media/save publication. Whole jobs have separate4/actor,8/process
+custody before staging or durable Keep debit, independent of actual lower attempts. All40 worker
+regressions and the complete419-case native suite pass. The root sweep finished all other targets
+with2906 passes and24 existing ignored cases; its sole hung integration target is corrected and
+all30 affected cases pass on the original workspace feature graph. The revision ledger records
+that failed command, its bounded reproduction and the passing rerun, plus the other checks.
+This checkpoint does not complete C-side
+bridge/Keep, external destination resume, live V2, media relay or combined acceptance. Physical
+separate-network/audible checks remain open with only one available desktop.
+
+The b867c622 checkpoint exposed an additional recovery fairness issue: a stable first-ranked
+offline target can monopolize automatic indirect probes after negative replies. The adapter's
+receipt test now uses three actually admitted members so its sole helper and blocked target are
+unambiguous. The subsequent production rotation described above fixes that narrow starvation
+defect while preserving one target per pass. The revision ledger retains the failed native run,
+executed red controls, cancellation regression and subsequent verification.
+
+Latest file checkpoint: source30 and helper29 now dispatch behind native account/exact-entry,
+actor, Root/member/policy and strict bound-connection scope. This supersedes the earlier inert
+source statements below. The concrete native worker test passes with independent pending-metadata
+custody through panic. Expanded dispatch/deadline/lifecycle tests pass; source re-review is clear.
+All54 file-service cases pass, including four concurrent helper chains reaching a fourth source
+while12 earlier actual lower responders remain held. Helper review exposed a final-refusal buffer
+custody gap; original lower bytes and outgoing response input now independently own the same
+charge. The refusal/clone regressions pass and both ownership omissions execute red. Re-review
+has no remaining blocker/high/medium; the revision ledger records subsequent strict checks.
+Requester/Keep integration and end-to-end indirect Keep acceptance remain unfinished.
+
+The PR48 external review remains open. Current work is above `a41933f3`, preserving the separately
+merged Gate7 edits. See the [revision ledger](communication-recovery/PR48-REVIEW-REVISION.md) for
+current positive and negative evidence; the 18 October suite numbers below describe an older
+revision. The adapter now forwards cancellable automatic notifications, restored bound upgrades
+queue directory recovery, and SDP route metadata uses prepaid lower-work custody. Production-time
+fixtures exposed further connectivity/history failures. The latest reciprocal-frontier correction
+passes all eight local native scenarios and all 621 sync unit tests; earlier failed runs remain in
+the ledger. Hosted Linux green remains unverified.
+
+The inert V2 native seam now retains exact accepted/rejected terminal metadata with original
+ownership/deadline and actual engine custody. General action IPC, browser/RTC handoff, live V2
+dispatch and protocol isolation remain unfinished. The earlier statement below that all historical
+receipts are unimplemented is superseded only for this narrow native seam.
+
+Durable Keep implementation now has scoped sealed successor records, a separate metadata HKDF
+key, Resumable/Completed/Deleting ownership, private saved chunks, conservative persistent
+execution allowance and explicit idempotent Retry. Storage regressions and initial actor resume/
+cancellation tests pass; final integration checks are ongoing. New work never uses legacy pending,
+and the permanent format barrier prevents destructive downgrade. Automatic partial resume now has a paced actor wake and exact native unlock retirement; persistent
+Pause/Resume uses a separate intent CAS, and deterministic integrity failures stop automatic retry.
+V2 manual-only records require explicit Resume before V3 background consent. Completed checks
+retain Stop checking and an exhausted copy exposes Retry check. Focused checks/re-review are ongoing;
+V4 whole-variant fallback now has a separate immutable candidate journal and committed winner;
+the actual desktop store wrapper now delegates the V4 and bounded-read APIs. Its missing delegation
+was reproduced before correction; all 31 file-worker and 42 retained-store tests now pass. Six
+owned-read tests cover bounded metadata/buffers and current-store/winner fences. These are source-read
+primitives and a concrete bounded blocking executor, with mandatory request authority checked
+before preparation and actual read entry. They are not an active bridge. Reply-lifetime cancellation,
+pre-allocation transport caps for reserved kinds 29/30 and signed frame codecs have focused proof
+and clear slice reviews. The process-stable replay/rate policy passed eleven initial focused
+tests and review. Current Root/native/member authorization and source/helper service dispatch
+are now active as noted above; requester-side use and combined acceptance remain open. Actual
+lower custody remains separate.
+Existing file jobs now retain actor and Root/member/policy scopes, retiring before stop ACK/close
+waits and observed MLS removal; cancelled freeze resumes under a fresh generation. All35 file
+worker,30 file-service and2 shutdown-barrier cases pass, with strict sync/app Clippy and clear
+slice review. Native exact-entry/account composition for background Keep has clear static review
+and a passing native check plus all4 session and3 removal tests. This does not activate
+the connected file service or scope every external/manual native download command.
+Physical two-device audio/network acceptance cannot run: only this desktop is available. This
+does not block the remaining implementation or automated checks, and it does not count as audio
+or relay acceptance. The current full-sweep and corrected-target results are recorded above and
+in the revision ledger; earlier focused-only checkpoints are historical evidence.
+
+## Communication implementation in progress (2026-10-18)
+
+PR 48's current review revision is tracked separately in
+[PR48-REVIEW-REVISION.md](communication-recovery/PR48-REVIEW-REVISION.md). It reproduces and
+corrects the full application-event-sink/driver ACK deadlock, detaches automatic cached/reciprocal/
+probe forwarding submissions, and rotates file-provider searches beyond the first four peers.
+Mapping, announcement-clock and native warning-boundary corrections have focused proof and clear
+slice reviews. The narrow V2 capacity contract now prepays 224 KiB, work lanes, continuation slots
+and endpoint/helper origin records for one local/remote 8 KiB SDP exchange. Maximum native packet/
+reply and pressured declared engine/result composition regressions pass. General SDP crypto-action
+factories, historical receipts and browser/RTC custody remain unimplemented; live V2 stays disabled.
+Read-only re-review has no remaining blocker/high/medium. The revision ledger records final
+verification: 404 native tests, 1,829 frontend tests, ten browser checks and native startup pass.
+The full root sweep completed with two test defects; both corrections and their complete
+affected-target reruns are recorded separately from that failed unfiltered command.
+The next native result-recovery slice has a read-only
+[design checkpoint](communication-recovery/VOICE-NATIVE-RESULTS-NEXT.md); it is planned work,
+including terminal receipts and the IPC/result copy handoff, not live V2 integration.
+Local reconnect and explicit manual redial still use their existing immediate driver ACK paths;
+the driver no longer blocks swarm progress on application delivery. This is not programme acceptance.
+
+Later Gate7 Studio corrections `13e338eb` and `22e4ed77` are also merged. Integration review
+caught and corrected close/no-work and final-microtask navigation gaps, a stale cross-server wiki
+rename target and a stale channel-open sidebar mutation. Exact page-instance and mutation-time
+route checks preserve the original saved work and scope. Red regressions reproduce the defects;
+55 focused Studio/confirmation checks pass and re-review has no blocker/high/medium. The crypto
+retirement test now waits for actual engine/native settlement instead of fixed event-loop turns.
+
+Gate7 review follow-up `5bc43d2c` is also integrated. Its wiki pane and Index-half Save corrections
+retain the communication branch's final route/close checks and share one page-instance serial.
+Integration review additionally caught and fixed a delayed wiki Save deleting newer text stashed
+by an outgoing page read; a regression reopens the original page and restores that newer draft.
+All 90 focused Studio checks pass and read-only re-review is clear. Final full results are recorded
+in the revision ledger; the wider communication programme remains open.
+
+Development dependency preparation also uses a worktree-local Vite cache and explicit browser
+dependency prebundles: old generated Tauri HTML is not a second application entry, and shared
+node_modules must not mix worktree optimizer state. CommonJS QR dependencies remain optimized;
+future CommonJS subpath imports need an explicit include. A browser QR round-trip smoke check
+joins the original flow checks. Production bundling and fixture authorization are unchanged.
+
+Gate7 commit `4d321fef17514c5080f96d98f01be3e86c375333` is pushed to `origin/Gate7`.
+`chat-update-implementation` was created from that checkpoint and pushed with its upstream.
+The separate [communication ledger](communication-recovery/CHAT-FILES-VOICE-ACCEPTANCE.md) tracks
+subsequent unaccepted work. The live TCP baseline reproduces direct-only voice signalling through
+B and replacement D with A-C forbidden; local submission succeeds without C receipt. Initial
+changes fence stale RTC/call/mount work and introduce native optional router custody. Focused
+tests and adversarial corrections followed that initial checkpoint; final branch verification is
+recorded in the revision ledger. The remaining room/chat/file/media packages are outstanding.
+Gate7's earlier full results are baseline evidence,
+not verification of these later changes. The pre-existing `joinlog.test.ts` edit remains separate.
+
+The demonstrated multi-second discovery stall is corrected with detached connected PEX/
+finalization/offer stages and fair actor completion. Exact lower flight/per-peer custody,
+coalesced bounded discovery, typed supersession and a queued-only shared retirement wake prevent
+early capacity reuse and reciprocal waits. Signed-record revisions request the existing sealed
+core persistence worker in quiet legacy groups; duplicate/liveness-only changes do not write.
+New-channel and missed-membership native TCP matrix cases now pass, including creator-offline
+unselected bridge service, exact original channel-operation unions and solo sealed restore.
+A reproduced quiet-removal gap is corrected by a released kind2 poll before PEX. Recovered epochs
+publish member/role effects even for equal-count replacement. Responses retain the 16 MiB ceiling
+with a separate 1024-record work cap; larger configured legacy replies refuse. Retained-answer
+bounds are now 32/64 MiB for two/four actual flights, plus bounded decoder scratch. Focused results
+and the clear re-review are recorded in the communication ledger; the whole programme remains open.
+The native regression observes the saved descriptor before close and offline cache reconstruction.
+The TCP baseline now measures bridge receipt 21–26 ms and a nominal one-second control exercise
+at 1,046–1,095 ms (`target/chat-maintenance-native-tcp-focused.log`), versus the earlier 5,491/
+7,147 ms result. This is narrow scenario evidence, not full connection-package/media acceptance.
+
+V2 implementation now includes the standalone browser crypto broker, signed canonical objects,
+native mount/call/resource ownership and packet reservation/replay foundation. Focused crypto,
+codec, resource, packet and directory regressions pass, with review corrections for exact inbound
+tuple binding, reload branding, allocator reconstruction and clock rollback. Main-window native
+ACL entries are connected, including the mapping lifecycle commands. Native watcher/active-join
+presence foundations now have focused freshness, renewal, capacity, removal/re-add and retained-
+evidence regressions. Desktop actor attachment now shares the process Runtime/pool, uses fresh
+owners on mounted unlock and revokes exact entries on removal. Newly accepted directory changes
+retire deleted room incarnations even when recreation is buffered or in the same edit; duplicate,
+forged and local no-op operations cannot replay that authority. Optional voice failures leave
+chat/vault access available. A committed UI authorization generation closes the lock-entry versus
+older-unlock race. These mechanisms remain unused by live calls. Live V2 Endpoint/helper/UI
+integration and all communication acceptance remain outstanding; see the separate ledger.
+
+Inert V2 transport admission now authenticates bound Noise endpoints before inner decoding, uses
+exact-frame/time admission and validates typed ACK roles. Detached source/helper requests retain actual
+lower custody and permanent driver connection generations, including disconnect/reconnect before
+Root events are consumed. Production member maintenance captures that same additive transport
+owner; old events cannot cancel fresh generations. Kind28 is still absent from normal dispatch,
+and production source scheduling, encrypted endpoint ingress/pull/negotiation and browser IPC remain
+outstanding. Trusted public-control intake/pumping now commits exact native recipients and original
+allowance atomically; only fresh native challenge/proof responses admit presence. Source retains
+actual native cached packet/pair/action ownership. Root now owns bounded
+watcher/active-join lifecycle state, retires members synchronously on observed MLS changes and uses
+weak native call custody. Review caught and corrected a strong-grant retention error; dropping the
+last external grant now closes an actual queued source job without an actor turn while preserving
+lower capacity until actual final drop. Metadata wakes coalesce. Prepared encrypted ingress has
+focused rejection/replay tests; its final native origin transaction still needs wiring. None of
+these internal seams establish live room/media acceptance.
+
+The inert native typed-action queue now registers exact immutable LocalJoin inputs before engine
+admission. It shares one permanent settlement fence across idempotent admission and first actual
+sign/closed-confirmation effects; End retains admitted work until real settlement. Terminal
+identities count toward its combined 32-record cap. Capacity close releases only unused bytes,
+preserving actual loan bytes/slots. Exact historical-result recovery, whole-chain prepayment,
+retained Runtime progress ownership and main-window action IPC are still open; these foundations
+do not enable kind28 or establish native WebView/blocked-topology acceptance.
+
+PR48 review revision uses an isolated communication worktree while the main checkout contains
+separate Studio changes. Pending router mapping now shares its acquisition result among current
+peer waiters and checks the candidate's own current local ICE generation. Announcement timestamps
+use one checked Clock sample. The unused desktop V2 action registry compiles only for contract
+tests until its result owner/IPC consumers are implemented; the general warnings policy remains
+intact. See [the revision ledger](communication-recovery/PR48-REVIEW-REVISION.md) for corrected
+actor/driver progress, provider rotation, the narrow native SDP resource contract and final branch
+verification. The wider native/browser/file/media acceptance remains outstanding.
 ## Image viewer: a screen-sized fit copy after a Linux GPU hang (2026-10-20)
 
 A Linux tester's whole laptop froze while they flipped an image in the full-screen viewer between
@@ -197,7 +1855,7 @@ mediums and a low. Fixed with regression tests, each confirmed to fail without i
     entry back after a failure, so recovering or stopping it in Pending messages while the
     request was still out turned a possibly accepted message into "not sent". `send()` now keeps
     its own evidence that the identity may have been dispatched.
-- **OPEN, HIGH, handed to the communication session (not fixed on this branch)**: the native
+- **HIGH follow-up from the Gate7 clip-editor review**: the native
   upload/lock race. `finish_file_upload` (`src-tauri/src/lib.rs`) reads the unlocked state, then
   awaits the uploads mutex, removes the reservation on that earlier answer, and awaits
   publication without the UI-session commit guard; once the reservation is gone, a lock finds
@@ -213,6 +1871,21 @@ mediums and a low. Fixed with regression tests, each confirmed to fail without i
   - deterministic barrier tests around final admission and actor publication covering both
     orders and a lock/unlock cycle (the existing test passes a literal `true` to the helper and
     never exercises the race). That session owns the native tests and gates.
+  The separate, pushed communication commit [`c4005b89`](https://github.com/Thalpy/Mewtual/commit/c4005b89)
+  implements this correction in `upload_session.rs` and
+  `lib.rs`, with ten passing real-actor/session/staged-file tests (2.18s,
+  `chat-bubbles-upload-focused-2.log`) and a clear read-only re-review. It also fixes retired
+  uploads leaking staged chunks when a later quota check refused registration. The lost-caller
+  test restores the actual saved server and compares the complete uploaded-file projection.
+  The reviewed follow-up [`985c1f1d`](https://github.com/Thalpy/Mewtual/commit/985c1f1d)
+  is also required: it separates Studio event emission from the publication guard so an actor
+  behind a saturated event sink cannot deadlock publication and lock. Fourteen upload cases
+  and actual cancelled-lock/owner-revocation regressions pass. The final native suite passes
+  443 library plus five ACL tests; native check, debug build and actual startup also pass above.
+  These gates supersede the earlier 438+5 native results recorded in the acceptance ledger.
+  The separate Gate7 branch still needs both native corrections integrated.
+  Do not describe that branch's
+  high finding as closed merely because the correction exists in this communication checkout.
 - Follow-ups: limits on added videos' size and length (a lying sample rate can still make one
   export sound window about 120 MB), and the edited file name contract. Known residuals: emoji
   and built-in sounds skip the queue (small, but not admitted ahead); the previous editor's bin
@@ -615,7 +2288,6 @@ Tests changed because their contract changed:
   "creating…" in the sidebar; that now reads "create not written · retry in the editor".
 - The two departure tests from the previous round that pinned single-worker order and the
   single-worker limit are replaced by the multi-worker contract above.
-
 ## PR #46 fourth review: departure ordering (2026-10-18)
 
 The review of `5bc43d2c` confirmed the rename-context and Index-half fixes, plus 14 extended wiki
@@ -770,8 +2442,8 @@ and five LOW findings; all are fixed. A re-review found no remaining blocker/hig
 one LOW (the unread-Index path, identical at HEAD) is fixed too. Residual: `leaveServer`/`server-closed` with other servers remaining still go
 through a `switchServer` whose Studio Save can refuse. A frame publication not yet applied is
 still classified as possibly committed if a lock lands mid-publish. `jumpToInbox` does not await
-its channel switch. An absent document holding only queued restored edits shows no Save button
-until a Studio exit's global Save refuses it into retry/discard.
+its channel switch. The absent-document restored-edit Save limitation recorded in this earlier
+round is superseded by the read-error/held-queue controls described in the later re-review above.
 
 ## Gate 7 complete; communication programme next (2026-10-18)
 

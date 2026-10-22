@@ -5,6 +5,7 @@ import { addPendingSend, matchingPendingSend, pendingSendRetryBlock, resolvePend
 import { MAX_DRAFT_CHARS, planLegacyReadMarkMigration, sanitizeUiContinuity } from "./ui-continuity.ts";
 import { persistenceWarning, sendAndRefresh, sendOutcome } from "./message-send.ts";
 import { NativeVaultLockCoordinator } from "./window-close.ts";
+import { VideoReviewQueue } from "./video-review.ts";
 
 export function deferred<T = void>() {
   let resolve!: (value: T) => void, reject!: (reason: unknown) => void;
@@ -30,13 +31,15 @@ function productionCloseCallback() {
 /** Shared test fixture for real App save queue, hydration, decisions and submit/retry. */
 export function pendingManagerApp(initial: unknown) {
   const dependencies = { initial, addPendingSend, matchingPendingSend, pendingSendRetryBlock, resolvePendingSend,
-    MAX_DRAFT_CHARS, planLegacyReadMarkMigration, sanitizeUiContinuity, persistenceWarning, sendAndRefresh, sendOutcome, NativeVaultLockCoordinator };
+    MAX_DRAFT_CHARS, planLegacyReadMarkMigration, sanitizeUiContinuity, persistenceWarning, sendAndRefresh, sendOutcome, NativeVaultLockCoordinator, VideoReviewQueue };
   return new Function(...Object.keys(dependencies), `
     let locked = false, uiStateReady = false, uiStateLoadGeneration = 1, uiStateSaveTimer;
     let uiStateSaveChain = Promise.resolve(), uiStateSaveFailed = false, uiStateFailureToast = 0;
     let pendingSends = {}, recoveredSendDrafts = {}, pendingSendErrors = {}, pendingSendResolution = null;
     let retryingPendingSends = false, pendingManagerOpen = false, sending = false;
     let windowCloseInFlight = false, unlocking = false, closeAfterContinuityError = false;
+    let videoScopeEpoch = 0;
+    const videoEditorScope = "closing", videoReviews = new VideoReviewQueue(() => {});
     // These chat tests leave the lazy Studio chunk unmounted. Keep its real continuity
     // fallback and close hooks in scope so the extracted App functions run unchanged.
     let studioSnapshot = null, studioRestore = null, restoredStudioDraft = null;
@@ -123,11 +126,12 @@ export function pendingManagerApp(initial: unknown) {
       bulkyPreferences() { latePast = { fixture: "x".repeat(1024*1024) }; },
       lock() { lockScreen(); },
       close() { return closeHandler({ preventDefault() {} }); },
+      review(file) { return videoReviews.request(file, { index: 1, count: 1 }, "open", "chat"); },
       expireCloseWait() { for (const callback of [...closeTimers.values()]) callback(); },
       replaceUiGeneration() { uiStateLoadGeneration++; },
       async unlock() { await nativeVaultLock.settle(); nativeVaultLock.reset(); nativeLocked = false; nativeGeneration++; locked = false; uiStateLoadGeneration++; return loadUiContinuity(uiStateLoadGeneration); },
       done() { clearTimeout(uiStateSaveTimer); },
-      state() { return { pendingSends: structuredClone(pendingSends), recoveredSendDrafts: structuredClone(recoveredSendDrafts), drafts: structuredClone(drafts), draft, sealed: JSON.parse(sealed), writes, submissions, pendingSendResolution, locked, error, closeCalls, windowCloseInFlight, destroyCalls, restartCalls, contextCalls }; }
+      state() { return { pendingSends: structuredClone(pendingSends), recoveredSendDrafts: structuredClone(recoveredSendDrafts), drafts: structuredClone(drafts), draft, sealed: JSON.parse(sealed), writes, submissions, pendingSendResolution, locked, error, closeCalls, windowCloseInFlight, destroyCalls, restartCalls, contextCalls, videoScopeEpoch, videoReview: videoReviews.current }; }
     };
   `)(...Object.values(dependencies));
 }

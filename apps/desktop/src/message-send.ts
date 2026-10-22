@@ -16,7 +16,7 @@ export type SendMessageResult = {
  * a failed one is put back (found in review).
  * - `refused`: nothing was submitted (a guard, or the session moved on before dispatch);
  * - `failed`: not sent, and nothing will send it by itself: it sealed no identity, or its
- *   identity is blocked from automatic retry (refused natively; it waits in Pending messages);
+ *   fresh identity is blocked from automatic retry by a definite refusal of its first attempt;
  *   the app shows why. An announcement that threw is `failed` too, though with no retry token it
  *   may have been posted before the error came back;
  * - `sent`: accepted and saved on this device;
@@ -27,12 +27,13 @@ export type SendMessageResult = {
  */
 export type SendOutcome = "refused" | "failed" | "sent" | "uncertain";
 
-/** A submitted message's outcome from its native result. */
-export function sendOutcome(result: SendMessageResult): SendOutcome {
+/** Classify this reply without letting a retry refusal erase a prior unknown outcome. */
+export function sendOutcome(result: SendMessageResult, priorMayHaveGone = false): SendOutcome {
   if (result.accepted && result.persistence.status === "durable") return "sent";
   // Refused because the conversation moved on: never authored, and held for review with its
-  // automatic retry paused ("move it to a draft to start a new send"), so not "don't send it again".
-  if (!result.accepted && result.persistence.status === "superseded") return "failed";
+  // automatic retry paused. This is absence evidence for this attempt only: a lost predecessor
+  // could have committed before the conversation/registry changed.
+  if (!result.accepted && result.persistence.status === "superseded" && !priorMayHaveGone) return "failed";
   return "uncertain";
 }
 
@@ -50,8 +51,9 @@ export async function sendAndRefresh(
   }
 }
 
-export function persistenceWarning(result: SendMessageResult): string | null {
+export function persistenceWarning(result: SendMessageResult, priorMayHaveGone = false): string | null {
   if (!result.accepted && result.persistence.status === "superseded") {
+    if (priorMayHaveGone) return "Automatic retry is paused because the conversation changed. An earlier attempt may have sent this message; check the conversation before sending it again.";
     return "This pending message needs review because the conversation changed. Automatic retry is paused; move it to a draft to start a new send.";
   }
   if (!result.accepted) return "Message saved as a pending request in this vault. Its history save has not completed; it will retry automatically while unlocked.";

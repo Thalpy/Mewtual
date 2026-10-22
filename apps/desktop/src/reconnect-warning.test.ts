@@ -15,14 +15,16 @@ function reopen(reloaded: object[]) {
   return new Function("reloaded", `
     let servers = [], locked = true, uiStateLoadGeneration = 0;
     const warnings = [];
+    let callControllerClaims = 0;
+    const callMappingSession = { claimController() { callControllerClaims++; return Promise.resolve(null); } };
     const sessionStorage = { removeItem() {} };
     const toast = (...args) => warnings.push(args);
     const loadUiContinuity = () => new Promise(() => {});
     const refreshAllDmRequests = () => {}, loadInbox = () => {}, refreshAllServerIcons = () => {};
     ${restore}
     restoreReloaded(reloaded);
-    return { warnings, locked, servers };
-  `)(reloaded) as { warnings: unknown[][]; locked: boolean; servers: { id: number }[] };
+    return { warnings, locked, servers, callControllerClaims };
+  `)(reloaded) as { warnings: unknown[][]; locked: boolean; servers: { id: number }[]; callControllerClaims: number };
 }
 
 test("actual restored-server flow discloses missing outgoing routes without blocking the group", () => {
@@ -32,6 +34,7 @@ test("actual restored-server flow discloses missing outgoing routes without bloc
     { server: 2, name: "Other", channel: "1" },
   ]);
   assert.equal(result.locked, false);
+  assert.equal(result.callControllerClaims, 1, "resume claims a fresh native call controller even outside a call");
   assert.deepEqual(result.servers.map((server) => server.id), [1, 2]);
   assert.deepEqual(result.warnings, [[`Chat: ${warning}`, "warn", 0]]);
 });

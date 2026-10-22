@@ -481,6 +481,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         }
         self.admin_roster
             .retain(|id| self.group.contains_device(id));
+        self.reconcile_voice_actor();
         outcome
     }
 

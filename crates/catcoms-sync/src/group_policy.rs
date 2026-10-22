@@ -96,6 +96,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         }
         self.group_policy = Some(GroupPolicy::issue(&self.group, &self.device, mode)?);
         self.group_policy_revision = self.group_policy_revision.wrapping_add(1);
+        self.reconcile_voice_actor();
         Ok(())
     }
 
@@ -107,6 +108,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         }
         self.initialize_group_policy(GroupMode::PeerToPeer)?;
         self.group_policy_active = true;
+        self.reconcile_voice_actor();
         Ok(())
     }
 
@@ -173,6 +175,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         }
         self.group_policy_publish_ready = true;
         self.group_policy_active = true;
+        self.reconcile_voice_actor();
         Ok(())
     }
 
@@ -221,6 +224,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             }
             Err(error) => tracing::debug!(%error, "rejected group policy control message"),
         }
+        self.reconcile_voice_actor();
     }
 }
 

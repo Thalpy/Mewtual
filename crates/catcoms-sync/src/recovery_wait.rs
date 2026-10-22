@@ -17,11 +17,80 @@ pub(super) struct PendingCatchup {
     auth: RequestAuth,
     shape: Shape,
     doc_version: u64,
+    /// A newer authenticated frontier arrived after this wait was prepared. Its older empty
+    /// answer may still import valid bytes, but cannot discharge that later obligation.
+    completeness_dirty: bool,
+    member: Option<DeviceId>,
     cursor: Option<CatchupCursor>,
+    pub(super) wait_started: Arc<std::sync::OnceLock<u64>>,
+    pub(super) within_ms: u64,
+    pub(super) kind: u8,
     pub(super) response: Pin<Box<dyn Future<Output = Result<Bytes, SyncError>> + Send>>,
 }
 
 impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
+    fn forget_checked_source(&mut self, doc_type: DocType, doc_id: u128, peer: PeerId) {
+        if let Some((_, checked)) = self.catchup_sources_checked.get_mut(&(doc_type, doc_id)) {
+            checked.remove(&peer);
+        }
+    }
+
+    /// A verified current member's unknown hashes justify one bounded reverse read, not trust
+    /// in the claimed operations. The normal response signature, membership, ciphertext and
+    /// signed-operation checks still decide what may be imported. No document or route is opened.
+    pub(super) fn note_catchup_frontier_hint(
+        &mut self,
+        from: PeerId,
+        requester: DeviceId,
+        epoch: u64,
+        doc_type: DocType,
+        doc_id: u128,
+        heads: &[[u8; 32]],
+    ) {
+        if epoch != self.group.epoch()
+            || !self.group.is_active()
+            || !self.group.contains_device(&self.device.device_id())
+            || !self.group.contains_device(&requester)
+            || !self.peer_is_connected(from)
+            || self
+                .docs
+                .get(&(doc_type, doc_id))
+                .is_none_or(|doc| doc.knows_changes(heads))
+        {
+            return;
+        }
+        let now = self.clock.monotonic_ms();
+        let Some(next) = now.checked_add(CATCHUP_PEER_COOLDOWN_MS) else {
+            return;
+        };
+        let key = (doc_type, doc_id, requester);
+        if self
+            .catchup_frontier_hints
+            .get(&key)
+            .is_some_and(|until| now < *until)
+        {
+            return;
+        }
+        if !self.catchup_frontier_hints.contains_key(&key)
+            && self.catchup_frontier_hints.len() >= MAX_CATCHUP_STALL_ENTRIES
+        {
+            self.catchup_frontier_hints.retain(|_, until| *until > now);
+            if self.catchup_frontier_hints.len() >= MAX_CATCHUP_STALL_ENTRIES {
+                return;
+            }
+        }
+        self.catchup_frontier_hints.insert(key, next);
+        self.forget_checked_source(doc_type, doc_id, from);
+        if let Some(wait) = self.pending_catchup.as_mut().filter(|wait| {
+            wait.task == CatchupTask::Doc { doc_type, doc_id }
+                && (wait.peer == from || wait.member == Some(requester))
+        }) {
+            // Kept on the existing owner, so expiry/pruning of the hint budget cannot erase it.
+            wait.completeness_dirty = true;
+        }
+        self.enqueue_doc_catchup(doc_type, doc_id);
+    }
+
     pub(super) fn start_queued_catchup(&mut self)
     where
         T: 'static,
@@ -106,14 +175,28 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         }
         let transport = Arc::clone(&self.transport);
         let clock = Arc::clone(&self.clock);
+        let wait_started = Arc::new(std::sync::OnceLock::new());
+        let observed_start = wait_started.clone();
         self.pending_catchup = Some(PendingCatchup {
             task,
             peer,
             auth,
             shape,
             doc_version,
+            completeness_dirty: false,
+            member: self
+                .member_peers
+                .iter()
+                .find(|proof| proof.peer == peer && proof.bound)
+                .map(|proof| proof.device),
             cursor,
+            wait_started,
+            within_ms,
+            kind,
             response: Box::pin(async move {
+                // Diagnostic first-poll time only: neither projection reads nor cancelled outer
+                // owner polls may renew this retained wait. It is not a wire handoff receipt.
+                let _ = observed_start.set(clock.monotonic_ms());
                 Self::request_within_deadline(
                     &transport,
                     &*clock,
@@ -136,8 +219,20 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
     {
         enum Ready {
             Response(Result<Bytes, SyncError>),
+            Submission(super::recovery_submission::Completion),
+            FileSource(super::file_service::service::Completion),
             Event(Option<TransportEvent>),
             Retry,
+            Capacity,
+            Reconciliation,
+        }
+        if self.bound_source_reconciliation_owed {
+            // Authentication can complete after the connection edge that declined recovery.
+            // Drain one bounded rotating pass without waiting for the periodic fallback. The
+            // obligation and queue survive outer-poll cancellation; current sources are checked
+            // again by scheduling and by the request selector.
+            self.schedule_reconciliation();
+            self.start_queued_catchup();
         }
         // A pending request has its own finite deadline. An unrelated expired cooldown must
         // not busy-loop while that single slot is occupied.
@@ -150,6 +245,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             .into_iter()
             .flatten()
             .min();
+        let reconciliation_delay = self.next_reconciliation_delay();
         let transport = Arc::clone(&self.transport);
         let clock = Arc::clone(&self.clock);
         let event = transport.next_event();
@@ -159,22 +255,67 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
                 None => std::future::pending().await,
             }
         };
-        futures::pin_mut!(event, retry);
+        let reconciliation = async {
+            match reconciliation_delay {
+                Some(ms) => clock.sleep(std::time::Duration::from_millis(ms)).await,
+                None => std::future::pending().await,
+            }
+        };
+        let mut changed = self.recovery_submissions.changed.clone();
+        let waiting_submission =
+            !self.repair_outbox.is_empty() || !self.delivery_receipt_outbox.is_empty();
+        let capacity = async {
+            if waiting_submission {
+                let _ = changed.changed().await;
+            } else {
+                std::future::pending::<()>().await;
+            }
+        };
+        futures::pin_mut!(event, retry, capacity, reconciliation);
         let ready = poll_fn(|cx| {
-            // Alternate ready completions and inbound events. A peer flooding either side
-            // cannot indefinitely suppress the other; a pending branch registers its waker.
-            for response_first in [self.prefer_catchup_response, !self.prefer_catchup_response] {
-                if response_first {
+            // One bounded local turn per interval precedes ready I/O, so sustained incoming
+            // traffic cannot starve quiet anti-entropy. Advance the shared deadline before
+            // reporting readiness; cancelled caller polls retain that exact schedule.
+            if reconciliation.as_mut().poll(cx).is_ready() {
+                self.schedule_reconciliation();
+                return Poll::Ready(Ready::Reconciliation);
+            }
+            // Rotate catch-up, inbound events, detached submissions and file completions. This poll
+            // may be cancelled by an actor command; the jobs/permits remain on the group owner.
+            for offset in 0..4 {
+                let source = (self.recovery_turn + offset) % 4;
+                if source == 0 {
                     if let Some(pending) = self.pending_catchup.as_mut() {
                         if let Poll::Ready(result) = pending.response.as_mut().poll(cx) {
-                            self.prefer_catchup_response = false;
+                            self.recovery_turn = 1;
                             return Poll::Ready(Ready::Response(result));
                         }
                     }
-                } else if let Poll::Ready(value) = event.as_mut().poll(cx) {
-                    self.prefer_catchup_response = true;
-                    return Poll::Ready(Ready::Event(value));
+                } else if source == 1 {
+                    if let Poll::Ready(value) = event.as_mut().poll(cx) {
+                        self.recovery_turn = 2;
+                        return Poll::Ready(Ready::Event(value));
+                    }
+                } else if source == 2 && !self.recovery_submissions.jobs.is_empty() {
+                    use futures::Stream;
+                    if let Poll::Ready(Some(completed)) =
+                        Pin::new(&mut self.recovery_submissions.jobs).poll_next(cx)
+                    {
+                        self.recovery_turn = 3;
+                        return Poll::Ready(Ready::Submission(completed));
+                    }
+                } else if source == 3 && !self.file_service.jobs.is_empty() {
+                    use futures::Stream;
+                    if let Poll::Ready(Some(completed)) =
+                        Pin::new(&mut self.file_service.jobs).poll_next(cx)
+                    {
+                        self.recovery_turn = 0;
+                        return Poll::Ready(Ready::FileSource(completed));
+                    }
                 }
+            }
+            if capacity.as_mut().poll(cx).is_ready() {
+                return Poll::Ready(Ready::Capacity);
             }
             retry.as_mut().poll(cx).map(|()| Ready::Retry)
         })
@@ -185,7 +326,20 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
                 None
             }
             Ready::Event(event) => Some(event),
+            Ready::Submission(completed) => {
+                self.complete_recovery_submission(completed);
+                None
+            }
+            Ready::FileSource(completed) => {
+                self.complete_file_service(completed);
+                None
+            }
+            Ready::Capacity => {
+                self.recovery_submissions.changed.borrow_and_update();
+                None
+            }
             Ready::Retry => None,
+            Ready::Reconciliation => None,
         }
     }
 
@@ -203,6 +357,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             auth,
             shape,
             doc_version,
+            completeness_dirty,
             cursor,
             ..
         } = pending;
@@ -244,6 +399,10 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
                         // Compatibility keeps its existing larger finite deadline, but no
                         // longer monopolizes or loses its wait on the mutable actor owner.
                         if self.begin_catchup_wait(task, peer, Shape::Full).is_ok() {
+                            self.pending_catchup
+                                .as_mut()
+                                .expect("new full wait")
+                                .completeness_dirty = completeness_dirty;
                             return;
                         }
                         self.requeue_catchup(task);
@@ -254,6 +413,13 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
                         self.requeue_catchup(task);
                     }
                     Ok(Some(_)) => {}
+                }
+                if completeness_dirty {
+                    // The source's old reply cannot overwrite a later authenticated hint. Only
+                    // this exact source's answer is invalidated; unrelated completeness, failure
+                    // cooldowns, original cursors and continuation ownership remain unchanged.
+                    self.forget_checked_source(doc_type, doc_id, peer);
+                    self.requeue_catchup(task);
                 }
                 if moved {
                     // A local edit during the wait is not evidence that this source answered
@@ -304,3 +470,6 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod frontier_tests;

@@ -10,6 +10,11 @@ description = "Mewtual desktop app (Tauri 2)"
 name = "mewtual_desktop_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
+[features]
+# Tauri's mode/origin decision follows this feature, including packaged debug builds.
+# Native tests/development keep the default devUrl; packaging opts into embedded assets.
+custom-protocol = ["tauri/custom-protocol"]
+
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
 # build.rs reads security/command-policy.json to feed the ACL manifest, so the reviewed policy and
@@ -17,11 +22,22 @@ tauri-build = { version = "2", features = [] }
 serde_json = "1"
 
 [dependencies]
+# Disabled native handoff codec. These exact versions already exist in this lockfile;
+# explicit edges account for their newly reachable local-channel use independently of MLS.
+aes-gcm = "=0.10.3"
+hkdf = "=0.12.4"
+hmac = "=0.12.1"
+sha2 = "=0.10.9"
+# Newly reachable secret local-channel ECDH, not just an already-transitive public-key parser.
+# The bootstrap source review records arithmetic/zeroization limits. This edge requests only
+# ECDH; other dependants may unify further p256 features in the resolved native graph.
+p256 = { version = "=0.13.2", default-features = false, features = ["ecdh"] }
+async-trait = "0.1"
 bytes = "1"
 tauri = { version = "2", features = [] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-tokio = { version = "1", features = ["rt-multi-thread", "sync", "macros", "time"] }
+tokio = { version = "1", features = ["rt-multi-thread", "sync", "macros", "time", "net", "io-util"] }
 libp2p = { version = "0.56", features = ["tokio"] }
 hex = "0.4"
 base64 = "0.22"
@@ -65,10 +81,11 @@ tauri-plugin-updater = "2"
 tauri-plugin-process = "2"
 
 [dev-dependencies]
+catcoms-crypto = { path = "../../../crates/catcoms-crypto" }
 tokio = { version = "1", features = ["io-util", "process"] }
-async-trait = "0.1"
 automerge = "0.10"
 catcoms-replication = { path = "../../../crates/catcoms-replication" }
+catcoms-wire = { path = "../../../crates/catcoms-wire" }
 tempfile = "3"
 rand_chacha = "0.3"
 rand_core = "0.6"

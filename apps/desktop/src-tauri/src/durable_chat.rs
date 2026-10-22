@@ -187,6 +187,7 @@ mod tests {
         state.servers.lock().await.insert(
             12,
             ServerEntry {
+                files: keep_session::EntryOwner::new(),
                 actor: actor.clone(),
                 instance: 40,
                 group_id,
@@ -201,6 +202,7 @@ mod tests {
                 is_dm: false,
                 switchboard: false,
                 record_seq: 0,
+                voice: None,
                 persist: PersistCounters::default(),
             },
         );
