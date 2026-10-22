@@ -159,6 +159,29 @@ pub struct HandoffLoan {
     workflow: Arc<Workflow>,
     _credit: Credit,
 }
+impl HandoffLoan {
+    /// Irreversibly retire this ORIGINAL confirmation plan after a derivation-only handoff.
+    /// Ordinary loan Drop only returns copy capacity to an open Workflow; it does not close
+    /// the plan. This explicit native capability closes that exact plan without a lookup by
+    /// handshake ID, a replacement grant, or retaining a strong control owner in history.
+    ///
+    /// The trusted adapter must first establish actual browser/provider/RPC drainage and
+    /// engine settlement. Call outside Engine/Group/Policy/native registry guards: close may
+    /// retire unstarted actions and release credits. The consumed loan drops LAST. Other
+    /// credited inputs, engines, lower work or copy owners still retain the original Workflow;
+    /// returning from this method is closure, never evidence that all96KiB has drained.
+    /// This ends the confirmation plan, so it is not the future SDP phase-transfer API.
+    pub fn retire_confirmation(self) {
+        if let Some(control) = self.workflow.control.upgrade() {
+            control.close();
+        } else {
+            // The exact control was already destroyed; the loan still owns its original
+            // Workflow. It must not become an open reserve just because its control is gone.
+            self.workflow.close();
+        }
+        drop(self);
+    }
+}
 impl Drop for HandoffLoan {
     fn drop(&mut self) {
         let mut state = self
