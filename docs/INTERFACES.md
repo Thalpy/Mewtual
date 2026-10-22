@@ -1,5 +1,28 @@
 # Mewtual; Interfaces & Hooks Schema
 
+## Original variable Workflow observation (22 October)
+
+HandoffLoan::retire_confirmation_observed consumes the original loan, closes its original
+confirmation plan and returns a native-only non-Clone ConfirmationRetirement. The existing
+retire_confirmation unit API delegates and drops that observer; ordinary loan Drop still closes
+no plan. is_drained observes only the original VARIABLE Workflow's actual last-field retirement.
+It grants no key, engine, packet, call, RTC or replacement-plan authority. Fixed history and
+independent packet slots are outside this signal's scope.
+
+is_drained() -> bool is a monotonic snapshot only, with no waiter, wakeup or scheduling guarantee.
+OBSERVER_MEMORY_BYTES is pointer-sized caller witness storage, not wire size or a new reserve.
+The unchanged2KiB retained graph pays the flag and final publisher. Workflow and HistoryPlan
+borrow the SAME original pool from their binding's metadata credit; all pool-identity checks
+remain exact. Native must also count its enclosing state/task/output in existing paid control
+capacity and retain this SAME witness across cancellation. Missing proof cannot be recreated
+by handshake ID. The inactive native Phase retains the SAME witness in original paid State before publishing
+local completion. confirmation_status distinguishes no final intent (NotRequested), original
+closure still outstanding (Closing), stored witness not yet ready (Draining), and actual
+variable retirement (Drained). It allocates nothing and invokes no Clock/grant/Root callback.
+is_drained still reports only LOCAL16KiB return. Existing compaction may drop Phase/witness;
+absence is never full-retirement proof. Production consumption, final-proof capture/transfer
+and bounded native retry coordination remain unimplemented.
+
 ## Native channel/action history collection (22 October)
 
 Registry::collect_retired receives the actual native action Ledger. When the original channel

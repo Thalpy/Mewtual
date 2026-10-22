@@ -1,5 +1,38 @@
 # Mewtual; Architecture
 
+## Original confirmation Workflow retirement observer (22 October)
+
+The inactive native handoff can now obtain ConfirmationRetirement by consuming the original
+HandoffLoan through retire_confirmation_observed. Ordinary loan Drop still returns the16KiB
+action phase to the OPEN96KiB Workflow; final retirement closes the whole original plan.
+Derive -> Hello/Proof/Finish continuation must not use final retirement between those steps.
+The existing unit-returning retire_confirmation remains a compatibility wrapper.
+
+The observer retains only the original already-paid PlanBinding, never Workflow or effect
+authority. A LAST Workflow field publishes readiness after actual reserve/lane/packet capacity
+fields destruct. Raw Weak strong_count zero is insufficient: it precedes value/field Drop.
+Delayed input/lower/copy credits retain Workflow through actual custody; Credit returns bytes
+and lane ownership before that custody can cause the last drop. This proves variable Workflow
+retirement, not disappearance of fixed history/action metadata or independent packet-table slots.
+
+The separate monotonic flag provides a snapshot only. There is no waiter, notification channel,
+or scheduling guarantee. The original fixed metadata credit already owns the exact Resources
+pool; Workflow and HistoryPlan borrow it through their original binding instead of retaining
+two redundant pool pointers. Payment precedes lease/binding allocation. The flag and LAST
+publisher must fit the unchanged2KiB retained graph; caller witness storage has a separate
+pointer-sized memory guard. Native must also fund its enclosing state/task/output in existing
+control capacity. The inactive native Phase stores the SAME returned witness before publishing local loan
+completion. Its ConfirmationStatus snapshot distinguishes NotRequested, Closing, Draining and
+Drained; local is_drained still means only16KiB return. Ordinary closure cannot be relabelled
+after returning the original loan. No production consumer or retry coordinator is wired yet.
+If existing ledger compaction drops Phase, its lost witness is NOT full-retirement evidence;
+final-proof capture/transfer remains future work.
+
+Native must retain the SAME witness across cancelled work; a missing witness is never drainage.
+Future progress needs a bounded existing driver or injected-Clock cadence, not a busy loop,
+per-query task or fresh reservation. Preserve Control until final delivery. Browser adapter/normal
+Actor handoff, phase transfer and live V2 remain unfinished; production ingress serves Status only.
+
 ## App-owned status bootstrap and session collection (21 October)
 
 Source bac90cfa connects the retained browser channel to application-owned native bootstrap.

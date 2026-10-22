@@ -71,6 +71,15 @@ fn fixed_metadata_allowance_covers_retained_owner_layouts() {
         bytes <= METADATA_BYTES,
         "retained native layouts need {bytes} bytes, allowance is {METADATA_BYTES}"
     );
+    // The witness occupies the caller's already-funded state, not another Root heap
+    // allocation. Keep its growth guard separate from the UNCHANGED retained2KiB contract.
+    // A future native consumer must also measure its surrounding task/output/restore owner.
+    let observer = size_of::<ConfirmationRetirement>();
+    eprintln!(
+        "retained workflow graph {bytes}/{METADATA_BYTES}; caller observer {observer}/{}",
+        ConfirmationRetirement::OBSERVER_MEMORY_BYTES
+    );
+    assert!(observer <= ConfirmationRetirement::OBSERVER_MEMORY_BYTES);
 }
 
 #[test]

@@ -1,5 +1,39 @@
 # Mewtual; Handover
 
+## Original Workflow retirement and native snapshot candidate (22 October)
+
+Current unpublished work in target/communication-action-dispatch-worktree followscc7274b7.
+HandoffLoan::retire_confirmation_observed consumes the ORIGINAL loan and returns a non-Clone
+snapshot witness retaining only its paid fixed binding. Ordinary loan Drop still returns an
+individual16KiB phase to the OPEN96KiB Workflow; successful Derive continuation must use that
+ordinary path. Final retirement closes the whole original plan. The unit API remains compatible.
+
+A LAST Workflow field publishes readiness only after actual variable-capacity fields drop.
+Weak strong_count zero, End, missing history and returned local copies never prove this.
+Delayed actual input/lower/copy custody keeps readiness false. No waiter/watch/Notify allocation
+or scheduling guarantee exists. Two redundant Resources Arcs are replaced by borrowing the EXACT
+original pool through the immutable metadata credit; all identity checks remain intact.
+Root focus4 PASSED30/0fail,154.34s gate, including five new adversarial custody/pool regressions.
+Measured retained graph2040/2048 and caller witness8/8 preserve both original caps. Failed
+layout/watch prototypes remain recorded in focus1-3 and were never accepted as passing evidence.
+
+The inactive native Phase stores the SAME witness in original paid State before local completion.
+ConfirmationStatus separates NotRequested, Closing, Draining and Drained; is_drained remains ONLY
+local16KiB loan return. Snapshot reads invoke no grant, Clock, Root callback, task or allocation.
+Repeated closes cannot replace the witness; ordinary-close-wins refuses later relabelling.
+Focused native11 PASSED179/0fail,4.22s tests/292.38s gate; original native2KiB
+phase metadata and12KiB codec layout guards pass. Root strict all-target/all-feature Clippy
+PASSED66.92s, ambient0.98s, cargo deny11.30s; native strict Clippy48.92s and check48.16s
+pass. Root/native formatting and git diff --check pass. Exact commands/results are in
+target/voice-retirement-static.jsonl; these do not replace pending full-suite gates.
+Read-only design/actual-diff review has no actionable findings; no production opcode is enabled.
+
+Existing ledger compaction may drop Phase/witness. Missing or compacted Phase is NOT full-variable
+retirement proof. Final-proof capture/transfer, bounded native retry coordination and browser
+adapter wiring remain unfinished. Production ingress still serves Status only. Fresh complete
+root/native/build/startup/probe gates remain pending until the handoff implementation is coherent.
+No new live V2/SDP/RTC, relay, combined or independent physical acceptance follows.
+
 ## Active explicit native Pending closure (22 October)
 
 Unpublished current work in target/communication-action-dispatch-worktree follows04803e07.

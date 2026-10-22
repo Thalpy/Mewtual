@@ -1,5 +1,18 @@
 # Next voice milestone: native result recovery
 
+## Original variable-retirement observation candidate (22 October)
+
+The latest unpublished Root/native slice separates ordinary16KiB return from final96KiB plan
+retirement. Original consuming-loan provenance, a LAST field publisher and a non-Clone snapshot
+witness replace missing-row/weak-count inference. Root focus4 passes30 tests with2040/2048 retained
+bytes and8/8 caller witness. Native Phase retains the SAME witness in paid State before local
+completion; its separate snapshot has no wake/scheduling guarantee. Native focus11 passes179 tests
+including unchanged native phase/codec layout guards. Root/native strict Clippy, both format
+checks, ambient/deny and native check pass; full-suite gates remain pending.
+HANDOVER.md records the exact boundaries. Existing compaction may drop this witness; final-proof
+capture/transfer and bounded retry coordination still need implementation. Production remains
+Status only, with no normal successful Actor/browser handoff, live V2 or media acceptance claim.
+
 ## Explicit native Pending closure candidate (22 October)
 
 The latest unpublished checkpoint adds an inactive exact authenticated ClosePhase adapter for

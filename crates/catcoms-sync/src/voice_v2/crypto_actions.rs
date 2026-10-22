@@ -24,7 +24,7 @@ const RECORD_BYTES: usize = 1024;
 mod handoff;
 mod results;
 pub(crate) mod slots;
-pub use super::chain::HandoffLoan;
+pub use super::chain::{ConfirmationRetirement, HandoffLoan};
 pub use handoff::ProtectedCryptoBinding;
 pub use results::{CryptoOutcome, CryptoResultReceipt, CryptoResultStatus};
 pub(super) use results::{ResultBinding, TerminalResult};

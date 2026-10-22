@@ -1,5 +1,33 @@
 # Threat model; client integrity & enforcement boundaries
 
+## Original variable Workflow retirement signal (22 October)
+
+Final confirmation closure cannot be inferred from a returned16KiB loan, revoked grant, missing
+row, timeout or Weak strong_count zero. The consuming original-loan observer instead retains
+only the original fixed paid binding. A LAST Workflow field sets its separate readiness flag
+after actual variable capacity fields drop. Credit byte/lane return must continue to precede
+custody destruction; declaration order is an enforcement invariant. No other plan can write
+this flag, and the witness has no constructor, Clone or effect-control conversion.
+
+The observer is a monotonic snapshot only: it supplies no wakeup, waiter or scheduling guarantee.
+It retains no plan lease or notification allocation. Payment precedes original lease/binding
+allocation; no group/process cap is increased. Workflow and HistoryPlan borrow their exact
+original pool through the immutable binding's metadata credit, preserving pool-identity checks
+without duplicate pointers. Fixed metadata and independently loaned packet slots remain outside
+this VARIABLE retirement claim.
+
+The caller must pay its witness/enclosing state/task/output from existing fixed control memory
+and preserve the sole original witness across cancellation. Missing proof, a timeout or revocation
+never means drainage. Future retry coordination must use a bounded existing driver or injected
+Clock cadence, without busy loops, per-query tasks or fresh reservations. Ordinary per-action
+return keeps the plan open for Hello/Proof/Finish; final closure ends that plan. This API enables
+no browser dispatch, SDP/RTC or live V2. The inactive native Phase stores the SAME witness in paid State before local completion,
+retaining it across caller loss. Its separate final-plan snapshot invokes no Clock, grant,
+Root callback or allocation. Ordinary-close-wins still refuses later relabelling. Existing
+compaction may drop Phase and its proof; absence MUST NOT imply full variable retirement.
+Production consumption, final-proof capture/transfer and retry coordination remain unfinished;
+no physical acceptance follows.
+
 ## Original channel history reclamation (22 October)
 
 Lost replies, FinalACK, timeout, End and a dead lease alone cannot evict an action purpose.
