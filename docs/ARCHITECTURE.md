@@ -1,5 +1,73 @@
 # Mewtual; Architecture
 
+## App-owned status bootstrap and session collection (21 October)
+
+Source bac90cfa connects the retained browser channel to application-owned native bootstrap.
+The host binds its paid loopback socket before Tauri creates windows and adds only that exact
+numeric port to the existing CSP and devCSP. Origin selection follows Tauri custom-protocol
+mode and validated main-window configuration, including packaged debug builds. Setup explicitly
+enters Tauri's IO runtime; the Exit callback collects the actual task/socket before SDK cleanup
+or restart. Bind/start failure disables this channel while the rest of the app can start.
+
+The original IO state now retains a weak native action context. All nine references must
+upgrade before any ledger/factory admission. Ordinary IPC and the upgraded context borrow the
+same UI gate, including actual mounted-store presence, resumable-to-store lock order and the
+post-await lock/generation check. Three existing policy fields now use shared Arc ownership;
+no cached authorization snapshot or second commit mutex is introduced. The detached native
+worker retains only its actual actor, original selection/grant/commit and paid work owners.
+
+Weak references retain the original inline Arc allocations after their values drop. The fixed
+listener payment is now32KiB, up8KiB from24KiB, covering a32,256-byte measured Windows native
+peak including those allocations/control blocks and context wrappers. This spends more of the
+same2MiB process cap, without changing group or engine limits. Context drops before the IO
+credit; completed/uncollected native output retains that same original payment. Other platform
+layouts still fail closed if their measured peak does not fit.
+
+Factory admission now accepts the actual original SelectedHandoffOwner Arc, not owner/executor
+strings from a request body. Pure early/final Coordinator predicates compare the already-cached
+original allocation and current grant/lease/binding/generation. Refusal creates no local snapshot.
+Actual channel closure must still be checked at final admission under the same UI commit before
+any action opcode is exposed; this context alone enables no byte-bearing operation.
+
+Three main-only commands expose fixed public setup and exact cleanup metadata. They carry no
+private key, seed, plaintext, SDP, ICE or action constructor. Ready, Pending and Closed replies
+share the original Row's serial projection guard and payment through body handoff. A capped
+2,304-byte JSON writer and 2,048-byte hex scratch fit the original 8 KiB Row envelope; arbitrary
+retained framework/WebView public-metadata copies after handoff are outside this copy bound.
+No private/action data may use this exception. The retained production metadata adapter has
+one immutable identity across component and module remounts.
+
+The v9 browser broker retains its selected key, original TX/RX counters and constructor promise.
+An original native 8 KiB Crypto credit stays paid through real browser setup/outgoing SDK work.
+Separate original control capacity remains within the existing group/process/eight-Crypto and
+two-browser-position limits. IO expiry aborts actual reads but never proves SDK/cancel drainage.
+
+Final collection closes routing first, then detaches native Session/public/setup owners only
+after browser SDK/IO and buffers drain. Paid weak witnesses track independent headers, completed
+replies and public outputs. A slot is reusable only when its original lease is permanently dead,
+no setup is pending and every actual owner has drained. Serial IDs never reset. Housekeeping
+runs outside Coordinator before new controller/owner/key admission, including late last-owner
+drops after the collection reply. No uncertain history is evicted to make capacity.
+
+Action lookup now produces a native-only ResolvedRow only after checking the actual original
+grant allocation, executor, lease and complete purpose. It retains the paid Row through delayed
+metadata/cleanup use, without upgrading the grant for historical recovery. All raw ID-taking
+operational helpers are module-private. Data admission tests the original lease under State;
+this lookup is not current UI/channel/Root effect authority. Actual physical callers still
+need to bound simultaneous handles and complete funding/drainage before serving action bytes.
+An independent bounded original-purpose lookup also recovers this native handle when a lost
+factory reply left the requester without a RowId. It checks the same native provenance and
+works after End/grant destruction, without charges, Clock callbacks or factory mutation.
+Missing history is not drainage evidence. Current-authority retry remains a separate path:
+pure historical lookup must not prevent an idle Pending worker from resuming on its original row.
+
+This service still handles authenticated Status only. Factory/action input, result, exact
+receipt ACK, settlement, phase closure and final delivery remain open. Starting the local
+listener does not enable V2 signalling, SDP/ICE/RTC or legacy-mode isolation. The action ledger's
+separate finite history also needs collection. Relay and combined/physical acceptance remain
+open. Earlier checkpoint sections below retain their historical scope; HANDOVER has current
+gate provenance and platform limits.
+
 ## Internal immutable local-channel bootstrap (21 October)
 
 The disabled ECDH candidate retains Pending before native RNG, validates the actual selected

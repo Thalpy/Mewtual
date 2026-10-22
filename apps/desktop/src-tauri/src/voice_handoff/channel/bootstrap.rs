@@ -1,11 +1,13 @@
 //! Native-only local-channel key agreement. There is no raw-seed constructor/export here.
 //! A registry must retain its Pending ticket before construction, then atomically install the
 //! result under the original selected-owner/generation fence. These keys grant no Root effect.
-use super::{Counters, Keys, Refused, Session, BOOTSTRAP_BYTES, CONTROL_BYTES};
+use super::{
+    Counters, Keys, Refused, Session, BOOTSTRAP_BYTES, BROWSER_CONTROL_BYTES, CONTROL_BYTES,
+};
 use crate::voice_authority::{Binding, SelectedHandoffOwner};
 use catcoms_rt::rng::RngError;
 use catcoms_rt::{CryptoRng, CryptoRngCore, RngCore};
-use catcoms_sync::voice_v2::resources::{Credit, ResourceKind};
+use catcoms_sync::voice_v2::resources::{Credit, ResourceKind, WorkLane};
 use hkdf::Hkdf;
 use p256::{ecdh::EphemeralSecret, elliptic_curve::sec1::ToEncodedPoint, PublicKey};
 use sha2::{Digest, Sha256};
@@ -13,7 +15,7 @@ use std::sync::{Arc, Mutex};
 use zeroize::Zeroizing;
 
 pub(in crate::voice_handoff) const TRANSCRIPT_BYTES: usize = 1024;
-const SETUP_WORK_BYTES: usize = 8 * 1024;
+pub(in crate::voice_handoff) const SETUP_WORK_BYTES: usize = 8 * 1024;
 const DOMAIN: &[u8] = b"Mewtual native voice bootstrap\0";
 const SEED_LABEL: &[u8] = b"Mewtual native voice bootstrap seed v1";
 
@@ -35,7 +37,8 @@ impl PublicSetup {
 }
 
 /// Ordinary group bytes AND an ordinary Crypto slot precede native scalar arithmetic. The
-/// setup work charge is transient; Session's retained control/bootstrap payments survive it.
+/// SAME setup work charge transfers to the registry through actual browser setup, until an
+/// exact settlement/complete authenticated Status. Session's control lane is independent.
 /// This owner must never be constructed merely to recover an already Pending/Ready row.
 pub(in crate::voice_handoff) struct Prepared {
     selected: Arc<SelectedHandoffOwner>,
@@ -44,7 +47,9 @@ pub(in crate::voice_handoff) struct Prepared {
     device: [u8; 32],
     control: Credit,
     bootstrap: Credit,
-    _work: Credit,
+    browser_control: Credit,
+    control_lane: Arc<WorkLane>,
+    work: Credit,
 }
 impl Prepared {
     pub fn new(
@@ -65,6 +70,10 @@ impl Prepared {
         }
         let resources = selected.resources();
         let group = selected.binding().scope.group;
+        // A proven pre-admission refusal may drop these ordinary resource owners under the
+        // Coordinator/Index guards. They contain no active engine, affine grant or callback;
+        // no row/serial/RNG effect has happened. Actual-work/output owners retire outside
+        // those guards after Pending admission. Preserve this distinction when adding fields.
         let pay = |bytes, kind| {
             resources
                 .charge(group, bytes, kind)
@@ -73,7 +82,11 @@ impl Prepared {
         Ok(Self {
             control: pay(CONTROL_BYTES, ResourceKind::Retained)?,
             bootstrap: pay(BOOTSTRAP_BYTES, ResourceKind::Retained)?,
-            _work: pay(SETUP_WORK_BYTES, ResourceKind::Crypto)?,
+            browser_control: pay(BROWSER_CONTROL_BYTES, ResourceKind::Retained)?,
+            control_lane: resources
+                .reserve_crypto_lane(group)
+                .map_err(|_| Refused::Capacity)?,
+            work: pay(SETUP_WORK_BYTES, ResourceKind::Crypto)?,
             selected,
             session,
             slot,
@@ -87,7 +100,7 @@ impl Prepared {
     pub fn compute(
         self,
         rng: &mut dyn CryptoRngCore,
-    ) -> Result<(Arc<Session>, PublicSetup), Refused> {
+    ) -> Result<(Arc<Session>, PublicSetup, Credit), Refused> {
         // The older selected-point publication validates encoding/reference only. Validate
         // this actual curve point before scalar multiplication, never just its 04 prefix.
         let point = self.selected.point();
@@ -118,8 +131,12 @@ impl Prepared {
             }),
             _control: self.control,
             _bootstrap: self.bootstrap,
+            _browser_control: self.browser_control,
+            control_lane: self.control_lane,
         });
-        Ok((session, public))
+        // The browser has not performed ECDH/HKDF/sealing merely because native arithmetic
+        // finished. Install this same credit before exposing public setup; do not re-charge.
+        Ok((session, public, self.work))
     }
 
     fn transcript(&self, native: [u8; 65]) -> Result<PublicSetup, Refused> {

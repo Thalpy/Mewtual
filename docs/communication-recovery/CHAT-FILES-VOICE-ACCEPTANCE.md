@@ -19,7 +19,133 @@ resolved with regressions confirmed to fail when reverted. Mem transport is not 
 exclusion; no WebView crypto, real RTC, SDP forwarding or audio is claimed. Complete suites were
 not run in this session (the primary owns them).
 
-## Bootstrap continuation (21 October, local complete gates passed)
+## Native weak-context and lost-reply checkpoint (22 October)
+
+Frozen runtime source4db3f8249ef7960e11cc40febd2b81f6c3a6018e in
+target/communication-browser-action-worktree follows published PR48 checkpoint8773ac6b.
+The native/browser handoff remains this agent's assignment. This checkpoint does not enable
+an action opcode, live V2, SDP/ICE/RTC or member media relay.
+
+The paid application IO state now holds nine Weak references to the actual native owners.
+Per-call upgrade is all-or-nothing; ordinary commands and the native factory borrow the SAME
+UI session gate, real store, atomics and original commit mutex. Broad native state drops outside
+guards before detached work, which retains only actual actor/selected/grant/commit/work/payment.
+Factory selection accepts the original native Arc; pure early/final Coordinator checks cannot
+materialize a local snapshot when rejecting a foreign equal-label owner.
+
+Weak references retain original inline Arc allocations after value destruction. The fixed IO
+payment increased from24KiB to32KiB, within the same2MiB process limit. The current Windows
+layout is32,256 bytes, including11,352 bytes for weak-retained allocations and context wrappers;
+tail padding is measured using the pinned Arc layout. Context drops before its payment.
+Other platform layouts continue to refuse if the measured peak cannot fit.
+
+Ledger::lookup_original now recovers the same paid native row after a lost Begin reply supplied
+no RowId. It checks original grant allocation/executor/lease/full purpose, runs no Clock/charge/
+grant upgrade/factory action, and remains usable after End and actual grant destruction.
+None means no retained matching row, never drainage. This historical lookup is separate from
+currently authorized retry: idle handed-off Pending work still resumes on its original row/serial.
+No caller or transport uses historical metadata as permission to re-arm a factory.
+
+Focused current gates: all123 native handoff tests pass (2.06s); the preceding172 voice-filter
+tests pass before the three additional lookup tests. Nine actual native command-security tests
+and the full2,348 frontend tests pass (62.24s). Actual-diff adversarial design/review/re-review
+has no remaining findings. The earlier24KiB layout refusal and test-only Context name collision
+remain in failed logs; corrected focused runs and measured-layout check pass.
+The restricted browser-flow attempt lost CDP before flow assertions; the unchanged gate was
+rerun with normal Windows process access. Failed attempts are retained, never counted as passes.
+
+Complete fresh native passes600 tests including five ACL tests, zero failures
+(512.28s gate). Check27.17s, strict all-target/all-feature
+Clippy40.94s, format0.84s and the fresh Root construction
+scanner0.77s pass. Fresh complete Root passes3233 tests, zero failures,
+24 existing ignored across59 result summaries (1920.34s). Root Rust/Cargo/
+dependency-policy inputs remain byte-identical to validated f1c58519; prior Root static/ambient/
+dependency checks retain their own provenance. Native and Root full suites ran serially.
+
+Fresh frontend Svelte check57.41s has zero errors/warnings; production
+build45.14s and all ten rendered flows55.89s pass.
+Development executable build131.47s, actual startup3.62s,
+packaged custom-protocol debug build119.19s and actual packaged Windows
+document/reload/CSP/CORS/public-metadata/normal-close probe2.67s pass.
+Probe binary SHA256:32e07da86119b0cc764d719fb9ec0c3e172a5443d062096b9eafc969470be8ab. It requests no unlock/credentials and verifies
+only public metadata, exact-port policy and normal native collection. It does not establish
+selected crypto/action delivery or audible/physical networking. Only one desktop is available.
+Logs: target/voice-native-context-*; exact commands/times: voice-native-context-gates.jsonl.
+
+Still required: authenticated factory/action input/result/receipt ACK/settlement/phase closure
+and final delivery over the same Session; final actual-channel closure under the original UI
+commit; production proven-pair registration; full96KiB Workflow retirement and copy funding;
+sharing the original browser execution position; safe collection of the separate32-row action
+history. The existing16KiB Phase loan is not the whole Workflow. Live V2/RTC/isolation, relay,
+combined acceptance and independent physical audio/network acceptance remain open with their
+assigned owners. Separate native/experiment dependency-audit findings remain open.
+
+## Previous action-row ownership checkpoint (21 October)
+
+Source b0b303ebcc140f6414e89ae4b06ee8a46ece5175 follows the published edb00dda app-owned
+Status checkpoint in target/communication-browser-action-worktree. The native/browser handoff
+remains the active assignment. All raw RowId-taking operational helpers are now private;
+Ledger::resolve requires the original native-selected grant allocation, executor, lease and
+complete peer/join/key/epoch purpose. A native-only ResolvedRow retains the actual paid Row.
+Repeated resolution is not a once-only work permit; physical callers still must account and
+bound their handles. The complete layout remains inside the original2KiB Row payment.
+
+Historical lookup/receipt ACK/settlement remains usable after End and actual CallGrant drop.
+Data work checks the original lease under State before copy/worker admission, including when
+End won during a wait. Four new regressions cover foreign equal-field owners/all selector
+fields/invalid IDs, each key component, exact post-End recovery and the actual held-State race.
+All112 focused handoff tests pass (2.03s after49.66s compile). Actual-diff adversarial review/
+re-review has no remaining findings. Full frontend2,348 passes (68.32s). Full native583 library
+plus five ACL tests pass, zero failures (523.69s library;526.92s gate). Native check48.50s,
+strict all-target/all-feature Clippy50.34s, format0.76s and the fresh Root construction scanner
+(one test,0.97s gate) pass. These ran serially; no validation process remains active. Failed
+test-Barrier compile and interrupted focus3 are retained; the final barrier samples
+credits after End's legitimate independent generation retirement, without weakening work,
+receipt, copy or worker assertions. Logs: target/voice-scoped-row-*.
+
+This adds no action opcode, new command, live V2 driver or Root/wire/storage change. The passing
+packaged probe/build/startup evidence below belongs to unchanged bac90 application lifetime;
+it does not prove action delivery. Native/browser action/result/ACK/settlement/phase closure and
+final delivery remain open. Native context, full Workflow/copy funding, sharing the original
+browser execution position and safe32-row action-history collection still require integration.
+Root Rust/Cargo/policy and frontend/build inputs are unchanged; preserve their recorded exact
+provenance rather than treating previous gates as fresh runs. One physical desktop is available.
+
+## App-owned status/bootstrap checkpoint (21 October, still partial)
+
+Source bac90cfa in target/communication-browser-action-worktree adds the native application host,
+exact pre-window numeric-loopback CSP, entered-runtime setup, Exit-before-SDK-cleanup collection,
+three main-only public metadata commands and a retained production browser adapter. It also
+implements reusable channel closure with actual independent header/reply/public-owner custody,
+monotonic serials and grant-independent housekeeping. All setup variants retain their original
+paid serialization position; JSON capacity is hard-capped, not inferred from final length.
+
+All 108 focused native handoff tests pass; 35 browser adapter/Session and nine command-security
+checks pass. Full frontend2,348, Svelte zero errors/warnings, build and all ten rendered flows
+pass. Complete native passes579 library plus five ACL tests, zero failures. Native strict
+all-target/all-feature Clippy/check/format, development build/startup and packaged build pass.
+The actual packaged Windows committed document/reload, enforced exact-port CSP, CORS, public
+metadata cleanup and normal-close/task-collection probe6 passes. Earlier failed harness attempts
+remain recorded; no runtime change or relaxed readiness was required. Root's complete3,233 and
+static gates passed on unchanged Root inputs; they were not repeated for this native-only delta.
+The fresh Root construction gate also passes against current native source. Actual-diff review/re-review has no remaining blocker/high/medium finding. Exact final
+gate records and failed-attempt provenance are in HANDOVER and target/voice-app-channel-*.
+
+Only authenticated Status is enabled. Public metadata IPC is not action/result delivery; stock
+framework/WebView public-metadata copies after handoff are outside the stated application-copy
+bound. Factory input, result, exact receipt ACK, settlement, authenticated browser phase closure,
+final delivery and separate action-history collection remain open. Live V2/SDP/ICE/RTC, legacy
+isolation, member media relay and combined/physical acceptance remain unfinished. Only one
+physical desktop is available. The passing packaged Windows startup/close probe exercises public
+metadata/CSP/CORS/normal shutdown only, not selected crypto or audible calls; it requests no vault
+unlock and supplies no credentials. Linux/macOS WebView compatibility remains unverified.
+
+Historical hosted f227b4f7 run39649824415/Linux job119394907283 failed reversed-reopen exact signed
+chat union (531 passes/1 failure, client5 had14/15; bridge4/client6 had15/15). Diagnostics did not
+fix that cause; latest-head hosted acceptance is unverified. The local new-channel discovery
+scenario passing does not establish a hosted recovery fix. Preserve the exact union and bounds.
+
+## Historical bootstrap checkpoint (21 October, preceding complete gates)
 
 Active checkout is target/communication-bootstrap-channel-worktree, based on published
 `c5c52fd8`. An earlier fresh Root stopped with1209 passed/1 failed in the app library: a capacity-custody

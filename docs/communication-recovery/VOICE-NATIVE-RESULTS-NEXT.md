@@ -1,6 +1,191 @@
 # Next voice milestone: native result recovery
 
-## Native bootstrap candidate (21 October, local complete gates passed)
+## Native weak-context and lost-reply checkpoint (22 October)
+
+Frozen runtime source4db3f8249ef7960e11cc40febd2b81f6c3a6018e in
+target/communication-browser-action-worktree follows published PR48 checkpoint8773ac6b.
+The native/browser handoff remains this agent's assignment. This checkpoint does not enable
+an action opcode, live V2, SDP/ICE/RTC or member media relay.
+
+The paid application IO state now holds nine Weak references to the actual native owners.
+Per-call upgrade is all-or-nothing; ordinary commands and the native factory borrow the SAME
+UI session gate, real store, atomics and original commit mutex. Broad native state drops outside
+guards before detached work, which retains only actual actor/selected/grant/commit/work/payment.
+Factory selection accepts the original native Arc; pure early/final Coordinator checks cannot
+materialize a local snapshot when rejecting a foreign equal-label owner.
+
+Weak references retain original inline Arc allocations after value destruction. The fixed IO
+payment increased from24KiB to32KiB, within the same2MiB process limit. The current Windows
+layout is32,256 bytes, including11,352 bytes for weak-retained allocations and context wrappers;
+tail padding is measured using the pinned Arc layout. Context drops before its payment.
+Other platform layouts continue to refuse if the measured peak cannot fit.
+
+Ledger::lookup_original now recovers the same paid native row after a lost Begin reply supplied
+no RowId. It checks original grant allocation/executor/lease/full purpose, runs no Clock/charge/
+grant upgrade/factory action, and remains usable after End and actual grant destruction.
+None means no retained matching row, never drainage. This historical lookup is separate from
+currently authorized retry: idle handed-off Pending work still resumes on its original row/serial.
+No caller or transport uses historical metadata as permission to re-arm a factory.
+
+Focused current gates: all123 native handoff tests pass (2.06s); the preceding172 voice-filter
+tests pass before the three additional lookup tests. Nine actual native command-security tests
+and the full2,348 frontend tests pass (62.24s). Actual-diff adversarial design/review/re-review
+has no remaining findings. The earlier24KiB layout refusal and test-only Context name collision
+remain in failed logs; corrected focused runs and measured-layout check pass.
+The restricted browser-flow attempt lost CDP before flow assertions; the unchanged gate was
+rerun with normal Windows process access. Failed attempts are retained, never counted as passes.
+
+Complete fresh native passes600 tests including five ACL tests, zero failures
+(512.28s gate). Check27.17s, strict all-target/all-feature
+Clippy40.94s, format0.84s and the fresh Root construction
+scanner0.77s pass. Fresh complete Root passes3233 tests, zero failures,
+24 existing ignored across59 result summaries (1920.34s). Root Rust/Cargo/
+dependency-policy inputs remain byte-identical to validated f1c58519; prior Root static/ambient/
+dependency checks retain their own provenance. Native and Root full suites ran serially.
+
+Fresh frontend Svelte check57.41s has zero errors/warnings; production
+build45.14s and all ten rendered flows55.89s pass.
+Development executable build131.47s, actual startup3.62s,
+packaged custom-protocol debug build119.19s and actual packaged Windows
+document/reload/CSP/CORS/public-metadata/normal-close probe2.67s pass.
+Probe binary SHA256:32e07da86119b0cc764d719fb9ec0c3e172a5443d062096b9eafc969470be8ab. It requests no unlock/credentials and verifies
+only public metadata, exact-port policy and normal native collection. It does not establish
+selected crypto/action delivery or audible/physical networking. Only one desktop is available.
+Logs: target/voice-native-context-*; exact commands/times: voice-native-context-gates.jsonl.
+
+Still required: authenticated factory/action input/result/receipt ACK/settlement/phase closure
+and final delivery over the same Session; final actual-channel closure under the original UI
+commit; production proven-pair registration; full96KiB Workflow retirement and copy funding;
+sharing the original browser execution position; safe collection of the separate32-row action
+history. The existing16KiB Phase loan is not the whole Workflow. Live V2/RTC/isolation, relay,
+combined acceptance and independent physical audio/network acceptance remain open with their
+assigned owners. Separate native/experiment dependency-audit findings remain open.
+
+## Next action transport sequence (design only,22 October)
+
+The next change must connect the actual channel and selected key, rather than enable an opcode
+around the current factory unchanged. Before any first actor effect, repeat the actual Route's
+closed-state fence under the SAME original UI commit. Use original-purpose history before
+new-work eligibility for lost Begin replies, while preserving an explicitly authorized same-row
+idle-Pending retry. Historical lookup is not authority to perform that retry.
+
+BrowserChain and RetainedIpcChannel live in voice-crypto.ts. A broker-only channel-chain entry
+must resolve the exact retained channel/SelectedKeyRecord/key and borrow its already reserved
+browser position. Do not increment the two-position pool or allow a third provider position.
+Keep chain.running for logical action serialization, but acquire the shared physical execution
+lane only for provider/digest work, releasing it BEFORE admit/commit/settle RPCs over the same
+channel. Holding that lane around the whole action pump would deadlock on its own RPC.
+
+End/retire must fence first effects without destroying cleanup transport. Current channel
+cleanup knows only its own setup/exchange: it cannot yet know a linked chain still computes or
+needs exact receipt ACK/settlement. Retain original framing keys/control position until linked
+SDK/RPC/ACK/settlement, native phase close and final reply owners actually drain; collectChannel
+must be last. A timeout or current-owner refusal cannot replace that observation.
+
+Native full-chain closure needs an original capability, never a handshake-ID lookup or a copied
+browser assertion. A narrowly named consuming HandoffLoan method could upgrade its existing
+Workflow.control Weak and close that original PreparedChain (or close its original Workflow if
+control is gone), then drop outside native State/Index/Coordinator/Group/Policy/Engine guards.
+This is a derivation-only pilot proposal, not implemented. Phase.close currently returns only
+16KiB to an OPEN96KiB reserve. Even chain close must not report full drainage while credited
+input/engine/lower/copy owners remain. Whole-call End is a fallback, but its reply alone is not
+96KiB drainage evidence: EndpointOwners.prune/quiet housekeeping still owns pair-chain closure.
+
+Required regressions: two retained channels sharing the existing two positions; provider work
+and same-channel RPC mutually excluded without self-deadlock; End during provider work followed
+by exact historical ACK/settle/phase/final cleanup; lost replies at each phase; actual channel
+close winning or losing final admission; original Workflow held by delayed last copy/input/
+lower owner; and more than32 safely collected action generations without uncertain eviction.
+Normal proven-pair Actor ingress remains a separate required integration, not a fixture claim.
+
+## Previous action-row ownership checkpoint (21 October)
+
+Source b0b303ebcc140f6414e89ae4b06ee8a46ece5175 follows the published edb00dda app-owned
+Status checkpoint in target/communication-browser-action-worktree. The native/browser handoff
+remains the active assignment. All raw RowId-taking operational helpers are now private;
+Ledger::resolve requires the original native-selected grant allocation, executor, lease and
+complete peer/join/key/epoch purpose. A native-only ResolvedRow retains the actual paid Row.
+Repeated resolution is not a once-only work permit; physical callers still must account and
+bound their handles. The complete layout remains inside the original2KiB Row payment.
+
+Historical lookup/receipt ACK/settlement remains usable after End and actual CallGrant drop.
+Data work checks the original lease under State before copy/worker admission, including when
+End won during a wait. Four new regressions cover foreign equal-field owners/all selector
+fields/invalid IDs, each key component, exact post-End recovery and the actual held-State race.
+All112 focused handoff tests pass (2.03s after49.66s compile). Actual-diff adversarial review/
+re-review has no remaining findings. Full frontend2,348 passes (68.32s). Full native583 library
+plus five ACL tests pass, zero failures (523.69s library;526.92s gate). Native check48.50s,
+strict all-target/all-feature Clippy50.34s, format0.76s and the fresh Root construction scanner
+(one test,0.97s gate) pass. These ran serially; no validation process remains active. Failed
+test-Barrier compile and interrupted focus3 are retained; the final barrier samples
+credits after End's legitimate independent generation retirement, without weakening work,
+receipt, copy or worker assertions. Logs: target/voice-scoped-row-*.
+
+This adds no action opcode, new command, live V2 driver or Root/wire/storage change. The passing
+packaged probe/build/startup evidence below belongs to unchanged bac90 application lifetime;
+it does not prove action delivery. Native/browser action/result/ACK/settlement/phase closure and
+final delivery remain open. Native context, full Workflow/copy funding, sharing the original
+browser execution position and safe32-row action-history collection still require integration.
+Root Rust/Cargo/policy and frontend/build inputs are unchanged; preserve their recorded exact
+provenance rather than treating previous gates as fresh runs. One physical desktop is available.
+
+## App-owned status checkpoint (21 October)
+
+Source bac90cfa is isolated in target/communication-browser-action-worktree, following published
+PR48 checkpoint 9218d179. Application host, exact pre-window CSP, fixed main-only bootstrap/cleanup
+commands and a retained production metadata adapter now connect the previously internal service.
+Only authenticated Status is enabled. Native action/receipt/result transport remains open.
+
+All 108 focused native handoff tests and 35 browser adapter/Session tests pass. Full frontend
+passes 2,348; Svelte has zero errors/warnings, build and all ten rendered flows pass. Native
+strict all-target/all-feature Clippy/check/format, complete native579+5ACL, development build/
+startup, packaged build and actual Windows document/reload/CSP/CORS/metadata/normal-close probe
+pass. The probe requests no vault unlock and does not establish selected crypto exchange or
+action transport. Actual-diff review/re-review has no remaining blocker/high/medium
+finding after command-ledger, serializer-capacity and non-Ready projection-custody corrections.
+A missing close-first initializer failed compilation once; its log is retained and corrected
+focus4 passes. Root's prior 3,233/full-static validation is on unchanged Root Rust/dependencies,
+not a fresh native-source run. HANDOVER records exact final gate provenance.
+
+Closed channel collection now tracks real independent owners and preserves monotonic serials;
+68 successive actual selected generations reuse capacity without reviving old Sessions. Browser
+v9 cleanup awaits all SDK/IO, then exact setup settlement, buffer disposal and final collection.
+Every public reply variant retains one original paid serialization position through framework
+handoff. Framework/WebView public-metadata copies beyond that boundary remain excluded; private
+or action bytes must never use stock IPC. Only one physical desktop is available.
+
+Implemented by the current checkpoint above: retain only Weak references to actual native state in the
+application host. Per-call context upgrades must fail closed, use the SAME borrowed UI gate as
+AppState (including actual store presence), then repeat original selection/registry/generation
+checks after awaits under the existing commit. Drop broad context references before detached
+work; workers retain only the actual actor, selected owner, grant, commit and paid work owners.
+Weak references prevent persistent ownership cycles; they are not a revocation mechanism.
+
+Lost BeginDerive replies need original-purpose lookup before new-work/current-owner eligibility:
+a requester may have no RowId yet while the original actor handoff remains uncertain. Resolve
+historical native identity without rearming a factory or treating unknown as drained. Any such
+API must retain the same grant/executor/lease/purpose checks as ResolvedRow and distinguish
+history from admission. The current checkpoint above implements the native-only lookup. Action transport still does not use it; it must precede first-effect admission without suppressing an explicitly authorized idle-Pending retry.
+
+The existing Phase.close returns a16KiB HandoffLoan, not the original96KiB Workflow. Full-chain
+closure needs an exact native original-chain retirement capability or explicit original-call
+End for a derivation-only pilot; Phase.drained must never be described as full Workflow release.
+
+Next implement original factory/action input, result, exact receipt ACK, settlement, authenticated
+browser phase closure and final delivery collection over this same immutable Session. Resolve
+native context without an AppHandle cycle; admission still needs actual selected owner/actor,
+original UI commit/generation, native clock/deadline and current room/epoch/pair authority.
+Pending RowId is metadata, not action readiness. Normal proven-pair actor registration remains
+required; fixture-created pairs cannot establish that production path.
+
+Compose the original Workflow funding with actual native/browser serialization, SDK and retained
+copies before enabling action transport. The existing 16 KiB derivation HandoffLoan is not proof
+of a complete chain. Channel control already owns one of the existing two browser positions;
+protected work must share/lend it explicitly, never queue cleanup behind the chain being settled.
+The separate 32-row action ledger needs safe historical collection too. SDP phase/key transfer,
+live RTC/mode isolation, relay and combined/physical acceptance remain open.
+
+## Historical native bootstrap candidate (21 October, preceding complete gates)
 
 Active checkout is target/communication-bootstrap-channel-worktree, based on published
 `c5c52fd8`; Root resource primitive is separately committed `a695470d`. The current candidate

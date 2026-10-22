@@ -8,7 +8,7 @@ use super::http;
 use catcoms_rt::CryptoRngCore;
 #[cfg(test)]
 use catcoms_sync::voice_v2::resources::ResourceKind;
-use catcoms_sync::voice_v2::resources::{Credit, Resources};
+use catcoms_sync::voice_v2::resources::{Credit, Resources, WorkLane};
 use std::sync::{Arc, Mutex};
 use zeroize::Zeroize;
 #[cfg(test)]
@@ -20,6 +20,10 @@ pub(super) use crypto::{BodyKind, Operation};
 use crypto::{Direction, Header, Keys};
 
 pub(super) const CONTROL_BYTES: usize = 12 * 1024;
+// Browser-owned fixed control metadata, SDK input/output views, one request and one BYOB
+// response are separate from the native header/body/reply envelope. Both share the original
+// serial Crypto lane, but these bytes coexist across the local HTTP boundary.
+pub(super) const BROWSER_CONTROL_BYTES: usize = 8 * 1024;
 pub(super) const BOOTSTRAP_BYTES: usize = 2048;
 const CONTROL_CIPHER: usize = 256 + 16;
 
@@ -50,8 +54,24 @@ pub(super) struct Session {
     counters: Mutex<Counters>,
     _control: Credit,
     _bootstrap: Credit,
+    _browser_control: Credit,
+    // Prepaid from existing ordinary Crypto limits, independently of setup/data work.
+    // Terminal browser control cannot depend on a fresh slot when other work fills the pool.
+    control_lane: Arc<WorkLane>,
 }
 impl Session {
+    #[cfg(test)]
+    pub(super) fn fixture_counts(&self) -> (bool, u64, u64) {
+        let counters = self
+            .counters
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        (
+            counters.busy,
+            counters.request_floor,
+            counters.response_sequence,
+        )
+    }
     #[cfg(test)]
     pub(super) fn new(
         resources: Arc<Resources>,
@@ -70,6 +90,12 @@ impl Session {
         let bootstrap = resources
             .charge(group, BOOTSTRAP_BYTES, ResourceKind::Retained)
             .map_err(|_| Refused::Capacity)?;
+        let browser_control = resources
+            .charge(group, BROWSER_CONTROL_BYTES, ResourceKind::Retained)
+            .map_err(|_| Refused::Capacity)?;
+        let control_lane = resources
+            .reserve_crypto_lane(group)
+            .map_err(|_| Refused::Capacity)?;
         let mut seed = Zeroizing::new([0; 32]);
         rng.fill_bytes(seed.as_mut());
         let keys = Keys::new(&seed);
@@ -85,6 +111,8 @@ impl Session {
             }),
             _control: control,
             _bootstrap: bootstrap,
+            _browser_control: browser_control,
+            control_lane,
         }))
     }
     /// Own the paid scratch BEFORE reading unauthenticated HTTP. A single position continues
@@ -103,6 +131,14 @@ impl Session {
             filled: 0,
             session: self.clone(),
         })
+    }
+}
+impl Drop for Session {
+    fn drop(&mut self) {
+        // Header/reply owners hold this actual Arc, so they have drained before final Drop.
+        // Browser/provider retirement must separately precede registry collection; End alone
+        // cannot remove the row. This closes its one original lane, never a replacement.
+        self.control_lane.close();
     }
 }
 pub(super) struct HeaderWorker {
@@ -131,6 +167,26 @@ impl HeaderWorker {
         origin: &str,
         phase: Option<&Arc<Phase>>,
     ) -> Result<Incoming, Refused> {
+        self.admit_inner(port, origin, phase, None)
+    }
+    /// Closed status-only service seam: operation/class/exact length/logical session are
+    /// authenticated BEFORE counter debit. No callback or renderer-selected predicate runs
+    /// under the counter fence. An admitted malformed body still permanently spends both.
+    pub(super) fn admit_status(
+        self,
+        port: u16,
+        origin: &str,
+        session: [u8; 16],
+    ) -> Result<Incoming, Refused> {
+        self.admit_inner(port, origin, None, Some(session))
+    }
+    fn admit_inner(
+        self,
+        port: u16,
+        origin: &str,
+        phase: Option<&Arc<Phase>>,
+        status: Option<[u8; 16]>,
+    ) -> Result<Incoming, Refused> {
         let head = http::parse(&self.scratch[..self.filled], port, origin)
             .map_err(|_| Refused::Header)?
             .ok_or(Refused::Header)?;
@@ -142,6 +198,14 @@ impl HeaderWorker {
             .keys
             .authenticate_request(head.admission.ok_or(Refused::Header)?)?;
         if request.slot() != self.session.slot || request.length() != head.length {
+            return Err(Refused::Binding);
+        }
+        if status.is_some_and(|session| {
+            request.operation() != Operation::Status
+                || request.kind() != BodyKind::Control
+                || request.length() != 49 + 16
+                || request.logical() != session
+        }) {
             return Err(Refused::Binding);
         }
         let mut body = Body::new(

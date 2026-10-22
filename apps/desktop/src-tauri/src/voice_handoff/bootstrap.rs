@@ -1,8 +1,7 @@
-//! Immutable process-owned setup for the disabled native/browser channel. This registry has
-//! no network listener or renderer command. A lost caller cannot reset its selected key,
-//! ephemeral agreement or physical counters. Pending, Ready and closed fences share64 slots;
-//! uncertain rows are never evicted. This finite pilot requires lifecycle collection before
-//! live activation; saturation refuses setup rather than reconstructing old session history.
+//! Immutable process-owned native/browser channel setup. A lost caller cannot reset its
+//! selected key, ephemeral agreement or physical counters. Pending, Ready and closed fences
+//! share64 slots; uncertain rows are never evicted. Collection requires actual independent
+//! owners to drain and the original lease to die permanently; serials never reset on reuse.
 use super::channel::bootstrap::{Prepared, PublicSetup};
 use super::channel::{Refused, Session};
 use crate::voice_authority::SelectedHandoffOwner;
@@ -11,7 +10,8 @@ use crate::{
 };
 use catcoms_rt::CryptoRngCore;
 use catcoms_sync::voice_v2::resources::{Credit, ProcessRetainedCredit, ResourceKind, Resources};
-use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, Weak};
 
 const ROWS: usize = 64;
 const INDEX_BYTES: usize = 4096;
@@ -29,6 +29,7 @@ struct Row {
     session_id: [u8; 16],
     slot: u8,
     state: Mutex<State>,
+    projection_busy: AtomicBool,
     _credit: Arc<Credit>,
 }
 struct State {
@@ -36,6 +37,17 @@ struct State {
     closed: bool,
     session: Option<Arc<Session>>,
     public: Option<Arc<SetupOutput>>,
+    // Original native ECDH credit continues through browser setup/outgoing SDK promises.
+    // Lease revocation and caller loss are NOT evidence that this work has drained.
+    browser_setup: Option<Credit>,
+    retirement: Option<Retirement>,
+}
+/// Direct Session/header/reply and public-output owners can outlive Row references. Paid
+/// weak witnesses keep their control blocks attributable until actual strong owners drain.
+/// Closed rows cannot reinstall a strong owner from these witnesses.
+struct Retirement {
+    session: Weak<Session>,
+    public: Weak<SetupOutput>,
 }
 /// Exact retries share ONE immutable projection/allocation. Every returned owner retains the
 /// original row payment even after the registry is destroyed; a caller cannot clone raw public
@@ -47,6 +59,39 @@ pub(crate) struct SetupOutput {
 impl SetupOutput {
     pub(crate) fn public(&self) -> &PublicSetup {
         &self.public
+    }
+}
+pub(crate) struct PublicProjection {
+    output: Arc<SetupOutput>,
+}
+impl serde::Serialize for PublicProjection {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        // No intermediate native heap String. The fixed reply is public metadata only; the
+        // pinned Tauri serializer owns the subsequent JSON String/HTTP response allocation.
+        let mut hex = [0u8; 2048];
+        let transcript = self.output.public().transcript();
+        let used = transcript.len() * 2;
+        hex::encode_to_slice(transcript, &mut hex[..used]).map_err(serde::ser::Error::custom)?;
+        let text = std::str::from_utf8(&hex[..used]).map_err(serde::ser::Error::custom)?;
+        serializer.serialize_str(text)
+    }
+}
+/// One original payment/serial position for EVERY successful setup variant. Closed and
+/// Pending replies allocate the same bounded JSON as Ready, so they cannot be bare Strings.
+pub(super) struct MetadataProjection {
+    row: Arc<Row>,
+}
+impl MetadataProjection {
+    pub(super) fn transcript(&self, output: Arc<SetupOutput>) -> Result<PublicProjection, Refused> {
+        if !Arc::ptr_eq(&self.row._credit, &output._credit) {
+            return Err(Refused::Binding);
+        }
+        Ok(PublicProjection { output })
+    }
+}
+impl Drop for MetadataProjection {
+    fn drop(&mut self) {
+        self.row.projection_busy.store(false, Ordering::Release);
     }
 }
 /// The dormant wrapper belongs to AppState. Allocate/pay its fixed slot index lazily, from
@@ -72,6 +117,62 @@ struct Ticket {
 }
 
 impl Registry {
+    /// Exact public projection after ensure, outside Coordinator. If collection won this
+    /// interval, refuse rather than create an unpaid historical reply. Holding the actual Row
+    /// keeps its payment through delayed serialization after End/collection. The single busy
+    /// gate is shared across Ready/Pending/Closed; variants cannot overlap their allocations.
+    /// Stock Tauri/WebView copies after body handoff remain outside the application copy bound.
+    pub(super) fn project(
+        &self,
+        owner: &str,
+        executor: [u8; 32],
+    ) -> Result<MetadataProjection, Refused> {
+        let held = self.index.lock().unwrap_or_else(|error| error.into_inner());
+        let row =
+            held.as_ref()
+                .and_then(|index| {
+                    index.rows.iter().flatten().find(|row| {
+                        row.selected.id() == owner && row.selected.executor() == executor
+                    })
+                })
+                .ok_or(Refused::Binding)?;
+        row.projection_busy
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .map_err(|_| Refused::Capacity)?;
+        Ok(MetadataProjection { row: row.clone() })
+    }
+    /// Bind the fixed service infrastructure to the SAME native process pool before opening
+    /// a listener. This may allocate the separately prepaid empty index, never a group/row.
+    pub(super) fn bind_pool(&self, resources: &Arc<Resources>) -> Result<(), Refused> {
+        let mut held = self.index.lock().unwrap_or_else(|error| error.into_inner());
+        Self::index(&mut held, resources)?;
+        Ok(())
+    }
+
+    /// An unauthenticated slot is only a bounded index hint. Resolve the original immutable
+    /// Session/public allocation; lookup cannot create or restart setup, even after End.
+    /// Closed history can answer status only, without granting any current effect authority.
+    pub(super) fn route(&self, slot: u8) -> Result<Route, Refused> {
+        let slot = slot
+            .checked_sub(1)
+            .filter(|slot| *slot < 64)
+            .ok_or(Refused::Binding)?;
+        let held = self.index.lock().unwrap_or_else(|error| error.into_inner());
+        let row = held
+            .as_ref()
+            .and_then(|index| index.rows[usize::from(slot)].as_ref())
+            .ok_or(Refused::Binding)?;
+        let state = row.state.lock().unwrap_or_else(|error| error.into_inner());
+        if state.closed {
+            return Err(Refused::Binding);
+        }
+        Ok(Route {
+            row: row.clone(),
+            session: state.session.clone().ok_or(Refused::Binding)?,
+            public: state.public.clone().ok_or(Refused::Binding)?,
+        })
+    }
+
     fn index<'a>(
         held: &'a mut Option<Box<Index>>,
         resources: &Arc<Resources>,
@@ -151,7 +252,10 @@ impl Registry {
                 closed: false,
                 session: None,
                 public: None,
+                browser_setup: None,
+                retirement: None,
             }),
+            projection_busy: AtomicBool::new(false),
             _credit: Arc::new(credit),
         });
         index.serial = serial;
@@ -172,6 +276,17 @@ impl Registry {
         executor: [u8; 32],
         selected: Option<Arc<SelectedHandoffOwner>>,
     ) -> Result<Status, Refused> {
+        self.close_row(owner, executor, selected)
+            .map(|row| row.status())
+    }
+    /// Hold the actual Row across post-guard retirement; a collector cannot turn an admitted
+    /// exact close into an ambiguous missing-row error between the two operations.
+    fn close_row(
+        &self,
+        owner: &str,
+        executor: [u8; 32],
+        selected: Option<Arc<SelectedHandoffOwner>>,
+    ) -> Result<Arc<Row>, Refused> {
         let mut held = self.index.lock().unwrap_or_else(|error| error.into_inner());
         if let Some(row) = held.as_ref().and_then(|index| {
             index
@@ -184,7 +299,7 @@ impl Registry {
                 .lock()
                 .unwrap_or_else(|error| error.into_inner())
                 .closed = true;
-            return Ok(row.status());
+            return Ok(row.clone());
         }
         let selected = selected
             .filter(|selected| {
@@ -218,17 +333,144 @@ impl Registry {
                 closed: true,
                 session: None,
                 public: None,
+                browser_setup: None,
+                retirement: None,
             }),
+            projection_busy: AtomicBool::new(false),
             _credit: Arc::new(credit),
         });
         index.serial = serial;
-        index.rows[slot] = Some(row);
-        Ok(Status::Closed {
-            native_setup_drained: true,
-        })
+        index.rows[slot] = Some(row.clone());
+        Ok(row)
+    }
+    /// Only the trusted setup-settlement adapter may call this after SDK drainage, or the
+    /// Status route after complete AEAD/session/transcript validation. Drop outside all
+    /// Index/Row/Coordinator guards; unknown history supplies no drainage proof.
+    fn retire_setup(&self, owner: &str, executor: [u8; 32]) -> Result<(), Refused> {
+        let row = {
+            let held = self.index.lock().unwrap_or_else(|error| error.into_inner());
+            held.as_ref()
+                .and_then(|index| {
+                    index.rows.iter().flatten().find(|row| {
+                        row.selected.id() == owner && row.selected.executor() == executor
+                    })
+                })
+                .cloned()
+                .ok_or(Refused::Binding)?
+        };
+        row.retire_setup()
+    }
+
+    /// Bounded collection requires an irreversibly dead original lease, no pending setup,
+    /// and actual drainage of ALL detached owners. Keep the monotonic serial across reuse.
+    pub(crate) fn collect_retired(&self) {
+        let mut removed: [Option<Arc<Row>>; ROWS] = std::array::from_fn(|_| None);
+        {
+            let mut held = self.index.lock().unwrap_or_else(|error| error.into_inner());
+            let Some(index) = held.as_mut() else { return };
+            for (slot, retired) in index.rows.iter_mut().zip(&mut removed) {
+                let reclaim = slot.as_ref().is_some_and(|row| {
+                    if row.selected.lease().is_live() || Arc::strong_count(row) != 1 {
+                        return false;
+                    }
+                    let state = row.state.lock().unwrap_or_else(|error| error.into_inner());
+                    state.closed
+                        && !state.pending
+                        && state.retirement.as_ref().is_some_and(|owners| {
+                            owners.session.strong_count() == 0 && owners.public.strong_count() == 0
+                        })
+                });
+                if reclaim {
+                    *retired = slot.take();
+                }
+            }
+        }
+        // Includes original selected snapshot and paid weak control blocks. No resource/
+        // output destructor may execute under Index/State (or a caller's Coordinator guard).
+        drop(removed);
+    }
+}
+/// Native-only immutable control routing. Retain the actual row, Session and paid public
+/// output across IO; copied session IDs alone cannot create this owner or authorize actions.
+pub(super) struct Route {
+    row: Arc<Row>,
+    session: Arc<Session>,
+    public: Arc<SetupOutput>,
+}
+impl Route {
+    pub(super) fn session(&self) -> &Arc<Session> {
+        &self.session
+    }
+    pub(super) fn session_id(&self) -> [u8; 16] {
+        self.row.session_id
+    }
+    pub(super) fn hash(&self) -> [u8; 32] {
+        self.public.public.hash
+    }
+    /// Complete authenticated body validation is the prerequisite. Header MAC, bad AEAD,
+    /// timeout and End cannot acknowledge the browser's original setup work.
+    pub(super) fn acknowledge_setup(&self) -> Result<(), Refused> {
+        self.row.retire_setup()
+    }
+    /// A snapshot of NATIVE setup state only. It neither proves browser drainage nor lets a
+    /// late Ready response revive a retired call, room, join or action.
+    pub(super) fn snapshot(&self) -> [u8; 3] {
+        let state = self
+            .row
+            .state
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let closed = state.closed || !self.row.selected.lease().is_live();
+        [1, if closed { 2 } else { 1 }, u8::from(!state.pending)]
     }
 }
 impl Row {
+    /// Trusted executor closure after all real browser SDK/IO/cancel work and application
+    /// buffers drained. Existing streams/replies retain their actual Session's bytes/slot
+    /// until their own last drop; detached public outputs remain independently paid too.
+    fn retire_channel(&self) -> Result<(), Refused> {
+        let retired = {
+            let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+            if !state.closed {
+                return Err(Refused::Binding);
+            }
+            if state.pending {
+                return Err(Refused::Capacity);
+            }
+            if state.retirement.is_none() {
+                state.retirement = Some(Retirement {
+                    session: state
+                        .session
+                        .as_ref()
+                        .map(Arc::downgrade)
+                        .unwrap_or_default(),
+                    public: state
+                        .public
+                        .as_ref()
+                        .map(Arc::downgrade)
+                        .unwrap_or_default(),
+                });
+            }
+            (
+                state.session.take(),
+                state.public.take(),
+                state.browser_setup.take(),
+            )
+        };
+        drop(retired);
+        Ok(())
+    }
+    fn retire_setup(&self) -> Result<(), Refused> {
+        let credit = {
+            let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+            if state.pending {
+                return Err(Refused::Capacity);
+            }
+            state.browser_setup.take()
+        };
+        drop(credit);
+        Ok(())
+    }
     fn status(&self) -> Status {
         let state = self.state.lock().unwrap_or_else(|error| error.into_inner());
         if state.closed || !self.selected.lease().is_live() {
@@ -246,7 +488,7 @@ impl Ticket {
     fn compute(
         &mut self,
         rng: &mut dyn CryptoRngCore,
-    ) -> Result<(Arc<Session>, PublicSetup), Refused> {
+    ) -> Result<(Arc<Session>, PublicSetup, Credit), Refused> {
         // The registry owns Pending before this first possible callback. Taking the sole
         // preparation is irreversible: an error/panic cannot create another scalar on retry.
         let prepared = self.prepared.take().ok_or(Refused::Binding)?;
@@ -265,7 +507,7 @@ impl Ticket {
     /// this installation. Failed output stays in caller's Option and drops AFTER guards.
     fn install(
         &mut self,
-        output: &mut Option<(Arc<Session>, Arc<SetupOutput>)>,
+        output: &mut Option<(Arc<Session>, Arc<SetupOutput>, Credit)>,
     ) -> Result<(), Refused> {
         let mut state = self
             .row
@@ -275,14 +517,15 @@ impl Ticket {
         if state.closed || !state.pending || !self.row.selected.lease().is_live() {
             return Err(Refused::Binding);
         }
-        let (session, public) = output.take().ok_or(Refused::Binding)?;
+        let (session, public, setup) = output.take().ok_or(Refused::Binding)?;
         if public.public.session != self.row.session_id || public.public.slot != self.row.slot {
             // This is an internal invariant, but do not drop keys under the caller's fence.
-            *output = Some((session, public));
+            *output = Some((session, public, setup));
             return Err(Refused::Binding);
         }
         state.session = Some(session);
         state.public = Some(public);
+        state.browser_setup = Some(setup);
         state.pending = false;
         self.installed = true;
         Ok(())
@@ -307,14 +550,17 @@ impl Drop for Ticket {
     }
 }
 
-/// Internal bridge consumer only. No command exposes it until authenticated delivery and
-/// browser ownership are integrated. Fixed public metadata alone grants no Root/RTC authority.
+/// The trusted main-window bootstrap resolves actual selected ownership. Fixed public
+/// metadata alone grants no Root/RTC authority or a new local-channel counter allocator.
 pub(crate) async fn ensure(
     state: &AppState,
     owner: &str,
     executor: [u8; 32],
-    rng: &mut dyn CryptoRngCore,
+    rng: &mut impl CryptoRngCore,
 ) -> Result<Status, Refused> {
+    // Collection stays outside Coordinator: even paid historical snapshot/control-block
+    // owners must be destroyed after final native authority/index gates are released.
+    state.voice_channels.collect_retired();
     let selected = state
         .voice_authority
         .lock()
@@ -354,12 +600,12 @@ pub(crate) async fn ensure(
     };
     // No await after Pending admission. Injected RNG/arithmetic can run no final native lock;
     // the original UI commit still orders admission/completion against lock's report.
-    let (session, public) = ticket.compute(rng)?;
+    let (session, public, setup) = ticket.compute(rng)?;
     let reply = Arc::new(SetupOutput {
         public,
         _credit: ticket.row._credit.clone(),
     });
-    let mut output = Some((session, reply.clone()));
+    let mut output = Some((session, reply.clone(), setup));
     {
         let mut authority = state
             .voice_authority
@@ -369,6 +615,81 @@ pub(crate) async fn ensure(
         ticket.install(&mut output)?;
     }
     Ok(Status::Ready(reply))
+}
+
+/// Exact trusted-main-window failure cleanup, including when no channel keys could be made.
+/// The retained broker must first await every real setup SDK promise/intermediate. No boolean
+/// assertion or arbitrary row descriptor is accepted. A delayed ensure stays permanently closed.
+/// Its main-window command accepts only the exact original owner/executor identity.
+pub(crate) async fn settle_setup(
+    state: &AppState,
+    owner: &str,
+    executor: [u8; 32],
+) -> Result<Status, Refused> {
+    finish(state, owner, executor, Closure::Setup).await
+}
+
+/// Final trusted original-broker closure, AFTER actual setup/SDK/IO/buffer drainage. This
+/// accepts no boolean assertion or renderer row descriptor and remains exact after reply loss.
+pub(crate) async fn collect_channel(
+    state: &AppState,
+    owner: &str,
+    executor: [u8; 32],
+) -> Result<Status, Refused> {
+    finish(state, owner, executor, Closure::Channel).await
+}
+enum Closure {
+    Setup,
+    Channel,
+}
+async fn finish(
+    state: &AppState,
+    owner: &str,
+    executor: [u8; 32],
+    closure: Closure,
+) -> Result<Status, Refused> {
+    let _commit = state.ui_session_commit.clone().lock_owned().await;
+    let row = {
+        let mut authority = state
+            .voice_authority
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let selected = authority
+            .selected_handoff_owner(owner, executor)
+            .ok()
+            .filter(|selected| {
+                check_voice_activation_generation(state, selected.binding().generation).is_ok()
+            });
+        let may_admit = authority.owner(owner).is_some_and(|current| {
+            check_voice_activation_generation(state, current.binding.generation).is_ok()
+        });
+        // Existing exact cleanup works after lock/End. Unknown retired owners allocate none;
+        // only a current selection can install the close-first fence under Coordinator.
+        match state
+            .voice_channels
+            .close_row(owner, executor, selected.clone())
+        {
+            Ok(row) => row,
+            Err(Refused::Binding) if selected.is_none() && !may_admit => {
+                // UI commit excludes a pending/new ensure. No exact historical row exists,
+                // and this accepted purpose cannot admit in its original generation anymore.
+                // This is authoritative no-work metadata, not a browser inference from a
+                // lost/error reply. Allocate no tombstone for unknown retired identities.
+                return Ok(Status::Closed {
+                    native_setup_drained: true,
+                });
+            }
+            Err(error) => return Err(error),
+        }
+    };
+    match closure {
+        Closure::Setup => row.retire_setup()?,
+        Closure::Channel => row.retire_channel()?,
+    }
+    let status = row.status();
+    drop(row);
+    state.voice_channels.collect_retired();
+    Ok(status)
 }
 
 fn require_selected(
