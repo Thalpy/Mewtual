@@ -31,6 +31,10 @@ export const TAURI_COMMAND_GROUPS = {
       // Selected-key cleanup can close one paid selection before a delayed admission and
       // waits for actual publication drainage; it never returns engine/network authority.
       "settle_voice_join_key",
+      // Exact original-channel cleanup must survive lock, End and lost setup/final replies.
+      // It accepts no drain flag, private bytes or replacement generation; setup still gates
+      // the unlocked session and native selected owner before RNG or channel admission.
+      "setup_voice_channel", "settle_voice_channel_setup", "collect_voice_channel",
       // CAS lifecycle and bounded engine admission, independent of optional router grants.
       // Selected-key admission recovers its original permit until settlement; publication
       // installs only that accepted owner's frozen public point through the actual actor.

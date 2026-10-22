@@ -35,7 +35,7 @@ MUTATIONS = {
         ("apps/desktop/src-tauri/src/studio/inspection.rs", "after_rebuild(&context);",
          "after_rebuild(&context);\n    let context = InvokeContext::new(state, server, Some(target)).await?;",
          NPREFIX + "native_studio_inspection_original_session_request_and_instance_span_both_visits",
-         "obsolete first inspection was legitimized by second custody visit"),
+         "original inspection context was replaced during second custody visit"),
     ],
 }
 

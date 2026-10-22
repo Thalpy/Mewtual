@@ -6,16 +6,16 @@ use rand_core::SeedableRng;
 
 mod join_key;
 
-struct Fixture {
-    state: AppState,
+pub(crate) struct Fixture {
+    pub(crate) state: AppState,
     _root: tempfile::TempDir,
-    actor: ServerActor,
+    pub(crate) actor: ServerActor,
     worker: tokio::task::JoinHandle<()>,
     drain: tokio::task::JoinHandle<()>,
     controller: String,
 }
 impl Fixture {
-    async fn new() -> Self {
+    pub(crate) async fn new() -> Self {
         let state = AppState::default();
         let root = tempfile::tempdir().unwrap();
         *state.store.lock().await =
@@ -54,7 +54,7 @@ impl Fixture {
             controller,
         }
     }
-    async fn candidate(&self) -> String {
+    pub(crate) async fn candidate(&self) -> String {
         prepare_voice_owner_inner(
             &self.state,
             self.controller.clone(),
@@ -64,7 +64,7 @@ impl Fixture {
         .await
         .unwrap()
     }
-    async fn close(self) {
+    pub(crate) async fn close(self) {
         self.actor.shutdown().await;
         self.worker.await.unwrap();
         self.drain.await.unwrap();

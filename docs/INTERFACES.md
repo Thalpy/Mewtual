@@ -1,5 +1,101 @@
 # Mewtual; Interfaces & Hooks Schema
 
+## App-owned public bootstrap and status channel (21 October)
+
+`setup_voice_channel({owner, executor})` requires the unlocked session and actual selected
+native owner/executor/generation. A failed/unstarted/finished service refuses before RNG or
+registry admission. It returns exactly Ready{owner,executor,kind,port,transcript},
+Pending{owner,executor,kind}, or Closed{owner,executor,kind,nativeSetupDrained}. IDs are the
+canonical voice- plus sixteen lowercase hex digits and 64 lowercase executor hex digits.
+The transcript is fixed public metadata; native ECDH/framing keys are never exported.
+
+`settle_voice_channel_setup({owner,executor})` and `collect_voice_channel({owner,executor})`
+are main-window-only, exact original-identity cleanup and remain usable after lock/End.
+Their void success requires native Closed and actually drained setup. Unknown retired no-work
+is decided under UI commit; active same-owner/wrong-executor requests cannot invent it. Neither
+command accepts a drain flag, caller-selected Session/port or replacement generation.
+
+`windowVoiceIpcNative(invoke)` retains the actual stateless adapter object across remounts.
+Use it with the retained `VoiceCryptoBroker.nativeChannel(owner,key,native)` and the original
+accepted selected-key handle. An incompatible retained invoke/adapter or v7/v8 broker refuses
+rather than installing another pool. `status()` coalesces its current physical attempt; later
+attempts spend fresh TX on the same allocator. `close()` waits for actual SDK/read/cancel work,
+then exact setup settlement, buffer disposal and final channel collection.
+
+Every successful public setup variant owns the same original Row projection guard through
+consuming IpcResponse conversion. JSON is written into one hard-capped 2,304-byte allocation;
+hex uses fixed 2,048-byte scratch. Delayed Closed/Pending replies remain paid after End/collection
+and cannot overlap Ready projections. Stock framework/WebView copies after handoff are excluded
+from this application-copy bound. Private/action bytes must use the authenticated channel.
+
+The app binds before window creation and adds only its exact http://127.0.0.1:port connect-src.
+The service accepts only the validated fixed native origin and literal Host, POST/OPTIONS
+`/voice/v2`, canonical framing and the original five-second connection deadline. HTTP 200 body
+starts with 144 lowercase admission bytes, then ciphertext; Status has 19 cipher bytes and
+Content-Length 163. Preflight 204 has neither body nor Content-Length. BYOB prefix authentication
+and RX debit precede body allocation. Browser IO expiry aborts, then awaits actual cancellation.
+
+The private native factory takes Context + the actual original SelectedHandoffOwner Arc and
+PairSelector. Context upgrades the nine actual state owners and reuses AppState's borrowed UI
+gate; it accepts no cached unlocked flag, serialized grant or alternate mutex. Its exact actor
+query is shared with ordinary native commands. Early/final supplied-selection checks are pure,
+including when no local selected snapshot exists. Broad upgraded context drops outside guards
+before the admitted worker spawns. The worker retains original actor/grant/commit/work/payment.
+The IO state's weak context and retained inline allocations are included in a32KiB process
+payment (8KiB more than before) within the same2MiB process ceiling. No command or opcode was
+added for this private factory. Final channel-closure, action delivery and browser drainage
+remain separate preconditions.
+
+Status plaintext is version1 + original 16-byte Session + 32-byte transcript hash. Its only
+reply is version1 + Ready1/Closed2 + native-setup-drained0/1. This grants no action, remote room,
+pair or RTC authority. Native routing is fenced before final closure; independent header/reply/
+public owners retain their capacity until actual drop, and a dead original lease precedes slot
+reuse. Factory/action delivery, receipt ACK, settlement and final phase collection remain open.
+
+## Internal channel bootstrap candidate (21 October)
+
+Native-only voice_handoff::bootstrap::ensure resolves the actual selected owner/executor and
+matching actor device before constructing one retained ECDH setup. It returns Pending, one
+shared immutable Ready output, or Closed with native_setup_drained. That last field describes
+native construction only, never browser/provider cleanup. No renderer command accepts it.
+The transcript uses closed version/suite1, exact big-endian fields and bounded UTF8/raw-group
+lengths; voice-ipc-bootstrap.ts validates public metadata against the original selection but
+creates no key, Session or counter. ECDH/framing keys remain private to their native owner.
+Actual renderer serialization, IO, browser crypto/ACK and action transfer are not implemented.
+
+## Process-only retained capacity (21 October)
+
+`Resources::charge_process_retained(bytes)` returns a noncloneable `ProcessRetainedCredit`
+for trusted native fixed process infrastructure. Zero, oversize and capacity refusal change
+no accounting. Bytes share the existing2MiB process cap with group credits; no group record
+or Crypto/Forward slot is created. The owner exposes no partition/conversion/early-release
+API. An adapter must prepay its measured infrastructure peak, including owner/task overhead,
+before allocation/bind and retain the credit through actual task/output collection. It cannot
+pay for group/member payloads or authorize protocol work. Aggregate `counts().0` includes it.
+
+## Disabled native handoff framing candidate (21 October)
+
+The private native codec in voice_handoff/channel and pure browser voice-ipc-frame.ts agree on
+40-byte headers,144 lowercase-hex admission characters, big-endian nonzero u64 sequences and
+the domain `Mewtual native voice handoff v1`. Directional HKDF labels separate header HMAC and
+AES-256-GCM body keys. A response authenticates responseHeader || exactOriginalRequestHeader.
+The local framing format is not a member wire packet or new room/signalling authority.
+
+Requests use operations Input1, Admit2, Result3, ReceiptAck4, Settle5, ClosePhase6, FinalAck7,
+BeginDerive8 and Status9. Only Result requests and Input responses may use Data (up to2064
+cipher bytes). Result requests require Data; all other bodies use Control (up to272 cipher
+bytes). Input responses may instead carry Control. The minimum body is the16-byte AEAD tag.
+Slot is1..64; magic/version/reserved bytes and HTTP Content-Length are exact. Unknown fields,
+classes and noncanonical values refuse before admission. TypeScript sequences remain bigint.
+
+Session owns one physical position from fixed header scratch to completed reply collection.
+Header MAC/class/length and data capacity precede RX/TX debit. Once admitted, either counter
+stays spent on body failure, cancellation or reply loss. Consuming PreparedReply prevents a
+second encryption under its issued response nonce. Actual data owns its original Phase; control
+uses separate paid capacity. The browser codec authenticates nothing and creates no Session.
+Session seed export, bootstrap ownership, actual IO deadlines and actor/browser transfer are
+still unimplemented; no listener/command/CSP/live dispatch is enabled by this candidate.
+
 ## Validated protected native handoff loan (21 October)
 
 CryptoAction::protected_binding returns immutable native-selected metadata, including after
@@ -22,7 +118,25 @@ actor await. Lost/Stopped replies retain that exact counted purpose. attach veri
 Root Action and original pair binding and installs it before returning an ID. No renderer may
 register an action by copying fields. The pilot supports derivation only, with 32 total rows.
 
-Ledger::reconcile, acknowledge and settle are bounded metadata-only native operations, including
+Ledger::resolve(original_selected, complete_purpose, row_id) and the independent
+Ledger::lookup_original(original_selected, complete_purpose) are the cross-module native
+operational lookups. The latter scans only the finite32-row index after a lost Begin reply,
+when no caller-known RowId exists. It returns Option<ResolvedRow>; None is only absence of a
+retained matching row, never proof of drainage. ResolvedRow::id returns fixed reply metadata.
+Slot/serial is a hint, not authority: the actual Weak<CallGrant> allocation,
+executor, original CallLease allocation and entire peer/join/key/epoch selector must match.
+It returns a native-only ResolvedRow retaining the actual paid row; it is neither serialized
+nor a once-only worker token. Physical callers must bound simultaneous handles in their own
+existing payments. Raw ID-taking status/work/ACK/settle/cleanup helpers are module-private.
+Resolution deliberately works after End and actual grant destruction so exact history cleanup
+cannot be stranded. Work rechecks the original lease under State immediately before copy and
+worker admission; this does not replace final channel/UI/Root first-effect fences.
+Original-purpose lookup runs no Clock, charge, grant upgrade or factory admission and changes
+no Pending state. It must remain separate from a currently authorized retry through begin:
+an idle handed-off Pending factory can resume on the same row/serial, while history after End
+cannot re-arm work. No renderer command or channel opcode exposes either lookup yet.
+
+ResolvedRow::reconcile, acknowledge and settle are bounded metadata-only native operations, including
 after End/phase closure. They never reloan variable capacity or admit computation. settle and
 Phase::close require actual selected-browser/provider/RPC drainage established by the future
 authenticated adapter. No IPC accepts a boolean assertion of that proof. compact retains exact

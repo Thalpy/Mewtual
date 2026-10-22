@@ -73,8 +73,8 @@ mod studio_exports;
 #[cfg(test)]
 mod voice_activation_tests;
 mod voice_authority;
-// The native pilot is compiled/tested while its listener/commands/live driver remain disabled.
-// Remove this temporary unused-item allowance when that integration owns these private APIs.
+// Status bootstrap is app-owned; action transport/live dispatch remain disabled. Remove the
+// temporary unused-item allowance as the live driver takes ownership of those private APIs.
 #[allow(dead_code)]
 mod voice_handoff;
 mod voice_join_key;
@@ -476,6 +476,10 @@ struct AppState {
     /// The disabled pilot has no command consumer yet; do not clear uncertain rows on End.
     #[allow(dead_code)]
     voice_handoff: Arc<voice_handoff::ledger::Ledger>,
+    /// Immutable local-channel setup/counters outlive an invoke waiter. Status bootstrap only;
+    /// End/lock cannot clear uncertain setup or install a new session for the original owner.
+    #[allow(dead_code)]
+    voice_channels: Arc<voice_handoff::bootstrap::Registry>,
     next_id: Mutex<u64>,
     /// Serialize first mount and already-mounted authentication. A duplicate frontend unlock must
     /// never race two reloads, while an explicitly UI-locked session must authenticate against
@@ -492,17 +496,17 @@ struct AppState {
     store: Arc<Mutex<Option<ServerStore>>>,
     /// Whether a freshly-mounted frontend may restore the already-unlocked UI session. This stays
     /// true across F5/HMR, but an explicit Ctrl+L clears it so a reload cannot bypass the lock.
-    session_resumable: Mutex<bool>,
+    session_resumable: Arc<Mutex<bool>>,
     /// Set before an explicit lock performs any awaited cleanup. Commands check this as well as
     /// `session_resumable`, so new IPC cannot slip through while the lock is waiting to serialize
     /// against an older command's final native commit.
-    session_lock_requested: AtomicBool,
+    session_lock_requested: Arc<AtomicBool>,
     /// Every explicit lock invalidates work that began in an earlier UI authorization epoch.
     /// Long-running joins carry the captured value to both their reply event and durable commit.
     ui_session_generation: Arc<AtomicU64>,
     /// Exact generation last committed by authenticated unlock. Publishing a newer lock
     /// generation closes IPC even if that thread stops before setting the separate request flag.
-    ui_authorized_generation: AtomicU64,
+    ui_authorized_generation: Arc<AtomicU64>,
     /// Orders the externally-visible parts of a long command against explicit lock completion.
     /// The lock-request atomic closes new IPC immediately; this mutex makes it impossible for a
     /// reply event or server registration to occur after `lock_session` itself has completed.
@@ -1096,24 +1100,59 @@ struct PendingGrant {
 /// Reject webview IPC while the explicit UI lock is active. Server actors intentionally continue
 /// networking in the background, but that must not leave their plaintext projections callable by
 /// injected/stale frontend code behind the lock screen.
+/// Borrow the actual session policy, including its mounted store. This is not a cached
+/// authorization decision or owned grant. Both ordinary IPC and the native handoff context
+/// use this same implementation so lock/unlock cannot make their policies diverge.
+#[derive(Clone, Copy)]
+struct UiSessionGate<'a> {
+    resumable: &'a Mutex<bool>,
+    requested: &'a AtomicBool,
+    generation: &'a AtomicU64,
+    authorized: &'a AtomicU64,
+    store: &'a Mutex<Option<ServerStore>>,
+}
+impl UiSessionGate<'_> {
+    fn is_closed(&self) -> bool {
+        self.requested.load(Ordering::Acquire)
+            || self.generation.load(Ordering::Acquire) != self.authorized.load(Ordering::Acquire)
+    }
+    async fn require_unlocked(&self) -> Result<(), String> {
+        if self.is_closed() {
+            return Err("the vault is locked".into());
+        }
+        // Preserve the existing resumable -> actual store lock order and repeat the atomic
+        // fence AFTER both awaits. A lock request can arrive while either mutex is busy.
+        if *self.resumable.lock().await && self.store.lock().await.is_some() && !self.is_closed() {
+            Ok(())
+        } else {
+            Err("the vault is locked".into())
+        }
+    }
+    /// Pure final fence, safe while Coordinator is held. No await or native callback.
+    fn check_generation(&self, expected: u64) -> Result<(), String> {
+        if self.is_closed() || self.generation.load(Ordering::Acquire) != expected {
+            return Err("the UI session changed while the operation was in progress".into());
+        }
+        Ok(())
+    }
+}
+impl AppState {
+    fn ui_session_gate(&self) -> UiSessionGate<'_> {
+        UiSessionGate {
+            resumable: &self.session_resumable,
+            requested: &self.session_lock_requested,
+            generation: &self.ui_session_generation,
+            authorized: &self.ui_authorized_generation,
+            store: &self.store,
+        }
+    }
+}
 fn ui_session_closed(state: &AppState) -> bool {
-    state.session_lock_requested.load(Ordering::Acquire)
-        || state.ui_session_generation.load(Ordering::Acquire)
-            != state.ui_authorized_generation.load(Ordering::Acquire)
+    state.ui_session_gate().is_closed()
 }
 
 async fn require_unlocked_session(state: &AppState) -> Result<(), String> {
-    if ui_session_closed(state) {
-        return Err("the vault is locked".into());
-    }
-    if *state.session_resumable.lock().await
-        && state.store.lock().await.is_some()
-        && !ui_session_closed(state)
-    {
-        Ok(())
-    } else {
-        Err("the vault is locked".into())
-    }
+    state.ui_session_gate().require_unlocked().await
 }
 
 /// Capture an unlocked UI epoch while serialized with the final phase of any older command.
@@ -10802,8 +10841,17 @@ async fn check_voice_binding(
     state: &AppState,
     binding: &voice_authority::Binding,
 ) -> Result<(), String> {
+    check_voice_binding_in(&state.servers, binding).await
+}
+
+/// The same exact registry/actor query for ordinary IPC and an upgraded handoff context.
+/// Its result is only a snapshot; both callers still need final commit/selection fencing.
+async fn check_voice_binding_in(
+    servers: &Mutex<HashMap<u64, ServerEntry>>,
+    binding: &voice_authority::Binding,
+) -> Result<(), String> {
     let actor = {
-        let servers = state.servers.lock().await;
+        let servers = servers.lock().await;
         let entry = servers
             .get(&binding.server)
             .filter(|entry| entry.instance == binding.instance && entry.group_id == binding.group)
@@ -10824,6 +10872,10 @@ async fn prepare_voice_controller(state: State<'_, AppState>) -> Result<String, 
 }
 
 async fn prepare_voice_controller_inner(state: &AppState) -> Result<String, String> {
+    // A last detached IO owner may drain after final-close returned. Reclaim only its proven
+    // dead history BEFORE any new grant/key admission can be blocked by that paid metadata.
+    // This bounded pass is grant-independent and runs outside Coordinator; it refunds no work.
+    state.voice_channels.collect_retired();
     let generation = unlocked_ui_session_generation(state).await?;
     let _commit = require_ui_session_generation(state, generation).await?;
     state
@@ -10846,6 +10898,7 @@ async fn prepare_voice_owner_inner(
     if room_id.to_string() != room {
         return Err("invalid voice room".into());
     }
+    state.voice_channels.collect_retired();
     let generation = unlocked_ui_session_generation(state).await?;
     let (actor, instance, group) = {
         let servers = state.servers.lock().await;
@@ -10894,6 +10947,7 @@ async fn activate_voice_owner_inner(
     state: &AppState,
     candidate: String,
 ) -> Result<VoiceActivation, String> {
+    state.voice_channels.collect_retired();
     // Successful activation consumes its candidate. Resolve the original current installation
     // first, or a lost accepted reply would force a new join/key generation. This is metadata
     // recovery only: never adopt a past grant or skip the actor/UI/native identity checks.
@@ -10996,11 +11050,7 @@ async fn activate_voice_owner_inner(
 /// pure atomic fence inside the final native guard, including after nonce generation, so a
 /// delayed revocation hook cannot make an already registered lock look like a current session.
 fn check_voice_activation_generation(state: &AppState, generation: u64) -> Result<(), String> {
-    if ui_session_closed(state) || state.ui_session_generation.load(Ordering::Acquire) != generation
-    {
-        return Err("the UI session changed while the operation was in progress".into());
-    }
-    Ok(())
+    state.ui_session_gate().check_generation(generation)
 }
 
 /// Fixed public activation metadata. This does not return a key, actor grant or RTC authority.
@@ -11032,6 +11082,7 @@ async fn end_voice_owner(state: State<'_, AppState>, owner: String) -> Result<()
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .end(&owner);
+    state.voice_channels.collect_retired();
     Ok(())
 }
 
@@ -11042,6 +11093,7 @@ async fn admit_voice_crypto_inner(
     bytes: usize,
 ) -> Result<String, String> {
     let operation = voice_authority::Operation::parse(&operation)?;
+    state.voice_channels.collect_retired();
     let binding = state
         .voice_authority
         .lock()
@@ -14877,6 +14929,9 @@ async fn publish_download_for_generation(
 /// Unlike `<a download>`, this has an observable result in a Tauri webview. The file is revealed,
 /// never executed automatically.
 #[tauri::command]
+// Each argument is a named Tauri command field. Preserve that existing frontend/native wire
+// contract rather than introducing a differently shaped request just to shorten this signature.
+#[allow(clippy::too_many_arguments)]
 async fn save_group_file(
     app: AppHandle,
     state: State<'_, AppState>,
@@ -15174,6 +15229,10 @@ async fn inspect_published_with(
 /// MEDIUM 1): that guard is process-wide (Lock and every other save's checks take it), and the
 /// inspection reads the destination, which can stall. Its result reaches the renderer only after
 /// the guarded recheck below, and a retired invocation is refused before inspection starts.
+// Keep original session/read owners and the independently testable authorization/publication
+// callbacks explicit. Their ordering is a security boundary; an argument-bundle refactor is not
+// needed to preserve this established helper's contract.
+#[allow(clippy::too_many_arguments)]
 async fn finish_saved_read_if<I, IF, R, A>(
     state: &AppState,
     generation: u64,
@@ -18007,12 +18066,22 @@ fn record_ui_log(level: &str, message: String, repeats: u32) -> bool {
 
 /// Build and run the Tauri application.
 pub fn run() {
-    tauri::Builder::default()
+    let state = AppState::default();
+    let mut context = tauri::generate_context!();
+    // Tauri creates configured windows BEFORE calling user setup. Bind the paid socket and
+    // add only its exact numeric-loopback source before build/run, never in a late setup hook.
+    let voice_host = Arc::new(
+        voice_handoff::application::Host::prepare(&state, context.config_mut(), tauri::is_dev())
+            .unwrap_or_else(voice_handoff::application::Host::unavailable),
+    );
+    let exit_voice_host = voice_host.clone();
+    let app = tauri::Builder::default()
         // Update checking lives in Rust so the download and its minisign verification never
         // touch the webview: the frontend only asks "is there one?" and "install it".
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
-        .manage(AppState::default())
+        .manage(state)
+        .manage(voice_host)
         // Shared media plays straight out of the vault instead of crossing the IPC bridge as a
         // base64 string. The handler answers Range requests, so a player starts on the first
         // chunk and a seek costs one chunk, and the bytes never become a JS string at all.
@@ -18068,6 +18137,14 @@ pub fn run() {
                 init_error,
                 dir,
             });
+            if let Err(reason) = app
+                .state::<Arc<voice_handoff::application::Host>>()
+                .start_in_tauri_runtime()
+            {
+                // Fixed native metadata only. No owner, point, transcript or port is logged.
+                // Local handoff failure must not prevent chat/the rest of the app starting.
+                tracing::warn!(?reason, "VOICE.HANDOFF.UNAVAILABLE");
+            }
             spawn_network_monitor(&handle);
             app.manage(voice_authority::CollectionTask::start(&voice_runtime(
                 &app.state::<AppState>(),
@@ -18229,6 +18306,9 @@ pub fn run() {
             voice_join_key::admit_voice_join_key,
             voice_join_key::publish_voice_join_key,
             voice_join_key::settle_voice_join_key,
+            voice_handoff::commands::setup_voice_channel,
+            voice_handoff::commands::settle_voice_channel_setup,
+            voice_handoff::commands::collect_voice_channel,
             default_route_address,
             unmap_call_port,
             get_switchboard_status,
@@ -18293,8 +18373,20 @@ pub fn run() {
             private_downloads::retry_private_download,
             private_downloads::cancel_private_download
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running the Mewtual desktop app");
+        .build(context)
+        .expect("error while building the Mewtual desktop app");
+    app.run(move |_, event| {
+        if matches!(event, tauri::RunEvent::Exit) {
+            // App::run never returns, and restart also exits directly. The Exit callback runs
+            // before Tauri cleanup/restart. Stop and collect here while IO runtime and logging
+            // still exist. This status worker has no UI/actor dependency that could deadlock
+            // the final event callback; preserve that invariant when adding action transport.
+            match tauri::async_runtime::block_on(exit_voice_host.finish()) {
+                Ok(()) => tracing::info!(target: "catcoms_app", "VOICE.HANDOFF.STOPPED"),
+                Err(reason) => tracing::warn!(?reason, "VOICE.HANDOFF.STOP_FAILED"),
+            }
+        }
+    });
 }
 
 #[cfg(test)]

@@ -6,6 +6,7 @@ COPY . .
 RUN test -f Cargo.toml \
     && test -f crates/catcoms-app/src/store.rs \
     && test -f apps/desktop/src/App.svelte \
+    && test -f apps/desktop/src-tauri/src/voice_handoff/channel/vectors.json \
     && test -f assets/mewtual-logo.svg \
     && test -f assets/cat/mascot-idle.svg \
     && test ! -e .claude/review-secret \

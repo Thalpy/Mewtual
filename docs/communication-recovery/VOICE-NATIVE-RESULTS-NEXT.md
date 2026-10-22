@@ -1,5 +1,327 @@
 # Next voice milestone: native result recovery
 
+## Native weak-context and lost-reply checkpoint (22 October)
+
+Frozen runtime source4db3f8249ef7960e11cc40febd2b81f6c3a6018e in
+target/communication-browser-action-worktree follows published PR48 checkpoint8773ac6b.
+The native/browser handoff remains this agent's assignment. This checkpoint does not enable
+an action opcode, live V2, SDP/ICE/RTC or member media relay.
+
+The paid application IO state now holds nine Weak references to the actual native owners.
+Per-call upgrade is all-or-nothing; ordinary commands and the native factory borrow the SAME
+UI session gate, real store, atomics and original commit mutex. Broad native state drops outside
+guards before detached work, which retains only actual actor/selected/grant/commit/work/payment.
+Factory selection accepts the original native Arc; pure early/final Coordinator checks cannot
+materialize a local snapshot when rejecting a foreign equal-label owner.
+
+Weak references retain original inline Arc allocations after value destruction. The fixed IO
+payment increased from24KiB to32KiB, within the same2MiB process limit. The current Windows
+layout is32,256 bytes, including11,352 bytes for weak-retained allocations and context wrappers;
+tail padding is measured using the pinned Arc layout. Context drops before its payment.
+Other platform layouts continue to refuse if the measured peak cannot fit.
+
+Ledger::lookup_original now recovers the same paid native row after a lost Begin reply supplied
+no RowId. It checks original grant allocation/executor/lease/full purpose, runs no Clock/charge/
+grant upgrade/factory action, and remains usable after End and actual grant destruction.
+None means no retained matching row, never drainage. This historical lookup is separate from
+currently authorized retry: idle handed-off Pending work still resumes on its original row/serial.
+No caller or transport uses historical metadata as permission to re-arm a factory.
+
+Focused current gates: all123 native handoff tests pass (2.06s); the preceding172 voice-filter
+tests pass before the three additional lookup tests. Nine actual native command-security tests
+and the full2,348 frontend tests pass (62.24s). Actual-diff adversarial design/review/re-review
+has no remaining findings. The earlier24KiB layout refusal and test-only Context name collision
+remain in failed logs; corrected focused runs and measured-layout check pass.
+The restricted browser-flow attempt lost CDP before flow assertions; the unchanged gate was
+rerun with normal Windows process access. Failed attempts are retained, never counted as passes.
+
+Complete fresh native passes600 tests including five ACL tests, zero failures
+(512.28s gate). Check27.17s, strict all-target/all-feature
+Clippy40.94s, format0.84s and the fresh Root construction
+scanner0.77s pass. Fresh complete Root passes3233 tests, zero failures,
+24 existing ignored across59 result summaries (1920.34s). Root Rust/Cargo/
+dependency-policy inputs remain byte-identical to validated f1c58519; prior Root static/ambient/
+dependency checks retain their own provenance. Native and Root full suites ran serially.
+
+Fresh frontend Svelte check57.41s has zero errors/warnings; production
+build45.14s and all ten rendered flows55.89s pass.
+Development executable build131.47s, actual startup3.62s,
+packaged custom-protocol debug build119.19s and actual packaged Windows
+document/reload/CSP/CORS/public-metadata/normal-close probe2.67s pass.
+Probe binary SHA256:32e07da86119b0cc764d719fb9ec0c3e172a5443d062096b9eafc969470be8ab. It requests no unlock/credentials and verifies
+only public metadata, exact-port policy and normal native collection. It does not establish
+selected crypto/action delivery or audible/physical networking. Only one desktop is available.
+Logs: target/voice-native-context-*; exact commands/times: voice-native-context-gates.jsonl.
+
+Still required: authenticated factory/action input/result/receipt ACK/settlement/phase closure
+and final delivery over the same Session; final actual-channel closure under the original UI
+commit; production proven-pair registration; full96KiB Workflow retirement and copy funding;
+sharing the original browser execution position; safe collection of the separate32-row action
+history. The existing16KiB Phase loan is not the whole Workflow. Live V2/RTC/isolation, relay,
+combined acceptance and independent physical audio/network acceptance remain open with their
+assigned owners. Separate native/experiment dependency-audit findings remain open.
+
+## Next action transport sequence (design only,22 October)
+
+The next change must connect the actual channel and selected key, rather than enable an opcode
+around the current factory unchanged. Before any first actor effect, repeat the actual Route's
+closed-state fence under the SAME original UI commit. Use original-purpose history before
+new-work eligibility for lost Begin replies, while preserving an explicitly authorized same-row
+idle-Pending retry. Historical lookup is not authority to perform that retry.
+
+BrowserChain and RetainedIpcChannel live in voice-crypto.ts. A broker-only channel-chain entry
+must resolve the exact retained channel/SelectedKeyRecord/key and borrow its already reserved
+browser position. Do not increment the two-position pool or allow a third provider position.
+Keep chain.running for logical action serialization, but acquire the shared physical execution
+lane only for provider/digest work, releasing it BEFORE admit/commit/settle RPCs over the same
+channel. Holding that lane around the whole action pump would deadlock on its own RPC.
+
+End/retire must fence first effects without destroying cleanup transport. Current channel
+cleanup knows only its own setup/exchange: it cannot yet know a linked chain still computes or
+needs exact receipt ACK/settlement. Retain original framing keys/control position until linked
+SDK/RPC/ACK/settlement, native phase close and final reply owners actually drain; collectChannel
+must be last. A timeout or current-owner refusal cannot replace that observation.
+
+Native full-chain closure needs an original capability, never a handshake-ID lookup or a copied
+browser assertion. A narrowly named consuming HandoffLoan method could upgrade its existing
+Workflow.control Weak and close that original PreparedChain (or close its original Workflow if
+control is gone), then drop outside native State/Index/Coordinator/Group/Policy/Engine guards.
+This is a derivation-only pilot proposal, not implemented. Phase.close currently returns only
+16KiB to an OPEN96KiB reserve. Even chain close must not report full drainage while credited
+input/engine/lower/copy owners remain. Whole-call End is a fallback, but its reply alone is not
+96KiB drainage evidence: EndpointOwners.prune/quiet housekeeping still owns pair-chain closure.
+
+Required regressions: two retained channels sharing the existing two positions; provider work
+and same-channel RPC mutually excluded without self-deadlock; End during provider work followed
+by exact historical ACK/settle/phase/final cleanup; lost replies at each phase; actual channel
+close winning or losing final admission; original Workflow held by delayed last copy/input/
+lower owner; and more than32 safely collected action generations without uncertain eviction.
+Normal proven-pair Actor ingress remains a separate required integration, not a fixture claim.
+
+## Previous action-row ownership checkpoint (21 October)
+
+Source b0b303ebcc140f6414e89ae4b06ee8a46ece5175 follows the published edb00dda app-owned
+Status checkpoint in target/communication-browser-action-worktree. The native/browser handoff
+remains the active assignment. All raw RowId-taking operational helpers are now private;
+Ledger::resolve requires the original native-selected grant allocation, executor, lease and
+complete peer/join/key/epoch purpose. A native-only ResolvedRow retains the actual paid Row.
+Repeated resolution is not a once-only work permit; physical callers still must account and
+bound their handles. The complete layout remains inside the original2KiB Row payment.
+
+Historical lookup/receipt ACK/settlement remains usable after End and actual CallGrant drop.
+Data work checks the original lease under State before copy/worker admission, including when
+End won during a wait. Four new regressions cover foreign equal-field owners/all selector
+fields/invalid IDs, each key component, exact post-End recovery and the actual held-State race.
+All112 focused handoff tests pass (2.03s after49.66s compile). Actual-diff adversarial review/
+re-review has no remaining findings. Full frontend2,348 passes (68.32s). Full native583 library
+plus five ACL tests pass, zero failures (523.69s library;526.92s gate). Native check48.50s,
+strict all-target/all-feature Clippy50.34s, format0.76s and the fresh Root construction scanner
+(one test,0.97s gate) pass. These ran serially; no validation process remains active. Failed
+test-Barrier compile and interrupted focus3 are retained; the final barrier samples
+credits after End's legitimate independent generation retirement, without weakening work,
+receipt, copy or worker assertions. Logs: target/voice-scoped-row-*.
+
+This adds no action opcode, new command, live V2 driver or Root/wire/storage change. The passing
+packaged probe/build/startup evidence below belongs to unchanged bac90 application lifetime;
+it does not prove action delivery. Native/browser action/result/ACK/settlement/phase closure and
+final delivery remain open. Native context, full Workflow/copy funding, sharing the original
+browser execution position and safe32-row action-history collection still require integration.
+Root Rust/Cargo/policy and frontend/build inputs are unchanged; preserve their recorded exact
+provenance rather than treating previous gates as fresh runs. One physical desktop is available.
+
+## App-owned status checkpoint (21 October)
+
+Source bac90cfa is isolated in target/communication-browser-action-worktree, following published
+PR48 checkpoint 9218d179. Application host, exact pre-window CSP, fixed main-only bootstrap/cleanup
+commands and a retained production metadata adapter now connect the previously internal service.
+Only authenticated Status is enabled. Native action/receipt/result transport remains open.
+
+All 108 focused native handoff tests and 35 browser adapter/Session tests pass. Full frontend
+passes 2,348; Svelte has zero errors/warnings, build and all ten rendered flows pass. Native
+strict all-target/all-feature Clippy/check/format, complete native579+5ACL, development build/
+startup, packaged build and actual Windows document/reload/CSP/CORS/metadata/normal-close probe
+pass. The probe requests no vault unlock and does not establish selected crypto exchange or
+action transport. Actual-diff review/re-review has no remaining blocker/high/medium
+finding after command-ledger, serializer-capacity and non-Ready projection-custody corrections.
+A missing close-first initializer failed compilation once; its log is retained and corrected
+focus4 passes. Root's prior 3,233/full-static validation is on unchanged Root Rust/dependencies,
+not a fresh native-source run. HANDOVER records exact final gate provenance.
+
+Closed channel collection now tracks real independent owners and preserves monotonic serials;
+68 successive actual selected generations reuse capacity without reviving old Sessions. Browser
+v9 cleanup awaits all SDK/IO, then exact setup settlement, buffer disposal and final collection.
+Every public reply variant retains one original paid serialization position through framework
+handoff. Framework/WebView public-metadata copies beyond that boundary remain excluded; private
+or action bytes must never use stock IPC. Only one physical desktop is available.
+
+Implemented by the current checkpoint above: retain only Weak references to actual native state in the
+application host. Per-call context upgrades must fail closed, use the SAME borrowed UI gate as
+AppState (including actual store presence), then repeat original selection/registry/generation
+checks after awaits under the existing commit. Drop broad context references before detached
+work; workers retain only the actual actor, selected owner, grant, commit and paid work owners.
+Weak references prevent persistent ownership cycles; they are not a revocation mechanism.
+
+Lost BeginDerive replies need original-purpose lookup before new-work/current-owner eligibility:
+a requester may have no RowId yet while the original actor handoff remains uncertain. Resolve
+historical native identity without rearming a factory or treating unknown as drained. Any such
+API must retain the same grant/executor/lease/purpose checks as ResolvedRow and distinguish
+history from admission. The current checkpoint above implements the native-only lookup. Action transport still does not use it; it must precede first-effect admission without suppressing an explicitly authorized idle-Pending retry.
+
+The existing Phase.close returns a16KiB HandoffLoan, not the original96KiB Workflow. Full-chain
+closure needs an exact native original-chain retirement capability or explicit original-call
+End for a derivation-only pilot; Phase.drained must never be described as full Workflow release.
+
+Next implement original factory/action input, result, exact receipt ACK, settlement, authenticated
+browser phase closure and final delivery collection over this same immutable Session. Resolve
+native context without an AppHandle cycle; admission still needs actual selected owner/actor,
+original UI commit/generation, native clock/deadline and current room/epoch/pair authority.
+Pending RowId is metadata, not action readiness. Normal proven-pair actor registration remains
+required; fixture-created pairs cannot establish that production path.
+
+Compose the original Workflow funding with actual native/browser serialization, SDK and retained
+copies before enabling action transport. The existing 16 KiB derivation HandoffLoan is not proof
+of a complete chain. Channel control already owns one of the existing two browser positions;
+protected work must share/lend it explicitly, never queue cleanup behind the chain being settled.
+The separate 32-row action ledger needs safe historical collection too. SDP phase/key transfer,
+live RTC/mode isolation, relay and combined/physical acceptance remain open.
+
+## Historical native bootstrap candidate (21 October, preceding complete gates)
+
+Active checkout is target/communication-bootstrap-channel-worktree, based on published
+`c5c52fd8`; Root resource primitive is separately committed `a695470d`. The current candidate
+adds internal selected-owner ECDH setup, with no renderer command, application listener,
+CSP change or browser Session. Pending is retained before RNG; final generation, actual
+selected Arc and lease checks cover Ready installation under Coordinator. Error/unwind closes
+that original purpose. Exact setup replies share one immutable descriptor and its original
+credit even after registry removal. Close-first is independent of join-key settlement.
+
+The lazy64-slot index prepays4KiB process capacity; each row/output prepays8KiB real group
+capacity, separate from the existing12KiB control/2KiB Session payments. Native arithmetic
+prepays an ordinary8KiB Crypto owner. The concrete future, named setup owners and pinned
+primeorder16-point table have layout regression guards. All13 new native bootstrap tests pass
+within61 passing handoff tests, including actual ServerActor selected-key fixtures. Complete
+native passes532 library plus five ACL tests, check/strict Clippy/format/build/startup. Exact
+counts/timings and source provenance are in HANDOVER.md. No complete allocation/RSS bound is claimed.
+There is no uncertain-row eviction; this finite pilot requires lifecycle collection before
+live activation. `Closed.native_setup_drained` currently describes native computation only, never actual
+browser/provider drainage. Before browser crypto is connected, retain/transfer a corresponding
+ordinary engine owner through real setup, outgoing sealing/MAC and authenticated setup ACK.
+
+The canonical transcript includes version/suite, monotonic native session ID/slot, original
+generation/server/incarnation/raw group/scope/policy/room, actual local device/join, selected
+owner/executor and both65-byte points in fixed roles. The pure browser parser creates no key
+or counter allocator. Seven new real-WebCrypto/metadata regressions and the eight existing
+frame regressions pass, including fixed-width leading-zero ECDH and UTF8 BOM identity refusal.
+Shared fixtures use deterministic public test keys only. Fresh complete Root passes3,233
+tests with zero failures; format, strict Clippy, ambient and Root deny pass. Complete frontend
+passes2,312, Svelte zero errors/warnings, production build and all ten rendered flows pass.
+Read-only actual-diff re-review has no remaining findings. Hosted c5c52fd8 still fails Linux
+exact-history recovery and a Windows file-range actor bound; current native diagnostics do
+not fix the Linux failure. No live V2/media/combined acceptance follows.
+
+### Newly reachable native ECDH source review
+
+The direct pinned `p256=0.13.2` ECDH edge adds only that dependency to the native package's
+lock entry; no resolved version changed. `default-features=false` limits this edge's request,
+not features unified by other dependants. This is a new secret-arithmetic consumer, not
+assurance inferred from a pre-existing lockfile entry.
+
+Reviewed exact registry sources: p2560.13.2 ecdh.rs and arithmetic/scalar.rs;
+elliptic-curve0.13.8 ecdh.rs/public_key.rs/scalar/nonzero.rs; primeorder0.13.6 projective.rs.
+Native prepays before parsing the full uncompressed SEC1 point and doing scalar work. The
+borrowed Sized RNG adapter delegates only to injected catcoms-rt randomness. Scalar generation
+uses rejection sampling; fixtures pin that contract. Both ephemeral public-key construction
+and ECDH use the pinned arithmetic, whose multiplication table is considered in the guard.
+`EphemeralSecret` and `SharedSecret` drop zeroize their own stored scalar/field bytes; extracted
+seed/framing keys have their own zeroizing owners. Arithmetic temporaries, browser providers,
+thread stacks, SDK/GC heaps and compiler copies are not covered by that erasure statement.
+
+The p256 README explicitly reports no independent arithmetic audit or thorough generated-
+assembly constant-time assessment. This source review is not such an audit. ECDH alone is
+unauthenticated: the immutable native point/transcript must come from trusted main-window
+IPC and the actual selected browser private key. Local keys confer no remote member or Root
+effect authority. Compromise of the retained browser join private key can recover recorded
+local exchanges; this construction does not claim forward secrecy against that compromise.
+Existing separate native/experiment dependency-audit findings remain open; Root deny passing
+does not clear them, and this change adds no advisory exemption.
+
+## Historical framed-handoff continuation (21 October)
+
+Published checkpoint is `71d11284`; reviewed file-fixture correction is `7609b66b`. Active work is in
+target/communication-framed-handoff-worktree. The native fixed framing codec and pure browser
+metadata counterpart now pass13 actual-native and8 real-WebCrypto tests, including shared
+fixed bidirectional vectors at maximum Data sizes and exact u64 sequences. Full frontend
+passes2,305 tests, Svelte zero errors/warnings and production build36.06s. Codec-only static
+re-review has no remaining findings. Complete Windows native passes515 library plus five ACL
+tests, check/build/startup and strict native Clippy/format pass; all100 focused native voice
+tests pass. Current-delta complete Root and hosted Linux native gates are not yet established;
+the hosted71d11284 Docker context audit passes.
+
+The current internal native factory worker wires actual selected-owner/actor registration,
+original UI-generation ordering and separately paid completed-output custody. Its six focused
+actual-native regressions pass (0.78s;4m41s compile); read-only re-review has no remaining
+findings after a test-only panic-wake correction. Full native validation passes on that correction.
+Its pending RowId is not readiness. Positive proven-pair Actor registration is still unproved
+through normal ingress.
+
+Published-head Linux membership recovery and the native Studio mutation gate have since failed.
+The continuation strengthens original admission to wait for the actual sealed3->1 route needed
+by the membership restart topology, adds bounded saved-route/dial observations, and corrects
+the mutation's expected assertion marker without loosening security checks. Focused Windows
+chat-matrix scenarios pass; the corrected mutation gate passes389.75s. A subsequent full run
+exposed C's file directory arriving before B's queued copy was applied. Requiring both exact
+catalogs within the original30-second barrier preserves all bridge/byte/restart oracles. All
+seven file scenarios pass44.56s; final native passes515+5ACL (521.62s), check/strict Clippy/format
+pass. Fresh complete Root is running serially; Linux native confirmation remains required.
+
+Next connect immutable native/browser bootstrap ownership and actual framed action input,
+result, exact receipt ACK, settlement, browser closure and final delivery collection. Do not
+copy the experiment's resettable seed constructor into app code. The future browser Session
+must spend TX before WebCrypto and spend authenticated RX before body intake; failed body or
+lost reply never refunds either. Its sole prepaid position survives fetch/read cancellation,
+crypto settlement and explicit returned-buffer disposal. The current pure codec owns no keys.
+Whole-chain/SDP/RTC activation and relay/combined/physical work below remain open.
+
+### Original bootstrap design: selected-key ECDH (candidate above)
+
+Use the actual selected browser join key and a fresh native local-channel P-256 ephemeral key.
+Return only the immutable native public point/session metadata through the trusted main-WebView
+bridge. Native retains the original Session/counters before any publication; browser retains
+one constructor promise before its first await. Retries recover that identity; they never
+install another allocator or substitute another native point. A hard remount with a different
+executor must replace its original controller/join explicitly. Generic same-owner compatibility
+key handles do not qualify: require the exact accepted selectedKeys record and executor.
+
+Current native selected-key checks validate the SEC1 prefix/reference, not the curve. The new
+consumer must require exact65-byte uncompressed encoding and successful p256::PublicKey parsing
+before scalar multiplication; the browser independently imports the native point as P-256.
+Bind an injective versioned transcript to native session ID/slot, original native binding,
+owner/executor, selected point and native point in fixed roles. Preserve all32 big-endian bytes
+of WebCrypto's256-bit ECDH result, including leading zeroes. Derive a32-byte seed under a new
+bootstrap domain/label, then use the already tested directional handoff key schedule.
+
+Prepay setup bytes and an ordinary Crypto permit before native RNG/ECDH, outside Coordinator
+and ledger locks. Cache Pending identity first and repeat current generation/selection at final
+native installation. Settlement-first latches closure against a delayed admission. Actual
+browser setup and outgoing seal/MAC must settle and release setup buffers before a first frame
+can acknowledge that setup phase; physical response verification/decryption has its own custody.
+Cancellation before any frame needs exact cleanup/settlement, with no timeout refund.
+
+This adds direct native secret-ECDH reachability. Pinned p256's README reports no independent
+audit/assembly constant-time assessment of its arithmetic; record a fresh dependency/source
+review rather than treating existing lockfile presence as assurance. Owned ephemeral/shared
+secret types zeroize their own storage, without a broader provider/SDK erasure claim. Local
+channel keys confer no remote signalling/media authority, and this exchange does not provide
+forward secrecy against later compromise of the still-retained browser join private key.
+
+Required tests include shared Rust/WebCrypto ECDH vectors with leading zeroes; valid-prefix
+off-curve points; transcript/point/session substitution; distinct native session IDs under
+repeated RNG fixtures; wrong actual selected handle; accepted reply loss; concurrent startup;
+End/lock during computation; and settlement before delayed first admission. Start with a
+harmless authenticated Control exchange before adding Root effects. This design is not a
+validated operational bootstrap, application listener or live V2 call. The candidate above
+implements the internal native setup and awaits application/browser integration.
+
 ## Validated handoff prerequisites (21 October)
 
 An actual native action can now lend one chain-wide HandoffLoan from its existing96KiB

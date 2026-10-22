@@ -41,12 +41,22 @@ async fn bridged_saved_copy(private: bool) {
     .await
     .unwrap();
     let raw = hex::decode(&cid).unwrap();
-    bounded("file directory reaches requester through B", async {
+    bounded("file directory reaches requester and bridge", async {
         loop {
+            // The transport can forward gossip to C before B's independent actor applies its
+            // queued file-index event. C's catalog is not evidence of B's local manifest yet.
+            // Observe both original prerequisites within the existing deadline before reading;
+            // this query creates no history, provider proof or route for the bridge.
+            let bridge_plan = scenario
+                .online(0)
+                .actor
+                .file_download_plan(raw.clone())
+                .await;
             if scenario.online(2).actor.files().await.iter().any(|entry| {
                 catcoms_storage::FileManifest::decode_or_legacy(&entry.file_ref)
                     .is_ok_and(|m| hex::encode(m.plaintext_cid.as_bytes()) == cid)
-            }) {
+            }) && bridge_plan == Some((1, bytes.len() as u64))
+            {
                 break;
             }
             SystemClock.sleep(Duration::from_millis(50)).await;

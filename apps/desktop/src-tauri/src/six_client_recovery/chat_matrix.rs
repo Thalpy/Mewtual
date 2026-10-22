@@ -128,14 +128,28 @@ impl Scenario {
                 "membership connected submissions: {:?}",
                 self.rules.trace.lock().unwrap().connected_submissions
             );
+            {
+                let trace = self.rules.trace.lock().unwrap();
+                eprintln!(
+                    "membership peer dials: requested={:?} driver_submitted={:?}",
+                    trace.peer_dials, trace.submitted_peer_dials
+                );
+            }
             for index in indices {
                 let actor = &self.online(*index).actor;
                 let query = tokio::select! {
                     result = async { (actor.recovery_progress(catcoms_wire::DocType::ChannelIndex, 0).await, actor.member_routes().await) } => Some(result),
                     _ = SystemClock.sleep(Duration::from_millis(500)) => None,
                 };
+                // Probe sealed custody independently: an actor timeout must not hide a missing
+                // saved hint, and a suppressed dial must not look like failed finalization.
+                let net = tokio::select! {
+                    result = network(&self.online(*index).state) => Some(result),
+                    _ = SystemClock.sleep(Duration::from_millis(500)) => None,
+                };
+                let saved = self.sealed_route_diagnostic(net);
                 eprintln!(
-                    "membership timeout: client={index} passes={} recovery_routes={query:?}",
+                    "membership timeout: client={index} passes={} network={saved} recovery_routes={query:?}",
                     self.online(*index).passes.load(Ordering::Acquire)
                 );
             }

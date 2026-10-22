@@ -516,6 +516,9 @@ test("every non-bootstrap native command visibly crosses the unlocked-session ga
     "cancel_inline_download",
     // Exact native revocation/settlement survives UI lock. No fresh work or existence bit.
     "end_call_mapping_owner", "unmap_call_port", "end_voice_owner", "settle_voice_crypto", "settle_voice_join_key",
+    // Original-owner channel closure/collection remain callable after lock/End. Native admits
+    // no fresh effect and reports success only for actually drained, permanently closed setup.
+    "settle_voice_channel_setup", "collect_voice_channel",
     "log_ui",
     "log_ui_batch",
     "record_ui_events",

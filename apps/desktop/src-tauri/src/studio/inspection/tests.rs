@@ -175,7 +175,7 @@ async fn native_studio_inspection_original_session_request_and_instance_span_bot
                     }
                 }
             },
-            |_| panic!("obsolete first inspection was legitimized by second custody visit"),
+            |_| panic!("original inspection context was replaced during second custody visit"),
         )
         .await;
         assert!(
@@ -183,12 +183,17 @@ async fn native_studio_inspection_original_session_request_and_instance_span_bot
             "mode {mode} must rebuild before changing original operation context"
         );
         assert_eq!(
-            result.unwrap_err(),
+            result
+                .expect_err("original inspection context was replaced during second custody visit"),
             match mode {
                 0 => "Studio request belongs to a locked or changed UI session",
                 1 => "Studio view request was superseded; refresh",
                 _ => "server changed before Studio commit",
-            }
+            },
+            // Reconstructing context can refuse earlier (e.g. "the vault is locked") instead
+            // of reaching conversion. That still violates this exact original-context result;
+            // the mutation gate must recognize this assertion without accepting arbitrary failure.
+            "original inspection context was replaced during second custody visit"
         );
         if mode == 0 {
             assert_eq!(

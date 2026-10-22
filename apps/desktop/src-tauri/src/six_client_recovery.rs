@@ -319,7 +319,10 @@ impl Scenario {
     }
 
     async fn wait_for_routes(&self, count: usize) {
-        let required = [(1, 0), (2, 0), (3, 0), (4, 3), (5, 3)];
+        // dial() only queues an attempt. The missed-membership scenario later leaves only
+        // clients 1 and 3 online, so it also needs 3's authenticated, persisted route to 1.
+        // Establish that custody during original admission, never by injecting a restore hint.
+        let required = [(1, 0), (2, 0), (3, 0), (3, 1), (4, 3), (5, 3)];
         tokio::select! {
             _ = async {
                 loop {
@@ -540,14 +543,25 @@ impl Scenario {
             observe(running.actor.member_routes()),
         );
         let history = history.map_or_else(|| "history actor/snapshot probe exceeded 500ms".to_owned(), |history| {
-            let missing_messages: Vec<_> = expected.messages.keys().filter(|id| !history.messages.contains_key(*id)).collect();
+            // Fixed fixture labels/author identities identify which partition's operation is
+            // missing. Cap observations; never dump signed payloads or unbounded history.
+            let missing_messages: Vec<_> = expected.messages.iter().filter(|(id, _)| !history.messages.contains_key(*id))
+                .take(4).map(|(id, (author, label))| (id, author, label.chars().take(80).collect::<String>())).collect();
             let unexpected_messages: Vec<_> = history.messages.keys().filter(|id| !expected.messages.contains_key(*id)).collect();
             let changed_messages: Vec<_> = expected.messages.iter().filter(|(id, value)| history.messages.get(*id).is_some_and(|actual| actual != *value)).map(|(id, _)| id).collect();
             let missing_operations: Vec<_> = expected.operations.keys().filter(|id| !history.operations.contains_key(*id)).map(hex::encode).collect();
             let extra_operations: Vec<_> = history.operations.keys().filter(|id| !expected.operations.contains_key(*id)).map(hex::encode).collect();
             format!("messages={} ops={} missing_messages={missing_messages:?} unexpected_messages={unexpected_messages:?} changed_messages={changed_messages:?} missing_operations={missing_operations:?} extra_operations={extra_operations:?}", history.messages.len(), history.operations.len())
         });
-        let saved = net.map_or_else(
+        let saved = self.sealed_route_diagnostic(net);
+        format!("client={} {history} cadence_submitted_passes={} network={saved} recovery={recovery:?} routes={routes:?}",
+            index + 1, running.passes.load(Ordering::Acquire))
+    }
+
+    /// Project only fixture identities and listener equality; ServerNet itself contains secrets.
+    /// Callers bound the store query separately from actor observations so one cannot hide the other.
+    fn sealed_route_diagnostic(&self, net: Option<ServerNet>) -> String {
+        net.map_or_else(
             || "sealed network store probe exceeded 500ms".to_owned(),
             |net| {
                 let targets: Vec<_> = net
@@ -572,18 +586,21 @@ impl Scenario {
                     net.reconnect_policy
                 )
             },
-        );
-        format!("client={} {history} cadence_submitted_passes={} network={saved} recovery={recovery:?} routes={routes:?}",
-            index + 1, running.passes.load(Ordering::Acquire))
+        )
     }
 
     async fn converge_in(&self, channel: u128, indices: &[usize], expected: &History, phase: &str) {
         eprintln!("six-client phase: {phase}");
+        self.rules.begin_phase(phase);
         tokio::select! {
             _ = async {
                 loop {
                     let mut complete = true;
-                    for index in indices { complete &= self.online(*index).history_in(channel).await == *expected; }
+                    for index in indices {
+                        let history = self.online(*index).history_in(channel).await;
+                        self.rules.observe_history(*index, history.messages.len(), history.operations.len());
+                        complete &= history == *expected;
+                    }
                     if complete { break; }
                     SystemClock.sleep(Duration::from_millis(100)).await;
                 }
@@ -597,7 +614,7 @@ impl Scenario {
                 }
                 let trace = {
                     let trace = self.rules.trace.lock().unwrap();
-                    format!("received_kinds={:?}; connected_submissions={:?}; peer_dials={:?}", trace.received_kinds, trace.connected_submissions, trace.peer_dials)
+                    format!("received_kinds={:?}; connected_maintenance_submissions={:?}; peer_dials={:?}; phases={:?}; history_samples_phase_client1_mono_messages_ops={:?}; ordinary_last_192_evicted={}; ordinary_requests={:?}", trace.received_kinds, trace.connected_submissions, trace.peer_dials, trace.phases, trace.history_samples, trace.ordinary_evicted, trace.ordinary)
                 }; // Release the diagnostic mutex before panic; secondary tasks retain usable logs.
                 panic!("{phase} failed exact ID/author/text/original-signed-operation convergence; expected_messages={} expected_ops={} recipients={actual:?}; {trace}",
                     expected.messages.len(), expected.operations.len());

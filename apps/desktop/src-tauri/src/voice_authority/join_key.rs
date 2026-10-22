@@ -118,6 +118,9 @@ impl JoinKeyWork {
         self.point
     }
 }
+// Keep the affine native work inline: its already paid generation metadata covers this wrapper.
+// Boxing Start would add an otherwise unnecessary heap allocation and a new custody obligation.
+#[allow(clippy::large_enum_variant)]
 pub(crate) enum PublicationPlan {
     Accepted(JoinKeyPublication),
     Start(JoinKeyWork),
@@ -244,6 +247,38 @@ impl Coordinator {
         });
         generation.selected = Some(selected.clone());
         Ok(selected)
+    }
+
+    /// Validate a supplied ORIGINAL allocation without creating a selection or charging
+    /// metadata. The lazy selected_handoff_owner factory is for bootstrap, not this final
+    /// admission check: foreign equal labels must not materialize a local cache on refusal.
+    /// Pure pointer/lease/field checks are safe under Coordinator, with no Clock or callback.
+    pub(crate) fn is_current_handoff_owner(&self, selected: &Arc<SelectedHandoffOwner>) -> bool {
+        let Some(owner) = self.owner.as_ref() else {
+            return false;
+        };
+        if owner.id != selected.id
+            || !owner.lease.is_live()
+            || !selected.lease.is_live()
+            || !owner.lease.is_same(&selected.lease)
+            || owner.binding != selected.binding
+            || owner.join != selected.join
+            || !selected.grant.ptr_eq(&Arc::downgrade(&owner._grant))
+        {
+            return false;
+        }
+        self.join_generations
+            .get(&owner.id)
+            .is_some_and(|generation| {
+                generation.executor == selected.executor
+                    && generation.grant.ptr_eq(&Arc::downgrade(&owner._grant))
+                    && generation.published
+                    && !generation.publishing
+                    && generation
+                        .selected
+                        .as_ref()
+                        .is_some_and(|cached| Arc::ptr_eq(cached, selected))
+            })
     }
 
     pub fn admit_join_key(

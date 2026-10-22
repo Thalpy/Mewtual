@@ -1,5 +1,123 @@
 # Threat model; client integrity & enforcement boundaries
 
+## App-owned bootstrap/status boundary (21 October)
+
+The listener is now reachable during application lifetime. Its fixed process payment and
+registry bind precede socket creation; its exact numeric port enters existing CSP before Tauri
+creates windows. Mode selection uses Tauri's custom-protocol decision, not Rust debug mode.
+Remote assets/windows, changed dev origins and unsupported HTTPS configuration refuse this
+channel rather than widen CORS. Startup failure leaves other app functions available. Explicit
+IO runtime entry avoids setup panics; Exit drains the actual status worker before SDK cleanup
+and restart. An interrupted observer or concurrent finish cannot fabricate completed drainage.
+
+The paid IO state holds nine Weak references to the actual native state, with no strong
+AppState/AppHandle or registry/store/Coordinator owner in the process host. Every context upgrade
+is all-or-nothing before factory admission; partial upgrades drain outside native fences. This
+is lifetime access, not revocation. The same borrowed UI gate as ordinary IPC checks actual store
+presence, original flags and generations after awaits. Weak references still retain inline Arc
+allocations/control blocks; the measured32,256-byte Windows peak is prepaid by32KiB instead of
+24KiB, reducing other available bytes within the unchanged2MiB process cap. Context fields drop
+before the original IO payment; uncollected task output retains its payment as before.
+
+Factories accept the original native-selected Arc and use pure early/final checks of actual
+cached allocation, grant/lease, generation and binding. A foreign equal-label selection cannot
+materialize or pay for a local snapshot. Broad live context drops before detached actor work;
+that work alone retains its original actor/selected/grant/commit/registration/credit. A lock
+cannot finish ahead of an admitted actor request after caller loss. A future action handler must
+also repeat actual channel closure under the same final UI commit; weak context or selection
+provenance alone does not authorize effects or claim the channel stayed open.
+
+The three fixed-metadata commands are granted only to main, with remote/restricted surfaces
+excluded by the real ACL. Setup also requires unlocked session, selected native owner, original
+generation and actor binding. Exact cleanup remains possible while locked; it cannot install
+keys, revive an old generation or authorize a Root effect. Cleanup accepts no arbitrary drain
+assertion. Its trusted retained broker awaits real setup/SDK/IO promises before calling it.
+
+All successful setup variants borrow one original Row projection guard. Pending/Closed metadata
+remain paid even if End and collection race their delayed serialization. Ready checks the exact
+original credit. A hard-capped JSON writer prevents serializer capacity growth; combined graph,
+hex scratch and allocation fit the unchanged 8 KiB Row allowance. Arbitrary stock Tauri/WebView
+public-metadata copies after handoff, SDK/GC heaps, allocator RSS and physical erasure are not
+bounded by this payment. This narrow exception cannot carry secrets or action data.
+
+The browser's retained v9 Session uses only its original selected key and executor. Constructor,
+adapter identity and TX/RX floors survive remount; generic keys/seeds cannot construct another
+channel. Native setup credit and the original control lane remain through actual SDK/read/cancel
+work, within existing caps. Header MAC alone, timeout, End and caller loss never prove drainage.
+Port takeover is hostile: fixed BYOB response prefix, MAC/AEAD/request binding and permanent replay
+floors apply before body admission; redirects, credentials and arbitrary endpoints are refused.
+
+Final closure fences new routing before detaching owners. Row collection requires a permanently
+dead lease, no pending setup, unique registry Row ownership and zero strong Session/public owners.
+Paid weak witnesses include headers and completed replies that hold no Row. Serial IDs never
+reset; stale cleanup cannot affect a replacement. Late drops are reclaimed before new admission,
+outside Coordinator. Uncertain history is never evicted for capacity.
+
+The internal action ledger now resolves every cross-module operation against the actual
+native-selected grant allocation, original lease, executor and full pair selector before
+returning a native-only paid-row handle. Authentication of a channel or equality of public
+fields cannot substitute another owner's row. Raw ID-taking operation helpers are private.
+Historical resolution and exact receipt ACK/settlement do not upgrade a dead grant; data work
+checks the original lease under State before copy/worker admission, including after waits.
+This proves row provenance only. The future transport must still check actual channel closure,
+current selection and UI generation at final effect admission, with Root's membership/epoch/
+deadline checks. Repeated resolution is possible; physical callers must bound concurrent
+handles in their existing payments rather than interpreting non-Clone as an admission gate.
+An independent original-purpose lookup uses the same bounded index/provenance when a lost
+factory reply supplied no RowId. It cannot allocate a row, re-arm a Pending worker, upgrade
+a grant or treat missing history as drained. Explicit current-authority retry stays separate
+and resumes only the same retained purpose/serial. End still permits historical lookup while
+rejecting fresh work. Neither metadata lookup is exposed as a channel action by this increment.
+
+Only Status is served. No factory/action input/result/ACK/settlement/final-delivery chain, live
+V2/SDP/ICE/RTC, legacy-mode isolation or member media relay is enabled by this increment. Packaged
+Windows committed document/reload, enforced CSP/CORS, public metadata and native shutdown checks
+pass as recorded in HANDOVER; the probe requests no unlock and does not establish selected crypto
+or action delivery. Linux/macOS WebViews and independent physical audio/network acceptance remain
+unverified.
+
+## Internal ECDH bootstrap boundary (21 October)
+
+The candidate checks the actual selected-owner Arc, original UI generation and live lease at
+final Session installation. Pending precedes injected RNG; error/unwind permanently closes
+that purpose, so lost replies cannot reset counters or request another ephemeral key. Public
+outputs share their original paid allocation. Native curve validation precedes secret scalar
+work and transcript bindings separate roles/groups/devices/joins/executors/sessions. UTF8
+decoding preserves a leading BOM rather than aliasing two owner identities.
+
+ECDH is not remote authentication. Immutable native metadata must eventually arrive through
+trusted main-window IPC and the actual selected browser private key. Later compromise of that
+retained join key can recover recorded local exchanges; no forward-secrecy claim is made.
+Pinned p256 has no independent arithmetic/assembly audit; stored-value Drop zeroization does
+not cover arithmetic temporaries, SDK/provider heaps or compiler copies. Detailed source audit
+is in communication-recovery/VOICE-NATIVE-RESULTS-NEXT.md. There is no listener or live path;
+browser crypto funding, actual physical setup ACK/drainage and legacy isolation remain required.
+
+## Fixed native infrastructure capacity (21 October)
+
+The distinct process-retained credit shares the existing2MiB total with all groups. It is
+capacity for trusted fixed native listener/router/task overhead only, with no group, Crypto
+slot, forwarding lane, lending or effect authority. Group-scoped input, crypto and outputs
+must not use it to bypass the256KiB group cap. Retain it until actual infrastructure/output
+drainage, including after cancellation or group retirement. It does not bound OS socket
+buffers, SDK heaps or allocator metadata outside the adapter's documented measured charge.
+
+## Disabled local framing candidate (21 October)
+
+The native candidate authenticates canonical fixed-size headers before body admission. Closed
+direction/operation/body-class rules, exact HTTP length and native slot binding precede variable
+allocation and counter debit. Admitted invalid/truncated bodies and cancellation permanently
+spend both physical counters. A consumed reply owner prevents outgoing nonce reuse; response
+MAC/AEAD bind the exact original request. A single position stays paid through actual output
+collection, independently of caller lifetime. Control replies do not borrow a closed data Phase.
+
+This local MAC does not authenticate a remote member or authorize a Root effect. Pool/group
+identity checks are capacity binding only; registered opaque Actions and current native owners
+remain mandatory. No browser raw-seed Session constructor was introduced: the experiment's
+resettable codec remains fixture-only. Native/browser bootstrap, SDK delivery custody, IO
+deadlines and authenticated browser closure are separate open gates. No listener/CSP/ordinary
+V2 ingress or RTC call has been enabled by the codec.
+
 ## Protected handoff custody prerequisite (21 October)
 
 Waiter loss, End, expiry or engine settlement is not evidence of application-copy drainage.
