@@ -641,30 +641,49 @@ impl ChosenDestination {
             )?,
             None => file,
         };
-        // Picker re-review LOW 2: when the filesystem reports identities, the probe must link our
-        // own handle's object. Without that, a swap and swap-back around the create plus a file
-        // planted at our name would make the probe "work" on the planted file, and publication
-        // would later link it. On an identity-less folder there is nothing to compare (residual).
-        let ours = external::observe(&file)
-            .ok()
-            .map(|observed| observed.identity);
-        let failure = match links_supported(&self.folder, &staging_leaf, ours) {
-            LinkProbe::Works => return Ok((file, staging, final_path)),
-            LinkProbe::Refused => ExportError::NoLinks,
-            // A probe name may still point at this file; never fill it with plaintext. The
-            // abandoned file is empty, so a leftover probe name discloses nothing.
-            // Re-review LOW B: also reached when the probe name is not provably our own file (a
-            // transient hold by an indexer, or a swapped name), so say "confirmed", not only
-            // "removed". Refusing is the safe direction; the user can try again.
-            LinkProbe::Inconclusive => ExportError::Local {
-                retryable: false,
-                reason: "a temporary name in that folder could not be confirmed or removed".into(),
-            },
-        };
-        // Only while the name still proves to be the file this call created.
-        remove_created(file, &staging);
-        Err(failure)
+        let file = confirm_staging_links(file, &self.folder, &staging_leaf)?;
+        Ok((file, staging, final_path))
     }
+}
+
+/// Probe, on a file the caller just created exclusively as `folder/staging_leaf`, that the folder
+/// can make the no-replace hard link every writer publishes with. Returns the file when it can.
+/// Otherwise the file is removed (only while its name still proves to be that file) and the save
+/// is refused before any plaintext is written: `NoLinks` for a folder that refuses links (FAT,
+/// exFAT), a local failure when the probe could not be confirmed or cleaned up.
+///
+/// Shared by the chosen-place reservation ([`ChosenDestination::create_unjournaled`]) and native's
+/// one-click Downloads reservation for folders that cannot carry a journal (re-review 2 LOW 4:
+/// a Downloads folder on vfat without birth time used to write all the plaintext and fail only at
+/// the link).
+pub fn confirm_staging_links(
+    file: File,
+    folder: &Path,
+    staging_leaf: &str,
+) -> Result<File, ExportError> {
+    // Picker re-review LOW 2: when the filesystem reports identities, the probe must link our
+    // own handle's object. Without that, a swap and swap-back around the create plus a file
+    // planted at our name would make the probe "work" on the planted file, and publication
+    // would later link it. On an identity-less folder there is nothing to compare (residual).
+    let ours = external::observe(&file)
+        .ok()
+        .map(|observed| observed.identity);
+    let failure = match links_supported(folder, staging_leaf, ours) {
+        LinkProbe::Works => return Ok(file),
+        LinkProbe::Refused => ExportError::NoLinks,
+        // A probe name may still point at this file; never fill it with plaintext. The
+        // abandoned file is empty, so a leftover probe name discloses nothing.
+        // Re-review LOW B: also reached when the probe name is not provably our own file (a
+        // transient hold by an indexer, or a swapped name), so say "confirmed", not only
+        // "removed". Refusing is the safe direction; the user can try again.
+        LinkProbe::Inconclusive => ExportError::Local {
+            retryable: false,
+            reason: "a temporary name in that folder could not be confirmed or removed".into(),
+        },
+    };
+    // Only while the name still proves to be the file this call created.
+    remove_created(file, &folder.join(staging_leaf));
+    Err(failure)
 }
 
 /// Picker review L4: the folder identity check before an exclusive creation and the path-based

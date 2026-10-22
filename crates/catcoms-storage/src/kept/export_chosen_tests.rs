@@ -343,6 +343,32 @@ fn a_folder_swapped_between_the_identity_check_and_creation_is_refused() {
 }
 
 #[test]
+fn a_downloads_reservation_without_links_is_refused_before_any_plaintext() {
+    // Re-review 2 LOW 4: native's one-click `.part` in a Downloads folder that cannot carry a
+    // journal now probes links on its fresh file, as the chosen-place reservation does.
+    let fx = fixture();
+    let staging = fx.downloads.join("notes.txt.part");
+    let file = external::create_leaf(&staging).unwrap();
+    assert!(matches!(
+        injected(Effect::Link, io::ErrorKind::PermissionDenied, || {
+            confirm_staging_links(file, &fx.downloads, "notes.txt.part")
+        }),
+        Err(ExportError::NoLinks)
+    ));
+    assert_eq!(
+        fs::read_dir(&fx.downloads).unwrap().count(),
+        0,
+        "the empty reservation is removed"
+    );
+    // A folder that links keeps the reservation and nothing else.
+    let file = external::create_leaf(&staging).unwrap();
+    let file = confirm_staging_links(file, &fx.downloads, "notes.txt.part").unwrap();
+    drop(file);
+    assert_eq!(fs::read_dir(&fx.downloads).unwrap().count(), 1);
+    assert!(staging.exists());
+}
+
+#[test]
 fn a_remembered_choice_is_preflighted_without_creating_anything() {
     // Re-review 2 LOW 3: an unplugged, swapped or occupied chosen place is found before Resume
     // spends allowance, and the check itself creates nothing.

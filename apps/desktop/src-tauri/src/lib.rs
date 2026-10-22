@@ -13860,13 +13860,24 @@ fn create_staged_download(
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
             Err(error) => return Err(error.to_string()),
         }
-        let staging_path = downloads.join(format!("{name}.{DOWNLOAD_STAGING_SUFFIX}"));
+        let staging_leaf = format!("{name}.{DOWNLOAD_STAGING_SUFFIX}");
+        let staging_path = downloads.join(&staging_leaf);
         match std::fs::OpenOptions::new()
             .write(true)
             .create_new(true)
             .open(&staging_path)
         {
-            Ok(file) => return Ok((file, staging_path, final_path)),
+            Ok(file) => {
+                // Re-review 2 LOW 4: publication needs a no-replace hard link. Probe it on the
+                // fresh, empty reservation, so a Downloads folder that cannot link (FAT or exFAT
+                // without the identities a journal needs) is refused before any plaintext is
+                // written instead of failing after the whole file. The probe removes the
+                // reservation when it refuses.
+                let file =
+                    catcoms_storage::kept::confirm_staging_links(file, downloads, &staging_leaf)
+                        .map_err(|error| error.to_string())?;
+                return Ok((file, staging_path, final_path));
+            }
             Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
             Err(error) => return Err(error.to_string()),
         }
