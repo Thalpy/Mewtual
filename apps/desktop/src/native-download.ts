@@ -8,6 +8,8 @@ export type SavedFileResult = {
   displayed: boolean;
   warning?: string;
   contentValidation?: "matched" | "mismatch" | "unrecognized";
+  /** Native says this group-file save went to a place chosen in Save as, not to Downloads. */
+  chosenPlace?: true;
 };
 
 function checkedResult(value: unknown): SavedFileResult {
@@ -26,6 +28,9 @@ function checkedResult(value: unknown): SavedFileResult {
       result.contentValidation !== "unrecognized") {
     throw new Error("the desktop returned an invalid save result");
   }
+  if (result.chosenPlace !== undefined && result.chosenPlace !== null && typeof result.chosenPlace !== "boolean") {
+    throw new Error("the desktop returned an invalid save result");
+  }
   return {
     path: result.path,
     displayed: result.displayed,
@@ -33,6 +38,7 @@ function checkedResult(value: unknown): SavedFileResult {
     ...(typeof result.contentValidation === "string"
       ? { contentValidation: result.contentValidation as SavedFileResult["contentValidation"] }
       : {}),
+    ...(result.chosenPlace === true ? { chosenPlace: true as const } : {}),
   };
 }
 
@@ -112,7 +118,10 @@ export function completedDownload(
  * the same folder-free wording; only "mismatch" and "unrecognized" need their own text. */
 export function downloadSavedNotice(name: string, saved: SavedFileResult, toDownloads = true) {
   const warning = saved.warning ? ` ${saved.warning}` : "";
-  if (!toDownloads && (!saved.contentValidation || saved.contentValidation === "matched")) {
+  // Native's own word wins over the caller's inference, which rests on a list that can be stale
+  // (a one-click save can resume a record that remembers a Save as choice).
+  const inDownloads = toDownloads && saved.chosenPlace !== true;
+  if (!inDownloads && (!saved.contentValidation || saved.contentValidation === "matched")) {
     return saved.displayed
       ? { text: `Saved ${name}.${warning}`, kind: saved.warning ? "info" as const : "ok" as const, ms: saved.warning ? 8_000 : 4_000 }
       : { text: `Saved to ${saved.path}.${warning}`, kind: "info" as const, ms: 8_000 };

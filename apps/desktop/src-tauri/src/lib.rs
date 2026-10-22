@@ -13909,6 +13909,12 @@ struct SavedFileResult {
     /// `matched`, `mismatch`, or `unrecognized` for an allowlisted declared media type. This is
     /// format evidence only—not a promise that a platform decoder is vulnerability-free.
     content_validation: Option<String>,
+    /// `save_group_file` only: the file went to a place chosen in Save as (this invocation's
+    /// choice or one the record remembered), not to Downloads. The renderer's notice names
+    /// Downloads only when this is false, because its own list can be stale (picker re-review
+    /// LOW 1b). Omitted from the JSON when false, so other results are unchanged.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    chosen_place: bool,
 }
 
 #[derive(Serialize)]
@@ -14191,6 +14197,7 @@ async fn save_and_open_space_guide(
         displayed: warning.is_none(),
         warning,
         content_validation: Some("matched".into()), // generator output passed strict PNG checks
+        chosen_place: false,
     })
 }
 
@@ -14215,6 +14222,7 @@ async fn save_space_layout(
         displayed: warning.is_none(),
         warning,
         content_validation: None,
+        chosen_place: false,
     })
 }
 
@@ -14538,6 +14546,7 @@ where
         displayed: warning.is_none(),
         warning,
         content_validation: None,
+        chosen_place: false,
     })
 }
 
@@ -15042,6 +15051,8 @@ async fn save_group_file(
         || ready.is_current(),
     )
     .await?;
+    // Native, not the renderer's possibly stale list, says whether this went to a chosen place.
+    saved.chosen_place = matches!(destination, private_downloads::Destination::Chosen(_));
     if !resumable {
         // Say honestly that this location could not have resumed an interrupted save.
         private_downloads::append_warning(&mut saved, private_downloads::NOT_RESUMABLE_NOTE);
@@ -15192,6 +15203,7 @@ where
         displayed: warning.is_none(),
         warning,
         content_validation,
+        chosen_place: false,
     })
 }
 
@@ -25463,6 +25475,23 @@ mod tests {
         assert_eq!(safe_download_name(" . "), "mewtual-download");
         assert_eq!(numbered_download_name("photo.png", 2), "photo (2).png");
         assert_eq!(numbered_download_name("README", 3), "README (3)");
+    }
+
+    /// Picker re-review LOW 1b: a group-file save says when it went to a chosen place; every other
+    /// save result keeps its exact earlier JSON.
+    #[test]
+    fn only_a_save_at_a_chosen_place_carries_the_chosen_place_flag() {
+        let result = |chosen_place| SavedFileResult {
+            path: "x".into(),
+            displayed: true,
+            warning: None,
+            content_validation: None,
+            chosen_place,
+        };
+        let plain = serde_json::to_value(result(false)).unwrap();
+        assert!(plain.get("chosenPlace").is_none(), "{plain}");
+        let chosen = serde_json::to_value(result(true)).unwrap();
+        assert_eq!(chosen["chosenPlace"], serde_json::Value::Bool(true));
     }
 
     /// Picker review L5: Windows ignores trailing spaces before the extension, so "CON .txt" still

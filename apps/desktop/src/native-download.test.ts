@@ -186,4 +186,21 @@ test("malformed native responses cannot falsely mark a download done", async () 
     saveGroupFile(badValidation.invoke, 1, "ab12", "cat.png"),
     /invalid save result/,
   );
+  const badPlace = mockInvoker({ path: "/Chosen/cat.png", displayed: true, chosenPlace: "yes" });
+  await assert.rejects(saveGroupFile(badPlace.invoke, 1, "ab12", "cat.png"), /invalid save result/);
+});
+
+test("native's chosen-place flag overrides a caller that assumed Downloads", async () => {
+  // Picker re-review LOW 1b: a one-click save whose record remembered a Save as choice went to
+  // that place although the caller's (possibly stale) list said Downloads.
+  const chosen = mockInvoker({ path: "/Chosen/cat.png", displayed: true, chosenPlace: true });
+  const saved = await saveGroupFile(chosen.invoke, 1, "ab12", "cat.png");
+  assert.equal(saved.chosenPlace, true);
+  for (const result of [saved, { ...saved, contentValidation: "matched" as const }, { ...saved, displayed: false }]) {
+    assert.doesNotMatch(downloadSavedNotice("cat.png", result, true).text, /Downloads/);
+  }
+  // Without the flag (and for every other save result) nothing changes.
+  const plain = await saveGroupFile(mockInvoker({ path: "/Downloads/cat.png", displayed: true, chosenPlace: false }).invoke, 1, "ab12", "cat.png");
+  assert.equal("chosenPlace" in plain, false);
+  assert.equal(downloadSavedNotice("cat.png", plain, true).text, "Saved cat.png to Downloads");
 });
