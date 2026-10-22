@@ -1,5 +1,16 @@
 # Next voice milestone: native result recovery
 
+## Explicit native Pending closure candidate (22 October)
+
+The latest unpublished checkpoint adds an inactive exact authenticated ClosePhase adapter for
+native Pending only. Closing/ClosedPending explicitly terminate local preparation without
+asserting Root publication absence, engine settlement or Phase/96KiB Workflow drainage.
+Indexed native identity, actual owner destruction and physical last-owner GC remain distinct
+boundaries. Native handoff177 focused tests and strict Clippy pass; full gates remain pending.
+HANDOVER.md records source/provenance and unchanged capacity measurements. Browser closure
+wiring, actual action dispatch and normal proven-pair Actor acceptance are still unfinished;
+the production service continues to serve Status only.
+
 ## Active action transport checkpoint (22 October)
 
 See the current opening section of HANDOVER.md for exact source and focused/full gate scope.

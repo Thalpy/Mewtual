@@ -481,6 +481,7 @@ async fn registration_completed_uncollected_error_keeps_factory_payment_until_co
         .unwrap();
     let commit = f.state.ui_session_commit.clone().lock_owned().await;
     let grant = selected.grant().unwrap();
+    let original = selected.clone();
     let work = run(
         registration,
         selected,
@@ -509,6 +510,18 @@ async fn registration_completed_uncollected_error_keeps_factory_payment_until_co
     ready
         .await
         .expect("factory worker panicked before producing output");
+    // The actual Registration has dropped and is retryable, but its completed native task
+    // STILL owns the physical position. No new authenticated ClosePhase can enter yet.
+    let Begin::Factory(retry) = f
+        .state
+        .voice_handoff
+        .begin(original.clone(), Purpose::Derive(selector))
+        .unwrap()
+    else {
+        panic!("completed factory is locally idle")
+    };
+    let id = retry.id();
+    drop(retry);
     assert!(
         route.session().header().is_err(),
         "completed uncollected factory output still owns its physical position"
@@ -523,6 +536,40 @@ async fn registration_completed_uncollected_error_keeps_factory_payment_until_co
     drop(output);
     assert!(route.session().header().is_ok());
     assert_eq!(pool.counts(), before);
+    let crate::voice_handoff::bootstrap::Status::Ready(public) =
+        crate::voice_handoff::bootstrap::ensure(
+            &f.state,
+            original.id(),
+            original.executor(),
+            &mut rand_chacha::ChaCha20Rng::seed_from_u64(83),
+        )
+        .await
+        .unwrap()
+    else {
+        panic!("same original setup")
+    };
+    let mut bytes = vec![1];
+    bytes.extend_from_slice(selector.peer.as_bytes());
+    bytes.extend_from_slice(&selector.join);
+    bytes.extend_from_slice(&selector.key_ref);
+    bytes.extend_from_slice(&selector.epoch.to_be_bytes());
+    let incoming = crate::voice_handoff::service::tests::opened_frame(
+        &public,
+        &route,
+        (1, 6, 0, id.logical()),
+        &bytes,
+        None,
+    );
+    let (closed, incoming) =
+        crate::voice_handoff::pending_close::close(&Context::new(&f.state), &route, incoming)
+            .into_parts();
+    assert!(matches!(
+        closed.unwrap().pending,
+        crate::voice_handoff::ledger::PendingStatus::Closed {
+            actor_handoff: true
+        }
+    ));
+    drop(incoming);
     f.close().await;
 }
 

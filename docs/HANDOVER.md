@@ -1,5 +1,40 @@
 # Mewtual; Handover
 
+## Active explicit native Pending closure (22 October)
+
+Unpublished current work in target/communication-action-dispatch-worktree follows04803e07.
+The inactive ClosePhase adapter validates the actual opened Session, SAME header RowId and
+full original purpose through the actual native ledger. It takes no live grant, task, Clock
+or new variable loan. Actual broker SDK/RPC drainage remains a protocol precondition; AEAD
+alone cannot establish it. Production ingress remains authenticated Status only.
+
+Pending now has explicit Open/Closing/Closed { actor_handoff } metadata. Closing owns the
+actual PreparedPhase/selected values outside all native guards; only their actual destruction
+publishes Closed. Begin cannot restart Closing/Closed. Slot, serial and actual Row pointer are
+validated under Index -> State even for retained native handles, including repeated closure
+after proven-unstarted removal and slot reuse. ClosedPending is separate from Body::Drained:
+action/receipt absent, engine.settled=false, acknowledged=false and drained=false. Native
+local preparation closure must never be reported as Root absence/settlement/Workflow drainage.
+wait_compacted can return this explicit local disposition; inspect it rather than interpreting
+success as attached-Phase compaction. Physical history GC accepts either real Drained or
+ClosedPending, still requiring actual Session proof, dead lease and last indexed owner.
+
+Focused native handoff PASSED177/0fail (4.33s tests/93.30s gate); strict all-target/all-feature
+native Clippy PASSED42.09s, native fmt --check and git diff --check pass. Actual-diff adversarial
+review/re-review has no remaining findings after stale/orphan-handle correction. Tests cover
+both Closing/Begin orderings, repeated orphan use, exact/noncanonical/foreign MAC+AEAD requests,
+lock/unlock, End without grant, original uncollected factory/response owners, full2MiB pressure
+and historical local-closure status. Original caps are unchanged: codec10172/12288 (whole
+Pending response/retirement graph and fixed scratch counted), router19984/32768, result task
+4576/8192. Focus10 records hashes of all three then-new files in its JSONL provenance.
+
+Fresh complete root/native suites and build/startup/probe remain pending until the remaining
+handoff work is coherent. Do not call the unpublished changes fully validated or live-enabled.
+Next: authenticated factory/input/admission/result/receipt ACK/settlement/phase/final reply
+dispatch, actual browser adapter, channel unlink proof and normal proven-pair Actor success.
+The published fully validated checkpoint is still PR48 head7dfbb797. Only one physical desktop
+is available; live V2/RTC/relay/combined and independent physical acceptance are not established.
+
 ## Active native action cleanup (22 October)
 
 Published PR48 remains7dfbb797 (fully validated ownership checkpoint, equivalent tree to

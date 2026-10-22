@@ -45,7 +45,8 @@ two-browser-position limits. IO expiry aborts actual reads but never proves SDK/
 
 Explicit setup-failure and final channel collection first acquire the original shared UI commit
 and check the action ledger using the actual retained selected owner. Every matching action
-must already be compacted before routing closes. Pending or Live work returns Capacity with
+must already be compacted or explicitly closed as a native Pending before routing closes.
+Open/Closing Pending or Live work returns Capacity with
 Control still open, so receipt ACK, settlement and phase cleanup remain reachable. Factory
 admission uses that same commit; the check and closure cannot race a new Pending factory.
 Only then does final collection detach native Session/public/setup owners after browser SDK/IO
@@ -58,12 +59,21 @@ drops after the collection reply. No uncertain history is evicted to make capaci
 Physical channel collection transfers an opaque native-only original-Row witness to the action
 ledger, after releasing all bootstrap registry locks. It records original grant allocation,
 executor and lease provenance without upgrading current authority. The separate bounded32-slot
-sweep reclaims only actual compacted Body::Drained records with this proof, a permanently dead
+sweep reclaims only actual compacted Body::Drained or explicitly ClosedPending records with
+this proof, a permanently dead
 lease and no other Row owner. Evidence persists through late metadata/cleanup handles; every
 ordinary collection hook sweeps even without a new channel witness. Resources drop outside all
 registry/ledger guards and both serial allocators remain monotonic. Root can independently retain
 its own history, lower work and input owners; this collection is not proof of full Workflow
-drainage. Pending/uncertain factory closure and production action dispatch remain unfinished.
+drainage. The inactive Pending closure adapter validates the actual opened Session, exact
+header RowId and complete original purpose. It refuses a live worker, publishes Closing while
+actual PreparedPhase/selected owners retire outside all guards, then records ClosedPending.
+Begin cannot restart a Closing/Closed row. This separate local terminal leaves action/receipt
+absent and engine.settled, acknowledged and drained FALSE: Root publication may be uncertain.
+Indexed slot/serial/Row pointer are rechecked even for a retained native handle, so orphaned
+unstarted records cannot be mutated after removal/reuse. The original physical request excludes
+uncollected factory work/output. Real browser SDK/RPC drainage remains a protocol precondition;
+the retained broker's authenticated Pending closure and production action dispatch remain open.
 
 Action lookup now produces a native-only ResolvedRow only after checking the actual original
 grant allocation, executor, lease and complete purpose. It retains the paid Row through delayed
@@ -80,7 +90,8 @@ pure historical lookup must not prevent an idle Pending worker from resuming on 
 This service still handles authenticated Status only. Factory/action input, result, exact
 receipt ACK, settlement, phase closure and final delivery remain open. Starting the local
 listener does not enable V2 signalling, SDP/ICE/RTC or legacy-mode isolation. The action ledger's
-separate finite history now has Drained-only physical collection; Pending closure remains open.
+separate finite history now has physical collection of Drained or explicitly ClosedPending
+records; browser Pending closure remains open.
 Relay and combined/physical acceptance remain
 open. Earlier checkpoint sections below retain their historical scope; HANDOVER has current
 gate provenance and platform limits.

@@ -11,5 +11,6 @@ mod derivation_result;
 pub(crate) mod factory;
 mod http;
 pub(crate) mod ledger;
+mod pending_close;
 mod requests;
 mod service;

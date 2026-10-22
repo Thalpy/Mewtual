@@ -116,6 +116,7 @@ fn paid_fixed_storage_and_original_control_lane_cover_codec_peak() {
         + 2 * std::mem::size_of::<usize>()
         + state
         + http::HEADER_BYTES // FULL fixed Box allocation, not merely its inline pointer
+        + super::super::pending_close::layout_bytes()
         + std::mem::size_of::<Aes256Gcm>()
         + 2 * std::mem::size_of::<Hmac<Sha256>>()
         + crypto::HEADER * 4

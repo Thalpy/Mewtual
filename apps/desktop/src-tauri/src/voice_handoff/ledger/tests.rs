@@ -7,6 +7,8 @@ use catcoms_crypto::DeviceKeypair;
 use catcoms_sync::voice_v2::runtime::Runtime;
 use catcoms_sync::voice_v2::{key_reference, Scope};
 
+mod pending;
+
 fn noop_waker() -> std::task::Waker {
     struct Idle;
     impl std::task::Wake for Idle {
@@ -118,6 +120,8 @@ fn complete_records_index_handles_and_one_worker_fit_existing_fixed_payments() {
         + std::mem::size_of::<Work>()
         + std::mem::size_of::<ResolvedRow>()
         + std::mem::size_of::<Observation>()
+        + std::mem::size_of::<PendingRetirement>()
+        + std::mem::size_of::<ClosePending>()
         + std::mem::size_of::<Option<Arc<Row>>>() // fixed collector's one removed-slot owner
         + std::mem::size_of_val(&waiter)
         + std::mem::size_of::<Status>();
@@ -125,6 +129,58 @@ fn complete_records_index_handles_and_one_worker_fit_existing_fixed_payments() {
         bytes <= ROW_BYTES,
         "native row layout {bytes} exceeds {ROW_BYTES}"
     );
+}
+
+#[test]
+fn pending_retirement_is_nonretryable_until_actual_original_preparation_drops() {
+    let (_coordinator, selected, selector) = selection();
+    let ledger = Arc::new(Ledger::default());
+    let registration = ticket(&ledger, selected.clone(), selector);
+    registration.mark_handoff().unwrap();
+    let id = registration.id();
+    drop(registration);
+    let row = ledger.row(id).unwrap();
+    let before = selected.resources().counts();
+    let ClosePending::Retire(retirement) = ledger.prepare_pending_close(&row).unwrap() else {
+        panic!("actual local retirement")
+    };
+    assert!(matches!(
+        ledger.status(id).unwrap().pending,
+        PendingStatus::Closing
+    ));
+    assert_eq!(
+        selected.resources().counts(),
+        before,
+        "original preparation remains owned at the actual retirement boundary"
+    );
+    assert!(matches!(
+        ledger.begin(selected.clone(), Purpose::Derive(selector)),
+        Err(VoiceError::Capacity)
+    ));
+    assert!(matches!(
+        ledger.close_pending(&row),
+        Err(VoiceError::Capacity)
+    ));
+    assert!(!ledger.channel_may_close(&selected));
+    assert!(ledger.index.try_lock().is_ok());
+    assert!(row.state.try_lock().is_ok());
+    drop(retirement);
+    let status = ledger.status(id).unwrap();
+    assert!(matches!(
+        status.pending,
+        PendingStatus::Closed {
+            actor_handoff: true
+        }
+    ));
+    assert!(selected.resources().counts().0 < before.0);
+    assert!(!status.engine.settled && !status.drained && !status.acknowledged);
+    let Begin::Existing(retry) = ledger
+        .begin(selected.clone(), Purpose::Derive(selector))
+        .unwrap()
+    else {
+        panic!("closed original")
+    };
+    assert!(retry == id);
 }
 
 #[test]
@@ -693,6 +749,7 @@ fn reordered_metadata_observations_cannot_erase_rejected_history_or_settlement()
         retired: true,
     };
     let mut status = Status {
+        pending: PendingStatus::NotPending,
         action: Some((3, 1, [1; 32])),
         engine: CryptoResultStatus {
             settled: true,

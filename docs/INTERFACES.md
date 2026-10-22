@@ -7,16 +7,29 @@ row is physically removable (closed, setup finished, dead lease, no independent 
 or Row owners), it transfers a private CollectedChannel witness outside Registry locks. Only
 bootstrap can construct that witness; it has no renderer constructor or serialized identity.
 Ledger remembers it only for the same original grant allocation/executor/lease. A subsequent
-bounded sweep removes only Body::Drained plus dead lease plus recorded proof plus sole indexed
+bounded sweep removes only Body::Drained or explicit ClosedPending, plus dead lease plus recorded proof plus sole indexed
 Row ownership. It runs on every collection hook, including an empty registry, so late metadata
 handles cannot strand the one-shot evidence. Missing history is still an error, not a drained
 status. Neither index serial resets when a slot is reused.
 
 Both explicit setup-failure cleanup and final channel collection hold the original UI commit
 across original-selection lookup, Ledger::channel_may_close and routing closure. Every matching
-action must already be compacted; Capacity leaves Control available for its ACK/settlement/phase
-cleanup. This is not browser SDK or full Root Workflow drainage proof. Pending factory closure
-and production action transport remain unfinished; the listener still serves Status only.
+action must already be compacted or explicitly closed as a native Pending; Capacity leaves Control available for its ACK/settlement/phase
+cleanup. This is not browser SDK or full Root Workflow drainage proof. Production action
+transport remains unfinished; the listener still serves Status only.
+
+The inactive Pending ClosePhase adapter checks the actual opened Incoming belongs to the Route
+Session, then resolves the SAME header RowId and complete decrypted purpose through the actual
+native Ledger. An active Registration refuses. PendingStatus::Closing fences Begin while
+actual local preparation retires outside native guards; Closed { actor_handoff } preserves
+that observed native handoff marker and never recreates a factory on retry. This local terminal
+has action=None, receipt=None, engine.settled=false, acknowledged=false and drained=false.
+wait_compacted may return that explicit local closure; callers MUST inspect its disposition
+instead of treating success as attached-Phase/Root compaction. Slot/serial/pointer checks reject
+removed native handles even on repeated closure. No renderer bool, grant upgrade, task, Clock
+or new variable loan is accepted. Actual retained-broker SDK/RPC drainage must precede the
+request; authentication alone does not prove it. Browser wiring and Root-independent cleanup
+still remain open.
 
 ## App-owned public bootstrap and status channel (21 October)
 

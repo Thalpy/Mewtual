@@ -55,10 +55,21 @@ pub(crate) enum Purpose {
 /// Unknown rows are errors, never an assertion that an engine, phase or reply has drained.
 #[derive(Clone, PartialEq, Eq)]
 pub(crate) struct Status {
+    pub pending: PendingStatus,
     pub action: Option<(u64, u64, [u8; 32])>,
     pub engine: CryptoResultStatus,
     pub acknowledged: bool,
     pub drained: bool,
+}
+/// Native preparation closure is distinct from an attached action's Phase/engine drainage.
+/// A lost actor reply may hide a published Root pair. `Closed` records only that this native
+/// Pending can never resume; it does not assert Root absence, settlement or Workflow drainage.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PendingStatus {
+    NotPending,
+    Open,
+    Closing,
+    Closed { actor_handoff: bool },
 }
 struct Key {
     grant: Weak<CallGrant>,
@@ -80,6 +91,37 @@ struct Pending {
     worker: bool,
     handed_off: bool,
 }
+/// Own the actual local preparation between Closing and Closed. Cancellation/unwind cannot
+/// publish closure before owners drop. Production retires this synchronously outside native
+/// guards; deterministic tests can retain the SAME ticket at this actual transition boundary.
+struct PendingRetirement {
+    row: Arc<Row>,
+    owners: Option<Pending>,
+    actor_handoff: bool,
+}
+impl Drop for PendingRetirement {
+    fn drop(&mut self) {
+        drop(self.owners.take());
+        {
+            let mut state = self
+                .row
+                .state
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            debug_assert!(matches!(state.body, Body::ClosingPending));
+            state.body = Body::ClosedPending;
+            state.status.pending = PendingStatus::Closed {
+                actor_handoff: self.actor_handoff,
+            };
+            // No engine settlement, ACK or Phase drainage is inferred from local closure.
+        }
+        self.row.changed.notify_waiters();
+    }
+}
+enum ClosePending {
+    Existing(Status),
+    Retire(PendingRetirement),
+}
 struct Live {
     selected: Arc<SelectedHandoffOwner>,
     action: Arc<CryptoAction>,
@@ -89,6 +131,8 @@ struct Live {
 }
 enum Body {
     Pending(Pending),
+    ClosingPending,
+    ClosedPending,
     Live(Live),
     Drained,
 }
@@ -170,6 +214,12 @@ impl ResolvedRow {
     pub(crate) fn settle(&self) -> Result<Status, VoiceError> {
         self.ledger.settle(self.row.id)
     }
+    /// Native-only closure after the original authenticated ClosePhase adapter established
+    /// exact Session/RowId/purpose and retained-broker SDK/RPC drainage. This is not a renderer
+    /// boolean or proof of Root settlement. No other consumer may infer those preconditions.
+    pub(super) fn close_pending(&self) -> Result<Status, VoiceError> {
+        self.ledger.close_pending(&self.row)
+    }
     /// Historical provenance alone cannot restart data work after End. This early fence is
     /// not the channel's final admission or a replacement for Root's actual effect checks.
     pub(crate) fn work(&self) -> Result<Work, VoiceError> {
@@ -196,7 +246,7 @@ impl Ledger {
                         .lock()
                         .unwrap_or_else(|error| error.into_inner())
                         .body,
-                    Body::Drained
+                    Body::Drained | Body::ClosedPending
                 )
         })
     }
@@ -238,7 +288,8 @@ impl Ledger {
                         return false;
                     }
                     let state = row.state.lock().unwrap_or_else(|error| error.into_inner());
-                    state.session_collected && matches!(state.body, Body::Drained)
+                    state.session_collected
+                        && matches!(state.body, Body::Drained | Body::ClosedPending)
                 });
                 if reclaim {
                     *retired = slot.take();
@@ -277,7 +328,9 @@ impl Ledger {
         let state = row.state.lock().unwrap_or_else(|error| error.into_inner());
         match &state.body {
             Body::Live(live) => Ok(live.phase.clone()),
-            Body::Pending(_) | Body::Drained => Err(VoiceError::Capacity),
+            Body::Pending(_) | Body::ClosingPending | Body::ClosedPending | Body::Drained => {
+                Err(VoiceError::Capacity)
+            }
         }
     }
     /// Recover a lost factory reply even when its caller never received a RowId. Search only
@@ -358,6 +411,9 @@ impl Ledger {
                     }));
                 }
             }
+            if matches!(state.body, Body::ClosingPending) {
+                return Err(VoiceError::Capacity);
+            }
             return Ok(Begin::Existing(row.id));
         }
         let slot = index
@@ -389,6 +445,7 @@ impl Ledger {
                     handed_off: false,
                 }),
                 status: Status {
+                    pending: PendingStatus::Open,
                     action: None,
                     engine: CryptoResultStatus {
                         settled: false,
@@ -430,6 +487,55 @@ impl Ledger {
             .status
             .clone();
         Ok(status)
+    }
+    /// Close only this original native preparation, never a potentially published Root pair.
+    /// State excludes both a retrying Registration and another closer. Move actual owners
+    /// out, release ALL native guards, destroy them, then publish completion. Observers and
+    /// Begin see Closing/Capacity until destruction finishes; no early success on last drop.
+    fn close_pending(&self, row: &Arc<Row>) -> Result<Status, VoiceError> {
+        match self.prepare_pending_close(row)? {
+            ClosePending::Existing(status) => Ok(status),
+            ClosePending::Retire(retired) => {
+                drop(retired);
+                self.status(row.id)
+            }
+        }
+    }
+    fn prepare_pending_close(&self, row: &Arc<Row>) -> Result<ClosePending, VoiceError> {
+        let pending = {
+            // Old metadata may outlive removal of a demonstrably unstarted Registration.
+            // Validate indexed identity before any mutation, including repeated closure.
+            // Same Index -> State order as begin/Registration::drop; owners leave both guards.
+            let index = self.index.lock().unwrap_or_else(|error| error.into_inner());
+            if !index
+                .rows
+                .get(row.id.slot)
+                .and_then(Option::as_ref)
+                .is_some_and(|indexed| indexed.id == row.id && Arc::ptr_eq(indexed, row))
+            {
+                return Err(VoiceError::Unauthorized);
+            }
+            let mut state = row.state.lock().unwrap_or_else(|error| error.into_inner());
+            match &state.body {
+                Body::ClosedPending => return Ok(ClosePending::Existing(state.status.clone())),
+                Body::ClosingPending => return Err(VoiceError::Capacity),
+                Body::Pending(pending) if !pending.worker && state.status.action.is_none() => {}
+                Body::Pending(_) => return Err(VoiceError::Capacity),
+                Body::Live(_) | Body::Drained => return Err(VoiceError::Unauthorized),
+            }
+            state.status.pending = PendingStatus::Closing;
+            let Body::Pending(pending) = std::mem::replace(&mut state.body, Body::ClosingPending)
+            else {
+                unreachable!("checked Pending")
+            };
+            pending
+        };
+        let actor_handoff = pending.handed_off;
+        Ok(ClosePending::Retire(PendingRetirement {
+            row: row.clone(),
+            owners: Some(pending),
+            actor_handoff,
+        }))
     }
     /// Recover actual terminal/settlement metadata even after phase closure or a native
     /// worker lost its last refresh. This admits no data copy, engine, computation or first
@@ -599,6 +705,8 @@ impl Ledger {
     /// authenticated browser closure and closes Phase. Native data drainage and metadata/ACK
     /// readiness are distinct events: observing the first must never lose the second wake.
     /// This future creates no retry timer, new factory, engine or variable data loan.
+    /// ClosedPending returns explicit LOCAL preparation closure with drained=false and
+    /// engine.settled=false, never an attached Phase or Root compaction receipt.
     async fn wait_compacted(&self, id: RowId) -> Result<Status, VoiceError> {
         let row = self.row(id)?;
         if row
@@ -614,7 +722,8 @@ impl Ledger {
             match &state.body {
                 Body::Live(live) => Some(live.phase.clone()),
                 Body::Drained => None,
-                Body::Pending(_) => return Err(VoiceError::Capacity),
+                Body::Pending(_) | Body::ClosingPending => return Err(VoiceError::Capacity),
+                Body::ClosedPending => return Ok(state.status.clone()),
             }
         };
         if let Some(phase) = phase {
@@ -631,6 +740,10 @@ impl Ledger {
             }
         }
     }
+}
+#[cfg(test)]
+pub(super) fn pending_close_layout_bytes() -> usize {
+    std::mem::size_of::<ClosePending>() + std::mem::size_of::<PendingRetirement>()
 }
 impl Registration {
     pub(crate) fn id(&self) -> RowId {
@@ -714,6 +827,7 @@ impl Registration {
                 return Err(VoiceError::Unauthorized);
             }
             state.status.action = Some((action.serial(), action.version(), action.input_tag()));
+            state.status.pending = PendingStatus::NotPending;
             std::mem::replace(
                 &mut state.body,
                 Body::Live(Live {

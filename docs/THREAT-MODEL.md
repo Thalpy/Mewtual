@@ -7,17 +7,25 @@ Otherwise an original Session still able to submit Begin could allocate a second
 Bootstrap alone creates an opaque witness when its original closed row has no live Session,
 header, reply, setup ticket, public-output or Row owner and its lease is permanently dead.
 The ledger accepts only matching original grant allocation/executor/lease and separately requires
-actual Body::Drained and sole indexed ownership. A foreign equal-label generation cannot collect
+actual Body::Drained or explicit local ClosedPending, plus sole indexed ownership. A foreign equal-label generation cannot collect
 another original record. Proof is monotonic and survives delayed metadata owners; fixed sweeps
 and non-resetting serials prevent late old IDs from aliasing replacement slots. Registry and
 ledger locks do not overlap, and actual owners/resources drop outside their guards.
 
-Explicit setup/final closure also checks every original action is compacted before cutting off
+Explicit setup/final closure also checks every original action is compacted or explicitly closed
+as a native Pending before cutting off
 Control. The same original UI commit orders this check/closure against factory admission.
 Refusal preserves Control and existing owners; a settled engine, acknowledged receipt or closed
 browser alone is insufficient. Native Pending may hide an accepted Root pair after a lost actor
-reply and remains retained. Its cleanup protocol, production opcode dispatch and full browser/
-Root Workflow drainage are still open; no new live V2 or physical-media claim follows.
+reply. The inactive Pending closer records a DISTINCT local terminal only after exact opened
+Session/header RowId/full-purpose resolution, no active Registration, and actual local owner
+destruction outside guards. Closing refuses concurrent Begin/close; Closed never re-arms a
+factory and never asserts Root settlement or Phase drainage. Index/serial/Row-pointer validation
+also rejects retained orphan handles after proven-unstarted removal and slot reuse. A completed
+factory's physical position blocks a new ClosePhase even when Registration already became idle.
+SDK/RPC drainage is a trusted retained-broker protocol precondition, not something AEAD proves.
+Browser closure wiring, production opcode dispatch and full browser/Root Workflow drainage
+remain open; no new live V2 or physical-media claim follows.
 
 ## App-owned bootstrap/status boundary (21 October)
 
