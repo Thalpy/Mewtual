@@ -935,7 +935,8 @@ pub(super) async fn prepare_resume(
         return Err(JOURNAL_EXISTS.into());
     }
     let mut notice = None;
-    let intent = if fresh_copy {
+    // The claim (plain Resume only) is held until the intent CAS below has committed.
+    let (intent, _claim) = if fresh_copy {
         let (intent, left) = abandon_partial(
             state,
             server,
@@ -947,9 +948,17 @@ pub(super) async fn prepare_resume(
         )
         .await?;
         notice = left;
-        intent
+        (intent, None)
     } else {
+        // Re-review 2 LOW 2: Resume is excluded by the same claim as Remove, Keep and Save new
+        // copy. After Save new copy retires the journal, a Resume carrying the new intent (a
+        // second window, or a list refreshed meanwhile) could otherwise reopen and lock the
+        // partial its delete worker is about to remove. Held across the preflight and the intent
+        // CAS only; the save itself runs without it, and a later cleanup retires its session.
+        let claim = CleanupClaim::acquire(server, id)?;
         if let Preflight::Saved(path, preflight) = resume_preflight(actor, id, origin).await? {
+            // Clearing the recovered record takes the claim itself.
+            drop(claim);
             let cleanup = async {
                 remove_download(state, server, instance, generation, actor, id, false)
                     .await
@@ -970,7 +979,7 @@ pub(super) async fn prepare_resume(
                 notice: None,
             });
         }
-        expected_intent
+        (expected_intent, Some(claim))
     };
     commit_kept_command(
         state,

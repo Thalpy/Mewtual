@@ -333,6 +333,34 @@ async fn a_stale_save_new_copy_deletes_nothing() {
     assert_eq!(fake.deletes.load(std::sync::atomic::Ordering::SeqCst), 0);
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn resume_is_refused_while_a_cleanup_owns_the_download() {
+    // Re-review 2 LOW 2: while Remove, Keep or Save new copy holds the claim (Save new copy has
+    // already retired the journal and moved the intent), a Resume carrying that new intent must
+    // not reopen and lock the partial the delete worker is about to remove.
+    let state = AppState::default();
+    let (row, task, drain) = crate::leaving::tests::running(943);
+    let actor = row.actor.clone();
+    let (_cancel, watch) = tokio::sync::watch::channel(false);
+    let origin = RequestCancellation::new(watch, None);
+    let key = id(0xA7);
+    let held = CleanupClaim::acquire(1, key).unwrap();
+    let refused = prepare_resume(&state, 1, 0, 0, &actor, &origin, key, 4, false, false).await;
+    assert_eq!(refused.err().as_deref(), Some(CLEANUP_BUSY));
+    drop(held);
+    // With no cleanup in flight Resume gets past the claim (this empty actor then refuses it for
+    // its own reason) and releases the claim again.
+    let later = prepare_resume(&state, 1, 0, 0, &actor, &origin, key, 4, false, false).await;
+    assert_ne!(later.err().as_deref(), Some(CLEANUP_BUSY));
+    assert!(
+        CleanupClaim::acquire(1, key).is_ok(),
+        "Resume does not keep the claim"
+    );
+    actor.shutdown().await;
+    task.await.unwrap();
+    drain.await.unwrap();
+}
+
 #[test]
 fn claims_are_per_download_and_released_by_the_last_holder() {
     let first = CleanupClaim::acquire(7, id(0xB1)).unwrap();
