@@ -516,6 +516,19 @@ pub(super) enum Destination {
 ///   another save already took it into a journal, and this Save as is refused with
 ///   [`PLACE_CHANGED`], never silently redirected to Downloads.
 /// - `downloads`: resolved only when Downloads is actually the destination.
+/// Whether a finished group-file save may be somewhere other than the Downloads folder, for the
+/// result's `chosenPlace` flag (picker re-review LOW 1b). A chosen destination always is. With
+/// Downloads selected, a resumed journal still writes to its own sealed folder, which may be a
+/// place chosen earlier, so only a file directly inside the resolved Downloads folder counts as
+/// "in Downloads". This drives notice wording only, never authority; any path-form mismatch
+/// (case, links) errs toward naming no folder.
+pub(super) fn saved_outside_downloads(destination: &Destination, saved: &Path) -> bool {
+    match destination {
+        Destination::Chosen(_) => true,
+        Destination::Downloads(folder) => saved.parent() != Some(folder.as_path()),
+    }
+}
+
 pub(super) fn select_destination(
     planned: Option<Result<Arc<ChosenDestination>, ChoiceRefusal>>,
     chose_now: bool,

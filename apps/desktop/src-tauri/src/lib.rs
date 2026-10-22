@@ -15051,8 +15051,8 @@ async fn save_group_file(
         || ready.is_current(),
     )
     .await?;
-    // Native, not the renderer's possibly stale list, says whether this went to a chosen place.
-    saved.chosen_place = matches!(destination, private_downloads::Destination::Chosen(_));
+    // Native, not the renderer's possibly stale list, says whether this may not be in Downloads.
+    saved.chosen_place = private_downloads::saved_outside_downloads(&destination, &path);
     if !resumable {
         // Say honestly that this location could not have resumed an interrupted save.
         private_downloads::append_warning(&mut saved, private_downloads::NOT_RESUMABLE_NOTE);
