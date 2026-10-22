@@ -266,6 +266,99 @@ fn a_parent_swapped_or_name_taken_after_selection_is_refused_before_any_write() 
     assert_eq!(fs::read_dir(&folder).unwrap().count(), 0);
 }
 
+/// Swap `folder` for a fresh empty directory at the same path the first time any exclusive
+/// creation runs inside `run`, modelling another program acting between the folder identity
+/// check and the path-based create. Returns where the original folder went.
+fn with_swap_before_create<T>(folder: &Path, run: impl FnOnce() -> T) -> (T, PathBuf) {
+    let moved = folder.with_file_name("Swapped away");
+    let (path, target) = (folder.to_owned(), moved.clone());
+    let mut armed = true;
+    external::BEFORE_CREATE.with(|hook| {
+        *hook.borrow_mut() = Some(Box::new(move |_| {
+            if std::mem::take(&mut armed) {
+                fs::rename(&path, &target).unwrap();
+                fs::create_dir(&path).unwrap();
+            }
+        }))
+    });
+    let result = run();
+    external::BEFORE_CREATE.with(|hook| *hook.borrow_mut() = None);
+    (result, moved)
+}
+
+#[test]
+fn a_folder_swapped_between_the_identity_check_and_creation_is_refused() {
+    // Picker review L4: the partial must not stay (and later fill with plaintext) in a folder
+    // swapped in after the identity check. Each creation re-checks, removes its own partial and
+    // refuses, leaving both folders empty.
+    let fx = fixture();
+    let folder = chosen_folder(&fx);
+    let choice = ChosenDestination::validate(&folder.join("report.bin")).unwrap();
+    let (created, moved) = with_swap_before_create(&folder, || {
+        ExportFile::create_chosen(&choice, export_plan())
+    });
+    assert!(matches!(
+        created,
+        Err(ExportError::Refused(ChoiceRefusal::FolderChanged))
+    ));
+    assert_eq!(
+        fs::read_dir(&folder).unwrap().count(),
+        0,
+        "swapped-in folder"
+    );
+    assert_eq!(fs::read_dir(&moved).unwrap().count(), 0, "original folder");
+
+    // The non-resumable reservation at an identified chosen place.
+    let fx = fixture();
+    let folder = chosen_folder(&fx);
+    let choice = ChosenDestination::validate(&folder.join("report.bin")).unwrap();
+    let (created, moved) = with_swap_before_create(&folder, || choice.create_unjournaled());
+    assert!(matches!(
+        created,
+        Err(ExportError::Refused(ChoiceRefusal::FolderChanged))
+    ));
+    assert_eq!(fs::read_dir(&folder).unwrap().count(), 0);
+    assert_eq!(fs::read_dir(&moved).unwrap().count(), 0);
+
+    // The one-click Downloads save: refused as a local failure, nothing left behind.
+    let fx = fixture();
+    fs::create_dir_all(&fx.downloads).unwrap();
+    let (created, moved) = with_swap_before_create(&fx.downloads, || {
+        ExportFile::create(&fx.downloads, "report.bin", export_plan())
+    });
+    assert!(matches!(created, Err(ExportError::Local { .. })));
+    assert_eq!(fs::read_dir(&fx.downloads).unwrap().count(), 0);
+    assert_eq!(fs::read_dir(&moved).unwrap().count(), 0);
+}
+
+#[test]
+fn an_orphan_partial_from_a_crash_before_begin_is_refused_and_left_alone() {
+    // Picker review L3: a crash between `create_chosen` and Begin leaves an empty
+    // `<name>.mewtual-part` at the chosen place. Nothing proves it is ours, so a later save to the
+    // remembered choice refuses it (never adopts or deletes it) and says how to recover.
+    let fx = fixture();
+    let folder = chosen_folder(&fx);
+    let mut store = open(&fx.vault);
+    let choice = ChosenDestination::validate(&folder.join("report.bin")).unwrap();
+    let (id, _run) = planned_run(&mut store, &choice);
+    let orphan = ExportFile::create_chosen(&remembered(&store, id), export_plan()).unwrap();
+    drop(orphan); // the crash: no Begin, no discard
+    let staging = folder.join("report.bin.mewtual-part");
+    assert!(staging.exists());
+    let refused = ExportFile::create_chosen(&remembered(&store, id), export_plan()).unwrap_err();
+    assert!(matches!(
+        refused,
+        ExportError::Refused(ChoiceRefusal::PartialExists)
+    ));
+    let message = refused.to_string().to_lowercase();
+    assert!(
+        message.contains("earlier interrupted save") && message.contains("remove it"),
+        "says where it came from and how to recover: {message}"
+    );
+    assert_eq!(fs::read(&staging).unwrap(), b"", "the orphan is untouched");
+    assert_eq!(fs::read_dir(&folder).unwrap().count(), 1);
+}
+
 #[test]
 fn a_chosen_folder_without_links_is_refused_before_any_plaintext_exists() {
     let fx = fixture();

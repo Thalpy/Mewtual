@@ -39,6 +39,13 @@
 //! publication link. Anyone with write access to that folder (the same user, or another user of a
 //! shared folder) who swaps the name at exactly that moment can make Mewtual delete or publish
 //! the swapped object.
+//!
+//! Creating a new partial is also path-based (picker review L4): the folder identity check and
+//! the exclusive create are separate calls. Each creation re-checks the folder identity after
+//! creating and removes (by proven handle identity) and refuses a partial that landed in a
+//! swapped folder. A swap and swap-back that both fall between the two checks still puts an empty
+//! partial in the other folder; the link probe that follows then fails, so no plaintext is ever
+//! written there.
 use std::ffi::{OsStr, OsString};
 use std::fs::{self, File, OpenOptions};
 use std::io;
@@ -408,7 +415,17 @@ fn open_leaf_as(path: &Path, write: bool, pinned: bool) -> io::Result<Leaf> {
 
 /// Exclusively create a new leaf. `create_new` refuses any existing entry at the name, including
 /// a dangling link, so an existing user file can never be adopted or truncated here.
+///
+/// This is a path-based call made after the caller's folder identity check, so the folder can be
+/// swapped in between. Every caller re-checks the folder identity afterwards (picker review L4,
+/// `confirm_folder` in `export.rs`) and removes a partial that landed in a swapped folder.
 pub(super) fn create_leaf(path: &Path) -> io::Result<File> {
+    #[cfg(test)]
+    BEFORE_CREATE.with(|hook| {
+        if let Some(hook) = hook.borrow_mut().as_mut() {
+            hook(path);
+        }
+    });
     OpenOptions::new()
         .read(true)
         .write(true)
@@ -651,6 +668,10 @@ thread_local! {
     /// Test-only interleaving point just before the path-based hard link: a test models another
     /// program acting on the source path at exactly that moment.
     pub(in crate::kept) static BEFORE_LINK: std::cell::RefCell<LinkHook> =
+        const { std::cell::RefCell::new(None) };
+    /// Test-only interleaving point just before an exclusive creation (picker review L4): a test
+    /// swaps the destination folder between the identity check and the create.
+    pub(in crate::kept) static BEFORE_CREATE: std::cell::RefCell<LinkHook> =
         const { std::cell::RefCell::new(None) };
 }
 /// No-replace publication primitive: refuses an existing destination on every platform.

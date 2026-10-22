@@ -435,8 +435,11 @@ impl std::fmt::Display for ChoiceRefusal {
             Self::Exists => {
                 "A file with that name already exists there and was left unchanged. Choose another name."
             }
+            // Review L3: also reached when a save to a remembered choice finds the empty partial
+            // an earlier interrupted save left (a crash between creation and Begin). It is never
+            // adopted or deleted, so say where it likely came from and how to recover.
             Self::PartialExists => {
-                "A partly saved file with that name already exists there. Choose another name."
+                "A partly saved file with that name is already there, probably from an earlier interrupted save. Remove it, or choose another name."
             }
             Self::FolderChanged => "The chosen folder changed before saving started. Choose it again.",
             Self::NotWritable => "Mewtual cannot write to that folder. Choose another folder.",
@@ -587,6 +590,17 @@ impl ChosenDestination {
             }
             Err(error) => return Err(chosen_error(error)),
         };
+        // Picker review L4: an identified folder is checked again now that the partial exists.
+        let file = match self.folder_id {
+            Some(captured) => confirm_folder(
+                &self.folder,
+                captured,
+                file,
+                &staging,
+                refused(ChoiceRefusal::FolderChanged),
+            )?,
+            None => file,
+        };
         let failure = match links_supported(&self.folder, &staging_leaf, None) {
             LinkProbe::Works => return Ok((file, staging, final_path)),
             LinkProbe::Refused => ExportError::NoLinks,
@@ -601,6 +615,52 @@ impl ChosenDestination {
         drop(file);
         let _ = fs::remove_file(&staging);
         Err(failure)
+    }
+}
+
+/// Picker review L4: the folder identity check before an exclusive creation and the path-based
+/// creation itself are separate calls, so a folder swapped in between would receive this save's
+/// partial and, later, its plaintext. Re-check the folder after creating. On a mismatch (or a
+/// folder that no longer reports an identity) remove the partial this call just created, only
+/// once its handle identity proves the name is still ours, and refuse with `changed`.
+fn confirm_folder(
+    folder: &Path,
+    captured: FileIdentity,
+    file: File,
+    created: &Path,
+    changed: ExportError,
+) -> Result<File, ExportError> {
+    match external::folder_identity(folder) {
+        Ok(id) if id == captured => Ok(file),
+        _ => {
+            remove_created(file, created);
+            Err(changed)
+        }
+    }
+}
+
+/// Remove a partial this call created exclusively a moment ago, but only while the name still
+/// refers to that same object (its handle identity). A name swapped since is left alone: deleting
+/// by path without that proof could remove somebody else's file. The handle is closed first so
+/// Windows allows the delete.
+fn remove_created(file: File, created: &Path) {
+    let ours = external::observe(&file)
+        .ok()
+        .map(|observed| observed.identity);
+    drop(file);
+    let still_ours = match ours {
+        Some(ours) => matches!(
+            external::open_leaf(created, false),
+            Ok(Leaf::Opened(_, found)) if found.identity == ours
+        ),
+        // No identity to prove it with (often the very reason creation is being abandoned):
+        // the name was created exclusively by this call a moment ago, so remove it by path as
+        // before, rather than leave an empty partial behind on every save to such a folder.
+        // The same documented path-based residual as the link-probe cleanup.
+        None => true,
+    };
+    if still_ours {
+        let _ = fs::remove_file(created);
     }
 }
 
@@ -1379,6 +1439,17 @@ impl ExportFile {
                 Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
                 Err(error) => return Err(local(error)),
             };
+            // Picker review L4: Downloads swapped between the identity read and the create.
+            let file = confirm_folder(
+                folder,
+                folder_id,
+                file,
+                &folder.join(&staging),
+                ExportError::Local {
+                    retryable: true,
+                    reason: "the folder changed while the save was starting".into(),
+                },
+            )?;
             let leaves = (staging, final_leaf);
             return Self::adopt_created(file, folder, encoded, folder_id, leaves, plan);
         }
@@ -1429,11 +1500,21 @@ impl ExportFile {
         let staging = external::staging_for(name);
         let file = match external::create_leaf(&folder.join(&staging)) {
             Ok(file) => file,
+            // Review L3: never adopted, even when it is an empty orphan of an earlier save of
+            // this choice that crashed between creation and Begin (nothing proves it is ours).
             Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
                 return Err(ExportError::Refused(ChoiceRefusal::PartialExists))
             }
             Err(error) => return Err(chosen_error(error)),
         };
+        // Picker review L4: the folder swapped between the identity check and the create.
+        let file = confirm_folder(
+            folder,
+            captured,
+            file,
+            &folder.join(&staging),
+            ExportError::Refused(ChoiceRefusal::FolderChanged),
+        )?;
         let leaves = (staging, name.to_owned());
         Self::adopt_created(file, folder, encoded, captured, leaves, plan)
     }
@@ -1467,9 +1548,9 @@ impl ExportFile {
             Ok(observed) => observed,
             Err(error) => {
                 // Created by this call a moment ago; remove it so a refused or unsupported
-                // destination leaves nothing behind for the fallback writer to trip over.
-                drop(file);
-                let _ = fs::remove_file(&path);
+                // destination leaves nothing behind for the fallback writer to trip over. Only
+                // while the name still proves to be that object (a swap since is left alone).
+                remove_created(file, &path);
                 return Err(error);
             }
         };
