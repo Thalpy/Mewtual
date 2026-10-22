@@ -1868,22 +1868,31 @@ impl ExportFile {
             return Err(ExportError::Storage(StorageError::Malformed));
         }
         let current = self.folder.join(&self.journal.final_leaf);
-        let final_is_ours = match external::open_leaf(&current, false) {
-            Ok(Leaf::Opened(_, observed)) => observed.identity == self.journal.file_id,
-            Ok(_) => false,
+        // `proven_not_ours`: the final name is absent, or opens as a regular file with another
+        // identity. Only that evidence may clear an uncertain link below (re-review 3 LOW 1).
+        let (final_is_ours, proven_not_ours) = match external::open_leaf(&current, false) {
+            Ok(Leaf::Opened(_, observed)) => {
+                let ours = observed.identity == self.journal.file_id;
+                (ours, !ours)
+            }
+            Ok(Leaf::Missing) => (false, true),
+            Ok(Leaf::Foreign) => (false, false),
             // Review L8: something we cannot open (permission, a sharing violation) occupies the
             // name. It cannot be proven ours, so it is someone else's: number around it below
-            // instead of halting on it forever.
-            Err(_) if matches!(external::occupied(&current), Ok(true)) => false,
+            // instead of halting on it forever. It is not proven to be someone else's either.
+            Err(_) if matches!(external::occupied(&current), Ok(true)) => (false, false),
             Err(error) => return Err(local(error)),
         };
         let links = external::observe(&self.file).map_err(local)?.links;
         // Re-review 2 LOW 1: an uncertain link error (a network timeout) marks the session
-        // "possibly visible". If our file still has exactly one name and the final name is not
-        // ours, that link did not happen (or its name is already gone), so no other name can show
-        // these bytes and the session is private again. Publication retries instead of halting
-        // Changed, which would discard a complete, valid partial as "changed or replaced".
-        if self.linked && !final_is_ours && links == 1 {
+        // "possibly visible". If our file still has exactly one name and the final name is
+        // provably not ours (absent, or another file), that link did not happen (or its name is
+        // already gone), so no other name can show these bytes and the session is private again.
+        // Publication retries instead of halting Changed, which would discard a complete, valid
+        // partial as "changed or replaced". Re-review 3 LOW 1: a final name that merely cannot be
+        // opened proves nothing. Our link may have made it and our staging name may be the one
+        // that went away, so trimming then could truncate the visible file.
+        if self.linked && proven_not_ours && links == 1 {
             self.linked = false;
         }
         if self.linked || final_is_ours || links != 1 {

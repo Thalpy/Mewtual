@@ -637,6 +637,9 @@ pub(super) fn staging_for(final_leaf: &str) -> String {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum Effect {
     Link,
+    /// After a hard link that DID create the new name, report an error anyway (a network
+    /// filesystem whose reply was lost), to model an uncertain link error that made a link.
+    LinkReport,
     Write,
     Remove,
     /// The identity check of the final name right after a successful link.
@@ -706,7 +709,8 @@ pub(super) fn link(from: &Path, to: &Path) -> io::Result<()> {
             hook(from);
         }
     });
-    fs::hard_link(from, to)
+    fs::hard_link(from, to)?;
+    inject(Effect::LinkReport)
 }
 pub(super) fn remove(path: &Path) -> io::Result<()> {
     inject(Effect::Remove)?;

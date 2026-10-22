@@ -996,6 +996,43 @@ fn an_uncertain_link_error_that_made_no_link_retries_instead_of_halting_changed(
 }
 
 #[test]
+fn an_uncertain_link_error_that_did_link_never_trims_a_final_file_it_cannot_open() {
+    // Re-review 3 LOW 1: the link created the final name but reported an error; then something
+    // removed our staging name (our file's only name is now the final one), the final file grew
+    // and cannot be opened right now. "Final name not ours" must not be inferred from an open
+    // error: the session stays "possibly visible" and nothing is trimmed.
+    let fx = fixture();
+    let mut store = open(&fx.vault);
+    let (_id, lease) = completed(&mut store);
+    let mut file = started(&mut store, &lease, &fx.downloads);
+    write_all(&mut file);
+    let Publication::Ready(journal) = file.prepare_publication().unwrap() else {
+        panic!();
+    };
+    store
+        .checkpoint_download_export(&lease, file.journal(), &journal)
+        .unwrap();
+    file.checkpointed(journal);
+    assert!(injected(Effect::LinkReport, io::ErrorKind::TimedOut, || file.link()).is_err());
+    let path = fx.downloads.join("notes.txt");
+    assert!(path.exists(), "the link was made");
+    fs::remove_file(fx.downloads.join("notes.txt.mewtual-part")).unwrap();
+    file.release_lock_for_test();
+    let mut handle = fs::OpenOptions::new().append(true).open(&path).unwrap();
+    std::io::Write::write_all(&mut handle, b" grown by its owner").unwrap();
+    drop(handle);
+    let grown = fs::metadata(&path).unwrap().len();
+    // The final name cannot be opened for this check (one injected identity failure).
+    assert!(matches!(
+        injected(Effect::Identity, io::ErrorKind::Other, || file
+            .prepare_publication()),
+        Err(ExportError::Halted(ExportHalt::Changed))
+    ));
+    drop(file);
+    assert_eq!(fs::metadata(&path).unwrap().len(), grown, "nothing trimmed");
+}
+
+#[test]
 fn a_long_multibyte_name_saves_with_its_extension_and_numbering_room() {
     // Review U-L3: 120 non-BMP characters made the probe name exceed 255 UTF-16 units (or the
     // staging name exceed 255 bytes on Unix), which looked like a folder without links.
