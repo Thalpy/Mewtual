@@ -156,7 +156,7 @@ pub(super) async fn ensure_derivation_row(
 
 /// Keep the atomic lock-registration fence inside the same Coordinator turn as selection.
 /// A lock may publish its new generation before its revocation hook can acquire this mutex.
-fn require_current_selection(
+pub(super) fn require_current_selection(
     gate: UiSessionGate<'_>,
     authority: &crate::voice_authority::Coordinator,
     selected: &Arc<SelectedHandoffOwner>,

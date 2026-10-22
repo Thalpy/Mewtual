@@ -17,8 +17,9 @@ no cached authorization snapshot or second commit mutex is introduced. The detac
 worker retains only its actual actor, original selection/grant/commit and paid work owners.
 
 Weak references retain the original inline Arc allocations after their values drop. The fixed
-listener payment is now32KiB, up8KiB from24KiB, covering a32,256-byte measured Windows native
-peak including those allocations/control blocks and context wrappers. This spends more of the
+listener payment remains32KiB, up8KiB from24KiB. The original weak-context Windows native
+peak was32,256 bytes; retaining one fixed header allocation across stages reduces the current
+measured peak to19,984 bytes, including context allocations/control blocks and wrappers. This spends more of the
 same2MiB process cap, without changing group or engine limits. Context drops before the IO
 credit; completed/uncollected native output retains that same original payment. Other platform
 layouts still fail closed if their measured peak does not fit.
@@ -1751,3 +1752,47 @@ provider ownership to avoid self-deadlock. Every row retains its original native
 These ownership primitives do not enable action opcodes: the application listener still serves
 Status only. Framed action dispatch, complete final ACK/collection, proven-pair actor ingress,
 SDP transfer, live V2 and physical acceptance remain separate unfinished work.
+
+### Native physical shutdown and private request grammar (22 October continuation)
+
+The application service now closes its listener, latches Registry shutdown under Index, and
+closes every original Row's first-effect fence. No later bootstrap or retained Route may create
+new work. It then closes header admission on each original Session and waits for that Session's
+actual physical position outside Index/Row/UIcommit/Coordinator guards. Retirement witnesses
+also find a Session whose only remaining owner is a detached worker or completed reply. A single
+in-place Notify waiter observes last-owner collection; socket loss, End and timeouts do not
+replace it. The service task/output retains its original process payment throughout this wait.
+SDK/actor cleanup follows Host completion. This is native physical collection, not proof that
+browser SDK work or the complete96KiB Workflow drained.
+
+An authenticated, opened Data request can transfer its original buffer into the Phase-funded
+actor body without copying it, leaving only an empty body placeholder with the same affine
+response nonce. Local range/foreign-Phase/capacity refusal restores that exact buffer. The
+eventual dispatcher still must resolve the complete decrypted purpose and original header RowId,
+fund detached task metadata separately, and retain the unique physical hold through real result
+work and output collection. The extraction primitive supplies no such effect authority itself.
+
+Private version1 action plaintext has a fixed full selector prefix and closed per-operation
+lengths. Native borrows at most528 output bytes; the browser constructs one prepaid bounded
+request. Shared public vectors pin full-width u64 fields. Receipt ACK digests bind the actual
+native transition and exclude observational retirement, matching Root's same_transition.
+This grammar is inert: production continues to serve Status only. Pending closure, native proof
+of final delivery, safe32-row purpose history collection and the complete action adapter remain
+required before enablement. FinalACK alone must never remove history from a still-live Session.
+
+The inactive derivation-result executor now consumes the actual opened Incoming and checks
+its Session allocation against Route before lookup. It resolves the authenticated header RowId,
+complete selector and native serial/version/input tag, and accepts only an empty Derive output
+with its actual empty-output hash. Historical receipt recovery precedes current eligibility and
+takes no additional Phase contribution, Work or task; the already-paid Data body remains owned.
+Current effects repeat original UI/selection/Route checks under UIcommit and call the actual
+ServerActor/Root method. Detached Worker and completed Response retain Work/task custody before
+Incoming in field-drop order, keeping shutdown behind real publication and output collection.
+The measured future/output/command envelope must fit8KiB from the original16KiB loan. Incoming
+stays inline; both future and output storage count. Its single fixed4KiB header-scratch backing
+allocation is explicitly counted/prepaid by the unchanged12KiB Session control envelope. Moving
+that affine scratch handle does not reserve another inline4KiB in each async state; its full
+backing storage is counted, zeroized and freed before physical idle can be published.
+This narrow empty-marker executor does not construct the separate seal/open body bridge. Its
+actor fixtures deliberately require rejection of a synthetic foreign pair; successful normal
+production-pair publication, listener dispatch and the browser action adapter remain unproved.

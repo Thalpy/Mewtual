@@ -2910,3 +2910,27 @@ cannot adopt a replacement Workflow or declare held inputs/lower work drained. B
 shares actual channel/provider execution, retains each action's exact adapter, and keeps cleanup
 transport until linked SDK/RPC work settles. Framed action/final ACK delivery, safe historical
 collection, normal ingress, SDP/RTC, relay and independent physical acceptance remain open.
+
+Process exit now closes new native physical admission and waits for original header/reply and
+detached factory ownership before reporting service completion. Shutdown waits outside UIcommit
+and native guards, while actors remain alive to complete admitted turns. A retired Session's
+weak witness prevents socket loss or Row detachment from hiding live physical owners. This
+barrier does not acknowledge browser SDK work, retire uncertain purpose history, or establish
+full Workflow drainage; any future result worker must retain the same physical hold until its
+actual Work/body/completion owners are collected.
+
+The new private action plaintext grammar is not enabled at ingress. Its fixed selector/action
+fields and strict bounds are parsing checks, not capabilities. A valid channel MAC still requires
+the same original selected owner, header RowId and complete decrypted purpose/action at every
+effect boundary. Receipt ACK identity excludes observational retirement; End cannot invalidate
+an earlier exact transition ACK. Conversely, unknown/stale FinalACK cannot establish drainage,
+and FinalACK cannot justify deleting purpose tombstones while that Session may still admit Begin.
+
+The inactive derivation executor additionally requires pointer identity of the actual request
+Session and Route. A valid MAC from another Session or a changed authenticated header RowId
+cannot select the original action. Empty output/hash and the full native action tuple are
+checked before Work. Historical recovery still owns a previously admitted Data body, but takes
+no additional Phase loan/task or current grant. New result publication holds the original UIcommit
+through the actual actor turn after caller loss. Structured drop order keeps Work/task retirement
+ahead of physical idle; actor and Root remain responsible for current member/epoch/pair checks.
+Synthetic-pair rejection tests do not establish successful production ingress or browser keys.

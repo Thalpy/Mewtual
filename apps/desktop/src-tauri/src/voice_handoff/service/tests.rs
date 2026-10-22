@@ -81,6 +81,29 @@ struct Client {
     session: [u8; 16],
     hash: [u8; 32],
 }
+
+/// Actual native bootstrap + independent client MAC/AEAD for sibling executor regressions.
+/// Fixture allocations are not application custody evidence; returned Incoming is the real
+/// original Session owner and has already passed header authentication and body opening.
+pub(in crate::voice_handoff) fn opened_frame(
+    public: &SetupOutput,
+    route: &super::super::bootstrap::Route,
+    header: (u64, u8, u8, [u8; 16]),
+    plaintext: &[u8],
+    phase: Option<&Arc<super::super::custody::Phase>>,
+) -> Incoming {
+    let client = Client::new(public.public());
+    let (_, admission, body) = client.packet(header.0, header.1, header.2, header.3, plaintext);
+    let submitted = wire(41891, &admission, &body);
+    let mut worker = route.session().header().unwrap();
+    worker.scratch_mut()[..submitted.len()].copy_from_slice(&submitted);
+    worker.set_filled(submitted.len()).unwrap();
+    let mut incoming = worker
+        .admit(41891, Origin::PackagedHttp.value(), phase)
+        .unwrap();
+    assert_eq!(incoming.open().unwrap(), plaintext);
+    incoming
+}
 impl Client {
     fn new(public: &super::super::channel::bootstrap::PublicSetup) -> Self {
         let mut scalar = [0; 32];
@@ -653,9 +676,12 @@ fn starting_outside_the_native_runtime_refuses_without_spawning_or_leaking_payme
 
 #[tokio::test]
 async fn completed_uncollected_and_aborted_idle_or_active_tasks_keep_their_process_payment() {
-    let (f, _, _public, runtime, client) = setup().await;
-    let baseline = runtime.resources().counts().0;
     for mode in 0..3 {
+        // Graceful process shutdown now permanently closes its original Registry. Each
+        // independent stop/abort ordering therefore needs its own actual process fixture;
+        // never restore a stopped Registry just to exercise the next test mode.
+        let (f, _, _public, runtime, client) = setup().await;
+        let baseline = runtime.resources().counts().0;
         let bound = BoundServer::bind(
             f.state.voice_channels.clone(),
             runtime.clone(),
@@ -704,6 +730,17 @@ async fn completed_uncollected_and_aborted_idle_or_active_tasks_keep_their_proce
                 baseline + INFRASTRUCTURE_BYTES
             );
             drop(completed);
+            assert!(
+                matches!(
+                    BoundServer::bind(
+                        f.state.voice_channels.clone(),
+                        runtime.clone(),
+                        Origin::PackagedHttp
+                    ),
+                    Err(Refused::Binding)
+                ),
+                "the original stopped Registry cannot restart"
+            );
         } else {
             assert!(matches!(running.finish().await, Err(Refused::Io)));
         }
@@ -724,8 +761,8 @@ async fn completed_uncollected_and_aborted_idle_or_active_tasks_keep_their_proce
                 (false, 1, 1)
             );
         }
+        f.close().await;
     }
-    f.close().await;
 }
 
 #[tokio::test]
@@ -786,6 +823,13 @@ async fn cancelling_finish_keeps_the_actual_socket_task_paid_until_it_drains() {
     .unwrap();
     let port = bound.port();
     let running = bound.start().unwrap();
+    let session = f
+        .state
+        .voice_channels
+        .route(client.slot)
+        .unwrap()
+        .session()
+        .clone();
     let credit = Arc::downgrade(&running._credit);
     let (_, admission, body) = client.status(1);
     let mut submitted = wire(port, &admission, &body);
@@ -825,15 +869,12 @@ async fn cancelling_finish_keeps_the_actual_socket_task_paid_until_it_drains() {
         bounded(socket.read(&mut byte)).await,
         Ok(0) | Err(_)
     ));
-    assert_eq!(
-        f.state
-            .voice_channels
-            .route(client.slot)
-            .unwrap()
-            .session()
-            .fixture_counts(),
-        (false, 1, 1)
-    );
+    assert_eq!(session.fixture_counts(), (false, 1, 1));
+    assert!(f.state.voice_channels.route(client.slot).is_err());
+    assert!(matches!(
+        session.header(),
+        Err(super::super::channel::Refused::Binding)
+    ));
     assert_eq!(runtime.resources().counts().0, baseline);
     f.close().await;
 }
@@ -984,6 +1025,100 @@ async fn fixed_runner_future_and_output_fit_the_prepaid_infrastructure_peak() {
         peak <= INFRASTRUCTURE_BYTES,
         "native status peak needs {peak}"
     );
+}
+
+#[tokio::test]
+async fn service_shutdown_collects_an_authenticated_detached_position_after_socket_owner_loss() {
+    let (f, _owner, output, runtime, client) = setup().await;
+    let bound = BoundServer::bind(
+        f.state.voice_channels.clone(),
+        runtime,
+        Origin::PackagedHttp,
+    )
+    .unwrap();
+    let port = bound.port();
+    let running = bound.start().unwrap();
+    let route = f.state.voice_channels.route(client.slot).unwrap();
+    let (_, admission, body) = client.status(1);
+    let submitted = wire(port, &admission, &body);
+    let mut worker = route.session().header().unwrap();
+    worker.scratch_mut()[..submitted.len()].copy_from_slice(&submitted);
+    worker.set_filled(submitted.len()).unwrap();
+    let mut incoming = worker
+        .admit_status(port, Origin::PackagedHttp.value(), client.session)
+        .unwrap();
+    assert_eq!(incoming.open().unwrap(), client.plain());
+    let physical = incoming.hold_position().unwrap();
+    drop(incoming); // the socket/header owner disappeared; detached work is still real.
+    let mut finish = Box::pin(running.finish());
+    assert!(std::future::poll_fn(|cx| Poll::Ready(finish.as_mut().poll(cx).is_pending())).await);
+    until(|| route.require_open().is_err()).await;
+    assert!(f.state.voice_channels.route(client.slot).is_err());
+    assert!(matches!(
+        route.session().header(),
+        Err(super::super::channel::Refused::Binding)
+    ));
+    assert!(std::future::poll_fn(|cx| Poll::Ready(finish.as_mut().poll(cx).is_pending())).await);
+    // The listener has closed even though native work must still be collected.
+    assert!(TcpStream::connect((Ipv4Addr::LOCALHOST, port))
+        .await
+        .is_err());
+    drop(physical);
+    assert!(!bounded(finish).await.unwrap().io_failed);
+    assert_eq!(route.session().fixture_counts(), (false, 1, 1));
+    assert!(matches!(
+        route.session().header(),
+        Err(super::super::channel::Refused::Binding)
+    ));
+    drop(output);
+    f.close().await;
+}
+
+#[tokio::test]
+async fn shutdown_finds_a_retired_session_owned_only_by_an_uncollected_reply() {
+    let (f, owner, output, runtime, client) = setup().await;
+    let bound = BoundServer::bind(
+        f.state.voice_channels.clone(),
+        runtime,
+        Origin::PackagedHttp,
+    )
+    .unwrap();
+    let port = bound.port();
+    let running = bound.start().unwrap();
+    let route = f.state.voice_channels.route(client.slot).unwrap();
+    let (_, admission, body) = client.status(1);
+    let submitted = wire(port, &admission, &body);
+    let mut worker = route.session().header().unwrap();
+    worker.scratch_mut()[..submitted.len()].copy_from_slice(&submitted);
+    worker.set_filled(submitted.len()).unwrap();
+    let mut incoming = worker
+        .admit_status(port, Origin::PackagedHttp.value(), client.session)
+        .unwrap();
+    incoming.open().unwrap();
+    let mut prepared = incoming.reply(BodyKind::Control, 3, None).unwrap();
+    prepared.plain_mut().copy_from_slice(&route.snapshot());
+    let reply = prepared.seal().unwrap();
+    drop(route);
+    f.state.voice_authority.lock().unwrap().end(&owner);
+    super::super::bootstrap::collect_channel(&f.state, &owner, [9; 32])
+        .await
+        .unwrap();
+    f.state.voice_channels.collect_retired(); // actual reply prevents reclamation.
+    let mut finish = Box::pin(running.finish());
+    assert!(std::future::poll_fn(|cx| Poll::Ready(finish.as_mut().poll(cx).is_pending())).await);
+    // Observe service reaching its drain through the closed socket, not a timer.
+    bounded(async {
+        while let Ok(stream) = TcpStream::connect((Ipv4Addr::LOCALHOST, port)).await {
+            drop(stream);
+            tokio::task::yield_now().await;
+        }
+    })
+    .await;
+    assert!(std::future::poll_fn(|cx| Poll::Ready(finish.as_mut().poll(cx).is_pending())).await);
+    drop(reply);
+    assert!(!bounded(finish).await.unwrap().io_failed);
+    drop(output);
+    f.close().await;
 }
 
 #[tokio::test]

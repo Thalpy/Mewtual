@@ -5492,3 +5492,40 @@ native capability, not a handshake-ID lookup or SDP transfer. Existing input/eng
 owners may still hold the96KiB Workflow. `Phase::close_confirmation` cannot relabel an ordinary
 already-draining close as full-plan retirement. A local phase-drained bit is not full Workflow
 release. This bridge adds no Tauri command, renderer result API or live dispatch.
+
+### Private action framing and native physical collection (22 October continuation)
+
+Native `Incoming::result_body` requires an actually opened Result/Data frame and an exact native
+output range within its plaintext. It pins the original Phase Buffer in VoiceConfirmationBody;
+range, foreign-Phase and local capacity refusals preserve the same allocation, bytes and request
+metadata. The remaining request retains its original one-use reply nonce. This API does not
+resolve purpose/action authority or fund a detached dispatcher task.
+
+The inactive `requests` codec and `voice-ipc-actions.ts` encode version1 plus the complete peer,
+join, key reference and u64 epoch. Input/Close are105 bytes; Begin106 (canonical retry flag);
+Admit157; Result187 plus at most528 output bytes; receipt ACK185; Settle153; FinalACK137.
+Action-bearing requests include original serial/version/input tag. All integers are big-endian;
+browser u64 values are canonical decimal strings, never numbers. Truncation, trailing bytes,
+unknown versions/flags and zero action serial/version refuse. Existing authenticated framing
+supplies operation and RowId; this decoder authenticates nothing. Begin's routing convention and
+full same-header/purpose/action enforcement are still dispatcher work. Receipt digests have a
+closed binary outcome/error encoding, omit retired and must match the retained native receipt.
+An ACK digest never constructs a Root receipt or grants new protocol authority.
+
+Service shutdown permanently closes Registry and physical Session admission, drops its listener,
+and waits for actual original physical owners, including detached work/completed replies found
+through retirement witnesses. No native guards or UIcommit cross that await. One existing
+process-paid service task supervises the fixed64 Session positions sequentially; no extra queue
+or per-Session task is spawned. This adds neither an action command nor browser drainage proof.
+
+`derivation_result::commit(context, route, incoming)` is an inactive trusted-native executor,
+not a Tauri command. It requires the actual already-opened Result/Data request from that Route's
+Session. Complete purpose and action identity resolve against its SAME authenticated header RowId.
+Nonempty output or a wrong empty-output digest refuses before Work. Existing receipt recovery
+takes no additional data/task contribution or grant upgrade. Current actor admission repeats
+the original UI-generation/selection/channel fences and owns UIcommit through actor completion.
+Its detached Worker/Response keeps the original Work,8KiB task contribution and inline request
+until actual collection; Work/task custody drops before the physical Header. `into_parts`
+returns fixed result metadata plus the still-owned original request for its single Control reply.
+No timeout, caller cancellation, receipt or native task completion acknowledges browser drainage.
+This executor has no listener consumer and does not implement the seal/open result path.

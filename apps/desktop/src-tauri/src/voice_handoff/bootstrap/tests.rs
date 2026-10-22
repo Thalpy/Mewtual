@@ -242,6 +242,58 @@ async fn pending_is_visible_before_rng_and_duplicate_begin_allocates_no_second_w
 }
 
 #[tokio::test]
+async fn process_stop_refuses_late_bootstrap_installation_without_publishing_a_session() {
+    for computed_first in [false, true] {
+        let f = Fixture::new().await;
+        let (_, selected) = select(&f, point()).await;
+        let Begin::Work(mut ticket) = f
+            .state
+            .voice_channels
+            .begin(selected.clone(), [8; 32])
+            .unwrap()
+        else {
+            panic!("bootstrap ticket");
+        };
+        let slot = ticket.row.slot;
+        let mut output = if computed_first {
+            let (session, public, setup) = ticket.compute(&mut Rng::new()).unwrap();
+            Some((
+                session,
+                Arc::new(SetupOutput {
+                    public,
+                    _credit: ticket.row._credit.clone(),
+                }),
+                setup,
+            ))
+        } else {
+            None
+        };
+        f.state.voice_channels.stop_and_wait_for_physical().await;
+        if computed_first {
+            assert_eq!(ticket.install(&mut output), Err(Refused::Binding));
+            assert!(
+                output.is_some(),
+                "unpublished owners return to caller for post-guard drop"
+            );
+        } else {
+            let mut rng = Rng::new();
+            assert!(matches!(ticket.compute(&mut rng), Err(Refused::Binding)));
+            assert_eq!(rng.draws, 0);
+        }
+        assert!(f.state.voice_channels.route(slot).is_err());
+        assert!(f
+            .state
+            .voice_channels
+            .begin(selected.clone(), [8; 32])
+            .is_err());
+        drop(output);
+        drop(ticket);
+        assert_eq!(selected.resources().counts().1, 0);
+        f.close().await;
+    }
+}
+
+#[tokio::test]
 async fn close_first_latches_before_any_setup_payment_or_draw_and_unknown_retired_allocates_none() {
     let f = Fixture::new().await;
     let (owner, selected) = select(&f, point()).await;

@@ -9,6 +9,7 @@ use catcoms_rt::CryptoRngCore;
 #[cfg(test)]
 use catcoms_sync::voice_v2::resources::ResourceKind;
 use catcoms_sync::voice_v2::resources::{Credit, Resources, WorkLane};
+use std::ops::Range;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use zeroize::Zeroize;
@@ -40,6 +41,8 @@ pub(crate) enum Refused {
     Binding,
 }
 struct Counters {
+    // Process shutdown closes admission permanently. An old Route cannot reopen this Session.
+    closed: bool,
     busy: bool,
     request_floor: u64,
     response_sequence: u64,
@@ -53,6 +56,7 @@ pub(super) struct Session {
     slot: u8,
     keys: Keys,
     counters: Mutex<Counters>,
+    idle: tokio::sync::Notify,
     _control: Credit,
     _bootstrap: Credit,
     _browser_control: Credit,
@@ -106,10 +110,12 @@ impl Session {
             slot,
             keys,
             counters: Mutex::new(Counters {
+                closed: false,
                 busy: false,
                 request_floor: 0,
                 response_sequence: 0,
             }),
+            idle: tokio::sync::Notify::new(),
             _control: control,
             _bootstrap: bootstrap,
             _browser_control: browser_control,
@@ -123,18 +129,54 @@ impl Session {
             .counters
             .lock()
             .unwrap_or_else(|error| error.into_inner());
+        if counters.closed {
+            return Err(Refused::Binding);
+        }
         if counters.busy {
             return Err(Refused::Capacity);
         }
         counters.busy = true;
         Ok(HeaderWorker {
-            scratch: [0; http::HEADER_BYTES],
+            scratch: Box::new([0; http::HEADER_BYTES]),
             filled: 0,
             position: Arc::new(PhysicalPosition {
                 session: self.clone(),
                 held: AtomicBool::new(false),
             }),
         })
+    }
+
+    /// Irreversible process-shutdown fence, independent of call lease revocation. Hold the
+    /// counter mutex so an old Route's header either acquired the original position before
+    /// this fence (and must be collected), or is refused without debiting a sequence.
+    pub(super) fn close_admission(&self) {
+        self.counters
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .closed = true;
+    }
+
+    /// The service has ONE shutdown collector. Register its wake before inspecting busy,
+    /// avoiding a lost last-drop notification. This waits for actual header/reply AND detached
+    /// worker/completion ownership; timeout, socket loss and lease End are never substitutes.
+    /// The original control payment includes this Notify and its one in-place waiter.
+    pub(super) async fn wait_idle(&self) {
+        loop {
+            let notified = self.idle.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            {
+                let counters = self
+                    .counters
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner());
+                debug_assert!(counters.closed);
+                if !counters.busy {
+                    return;
+                }
+            }
+            notified.await;
+        }
     }
 }
 impl Drop for Session {
@@ -146,7 +188,11 @@ impl Drop for Session {
     }
 }
 pub(super) struct HeaderWorker {
-    scratch: [u8; http::HEADER_BYTES],
+    // ONE fixed allocation, prepaid by the original Session control before header admission.
+    // Moving this affine handle through async frames/output must not reserve another inline
+    //4KiB scratch in each generator state. The codec peak counts the FULL backing allocation.
+    // Keep this field first: zeroize/free before Position's last drop can publish idle.
+    scratch: Box<[u8; http::HEADER_BYTES]>,
     filled: usize,
     position: Arc<PhysicalPosition>,
 }
@@ -166,7 +212,9 @@ impl Drop for PhysicalPosition {
             .unwrap_or_else(|error| error.into_inner());
         debug_assert!(counters.busy);
         counters.busy = false;
-        // Drop counters before the actual Session/credits can destruct.
+        // Drop counters before waking a collector or the actual Session/credits destruct.
+        drop(counters);
+        self.session.idle.notify_waiters();
     }
 }
 /// At most ONE extra owner of an admitted frame; retain in the actual worker AND its completed
@@ -199,7 +247,7 @@ impl HeaderWorker {
         self.hold()
     }
     pub(super) fn scratch_mut(&mut self) -> &mut [u8; http::HEADER_BYTES] {
-        &mut self.scratch
+        self.scratch.as_mut()
     }
     pub(super) fn set_filled(&mut self, bytes: usize) -> Result<(), Refused> {
         if bytes > self.scratch.len() {
@@ -337,7 +385,7 @@ impl AuthenticatedRequest {
 }
 impl Drop for HeaderWorker {
     fn drop(&mut self) {
-        self.scratch.zeroize();
+        self.scratch.as_mut().zeroize();
         // Body/reply objects drop first. The separate physical guard may still belong to an
         // actual detached actor worker/output; only its LAST drop can reopen this Session.
     }
@@ -412,6 +460,16 @@ pub(super) struct Incoming {
     worker: HeaderWorker,
 }
 impl Incoming {
+    /// Native allocation binding, not a copied slot/session label. A successfully opened
+    /// request from another Session cannot authorize work through this Route.
+    pub(super) fn belongs_to(&self, session: &Arc<Session>) -> bool {
+        Arc::ptr_eq(&self.worker.position.session, session)
+    }
+    /// Read only the already AEAD-opened native body. Calling this never decrypts twice or
+    /// creates a separately owned plaintext copy; parsed borrows must end before extraction.
+    pub(super) fn plain(&self) -> Result<&[u8], Refused> {
+        self.body.plain()
+    }
     /// Obtain the unique detached-worker hold only AFTER this original request was AEAD-opened.
     /// The dispatcher still must bind full purpose/RowId/current authority before effects.
     pub(super) fn hold_position(&self) -> Result<PhysicalHold, Refused> {
@@ -448,6 +506,57 @@ impl Incoming {
     }
     pub(super) fn logical(&self) -> [u8; 16] {
         self.request.logical()
+    }
+
+    /// Move the actual AEAD-opened Data buffer into the original Phase's actor body owner.
+    /// The native dispatcher must already have resolved full purpose/action against the SAME
+    /// authenticated header RowId, and selected the exact decoded output range. No bytes or
+    /// Vec backing allocation are duplicated. The remaining affine request can still seal its
+    /// one response; detached actor work additionally needs this position's unique hold.
+    ///
+    /// All local refusals preserve the exact request buffer for retry/diagnostics. Metadata
+    /// comes from the original loan before ownership moves into the actor bridge. A successful
+    /// move is irreversible: neither a second extraction nor another open is possible.
+    pub(super) fn result_body(
+        &mut self,
+        phase: &Arc<Phase>,
+        range: Range<usize>,
+    ) -> Result<catcoms_app::VoiceConfirmationBody, Refused> {
+        let plain = self.body.plain_bytes.ok_or(Refused::Body)?;
+        if self.request.operation() != Operation::Result
+            || !matches!(self.body.storage, Storage::Data(_))
+            || range.start > range.end
+            || range.end > plain
+            || range.len() > 528
+        {
+            return Err(Refused::Bounds);
+        }
+        let Storage::Data(buffer) = std::mem::replace(
+            &mut self.body.storage,
+            Storage::Control([0; CONTROL_CIPHER]),
+        ) else {
+            unreachable!("checked Data storage");
+        };
+        let original_cipher = self.body.cipher_bytes;
+        let original_filled = self.filled;
+        // An empty opened placeholder keeps Body's Drop and the affine reply path valid.
+        // Its bytes contain no extracted plaintext and never become a second request body.
+        self.body.cipher_bytes = 16;
+        self.body.plain_bytes = Some(0);
+        self.filled = 16;
+        match phase.result_body(buffer, range) {
+            Ok(body) => Ok(body),
+            Err((error, buffer)) => {
+                self.body.storage = Storage::Data(buffer);
+                self.body.cipher_bytes = original_cipher;
+                self.body.plain_bytes = Some(plain);
+                self.filled = original_filled;
+                Err(match error {
+                    catcoms_sync::voice_v2::VoiceError::Capacity => Refused::Capacity,
+                    _ => Refused::Bounds,
+                })
+            }
+        }
     }
     /// Consume the one nonce/paid worker. The old request drops before allocating the reply;
     /// bytes may not escape their paid owner. This is not yet an Actor payload-transfer API.

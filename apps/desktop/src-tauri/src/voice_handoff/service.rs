@@ -15,8 +15,9 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::oneshot;
 
-// Current concrete task/owner/weak-retained allocation peak is 32,256 bytes in Windows native
-// debug tests. Prepay 32 KiB before bind: 8 KiB more fixed cost than the status-only context.
+// Current concrete task/owner/weak-retained allocation peak is19,984 bytes in Windows native
+// debug tests after retaining one fixed scratch allocation across stages (previously32,256).
+// Keep the existing32KiB payment before bind; wiring action dispatch must remeasure this peak.
 // This reduces available bytes within the SAME 2 MiB process cap, never increasing that cap
 // or any group/engine limit. Other layouts still refuse if their actual peak cannot fit.
 // Both runtime admission and the regression below measure the actual nested future.
@@ -220,19 +221,16 @@ impl Drop for RunningServer {
 }
 impl ServerState {
     async fn run(self, mut stop: oneshot::Receiver<()>) -> Completion {
-        loop {
+        let io_failed = loop {
             #[cfg(test)]
             self.phase.store(1, std::sync::atomic::Ordering::Release);
             let accepted = tokio::select! {
                 biased;
-                _ = &mut stop => break,
+                _ = &mut stop => break false,
                 accepted = self.listener.accept() => accepted,
             };
             let Ok((stream, _)) = accepted else {
-                return Completion {
-                    _credit: self.credit.clone(),
-                    io_failed: true,
-                };
+                break true;
             };
             #[cfg(test)]
             self.phase.store(2, std::sync::atomic::Ordering::Release);
@@ -246,15 +244,21 @@ impl ServerState {
             let mut connection = Connection::new(stream);
             tokio::select! {
                 biased;
-                _ = &mut stop => break,
+                _ = &mut stop => break false,
                 _ = expire_at(self.clock.as_ref(), deadline) => {},
                 _ = connection.serve(&self.registry, self.port, self.origin, self.clock.as_ref(), deadline) => {},
             }
             // Connection fields destroy the stream before any admitted Session/reply owner.
-        }
+        };
+        // Stop accepting sockets first, then fence first effects and collect the ORIGINAL
+        // positions retained by detached action workers/completions. The SDK/actors remain
+        // available until Host::finish observes this actual task completion. Socket expiry
+        // merely dropped Connection; it did not join an admitted actor request.
+        drop(self.listener);
+        self.registry.stop_and_wait_for_physical().await;
         Completion {
             _credit: self.credit.clone(),
-            io_failed: false,
+            io_failed,
         }
     }
 }
@@ -448,4 +452,4 @@ impl fmt::Write for Output {
 }
 
 #[cfg(test)]
-mod tests;
+pub(super) mod tests;

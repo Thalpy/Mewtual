@@ -231,6 +231,68 @@ async fn admitted_factory_holds_channel_collection_behind_actual_actor_completio
 }
 
 #[tokio::test]
+async fn process_shutdown_waits_for_the_actual_detached_factory_after_request_cancellation() {
+    use crate::voice_handoff::service::{BoundServer, Origin};
+    let f = Fixture::new().await;
+    let context = Context::new(&f.state);
+    let (_owner, selected, selector) = selection(&f).await;
+    let route = channel_route(&f, &selected).await;
+    let runtime = f.state.voice_authority.lock().unwrap().runtime();
+    let running = BoundServer::bind(
+        f.state.voice_channels.clone(),
+        runtime,
+        Origin::PackagedHttp,
+    )
+    .unwrap()
+    .start()
+    .unwrap();
+    let boundary = f.state.ui_session_commit.lock().await;
+    let mut pending = Box::pin(ensure_derivation_row(
+        &context,
+        &route,
+        selector,
+        physical(&route),
+    ));
+    assert!(poll_once(pending.as_mut()).await.is_pending());
+    f.actor.member_count().await;
+    assert!(poll_once(pending.as_mut()).await.is_pending());
+    let parked = park(&f.actor).await;
+    drop(boundary);
+    assert!(poll_once(pending.as_mut()).await.is_pending());
+    drop(pending);
+    let mut finish = Box::pin(running.finish());
+    assert!(poll_once(finish.as_mut()).await.is_pending());
+    // The service must be able to install its fence while the admitted factory owns UIcommit.
+    // Waiting for that mutex here would deadlock shutdown with the still-live actor turn.
+    tokio::time::timeout(std::time::Duration::from_secs(15), async {
+        while route.require_open().is_ok() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    assert!(f.state.ui_session_commit.try_lock().is_err());
+    assert!(poll_once(finish.as_mut()).await.is_pending());
+    drop(parked);
+    let completion = tokio::time::timeout(std::time::Duration::from_secs(15), finish)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(!completion.io_failed);
+    assert!(f.state.ui_session_commit.try_lock().is_ok());
+    assert!(f
+        .state
+        .voice_handoff
+        .lookup_original(&selected, Purpose::Derive(selector))
+        .is_some());
+    assert!(matches!(
+        route.session().header(),
+        Err(crate::voice_handoff::channel::Refused::Binding)
+    ));
+    f.close().await;
+}
+
+#[tokio::test]
 async fn registration_pending_duplicate_returns_only_original_metadata_without_another_actor_turn()
 {
     let f = Fixture::new().await;

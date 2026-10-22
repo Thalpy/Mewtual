@@ -99,6 +99,7 @@ impl Drop for MetadataProjection {
 #[derive(Default)]
 pub(crate) struct Registry {
     index: Mutex<Option<Box<Index>>>,
+    stopping: AtomicBool,
 }
 pub(crate) enum Status {
     Pending,
@@ -145,6 +146,9 @@ impl Registry {
     /// a listener. This may allocate the separately prepaid empty index, never a group/row.
     pub(super) fn bind_pool(&self, resources: &Arc<Resources>) -> Result<(), Refused> {
         let mut held = self.index.lock().unwrap_or_else(|error| error.into_inner());
+        if self.stopping.load(Ordering::Acquire) {
+            return Err(Refused::Binding);
+        }
         Self::index(&mut held, resources)?;
         Ok(())
     }
@@ -158,6 +162,9 @@ impl Registry {
             .filter(|slot| *slot < 64)
             .ok_or(Refused::Binding)?;
         let held = self.index.lock().unwrap_or_else(|error| error.into_inner());
+        if self.stopping.load(Ordering::Acquire) {
+            return Err(Refused::Binding);
+        }
         let row = held
             .as_ref()
             .and_then(|index| index.rows[usize::from(slot)].as_ref())
@@ -204,6 +211,9 @@ impl Registry {
     ) -> Result<Begin, Refused> {
         let resources = selected.resources();
         let mut held = self.index.lock().unwrap_or_else(|error| error.into_inner());
+        if self.stopping.load(Ordering::Acquire) {
+            return Err(Refused::Binding);
+        }
         let index = Self::index(&mut held, &resources)?;
         if let Some(row) = index.rows.iter().flatten().find(|row| {
             row.selected.id() == selected.id() && row.selected.executor() == selected.executor()
@@ -301,6 +311,9 @@ impl Registry {
                 .closed = true;
             return Ok(row.clone());
         }
+        if self.stopping.load(Ordering::Acquire) {
+            return Err(Refused::Binding);
+        }
         let selected = selected
             .filter(|selected| {
                 selected.id() == owner
@@ -388,6 +401,53 @@ impl Registry {
         // Includes original selected snapshot and paid weak control blocks. No resource/
         // output destructor may execute under Index/State (or a caller's Coordinator guard).
         drop(removed);
+    }
+
+    /// Process shutdown only: close every existing first-effect fence before collecting any
+    /// physical position. No channel may be created after this Index-ordered transition.
+    /// The service is the sole caller/collector, after its connection future has dropped.
+    ///
+    /// Unlike ordinary channel collection, this deliberately terminates Control routing:
+    /// the renderer/listener is stopping. It does NOT acknowledge browser drainage, retire an
+    /// uncertain purpose, compact an action row, or claim that all Workflow credits returned.
+    pub(super) async fn stop_and_wait_for_physical(&self) {
+        {
+            let held = self.index.lock().unwrap_or_else(|error| error.into_inner());
+            self.stopping.store(true, Ordering::Release);
+            if let Some(index) = held.as_ref() {
+                for row in index.rows.iter().flatten() {
+                    row.state
+                        .lock()
+                        .unwrap_or_else(|error| error.into_inner())
+                        .closed = true;
+                }
+            }
+        }
+        // One paid Session/waiter at a time; no heap registry, detached waiter or 64-owner
+        // snapshot. Retired Sessions can have no Row references while a reply/worker still
+        // owns them, so consult the original weak witness as well as live State.session.
+        for slot in 0..ROWS {
+            let session = {
+                let held = self.index.lock().unwrap_or_else(|error| error.into_inner());
+                held.as_ref()
+                    .and_then(|index| index.rows[slot].as_ref())
+                    .and_then(|row| {
+                        let state = row.state.lock().unwrap_or_else(|error| error.into_inner());
+                        state.session.clone().or_else(|| {
+                            state
+                                .retirement
+                                .as_ref()
+                                .and_then(|retired| retired.session.upgrade())
+                        })
+                    })
+            };
+            // No Index/Row/UI commit/Coordinator guard may cross this await. Admitted
+            // actor work still needs those owners to finish while shutdown is waiting.
+            if let Some(session) = session {
+                session.close_admission();
+                session.wait_idle().await;
+            }
+        }
     }
 }
 /// Native-only immutable control routing. Retain the actual row, Session and paid public

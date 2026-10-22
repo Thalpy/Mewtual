@@ -125,10 +125,12 @@ impl Prepared {
             slot: self.slot,
             keys,
             counters: Mutex::new(Counters {
+                closed: false,
                 busy: false,
                 request_floor: 0,
                 response_sequence: 0,
             }),
+            idle: tokio::sync::Notify::new(),
             _control: self.control,
             _bootstrap: self.bootstrap,
             _browser_control: self.browser_control,
