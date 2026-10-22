@@ -343,42 +343,57 @@ owner-specific and coalesced around actual actor progress, so a same-CID Keep ca
 Completed ciphertext is private; only native `DownloadReady`/export leases can read it. Successful
 external publication remains committed if encrypted cleanup fails, with a visible warning.
 
-## Journaled external Download export (21 October, focused checks; full suites pending)
+## Journaled external Download export (21 October; Save as and review fixes 22 October; focused checks, full suites pending)
 
-Supersedes the "fresh destination only" export above for saves that can be journaled. Design and
-crash table: [EXTERNAL-DOWNLOAD-RESUME](communication-recovery/EXTERNAL-DOWNLOAD-RESUME.md).
+Supersedes the "fresh destination only" export above for saves that can be journaled. Design,
+crash table and review dispositions:
+[EXTERNAL-DOWNLOAD-RESUME](communication-recovery/EXTERNAL-DOWNLOAD-RESUME.md).
 
 Renderer commands (no new command names):
 
-- `save_group_file(..., freshCopy?)`: `freshCopy` requires `resume` and `expectedIntent`. It
-  removes the partly saved file native can prove it created, forgets that journal under the intent
-  CAS, then saves a separate file. A plain Resume first runs a destination preflight (before any
-  allowance is spent on re-verification); it may return a saved result directly when the file was
-  already published before a crash.
-- `cancel_private_download(server, download, keepPartial?)`: with a journal, removal is two-step
-  (durable Deleting, native removal of only the proven partial, then release). `keepPartial`
-  releases the record and leaves the file. A failed proven removal leaves the row in `removing`.
-- `get_private_downloads` rows add `savedChunks` (journal checkpoint) and the statuses `saving`,
-  `save-interrupted`, `save-paused`, `destination-unavailable`, `destination-changed` and `saved`.
-  Rows never carry a path, file name or file identity.
+- `save_group_file(..., freshCopy?, saveAs?)`: `freshCopy` requires `resume` and `expectedIntent`.
+  It removes the partly saved file native can prove it created, forgets that journal under the
+  intent CAS, then saves a separate file. `saveAs` is a flag only: native opens the OS dialog
+  itself (at most one at a time), validates the result and remembers the choice in the sealed
+  record; the command's parameter list is pinned by a test so no path, folder or destination
+  parameter can be added. Closing the dialog returns exactly "Save as was cancelled." with nothing
+  started. A plain Resume first runs a destination preflight (before any allowance is spent on
+  re-verification); it may return a verified saved result directly when the file was already
+  published before a crash.
+- `cancel_private_download(server, download, keepPartial?) -> Option<String>`: with a journal,
+  removal is two-step (durable Deleting, native removal of only the proven partial, then release).
+  `keepPartial` releases the record and leaves the file. The returned notice says when a file of
+  the save stays on disk. Busy while another removal or Save new copy of the same Download is
+  running. A failed proven removal leaves the row in `removing`.
+- `get_private_downloads` rows add `savedChunks` (journal checkpoint), `chosenPlace` (boolean) and
+  the statuses `saving`, `save-interrupted`, `save-paused`, `destination-unavailable`,
+  `destination-changed` and `saved`. Rows never carry a path, file name or file identity.
 
 Rust interfaces:
 
-- `catcoms_storage::kept::ExportFile` performs every external effect (create, probe, reopen,
-  accept, checkpoint, prepare_publication, link, finish) on an owned value native moves into
-  `spawn_blocking`; it holds no store borrow. `ExportPlan` binds chunk sizes and the plaintext CID
-  from `DownloadReady::export_plan()`. `remove_partial` and `flush_destination` are the only other
-  external entry points.
+- `catcoms_storage::kept::ExportFile` performs every external effect (create, create_chosen,
+  probe, reopen, accept, checkpoint, prepare_publication, link, finish) on an owned value native
+  moves into `spawn_blocking`; it holds no store borrow and holds an exclusive OS lock on its file.
+  `ExportPlan` binds chunk sizes and the plaintext CID from `DownloadReady::export_plan()` (one
+  empty chunk is the empty file). `SavedCandidate::verify`, `remove_partial` (typed
+  `PartialRemoval` with notices), `partial_presence`, `flush_destination` and
+  `ChosenDestination::{validate, create_unjournaled}` are the only other external entry points.
 - `DownloadStore` adds `download_export_state`, `begin/resume/checkpoint/publish_download_export`
-  (export-lease fenced), `recover/halt_download_export` (exact journal CAS),
-  `abandon_download_export` (intent CAS) and `finish_download_cleanup`. `cancel_download` now
-  returns `Option<ExportState>`: `Some` means Deleting is durable and external cleanup is pending.
-  `finish_download_export` refuses a Writing journal and is a no-op once the record is released.
-- `ServerActor::download_export_transition`/`download_export_edge` carry the original native
-  invocation `RequestCancellation`; the actor refuses them once it is cancelled (Lock does not
-  retire storage leases).
-- Persistence: sealed domain `mewtual/download-transfer/v2` (V1 body plus a closed export
-  journal). Only the start-of-export edge upgrades V1; V2-to-V1 is refused.
+  (export-lease fenced), `download_observation` plus `recover/halt_download_export` (fenced by an
+  `ExportFence`: the preflight observation or the export lease, plus an exact journal CAS),
+  `retire_download_export` and `abandon_download_export` (intent CAS), `plan_download_destination`
+  (current run) and `download_planned_destination`, and `finish_download_cleanup`.
+  `cancel_download` returns `Option<ExportState>`: `Some` means Deleting is durable and external
+  cleanup is pending. `finish_download_export` refuses a Writing journal and is a no-op once the
+  record is released.
+- `ServerActor::download_export_transition` (now also `Halt` and `RecoverPublished`),
+  `download_preflight`/`download_export_edge` (fenced by the `DownloadPreflight` observation),
+  `retire_download_export` and `acquire_download_to` (remembers a Save as choice before network
+  work) carry the original native invocation `RequestCancellation`; the actor refuses them once it
+  is cancelled. `DownloadReady::planned()` names where a fresh export goes.
+- Persistence: sealed domain `mewtual/download-transfer/v2` (V1 body plus a closed export journal
+  and an optional planned destination; amended before release, no v3). Only the edges that start
+  an export or remember a choice upgrade V1; V2-to-V1 is refused.
 
 ## Native member catalog interface (19 October)
 

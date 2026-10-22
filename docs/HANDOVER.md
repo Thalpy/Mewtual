@@ -502,29 +502,42 @@ dependency audit still fails on the pinned Tauri maintenance/quick-xml/plist adv
 root `cargo deny` does not clear that separate failure. No dependency exemption was added.
 The [acceptance ledger](communication-recovery/CHAT-FILES-VOICE-ACCEPTANCE.md) records the evidence.
 
-## External download resume (2026-10-21, focused checks; full suites pending)
+## External download resume and Save as (2026-10-21/22, focused checks; full suites pending)
 
 Branch `communication-external-download` (worktree `target/communication-external-download-worktree`,
-baseline `dbb8d36b`, not pushed or merged) implements resumable saves of private Downloads to the
-user's Downloads folder; this supersedes the "appending to a partly written external file is not
-implemented" note above for destinations that can be journaled. Design, crash table and both
-review rounds: [EXTERNAL-DOWNLOAD-RESUME](communication-recovery/EXTERNAL-DOWNLOAD-RESUME.md).
+baseline `dbb8d36b`, not pushed or merged) implements resumable saves of private Downloads, to the
+user's Downloads folder or to a folder and name chosen in a native "Save as" dialog; this
+supersedes the "appending to a partly written external file is not implemented" note above for
+destinations that can be journaled. Design, crash table and every review's dispositions:
+[EXTERNAL-DOWNLOAD-RESUME](communication-recovery/EXTERNAL-DOWNLOAD-RESUME.md).
 
-- Storage: `kept/export.rs` (sealed `mewtual/download-transfer/v2` journal, typed transitions,
-  `ExportFile`), `kept/external.rs` (handle identity with birth time via `winapi-util`, no-follow
-  opens, link probe), exhaustive encoding predicates in `record.rs`, disk-full record writes that
-  no longer poison (`persistence.rs`), single-pass mount that leaves journaled removals for Remove.
-- Actor: journal transitions and preflight edges fenced by the export lease and the original
-  invocation (`actor.rs`); tests in `actor/file_transfers/tests/export.rs`.
-- Native: `private_downloads.rs` drives `export_journaled` in `spawn_blocking`, the Resume
-  preflight, Save new copy (`freshCopy`) and two-step Remove (`keepPartial`); small `lib.rs` hunk in
-  `save_group_file`. Fresh saves on destinations without identity or links keep the old writer.
-- Frontend: typed statuses and actions in `private-downloads.ts`; Transfers list in `App.svelte`.
+- Storage: `kept/export.rs` (sealed `mewtual/download-transfer/v2` journal plus a remembered
+  "Save as" destination, typed transitions, `ExportFile` with an exclusive OS lock, read-only
+  verification before any Published, preflight observation, retire-before-delete),
+  `kept/external.rs` (handle identity with birth time via `winapi-util`, no-follow and
+  non-blocking opens via `libc` constants on Unix, name-surrogate classification, the Windows
+  publication pin, the name budget, link probe), exhaustive encoding predicates in `record.rs`,
+  disk-full record writes and admission that no longer poison (`persistence.rs`).
+- Actor: journal transitions fenced by the export lease, preflight edges fenced by a
+  `DownloadPreflight` observation (actor lifetime, Root, mount, transfer epoch), the remembered
+  choice written before network work, all carrying the original invocation (`actor.rs`,
+  `actor/file_transfers.rs`); tests in `actor/file_transfers/tests/export.rs` and `tests.rs`.
+- Native: `private_downloads.rs` runs the export sequence over `ExportPorts` in `spawn_blocking`,
+  the Resume preflight, Save new copy, two-step Remove with a process-wide cleanup claim, and the
+  `rfd` dialog behind a chooser seam; `save_group_file` in `lib.rs` orders the dialog before any
+  slot or record. No plugin, builder or `setup` change. FAT and exFAT are refused; fresh saves on
+  destinations without identity or locks keep the old writer.
+- Frontend: typed statuses and actions (including Save as and `chosenPlace`) in
+  `private-downloads.ts`, `native-download.ts`; Save as entries and the Transfers list in
+  `App.svelte`; visual fixture support.
 
-Focused checks and three review rounds are recorded in the acceptance ledger. Not yet run:
-complete root/native/frontend suites, `npm run build`, `test:startup`, `test:flows` (including the
-updated opt-in `FLOW_SCENARIO=private-download`), native physical checks. The Unix identity branch
-is compile-unverified on this host. No screenshot exists yet for the new Transfers rows.
+Focused checks, the picker design review and the dispositions of two reviews of `27ffa183` are in
+the design document's ledger; the actual `dbb8d36b` reader was shown to refuse real V2 fixtures
+without changing a byte. Not yet run: complete root/native/frontend suites, `npm run build`,
+`test:startup`, `test:flows` (including the opt-in `FLOW_SCENARIO=private-download`), a real dialog
+on each OS, physical FAT/SMB/ReFS/OneDrive/portal checks, and any Unix execution (the storage
+crate compiles and passes Clippy for `x86_64-linux-android`). A post-implementation review of the
+whole range is still to come. No screenshot exists yet for the new rows or Save as entries.
 
 ## Chat history adversarial checkpoint (2026-10-20)
 

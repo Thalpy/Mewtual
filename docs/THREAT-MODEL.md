@@ -346,45 +346,70 @@ not same-user tampering with the source staging path. A crash after publication 
 can leave an external file plus private progress; the UI discloses possible duplicate re-export.
 This is not an exactly-once external receipt or a physical audio/network acceptance claim.
 
-## Journaled external export boundary (21 October, implementation in progress)
+## Journaled external export boundary (21 October; Save as and review fixes 22 October)
 
 For saves that can be journaled, this supersedes the statements above that no external path or
 offset is persisted and that resume always uses a fresh destination; the non-resumable fallback
 writer keeps those properties.
 
-- **New persisted metadata.** The destination folder path, the staging and final leaf names and
-  the partial's file identity (volume, file index or inode, birth time) live only inside the
-  sealed Download record under the purpose-separated metadata key, and in native memory. They are
-  redacted from Debug output and never reach renderer projections, logs, diagnostics or error
-  strings (pinned by tests).
-- **Ownership proof.** A saved path is never authority. Mewtual truncates, appends to, publishes
-  or deletes an external file only through a handle whose identity matches the journal; leaf opens
-  never follow a link or reparse point. A byte mismatch inside the durable checkpoint halts as
-  Changed and modifies nothing. The final name is never deleted, and publication is a no-replace
-  hard link verified afterwards.
-- **New exposure.** A paused or interrupted export now keeps partial plaintext in the destination
+- **New persisted metadata.** The destination folder path, the staging and final leaf names, the
+  partial's file identity (volume, file index or inode, birth time) and a remembered "Save as"
+  folder and name live only inside the sealed Download record under the purpose-separated metadata
+  key, and in native memory. They are redacted from Debug output and never reach renderer
+  projections (which carry only a `chosenPlace` boolean), logs, diagnostics or error strings
+  (pinned by tests).
+- **Ownership proof.** A saved path is never authority. Ownership is proven by the identity of an
+  open handle; leaf opens never follow a link or name-surrogate reparse point (a cloud placeholder,
+  WOF or dedup tag is still the same file). Writes and truncation go through the session's own
+  handle, which holds an exclusive OS lock, so a second writer is refused across mounts and
+  processes. A byte mismatch inside the durable checkpoint halts as Changed and modifies nothing.
+  The final name is never deleted, and publication is a no-replace hard link verified afterwards. A
+  final name holding our identity is recorded as saved only after its content is verified
+  read-only against the saved plan. Once a link may exist, the session never trims or writes.
+- **Path-based steps that remain.** std has no delete-by-handle and a handle-based delete needs
+  `unsafe`, which the workspace denies. So removing a proven staging name, removing the link-probe
+  name and (on Unix) the publication link are path calls made after a handle check. On Windows the
+  publication link is made while a delete-denying handle pins the staging file and its folder.
+  Anyone with write access to that folder (the same user, or another user of a shared folder) who
+  swaps the name at exactly that moment can make Mewtual delete or, on Unix, publish the swapped
+  object. Identity is the only proof for deletion, so a real identity collision (possible in
+  principle on ReFS, whose 64-bit index is not guaranteed unique) would let Remove delete a
+  foreign file.
+- **New exposure.** A paused or interrupted export keeps partial plaintext in the destination
   folder as `<name>.mewtual-part` across lock and restart until it is resumed, completed, replaced
-  by Save new copy or removed. Previously a failed export deleted it.
-- **Fences.** Journal transitions require the original export lease or an exact journal CAS, and
-  the original native invocation, so writes finishing after Lock, freeze/thaw, remount, Pause,
-  Remove or Save new copy persist nothing. Native rechecks the invocation and lease before every
-  plaintext write attempt, including retries. Within one mounted store only one live session may
-  write a partial (a write already stalled in flight across a remount or account switch can still
-  race a new session), and a session that finds the file shorter than its verified offset stops
-  instead of zero-extending.
-  Publication and Pause/Remove/Lock serialize on the session commit guard.
-- **Residual risks.** A same-user process can still race the gap between an identity check and the
-  path-based link or unlink. Filesystems without stable identities, birth times or hard links (some
-  SMB/FUSE, FAT, exFAT) keep the non-resumable writer. A volume whose device number changes across
-  reboot reports Changed. Destination folder flushes are best effort, so power loss can lose a
-  just-published name on filesystems that ignore them. A destination that hangs during the guarded
-  link can delay Lock, as the existing writer could. Remove keeps a partial it cannot check (folder
-  unavailable, file held without sharing) tracked as Removing rather than forgetting it; "Keep
-  partly saved file" and Save new copy on an unreachable folder can leave a remnant there, by the
-  user's choice. Unix identity code is compile-unverified on the Windows development host.
-- **Retained store.** A record write refused by a full volume before its rename now removes the
-  torn successor (and an empty new transfer directory) instead of poisoning the store; failures at
-  or after the rename, and process crashes, keep the existing fail-closed behavior.
+  by Save new copy or removed. While a session is open on Windows, other programs cannot read it.
+- **Save as.** Native opens the OS dialog itself; the renderer sends only a flag and the command's
+  parameter list is pinned so no path can be added. The chosen place authorizes that save and its
+  resumes only, is never logged, and persists only in the sealed record. An existing name is
+  refused even if the dialog asked to replace it. Lock cannot close an open OS dialog, so the
+  suggested name and folder stay on screen until the user closes it (the choice is then
+  discarded). A cloud-synced or shared chosen folder (for example OneDrive Desktop or Documents)
+  uploads the partial plaintext and the probe name as they are written. A chosen folder inside the
+  app's own data or vault folder is not refused (documented, not enforced).
+- **Fences.** In-session journal transitions require the original export lease; the Resume
+  preflight's edges require a preflight observation bound to the actor lifetime, Root authority,
+  storage mount and transfer epoch, plus an exact journal CAS; all require the original native
+  invocation. Writes finishing after Lock, freeze/thaw, remount, Pause, Remove or Save new copy
+  persist nothing, and a recovered save returns its path only if still authorized after cleanup.
+  Native rechecks the invocation and lease before every plaintext write attempt and again when a
+  queued blocking step starts. A session that finds the file shorter than its verified offset
+  stops instead of zero-extending. Publication and Pause/Remove/Lock serialize on the session
+  commit guard. Remove, Keep partly saved file and Save new copy hold a process-wide claim per
+  Download that outlives a dropped invocation until its delete ends, so Keep can never promise a
+  file a pending delete may still remove; Save new copy retires every observer before deleting.
+- **Residual risks.** Filesystems without stable identities, birth times or locks (some SMB/FUSE)
+  keep the non-resumable writer; FAT and exFAT are refused before writing. A volume whose device
+  number changes across reboot reports Changed. Destination folder flushes are best effort, so
+  power loss can lose a just-published name on filesystems that ignore them. A destination that
+  hangs during the guarded link can delay Lock, as the existing writer could. Remove keeps a
+  partial it cannot check tracked as Removing; every other file it leaves on disk is reported to
+  the user. Unix code is compile- and Clippy-checked for an Android target but never run on the
+  Windows development host.
+- **Retained store.** A record write refused by a full volume before its rename removes the torn
+  successor (and an empty new transfer directory, or reports the refused directory creation)
+  instead of poisoning the store; failures at or after the rename, a failed cleanup, and process
+  crashes keep the existing fail-closed behavior. The released reader refuses a store containing
+  any V2 record without changing a byte (verified with real fixtures).
 
 ## Public MLS source-catalog boundary (19 October)
 
