@@ -1,5 +1,29 @@
 # Mewtual; Architecture
 
+## Original final proof and retained cleanup cadence (22 October)
+
+A compacted final-intent native Row retains the same already-paid Arc<Phase>. Its drained
+state owns the original fixed Root observer, with no variable loan or Action/Input/Workflow.
+Ordinary continuation retains no Phase. Compaction drops Live outside native guards before
+requiring Root readiness; local compaction cannot imply whole Workflow retirement. Native
+snapshots borrow the same Phase under Row -> Phase without Root callbacks or allocation.
+
+Channel preflight and independent history GC additionally require a requested final proof to
+be ready. Dead lease, actual physical-session proof, sole indexed ownership and monotonic
+serials remain independent GC conditions. Existing fixed Row/Phase payments fund retention.
+
+Root provides no notification into Row/browser. Broker v12's exact setup/channel cleanup uses
+one injected-Clock timer per waiting original driver after an actual refused RPC. Timer and
+availability resolve one existing Signal; cancellation checks the original wait identity.
+Each refusal starts a fresh interval, so large jumps cannot create a catch-up burst. Actual
+SDK/read/linked drainage still precedes cleanup; no pending RPC is overlapped. General action
+retry behavior is unchanged. Older retained brokers refuse adoption.
+
+Final wire remains disabled. Authenticated post-End final exchange/issuance/ACK must retain
+original framing keys and compose with this cadence before normal cleanup closes routing.
+HANDOVER records source-specific tests and the remaining Actor/WebView/live V2 boundaries.
+
+
 ## Original-session read-only action history (22 October)
 
 Production native loopback ingress accepts Status9 and, only with the original application
@@ -22,7 +46,7 @@ One fixed242-byte status or3-byte refusal describes native history; exact u64s s
 localDrained is not whole96KiB Workflow retirement. Native Derive publishes only actual Derived;
 an actor error with no terminal result remains no receipt. Other generic codec outcomes confer
 no effect authority or implemented adapter. Factory/action execution, ACK/settlement/phase/final
-wiring, retained final proof and normal production Actor/MLS success remain unfinished. Historical
+wiring, final issuance/retry coordination and normal production Actor/MLS success remain unfinished. Historical
 checkpoint claims below are scoped to their source; HANDOVER records current test provenance.
 
 ## Original confirmation Workflow retirement observer (22 October)

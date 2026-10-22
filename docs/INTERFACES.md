@@ -1,5 +1,28 @@
 # Mewtual; Interfaces & Hooks Schema
 
+## Native final snapshot and browser cleanup retry (22 October)
+
+`ResolvedRow::confirmation_status() -> Result<ConfirmationStatus, VoiceError>` reads the
+original Live Phase or the same final-intent Phase retained after local compaction. Unknown
+or removed IDs are errors; Pending/ClosedPending/ordinary continuation report NotRequested,
+never fabricated Root Drained. This native-only snapshot is absent from the 242-byte history
+wire schema. It is neither final issuance, authorization nor a notification API.
+
+Compaction preserves that original paid Phase before detaching Live. Channel closure and
+history GC separately require requested final retirement readiness. No observer clone,
+transfer gap or fresh reservation exists; existing layout guards include the retained pointer.
+
+Broker v12 automatically retries only already-started `settleSetup`/`collectChannel` cleanup
+after an actual rejected RPC. One original driver owns one injected-Clock wait, coalesced
+with availability on the same Signal. A completed refusal starts the next one-second
+interval; no missed-tick replay or pending-RPC overlap occurs. Success cancels the timer;
+stale callbacks cannot wake a successor. Older retained brokers through v11 refuse adoption.
+
+Actual SDK/read/linked-chain drainage still precedes cleanup. General action retries remain
+availability-driven. This does not implement authenticated post-End action/final exchange,
+final issuance/ACK or a production Actor/MLS/WebView action flow. HANDOVER owns test evidence.
+
+
 ## Retained history transport (22 October)
 
 VoiceCryptoBroker.recoverChannelHistory(owner, channel, purpose, expectedRow=null) requires the

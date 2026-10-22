@@ -8,6 +8,7 @@ use catcoms_sync::voice_v2::runtime::Runtime;
 use catcoms_sync::voice_v2::{key_reference, Scope};
 
 mod pending;
+mod retirement;
 
 fn noop_waker() -> std::task::Waker {
     struct Idle;

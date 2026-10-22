@@ -264,7 +264,8 @@ impl Phase {
     }
     /// Read only the original retained state/atomic: no grant, Clock, allocation or Root call.
     /// Ordinary Phase drainage remains NotRequested even when End independently closes Root.
-    /// Compaction that drops this Phase/witness is NOT evidence of variable retirement.
+    /// Final-intent compaction retains this SAME paid Phase/witness in the native Row.
+    /// Missing caller handles never establish variable retirement.
     pub(crate) fn confirmation_status(&self) -> ConfirmationStatus {
         let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
         if !state.retire_confirmation {

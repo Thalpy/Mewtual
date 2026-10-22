@@ -178,6 +178,9 @@ const SELECTED_KEY_BYTES = 4096;
 // These browser-side charges cover application-owned copies, not opaque SDK/GC heaps.
 const IPC_SETUP_BYTES = 8 * 1024;
 const IPC_CONTROL_BYTES = 8 * 1024;
+// Only exact, already-started cleanup is retried automatically. A completed refusal starts
+// one new cadence interval; missed ticks cannot create catch-up work or overlap native RPCs.
+const IPC_CLEANUP_RETRY_MS = 1_000;
 
 export type VoiceIpcSetupReply =
   | Readonly<{ owner: string; executor: string; kind: "ready"; port: number; transcript: string }>
@@ -370,7 +373,7 @@ function context(label: string, transcript: Uint8Array): Uint8Array<ArrayBuffer>
  * unsettled work. Revoking an owner never frees a running promise; only its real settlement does.
  * A derive pipeline uses one permit for sequential import/ECDH/HKDF work, never parallel calls. */
 export class VoiceCryptoBroker {
-  readonly version = 11;
+  readonly version = 12;
   readonly subtle: SubtleCrypto;
   private readonly native: VoiceCryptoAdmission;
   private active = 0;
@@ -1410,6 +1413,35 @@ class RetainedIpcChannel {
     try { await waiting.promise; }
     finally { if (this.retry === waiting) this.retry = null; }
   }
+  /** Root's final-retirement snapshot has no notification into the browser. Keep one
+   * original paid cleanup driver alive across temporary native refusals without depending
+   * on remount/availability. Timer and availability resolve the SAME Signal: racing two
+   * asynchronous waiters would leak a waitWake continuation on every expired interval.
+   * This is cleanup only, after actual SDK/IO/linked drainage; it grants no action authority. */
+  private async waitCleanupWake(observed: object): Promise<void> {
+    if (this.wakeIdentity !== observed) return;
+    const waiting = this.retry ??= signal<void>();
+    const deadline = this.clock.now() + IPC_CLEANUP_RETRY_MS;
+    let active = true, timer: unknown = null;
+    const expire = () => {
+      // Cancellation can race a queued callback. An old wait must never wake its successor.
+      if (!active || this.retry !== waiting) return;
+      const remaining = deadline - this.clock.now();
+      if (remaining > 0) timer = this.clock.schedule(expire, Math.max(1, remaining));
+      else waiting.resolve();
+    };
+    try {
+      // Publish the Signal first, then arm ONE timer. The identity recheck also covers a
+      // synchronous availability callback from an injected scheduler during installation.
+      timer = this.clock.schedule(expire, IPC_CLEANUP_RETRY_MS);
+      if (this.wakeIdentity !== observed) waiting.resolve();
+      await waiting.promise;
+    } finally {
+      active = false;
+      if (timer !== null) this.clock.cancel(timer);
+      if (this.retry === waiting) this.retry = null;
+    }
+  }
   observe(): void { this.unsubscribe = this.selected.owner.onRetired(() => this.retire()); }
   /** Constructor subscription refusal precedes every RPC/SDK call and may roll back locally. */
   abandon(): void {
@@ -1632,7 +1664,7 @@ class RetainedIpcChannel {
       try { await this.native.settleSetup(this.selected.owner.token, this.selected.executor); break; }
       catch {
         this.request?.resolve(Object.freeze({ kind: "uncertain" })); this.request = null;
-        await this.waitWake(observed);
+        await this.waitCleanupWake(observed);
       }
     }
     this.keys = null; this.construction = null;
@@ -1644,7 +1676,7 @@ class RetainedIpcChannel {
       try { await this.native.collectChannel(this.selected.owner.token, this.selected.executor); break; }
       catch {
         this.request?.resolve(Object.freeze({ kind: "uncertain" })); this.request = null;
-        await this.waitWake(observed);
+        await this.waitCleanupWake(observed);
       }
     }
     this.drained = true;
@@ -1665,7 +1697,7 @@ export function windowVoiceCryptoBroker(
   const host = window as Record<symbol, unknown>;
   const previous = host[BROKER] as VoiceCryptoBroker | undefined;
   if (previous) {
-    if (previous.version !== 11 || typeof previous.recoverChannelHistory !== "function" || typeof previous.prepareChainFromChannel !== "function" || typeof previous.nativeChannel !== "function" || typeof previous.run !== "function" || typeof previous.selectJoinKey !== "function" || typeof previous.retrySelectedJoinKeys !== "function" ||
+    if (previous.version !== 12 || typeof previous.recoverChannelHistory !== "function" || typeof previous.prepareChainFromChannel !== "function" || typeof previous.nativeChannel !== "function" || typeof previous.run !== "function" || typeof previous.selectJoinKey !== "function" || typeof previous.retrySelectedJoinKeys !== "function" ||
         typeof previous.registerProtectedConfirmation !== "function" ||
         typeof previous.registerProtectedDerivation !== "function" || typeof previous.registerConfirmation !== "function" || typeof previous.createPair !== "function") {
       throw new Error("voice crypto broker version changed; reload required");

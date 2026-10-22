@@ -8,6 +8,66 @@ use crate::voice_handoff::ledger::{Begin as ActionBegin, Ledger, Purpose, RowId}
 use catcoms_sync::voice_v2::presence::PairSelector;
 use catcoms_sync::voice_v2::VoiceError;
 
+#[tokio::test]
+async fn actual_channel_collection_keeps_final_proof_until_late_root_input_retires() {
+    use crate::voice_handoff::custody::ConfirmationStatus;
+    let (mut coordinator, selected, selector) = selection();
+    let ledger = Arc::new(Ledger::default());
+    let registry = Registry::default();
+    let (output, route) = installed(&registry, selected.clone());
+    let ActionBegin::Factory(registration) = ledger
+        .begin(selected.clone(), Purpose::Derive(selector))
+        .unwrap()
+    else {
+        panic!("new original action")
+    };
+    let (join, action, pair) = actual_action(&coordinator, &selected);
+    let root_input = action.input().unwrap();
+    let id = registration
+        .attach(action.clone(), pair, 16 * 1024)
+        .unwrap();
+    let row = ledger
+        .resolve(&selected, Purpose::Derive(selector), id)
+        .unwrap();
+    let work = row.work().unwrap();
+    let phase = work.phase().clone();
+    let original_phase = Arc::downgrade(&phase);
+    action.settle_engine();
+    phase.close_confirmation().unwrap();
+    drop(work);
+    assert!(row.wait_compacted().await.unwrap().drained);
+    assert_eq!(
+        row.confirmation_status().unwrap(),
+        ConfirmationStatus::Draining
+    );
+    assert!(!ledger.channel_may_close(&selected));
+    coordinator.end(selected.id());
+    // Force the real low-level registry's physical close, bypassing the production preflight,
+    // to verify GC's independent final-proof check rather than fabricating collection evidence.
+    retire(&registry, &selected);
+    drop((output, route, phase, join, action, row));
+    registry.collect_retired(&ledger);
+    assert!(ledger
+        .lookup_original(&selected, Purpose::Derive(selector))
+        .is_some());
+    assert!(
+        original_phase.upgrade().is_some(),
+        "unready original proof stays indexed"
+    );
+    drop(root_input);
+    assert_eq!(
+        original_phase.upgrade().unwrap().confirmation_status(),
+        ConfirmationStatus::Drained
+    );
+    // No Root -> Row wake exists. The ordinary bounded empty-registry sweep must observe
+    // readiness and retire actual Phase/Row credits outside Index/State, without new authority.
+    Registry::default().collect_retired(&ledger);
+    assert!(ledger
+        .lookup_original(&selected, Purpose::Derive(selector))
+        .is_none());
+    assert!(original_phase.upgrade().is_none());
+}
+
 fn installed(
     registry: &Registry,
     selected: Arc<SelectedHandoffOwner>,
@@ -326,6 +386,83 @@ async fn both_explicit_close_variants_preserve_control_while_original_factory_is
             .await
             .unwrap();
         assert!(route.require_open().is_err());
+        f.close().await;
+    }
+}
+
+#[tokio::test]
+async fn both_explicit_close_variants_keep_control_until_compacted_final_root_proof_is_ready() {
+    use crate::voice_handoff::custody::ConfirmationStatus;
+    for channel in [false, true] {
+        let f = Fixture::new().await;
+        // The protected action uses the existing synthetic lifecycle grant. Install that
+        // exact selected owner in the real registry, then exercise BOTH actual AppState
+        // finish adapters. This is cleanup coverage, not normal Actor/MLS acceptance.
+        let (coordinator, selected, selector) = selection();
+        let (output, route) = installed(&f.state.voice_channels, selected.clone());
+        let ActionBegin::Factory(registration) = f
+            .state
+            .voice_handoff
+            .begin(selected.clone(), Purpose::Derive(selector))
+            .unwrap()
+        else {
+            panic!("new original action")
+        };
+        let (join, action, pair) = actual_action(&coordinator, &selected);
+        let root_input = action.input().unwrap();
+        let id = registration
+            .attach(action.clone(), pair, 16 * 1024)
+            .unwrap();
+        let row = f
+            .state
+            .voice_handoff
+            .resolve(&selected, Purpose::Derive(selector), id)
+            .unwrap();
+        let work = row.work().unwrap();
+        let phase = work.phase().clone();
+        action.settle_engine();
+        phase.close_confirmation().unwrap();
+        drop(work);
+        assert!(row.wait_compacted().await.unwrap().drained);
+        assert_eq!(
+            row.confirmation_status().unwrap(),
+            ConfirmationStatus::Draining
+        );
+        // Keep the actual LocalJoin's revocation owner alive while asserting that the
+        // call's Control route remains open. Its Drop legitimately revokes the call lease;
+        // final Workflow retirement must instead depend on root_input, not ending the call.
+        drop((phase, action));
+        assert!(selected.lease().is_live());
+        let counts = selected.resources().counts();
+        let original_slots = route.snapshot();
+        for _ in 0..2 {
+            let result = if channel {
+                collect_channel(&f.state, selected.id(), selected.executor()).await
+            } else {
+                settle_setup(&f.state, selected.id(), selected.executor()).await
+            };
+            assert!(matches!(result, Err(Refused::Capacity)));
+            assert!(route.require_open().is_ok());
+            assert_eq!(route.snapshot(), original_slots);
+            assert_eq!(selected.resources().counts(), counts);
+            assert_eq!(
+                row.confirmation_status().unwrap(),
+                ConfirmationStatus::Draining
+            );
+        }
+        drop(root_input); // the actual late Root owner, not a supplied readiness assertion
+        assert_eq!(
+            row.confirmation_status().unwrap(),
+            ConfirmationStatus::Drained
+        );
+        let result = if channel {
+            collect_channel(&f.state, selected.id(), selected.executor()).await
+        } else {
+            settle_setup(&f.state, selected.id(), selected.executor()).await
+        };
+        assert!(matches!(result, Ok(Status::Closed { .. })));
+        assert!(route.require_open().is_err());
+        drop((row, route, output, join));
         f.close().await;
     }
 }

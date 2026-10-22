@@ -1,5 +1,27 @@
 # Threat model; client integrity & enforcement boundaries
 
+## Preserving original retirement proof and bounded cleanup progress (22 October)
+
+Local 16 KiB return cannot become whole 96 KiB retirement by dropping Phase. Final-intent
+history retains the same paid Phase/observer; ordinary rows do not. No variable loan,
+Action/Input/Workflow owner, witness reconstruction or new grant is introduced. Compaction
+drops Live outside native guards before requiring Root readiness. Channel preflight and
+independent GC reject final-unready proof; unknown/orphan rows remain errors and ClosedPending
+cannot invent settlement or retirement.
+
+Root's snapshot has no wake. Broker v12's existing cleanup waits use one injected-Clock timer
+to resolve the same Signal as availability after an actual native refusal. No extra waiter
+is abandoned on expiry, no callback starts work, and original wait identity fences cancelled
+stale callbacks. Large clock jumps cause one retry, never a backlog; pending native RPCs are
+not overlapped. SDK/read cancellation and linked drainage precede the first cleanup call.
+Original payment remains through actual driver completion. HMR rejects old retained pools.
+The 8 KiB structural wrapper inventory does not establish arbitrary JS/SDK/GC heap or RSS bounds.
+
+Final dispatch remains disabled. Authenticated post-End final exchange/issuance/ACK must
+retain the original Session/keys and compose with cleanup before routing closes. No new
+normal Actor/MLS/WebView action, live V2/RTC, relay or physical acceptance follows.
+
+
 ## Read-only original-session history ingress (22 October)
 
 Exposing history does not expose factory admission. The production whitelist admits only
@@ -23,7 +45,7 @@ The fixed opaque receipt digest is metadata, not browser authority to mint/ACK a
 The new query/purpose/known wire/plaintext/metadata copies fit the original8KiB Control payload
 inventory with wrapper allowance. This structural check does not bound arbitrary caller-retained
 metadata, opaque SDK allocations, GC heaps or RSS. localDrained cannot establish whole original
-Workflow retirement. Native final-proof transfer across compaction, effect dispatch and normal
+Workflow retirement. Native final issuance/retry coordination, effect dispatch and normal
 Actor/MLS browser handoff remain unfinished. Existing phase/effect adapters stay unexposed;
 this change makes no live V2/RTC, relay or independent physical audio/network acceptance claim.
 

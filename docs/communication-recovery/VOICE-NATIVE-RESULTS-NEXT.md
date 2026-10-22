@@ -1,5 +1,28 @@
 # Next voice milestone: native result recovery
 
+## Current proof retention and cleanup retry candidate (22 October)
+
+The isolated final-proof checkout follows `e560d319`. Compacted final-intent history retains
+the same already-paid Phase and original Root witness. Native snapshots, channel preflight
+and independent history GC preserve unready proof; compaction still drops Live outside locks
+before requiring Root readiness. Ordinary continuation retains none and ClosedPending cannot
+invent Root retirement. All199 focused native handoff tests and existing layout/capacity guards pass; complete
+native/frontend/static/build gates remain pending.
+
+Broker v12's existing setup/channel cleanup retries temporary native refusals using one
+injected-Clock timer and the same availability Signal/paid driver. Large jumps, stale timer
+callbacks and pending RPCs cannot create duplicate work. The focused browser/request/reply
+suite passes 139/139; HANDOVER records source-specific evidence. General action retries remain
+availability-driven, and older retained brokers refuse HMR adoption.
+
+Still required: authorized factory/input/admission/result/receipt ACK/settlement/phase/final
+adapters and dispatch; authenticated post-End final exchange and original keys through final
+issuance/ACK/retry; normal production Actor/MLS pair success and combined real-WebView/native
+action acceptance. Final dispatch stays disabled. No live V2/RTC, relay or physical acceptance
+is established by these local custody/cleanup improvements. Historical checkpoints below
+retain their own source scope and do not supersede the current status.
+
+
 ## Current read-only history integration (22 October)
 
 Unpublished39fb329c supplies original Workflow retirement observation/native snapshot; the

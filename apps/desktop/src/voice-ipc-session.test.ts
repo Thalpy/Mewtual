@@ -53,6 +53,7 @@ async function fixture(t: TestContext, sharedBroker?: VoiceCryptoBroker, identit
   let observedStep = -1;
   let now = 0, timerSerial = 0, hostileHeaders = false, hangFetch = false, fetchAborted = false, fetchEntered = false;
   const timers = new Map<number, { at: number; run(): void }>();
+  let timerPeak = 0, scheduleHook: (() => void) | null = null;
   let fetchCancel: ReturnType<typeof gate> | null = null;
   const engine = new Proxy(real, { get(target, name) {
     const value = Reflect.get(target, name);
@@ -69,7 +70,10 @@ async function fixture(t: TestContext, sharedBroker?: VoiceCryptoBroker, identit
   const owner = createVoiceCryptoOwner(identitySeed === 1 ? "native-owner" : `native-owner-${identitySeed}`, hash(identitySeed), () => true);
   const admission = { async admit() { ordinary++; return "ordinary"; }, async settle() {}, async commitInbound() {} };
   const broker = sharedBroker ?? new VoiceCryptoBroker(admission, engine, () => now, {
-    now: () => now, schedule(run, ms) { const id = ++timerSerial; timers.set(id, { at: now + ms, run }); return id; },
+    now: () => now, schedule(run, ms) {
+      const id = ++timerSerial; timers.set(id, { at: now + ms, run }); timerPeak = Math.max(timerPeak, timers.size);
+      const hook = scheduleHook; scheduleHook = null; hook?.(); return id;
+    },
     cancel(id) { timers.delete(id as number); },
   });
   const selectedNative: VoiceSelectedKeyNative = {
@@ -198,6 +202,11 @@ async function fixture(t: TestContext, sharedBroker?: VoiceCryptoBroker, identit
     stallBody() { stalled = true; cancelGate = gate(); return { entered: () => cancelEntered, release: cancelGate.release }; },
     hostileHeaders() { hostileHeaders = true; },
     hangFetch() { hangFetch = true; fetchCancel = gate(); return { entered: () => fetchEntered, aborted: () => fetchAborted, release() { hangFetch = false; fetchCancel!.release(); } }; },
+    timers: () => ({ pending: timers.size, peak: timerPeak, callbacks: [...timers.values()].map(timer => timer.run) }),
+    fireTimerEarly() {
+      assert.equal(timers.size, 1); const [id, timer] = [...timers][0]; timers.delete(id); timer.run();
+    },
+    onSchedule(work: () => void) { scheduleHook = work; },
     advance(ms: number) { now += ms; for (const [id, timer] of [...timers]) if (timer.at <= now) { timers.delete(id); timer.run(); } },
   };
 }
@@ -295,6 +304,9 @@ test("End with a provider and queued channel retains cleanup transport until exa
   // End legitimately returns the eleven unused fixed row claims. Actual row0,96KiB
   // variable copies and original key/control custody must still remain until their owners drain.
   assert.equal(f.broker.counts().bytes, charged - 11 * 2048);
+  f.advance(2_000); await new Promise<void>(yes => setImmediate(yes));
+  assert.equal(f.timers().pending, 0, "cleanup cadence cannot precede actual linked provider drainage");
+  assert.equal(f.counts().settlements, 0);
   provider.release(); await until(() => linked.counts().settlements === 1);
   assert.equal(closed, false); assert.equal(f.counts().settlements, 0); assert.equal(f.counts().collections, 0);
   assert.ok(f.broker.counts().bytes > 0, "original key/control/chain custody stays retained");
@@ -465,6 +477,9 @@ test("End waits for actual body cancellation before exact native cleanup or loca
   assert.equal((await pending).kind, "retired"); await until(cancellation.entered);
   assert.equal(f.broker.counts().active, 1); assert.equal(f.broker.counts().bytes, before.bytes);
   assert.equal(f.counts().settlements, 0);
+  f.advance(2_000); await new Promise<void>(yes => setImmediate(yes));
+  assert.equal(f.counts().settlements, 0, "cleanup cadence cannot run ahead of actual read cancellation");
+  assert.equal(f.timers().pending, 1, "only the original five-second IO deadline remains");
   cancellation.release(); await until(() => f.broker.counts().active === 0);
   assert.equal(f.counts().settlements, 1);
 });
@@ -488,6 +503,132 @@ test("lost final collection reply retains original custody and retries only that
   f.broker.retrySelectedJoinKeys(); await closed;
   assert.equal(f.counts().collections, 2); assert.equal(f.counts().settlements, 1);
   assert.equal(f.counts().steps.length, steps, "lost final reply never re-derives, seals or reopens");
+});
+
+test("cleanup cadence retries a lost setup-close reply without availability or another SDK operation", async t => {
+  const f = await fixture(t), channel = f.channel(); await channel.status(); f.loseSettle();
+  const before = f.counts(), paid = f.broker.counts().bytes;
+  let closed = false; const close = channel.close().then(() => { closed = true; });
+  await until(() => f.timers().pending === 1);
+  assert.equal(f.counts().settlements, 1); assert.equal(f.counts().collections, 0);
+  assert.equal(f.broker.counts().active, 1); assert.equal(f.broker.counts().bytes, paid);
+  f.advance(999); await new Promise<void>(yes => setImmediate(yes));
+  assert.equal(closed, false); assert.equal(f.counts().settlements, 1);
+  f.advance(1); await close; await until(() => f.broker.counts().active === 0);
+  assert.equal(f.counts().settlements, 2); assert.equal(f.counts().collections, 1);
+  assert.deepEqual(f.counts().steps, before.steps); assert.deepEqual(f.counts().tx, before.tx);
+  assert.equal(f.counts().setups, before.setups); assert.equal(f.timers().pending, 0);
+  assert.equal(f.timers().peak, 1);
+  f.owner.retire(); assert.equal(f.broker.counts().bytes, 0);
+});
+
+test("cleanup cadence retries only final collection after its reply is lost", async t => {
+  const f = await fixture(t), channel = f.channel(); await channel.status(); f.loseCollection();
+  const before = f.counts(), paid = f.broker.counts().bytes;
+  const close = channel.close(); await until(() => f.timers().pending === 1);
+  assert.equal(f.counts().settlements, 1); assert.equal(f.counts().collections, 1);
+  assert.equal(f.broker.counts().bytes, paid);
+  f.advance(1_000); await close; await until(() => f.broker.counts().active === 0);
+  assert.equal(f.counts().settlements, 1); assert.equal(f.counts().collections, 2);
+  assert.deepEqual(f.counts().steps, before.steps); assert.deepEqual(f.counts().tx, before.tx);
+  assert.equal(f.timers().pending, 0); assert.equal(f.timers().peak, 1);
+});
+
+test("cleanup early timer firing rearms only the remainder of the original interval", async t => {
+  const f = await fixture(t), channel = f.channel(); await channel.status(); f.loseSettle();
+  const close = channel.close(); await until(() => f.timers().pending === 1);
+  f.advance(400); f.fireTimerEarly(); await new Promise<void>(yes => setImmediate(yes));
+  assert.equal(f.counts().settlements, 1); assert.equal(f.timers().pending, 1);
+  assert.equal(f.timers().peak, 1);
+  f.advance(599); await new Promise<void>(yes => setImmediate(yes));
+  assert.equal(f.counts().settlements, 1);
+  f.advance(1); await close; await until(() => f.broker.counts().active === 0);
+  assert.equal(f.counts().settlements, 2); assert.equal(f.timers().pending, 0);
+});
+
+test("cleanup availability and stale cancelled timer callbacks cannot duplicate or wake a later retry", async t => {
+  const f = await fixture(t), channel = f.channel(); await channel.status(); f.loseSettle();
+  const close = channel.close(); await until(() => f.timers().pending === 1);
+  const stale = f.timers().callbacks[0];
+  f.loseSettle(); f.broker.retrySelectedJoinKeys();
+  await until(() => f.counts().settlements === 2 && f.timers().pending === 1);
+  stale(); await new Promise<void>(yes => setImmediate(yes));
+  assert.equal(f.counts().settlements, 2); assert.equal(f.timers().pending, 1);
+  f.advance(999); await new Promise<void>(yes => setImmediate(yes));
+  assert.equal(f.counts().settlements, 2);
+  f.advance(1); await close; await until(() => f.broker.counts().active === 0);
+  stale(); assert.equal(f.counts().settlements, 3); assert.equal(f.timers().pending, 0);
+  assert.equal(f.timers().peak, 1);
+});
+
+test("cleanup consumes availability during a refused RPC and during timer installation", async t => {
+  for (const duringSchedule of [false, true]) {
+    const f = await fixture(t), channel = f.channel(); await channel.status();
+    const original = f.native.settleSetup; let calls = 0;
+    f.cleanup(() => { f.native.settleSetup = original; });
+    f.native.settleSetup = async (...args) => {
+      if (++calls === 1) {
+        if (duringSchedule) f.onSchedule(() => f.broker.retrySelectedJoinKeys());
+        else f.broker.retrySelectedJoinKeys();
+        throw new Error("original native state temporarily busy");
+      }
+      await original(...args);
+    };
+    await channel.close(); await until(() => f.broker.counts().active === 0);
+    assert.equal(calls, 2); assert.equal(f.timers().pending, 0);
+    assert.equal(f.timers().peak, 1);
+  }
+});
+
+test("cleanup repeated refusal owns one timer and a large clock jump admits only one retry", async t => {
+  const f = await fixture(t), channel = f.channel(); await channel.status();
+  const before = f.counts(), paid = f.broker.counts().bytes;
+  const original = f.native.settleSetup; let calls = 0;
+  f.cleanup(() => { f.native.settleSetup = original; });
+  f.native.settleSetup = async (...args) => { if (++calls <= 4) throw new Error("native capacity"); await original(...args); };
+  const close = channel.close(); await until(() => f.timers().pending === 1);
+  for (let expected = 2; expected <= 4; expected++) {
+    f.advance(100_000); await until(() => calls === expected && f.timers().pending === 1);
+    await new Promise<void>(yes => setImmediate(yes));
+    assert.equal(calls, expected, "no catch-up loop for missed intervals");
+    assert.equal(f.broker.counts().active, 1); assert.equal(f.broker.counts().bytes, paid);
+    assert.equal(f.timers().pending, 1); assert.equal(f.timers().peak, 1);
+  }
+  f.advance(999); await new Promise<void>(yes => setImmediate(yes)); assert.equal(calls, 4);
+  f.advance(1); await close; await until(() => f.broker.counts().active === 0);
+  assert.equal(calls, 5); assert.equal(f.timers().pending, 0);
+  assert.deepEqual(f.counts().steps, before.steps); assert.deepEqual(f.counts().tx, before.tx);
+});
+
+test("cleanup never arms its cadence or overlaps a still-pending native RPC", async t => {
+  const f = await fixture(t), channel = f.channel(); await channel.status();
+  const held = gate(), original = f.native.settleSetup; let calls = 0;
+  f.cleanup(() => { held.release(); f.native.settleSetup = original; });
+  f.native.settleSetup = async (...args) => {
+    if (++calls === 1) { await held.promise; throw new Error("native reply lost after delayed completion"); }
+    await original(...args);
+  };
+  let done = false; const close = channel.close().then(() => { done = true; }); await until(() => calls === 1);
+  f.advance(100_000); await new Promise<void>(yes => setImmediate(yes));
+  assert.equal(calls, 1); assert.equal(f.timers().pending, 0); assert.equal(done, false);
+  held.release(); await until(() => f.timers().pending === 1);
+  f.advance(1_000); await close; await until(() => f.broker.counts().active === 0);
+  assert.equal(calls, 2); assert.equal(f.timers().pending, 0);
+});
+
+test("a channel waiting for cleanup cadence does not prevent a different group channel progressing", async t => {
+  const first = await fixture(t), firstChannel = first.channel(); await firstChannel.status();
+  // Create the second selected key before cleanup owns its reserved first position.
+  const second = await fixture(t, first.broker, 2), secondChannel = second.channel();
+  first.loseSettle(); const close = firstChannel.close(); await until(() => first.timers().pending === 1);
+  assert.equal(first.timers().peak, 1, "the first channel owns only its one cleanup timer");
+  assert.equal((await secondChannel.status()).kind, "ready");
+  first.advance(1_000); await close; await secondChannel.close();
+  await until(() => first.broker.counts().active === 0);
+  assert.equal(first.timers().pending, 0);
+  assert.equal(first.timers().peak, 2, "one cleanup timer and the other channel's original IO deadline");
+  first.owner.retire(); second.owner.retire();
+  assert.equal(first.broker.counts().bytes, 0);
 });
 
 test("occupied browser positions reject channel before native setup, then the original handle can proceed", async t => {
@@ -517,7 +658,7 @@ test("absolute IO deadline aborts stale-port fetch but retains custody until act
   assert.equal((await channel.status()).kind, "ready"); assert.deepEqual(f.counts().tx, [2n]);
 });
 
-for (const version of [7, 8, 9, 10]) test(`HMR refuses v${version} retained pool rather than creating a second channel allocator`, () => {
+for (const version of [7, 8, 9, 10, 11]) test(`HMR refuses v${version} retained pool rather than creating a second channel allocator`, () => {
   const host = { [Symbol.for("mewtual.voice.crypto-broker.v2")]: { version } };
   const native = { async admit() { return ""; }, async settle() {}, async commitInbound() {} };
   assert.throws(() => windowVoiceCryptoBroker(native, host, real), /reload required/);
@@ -709,7 +850,11 @@ test("the bounded history graph fits the original 8KiB Control payment with its 
   // native metadata and one immutable request+response header record with string fields.
   const buffers = request.body.length + request.body.length + 16 + 40 + 32 + 12 +
     144 + 288 + 40 + 32 + 258 + 242 + 1 + 80 + 12;
-  const graph = buffers + strings(historyPurpose) + 64 + largestReply + 2 * (64 + 10 * 8) + 4096;
+  // The original driver's cleanup wait owns one timer handle/callback/deadline and ONE
+  // existing Signal, never Promise.race waiters. Add a structural wrapper allowance; this
+  // remains no claim about implementation-specific SDK/timer/Promise heap allocation.
+  const cleanupWait = 256;
+  const graph = buffers + strings(historyPurpose) + 64 + largestReply + 2 * (64 + 10 * 8) + 4096 + cleanupWait;
   assert.ok(graph <= 8192, `history payload/wrapper envelope ${graph}/8192`);
   // One query slot in the original driver, not a new map or a fresh ordinary permit.
   const source = readFileSync(new URL("./voice-crypto.ts", import.meta.url), "utf8");

@@ -1,5 +1,43 @@
 # Mewtual; Handover
 
+## Active final-proof retention and cleanup retry candidate (22 October)
+
+Isolated `target/communication-final-proof-worktree` follows frozen `e560d319`. Native
+compaction retains the same already-paid Phase only when final confirmation closure was
+requested. Its original affine Root observer survives caller loss and local compaction;
+ordinary continuation retains no Phase. No Action/Input/Workflow or fresh reservation is
+retained. `ResolvedRow::confirmation_status` is a native-only snapshot, including after
+compaction. Unknown/orphan rows remain errors; ClosedPending cannot invent Root retirement.
+
+Channel closure and independent history GC require a requested final proof to be ready.
+Compaction itself drops Live outside native locks before requiring Root readiness. Existing
+Row/Phase/codec/listener payments and layout limits are unchanged. Seven native regressions
+cover full-pool compaction, actual late Root input retirement, concurrent compaction, ordinary
+and orphan rows, independent real-registry collection and both actual bootstrap finish paths.
+All **199 focused native handoff tests pass** (4.88s tests;56.53s gate), including
+existing Row/Phase/codec/listener layout guards. Full/static/build gates remain pending.
+
+Browser broker v12 retries exact setup/channel cleanup after a rejected native RPC using one
+injected-Clock timer in the original paid driver. Timer and availability resolve the same
+Signal; stale callbacks cannot wake a later wait, and a large clock jump causes one retry.
+Pending RPCs never overlap. SDK/read cancellation and linked-chain drainage still precede
+cleanup. Ordinary action retries remain availability-driven. Old retained brokers through v11
+refuse HMR adoption. The existing 8 KiB structural inventory includes the cleanup wrapper;
+it does not measure arbitrary JavaScript/SDK/GC heaps or RSS.
+
+Focused browser/request/reply checks pass **139/139** (1.95s). One earlier assertion expected
+one aggregate timer for two channels; it now distinguishes cleanup from the other channel's
+IO deadline. The log is retained. The previous candidate's full Root suite passed **3,254**,
+zero failures, 24 existing ignored. Root workspace inputs/dependencies are unchanged here.
+Actual-diff adversarial design/review/re-review found no blocker/high/medium; final gates
+remain pending. Initial native focus198/1 is retained: that test dropped LocalJoin and correctly
+revoked the call lease; the corrected test keeps that real owner alive without weakening checks.
+
+Final wire dispatch remains disabled. This change does not implement authenticated post-End
+final exchange, issuance/ACK, action adapters or normal Actor/MLS/WebView action acceptance.
+The future final driver must compose its original Session/keys with this cleanup cadence.
+Live V2/RTC, relay, combined and independent physical acceptance remain unfinished.
+
 ## Validated native/browser history checkpoint (22 October)
 
 Frozen runtime `e560d319fa72727b3298f96396307cfef4ea2ad1` passed all required local gates. Publication
