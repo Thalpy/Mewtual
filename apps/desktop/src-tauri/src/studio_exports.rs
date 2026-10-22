@@ -229,7 +229,14 @@ where
 
 /// Bytes written and synced to a `.part` beside an absent final name. Publication atomically
 /// refuses a destination created by another local action. Dropping it removes only staging.
+///
+/// PR51 H1/M1: the staging handle stays open for the whole life of the stage. Publication names
+/// exactly its object (`publish_unjournaled`), and the staging name is only ever removed while it
+/// still proves to be that object; a name swapped in meanwhile, or (Unix) a Downloads folder other
+/// accounts can modify, is left alone. Dropping an unpublished stage on a runtime worker does that
+/// short check-and-delete there, as the plain delete before it did.
 struct StagedGif {
+    file: std::fs::File,
     staging: PathBuf,
     path: PathBuf,
     published: bool,
@@ -237,18 +244,20 @@ struct StagedGif {
 
 impl StagedGif {
     fn publish(&mut self) -> Result<(), String> {
-        self.publish_with_cleanup(|path| std::fs::remove_file(path))
+        self.publish_with_cleanup(|file, path| remove_staging(file, path).map(drop))
     }
 
+    /// `cleanup` removes the staging name after a committed link; a test seam for its failure.
     fn publish_with_cleanup(
         &mut self,
-        cleanup: impl FnOnce(&Path) -> std::io::Result<()>,
+        cleanup: impl FnOnce(&std::fs::File, &Path) -> std::io::Result<()>,
     ) -> Result<(), String> {
+        let file = &self.file;
         publish_staged_download_with(
             &self.staging,
             &self.path,
-            |from, to| std::fs::hard_link(from, to),
-            cleanup,
+            |from, to| catcoms_storage::kept::publish_unjournaled(file, from, to),
+            |path| cleanup(file, path),
         )?;
         self.published = true;
         Ok(())
@@ -258,7 +267,9 @@ impl StagedGif {
 impl Drop for StagedGif {
     fn drop(&mut self) {
         if !self.published {
-            let _ = std::fs::remove_file(&self.staging);
+            // The handle is still open here (fields drop after this body), so the number the
+            // removal verifies cannot belong to another file yet.
+            let _ = remove_staging(&self.file, &self.staging);
         }
     }
 }
@@ -273,13 +284,14 @@ fn stage_gif(
     mut before_chunk: impl FnMut(),
 ) -> Result<StagedGif, String> {
     let (file, staging, path) = create_staged_download(downloads, GIF_NAME)?;
-    let staged = StagedGif {
+    let mut staged = StagedGif {
+        file,
         staging,
         path,
         published: false,
     };
-    // The handle closes when this returns, before any failure path removes the files.
-    write_staging(file, gif, &cancelled, &mut before_chunk)?;
+    // A failure drops `staged`, which removes the staging name through its still-open handle.
+    write_staging(&mut staged.file, gif, &cancelled, &mut before_chunk)?;
     if cancelled() {
         return Err("request cancelled".into());
     }
@@ -287,7 +299,7 @@ fn stage_gif(
 }
 
 fn write_staging(
-    mut file: std::fs::File,
+    file: &mut std::fs::File,
     gif: &[u8],
     cancelled: &impl Fn() -> bool,
     before_chunk: &mut impl FnMut(),

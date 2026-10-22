@@ -30,7 +30,7 @@ fn partial() -> (tempfile::TempDir, PathBuf, ExportJournal) {
         chunks: vec![chunk],
     };
     let plan = ExportPlan::from_manifest(&manifest).unwrap();
-    let file = ExportFile::create(&downloads, "notes.txt", plan).unwrap();
+    let file = ExportFile::create(&downloads, "notes.txt", plan, &mut OsCryptoRng).unwrap();
     let journal = file.journal().clone();
     drop(file); // the session ended (Pause, Lock or a crash); the partial stays
     let staging = downloads.join("notes.txt.mewtual-part");
@@ -99,7 +99,7 @@ impl CleanupPorts for Arc<Fake> {
             None
         })
     }
-    fn remover(&self, journal: ExportJournal) -> Result<Remover, String> {
+    fn remover(&self, journal: ExportJournal, published: bool) -> Result<Remover, String> {
         // The first delete waits at the barrier inside the blocking worker, after the claim moved
         // there and before the real `remove_partial`.
         let gate = self.gate.lock().unwrap().take();
@@ -113,7 +113,7 @@ impl CleanupPorts for Arc<Fake> {
             }
             fake.deletes
                 .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            remove_partial(&journal)
+            remove_partial(&journal, published, &mut OsCryptoRng)
         }))
     }
     async fn presence(&self, journal: ExportJournal) -> Result<PartialPresence, String> {
@@ -449,6 +449,11 @@ async fn a_recovered_save_clears_only_the_record_it_recovered() {
     // same record (or still holds the claim). The late cleanup must leave that record and its run
     // alone and report no failure (which would become a false "could not be removed" warning).
     let (_root, staging, journal) = partial();
+    // A real published save: the final name is a second name of the same file. (PR51 M2: a
+    // Published record whose final name is missing keeps its staging name as the only copy, so
+    // this fixture must link the final name for "our staging name goes" to hold.)
+    let saved = staging.with_file_name("notes.txt");
+    std::fs::hard_link(&staging, &saved).unwrap();
     let (fake, release, _inside) = Fake::new(&journal);
     drop(release); // no barrier: the one delete below runs straight through
     fake.record.lock().unwrap().export = Some(ExportState::Published(journal.clone()));
@@ -476,6 +481,30 @@ async fn a_recovered_save_clears_only_the_record_it_recovered() {
     );
     assert!(!fake.exists());
     assert!(!staging.exists());
+    assert!(saved.exists(), "the saved file is never deleted");
+}
+
+/// PR51 M2: clearing a saved row whose final name is gone (lost to a power failure that a folder
+/// flush could not prevent, or moved) must never delete the staging name, which is then the only
+/// copy of the saved file.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn clearing_a_saved_row_keeps_the_only_copy_when_its_final_name_is_gone() {
+    let (_root, staging, journal) = partial();
+    let (fake, release, _inside) = Fake::new(&journal);
+    drop(release);
+    fake.record.lock().unwrap().export = Some(ExportState::Published(journal.clone()));
+    let claim = CleanupClaim::acquire(7, id(0xA9)).unwrap();
+    let notice = remove_sequence(&fake, claim, false).await.unwrap();
+    assert_eq!(notice, PartialRemoval::KeptOnlyCopy.notice(true));
+    assert!(
+        notice.unwrap().contains(".mewtual-part"),
+        "says where it is"
+    );
+    assert!(staging.exists(), "the only copy is kept");
+    assert!(
+        !fake.exists(),
+        "the row is cleared, never shown as saved again"
+    );
 }
 
 #[test]

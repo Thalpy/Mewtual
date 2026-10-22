@@ -37,6 +37,8 @@ enum Event {
     Begin,
     Resume,
     Checkpoint(usize),
+    /// The destination folder flush (PR51 M2), recorded with the final name it must follow.
+    Flush,
     Publish,
     Halt,
     Recover,
@@ -66,6 +68,8 @@ struct Fake {
     /// The actor refuses Begin (for example the record's remembered choice is not this journal's
     /// place, or the record was replaced meanwhile).
     refuse_begin: AtomicBool,
+    /// Lock lands during the folder flush, after the link and before Published (PR51 M2).
+    lock_at_flush: AtomicBool,
 }
 impl Fake {
     fn new(folder: &Path) -> Arc<Self> {
@@ -85,6 +89,7 @@ impl Fake {
             take_final_name: AtomicUsize::new(0),
             folder: folder.to_owned(),
             backoffs: AtomicUsize::new(0),
+            lock_at_flush: AtomicBool::new(false),
         })
     }
     fn events(&self) -> Vec<Event> {
@@ -200,6 +205,22 @@ impl ExportPorts for Arc<Fake> {
     async fn backoff(&self, _delay: Duration) {
         self.backoffs.fetch_add(1, AtomicOrdering::SeqCst);
     }
+    async fn flush(&self, journal: ExportJournal) {
+        // PR51 M2: the flush follows the link (the final name it must make durable exists) and
+        // runs outside the commit guard, so a slow flush never delays Lock.
+        assert!(
+            self.folder.join(journal.final_name()).exists(),
+            "the folder is flushed only after the final name is linked"
+        );
+        assert!(
+            !self.guard.load(AtomicOrdering::SeqCst),
+            "the flush runs outside the session commit guard"
+        );
+        if self.lock_at_flush.load(AtomicOrdering::SeqCst) {
+            self.live.store(false, AtomicOrdering::SeqCst);
+        }
+        self.events.lock().unwrap().push(Event::Flush);
+    }
 }
 
 fn downloads() -> (tempfile::TempDir, PathBuf) {
@@ -224,8 +245,14 @@ async fn a_save_checkpoints_before_linking_and_records_published_under_the_guard
     assert!(!folder.join("notes.txt.mewtual-part").exists());
     assert_eq!(
         fake.events(),
-        [Event::Begin, Event::Checkpoint(2), Event::Publish],
-        "the every-chunk checkpoint is durable before the link"
+        [
+            Event::Begin,
+            Event::Checkpoint(2),
+            Event::Flush,
+            Event::Publish
+        ],
+        "the every-chunk checkpoint is durable before the link, and the folder flush (after the \
+         link) before Published"
     );
     assert!(fake.published());
     assert!(
@@ -290,7 +317,12 @@ async fn a_save_as_choice_saves_at_the_exact_chosen_name_through_the_same_sequen
     assert_eq!(std::fs::read(&exported.path).unwrap(), DATA.concat());
     assert_eq!(
         fake.events(),
-        [Event::Begin, Event::Checkpoint(2), Event::Publish]
+        [
+            Event::Begin,
+            Event::Checkpoint(2),
+            Event::Flush,
+            Event::Publish
+        ]
     );
     assert_eq!(std::fs::read_dir(&folder).unwrap().count(), 1);
     assert_eq!(
@@ -391,11 +423,48 @@ async fn a_publish_failure_after_the_link_is_recovered_by_the_next_resume_withou
         .unwrap();
     assert_eq!(exported.path, folder.join("notes.txt"));
     assert!(exported.staging_cleared);
-    assert!(fake.events().ends_with(&[Event::Recover]));
+    // PR51 M2: the recovered final name is flushed before Published is recorded, too.
+    assert!(fake.events().ends_with(&[Event::Flush, Event::Recover]));
     assert!(fake.published());
     assert!(!folder.join("notes.txt.mewtual-part").exists());
     assert!(!folder.join("notes (1).txt").exists(), "no second copy");
     assert_eq!(std::fs::read(&exported.path).unwrap(), DATA.concat());
+}
+
+/// PR51 M2: Published waits for the folder flush, and that flush runs outside the commit guard, so
+/// Lock can win the gap between them. Then nothing is recorded as saved: the record keeps the
+/// every-chunk journal with our final name linked (crash-table row 6), and the next explicit
+/// Resume recovers it (flush, then Published) without making a second copy.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_lock_between_the_flush_and_published_records_nothing_and_resume_recovers() {
+    let (_root, folder) = downloads();
+    let fake = Fake::new(&folder);
+    fake.lock_at_flush.store(true, AtomicOrdering::SeqCst);
+    let destination = Destination::Downloads(folder.clone());
+    assert!(
+        export_sequence(&fake, good_plan(), &destination, "notes.txt")
+            .await
+            .is_err(),
+        "the second guard refuses once Lock has won"
+    );
+    assert_eq!(
+        fake.events(),
+        [Event::Begin, Event::Checkpoint(2), Event::Flush],
+        "no Published without the guard"
+    );
+    assert!(!fake.published());
+    assert_eq!(fake.written_chunks(), Some(DATA.len()));
+    assert!(folder.join("notes.txt").exists(), "the link was made");
+    fake.lock_at_flush.store(false, AtomicOrdering::SeqCst);
+    fake.live.store(true, AtomicOrdering::SeqCst);
+    let exported = export_sequence(&fake, good_plan(), &destination, "notes.txt")
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(exported.path, folder.join("notes.txt"));
+    assert!(fake.events().ends_with(&[Event::Flush, Event::Recover]));
+    assert!(fake.published());
+    assert!(!folder.join("notes (1).txt").exists(), "no second copy");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

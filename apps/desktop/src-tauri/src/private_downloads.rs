@@ -289,7 +289,9 @@ pub(super) trait CleanupPorts: Send + Sync {
     async fn export_state(&self) -> Result<Option<ExportState>, String>;
     /// The blocking work that deletes the proven partial. [`delete_owned`] runs it on a worker
     /// that also owns the claim, so the claim lasts exactly as long as the delete can happen.
-    fn remover(&self, journal: ExportJournal) -> Result<Remover, String>;
+    /// `published` tells the removal that the record was already saved, so a staging name that is
+    /// the only remaining copy is kept (PR51 M2).
+    fn remover(&self, journal: ExportJournal, published: bool) -> Result<Remover, String>;
     /// Read-only: is anything of this save still on disk? Best effort: production answers
     /// `Unknown` at once when no cleanup slot is free, and [`remove_sequence`] stops waiting after
     /// [`KEEP_PRESENCE_WAIT`] (re-review 2 MEDIUM).
@@ -329,13 +331,14 @@ impl CleanupPorts for ActorCleanup<'_> {
     async fn export_state(&self) -> Result<Option<ExportState>, String> {
         self.actor.download_export_state(self.id).await
     }
-    fn remover(&self, journal: ExportJournal) -> Result<Remover, String> {
+    fn remover(&self, journal: ExportJournal, published: bool) -> Result<Remover, String> {
         // Review L9: a bounded number of cleanup workers, so a compromised renderer cannot pin
         // unlimited blocking threads on a stalled volume. The permit moves into the worker.
         let slot = cleanup_slot()?;
         Ok(Box::new(move || {
             let _slot = slot;
-            remove_partial(&journal)
+            // PR51 H1: the verified removal draws its Unix "removing" name from the RNG seam.
+            remove_partial(&journal, published, &mut OsCryptoRng)
         }))
     }
     async fn presence(&self, journal: ExportJournal) -> Result<PartialPresence, String> {
@@ -437,9 +440,10 @@ pub(super) type Remover = Box<dyn FnOnce() -> Result<PartialRemoval, ExportError
 async fn delete_owned(
     ports: &impl CleanupPorts,
     journal: ExportJournal,
+    published: bool,
     claim: &CleanupClaim,
 ) -> Result<Result<PartialRemoval, ExportError>, String> {
-    let work = ports.remover(journal)?;
+    let work = ports.remover(journal, published)?;
     let claim = claim.clone();
     blocking(move || {
         let _claim = claim;
@@ -478,7 +482,7 @@ pub(super) async fn remove_sequence(
     } else {
         // Only an outcome that settles the question may forget the journal. A partial that cannot
         // be checked right now stays tracked in Removing.
-        match delete_owned(ports, journal, &claim).await? {
+        match delete_owned(ports, journal, published, &claim).await? {
             Ok(outcome) if outcome.settled() => outcome.notice(published),
             Ok(PartialRemoval::FolderUnreachable) => return Err(REMOVE_UNREACHABLE.into()),
             Ok(_) | Err(_) => return Err(REMOVE_RETRY.into()),
@@ -939,7 +943,7 @@ pub(super) async fn abandon_sequence(
     // then stays wherever it is, and the user is told. A reachable partial that cannot be checked
     // is not forgotten.
     let notice =
-        match delete_owned(ports, journal, &claim).await? {
+        match delete_owned(ports, journal, published, &claim).await? {
             Ok(PartialRemoval::FolderUnreachable) => Some(OLD_PARTIAL_UNREACHABLE),
             Ok(outcome) if outcome.settled() => outcome.notice(published),
             Ok(_) | Err(_) => return Err(
@@ -1176,6 +1180,9 @@ pub(super) trait ExportPorts: Send + Sync {
     fn progress(&self, progress: ExportProgress);
     /// Sanctioned-clock backoff between bounded local retries.
     async fn backoff(&self, delay: Duration);
+    /// Best-effort flush of the destination folder after the link and before Published (PR51
+    /// M2). Production runs it on the blocking pool; a refusal does not fail the save.
+    async fn flush(&self, journal: ExportJournal);
 }
 
 /// An owned liveness check for blocking workers (see [`ExportPorts::liveness`]).
@@ -1251,6 +1258,9 @@ impl ExportPorts for ActorExport<'_> {
     }
     async fn backoff(&self, delay: Duration) {
         SystemClock.sleep(delay).await;
+    }
+    async fn flush(&self, journal: ExportJournal) {
+        let _ = blocking(move || flush_destination(&journal)).await;
     }
 }
 
@@ -1395,11 +1405,13 @@ pub(super) async fn export_sequence(
             let created = match destination {
                 Destination::Downloads(folder) => {
                     let (folder, name) = (folder.clone(), base.clone());
-                    blocking(move || ExportFile::create(&folder, &name, plan)).await?
+                    blocking(move || ExportFile::create(&folder, &name, plan, &mut OsCryptoRng))
+                        .await?
                 }
                 Destination::Chosen(choice) => {
                     let choice = choice.clone();
-                    blocking(move || ExportFile::create_chosen(&choice, plan)).await?
+                    blocking(move || ExportFile::create_chosen(&choice, plan, &mut OsCryptoRng))
+                        .await?
                 }
             };
             let file = match created {
@@ -1414,7 +1426,7 @@ pub(super) async fn export_sequence(
                 })
                 .await;
             if let Err(error) = begun {
-                let _ = blocking(move || file.discard()).await;
+                let _ = blocking(move || file.discard(&mut OsCryptoRng)).await;
                 return Err(user_message(error));
             }
             OnPool::new(file)
@@ -1443,6 +1455,9 @@ pub(super) async fn export_sequence(
                 }
                 // The reopen verified the content read-only against this manifest (review U-M2).
                 ExportReopen::Published(path) => {
+                    // PR51 M2: the final name an interrupted session linked may not be durable
+                    // yet; flush the folder before Published is recorded, as a fresh link does.
+                    ports.flush(journal.clone()).await;
                     ports
                         .transition(DownloadExportTransition::RecoverPublished {
                             expected: journal.clone(),
@@ -1452,7 +1467,10 @@ pub(super) async fn export_sequence(
                     // The caller releases the record next; drop our second (staging) name first,
                     // and keep the record if that cannot be settled (review L3).
                     let staging_cleared = blocking(move || {
-                        matches!(remove_partial(&journal), Ok(outcome) if outcome.settled())
+                        matches!(
+                            remove_partial(&journal, true, &mut OsCryptoRng),
+                            Ok(outcome) if outcome.cleared_staging()
+                        )
                     })
                     .await?;
                     return Ok(Some(Exported {
@@ -1534,10 +1552,10 @@ pub(super) async fn export_sequence(
             file.get_mut().checkpointed(journal);
         }
         let linked = {
-            // Guard: the staging recheck, the link, the final-name check and Published. Pause,
-            // Remove and Lock take the same guard, so exactly one of them or publication wins.
+            // Guard: the staging recheck, the link and the final-name check. Pause, Remove and
+            // Lock take the same guard, so exactly one of them or the link wins.
             let _commit = ports.commit().await?;
-            let linked = match already {
+            match already {
                 Some(path) => Ok(path),
                 None => {
                     let mut session = file.take();
@@ -1549,16 +1567,27 @@ pub(super) async fn export_sequence(
                     file.put(session);
                     linked
                 }
-            };
-            if linked.is_ok() {
+            }
+        };
+        let linked = match linked {
+            Ok(path) => {
+                // PR51 M2: make the new name durable BEFORE recording Published, so an
+                // acknowledged save cannot lose its final name to a power failure that a later
+                // folder flush would have prevented. Outside the guard, so a slow flush cannot
+                // delay Lock (best effort: some network filesystems refuse folder flushes).
+                ports.flush(file.get().published_journal()).await;
+                // Second guard: Published. A Lock that wins the gap leaves Writing(all) with our
+                // final name linked: crash-table row 6, which the next Resume recovers.
+                let _commit = ports.commit().await?;
                 ports
                     .transition(DownloadExportTransition::Publish {
                         expected: file.get().published_journal(),
                     })
                     .await
                     .map_err(user_message)?;
+                Ok(path)
             }
-            linked
+            Err(error) => Err(error),
         };
         match linked {
             Ok(path) => break path,
@@ -1585,14 +1614,10 @@ pub(super) async fn export_sequence(
             Err(error) => return Err(stop(ports, file, error).await),
         }
     };
-    // After the guard: best-effort folder flush and removal of our staging name.
-    let journal = file.get().published_journal();
+    // After the guard: removal of our staging name (verified, PR51 H1). The folder was flushed
+    // before Published; the removal flushes the folder itself on Unix.
     let session = file.take();
-    let staging_cleared = blocking(move || {
-        flush_destination(&journal);
-        session.finish()
-    })
-    .await?;
+    let staging_cleared = blocking(move || session.finish(&mut OsCryptoRng)).await?;
     Ok(Some(Exported {
         path,
         staging_cleared,

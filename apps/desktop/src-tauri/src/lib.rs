@@ -13829,10 +13829,60 @@ fn create_download(
 fn write_download(downloads: &Path, requested_name: &str, bytes: &[u8]) -> Result<PathBuf, String> {
     let (mut file, path) = create_download(downloads, requested_name)?;
     if let Err(error) = file.write_all(bytes) {
-        let _ = std::fs::remove_file(&path);
-        return Err(error.to_string());
+        // PR51 H1: only while the name still holds the file this call created and still holds.
+        let removal = remove_staging(&file, &path);
+        return Err(format!("{error}{}", left_in_place(&path, &removal)));
     }
     Ok(path)
+}
+
+/// Remove a name this process created exclusively and whose handle it still holds (PR51 H1): the
+/// `.part` of the fallback writer or the GIF export, or a small download whose write failed.
+/// Storage deletes it only while it still holds the object behind `file` (Windows: through a
+/// delete-denying handle verified to be that object; Unix: renamed aside, verified, then unlinked,
+/// and never in a folder other accounts can modify). Holding `file` meanwhile keeps that object's
+/// number from being reused for another file. Never deletes anything it did not verify.
+fn remove_staging(
+    file: &std::fs::File,
+    path: &Path,
+) -> std::io::Result<catcoms_storage::kept::SessionRemoval> {
+    let id = catcoms_storage::kept::session_id(file)?;
+    remove_staging_by_id(id, path)
+}
+
+/// [`remove_staging`] with the number captured when the file was created, for a failure path
+/// whose handle a panicking worker may already have dropped. Prefer [`remove_staging`] whenever
+/// the handle is still held.
+fn remove_staging_by_id(
+    id: catcoms_storage::kept::SessionId,
+    path: &Path,
+) -> std::io::Result<catcoms_storage::kept::SessionRemoval> {
+    let (Some(folder), Some(leaf)) = (path.parent(), path.file_name().and_then(|n| n.to_str()))
+    else {
+        return Err(std::io::ErrorKind::InvalidInput.into());
+    };
+    catcoms_storage::kept::remove_if_session(folder, leaf, id, &mut OsCryptoRng)
+}
+
+/// The sentence a failed save appends after trying to remove its partly written file (PR51 H1).
+/// Said only when our own file may still be at that name (Unix: a folder other accounts can
+/// modify; anywhere: a name that could not be checked or deleted, for example one another program
+/// holds) and something is still there. Never said for a name that now holds somebody else's
+/// file: telling the user to delete it would delete a file Mewtual never created.
+fn left_in_place(
+    path: &Path,
+    removal: &std::io::Result<catcoms_storage::kept::SessionRemoval>,
+) -> String {
+    use catcoms_storage::kept::SessionRemoval;
+    let ours_may_remain = matches!(removal, Ok(SessionRemoval::SharedFolder) | Err(_));
+    if !ours_may_remain || path.symlink_metadata().is_err() {
+        return String::new();
+    }
+    let name = path
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    format!(" The partly saved file \"{name}\" was left in place; delete it yourself.")
 }
 
 /// Extension for a download still being written. A streamed save fills one of these and publishes
@@ -13872,10 +13922,15 @@ fn create_staged_download(
                 // fresh, empty reservation, so a Downloads folder that cannot link (FAT or exFAT
                 // without the identities a journal needs) is refused before any plaintext is
                 // written instead of failing after the whole file. The probe removes the
-                // reservation when it refuses.
-                let file =
-                    catcoms_storage::kept::confirm_staging_links(file, downloads, &staging_leaf)
-                        .map_err(|error| error.to_string())?;
+                // reservation when it refuses (only while that name still proves to be this
+                // file, PR51 H1; it is empty, so a reservation left behind discloses nothing).
+                let file = catcoms_storage::kept::confirm_staging_links(
+                    file,
+                    downloads,
+                    &staging_leaf,
+                    &mut OsCryptoRng,
+                )
+                .map_err(|error| error.to_string())?;
                 return Ok((file, staging_path, final_path));
             }
             Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => continue,
@@ -13887,22 +13942,52 @@ fn create_staged_download(
 
 /// Atomically add the verified file at an absent destination, never replacing a local file.
 ///
-/// Both paths are on the same filesystem. Hard-link creation refuses an occupied destination;
-/// there is deliberately no overwriting-rename fallback on filesystems without hard links.
-/// Once the link succeeds publication is committed. Failed staging unlink leaves an orphan
-/// `.part`, not a failed/rolled-back download. This is not a sandbox against another process
-/// with authority to modify the source staging path itself.
-fn publish_staged_download(staging: &Path, final_path: &Path) -> Result<(), String> {
+/// `file` is the handle this process created exclusively at `staging` and still holds. Both paths
+/// are in one folder. Hard-link creation refuses an occupied destination; there is deliberately
+/// no overwriting-rename fallback on filesystems without hard links. PR51 M1: storage's
+/// `publish_unjournaled` names exactly the object behind `file` (Linux and Android link from its
+/// descriptor; Windows holds a delete-denying pin on the staging name across the link; macOS
+/// links by path and then confirms the final name holds our object, failing otherwise), so a
+/// staging name swapped after verification is never published as this save.
+///
+/// Once the link succeeds publication is committed. The staging name is then removed only while
+/// it still proves to be our file (PR51 H1); a refused or failed removal leaves an orphan `.part`
+/// (a second name of the saved file), not a failed or rolled-back download.
+fn publish_staged_download(
+    file: &std::fs::File,
+    staging: &Path,
+    final_path: &Path,
+) -> Result<(), String> {
     publish_staged_download_with(
         staging,
         final_path,
-        |from, to| std::fs::hard_link(from, to),
-        |path| std::fs::remove_file(path),
+        |from, to| catcoms_storage::kept::publish_unjournaled(file, from, to),
+        |path| remove_staging(file, path).map(drop),
     )
 }
 
+/// Publish the fallback writer's verified staging file from the blocking pool, keeping its handle
+/// in `file` for any cleanup that follows (PR51 H1/M1). A worker that panics drops the handle
+/// there, and the caller's cleanup then falls back to the number captured at staging.
+async fn publish_staged_on_pool(
+    file: &mut private_downloads::OnPool<std::fs::File>,
+    staging: &Path,
+    final_path: &Path,
+) -> Result<(), String> {
+    let (staging, final_path) = (staging.to_path_buf(), final_path.to_path_buf());
+    let session = file.take();
+    let (session, published) = private_downloads::blocking(move || {
+        let published = publish_staged_download(&session, &staging, &final_path);
+        (session, published)
+    })
+    .await?;
+    file.put(session);
+    published
+}
+
 // Private filesystem seams pin the commit boundary without relying on platform-specific
-// permissions or a race with antivirus. Production always uses the standard no-replace link.
+// permissions or a race with antivirus. Production always uses storage's verified no-replace
+// publication and verified staging removal (`publish_staged_download`).
 fn publish_staged_download_with(
     staging: &Path,
     final_path: &Path,
@@ -14632,8 +14717,14 @@ trait SaveSource {
 
     /// Atomically cross from verified staging bytes to a visible plaintext file under the
     /// authorization epoch that started this save. Implementations must not split their final
-    /// session check from the rename.
-    async fn publish_verified(&self, staging: &Path, final_path: &Path) -> Result<(), String>;
+    /// session check from the rename. `file` is the still-open staging handle: publication names
+    /// exactly its object (PR51 M1, [`publish_staged_on_pool`]) and hands it back for cleanup.
+    async fn publish_verified(
+        &self,
+        file: &mut private_downloads::OnPool<std::fs::File>,
+        staging: &Path,
+        final_path: &Path,
+    ) -> Result<(), String>;
 
     /// The invocation's synchronous liveness (origin not cancelled, read epoch current) as an
     /// owned check a blocking worker evaluates when it actually starts. The async
@@ -14695,7 +14786,7 @@ async fn stream_download_to_chosen(
     stream_download_staged(
         move || {
             choice
-                .create_unjournaled()
+                .create_unjournaled(&mut OsCryptoRng)
                 .map_err(|error| error.to_string())
         },
         total,
@@ -14728,11 +14819,25 @@ async fn stream_download_staged(
     // and again when the staging worker starts (it may have waited for a pool thread).
     source.still_unlocked().await?;
     let live = source.liveness();
-    let (file, staging, path) = private_downloads::blocking(move || {
+    let (file, id, staging, path) = private_downloads::blocking(move || {
         if !live() {
             return Err(RETIRED_SAVE.to_string());
         }
-        stage()
+        let (file, staging, path) = stage()?;
+        // PR51 H1: the in-session number every later removal of the staging name is verified
+        // against. Without one nothing here could ever be proven ours, so refuse before any
+        // plaintext is written. The reservation is empty, so leaving it discloses nothing.
+        match catcoms_storage::kept::session_id(&file) {
+            Ok(id) => Ok((file, id, staging, path)),
+            Err(error) => Err(format!(
+                "This folder gives no file number Mewtual can check ({error}), so nothing was \
+                 saved. An empty \"{}\" may remain there.",
+                staging
+                    .file_name()
+                    .map(|name| name.to_string_lossy().into_owned())
+                    .unwrap_or_default()
+            )),
+        }
     })
     .await??;
     // Re-review 2 LOW 7: the open handle lives in `OnPool`, so whichever await returns early, it
@@ -14741,15 +14846,30 @@ async fn stream_download_staged(
     match fill_staged_download(&mut file, &staging, &path, total, size, target, source).await {
         Ok(()) => Ok(path),
         Err(error) => {
-            // Failures remove only our own staging name, never the final path. The handle (if a
-            // step did not already consume it) closes first, on the same pool thread.
+            // Failures remove only our own staging name, never the final path, and only while
+            // that name still proves to be our file (PR51 H1). The handle (if a panicking step did
+            // not drop it) stays open until the removal is over, so its number cannot be reused
+            // meanwhile; then it closes on the same pool thread.
             let (doomed, open) = (staging.clone(), file.release());
-            let _ = private_downloads::blocking(move || {
+            let note = private_downloads::blocking(move || {
+                let removal = match &open {
+                    Some(handle) => remove_staging(handle, &doomed),
+                    None => remove_staging_by_id(id, &doomed),
+                };
                 drop(open);
-                std::fs::remove_file(doomed)
+                left_in_place(&doomed, &removal)
             })
             .await;
-            Err(error)
+            // A cleanup worker that panicked removed nothing we know of. No filesystem check here:
+            // this runs on the async runtime, where a stalled share must never be touched.
+            let note = note.unwrap_or_else(|_| {
+                let name = staging
+                    .file_name()
+                    .map(|name| name.to_string_lossy().into_owned())
+                    .unwrap_or_default();
+                format!(" The partly saved file \"{name}\" may have been left in place.")
+            });
+            Err(format!("{error}{note}"))
         }
     }
 }
@@ -14807,12 +14927,17 @@ async fn fill_staged_download(
         written?;
         source.progress(i + 1, bytes_done, network_bytes_done, provider);
     }
-    // Closing happens on the blocking pool too, so a share that stalls on close cannot hold a
-    // runtime worker either.
+    // The sync runs on the blocking pool too, so a share that stalls cannot hold a runtime worker.
+    // The handle comes back afterwards: publication links exactly its object and any cleanup is
+    // verified against it (PR51 H1/M1), so it stays open until the save is settled.
     let session = file.take();
-    private_downloads::blocking(move || session.sync_all())
-        .await?
-        .map_err(|e| e.to_string())?;
+    let (session, synced) = private_downloads::blocking(move || {
+        let synced = session.sync_all();
+        (session, synced)
+    })
+    .await?;
+    file.put(session);
+    synced.map_err(|e| e.to_string())?;
     if bytes_done != size {
         return Err("this file's chunks hold less data than it declares".into());
     }
@@ -14824,7 +14949,7 @@ async fn fill_staged_download(
     // The source owns one indivisible authorization+rename step. A plain check followed by this
     // rename has a lock TOCTOU: explicit lock can complete in the gap and the old command then
     // publishes plaintext under its final name.
-    source.publish_verified(staging, path).await
+    source.publish_verified(file, staging, path).await
 }
 
 fn exported_media_validation(path: &Path, declared_mime: &str) -> Option<String> {
@@ -14880,7 +15005,12 @@ impl SaveSource for ActorSaveSource<'_> {
         Ok(())
     }
 
-    async fn publish_verified(&self, staging: &Path, final_path: &Path) -> Result<(), String> {
+    async fn publish_verified(
+        &self,
+        file: &mut private_downloads::OnPool<std::fs::File>,
+        staging: &Path,
+        final_path: &Path,
+    ) -> Result<(), String> {
         let _commit = require_ui_session_generation(self.state, self.generation).await?;
         if self.origin.is_cancelled() || !self.ready.is_current() {
             return Err("The file read is no longer active.".into());
@@ -14889,8 +15019,7 @@ impl SaveSource for ActorSaveSource<'_> {
         // check-and-link step, the same shape as the journaled path's guarded `link()`. Tauri
         // commands are not dropped mid-flight; only process exit could release the guard while the
         // pool thread still links, and then no later Lock exists to race.
-        let (staging, final_path) = (staging.to_path_buf(), final_path.to_path_buf());
-        private_downloads::blocking(move || publish_staged_download(&staging, &final_path)).await?
+        publish_staged_on_pool(file, staging, final_path).await
     }
 
     fn liveness(&self) -> private_downloads::Liveness {
@@ -14931,11 +15060,12 @@ impl SaveSource for ActorSaveSource<'_> {
 async fn publish_download_for_generation(
     state: &AppState,
     generation: u64,
+    file: &std::fs::File,
     staging: &Path,
     final_path: &Path,
 ) -> Result<(), String> {
     let _commit = require_ui_session_generation(state, generation).await?;
-    publish_staged_download(staging, final_path)
+    publish_staged_download(file, staging, final_path)
 }
 
 /// Download a listed group file straight into Downloads, one chunk at a time, and reveal it.
@@ -19888,6 +20018,9 @@ mod tests {
         /// loop, where there is no next iteration left to notice a lock.
         lock_after_writes: Option<usize>,
         occupy_during_fetch: Option<PathBuf>,
+        /// `(staging, aside)`: during the first fetch another program moves our staging file to
+        /// `aside` and puts its own file at the staging name (PR51 H1/M1).
+        swap_staging_during_fetch: Option<(PathBuf, PathBuf)>,
         fetches: std::cell::Cell<usize>,
         locked: std::cell::Cell<bool>,
         /// `(chunks written, bytes written)` after each successful write. The observable record of
@@ -19906,6 +20039,7 @@ mod tests {
                 lock_after_fetches: None,
                 lock_after_writes: None,
                 occupy_during_fetch: None,
+                swap_staging_during_fetch: None,
                 fetches: std::cell::Cell::new(0),
                 locked: std::cell::Cell::new(false),
                 progress: std::cell::RefCell::new(Vec::new()),
@@ -19961,6 +20095,10 @@ mod tests {
                 if let Some(path) = &self.occupy_during_fetch {
                     std::fs::write(path, b"unrelated local file").unwrap();
                 }
+                if let Some((staging, aside)) = &self.swap_staging_during_fetch {
+                    std::fs::rename(staging, aside).unwrap();
+                    std::fs::write(staging, b"someone else's file").unwrap();
+                }
             }
             // The lock lands while this fetch is outstanding, which is the whole point: it becomes
             // true only after the await the caller was suspended in.
@@ -19978,9 +20116,14 @@ mod tests {
             }
         }
 
-        async fn publish_verified(&self, staging: &Path, final_path: &Path) -> Result<(), String> {
+        async fn publish_verified(
+            &self,
+            file: &mut private_downloads::OnPool<std::fs::File>,
+            staging: &Path,
+            final_path: &Path,
+        ) -> Result<(), String> {
             self.still_unlocked().await?;
-            publish_staged_download(staging, final_path)
+            publish_staged_on_pool(file, staging, final_path).await
         }
 
         fn liveness(&self) -> private_downloads::Liveness {
@@ -20202,16 +20345,19 @@ mod tests {
             create_staged_download(downloads.path(), "verified.txt").unwrap();
         file.write_all(b"verified plaintext").unwrap();
         file.sync_all().unwrap();
-        drop(file);
 
         // This is the deterministic post-verification/pre-rename pause: lock completes before the
         // old worker tries to publish its already-synced plaintext staging file.
         lock_session_inner(&state, None).await.unwrap();
-        assert!(
-            publish_download_for_generation(&state, old_generation, &staging, &final_path,)
-                .await
-                .is_err()
-        );
+        assert!(publish_download_for_generation(
+            &state,
+            old_generation,
+            &file,
+            &staging,
+            &final_path
+        )
+        .await
+        .is_err());
         assert!(staging.exists());
         assert!(
             !final_path.exists(),
@@ -20227,12 +20373,12 @@ mod tests {
             .unwrap();
         assert_ne!(old_generation, new_generation);
         assert!(
-            publish_download_for_generation(&state, old_generation, &staging, &final_path,)
+            publish_download_for_generation(&state, old_generation, &file, &staging, &final_path)
                 .await
                 .is_err(),
             "unlocking again must not revive an export authorized by the older session"
         );
-        publish_download_for_generation(&state, new_generation, &staging, &final_path)
+        publish_download_for_generation(&state, new_generation, &file, &staging, &final_path)
             .await
             .unwrap();
         assert_eq!(std::fs::read(final_path).unwrap(), b"verified plaintext");
@@ -20256,6 +20402,91 @@ mod tests {
             downloads_empty(dir.path()),
             "unverified bytes are not left on disk"
         );
+    }
+
+    /// PR51 H1: the fallback writer's failure cleanup used to delete its staging name by path, so a
+    /// file another program put at that name during the transfer was deleted although Mewtual never
+    /// created it. Now the name is deleted only while it still holds our open file: the swapped-in
+    /// file survives byte-identical, and the error never tells the user to delete it.
+    #[tokio::test]
+    async fn a_failed_fallback_save_never_deletes_a_file_swapped_in_at_its_staging_name() {
+        let dir = tempfile::tempdir().unwrap();
+        let staging = dir.path().join("x.bin.part");
+        let aside = dir.path().join("ours, moved by someone");
+        let mut source = ScriptedSave::new(vec![b"real bytes".to_vec()]);
+        source.swap_staging_during_fetch = Some((staging.clone(), aside.clone()));
+        let (total, size) = (source.total(), source.size());
+        let wrong = *Cid::of(b"a different file").as_bytes();
+
+        let err = stream_download_to_disk(dir.path(), "x.bin", total, size, &wrong, &mut source)
+            .await
+            .unwrap_err();
+
+        assert!(err.contains("integrity"), "{err}");
+        assert!(
+            !err.contains("delete it yourself"),
+            "never asks the user to delete someone else's file: {err}"
+        );
+        assert_eq!(std::fs::read(&staging).unwrap(), b"someone else's file");
+        assert!(aside.exists(), "nothing that is not at our name is touched");
+        assert!(!dir.path().join("x.bin").exists());
+    }
+
+    /// PR51 H1: in a folder other accounts can modify, Unix never deletes automatically. A failed
+    /// save leaves its partly written file and says so, so the user can delete it.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_failed_fallback_save_in_a_shared_folder_leaves_its_partial_and_says_so() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o777)).unwrap();
+        let mut source = ScriptedSave::new(vec![b"real bytes".to_vec()]);
+        let (total, size) = (source.total(), source.size());
+        let wrong = *Cid::of(b"a different file").as_bytes();
+
+        let err = stream_download_to_disk(dir.path(), "z.bin", total, size, &wrong, &mut source)
+            .await
+            .unwrap_err();
+
+        assert!(err.contains("\"z.bin.part\" was left in place"), "{err}");
+        assert!(dir.path().join("z.bin.part").exists());
+        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    /// PR51 M1: a staging name swapped after the bytes were verified must never become the saved
+    /// file. Linux and Android link our open descriptor, so the save completes with our bytes;
+    /// Windows' pin finds a foreign object at the staging name and refuses before linking; macOS's
+    /// post-link check finds the foreign object at the final name and fails the save. In every case
+    /// the swapped-in file is left exactly where it was.
+    #[tokio::test]
+    async fn a_fallback_save_never_publishes_a_file_swapped_in_at_its_staging_name() {
+        let dir = tempfile::tempdir().unwrap();
+        let staging = dir.path().join("y.bin.part");
+        let aside = dir.path().join("ours, moved by someone");
+        let mut source = ScriptedSave::new(vec![b"verified bytes".to_vec()]);
+        source.swap_staging_during_fetch = Some((staging.clone(), aside));
+        let (total, size, target) = (source.total(), source.size(), source.address());
+
+        let saved =
+            stream_download_to_disk(dir.path(), "y.bin", total, size, &target, &mut source).await;
+
+        let final_path = dir.path().join("y.bin");
+        assert_eq!(std::fs::read(&staging).unwrap(), b"someone else's file");
+        #[cfg(any(target_os = "linux", target_os = "android"))]
+        {
+            assert_eq!(saved.unwrap(), final_path);
+            assert_eq!(std::fs::read(&final_path).unwrap(), b"verified bytes");
+        }
+        #[cfg(windows)]
+        {
+            assert!(saved.is_err());
+            assert!(!final_path.exists(), "nothing was linked");
+        }
+        #[cfg(all(unix, not(any(target_os = "linux", target_os = "android"))))]
+        {
+            assert!(saved.is_err(), "never reported as saved");
+            assert_eq!(std::fs::read(&final_path).unwrap(), b"someone else's file");
+        }
     }
 
     #[tokio::test]
@@ -20373,8 +20604,8 @@ mod tests {
         assert_eq!(final2.file_name().unwrap(), "notes (1).txt");
         assert_ne!(staging2, staging);
 
+        publish_staged_download(&file, &staging, &final_path).unwrap();
         drop(file);
-        publish_staged_download(&staging, &final_path).unwrap();
         assert_eq!(std::fs::read(&final_path).unwrap(), b"half a file");
         assert!(!staging.exists(), "publishing consumes the staging file");
     }

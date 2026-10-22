@@ -241,13 +241,18 @@ impl SaveSource for PrivateExportSource<'_> {
         }
         Ok(())
     }
-    async fn publish_verified(&self, staging: &Path, final_path: &Path) -> Result<(), String> {
+    async fn publish_verified(
+        &self,
+        file: &mut private_downloads::OnPool<std::fs::File>,
+        staging: &Path,
+        final_path: &Path,
+    ) -> Result<(), String> {
         let _commit =
             keep_session::read_commit(&self.running.state, self.generation, &self.origin).await?;
         if !self.ready.is_current() {
             return Err("Download retired.".into());
         }
-        publish_staged_download(staging, final_path)
+        publish_staged_on_pool(file, staging, final_path).await
     }
     fn liveness(&self) -> private_downloads::Liveness {
         let (origin, ready) = (self.origin.clone(), self.ready.clone());

@@ -322,6 +322,72 @@ fn folder_identity_follows_a_linked_folder_and_refuses_files_and_missing_folders
 }
 
 #[test]
+fn other_accounts_rule_follows_owner_and_mode_bits() {
+    // PR51 H1 (Unix): automatic deletion is refused in a folder other accounts can modify.
+    const ME: u32 = 1000;
+    assert!(!shared_folder(ME, 0o755, ME), "a private home folder");
+    assert!(!shared_folder(ME, 0o700, ME));
+    assert!(
+        !shared_folder(0, 0o755, ME),
+        "root-owned, not writable by others"
+    );
+    assert!(
+        !shared_folder(0, 0o1777, ME),
+        "sticky /tmp: others cannot move our entries"
+    );
+    assert!(shared_folder(0, 0o777, ME), "world-writable without sticky");
+    assert!(
+        shared_folder(ME, 0o775, ME),
+        "group-writable (fails closed for a group of one)"
+    );
+    assert!(shared_folder(ME, 0o757, ME), "other-writable");
+    assert!(shared_folder(2000, 0o755, ME), "owned by another account");
+    assert!(
+        shared_folder(2000, 0o1777, ME),
+        "another account owns even a sticky folder"
+    );
+}
+
+#[test]
+fn filesystem_classes_fail_closed() {
+    // PR51 M3: only filesystems with stable identities and hard links get a journal.
+    assert_eq!(classify_linux_magic(0xEF53), FsClass::Journal, "ext4");
+    assert_eq!(classify_linux_magic(0x5846_5342), FsClass::Journal, "xfs");
+    assert_eq!(classify_linux_magic(0x9123_683E), FsClass::Journal, "btrfs");
+    assert_eq!(classify_linux_magic(0x0102_1994), FsClass::Journal, "tmpfs");
+    assert_eq!(classify_linux_magic(0x4D44), FsClass::NoLinks, "msdos/vfat");
+    assert_eq!(classify_linux_magic(0x2011_BAB0), FsClass::NoLinks, "exfat");
+    assert_eq!(classify_linux_magic(0x6969), FsClass::Unknown, "nfs");
+    assert_eq!(classify_linux_magic(0xFF53_4D42), FsClass::Unknown, "cifs");
+    assert_eq!(classify_linux_magic(0x6573_5546), FsClass::Unknown, "fuse");
+    assert_eq!(classify_apple("apfs", true), FsClass::Journal);
+    assert_eq!(classify_apple("apfs", false), FsClass::Unknown, "not local");
+    assert_eq!(classify_apple("smbfs", false), FsClass::Unknown);
+    assert_eq!(classify_apple("msdos", true), FsClass::NoLinks);
+    assert_eq!(classify_apple("exfat", true), FsClass::NoLinks);
+    assert_eq!(
+        classify_windows_canonical(r"\\?\C:\Users\me\Downloads"),
+        FsClass::Journal
+    );
+    assert_eq!(
+        classify_windows_canonical(r"\\?\UNC\server\share\Downloads"),
+        FsClass::Unknown,
+        "a mapped network drive canonicalizes to UNC"
+    );
+    assert_eq!(
+        classify_windows_canonical(r"\\server\share"),
+        FsClass::Unknown
+    );
+    assert_eq!(
+        classify_windows_canonical(r"\\?\unc\wsl$\Ubuntu"),
+        FsClass::Unknown
+    );
+    // The real local test folder classifies as journal-capable on the hosts CI uses.
+    let dir = tempfile::tempdir().unwrap();
+    assert_ne!(fs_class(dir.path()).unwrap(), FsClass::NoLinks);
+}
+
+#[test]
 fn identity_and_path_codecs_round_trip_and_refuse_foreign_shapes() {
     let identity = FileIdentity::for_test(CURRENT_PLATFORM.max(1), 0x0102_0304_0506_0708, 9);
     assert_eq!(FileIdentity::decode(&identity.encode()), Some(identity));

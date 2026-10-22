@@ -20,7 +20,7 @@
 //!
 //! See `docs/communication-recovery/EXTERNAL-DOWNLOAD-RESUME.md` for the state machine and crash
 //! table this code implements.
-use super::external::{self, FileIdentity, Leaf};
+use super::external::{self, Expected, FileIdentity, Leaf, Verified};
 use super::*;
 use crate::CidHasher;
 use std::fs::File;
@@ -597,7 +597,10 @@ impl ChosenDestination {
     /// numbered; an existing `<name>.part` is refused, never adopted. A folder that cannot hard
     /// link is refused before any plaintext exists, because publication needs that link. Returns
     /// the open partial, its path and the final path.
-    pub fn create_unjournaled(&self) -> Result<(File, PathBuf, PathBuf), ExportError> {
+    pub fn create_unjournaled(
+        &self,
+        rng: &mut dyn CryptoRngCore,
+    ) -> Result<(File, PathBuf, PathBuf), ExportError> {
         let refused = |refusal| ExportError::Refused(refusal);
         match self.folder_id {
             Some(captured) => match external::folder_identity(&self.folder) {
@@ -638,10 +641,11 @@ impl ChosenDestination {
                 file,
                 &staging,
                 refused(ChoiceRefusal::FolderChanged),
+                rng,
             )?,
             None => file,
         };
-        let file = confirm_staging_links(file, &self.folder, &staging_leaf)?;
+        let file = confirm_staging_links(file, &self.folder, &staging_leaf, rng)?;
         Ok((file, staging, final_path))
     }
 }
@@ -650,7 +654,8 @@ impl ChosenDestination {
 /// can make the no-replace hard link every writer publishes with. Returns the file when it can.
 /// Otherwise the file is removed (only while its name still proves to be that file) and the save
 /// is refused before any plaintext is written: `NoLinks` for a folder that refuses links (FAT,
-/// exFAT), a local failure when the probe could not be confirmed or cleaned up.
+/// exFAT), a local failure when the probe could not be confirmed or cleaned up, or (Linux and
+/// Android) when `/proc/self/fd` is unavailable, because [`publish_unjournaled`] links from it.
 ///
 /// Shared by the chosen-place reservation ([`ChosenDestination::create_unjournaled`]) and native's
 /// one-click Downloads reservation for folders that cannot carry a journal (re-review 2 LOW 4:
@@ -660,15 +665,9 @@ pub fn confirm_staging_links(
     file: File,
     folder: &Path,
     staging_leaf: &str,
+    rng: &mut dyn CryptoRngCore,
 ) -> Result<File, ExportError> {
-    // Picker re-review LOW 2: when the filesystem reports identities, the probe must link our
-    // own handle's object. Without that, a swap and swap-back around the create plus a file
-    // planted at our name would make the probe "work" on the planted file, and publication
-    // would later link it. On an identity-less folder there is nothing to compare (residual).
-    let ours = external::observe(&file)
-        .ok()
-        .map(|observed| observed.identity);
-    let failure = match links_supported(folder, staging_leaf, ours) {
+    let failure = match links_supported(folder, staging_leaf, &file, rng) {
         LinkProbe::Works => return Ok(file),
         LinkProbe::Refused => ExportError::NoLinks,
         // A probe name may still point at this file; never fill it with plaintext. The
@@ -680,9 +679,15 @@ pub fn confirm_staging_links(
             retryable: false,
             reason: "a temporary name in that folder could not be confirmed or removed".into(),
         },
+        LinkProbe::NoDescriptor => ExportError::Local {
+            retryable: false,
+            reason: "this system does not provide /proc, which Mewtual needs to publish a save \
+                     safely"
+                .into(),
+        },
     };
     // Only while the name still proves to be the file this call created.
-    remove_created(file, &folder.join(staging_leaf));
+    remove_created(file, &folder.join(staging_leaf), rng);
     Err(failure)
 }
 
@@ -697,38 +702,116 @@ fn confirm_folder(
     file: File,
     created: &Path,
     changed: ExportError,
+    rng: &mut dyn CryptoRngCore,
 ) -> Result<File, ExportError> {
     match external::folder_identity(folder) {
         Ok(id) if id == captured => Ok(file),
         _ => {
-            remove_created(file, created);
+            remove_created(file, created, rng);
             Err(changed)
         }
     }
 }
 
-/// Remove a partial this call created exclusively a moment ago, but only while the name still
-/// refers to that same object (its handle identity). A name swapped since is left alone: deleting
-/// by path without that proof could remove somebody else's file. The handle is closed first so
-/// Windows allows the delete.
-fn remove_created(file: File, created: &Path) {
-    let ours = external::observe(&file)
-        .ok()
-        .map(|observed| observed.identity);
-    drop(file);
-    let still_ours = match ours {
-        Some(ours) => matches!(
-            external::open_leaf(created, false),
-            Ok(Leaf::Opened(_, found)) if found.identity == ours
-        ),
-        // No identity to prove it with (often the very reason creation is being abandoned):
-        // the name was created exclusively by this call a moment ago, so remove it by path as
-        // before, rather than leave an empty partial behind on every save to such a folder.
-        // The same documented path-based residual as the link-probe cleanup.
-        None => true,
+/// Remove a file this call created exclusively a moment ago, through [`external::remove_verified`]
+/// against the in-session number of the handle we still hold (PR51 H1). The handle stays open
+/// until the removal is over, so that number cannot be reused for another file meanwhile. A name
+/// that no longer holds our file, a folder other accounts can modify, or a filesystem that gives
+/// no number to check is left alone: the file is empty, so leaving it discloses nothing, while
+/// deleting without proof could remove somebody else's file.
+fn remove_created(file: File, created: &Path, rng: &mut dyn CryptoRngCore) {
+    let (Some(folder), Some(leaf)) = (
+        created.parent(),
+        created.file_name().and_then(|n| n.to_str()),
+    ) else {
+        return;
     };
-    if still_ours {
-        let _ = fs::remove_file(created);
+    if let Ok(id) = external::session_id(&file) {
+        let _ = external::remove_verified(folder, None, leaf, Expected::Session(id), rng);
+    }
+    drop(file);
+}
+
+/// Native's view of a file it created and holds open: the in-session number to verify the
+/// object's names against before deleting them (PR51 H1, the non-resumable writer and GIF export).
+pub use external::{session_id, SessionId};
+
+/// Outcome of [`remove_if_session`]. Only `SharedFolder` (and an error) can mean that our own
+/// file is still at the name; native tells the user to delete it then, and never for `NotOurs`,
+/// where the name holds somebody else's file.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SessionRemoval {
+    /// Our file's name was deleted.
+    Removed,
+    /// Nothing is at the name.
+    Missing,
+    /// Another object is at the name; it was left exactly as it was.
+    NotOurs,
+    /// Unix: the folder can be modified by other accounts, so nothing was deleted automatically.
+    SharedFolder,
+}
+
+/// Delete `folder/leaf` only if it still holds the object with `id` (PR51 H1), for native writers
+/// that do not keep a journal. Never deletes or changes anything it did not verify. An error means
+/// the name could not be checked or deleted (for example another program holds it), so our file
+/// may still be there.
+pub fn remove_if_session(
+    folder: &Path,
+    leaf: &str,
+    id: SessionId,
+    rng: &mut dyn CryptoRngCore,
+) -> io::Result<SessionRemoval> {
+    external::remove_verified(folder, None, leaf, Expected::Session(id), rng).map(|verified| {
+        match verified {
+            Verified::Removed { .. } => SessionRemoval::Removed,
+            Verified::Missing => SessionRemoval::Missing,
+            // Without a captured folder identity the folder cannot "change"; treat it as foreign.
+            Verified::NotOurs | Verified::FolderChanged => SessionRemoval::NotOurs,
+            Verified::Shared => SessionRemoval::SharedFolder,
+        }
+    })
+}
+
+/// Publish a verified file written by a native writer that keeps no journal (PR51 M1): `file` is
+/// the handle this process created exclusively at `staging` and still holds; `final_path` is the
+/// absent name beside it. The final name is created without replacing anything and confirmed to
+/// hold the object behind `file`; the staging name is left for the caller to remove with
+/// [`remove_if_session`]. Per platform: Linux and Android link from the open descriptor, so a
+/// swapped staging name can never be published; Windows holds a delete-denying pin on the staging
+/// name across the link; macOS relies on the post-link check alone (a foreign object found at the
+/// final name fails the save and both names are left alone).
+///
+/// Errors: `AlreadyExists` when the final name was taken (nothing linked); `InvalidInput` when the
+/// two paths are not plain names in one folder; otherwise see the platform notes above.
+pub fn publish_unjournaled(file: &File, staging: &Path, final_path: &Path) -> io::Result<()> {
+    let leaf = |path: &Path| {
+        path.file_name()
+            .and_then(|name| name.to_str())
+            .map(str::to_owned)
+    };
+    let (Some(folder), Some(staging_leaf), Some(final_leaf)) =
+        (staging.parent(), leaf(staging), leaf(final_path))
+    else {
+        return Err(io::Error::from(io::ErrorKind::InvalidInput));
+    };
+    if final_path.parent() != Some(folder)
+        || !external::valid_leaf(&staging_leaf)
+        || !external::valid_leaf(&final_leaf)
+    {
+        return Err(io::Error::from(io::ErrorKind::InvalidInput));
+    }
+    external::publish_session(file, folder, &staging_leaf, &final_leaf)
+}
+
+/// PR51 M3: only a filesystem whose identities and hard links Mewtual relies on gets a journal
+/// (fail closed). FAT, vfat and exFAT are refused outright, because no writer could publish there;
+/// network, FUSE and unrecognized filesystems get `Unsupported`, so native uses the non-resumable
+/// writer, whose cleanup is verified against the handle it holds.
+fn journal_capable(folder: &Path) -> Result<(), ExportError> {
+    match external::fs_class(folder) {
+        Ok(external::FsClass::Journal) => Ok(()),
+        Ok(external::FsClass::NoLinks) => Err(ExportError::NoLinks),
+        Ok(external::FsClass::Unknown) | Err(_) => Err(ExportError::Unsupported),
     }
 }
 
@@ -1149,17 +1232,42 @@ pub enum PartialRemoval {
     /// The folder is ours but the partial could not be opened to prove ownership (for example
     /// another program holds it without sharing). It may be ours, so it is not forgotten.
     Unchecked,
+    /// PR51 H1 (Unix): the folder can be modified by other accounts, so nothing is deleted
+    /// automatically there. The partly saved file was left in place for the user to delete.
+    SharedFolder,
+    /// PR51 M2: the save was Published but its final name is gone (for example lost by a power
+    /// failure on a filesystem that ignored the folder flush) while our staging name still holds
+    /// the file. That is the only copy, so it is never deleted; the user is told where it is.
+    KeptOnlyCopy,
+    /// PR51 M2: the save was Published, but neither its final name nor its staging name is in the
+    /// (reachable, still ours) folder any more.
+    SavedFileMissing,
 }
 impl PartialRemoval {
     /// Whether the caller may forget the journal.
     pub fn settled(&self) -> bool {
         !matches!(self, Self::FolderUnreachable | Self::Unchecked)
     }
+    /// After publication: whether no staging name of ours can remain (PR51 H1). A name left in
+    /// place for any reason keeps the Published row, so the user is told about the second name.
+    pub fn cleared_staging(&self) -> bool {
+        matches!(
+            self,
+            Self::Removed | Self::KeptSaved | Self::OtherNameRemains
+        )
+    }
     /// What to tell the user when a file of this save stays on disk. `saved` is true when the
     /// record was already Published (clearing a saved row keeps the saved file by design).
     pub fn notice(&self, saved: bool) -> Option<&'static str> {
         match self {
             Self::Removed | Self::FolderUnreachable | Self::Unchecked => None,
+            Self::SharedFolder => Some(
+                "Other accounts can change the folder with the partly saved file, so Mewtual left it in place. Delete it yourself if you no longer need it.",
+            ),
+            Self::KeptOnlyCopy => Some(
+                "The saved file was no longer in its folder, so its copy under the temporary .mewtual-part name was kept. Rename that file to keep it.",
+            ),
+            Self::SavedFileMissing => Some("The saved file was no longer in its folder."),
             Self::KeptSaved if saved => None,
             Self::KeptSaved => Some("This file had already been saved, so the saved copy was kept."),
             Self::OtherNameRemains => Some(
@@ -1238,9 +1346,22 @@ fn locate(journal: &ExportJournal, write: bool) -> Result<Located, ExportError> 
 /// Remove the saved partial only if its folder and file identity prove it is ours. The final name
 /// is never touched; when staging and final are the same object only the staging name goes.
 /// The typed outcome lets each caller decide whether it may forget the journal: a partial that
-/// cannot be checked right now is reported, never silently treated as "not ours". `Err` means the
-/// partial was proven ours but its deletion failed.
-pub fn remove_partial(journal: &ExportJournal) -> Result<PartialRemoval, ExportError> {
+/// cannot be checked right now is reported, never silently treated as "not ours".
+///
+/// PR51 H1: the delete goes through [`external::remove_verified`]: on Windows through the very
+/// handle whose identity was verified (no name is re-resolved, and no attribute is ever changed
+/// through a path), on Unix relative to the pinned folder after renaming the name aside, never in
+/// a folder other accounts can modify. A deletion that fails is reported `Unchecked` (the record
+/// stays in Removing; "Keep partly saved file" remains the escape).
+///
+/// PR51 M2: `published` is true when the record was already Published. Its staging name is then
+/// deleted only while the final name still holds our file; otherwise the staging name is the only
+/// copy and is kept ([`PartialRemoval::KeptOnlyCopy`]).
+pub fn remove_partial(
+    journal: &ExportJournal,
+    published: bool,
+    rng: &mut dyn CryptoRngCore,
+) -> Result<PartialRemoval, ExportError> {
     let Some(folder) = journal.folder_path() else {
         return Ok(PartialRemoval::FolderUnreachable);
     };
@@ -1256,28 +1377,28 @@ pub fn remove_partial(journal: &ExportJournal) -> Result<PartialRemoval, ExportE
             Ok(Leaf::Opened(_, observed)) if observed.identity == journal.file_id
         )
     };
-    let staging = folder.join(&journal.staging);
-    match external::open_leaf(&staging, false) {
-        Ok(Leaf::Opened(file, observed)) if observed.identity == journal.file_id => {
-            // Close our probe before deleting so Windows sharing rules cannot refuse it.
-            let read_only = file
-                .metadata()
-                .is_ok_and(|metadata| metadata.permissions().readonly());
-            drop(file);
-            match remove_proven(&staging, read_only && observed.links == 1) {
-                Ok(()) => {}
-                Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-                Err(error) => {
-                    return Err(ExportError::Local {
-                        retryable: true,
-                        reason: error.to_string(),
-                    })
-                }
-            }
+    let staging_is_ours = || {
+        matches!(
+            external::open_leaf(&folder.join(&journal.staging), false),
+            Ok(Leaf::Opened(_, observed)) if observed.identity == journal.file_id
+        )
+    };
+    if published && !final_is_ours() && staging_is_ours() {
+        return Ok(PartialRemoval::KeptOnlyCopy);
+    }
+    let verified = external::remove_verified(
+        &folder,
+        Some(journal.folder_id),
+        &journal.staging,
+        Expected::Journal(journal.file_id),
+        rng,
+    );
+    match verified {
+        Ok(Verified::Removed { links }) => {
             // Account for every other name the object had: our own final name (already saved)
             // and anything beyond it, which someone else made and which still holds plaintext.
             let saved = final_is_ours();
-            let others = observed.links.saturating_sub(1 + u64::from(saved));
+            let others = links.saturating_sub(1 + u64::from(saved));
             Ok(if others > 0 {
                 PartialRemoval::OtherNameRemains
             } else if saved {
@@ -1286,9 +1407,29 @@ pub fn remove_partial(journal: &ExportJournal) -> Result<PartialRemoval, ExportE
                 PartialRemoval::Removed
             })
         }
-        Ok(Leaf::Missing) if final_is_ours() => Ok(PartialRemoval::KeptSaved),
-        Ok(Leaf::Missing) => Ok(PartialRemoval::Removed),
-        Ok(Leaf::Opened(..)) | Ok(Leaf::Foreign) => Ok(PartialRemoval::LeftInPlace),
+        Ok(Verified::Missing) => {
+            // Unix: a crash between the rename aside and the unlink leaves our file at a random
+            // "removing" name nothing records. Find it (by identity) before claiming "removed".
+            match external::sweep_aside(&folder, journal.folder_id, journal.file_id, true) {
+                Ok(external::Aside::Nothing | external::Aside::Removed) => {}
+                Ok(external::Aside::Left { shared: true }) => {
+                    return Ok(PartialRemoval::SharedFolder)
+                }
+                Ok(external::Aside::Left { shared: false }) | Err(_) => {
+                    return Ok(PartialRemoval::Unchecked)
+                }
+            }
+            Ok(if final_is_ours() {
+                PartialRemoval::KeptSaved
+            } else if published {
+                PartialRemoval::SavedFileMissing
+            } else {
+                PartialRemoval::Removed
+            })
+        }
+        Ok(Verified::NotOurs) => Ok(PartialRemoval::LeftInPlace),
+        Ok(Verified::Shared) => Ok(PartialRemoval::SharedFolder),
+        Ok(Verified::FolderChanged) => Ok(PartialRemoval::FolderChanged),
         Err(_) => Ok(PartialRemoval::Unchecked),
     }
 }
@@ -1322,35 +1463,16 @@ pub fn partial_presence(journal: &ExportJournal) -> PartialPresence {
     };
     match (ours(&journal.staging), ours(&journal.final_leaf)) {
         (Some(true), _) | (_, Some(true)) => PartialPresence::Present,
-        (Some(false), Some(false)) => PartialPresence::Gone,
-        _ => PartialPresence::Unknown,
-    }
-}
-
-/// Delete a staging name already proven ours. Windows refuses to delete a read-only file, so for
-/// a proven partial clear only that attribute and try once more; Unix unlink ignores the mode.
-/// `may_clear` must be false when the object has any other name: hard links share attributes, so
-/// clearing it would also change the user's saved file. Removal then fails and stays in Removing,
-/// where "Keep partly saved file" remains the escape.
-fn remove_proven(staging: &Path, may_clear: bool) -> io::Result<()> {
-    let removed = external::remove(staging);
-    #[cfg(windows)]
-    if may_clear
-        && matches!(&removed, Err(error) if error.kind() == io::ErrorKind::PermissionDenied)
-    {
-        // symlink_metadata: never follow a link that replaced the name since the identity check.
-        if let Ok(metadata) = fs::symlink_metadata(staging) {
-            let mut permissions = metadata.permissions();
-            #[allow(clippy::permissions_set_readonly_false)]
-            permissions.set_readonly(false);
-            if fs::set_permissions(staging, permissions).is_ok() {
-                return external::remove(staging);
+        // Unix: a crash mid-removal can leave our file at a "removing" name.
+        (Some(false), Some(false)) => {
+            match external::sweep_aside(&folder, journal.folder_id, journal.file_id, false) {
+                Ok(external::Aside::Nothing) => PartialPresence::Gone,
+                Ok(_) => PartialPresence::Present,
+                Err(_) => PartialPresence::Unknown,
             }
         }
+        _ => PartialPresence::Unknown,
     }
-    #[cfg(not(windows))]
-    let _ = may_clear;
-    removed
 }
 
 /// One live writer per partial, independent of any mount or process. The store's presence token
@@ -1382,6 +1504,10 @@ enum LinkProbe {
     /// Linking worked but the probe could not be confirmed or removed (for example an indexer
     /// holding the new name). Linking is possible, but a journal should not depend on it.
     Inconclusive,
+    /// Linux or Android without a usable `/proc/self/fd`: publication links the open descriptor
+    /// through it (PR51 M1), so no save can finish here safely.
+    #[cfg_attr(not(unix), allow(dead_code))]
+    NoDescriptor,
 }
 
 /// Publication needs a no-replace hard link. FAT and exFAT give a usable-looking file index and
@@ -1389,35 +1515,59 @@ enum LinkProbe {
 /// plaintext partial at "Saving interrupted". Prove linking works on this folder, with the fresh
 /// staging file, before anything is written: link it to an absent probe name, confirm the probe is
 /// the same object when `identity` is known, then remove only the probe name.
-fn links_supported(folder: &Path, staging: &str, identity: Option<FileIdentity>) -> LinkProbe {
-    let source = folder.join(staging);
-    for attempt in 0..4 {
-        let probe = format!("{staging}-probe{attempt}");
-        if !external::valid_leaf(&probe) {
-            return LinkProbe::Inconclusive;
+///
+/// PR51 H1: the probe name is removed only through [`external::remove_verified`], against the
+/// in-session number of the staging file we hold (`source`), so a name swapped in meanwhile is
+/// never deleted. A filesystem that gives no number to check gets `Inconclusive` (fail closed).
+///
+/// Unix (PR51 M3): no probe. The filesystem type from `fstatfs` decides instead: FAT, vfat and
+/// exFAT refuse links (`Refused`); every other type is assumed to link (if it does not, the save
+/// fails at publication). A probe there would leave a second name for the partial in any folder
+/// where Unix refuses automatic deletion (one other accounts can modify).
+fn links_supported(
+    folder: &Path,
+    staging: &str,
+    source: &File,
+    rng: &mut dyn CryptoRngCore,
+) -> LinkProbe {
+    #[cfg(unix)]
+    {
+        let _ = (staging, &rng);
+        match external::fs_class(folder) {
+            Ok(external::FsClass::NoLinks) => LinkProbe::Refused,
+            // PR51 M1: Linux and Android publish every save by linking the open descriptor through
+            // /proc (`external::publish_session`, `link_open`). Without /proc no save could finish
+            // safely, so refuse before any plaintext is written (fail closed).
+            Ok(_) if !external::link_by_descriptor_available(source) => LinkProbe::NoDescriptor,
+            Ok(_) => LinkProbe::Works,
+            Err(_) => LinkProbe::Inconclusive,
         }
-        let target = folder.join(&probe);
-        match external::link(&source, &target) {
-            Ok(()) => {}
-            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
-            Err(_) => return LinkProbe::Refused,
-        }
-        let ours = match identity {
-            Some(identity) => matches!(
-                external::open_leaf(&target, false),
-                Ok(Leaf::Opened(_, linked)) if linked.identity == identity
-            ),
-            // No identity source: the link call created this absent name exclusively from our
-            // own just-created partial, so the name is ours to remove.
-            None => true,
-        };
-        // Only our just-made second name for our own file is removed here.
-        if ours && fs::remove_file(&target).is_ok() {
-            return LinkProbe::Works;
-        }
-        return LinkProbe::Inconclusive;
     }
-    LinkProbe::Inconclusive
+    #[cfg(not(unix))]
+    {
+        let Ok(id) = external::session_id(source) else {
+            return LinkProbe::Inconclusive;
+        };
+        let source_path = folder.join(staging);
+        for attempt in 0..4 {
+            let probe = format!("{staging}-probe{attempt}");
+            if !external::valid_leaf(&probe) {
+                return LinkProbe::Inconclusive;
+            }
+            match external::link(&source_path, &folder.join(&probe)) {
+                Ok(()) => {}
+                Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
+                Err(_) => return LinkProbe::Refused,
+            }
+            // Only our just-made second name for our own file is removed here.
+            return match external::remove_verified(folder, None, &probe, Expected::Session(id), rng)
+            {
+                Ok(Verified::Removed { .. }) => LinkProbe::Works,
+                _ => LinkProbe::Inconclusive,
+            };
+        }
+        LinkProbe::Inconclusive
+    }
 }
 
 /// Attempt to make a just-changed directory entry durable. Best effort by design: some network
@@ -1470,7 +1620,12 @@ impl ExportFile {
     /// Start a fresh export in the freshly resolved Downloads `folder`, created if missing as the
     /// non-resumable writer does. Returns Unsupported when this destination cannot carry a
     /// journal; no file is left behind in that case.
-    pub fn create(folder: &Path, name: &str, plan: ExportPlan) -> Result<Self, ExportError> {
+    pub fn create(
+        folder: &Path,
+        name: &str,
+        plan: ExportPlan,
+        rng: &mut dyn CryptoRngCore,
+    ) -> Result<Self, ExportError> {
         if external::CURRENT_PLATFORM == 0 || !folder.is_absolute() {
             return Err(ExportError::Unsupported);
         }
@@ -1493,6 +1648,7 @@ impl ExportFile {
             },
         })?;
         let folder_id = external::folder_identity(folder).map_err(|_| ExportError::Unsupported)?;
+        journal_capable(folder)?;
         for number in 0..external::MAX_CANDIDATES {
             let final_leaf = external::numbered(name, number);
             let staging = external::staging_for(&final_leaf);
@@ -1517,9 +1673,10 @@ impl ExportFile {
                     retryable: true,
                     reason: "the folder changed while the save was starting".into(),
                 },
+                rng,
             )?;
             let leaves = (staging, final_leaf);
-            return Self::adopt_created(file, folder, encoded, folder_id, leaves, plan);
+            return Self::adopt_created(file, folder, encoded, folder_id, leaves, plan, rng);
         }
         Err(ExportError::Local {
             retryable: false,
@@ -1538,6 +1695,7 @@ impl ExportFile {
     pub fn create_chosen(
         choice: &ChosenDestination,
         plan: ExportPlan,
+        rng: &mut dyn CryptoRngCore,
     ) -> Result<Self, ExportError> {
         let folder = choice.folder.as_path();
         let name = choice.name.as_str();
@@ -1560,6 +1718,7 @@ impl ExportFile {
             }
             Err(error) => return Err(chosen_error(error)),
         }
+        journal_capable(folder)?;
         // Still before any plaintext exists, so a name taken since the dialog is refused and the
         // user chooses again; only a collision after this point is numbered at publication.
         if external::occupied(&folder.join(name)).map_err(chosen_error)? {
@@ -1582,9 +1741,10 @@ impl ExportFile {
             file,
             &folder.join(&staging),
             ExportError::Refused(ChoiceRefusal::FolderChanged),
+            rng,
         )?;
         let leaves = (staging, name.to_owned());
-        Self::adopt_created(file, folder, encoded, captured, leaves, plan)
+        Self::adopt_created(file, folder, encoded, captured, leaves, plan, rng)
     }
 
     /// Shared tail of both creations: prove identity and hard-link support on the file this call
@@ -1596,18 +1756,26 @@ impl ExportFile {
         folder_id: FileIdentity,
         (staging, final_leaf): (String, String),
         plan: ExportPlan,
+        rng: &mut dyn CryptoRngCore,
     ) -> Result<Self, ExportError> {
         let path = folder.join(&staging);
         let failure = match external::observe(&file) {
             // A journal needs the single-writer lock; a folder whose filesystem cannot lock (or
             // anything else holding our brand-new file) gets the non-resumable writer instead.
             Ok(_) if exclusive(&file).is_err() => Err(ExportError::Unsupported),
+            // PR51 M1: Linux publishes by linking the session's own descriptor through /proc.
+            // Without it, never start a journal that could not finish that way.
+            Ok(_) if !external::link_by_descriptor_available(&file) => {
+                Err(ExportError::Unsupported)
+            }
             Ok(observed) if observed.regular && observed.links == 1 => {
-                match links_supported(folder, &staging, Some(observed.identity)) {
+                match links_supported(folder, &staging, &file, rng) {
                     LinkProbe::Works => Ok(observed),
                     // No writer could publish here: refuse before any plaintext exists.
                     LinkProbe::Refused => Err(ExportError::NoLinks),
-                    LinkProbe::Inconclusive => Err(ExportError::Unsupported),
+                    LinkProbe::Inconclusive | LinkProbe::NoDescriptor => {
+                        Err(ExportError::Unsupported)
+                    }
                 }
             }
             _ => Err(ExportError::Unsupported),
@@ -1618,7 +1786,7 @@ impl ExportFile {
                 // Created by this call a moment ago; remove it so a refused or unsupported
                 // destination leaves nothing behind for the fallback writer to trip over. Only
                 // while the name still proves to be that object (a swap since is left alone).
-                remove_created(file, &path);
+                remove_created(file, &path, rng);
                 return Err(error);
             }
         };
@@ -1972,7 +2140,15 @@ impl ExportFile {
         };
         // Once the link exists, or may exist, the session never trims or writes again (see
         // `prepare_publication` and `accept`). Only a definite refusal leaves it private.
-        match external::link(&staging, &target) {
+        // PR51 M1: on Linux the final name is linked from this session's own descriptor, so a
+        // swapped staging name can never become the final name; elsewhere see `link_open`.
+        match external::link_open(
+            &self.file,
+            &self.folder,
+            Some(self.journal.folder_id),
+            &self.journal.staging,
+            &self.journal.final_leaf,
+        ) {
             Ok(()) => self.linked = true,
             // The name was taken: no link was made, so the retry may choose a numbered name.
             Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
@@ -2029,15 +2205,21 @@ impl ExportFile {
     /// Returns whether that question is settled (no staging name of ours can remain). Review L3:
     /// when it is not (the name could not be checked or deleted), native keeps the Published row
     /// so the leftover second plaintext name stays tracked until Clear removes it.
-    pub fn finish(self) -> bool {
+    ///
+    /// PR51 H1: only an outcome that actually removed our staging name counts as settled here. A
+    /// name left in place (in a folder other accounts can modify, held by another program, or not
+    /// provably ours) keeps the Published row so the user is told about the second name.
+    pub fn finish(self, rng: &mut dyn CryptoRngCore) -> bool {
         let journal = self.journal.clone();
         drop(self);
-        matches!(remove_partial(&journal), Ok(outcome) if outcome.settled())
+        matches!(remove_partial(&journal, true, rng), Ok(outcome) if outcome.cleared_staging())
     }
 
     /// Remove a just-created partial whose first journal publication failed.
-    pub fn discard(self) {
-        let _ = self.finish();
+    pub fn discard(self, rng: &mut dyn CryptoRngCore) {
+        let journal = self.journal.clone();
+        drop(self);
+        let _ = remove_partial(&journal, false, rng);
     }
 }
 

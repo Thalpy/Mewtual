@@ -8,6 +8,11 @@ use catcoms_storage::kept::{
 };
 use std::path::PathBuf;
 
+/// The injected RNG for storage removals (PR51 H1 renames aside on Unix).
+fn rng() -> ChaCha20Rng {
+    <ChaCha20Rng as rand_core::SeedableRng>::seed_from_u64(51)
+}
+
 struct Running {
     actor: ServerActor,
     task: tokio::task::JoinHandle<()>,
@@ -73,6 +78,7 @@ async fn begin(run: &Running, ready: &DownloadReady) -> ExportFile {
         run.downloads.path(),
         "cat.bin",
         ready.export_plan().unwrap(),
+        &mut rng(),
     )
     .unwrap();
     bounded(run.actor.download_export_transition(
@@ -147,7 +153,7 @@ async fn journaled_export_through_the_actor_publishes_the_verified_plaintext_onc
     ));
     write_all(&run, &ready, &mut file).await;
     let path = publish(&run, &ready, &mut file).await;
-    file.finish();
+    file.finish(&mut rng());
     assert_eq!(std::fs::read(&path).unwrap(), run.data);
     assert_eq!(path.file_name().unwrap(), "cat.bin");
     bounded(run.actor.finish_download_export(ready.clone()))
@@ -170,7 +176,7 @@ async fn an_empty_file_is_acquired_and_saved_as_one_empty_chunk() {
     let checkpoint = file.checkpoint().unwrap();
     assert_eq!(checkpoint.written_chunks(), 1);
     let path = publish(&run, &ready, &mut file).await;
-    file.finish();
+    file.finish(&mut rng());
     assert_eq!(std::fs::read(&path).unwrap(), b"");
     run.close().await;
 }
@@ -258,7 +264,7 @@ async fn a_save_as_choice_never_interrupts_a_live_journaled_save() {
     // The interrupted-looking save is in fact untouched: it writes and publishes normally.
     write_all(&run, &first, &mut file).await;
     let path = publish(&run, &first, &mut file).await;
-    file.finish();
+    file.finish(&mut rng());
     assert_eq!(std::fs::read(path).unwrap(), run.data);
     assert_eq!(std::fs::read_dir(chosen.path()).unwrap().count(), 0);
     run.close().await;
@@ -324,7 +330,7 @@ async fn pause_mid_export_stops_effects_and_resume_continues_the_same_partial_fi
     write_all(&run, &second, &mut file).await;
     let path = publish(&run, &second, &mut file).await;
     // Native finishes the session (releasing its file lock) before anything reads the file.
-    file.finish();
+    file.finish(&mut rng());
     assert_eq!(
         path.file_name().unwrap(),
         "cat.bin",
@@ -350,7 +356,7 @@ async fn cancel_racing_publication_resolves_to_exactly_one_outcome() {
                 panic!("Remove after publication keeps the saved journal for cleanup");
             };
             drop(file);
-            remove_partial(&journal).unwrap();
+            remove_partial(&journal, false, &mut rng()).unwrap();
             bounded(run.actor.finish_download_cleanup(id))
                 .await
                 .unwrap();
@@ -378,7 +384,7 @@ async fn cancel_racing_publication_resolves_to_exactly_one_outcome() {
             .await
             .is_err());
             drop(file);
-            remove_partial(&journal).unwrap();
+            remove_partial(&journal, false, &mut rng()).unwrap();
             bounded(run.actor.finish_download_cleanup(id))
                 .await
                 .unwrap();
@@ -396,7 +402,7 @@ async fn save_new_copy_and_replacement_transfers_release_stale_export_results() 
     let file = begin(&run, &old).await;
     let journal = file.journal().clone();
     let saved = bounded(run.actor.downloads()).await.unwrap().remove(0);
-    remove_partial(&journal).unwrap();
+    remove_partial(&journal, false, &mut rng()).unwrap();
     let intent = bounded(
         run.actor
             .abandon_download_export(saved.id, saved.state.intent),
@@ -434,7 +440,8 @@ async fn save_new_copy_and_replacement_transfers_release_stale_export_results() 
                 presence: ExportFile::create(
                     run.downloads.path(),
                     "other.bin",
-                    old.export_plan().unwrap()
+                    old.export_plan().unwrap(),
+                    &mut rng(),
                 )
                 .unwrap()
                 .presence(),
@@ -447,7 +454,7 @@ async fn save_new_copy_and_replacement_transfers_release_stale_export_results() 
     let mut file = begin(&run, &replacement).await;
     write_all(&run, &replacement, &mut file).await;
     let path = publish(&run, &replacement, &mut file).await;
-    file.finish();
+    file.finish(&mut rng());
     assert_eq!(std::fs::read(path).unwrap(), run.data);
     run.close().await;
 }
@@ -476,7 +483,8 @@ async fn the_resume_preflight_carries_the_remembered_choice_until_begin() {
         .unwrap();
     let planned = preflight.planned().expect("remembered").unwrap();
     assert_eq!(*planned, *choice);
-    let file = ExportFile::create_chosen(&planned, ready.export_plan().unwrap()).unwrap();
+    let file =
+        ExportFile::create_chosen(&planned, ready.export_plan().unwrap(), &mut rng()).unwrap();
     bounded(run.actor.download_export_transition(
         ready.clone(),
         DownloadExportTransition::Begin {
@@ -518,8 +526,13 @@ async fn preflight_edges_from_before_a_freeze_and_thaw_record_nothing() {
         .unwrap()
         .with_export_custody(Arc::new(()));
     let downloads = tempfile::tempdir().unwrap();
-    let file =
-        ExportFile::create(downloads.path(), "cat.bin", ready.export_plan().unwrap()).unwrap();
+    let file = ExportFile::create(
+        downloads.path(),
+        "cat.bin",
+        ready.export_plan().unwrap(),
+        &mut rng(),
+    )
+    .unwrap();
     bounded(actor.download_export_transition(
         ready.clone(),
         DownloadExportTransition::Begin {
@@ -718,8 +731,13 @@ async fn actor_freeze_and_thaw_release_stale_export_transitions() {
         .unwrap()
         .with_export_custody(Arc::new(()));
     let downloads = tempfile::tempdir().unwrap();
-    let file =
-        ExportFile::create(downloads.path(), "cat.bin", ready.export_plan().unwrap()).unwrap();
+    let file = ExportFile::create(
+        downloads.path(),
+        "cat.bin",
+        ready.export_plan().unwrap(),
+        &mut rng(),
+    )
+    .unwrap();
     let preparing = bounded(actor.prepare_shutdown()).await.unwrap();
     let frozen = bounded(
         preparing.save_and_freeze(crate::shutdown::ShutdownLease::new(

@@ -12,7 +12,7 @@ fn begin_chosen(
     lease: &DownloadExportLease,
     choice: &ChosenDestination,
 ) -> ExportFile {
-    let file = ExportFile::create_chosen(choice, export_plan()).unwrap();
+    let file = ExportFile::create_chosen(choice, export_plan(), &mut rng()).unwrap();
     store
         .begin_download_export(lease, file.journal(), file.presence())
         .unwrap();
@@ -152,7 +152,7 @@ fn a_chosen_destination_publishes_at_the_exact_name_and_resumes_there_after_rest
         .unwrap();
     write_all(&mut file);
     let path = publish(&mut store, &lease, &mut file);
-    file.finish();
+    file.finish(&mut rng());
     assert_eq!(path, folder.join("report.bin"));
     assert_eq!(fs::read(path).unwrap(), CHUNKS.concat());
 }
@@ -239,7 +239,7 @@ fn a_parent_swapped_or_name_taken_after_selection_is_refused_before_any_write() 
         fs::create_dir(&folder).unwrap();
     }
     assert!(matches!(
-        ExportFile::create_chosen(&choice, export_plan()),
+        ExportFile::create_chosen(&choice, export_plan(), &mut rng()),
         Err(ExportError::Refused(ChoiceRefusal::FolderChanged))
     ));
     assert_eq!(
@@ -253,7 +253,7 @@ fn a_parent_swapped_or_name_taken_after_selection_is_refused_before_any_write() 
     let choice = ChosenDestination::validate(&folder.join("report.bin")).unwrap();
     fs::write(folder.join("report.bin"), b"arrived meanwhile").unwrap();
     assert!(matches!(
-        ExportFile::create_chosen(&choice, export_plan()),
+        ExportFile::create_chosen(&choice, export_plan(), &mut rng()),
         Err(ExportError::Refused(ChoiceRefusal::Exists))
     ));
     assert_eq!(
@@ -267,11 +267,15 @@ fn a_parent_swapped_or_name_taken_after_selection_is_refused_before_any_write() 
     let folder = chosen_folder(&fx);
     let choice = ChosenDestination::validate(&folder.join("report.bin")).unwrap();
     assert!(matches!(
-        with_identity_unsupported(1, || ExportFile::create_chosen(&choice, export_plan())),
+        with_identity_unsupported(1, || ExportFile::create_chosen(
+            &choice,
+            export_plan(),
+            &mut rng()
+        )),
         Err(ExportError::Refused(ChoiceRefusal::FolderChanged))
     ));
     assert!(matches!(
-        with_identity_unsupported(1, || choice.create_unjournaled()),
+        with_identity_unsupported(1, || choice.create_unjournaled(&mut rng())),
         Err(ExportError::Refused(ChoiceRefusal::FolderChanged))
     ));
     assert_eq!(fs::read_dir(&folder).unwrap().count(), 0);
@@ -306,7 +310,7 @@ fn a_folder_swapped_between_the_identity_check_and_creation_is_refused() {
     let folder = chosen_folder(&fx);
     let choice = ChosenDestination::validate(&folder.join("report.bin")).unwrap();
     let (created, moved) = with_swap_before_create(&folder, || {
-        ExportFile::create_chosen(&choice, export_plan())
+        ExportFile::create_chosen(&choice, export_plan(), &mut rng())
     });
     assert!(matches!(
         created,
@@ -323,7 +327,8 @@ fn a_folder_swapped_between_the_identity_check_and_creation_is_refused() {
     let fx = fixture();
     let folder = chosen_folder(&fx);
     let choice = ChosenDestination::validate(&folder.join("report.bin")).unwrap();
-    let (created, moved) = with_swap_before_create(&folder, || choice.create_unjournaled());
+    let (created, moved) =
+        with_swap_before_create(&folder, || choice.create_unjournaled(&mut rng()));
     assert!(matches!(
         created,
         Err(ExportError::Refused(ChoiceRefusal::FolderChanged))
@@ -335,7 +340,7 @@ fn a_folder_swapped_between_the_identity_check_and_creation_is_refused() {
     let fx = fixture();
     fs::create_dir_all(&fx.downloads).unwrap();
     let (created, moved) = with_swap_before_create(&fx.downloads, || {
-        ExportFile::create(&fx.downloads, "report.bin", export_plan())
+        ExportFile::create(&fx.downloads, "report.bin", export_plan(), &mut rng())
     });
     assert!(matches!(created, Err(ExportError::Local { .. })));
     assert_eq!(fs::read_dir(&fx.downloads).unwrap().count(), 0);
@@ -351,7 +356,7 @@ fn a_downloads_reservation_without_links_is_refused_before_any_plaintext() {
     let file = external::create_leaf(&staging).unwrap();
     assert!(matches!(
         injected(Effect::Link, io::ErrorKind::PermissionDenied, || {
-            confirm_staging_links(file, &fx.downloads, "notes.txt.part")
+            confirm_staging_links(file, &fx.downloads, "notes.txt.part", &mut rng())
         }),
         Err(ExportError::NoLinks)
     ));
@@ -362,7 +367,7 @@ fn a_downloads_reservation_without_links_is_refused_before_any_plaintext() {
     );
     // A folder that links keeps the reservation and nothing else.
     let file = external::create_leaf(&staging).unwrap();
-    let file = confirm_staging_links(file, &fx.downloads, "notes.txt.part").unwrap();
+    let file = confirm_staging_links(file, &fx.downloads, "notes.txt.part", &mut rng()).unwrap();
     drop(file);
     assert_eq!(fs::read_dir(&fx.downloads).unwrap().count(), 1);
     assert!(staging.exists());
@@ -441,7 +446,7 @@ fn a_swap_and_swap_back_around_creation_with_a_planted_file_writes_nothing() {
             fs::write(path.join("report.bin.part"), b"planted").unwrap();
         }))
     });
-    let created = choice.create_unjournaled();
+    let created = choice.create_unjournaled(&mut rng());
     external::BEFORE_CREATE.with(|hook| *hook.borrow_mut() = None);
     external::AFTER_CREATE.with(|hook| *hook.borrow_mut() = None);
     assert!(created.is_err(), "the planted file is never adopted");
@@ -467,19 +472,20 @@ fn removing_a_just_created_partial_needs_its_identity_to_still_match() {
     let file = external::create_leaf(&swapped).unwrap();
     fs::rename(&swapped, folder.join("ours elsewhere")).unwrap();
     fs::write(&swapped, b"someone else's").unwrap();
-    remove_created(file, &swapped);
+    remove_created(file, &swapped, &mut rng());
     assert_eq!(fs::read(&swapped).unwrap(), b"someone else's");
     // Still our own object: removed.
     let kept = folder.join("ours.mewtual-part");
     let file = external::create_leaf(&kept).unwrap();
-    remove_created(file, &kept);
+    remove_created(file, &kept, &mut rng());
     assert!(!kept.exists());
-    // No identity to prove it with: the exclusively created name is removed by path, so an
-    // identity-less filesystem is not left with an empty partial on every refused save.
+    // No number to prove it with: left in place (PR51 H1 changed this contract on purpose: it
+    // used to be removed by path; an empty file left behind discloses nothing, while deleting
+    // without proof could remove someone else's file).
     let unproven = folder.join("unproven.mewtual-part");
     let file = external::create_leaf(&unproven).unwrap();
-    with_identity_unsupported(1, || remove_created(file, &unproven));
-    assert!(!unproven.exists());
+    with_identity_unsupported(1, || remove_created(file, &unproven, &mut rng()));
+    assert!(unproven.exists());
 }
 
 #[test]
@@ -492,11 +498,13 @@ fn an_orphan_partial_from_a_crash_before_begin_is_refused_and_left_alone() {
     let mut store = open(&fx.vault);
     let choice = ChosenDestination::validate(&folder.join("report.bin")).unwrap();
     let (id, _run) = planned_run(&mut store, &choice);
-    let orphan = ExportFile::create_chosen(&remembered(&store, id), export_plan()).unwrap();
+    let orphan =
+        ExportFile::create_chosen(&remembered(&store, id), export_plan(), &mut rng()).unwrap();
     drop(orphan); // the crash: no Begin, no discard
     let staging = folder.join("report.bin.mewtual-part");
     assert!(staging.exists());
-    let refused = ExportFile::create_chosen(&remembered(&store, id), export_plan()).unwrap_err();
+    let refused =
+        ExportFile::create_chosen(&remembered(&store, id), export_plan(), &mut rng()).unwrap_err();
     assert!(matches!(
         refused,
         ExportError::Refused(ChoiceRefusal::PartialExists)
@@ -519,7 +527,7 @@ fn a_chosen_folder_without_links_is_refused_before_any_plaintext_exists() {
     let choice = ChosenDestination::validate(&folder.join("report.bin")).unwrap();
     assert!(matches!(
         injected(Effect::Link, io::ErrorKind::Unsupported, || {
-            ExportFile::create_chosen(&choice, export_plan())
+            ExportFile::create_chosen(&choice, export_plan(), &mut rng())
         }),
         Err(ExportError::NoLinks)
     ));
@@ -528,7 +536,7 @@ fn a_chosen_folder_without_links_is_refused_before_any_plaintext_exists() {
     let choice = identityless(&folder, "report.bin");
     assert!(matches!(
         injected(Effect::Link, io::ErrorKind::PermissionDenied, || {
-            choice.create_unjournaled()
+            choice.create_unjournaled(&mut rng())
         }),
         Err(ExportError::NoLinks)
     ));
@@ -541,7 +549,7 @@ fn an_identityless_chosen_folder_falls_back_with_the_chosen_location_rules() {
     let folder = chosen_folder(&fx);
     let choice = identityless(&folder, "report.bin");
     assert!(matches!(
-        ExportFile::create_chosen(&choice, export_plan()),
+        ExportFile::create_chosen(&choice, export_plan(), &mut rng()),
         Err(ExportError::Unsupported)
     ));
     assert_eq!(
@@ -550,7 +558,7 @@ fn an_identityless_chosen_folder_falls_back_with_the_chosen_location_rules() {
         "nothing left behind"
     );
     // Exact name, beside it, no numbering.
-    let (file, staging, final_path) = choice.create_unjournaled().unwrap();
+    let (file, staging, final_path) = choice.create_unjournaled(&mut rng()).unwrap();
     assert_eq!(staging, folder.join("report.bin.part"));
     assert_eq!(final_path, folder.join("report.bin"));
     assert_eq!(
@@ -561,14 +569,14 @@ fn an_identityless_chosen_folder_falls_back_with_the_chosen_location_rules() {
     drop(file);
     // An existing .part is refused, never adopted or numbered around.
     assert!(matches!(
-        choice.create_unjournaled(),
+        choice.create_unjournaled(&mut rng()),
         Err(ExportError::Refused(ChoiceRefusal::PartialExists))
     ));
     fs::remove_file(&staging).unwrap();
     // The chosen name taken after selection is refused and left byte-identical.
     fs::write(&final_path, b"someone else's").unwrap();
     assert!(matches!(
-        choice.create_unjournaled(),
+        choice.create_unjournaled(&mut rng()),
         Err(ExportError::Refused(ChoiceRefusal::Exists))
     ));
     assert_eq!(fs::read(&final_path).unwrap(), b"someone else's");
@@ -577,7 +585,7 @@ fn an_identityless_chosen_folder_falls_back_with_the_chosen_location_rules() {
     fs::remove_file(&final_path).unwrap();
     fs::remove_dir(&folder).unwrap();
     assert!(matches!(
-        choice.create_unjournaled(),
+        choice.create_unjournaled(&mut rng()),
         Err(ExportError::Refused(ChoiceRefusal::FolderUnavailable))
     ));
     assert!(!folder.exists());
@@ -629,18 +637,19 @@ fn begin_refuses_a_journal_that_is_not_the_remembered_choice() {
     let (id, run) = planned_run(&mut store, &choice);
     let lease = verify_private(&mut store, run);
     // A one-click Downloads save that raced the choice cannot start.
-    let downloads = ExportFile::create(&fx.downloads, "notes.txt", export_plan()).unwrap();
+    let downloads =
+        ExportFile::create(&fx.downloads, "notes.txt", export_plan(), &mut rng()).unwrap();
     assert!(store
         .begin_download_export(&lease, downloads.journal(), downloads.presence())
         .is_err());
-    downloads.discard();
+    downloads.discard(&mut rng());
     // Nor can a journal for a different choice in the same folder.
     let other = ChosenDestination::validate(&folder.join("other.bin")).unwrap();
-    let wrong = ExportFile::create_chosen(&other, export_plan()).unwrap();
+    let wrong = ExportFile::create_chosen(&other, export_plan(), &mut rng()).unwrap();
     assert!(store
         .begin_download_export(&lease, wrong.journal(), wrong.presence())
         .is_err());
-    wrong.discard();
+    wrong.discard(&mut rng());
     assert_eq!(remembered(&store, id), choice, "the plan is untouched");
     assert!(store.download_export_state(id).unwrap().is_none());
     // The matching journal starts and consumes it.
@@ -706,7 +715,7 @@ fn planned_destination_encoding_and_successor_rules() {
     assert!(v1_with_plan.validate().is_err());
     let mut beside = planned.clone();
     beside.export = Export::Writing(
-        ExportFile::create_chosen(&choice, export_plan())
+        ExportFile::create_chosen(&choice, export_plan(), &mut rng())
             .unwrap()
             .journal()
             .clone(),

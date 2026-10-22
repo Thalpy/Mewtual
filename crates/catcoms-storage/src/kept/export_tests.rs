@@ -13,6 +13,11 @@ mod chosen;
 
 const CHUNKS: [&[u8]; 2] = [b"alpha chunk one!", b"bravo chunk two"];
 
+/// The injected RNG a removal draws its Unix "removing" name from (PR51 H1).
+fn rng() -> ChaCha20Rng {
+    ChaCha20Rng::seed_from_u64(51)
+}
+
 fn scope() -> KeepScope {
     KeepScope {
         group: vec![3; 32],
@@ -77,7 +82,7 @@ fn started(
     lease: &DownloadExportLease,
     downloads: &Path,
 ) -> ExportFile {
-    let file = ExportFile::create(downloads, "notes.txt", export_plan()).unwrap();
+    let file = ExportFile::create(downloads, "notes.txt", export_plan(), &mut rng()).unwrap();
     store
         .begin_download_export(lease, file.journal(), file.presence())
         .unwrap();
@@ -159,7 +164,7 @@ fn fresh_export_publishes_without_replacement_and_releases_only_private_progress
     ));
     write_all(&mut file);
     let path = publish(&mut store, &lease, &mut file);
-    file.finish();
+    file.finish(&mut rng());
     assert_eq!(path, fx.downloads.join("notes.txt"));
     assert_eq!(fs::read(&path).unwrap(), CHUNKS.concat());
     assert!(
@@ -260,7 +265,7 @@ fn crash_after_exclusive_create_leaves_an_unadopted_orphan_and_a_fresh_name() {
     let fx = fixture();
     let mut store = open(&fx.vault);
     let (id, _lease) = completed(&mut store);
-    let orphan = ExportFile::create(&fx.downloads, "notes.txt", export_plan()).unwrap();
+    let orphan = ExportFile::create(&fx.downloads, "notes.txt", export_plan(), &mut rng()).unwrap();
     drop(orphan); // crash before Writing(0)
     drop(store);
     let mut store = open(&fx.vault);
@@ -304,7 +309,7 @@ fn torn_or_extra_tail_after_the_checkpoint_is_verified_then_rewritten() {
         .unwrap();
     write_all(&mut file);
     let path = publish(&mut store, &lease, &mut file);
-    file.finish(); // releases the session lock, which on Windows also blocks other readers
+    file.finish(&mut rng()); // releases the session lock, which on Windows also blocks other readers
     assert_eq!(fs::read(path).unwrap(), CHUNKS.concat());
 }
 
@@ -359,7 +364,7 @@ fn checkpoint_claiming_more_than_the_file_rewinds_but_a_changed_byte_inside_it_h
         } else {
             write_all(&mut file);
             let path = publish(&mut store, &lease, &mut file);
-            file.finish();
+            file.finish(&mut rng());
             assert_eq!(fs::read(path).unwrap(), CHUNKS.concat());
         }
     }
@@ -532,7 +537,7 @@ fn destination_changes_while_paused_become_typed_halts_without_touching_other_fi
         let ExportState::Writing(halted) = store.cancel_download(id).unwrap().unwrap() else {
             panic!("journal is kept for cleanup");
         };
-        let outcome = remove_partial(&halted).unwrap();
+        let outcome = remove_partial(&halted, false, &mut rng()).unwrap();
         let expected_outcome = match change {
             Change::Deleted | Change::Moved | Change::PermissionRevoked => PartialRemoval::Removed,
             Change::Replaced | Change::Linked => PartialRemoval::LeftInPlace,
@@ -622,7 +627,7 @@ fn a_live_older_session_blocks_a_second_writer_until_it_is_dropped() {
     ));
     let elsewhere = fx.downloads.with_file_name("Elsewhere");
     fs::create_dir_all(&elsewhere).unwrap();
-    let unrelated = ExportFile::create(&elsewhere, "other.txt", export_plan()).unwrap();
+    let unrelated = ExportFile::create(&elsewhere, "other.txt", export_plan(), &mut rng()).unwrap();
     assert!(
         store
             .resume_download_export(&lease, &journal, unrelated.presence())
@@ -661,13 +666,19 @@ fn removal_reports_a_partial_it_cannot_open_instead_of_forgetting_it() {
     let ExportState::Writing(journal) = store.cancel_download(id).unwrap().unwrap() else {
         panic!();
     };
-    assert_eq!(remove_partial(&journal).unwrap(), PartialRemoval::Unchecked);
+    assert_eq!(
+        remove_partial(&journal, false, &mut rng()).unwrap(),
+        PartialRemoval::Unchecked
+    );
     drop(holder);
     assert!(
         staging(&fx.downloads).exists(),
         "nothing was deleted or forgotten"
     );
-    assert_eq!(remove_partial(&journal).unwrap(), PartialRemoval::Removed);
+    assert_eq!(
+        remove_partial(&journal, false, &mut rng()).unwrap(),
+        PartialRemoval::Removed
+    );
     store.finish_download_cleanup(id).unwrap();
 }
 
@@ -700,7 +711,10 @@ fn a_compressed_or_cloud_tagged_partial_probes_ready_and_is_removed() {
     let ExportState::Writing(saved) = store.cancel_download(id).unwrap().unwrap() else {
         panic!();
     };
-    assert_eq!(remove_partial(&saved).unwrap(), PartialRemoval::Removed);
+    assert_eq!(
+        remove_partial(&saved, false, &mut rng()).unwrap(),
+        PartialRemoval::Removed
+    );
     assert!(!staging(&fx.downloads).exists(), "the plaintext is gone");
     store.finish_download_cleanup(id).unwrap();
 }
@@ -738,8 +752,380 @@ fn publication_pins_the_proven_staging_file_across_the_link() {
         "the swap was attempted and refused"
     );
     let path = linked.unwrap();
-    file.finish();
+    file.finish(&mut rng());
     assert_eq!(fs::read(path).unwrap(), CHUNKS.concat());
+}
+
+/// Arm `BEFORE_REMOVE` to replace the name with someone else's file at exactly the moment between
+/// the identity check and the delete: move whatever is at the name away (if allowed) and, if the
+/// name is then free, write `foreign` there (read-only when asked). Returns whether the move away
+/// succeeded.
+fn swap_before_remove(
+    elsewhere: PathBuf,
+    foreign: &'static [u8],
+    read_only: bool,
+) -> std::rc::Rc<std::cell::Cell<Option<bool>>> {
+    let moved = std::rc::Rc::new(std::cell::Cell::new(None));
+    let seen = moved.clone();
+    external::BEFORE_REMOVE.with(|hook| {
+        *hook.borrow_mut() = Some(Box::new(move |path: &Path| {
+            seen.set(Some(fs::rename(path, &elsewhere).is_ok()));
+            if !path.exists() {
+                fs::write(path, foreign).unwrap();
+                if read_only {
+                    let mut permissions = fs::metadata(path).unwrap().permissions();
+                    permissions.set_readonly(true);
+                    fs::set_permissions(path, permissions).unwrap();
+                }
+            }
+        }))
+    });
+    moved
+}
+
+fn make_writable(path: &Path) {
+    if let Ok(metadata) = fs::metadata(path) {
+        let mut permissions = metadata.permissions();
+        #[allow(clippy::permissions_set_readonly_false)]
+        permissions.set_readonly(false);
+        let _ = fs::set_permissions(path, permissions);
+    }
+}
+
+#[test]
+fn a_name_swapped_after_verification_is_never_what_gets_deleted() {
+    // PR51 H1: Remove used to verify the partial's identity, close the handle and delete by path,
+    // so a file swapped in at the name in between was deleted although Mewtual never created it.
+    // Now the deleted object is exactly the verified one: on Windows the delete goes through the
+    // verified handle, which also refuses the swap; on Unix ours was renamed aside first, so the
+    // file put at the name survives. Also for a read-only partial (the old read-only retry
+    // cleared the attribute through a re-resolved path).
+    for read_only in [false, true] {
+        let fx = fixture();
+        let mut store = open(&fx.vault);
+        let (id, lease) = completed(&mut store);
+        let mut file = started(&mut store, &lease, &fx.downloads);
+        file.accept(0, CHUNKS[0]).unwrap();
+        drop(file);
+        let partial = staging(&fx.downloads);
+        if read_only {
+            let mut permissions = fs::metadata(&partial).unwrap().permissions();
+            permissions.set_readonly(true);
+            fs::set_permissions(&partial, permissions).unwrap();
+        }
+        let ExportState::Writing(journal) = store.cancel_download(id).unwrap().unwrap() else {
+            panic!("journal kept for cleanup");
+        };
+        let elsewhere = fx.downloads.join("moved by someone");
+        let moved = swap_before_remove(elsewhere.clone(), b"someone else's file", read_only);
+        let outcome = remove_partial(&journal, false, &mut rng());
+        external::BEFORE_REMOVE.with(|hook| *hook.borrow_mut() = None);
+        assert_eq!(
+            moved.get(),
+            Some(false),
+            "the swap ran at the boundary and could not move our file (read_only={read_only})"
+        );
+        assert!(!elsewhere.exists(), "read_only={read_only}");
+        assert_eq!(
+            outcome.unwrap(),
+            PartialRemoval::Removed,
+            "read_only={read_only}"
+        );
+        if partial.exists() {
+            // Unix: the name was free (ours was aside) and someone put a file there; it survives
+            // byte-identical, with its own attributes.
+            assert_eq!(fs::read(&partial).unwrap(), b"someone else's file");
+            assert_eq!(
+                fs::metadata(&partial).unwrap().permissions().readonly(),
+                read_only
+            );
+            make_writable(&partial);
+        }
+        let leftovers: Vec<_> = fs::read_dir(&fx.downloads)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .filter(|name| name.to_string_lossy().starts_with("mewtual-removing-"))
+            .collect();
+        assert!(leftovers.is_empty(), "nothing stays at a removing name");
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn unix_never_deletes_automatically_in_a_folder_other_accounts_can_modify() {
+    // PR51 H1: a folder others can write to (without the sticky bit) lets them swap names, so
+    // Remove leaves the partial for the user; a private or sticky folder still removes it.
+    use std::os::unix::fs::PermissionsExt;
+    for (mode, expected) in [
+        (0o777, PartialRemoval::SharedFolder),
+        (0o775, PartialRemoval::SharedFolder),
+        (0o1777, PartialRemoval::Removed),
+        (0o755, PartialRemoval::Removed),
+    ] {
+        let fx = fixture();
+        let mut store = open(&fx.vault);
+        let (id, lease) = completed(&mut store);
+        let mut file = started(&mut store, &lease, &fx.downloads);
+        file.accept(0, CHUNKS[0]).unwrap();
+        drop(file);
+        fs::set_permissions(&fx.downloads, fs::Permissions::from_mode(mode)).unwrap();
+        let ExportState::Writing(journal) = store.cancel_download(id).unwrap().unwrap() else {
+            panic!();
+        };
+        let outcome = remove_partial(&journal, false, &mut rng()).unwrap();
+        assert_eq!(outcome, expected, "mode {mode:o}");
+        assert_eq!(
+            staging(&fx.downloads).exists(),
+            expected == PartialRemoval::SharedFolder,
+            "mode {mode:o}"
+        );
+        if expected == PartialRemoval::SharedFolder {
+            assert!(outcome.settled() && outcome.notice(false).is_some());
+        }
+        fs::set_permissions(&fx.downloads, fs::Permissions::from_mode(0o755)).unwrap();
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn unix_finds_a_partial_a_crash_left_at_a_removing_name() {
+    // PR51 H1: a crash between the rename aside and the unlink leaves our plaintext at a random
+    // "removing" name. Keep must still see it, and the next Remove must find it by identity.
+    let fx = fixture();
+    let mut store = open(&fx.vault);
+    let (id, lease) = completed(&mut store);
+    let mut file = started(&mut store, &lease, &fx.downloads);
+    file.accept(0, CHUNKS[0]).unwrap();
+    drop(file);
+    let leftover = fx
+        .downloads
+        .join("mewtual-removing-00000000000000000000000000000001");
+    fs::rename(staging(&fx.downloads), &leftover).unwrap();
+    // Someone else's file under a similar name is never touched.
+    let unrelated = fx
+        .downloads
+        .join("mewtual-removing-ffffffffffffffffffffffffffffffff");
+    fs::write(&unrelated, b"not ours").unwrap();
+    let ExportState::Writing(journal) = store.cancel_download(id).unwrap().unwrap() else {
+        panic!();
+    };
+    assert_eq!(partial_presence(&journal), PartialPresence::Present);
+    assert_eq!(
+        remove_partial(&journal, false, &mut rng()).unwrap(),
+        PartialRemoval::Removed
+    );
+    assert!(!leftover.exists());
+    assert_eq!(fs::read(&unrelated).unwrap(), b"not ours");
+    assert_eq!(partial_presence(&journal), PartialPresence::Gone);
+}
+
+#[cfg(any(target_os = "linux", target_os = "android"))]
+#[test]
+fn linux_links_the_open_download_even_if_its_name_was_swapped() {
+    // PR51 M1: publication links the session's own descriptor through /proc, so a staging name
+    // swapped after the pin check can never become the final name; the swapped-in file is left
+    // exactly where it was.
+    let fx = fixture();
+    let mut store = open(&fx.vault);
+    let (_id, lease) = completed(&mut store);
+    let mut file = started(&mut store, &lease, &fx.downloads);
+    write_all(&mut file);
+    let Publication::Ready(journal) = file.prepare_publication().unwrap() else {
+        panic!();
+    };
+    store
+        .checkpoint_download_export(&lease, file.journal(), &journal)
+        .unwrap();
+    file.checkpointed(journal);
+    let aside = fx.downloads.join("ours moved");
+    external::BEFORE_LINK.with(|hook| {
+        *hook.borrow_mut() = Some(Box::new(move |staging: &Path| {
+            fs::rename(staging, &aside).unwrap();
+            fs::write(staging, b"someone else's file").unwrap();
+        }))
+    });
+    let path = file.link().unwrap();
+    external::BEFORE_LINK.with(|hook| *hook.borrow_mut() = None);
+    assert_eq!(
+        fs::read(&path).unwrap(),
+        CHUNKS.concat(),
+        "our object, not theirs"
+    );
+    assert_eq!(
+        fs::read(staging(&fx.downloads)).unwrap(),
+        b"someone else's file",
+        "the swapped-in file is untouched"
+    );
+}
+
+/// A native writer's staging file without a journal: created exclusively and held open, as the
+/// non-resumable writer and the GIF export do.
+fn unjournaled_staging(folder: &Path, bytes: &[u8]) -> (File, PathBuf, PathBuf) {
+    let staging = folder.join("notes.txt.part");
+    let mut file = external::create_leaf(&staging).unwrap();
+    std::io::Write::write_all(&mut file, bytes).unwrap();
+    (file, staging, folder.join("notes.txt"))
+}
+
+#[test]
+fn an_unjournaled_save_publishes_only_its_own_open_file() {
+    // PR51 M1 for the non-resumable writer: another program tries to swap the staging name between
+    // verification and the link. Windows: the pin refuses the swap. Linux and Android: the swap
+    // happens, but the link is made from our open descriptor, so the final name is still ours and
+    // the swapped-in file stays exactly where it was. macOS (no link by descriptor): the post-link
+    // check finds a foreign object at the final name, fails the save, and leaves both names.
+    let dir = tempfile::tempdir().unwrap();
+    let (file, staging, final_path) = unjournaled_staging(dir.path(), b"verified bytes");
+    let aside = dir.path().join("ours moved");
+    let moved = std::rc::Rc::new(std::cell::Cell::new(None));
+    let seen = moved.clone();
+    external::BEFORE_LINK.with(|hook| {
+        *hook.borrow_mut() = Some(Box::new(move |from: &Path| {
+            let swapped = fs::rename(from, &aside).is_ok();
+            seen.set(Some(swapped));
+            if swapped {
+                fs::write(from, b"someone else's file").unwrap();
+            }
+        }))
+    });
+    let published = publish_unjournaled(&file, &staging, &final_path);
+    external::BEFORE_LINK.with(|hook| *hook.borrow_mut() = None);
+    #[cfg(windows)]
+    {
+        assert_eq!(moved.get(), Some(false), "the pin refused the swap");
+        published.unwrap();
+        assert_eq!(fs::read(&final_path).unwrap(), b"verified bytes");
+        assert_eq!(fs::read(&staging).unwrap(), b"verified bytes");
+    }
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    {
+        assert_eq!(moved.get(), Some(true), "the swap happened");
+        published.unwrap();
+        assert_eq!(fs::read(&final_path).unwrap(), b"verified bytes", "ours");
+        assert_eq!(fs::read(&staging).unwrap(), b"someone else's file");
+    }
+    #[cfg(all(unix, not(any(target_os = "linux", target_os = "android"))))]
+    {
+        assert_eq!(moved.get(), Some(true), "the swap happened");
+        assert_eq!(
+            published.unwrap_err().kind(),
+            io::ErrorKind::InvalidData,
+            "never reported as saved"
+        );
+        assert_eq!(fs::read(&final_path).unwrap(), b"someone else's file");
+        assert_eq!(fs::read(&staging).unwrap(), b"someone else's file");
+    }
+    drop(file);
+}
+
+#[test]
+fn an_unjournaled_save_never_replaces_a_taken_name_or_leaves_its_folder() {
+    let dir = tempfile::tempdir().unwrap();
+    let (file, staging, final_path) = unjournaled_staging(dir.path(), b"verified bytes");
+    fs::write(&final_path, b"the user's own file").unwrap();
+    assert_eq!(
+        publish_unjournaled(&file, &staging, &final_path)
+            .unwrap_err()
+            .kind(),
+        io::ErrorKind::AlreadyExists
+    );
+    assert_eq!(fs::read(&final_path).unwrap(), b"the user's own file");
+    // The two names must be plain names in one folder.
+    let other = tempfile::tempdir().unwrap();
+    assert_eq!(
+        publish_unjournaled(&file, &staging, &other.path().join("notes.txt"))
+            .unwrap_err()
+            .kind(),
+        io::ErrorKind::InvalidInput
+    );
+    assert!(!other.path().join("notes.txt").exists());
+    // A post-link check that cannot be made: Linux, Android and Windows already linked our own
+    // object, so the save stands; macOS has nothing else proving the final name ours.
+    fs::remove_file(&final_path).unwrap();
+    let checked = injected(Effect::Check, io::ErrorKind::PermissionDenied, || {
+        publish_unjournaled(&file, &staging, &final_path)
+    });
+    #[cfg(any(windows, target_os = "linux", target_os = "android"))]
+    checked.unwrap();
+    #[cfg(not(any(windows, target_os = "linux", target_os = "android")))]
+    assert!(checked.is_err());
+    assert_eq!(fs::read(&final_path).unwrap(), b"verified bytes");
+}
+
+#[test]
+fn a_native_staging_name_is_removed_only_while_it_holds_our_open_file() {
+    // PR51 H1 for writers without a journal: the removal is verified against the in-session number
+    // of the handle the writer still holds. Someone else's file put at the name between the check
+    // and the delete survives byte-identical (Windows: the swap is refused; Unix: ours was renamed
+    // aside first), also when it is read-only.
+    for read_only in [false, true] {
+        let dir = tempfile::tempdir().unwrap();
+        let (file, staging, _final_path) = unjournaled_staging(dir.path(), b"partial plaintext");
+        let id = session_id(&file).unwrap();
+        let elsewhere = dir.path().join("moved by someone");
+        let moved = swap_before_remove(elsewhere.clone(), b"someone else's file", read_only);
+        let removed = remove_if_session(dir.path(), "notes.txt.part", id, &mut rng());
+        external::BEFORE_REMOVE.with(|hook| *hook.borrow_mut() = None);
+        assert_eq!(moved.get(), Some(false), "read_only={read_only}");
+        assert_eq!(
+            removed.unwrap(),
+            SessionRemoval::Removed,
+            "our file was removed (read_only={read_only})"
+        );
+        assert!(!elsewhere.exists());
+        if staging.exists() {
+            assert_eq!(fs::read(&staging).unwrap(), b"someone else's file");
+            assert_eq!(
+                fs::metadata(&staging).unwrap().permissions().readonly(),
+                read_only
+            );
+            make_writable(&staging);
+        }
+        drop(file);
+    }
+    // A name that already holds another object is never deleted.
+    let dir = tempfile::tempdir().unwrap();
+    let (file, staging, _final_path) = unjournaled_staging(dir.path(), b"partial plaintext");
+    let id = session_id(&file).unwrap();
+    let ours = dir.path().join("ours elsewhere");
+    let moved_away = fs::rename(&staging, &ours).is_ok();
+    if moved_away {
+        fs::write(&staging, b"someone else's file").unwrap();
+        assert_eq!(
+            remove_if_session(dir.path(), "notes.txt.part", id, &mut rng()).unwrap(),
+            SessionRemoval::NotOurs
+        );
+        assert_eq!(fs::read(&staging).unwrap(), b"someone else's file");
+        assert_eq!(fs::read(&ours).unwrap(), b"partial plaintext");
+    }
+    // Nothing at the name: nothing to delete.
+    assert_eq!(
+        remove_if_session(dir.path(), "absent.part", id, &mut rng()).unwrap(),
+        SessionRemoval::Missing
+    );
+    drop(file);
+}
+
+#[cfg(unix)]
+#[test]
+fn a_native_staging_name_in_a_folder_others_can_modify_is_left_in_place() {
+    // PR51 H1: Unix never deletes automatically where other accounts can swap names.
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::tempdir().unwrap();
+    let (file, staging, _final_path) = unjournaled_staging(dir.path(), b"partial plaintext");
+    let id = session_id(&file).unwrap();
+    fs::set_permissions(dir.path(), fs::Permissions::from_mode(0o777)).unwrap();
+    assert_eq!(
+        remove_if_session(dir.path(), "notes.txt.part", id, &mut rng()).unwrap(),
+        SessionRemoval::SharedFolder
+    );
+    assert!(staging.exists(), "left for the user to delete");
+    fs::set_permissions(dir.path(), fs::Permissions::from_mode(0o755)).unwrap();
+    assert_eq!(
+        remove_if_session(dir.path(), "notes.txt.part", id, &mut rng()).unwrap(),
+        SessionRemoval::Removed
+    );
+    drop(file);
 }
 
 #[test]
@@ -762,13 +1148,22 @@ fn clearing_a_saved_row_never_changes_the_saved_files_attributes() {
     // Model a filesystem that refuses to delete a read-only name (older Windows std did): the
     // read-only retry must not run for a multiply-linked file, so removal stays in Removing.
     let refused = injected(Effect::Remove, io::ErrorKind::PermissionDenied, || {
-        remove_partial(&saved)
+        remove_partial(&saved, false, &mut rng())
     });
-    assert!(refused.is_err(), "removal stays in Removing instead");
+    // PR51 H1: a failed verified delete reports Unchecked (the journal stays, still Removing)
+    // rather than an error.
+    assert_eq!(
+        refused.unwrap(),
+        PartialRemoval::Unchecked,
+        "removal stays in Removing instead"
+    );
     assert!(staging(&fx.downloads).exists());
     assert!(fs::metadata(&path).unwrap().permissions().readonly());
     // Where deletion of the name is allowed, it leaves the shared attributes alone.
-    assert_eq!(remove_partial(&saved).unwrap(), PartialRemoval::KeptSaved);
+    assert_eq!(
+        remove_partial(&saved, false, &mut rng()).unwrap(),
+        PartialRemoval::KeptSaved
+    );
     assert!(!staging(&fx.downloads).exists());
     assert!(fs::metadata(&path).unwrap().permissions().readonly());
     assert_eq!(fs::read(&path).unwrap(), CHUNKS.concat());
@@ -805,7 +1200,7 @@ fn a_fifo_in_place_of_the_saved_folder_fails_resume_and_remove_promptly() {
         panic!();
     };
     assert_eq!(
-        external::tests::bounded(move || remove_partial(&saved)).unwrap(),
+        external::tests::bounded(move || remove_partial(&saved, false, &mut rng())).unwrap(),
         PartialRemoval::FolderUnreachable
     );
 }
@@ -831,7 +1226,7 @@ fn removal_reports_every_name_it_leaves_behind() {
     let ExportState::Writing(saved) = store.cancel_download(id).unwrap().unwrap() else {
         panic!();
     };
-    let outcome = remove_partial(&saved).unwrap();
+    let outcome = remove_partial(&saved, false, &mut rng()).unwrap();
     assert_eq!(outcome, PartialRemoval::KeptSaved);
     assert!(outcome.notice(false).is_some() && outcome.notice(true).is_none());
     assert!(!staging(&fx.downloads).exists());
@@ -850,7 +1245,7 @@ fn removal_reports_every_name_it_leaves_behind() {
     let ExportState::Writing(saved) = store.cancel_download(id).unwrap().unwrap() else {
         panic!();
     };
-    let outcome = remove_partial(&saved).unwrap();
+    let outcome = remove_partial(&saved, false, &mut rng()).unwrap();
     assert_eq!(outcome, PartialRemoval::OtherNameRemains);
     assert!(outcome.notice(true).is_some());
     assert!(!staging(&fx.downloads).exists());
@@ -991,7 +1386,7 @@ fn an_uncertain_link_error_that_made_no_link_retries_instead_of_halting_changed(
     store
         .publish_download_export(&lease, &file.published_journal())
         .unwrap();
-    file.finish();
+    file.finish(&mut rng());
     assert_eq!(fs::read(path).unwrap(), CHUNKS.concat());
 }
 
@@ -1039,7 +1434,7 @@ fn a_long_multibyte_name_saves_with_its_extension_and_numbering_room() {
     let fx = fixture();
     let name = format!("{}.txt", "\u{1F600}".repeat(120));
     for expected_number in [0, 1] {
-        let file = ExportFile::create(&fx.downloads, &name, export_plan()).unwrap();
+        let file = ExportFile::create(&fx.downloads, &name, export_plan(), &mut rng()).unwrap();
         let journal = file.journal().clone();
         assert!(journal.final_leaf.ends_with(".txt"));
         assert!(external::component_units(&journal.staging) <= 255);
@@ -1075,7 +1470,7 @@ fn a_failed_removal_write_keeps_the_live_session_exclusive() {
     let lease = reverified(&mut store, id);
     let elsewhere = fx.downloads.with_file_name("Elsewhere");
     fs::create_dir_all(&elsewhere).unwrap();
-    let unrelated = ExportFile::create(&elsewhere, "other.txt", export_plan()).unwrap();
+    let unrelated = ExportFile::create(&elsewhere, "other.txt", export_plan(), &mut rng()).unwrap();
     assert!(
         store
             .resume_download_export(&lease, &journal, unrelated.presence())
@@ -1150,7 +1545,8 @@ fn an_empty_file_saves_as_one_empty_chunk_across_restart() {
     store.put_download(run, ciphertext).unwrap();
     let lease = store.finish_download(run).unwrap();
     let plan = ExportPlan::for_test(&[b""]);
-    let mut file = ExportFile::create(&fx.downloads, "empty.txt", plan.clone()).unwrap();
+    let mut file =
+        ExportFile::create(&fx.downloads, "empty.txt", plan.clone(), &mut rng()).unwrap();
     store
         .begin_download_export(&lease, file.journal(), file.presence())
         .unwrap();
@@ -1178,7 +1574,7 @@ fn an_empty_file_saves_as_one_empty_chunk_across_restart() {
         .unwrap();
     file.accept(0, b"").unwrap();
     let path = publish(&mut store, &lease, &mut file);
-    file.finish();
+    file.finish(&mut rng());
     assert_eq!(path, fx.downloads.join("empty.txt"));
     assert_eq!(fs::read(&path).unwrap(), b"");
     assert_eq!(view(&store), ExportView::Published);
@@ -1439,7 +1835,7 @@ fn disk_full_while_writing_persists_nothing_and_a_later_attempt_completes() {
     );
     write_all(&mut file);
     let path = publish(&mut store, &lease, &mut file);
-    file.finish();
+    file.finish(&mut rng());
     assert_eq!(fs::read(path).unwrap(), CHUNKS.concat());
 }
 
@@ -1452,7 +1848,7 @@ fn a_folder_without_links_is_refused_at_creation_and_halts_at_publication() {
         let fx = fixture();
         assert!(matches!(
             injected(Effect::Link, kind, || {
-                ExportFile::create(&fx.downloads, "notes.txt", export_plan())
+                ExportFile::create(&fx.downloads, "notes.txt", export_plan(), &mut rng())
             }),
             Err(ExportError::NoLinks)
         ));
@@ -1466,7 +1862,7 @@ fn a_folder_without_links_is_refused_at_creation_and_halts_at_publication() {
     let fx = fixture();
     assert!(matches!(
         injected(Effect::Identity, io::ErrorKind::Unsupported, || {
-            ExportFile::create(&fx.downloads, "notes.txt", export_plan())
+            ExportFile::create(&fx.downloads, "notes.txt", export_plan(), &mut rng())
         }),
         Err(ExportError::Unsupported)
     ));
@@ -1570,7 +1966,7 @@ fn crash_between_link_and_published_recovers_to_saved_without_a_second_copy() {
     let ExportState::Published(saved) = store.cancel_download(id).unwrap().unwrap() else {
         panic!();
     };
-    remove_partial(&saved).unwrap();
+    remove_partial(&saved, false, &mut rng()).unwrap();
     store.finish_download_cleanup(id).unwrap();
     assert!(!staging(&fx.downloads).exists());
     assert_eq!(fs::read(path).unwrap(), CHUNKS.concat());
@@ -1609,14 +2005,19 @@ fn removal_survives_restart_without_auto_cleanup_and_never_resumes() {
     let ExportState::Writing(journal) = store.cancel_download(id).unwrap().unwrap() else {
         panic!();
     };
+    // PR51 H1: reported as Unchecked (the caller keeps Removing), not as an error.
     assert!(matches!(
         injected(Effect::Remove, io::ErrorKind::PermissionDenied, || {
-            remove_partial(&journal)
+            remove_partial(&journal, false, &mut rng())
         }),
-        Err(ExportError::Local { .. })
+        Ok(PartialRemoval::Unchecked)
     ));
+    assert!(
+        staging(&fx.downloads).exists(),
+        "a refused delete leaves the partial at its own name"
+    );
     assert!(store.kept_files().error.is_none());
-    remove_partial(&journal).unwrap();
+    remove_partial(&journal, false, &mut rng()).unwrap();
     store.finish_download_cleanup(id).unwrap();
     assert!(!staging(&fx.downloads).exists());
     assert!(store.downloads().unwrap().is_empty());
@@ -1633,7 +2034,7 @@ fn save_new_copy_retires_the_old_session_and_keep_partly_saved_file_releases_wit
         panic!();
     };
     let intent = store.downloads().unwrap()[0].state.intent;
-    remove_partial(&journal).unwrap();
+    remove_partial(&journal, false, &mut rng()).unwrap();
     assert!(
         store.abandon_download_export(id, intent + 7).is_err(),
         "intent CAS"
@@ -1688,7 +2089,7 @@ fn save_new_copy_retires_every_observer_before_the_delete_and_keeps_the_journal(
     let mut store = open(&fx.vault);
     assert_eq!(state(&store, id), before);
     assert_eq!(
-        remove_partial(before.journal()).unwrap(),
+        remove_partial(before.journal(), false, &mut rng()).unwrap(),
         PartialRemoval::Removed
     );
     assert_eq!(

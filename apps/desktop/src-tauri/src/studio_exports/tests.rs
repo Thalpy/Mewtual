@@ -157,7 +157,7 @@ fn studio_export_link_is_committed_when_staging_cleanup_fails() {
     let mut staged = stage_gif(dir.path(), &gif, || false, || {}).unwrap();
     let (path, staging) = (staged.path.clone(), staged.staging.clone());
     staged
-        .publish_with_cleanup(|_| Err(std::io::ErrorKind::PermissionDenied.into()))
+        .publish_with_cleanup(|_, _| Err(std::io::ErrorKind::PermissionDenied.into()))
         .unwrap();
     assert!(staged.published);
     drop(staged);
