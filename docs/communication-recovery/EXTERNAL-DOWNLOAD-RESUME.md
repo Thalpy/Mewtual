@@ -443,7 +443,10 @@ second reservation.
   cleanup owns the Download; its destination preflight runs without the claim, so a Resume
   hung on a dead share never blocks a cleanup, and that preflight's halt and recovery edges are
   refused once a cleanup has started, because Remove's Deleting step and Save new copy's retire
-  both invalidate its observation.
+  both invalidate its observation. When that preflight recovered a save (crash after the link),
+  its cleanup of the record is conditional too (final review L1): it stands down, without a
+  warning, if another cleanup holds the claim or its observation is no longer current, so it can
+  never release a record that a later Save new copy is re-saving.
 - Native checks the original invocation and lease before **every** write attempt, including each
   retry after a backoff, so a session retired by Lock, Pause, Remove or replacement writes no more
   plaintext.
@@ -961,17 +964,28 @@ guard was broken on purpose and seen to fail.
 | Nit: docs said Keep "always releases" | Qualified: Keep never waits on the destination, but its two actor steps wait on the session commit guard like every guarded command. |
 | Nit: the busy-slot Keep test depended on the process-wide pool | Fixed in `01cea85b`: `presence_in` takes a pool and the test owns one (break-checked). |
 
+## Final review (`867ae8f5..724a7228`): dispositions
+
+Short read-only review: no blocker, high or medium; all six Re-review 3 commits close their
+findings. Two lows:
+
+| Finding | Disposition |
+| --- | --- |
+| L1: a recovered save's cleanup could release a record a later Save new copy was re-saving (dating from `14ddba4b`) | Fixed in `cd0d2aa9`: `recovered_cleanup` stands down without a warning when another cleanup holds the claim or the recovering preflight's observation is no longer current; under its own claim it clears the record as before. Tests: `a_recovered_save_clears_only_the_record_it_recovered` (native, over the cleanup ports: the moved-on record and a held claim both leave the record and run untouched with no error, the current record is cleared; both guards break-checked), `a_recovered_publication_keeps_its_observation_until_save_new_copy_retires_it` (actor: recording the recovery keeps the observation current, the retire ends it). The literal end-to-end sequence (recover, Save new copy acquiring, then the late cleanup) is not one test; it is covered by those two halves. |
+| L2: the rewritten native test did not pin that Resume takes the claim | Fixed in `8de5641a`: `a_real_resume_commits_its_intent_change_only_without_a_cleanup_claim` builds a real local Completed record whose preflight passes; with a cleanup holding the claim `prepare_resume` is Busy and the intent unchanged, without it the intent advances and the claim is released. Bypassing `plain_resume_commit` makes it fail. |
+
 ## Ledger (22 October)
 
-Focused commands, all passing at `01cea85b` (after Re-review 3):
+Focused commands, all passing at `8de5641a` (after the final review):
 
 - `cargo test -p catcoms-storage --lib kept::`: 131 passed.
-- `cargo test -p catcoms-app --lib actor::file_transfers`: 61 passed (includes the export tests).
+- `cargo test -p catcoms-app --lib actor::file_transfers`: 62 passed (includes the export tests).
 - Native `cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml --lib` with filters
-  `private_downloads` (31 passed), `keep_session` (14 passed), `download` (50 passed), and the
+  `private_downloads` (33 passed), `keep_session` (14 passed), `download` (52 passed), and the
   set `streamed_save fallback stops_the_save lock download_to_disk publish in_downloads_flag
   device_name` (95 passed); native `cargo check --locked`.
-- The complete frontend suite, `npm --prefix apps/desktop test`: 2,365 passed, 0 failed.
+- The complete frontend suite, `npm --prefix apps/desktop test`: 2,365 passed, 0 failed (last
+  run at `724a7228`; the final review changed no frontend file).
   `npm run check`: 0 errors, 0 warnings.
 - Strict native Clippy, `cargo clippy --manifest-path apps/desktop/src-tauri/Cargo.toml
   --all-targets --all-features -- -D warnings` (with `apps/desktop/dist` built): clean on

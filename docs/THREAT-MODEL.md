@@ -518,7 +518,9 @@ writer keeps those properties.
   preflight's edges require a preflight observation bound to the actor lifetime, Root authority,
   storage mount and transfer epoch, plus an exact journal CAS; all require the original native
   invocation. Writes finishing after Lock, freeze/thaw, remount, Pause, Remove or Save new copy
-  persist nothing, and a recovered save returns its path only if still authorized after cleanup.
+  persist nothing, and a recovered save returns its path only if still authorized after cleanup;
+  that cleanup releases the record only while it is still the one recovered (no other cleanup
+  holds the claim and the preflight's observation is current).
   Native rechecks the invocation and lease before every plaintext write attempt and again when a
   queued blocking step starts. A session that finds the file shorter than its verified offset
   stops instead of zero-extending. Publication and Pause/Remove/Lock serialize on the session
