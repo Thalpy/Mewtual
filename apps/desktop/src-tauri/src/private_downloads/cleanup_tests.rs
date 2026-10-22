@@ -52,6 +52,8 @@ struct Fake {
     gate: StdMutex<Option<mpsc::Receiver<()>>>,
     entered: StdMutex<Option<mpsc::Sender<()>>>,
     deletes: std::sync::atomic::AtomicUsize,
+    /// The presence check never returns (a dead share; folder identity blocks forever).
+    presence_hangs: std::sync::atomic::AtomicBool,
 }
 impl Fake {
     fn new(journal: &ExportJournal) -> (Arc<Self>, mpsc::Sender<()>, mpsc::Receiver<()>) {
@@ -67,6 +69,7 @@ impl Fake {
             gate: StdMutex::new(Some(gate)),
             entered: StdMutex::new(Some(entered)),
             deletes: Default::default(),
+            presence_hangs: Default::default(),
         });
         (fake, release, inside)
     }
@@ -114,7 +117,16 @@ impl CleanupPorts for Arc<Fake> {
         }))
     }
     async fn presence(&self, journal: ExportJournal) -> Result<PartialPresence, String> {
+        if self
+            .presence_hangs
+            .load(std::sync::atomic::Ordering::SeqCst)
+        {
+            std::future::pending::<()>().await;
+        }
         Ok(partial_presence(&journal))
+    }
+    async fn wait(&self, _delay: Duration) {
+        // The bound elapses at once; a presence answer that is ready still wins (biased select).
     }
     async fn finish_cleanup(&self) -> Result<(), String> {
         let mut record = self.record.lock().unwrap();
@@ -227,6 +239,47 @@ async fn keep_partial_releases_without_deleting_when_nothing_else_owns_the_clean
     assert!(staging.exists(), "the kept partial is untouched");
     assert!(!fake.exists());
     assert_eq!(fake.deletes.load(std::sync::atomic::Ordering::SeqCst), 0);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn keep_partial_still_releases_when_its_presence_check_hangs() {
+    // Re-review 2 MEDIUM: Keep is the escape from a stuck removal. A presence check that never
+    // returns must not hold the claim (and the Removing record's quota) forever.
+    let (_root, staging, journal) = partial();
+    let (fake, _release, _inside) = Fake::new(&journal);
+    fake.presence_hangs
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    let claim = CleanupClaim::acquire(7, id(0xA6)).unwrap();
+    let kept = tokio::time::timeout(BARRIER, remove_sequence(&fake, claim, true))
+        .await
+        .expect("Keep finishes although the check hangs");
+    assert_eq!(kept, Ok(None), "no notice promises anything");
+    assert!(!fake.exists(), "the record is released");
+    assert!(staging.exists(), "the partial is left for the user");
+    assert_eq!(fake.deletes.load(std::sync::atomic::Ordering::SeqCst), 0);
+    assert!(
+        CleanupClaim::acquire(7, id(0xA6)).is_ok(),
+        "the claim is released"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn keep_presence_is_unknown_without_touching_the_disk_when_every_slot_is_busy() {
+    // Re-review 2 MEDIUM: four stuck Removes, of any downloads, hold every cleanup slot. Keep's
+    // check answers Unknown at once (no promise) instead of Busy, and reads nothing.
+    let (_root, staging, journal) = partial();
+    let held: Vec<_> = std::iter::from_fn(|| cleanup_slot().ok()).take(8).collect();
+    assert_eq!(held.len(), 4, "the pool has four slots");
+    assert_eq!(
+        bounded_presence(journal.clone()).await,
+        Ok(PartialPresence::Unknown)
+    );
+    assert!(staging.exists());
+    drop(held);
+    assert_eq!(
+        bounded_presence(journal).await,
+        Ok(PartialPresence::Present)
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

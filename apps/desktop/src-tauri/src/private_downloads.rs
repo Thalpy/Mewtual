@@ -290,8 +290,12 @@ pub(super) trait CleanupPorts: Send + Sync {
     /// The blocking work that deletes the proven partial. [`delete_owned`] runs it on a worker
     /// that also owns the claim, so the claim lasts exactly as long as the delete can happen.
     fn remover(&self, journal: ExportJournal) -> Result<Remover, String>;
-    /// Read-only: is anything of this save still on disk?
+    /// Read-only: is anything of this save still on disk? Best effort: production answers
+    /// `Unknown` at once when no cleanup slot is free, and [`remove_sequence`] stops waiting after
+    /// [`KEEP_PRESENCE_WAIT`] (re-review 2 MEDIUM).
     async fn presence(&self, journal: ExportJournal) -> Result<PartialPresence, String>;
+    /// Sanctioned-clock wait bounding how long Keep waits for [`CleanupPorts::presence`].
+    async fn wait(&self, delay: Duration);
     async fn finish_cleanup(&self) -> Result<(), String>;
     /// Save new copy, step one: retire every observer under the intent CAS, keeping the journal.
     async fn retire(&self, expected_intent: u64) -> Result<u64, String>;
@@ -335,12 +339,10 @@ impl CleanupPorts for ActorCleanup<'_> {
         }))
     }
     async fn presence(&self, journal: ExportJournal) -> Result<PartialPresence, String> {
-        let slot = cleanup_slot()?;
-        blocking(move || {
-            let _held = slot;
-            partial_presence(&journal)
-        })
-        .await
+        bounded_presence(journal).await
+    }
+    async fn wait(&self, delay: Duration) {
+        SystemClock.sleep(delay).await;
     }
     async fn finish_cleanup(&self) -> Result<(), String> {
         let (state, server, instance, generation) =
@@ -393,6 +395,26 @@ fn cleanup_slot() -> Result<tokio::sync::OwnedSemaphorePermit, String> {
         .map_err(|_| CLEANUP_BUSY.into())
 }
 
+/// How long "Keep partly saved file" waits for its read-only presence check before releasing the
+/// record anyway with no promise about the file (re-review 2 MEDIUM).
+pub(super) const KEEP_PRESENCE_WAIT: Duration = Duration::from_secs(3);
+
+/// Production presence check for Keep. It takes a cleanup slot like every blocking cleanup worker
+/// (review L9), but when all slots are busy (for example four Removes stuck on a dead share, of
+/// any downloads) it answers `Unknown` without touching the filesystem instead of Busy: Keep is
+/// the escape from a stuck removal, `Unknown` makes no promise, and the held claim alone already
+/// excludes a concurrent delete of this Download.
+pub(super) async fn bounded_presence(journal: ExportJournal) -> Result<PartialPresence, String> {
+    let Ok(slot) = cleanup_slot() else {
+        return Ok(PartialPresence::Unknown);
+    };
+    blocking(move || {
+        let _held = slot;
+        partial_presence(&journal)
+    })
+    .await
+}
+
 /// Blocking delete work for one proven partial; see [`CleanupPorts::remover`].
 pub(super) type Remover = Box<dyn FnOnce() -> Result<PartialRemoval, ExportError> + Send>;
 
@@ -427,9 +449,18 @@ pub(super) async fn remove_sequence(
     let published = matches!(saved, ExportState::Published(_));
     let journal = saved.journal().clone();
     let notice = if keep_partial {
-        match ports.presence(journal).await? {
-            PartialPresence::Gone => Some(ALREADY_REMOVED),
-            PartialPresence::Present | PartialPresence::Unknown => None,
+        // Re-review 2 MEDIUM: the check only decides whether to say "already removed". A hung
+        // share (folder identity can block until the OS gives up, forever on a hard NFS mount), a
+        // busy slot or a failed check all mean "no promise", and Keep still releases the record.
+        // The worker of a check that times out keeps running read-only; it cannot delete.
+        let checked = tokio::select! {
+            biased;
+            presence = ports.presence(journal) => presence.ok(),
+            () = ports.wait(KEEP_PRESENCE_WAIT) => None,
+        };
+        match checked {
+            Some(PartialPresence::Gone) => Some(ALREADY_REMOVED),
+            Some(PartialPresence::Present | PartialPresence::Unknown) | None => None,
         }
     } else {
         // Only an outcome that settles the question may forget the journal. A partial that cannot
