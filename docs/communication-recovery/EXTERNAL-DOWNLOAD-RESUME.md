@@ -434,10 +434,16 @@ second reservation.
   ended; a second claimant gets Busy. Keep reassesses under the claim and says when the file was
   already removed instead of promising it. That check is best effort (re-review 2 MEDIUM): with
   every cleanup slot busy it answers "unknown" without touching the disk, and Keep stops waiting
-  for it after a few seconds on the sanctioned clock, so Keep stays the escape from a removal
-  stuck on a dead share; "unknown" promises nothing. Plain Resume takes the same claim across its
-  preflight and intent change (re-review 2 LOW 2), so it is Busy while a cleanup owns the
-  Download.
+  for it after a few seconds on the sanctioned clock, so Keep never waits on the destination and
+  stays the escape from a removal stuck on a dead share; "unknown" promises nothing. Keep's other
+  two steps (publishing Deleting, releasing the record) are actor commands under the session
+  commit guard, so like every guarded command they wait while another holder of that guard
+  (for example a publication whose link hangs) holds it. Plain Resume takes the same claim only
+  around its intent change (re-review 2 LOW 2, narrowed by re-review 3), so it is Busy while a
+  cleanup owns the Download; its destination preflight runs without the claim, so a Resume
+  hung on a dead share never blocks a cleanup, and that preflight's halt and recovery edges are
+  refused once a cleanup has started, because Remove's Deleting step and Save new copy's retire
+  both invalidate its observation.
 - Native checks the original invocation and lease before **every** write attempt, including each
   retry after a backoff, so a session retired by Lock, Pause, Remove or replacement writes no more
   plaintext.
@@ -449,10 +455,12 @@ second reservation.
 - After a successful link, a failure to *check* the final name is transient: the retry trims and
   writes nothing, verifies our own final name's content read-only, and only then reports it saved;
   a different identity, a foreign object or changed content there is Changed. A link call that
-  failed uncertainly (a network timeout) but left our file with one name and the final name not
-  ours made no link, so the retry publishes normally instead of halting Changed (re-review 2
-  LOW 1). Recording a proven
-  publication also retires an earlier halt and clears Pause with an intent change.
+  failed uncertainly (a network timeout) but left our file with one name and a final name that is
+  absent or opens as another file made no link, so the retry publishes normally instead of
+  halting Changed (re-review 2 LOW 1). A final name that merely cannot be opened proves nothing
+  (our link may have made it); the session then stays "possibly visible" and trims nothing
+  (re-review 3 LOW 1). Recording a proven publication also retires an earlier halt and clears
+  Pause with an intent change.
 - `finish_download_export` is allowed only with export None (the non-resumable path) or Published.
   A record with a Writing journal cannot be released through the fallback path. An already
   released record makes finish a no-op, so a Remove that won does not cause a false cleanup warning.
@@ -645,7 +653,8 @@ user picks in a native dialog, for that one save.
   resumed, so it never interrupts a live save of the same file. Every later Resume, including
   one-click Resume after a restart, saves to that planned place: an explicit Resume first checks
   it read-only (folder identity, names free) before spending allowance on re-verification
-  (re-review 2 LOW 3), the verified copy carries the record's planned destination, the export
+  (re-review 2 LOW 3; only for a Completed record, so an incomplete download's network Resume is
+  never refused over its destination, re-review 3 LOW 2), the verified copy carries the record's planned destination, the export
   validates it again (identity, name absent) and Begin consumes it, refusing a journal that does
   not match it. Save as again replaces it (the latest choice wins); a Save as invocation whose
   choice another save already consumed is refused, never redirected to Downloads. A remembered
@@ -710,7 +719,8 @@ user picks in a native dialog, for that one save.
   name and folder stay on screen until the user closes it (the choice is then discarded). Lock,
   unlock or a server replacement does end the invocation's wait and releases the one-dialog turn,
   so a dialog that never answers (a GTK future that never completes) cannot wedge Save as until
-  restart; that orphaned window's answer is discarded and a new Save as may open beside it.
+  restart; that orphaned window's answer is discarded and a new Save as may open beside it. An
+  invocation already cancelled when it reaches the dialog never opens one (re-review 3 LOW 3).
   Cloud-synced or shared folders may upload the partial plaintext and the probe name.
 - **UI.** "Save as" sits next to Download in the file menu, embed menu, file details and image
   viewer, and in Transfers rows that are ready, incomplete, paused, unavailable, changed or saved.
@@ -926,7 +936,7 @@ blocker. Its HIGH (Windows-only test fields dead on Linux under strict Clippy) w
 | --- | --- |
 | MEDIUM: "Keep partly saved file" was no longer an escape from a stuck removal (Busy when four stuck Removes held every cleanup slot; an unbounded presence check held the claim, record and quota while a dead share hung) | Fixed in `81541158`: with no free slot the check answers Unknown without touching the disk; a failed check is Unknown; Keep stops waiting after `KEEP_PRESENCE_WAIT` on the sanctioned clock (a new `CleanupPorts::wait`). Unknown promises nothing and the claim alone excludes a concurrent delete. Tests: `keep_partial_still_releases_when_its_presence_check_hangs`, `keep_presence_is_unknown_without_touching_the_disk_when_every_slot_is_busy`. |
 | LOW 1: an uncertain link error became a permanent, false "changed" | Fixed in `9fe145f5`: with one name on our file and a final name that is not ours, the link did not happen; the session is private again and publication retries within the budget. Test: `an_uncertain_link_error_that_made_no_link_retries_instead_of_halting_changed` (red before the fix). |
-| LOW 2: Resume was not excluded by the cleanup claim | Fixed in `7857aaeb`: plain Resume holds the claim across its preflight and intent CAS and is Busy while a cleanup owns the Download. Test: `resume_is_refused_while_a_cleanup_owns_the_download`. |
+| LOW 2: Resume was not excluded by the cleanup claim | Fixed in `7857aaeb`: plain Resume held the claim across its preflight and intent CAS and was Busy while a cleanup owned the Download. Re-review 3 found the preflight part harmful and narrowed it to the intent CAS (`44c72957`, below); that test became `resume_takes_the_cleanup_claim_only_around_its_intent_change`. |
 | LOW 3: a remembered Save as choice had no preflight | Fixed in `2d9290cf`: `ChosenDestination::preflight` (read-only folder identity and free names), carried by `DownloadPreflight::planned` and checked by the Resume preflight unless the invocation brings its own new choice. Tests: `a_remembered_choice_is_preflighted_without_creating_anything` (storage), `the_resume_preflight_carries_the_remembered_choice_until_begin` (actor), `a_remembered_choice_that_cannot_be_used_is_refused_before_reverification` (native). A plain chat click with a stale list (no row, so no Resume preflight) still learns at creation. |
 | LOW 4: the Downloads fallback writer had no link probe | Fixed in `7caeedec`: the shared `confirm_staging_links` (identity-checked probe, proven removal) now also guards native's one-click `.part`. Test: `a_downloads_reservation_without_links_is_refused_before_any_plaintext` (storage; the native call site has no failure injection, so only its success path runs natively). |
 | LOW 5: the Save as success toast named the listed file | Fixed in `2abd8649`: the notice names the final component of the saved path. Test: `a notice names the file that was written, not the listed name`. |
@@ -936,12 +946,27 @@ blocker. Its HIGH (Windows-only test fields dead on Linux under strict Clippy) w
 | Residual: a GTK dialog future that never completes kept the one-dialog flag set until restart | The turn already was an RAII guard, but Tauri does not drop running commands. Fixed in `e1ad2103`: the dialog wait also ends when the invocation's origin is cancelled (Lock, unlock, a server replacement), releasing the turn; the orphaned window's answer is discarded. Test: the chooser seam's never-answering dialog (bounded, break-checked). Without a Lock or replacement a hung dialog still holds the turn for that session; documented. |
 | PR #51 Windows root failure (`accepted_crossing_range_chunk_renews_quiet_deadline_before_fetching_the_next_chunk`) | Not worked on, as asked. That test drives `range_cancellable`. In the actor, Re-review 2 changed only `download_preflight` (an extra read of the planned destination); `start_saved` changed earlier (picker L2). Neither is on that test's path, and nothing here changes range chunks, quiet deadlines or chunk stepping. |
 
+## Re-review 3 (`cb1bc3e0..867ae8f5`): dispositions
+
+Short read-only re-review of the Re-review 2 fixes: no blocker or high. Confirmed closed: H1, the
+Keep MEDIUM, LOW 1-5, LOW 7a, `a8f959c8` and the docs commit, with the caveats fixed below. Each
+guard was broken on purpose and seen to fail.
+
+| Finding | Disposition |
+| --- | --- |
+| MEDIUM: plain Resume held the cleanup claim across destination reads that never time out, so a Resume hung on a dead share made Remove, Save new copy and Keep report "still being removed" | Fixed in `44c72957` by narrowing, not by bounding: the preflight runs without the claim and `plain_resume_commit` takes it only around the intent CAS. Narrowing was chosen because bounding the preflight would still hold the claim for the bound on every Resume and needs a timeout on a full read of up to 1 GiB, while the preflight's only effects are already fenced: its halt and recovery edges need its observation, which Remove's Deleting step and Save new copy's retire both invalidate. Tests: `resume_takes_the_cleanup_claim_only_around_its_intent_change` (native: Busy only at the intent change, and the preflight is reached with the claim held by a cleanup; both guards break-checked), `a_preflight_from_before_a_cleanup_cannot_act_on_its_journal` (actor, Remove and Save new copy; break-checked by removing the retire's epoch change). The native test's contract changed on purpose: the preflight is no longer excluded, the intent change is. |
+| LOW 1: the uncertain-link reset could treat a visible file as private when the final name existed but could not be opened | Fixed in `1590bd56`: the reset needs the final name absent or opening as another identity, never an open error. Test (new `LinkReport` effect: the link succeeds and reports an error): `an_uncertain_link_error_that_did_link_never_trims_a_final_file_it_cannot_open` (red before the fix). |
+| LOW 2: the plan preflight also blocked network-phase resumes | Fixed in `f9537e97`: `DownloadPreflight::planned()` reports a choice only for a Completed record. Test: `an_incomplete_download_resumes_although_its_chosen_place_is_gone` (break-checked). |
+| LOW 3: a Save as dialog could open for an already-cancelled invocation | Fixed in `6c75dfaa`: the cancellation branch is polled before the chooser. Test: the chooser seam with a pre-cancelled invocation asks for no dialog (red before the fix); the hung-dialog case now cancels only after the dialog opened. |
+| Nit: docs said Keep "always releases" | Qualified: Keep never waits on the destination, but its two actor steps wait on the session commit guard like every guarded command. |
+| Nit: the busy-slot Keep test depended on the process-wide pool | Fixed in `01cea85b`: `presence_in` takes a pool and the test owns one (break-checked). |
+
 ## Ledger (22 October)
 
-Focused commands, all passing at `e1ad2103` (after Re-review 2):
+Focused commands, all passing at `01cea85b` (after Re-review 3):
 
-- `cargo test -p catcoms-storage --lib kept::`: 130 passed.
-- `cargo test -p catcoms-app --lib actor::file_transfers`: 59 passed (includes the export tests).
+- `cargo test -p catcoms-storage --lib kept::`: 131 passed.
+- `cargo test -p catcoms-app --lib actor::file_transfers`: 61 passed (includes the export tests).
 - Native `cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml --lib` with filters
   `private_downloads` (31 passed), `keep_session` (14 passed), `download` (50 passed), and the
   set `streamed_save fallback stops_the_save lock download_to_disk publish in_downloads_flag

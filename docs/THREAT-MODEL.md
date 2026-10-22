@@ -505,8 +505,8 @@ writer keeps those properties.
   Download only: it stays the destination of every save of it (a later plain one-click Download
   of the same file included) until a save begins there, a newer Save as replaces it or the record
   is released. It is never logged (`rfd` logs only in backends this build does not compile), and
-  persists only in the sealed record. An explicit Resume checks a remembered place read-only
-  before spending allowance. An existing name is refused even if the dialog asked to
+  persists only in the sealed record. An explicit Resume of a completed copy checks a remembered
+  place read-only before spending allowance. An existing name is refused even if the dialog asked to
   replace it. The peer-chosen suggestion is sanitized (Windows device names including `COM¹` and
   `CONIN$`, and `%`, which the Windows dialog would expand into another path). Lock cannot close
   an open OS dialog, so the suggested name and folder stay on screen until the user closes it
@@ -525,6 +525,9 @@ writer keeps those properties.
   commit guard. Remove, Keep partly saved file and Save new copy hold a process-wide claim per
   Download that outlives a dropped invocation until its delete ends, so Keep can never promise a
   file a pending delete may still remove; Save new copy retires every observer before deleting.
+  Plain Resume takes that claim only around its intent change, so it cannot commit while a
+  cleanup runs, and never holds it across destination reads that could hang; a Resume preflight
+  started before a cleanup has its edges refused because the cleanup invalidated its observation.
 - **Residual risks.** Filesystems without stable identities, birth times or locks (some SMB/FUSE)
   keep the non-resumable writer, which like the journaled path does its file work on the blocking
   pool, so a stalled share pins one blocking thread, not an async worker; FAT and exFAT are
