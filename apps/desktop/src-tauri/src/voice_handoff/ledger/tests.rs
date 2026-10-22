@@ -2,6 +2,7 @@
 //! protected action/result factories. Not ServerActor/MLS/IPC/WebView acceptance evidence.
 use super::*;
 use crate::voice_authority::{Binding, CandidateKind, Coordinator, PublicationPlan};
+use crate::voice_handoff::channel::tests::FixtureChannel;
 use catcoms_crypto::DeviceKeypair;
 use catcoms_sync::voice_v2::runtime::Runtime;
 use catcoms_sync::voice_v2::{key_reference, Scope};
@@ -118,6 +119,173 @@ fn complete_records_index_handles_and_one_worker_fit_existing_fixed_payments() {
         bytes <= ROW_BYTES,
         "native row layout {bytes} exceeds {ROW_BYTES}"
     );
+}
+
+#[test]
+fn authenticated_header_capacity_is_original_owner_only_and_never_full_purpose_authority() {
+    let (coordinator, selected, selector) = selection();
+    let (_foreign_coordinator, foreign, _) = selection();
+    let ledger = Arc::new(Ledger::default());
+    let registration = ticket(&ledger, selected.clone(), selector);
+    let (_join, action, pair) = actual_action(&coordinator, &selected);
+    let id = registration.attach(action, pair, 16 * 1024).unwrap();
+    let endpoint = FixtureChannel::new(selected.resources(), selected.binding().scope.group);
+    let wire = endpoint.wire(
+        id.logical(),
+        1,
+        Operation::Result,
+        BodyKind::Data,
+        b"wrong encrypted purpose",
+    );
+    let counts = selected.resources().counts();
+    let authenticated = endpoint.authenticate(&wire).unwrap();
+    assert_eq!(
+        endpoint.session.fixture_counts(),
+        (true, 0, 0),
+        "MAC proof alone spends no physical counters"
+    );
+    assert!(matches!(
+        ledger.intake_phase(&foreign, &authenticated),
+        Err(VoiceError::Unauthorized)
+    ));
+    let phase = ledger.intake_phase(&selected, &authenticated).unwrap();
+    let status = ledger.status(id).unwrap();
+    let mut incoming = authenticated.admit(Some(&phase)).unwrap();
+    assert_eq!(incoming.logical(), id.logical());
+    assert_eq!(incoming.open().unwrap(), b"wrong encrypted purpose");
+    let mut changed = selector;
+    changed.join[0] ^= 1;
+    assert!(matches!(
+        ledger.resolve(&selected, Purpose::Derive(changed), id),
+        Err(VoiceError::Unauthorized)
+    ));
+    assert!(
+        ledger.status(id).unwrap() == status,
+        "bounded intake grants no Action/work/history mutation"
+    );
+    drop(incoming);
+    assert_eq!(endpoint.session.fixture_counts(), (false, 1, 1));
+    assert_eq!(selected.resources().counts(), counts);
+}
+
+#[test]
+fn wrong_mac_cannot_create_capacity_proof_and_stale_header_serial_cannot_adopt_a_row() {
+    let (coordinator, selected, selector) = selection();
+    let ledger = Arc::new(Ledger::default());
+    let registration = ticket(&ledger, selected.clone(), selector);
+    let (_join, action, pair) = actual_action(&coordinator, &selected);
+    let id = registration.attach(action, pair, 16 * 1024).unwrap();
+    let endpoint = FixtureChannel::new(selected.resources(), selected.binding().scope.group);
+    let counts = selected.resources().counts();
+    let mut wire = endpoint.wire(id.logical(), 1, Operation::Result, BodyKind::Data, b"x");
+    let marker = b"x-voice-admission: ";
+    let mac = wire
+        .windows(marker.len())
+        .position(|part| part == marker)
+        .unwrap()
+        + marker.len()
+        + 143;
+    wire[mac] = if wire[mac] == b'0' { b'1' } else { b'0' };
+    assert!(matches!(
+        endpoint.authenticate(&wire),
+        Err(crate::voice_handoff::channel::Refused::Authentication)
+    ));
+    assert_eq!(endpoint.session.fixture_counts(), (false, 0, 0));
+    let wrong = RowId {
+        slot: id.slot,
+        serial: id.serial + 1,
+    };
+    let wire = endpoint.wire(wrong.logical(), 1, Operation::Result, BodyKind::Data, b"x");
+    let authenticated = endpoint.authenticate(&wire).unwrap();
+    assert!(matches!(
+        ledger.intake_phase(&selected, &authenticated),
+        Err(VoiceError::Unauthorized)
+    ));
+    drop(authenticated);
+    assert_eq!(endpoint.session.fixture_counts(), (false, 0, 0));
+    assert_eq!(selected.resources().counts(), counts);
+}
+
+#[test]
+fn retired_data_phase_refuses_before_counter_debit_while_exact_control_history_stays_available_after_end(
+) {
+    let (mut coordinator, selected, selector) = selection();
+    let ledger = Arc::new(Ledger::default());
+    let registration = ticket(&ledger, selected.clone(), selector);
+    let (_join, action, pair) = actual_action(&coordinator, &selected);
+    let id = registration
+        .attach(action.clone(), pair, 16 * 1024)
+        .unwrap();
+    let endpoint = FixtureChannel::new(selected.resources(), selected.binding().scope.group);
+    let phase = ledger.work(id).unwrap().phase().clone();
+    action.settle_engine();
+    coordinator.end(selected.id());
+    phase.close();
+    assert!(phase.is_drained());
+    let wire = endpoint.wire(
+        id.logical(),
+        1,
+        Operation::Result,
+        BodyKind::Data,
+        b"old data",
+    );
+    let authenticated = endpoint.authenticate(&wire).unwrap();
+    let original = ledger.intake_phase(&selected, &authenticated).unwrap();
+    assert!(matches!(
+        authenticated.admit(Some(&original)),
+        Err(crate::voice_handoff::channel::Refused::Capacity)
+    ));
+    assert_eq!(endpoint.session.fixture_counts(), (false, 0, 0));
+    let wire = endpoint.wire(
+        id.logical(),
+        1,
+        Operation::Settle,
+        BodyKind::Control,
+        b"original purpose",
+    );
+    let authenticated = endpoint.authenticate(&wire).unwrap();
+    assert!(matches!(
+        ledger.intake_phase(&selected, &authenticated),
+        Err(VoiceError::Unauthorized)
+    ));
+    let mut control = authenticated.admit(None).unwrap();
+    assert_eq!(control.open().unwrap(), b"original purpose");
+    let historical = ledger
+        .resolve(&selected, Purpose::Derive(selector), id)
+        .unwrap()
+        .reconcile()
+        .unwrap();
+    assert!(historical.engine.settled);
+    assert!(
+        !historical.drained,
+        "closed data capacity alone is not full row/engine collection"
+    );
+}
+
+#[test]
+fn native_row_logical_metadata_is_canonical_and_never_accepts_zero_serial_or_out_of_range_slot() {
+    for slot in 0..ROWS {
+        for serial in [1, u64::MAX] {
+            let id = RowId { slot, serial };
+            assert!(RowId::from_logical(id.logical()).unwrap() == id);
+        }
+    }
+    for id in [
+        RowId { slot: 0, serial: 0 },
+        RowId {
+            slot: ROWS,
+            serial: 1,
+        },
+        RowId {
+            slot: usize::MAX,
+            serial: u64::MAX,
+        },
+    ] {
+        assert!(matches!(
+            RowId::from_logical(id.logical()),
+            Err(VoiceError::Unauthorized)
+        ));
+    }
 }
 
 #[test]

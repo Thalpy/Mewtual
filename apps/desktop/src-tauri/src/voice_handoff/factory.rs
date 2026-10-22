@@ -1,6 +1,8 @@
 //! Native-owned derivation registration. No command/listener exposes this pilot yet. The
 //! selected key, original actor and UI commit travel with actual work rather than an invoke
 //! waiter. A lost reply must recover the same counted ledger purpose, never create new work.
+use super::bootstrap::Route;
+use super::channel::PhysicalHold;
 use super::context::Context;
 use super::ledger::{Begin, Purpose, Registration, RowId};
 use crate::voice_authority::SelectedHandoffOwner;
@@ -47,13 +49,18 @@ impl From<VoiceError> for Refused {
 /// invoking future disappeared. This is deliberately not a serialization/IPC custody proof.
 struct Completion {
     result: Result<RowId, Refused>,
+    _custody: FactoryCustody,
+}
+/// The physical position and task payment follow the same actual worker/output lifetime.
+struct FactoryCustody {
+    _physical: PhysicalHold,
     _credit: Credit,
 }
 
 /// Consume the ORIGINAL native-selected allocation before any factory is called. A local
 /// channel must pass its retained selection, never owner/executor strings from a body.
-/// Matching public fields cannot adopt a replacement selection. This API still needs the
-/// future channel's actual closed-state fence at final admission under the same UI commit.
+/// Matching public fields cannot adopt a replacement selection. The actual channel's closed
+/// fence is repeated at final admission under the same commit which orders channel closure.
 /// First effects run under the original UI commit. Lock may revoke the affine lease immediately,
 /// but cannot report completion ahead of an already admitted actor turn. A subsequent unlock
 /// never makes this generation current again. Historical metadata has separate ledger APIs.
@@ -61,9 +68,14 @@ struct Completion {
 /// for input. Receiving RowId never asserts that an action is attached or a browser is ready.
 pub(super) async fn ensure_derivation_row(
     context: &Context,
-    selected: Arc<SelectedHandoffOwner>,
+    route: &Route,
     selector: PairSelector,
+    physical: PhysicalHold,
 ) -> Result<RowId, Refused> {
+    if !physical.belongs_to(route.session()) {
+        return Err(Refused::Closed);
+    }
+    let selected = route.selected().clone();
     let context = context.upgrade().ok_or(Refused::Closed)?;
     {
         let authority = context
@@ -71,6 +83,7 @@ pub(super) async fn ensure_derivation_row(
             .lock()
             .unwrap_or_else(|error| error.into_inner());
         require_current_selection(context.gate(), &authority, &selected)?;
+        route.require_open().map_err(|_| Refused::Closed)?;
     }
     check_voice_binding_in(&context.servers, selected.binding())
         .await
@@ -98,6 +111,7 @@ pub(super) async fn ensure_derivation_row(
             .lock()
             .unwrap_or_else(|error| error.into_inner());
         require_current_selection(context.gate(), &authority, &selected)?;
+        route.require_open().map_err(|_| Refused::Closed)?;
     }
     // Weak grant upgrade and all affine destruction occur outside Coordinator/ledger fences.
     let grant = selected.grant()?;
@@ -124,7 +138,10 @@ pub(super) async fn ensure_derivation_row(
         grant,
         selector,
         commit,
-        credit,
+        FactoryCustody {
+            _physical: physical,
+            _credit: credit,
+        },
     );
     // Include the actual future, completion and task handles, not an optimistic named payload
     // size. Refusal before polling has performed no actor work and drops the unused ticket.
@@ -171,7 +188,7 @@ async fn run(
     grant: Arc<CallGrant>,
     selector: PairSelector,
     _commit: tokio::sync::OwnedMutexGuard<()>,
-    credit: Credit,
+    custody: FactoryCustody,
 ) -> Completion {
     let result = async {
         registration.mark_handoff()?;
@@ -186,7 +203,7 @@ async fn run(
     .await;
     Completion {
         result,
-        _credit: credit,
+        _custody: custody,
     }
 }
 

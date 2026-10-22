@@ -1727,3 +1727,27 @@ epoch/member/policy changes even without voice attached. Its sole publisher is t
 field, so Drop ends it before transport/MLS/store fields. Neither observer owns those publishers.
 Actual lower accounting remains held through transport retirement. This supplies no bridge peer
 standing or native entry consent; those additional scopes remain separate.
+
+### Native confirmation result ownership (22 October continuation)
+
+The inactive native action path now composes an original buffer with actor delivery without
+copying that buffer. A trusted `VoiceConfirmationBody` pins one prepaid owner with
+`Bytes::from_owner` outside native/Root guards. The pinned bytes implementation calls the
+owner's slice callback once at construction; the actor reads only the cached immutable slice.
+One private Flight per body covers queueing and completed-but-uncollected output. A lost caller
+does not release the original buffer/payment while the actual command or output remains alive.
+The existing Root seal/open methods still validate the actual grant, action and result tag.
+
+Native Phase reserves4KiB actor metadata from its ORIGINAL16KiB loan before taking a result
+buffer. Local refusal returns that exact buffer for retry. This payment is independent of a
+future detached dispatcher task; neither a queue slot nor a receipt proves Phase drainage.
+Explicit confirmation retirement consumes the original HandoffLoan to close its original plan,
+outside native locks. Ordinary loan return leaves the96KiB Workflow open. Actual input/lower/
+copy owners continue to retain the original Workflow after closure.
+
+Browser broker v10 can lend a Ready channel's existing execution position to its exact selected
+key/chain. Provider/digest work and same-channel IO share that lane; RPC waits occur outside
+provider ownership to avoid self-deadlock. Every row retains its original native adapter.
+These ownership primitives do not enable action opcodes: the application listener still serves
+Status only. Framed action dispatch, complete final ACK/collection, proven-pair actor ingress,
+SDP transfer, live V2 and physical acceptance remain separate unfinished work.

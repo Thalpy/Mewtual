@@ -5467,3 +5467,28 @@ Separate whole-job custody admits at most4 read jobs/actor and8/process, without
 staging/head/range allocation or durable Keep run/debit. Sleeps and local/network continuations
 retain the owner until all job buffers retire. Actual lower attempts keep their independent4/8
 custody through real transport retirement; upper cancellation does not refund them.
+
+### Owned native confirmation result bridge (22 October continuation)
+
+Trusted Rust only: `ServerActor::submit_voice_confirmation_result(grant, action, &body, tag)`
+and `commit_voice_confirmation_result(...)` forward sealed/opened results to the existing Root
+methods. `VoiceConfirmationBody::from_owner` accepts a trusted prepaid native owner, at most
+128 inline bytes/alignment64 and528 result bytes. It has no public Clone, serialization,
+mutable bytes or extraction API. The caller must fund the actual backing allocation and the
+4KiB fixed actor contribution for its entire lifetime; a size cap does not bound nested heaps.
+Construction invokes the owner's slice callback once, outside all guards. Root receives only
+the cached immutable slice and independently validates actual native grant/action/tag.
+
+A single body Flight refuses concurrent queueing or reuse while a completed output remains
+uncollected. `VoiceConfirmationCompletion::result()` returns small exact outcome metadata;
+the Completion retains its actual original body until collection. Capacity/Stopped does not
+consume the caller's body or permit recomputation. A receipt is never a drainage assertion.
+Native `Phase::result_body` prepays from the original Phase and returns the same Buffer on
+range, foreign-Phase or local capacity refusal. Detached task/physical Session ownership still
+needs its own bounded accounting in the unfinished dispatcher.
+
+`HandoffLoan::retire_confirmation(self)` closes only its ORIGINAL confirmation plan. It is a
+native capability, not a handshake-ID lookup or SDP transfer. Existing input/engine/lower/copy
+owners may still hold the96KiB Workflow. `Phase::close_confirmation` cannot relabel an ordinary
+already-draining close as full-plan retirement. A local phase-drained bit is not full Workflow
+release. This bridge adds no Tauri command, renderer result API or live dispatch.

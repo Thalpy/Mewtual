@@ -9,6 +9,7 @@ use catcoms_rt::CryptoRngCore;
 #[cfg(test)]
 use catcoms_sync::voice_v2::resources::ResourceKind;
 use catcoms_sync::voice_v2::resources::{Credit, Resources, WorkLane};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use zeroize::Zeroize;
 #[cfg(test)]
@@ -129,7 +130,10 @@ impl Session {
         Ok(HeaderWorker {
             scratch: [0; http::HEADER_BYTES],
             filled: 0,
-            session: self.clone(),
+            position: Arc::new(PhysicalPosition {
+                session: self.clone(),
+                held: AtomicBool::new(false),
+            }),
         })
     }
 }
@@ -144,9 +148,56 @@ impl Drop for Session {
 pub(super) struct HeaderWorker {
     scratch: [u8; http::HEADER_BYTES],
     filled: usize,
+    position: Arc<PhysicalPosition>,
+}
+/// The actual physical position can outlive a cancelled socket/header when admitted actor
+/// work is detached. Its separately paid Session remains busy until BOTH original owners
+/// drain. This is not an engine/result authority and does not reset physical counters.
+struct PhysicalPosition {
     session: Arc<Session>,
+    held: AtomicBool,
+}
+impl Drop for PhysicalPosition {
+    fn drop(&mut self) {
+        let mut counters = self
+            .session
+            .counters
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        debug_assert!(counters.busy);
+        counters.busy = false;
+        // Drop counters before the actual Session/credits can destruct.
+    }
+}
+/// At most ONE extra owner of an admitted frame; retain in the actual worker AND its completed
+/// output until collection. No public Clone or constructor from a Session identifier exists.
+pub(super) struct PhysicalHold {
+    position: Arc<PhysicalPosition>,
+}
+impl PhysicalHold {
+    pub(super) fn belongs_to(&self, session: &Arc<Session>) -> bool {
+        Arc::ptr_eq(&self.position.session, session)
+    }
+}
+impl Drop for PhysicalHold {
+    fn drop(&mut self) {
+        self.position.held.store(false, Ordering::Release);
+    }
 }
 impl HeaderWorker {
+    fn hold(&self) -> Result<PhysicalHold, Refused> {
+        self.position
+            .held
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .map_err(|_| Refused::Capacity)?;
+        Ok(PhysicalHold {
+            position: self.position.clone(),
+        })
+    }
+    #[cfg(test)]
+    pub(in crate::voice_handoff) fn fixture_hold(&self) -> Result<PhysicalHold, Refused> {
+        self.hold()
+    }
     pub(super) fn scratch_mut(&mut self) -> &mut [u8; http::HEADER_BYTES] {
         &mut self.scratch
     }
@@ -157,8 +208,9 @@ impl HeaderWorker {
         self.filled = bytes;
         Ok(())
     }
-    /// The actual adapter resolves the native row and selects its original Phase before this
-    /// call. Group/pool checks below are capacity binding only, never original-action authority.
+    /// Low-level codec seam for a caller already holding its original Phase. A dispatcher
+    /// first uses authenticate + the opaque proof when it needs to look up that capacity.
+    /// Group/pool checks are capacity binding only, never original-action authority.
     /// Capacity refusal before admission spends neither RX nor TX sequence. Once admitted,
     /// truncation, bad AEAD, cancellation and lost replies never refund either counter.
     pub(super) fn admit(
@@ -167,7 +219,7 @@ impl HeaderWorker {
         origin: &str,
         phase: Option<&Arc<Phase>>,
     ) -> Result<Incoming, Refused> {
-        self.admit_inner(port, origin, phase, None)
+        self.authenticate(port, origin)?.admit(phase)
     }
     /// Closed status-only service seam: operation/class/exact length/logical session are
     /// authenticated BEFORE counter debit. No callback or renderer-selected predicate runs
@@ -178,15 +230,26 @@ impl HeaderWorker {
         origin: &str,
         session: [u8; 16],
     ) -> Result<Incoming, Refused> {
-        self.admit_inner(port, origin, None, Some(session))
+        let authenticated = self.authenticate(port, origin)?;
+        let request = &authenticated.request;
+        if request.operation() != Operation::Status
+            || request.kind() != BodyKind::Control
+            || request.length() != 49 + 16
+            || request.logical() != session
+        {
+            return Err(Refused::Binding);
+        }
+        authenticated.admit(None)
     }
-    fn admit_inner(
+    /// Authenticate immutable header metadata BEFORE any action-Phase lookup. This owner
+    /// retains the original paid HeaderWorker and exact parsed bytes through body admission;
+    /// a caller cannot supply another RowId or reparse a changed header after authentication.
+    /// No body, counters, variable capacity, Action or Root authority is admitted here.
+    pub(super) fn authenticate(
         self,
         port: u16,
         origin: &str,
-        phase: Option<&Arc<Phase>>,
-        status: Option<[u8; 16]>,
-    ) -> Result<Incoming, Refused> {
+    ) -> Result<AuthenticatedRequest, Refused> {
         let head = http::parse(&self.scratch[..self.filled], port, origin)
             .map_err(|_| Refused::Header)?
             .ok_or(Refused::Header)?;
@@ -194,31 +257,60 @@ impl HeaderWorker {
             return Err(Refused::Header);
         }
         let request = self
+            .position
             .session
             .keys
             .authenticate_request(head.admission.ok_or(Refused::Header)?)?;
-        if request.slot() != self.session.slot || request.length() != head.length {
+        if request.slot() != self.position.session.slot || request.length() != head.length {
             return Err(Refused::Binding);
         }
-        if status.is_some_and(|session| {
-            request.operation() != Operation::Status
-                || request.kind() != BodyKind::Control
-                || request.length() != 49 + 16
-                || request.logical() != session
-        }) {
-            return Err(Refused::Binding);
-        }
+        let prefix_bytes = head.body_prefix.len();
+        let prefix_start = self.filled - prefix_bytes;
+        Ok(AuthenticatedRequest {
+            request,
+            prefix_start,
+            prefix_bytes,
+            worker: self,
+        })
+    }
+}
+
+/// Opaque proof of canonical authenticated header metadata only. It is not body admission,
+/// current effect authority or a reusable token; consuming admission spends counters exactly
+/// once on the original Session. No public fields, Clone or renderer constructor exists.
+pub(super) struct AuthenticatedRequest {
+    request: Header,
+    prefix_start: usize,
+    prefix_bytes: usize,
+    worker: HeaderWorker,
+}
+impl AuthenticatedRequest {
+    pub(super) fn logical(&self) -> [u8; 16] {
+        self.request.logical()
+    }
+    pub(super) fn operation(&self) -> Operation {
+        self.request.operation()
+    }
+    pub(super) fn kind(&self) -> BodyKind {
+        self.request.kind()
+    }
+    pub(super) fn admit(self, phase: Option<&Arc<Phase>>) -> Result<Incoming, Refused> {
+        let request = self.request;
         let mut body = Body::new(
             request.kind(),
             request.length(),
             phase,
-            &self.session.resources,
-            self.session.group,
+            &self.worker.position.session.resources,
+            self.worker.position.session.group,
         )?;
-        body.cipher_mut()[..head.body_prefix.len()].copy_from_slice(head.body_prefix);
-        let filled = head.body_prefix.len();
+        body.cipher_mut()[..self.prefix_bytes].copy_from_slice(
+            &self.worker.scratch[self.prefix_start..self.prefix_start + self.prefix_bytes],
+        );
+        let filled = self.prefix_bytes;
         let response_sequence = {
             let mut counters = self
+                .worker
+                .position
                 .session
                 .counters
                 .lock()
@@ -239,22 +331,15 @@ impl HeaderWorker {
             filled,
             request,
             response_sequence,
-            worker: self,
+            worker: self.worker,
         })
     }
 }
 impl Drop for HeaderWorker {
     fn drop(&mut self) {
         self.scratch.zeroize();
-        // All body/reply objects are declared before this final owner and drop first. No actual
-        // input, crypto/Root callback or affine owner destructor runs under the counter fence.
-        let mut counters = self
-            .session
-            .counters
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
-        debug_assert!(counters.busy);
-        counters.busy = false;
+        // Body/reply objects drop first. The separate physical guard may still belong to an
+        // actual detached actor worker/output; only its LAST drop can reopen this Session.
     }
 }
 // Control is deliberately inline in the prepaid physical worker. Boxing its fixed bytes would
@@ -327,6 +412,14 @@ pub(super) struct Incoming {
     worker: HeaderWorker,
 }
 impl Incoming {
+    /// Obtain the unique detached-worker hold only AFTER this original request was AEAD-opened.
+    /// The dispatcher still must bind full purpose/RowId/current authority before effects.
+    pub(super) fn hold_position(&self) -> Result<PhysicalHold, Refused> {
+        if self.body.plain_bytes.is_none() {
+            return Err(Refused::Body);
+        }
+        self.worker.hold()
+    }
     pub(super) fn remaining_mut(&mut self) -> &mut [u8] {
         &mut self.body.cipher_mut()[self.filled..]
     }
@@ -343,6 +436,7 @@ impl Incoming {
             return Err(Refused::Body);
         }
         self.worker
+            .position
             .session
             .keys
             .open_request(&self.request, self.body.cipher_mut())?;
@@ -388,8 +482,8 @@ impl Incoming {
             kind,
             cipher_bytes,
             phase,
-            &worker.session.resources,
-            worker.session.group,
+            &worker.position.session.resources,
+            worker.position.session.group,
         )?;
         Ok(PreparedReply {
             body,
@@ -412,13 +506,14 @@ impl PreparedReply {
     }
     /// Consuming this owner makes encryption nonrepeatable under the issued physical nonce.
     pub(super) fn seal(mut self) -> Result<CompletedReply, Refused> {
-        self.worker.session.keys.seal_response(
+        self.worker.position.session.keys.seal_response(
             &self.response,
             &self.request,
             self.body.cipher_mut(),
         )?;
         let admission = self
             .worker
+            .position
             .session
             .keys
             .response_admission(&self.response, &self.request);
@@ -446,4 +541,4 @@ impl CompletedReply {
 }
 
 #[cfg(test)]
-mod tests;
+pub(super) mod tests;

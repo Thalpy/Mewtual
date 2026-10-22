@@ -39,7 +39,10 @@ mod file_transfers;
 mod member_maintenance;
 mod member_reconnect;
 mod voice_endpoint;
-pub use voice_endpoint::{VoiceEndpointCommand, VoiceEndpointError};
+pub use voice_endpoint::{
+    VoiceConfirmationBody, VoiceConfirmationCompletion, VoiceEndpointCommand, VoiceEndpointError,
+    VOICE_CONFIRMATION_BODY_METADATA_BYTES,
+};
 
 /// Per drive: how long to wait for a discovered record before concluding the queue is drained.
 const DISCOVERY_DRAIN_MS: u64 = 500;

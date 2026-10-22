@@ -13,6 +13,52 @@ fn session(resources: Arc<Resources>, group: [u8; 32]) -> (Arc<Session>, Keys) {
         Keys::new(&seed),
     )
 }
+
+/// Test-only actual codec endpoint shared by native ledger admission regressions. It creates
+/// deterministic real MAC/AEAD bytes, never an asserted authentication boolean or a forged
+/// AuthenticatedRequest. Its allocations are fixtures, not application copy-bound evidence.
+pub(in crate::voice_handoff) struct FixtureChannel {
+    pub(in crate::voice_handoff) session: Arc<Session>,
+    browser: Keys,
+}
+impl FixtureChannel {
+    pub(in crate::voice_handoff) fn new(resources: Arc<Resources>, group: [u8; 32]) -> Self {
+        let (session, browser) = session(resources, group);
+        Self { session, browser }
+    }
+    pub(in crate::voice_handoff) fn wire(
+        &self,
+        logical: [u8; 16],
+        sequence: u64,
+        operation: Operation,
+        kind: BodyKind,
+        plaintext: &[u8],
+    ) -> Vec<u8> {
+        let header = Header::new(
+            Direction::Request,
+            operation,
+            kind,
+            1,
+            sequence,
+            logical,
+            plaintext.len() + 16,
+        )
+        .unwrap();
+        let (admission, body) = self.browser.request(header, plaintext);
+        let mut wire = format!("POST /voice/v2 HTTP/1.1\r\nHost: 127.0.0.1:41891\r\nOrigin: http://tauri.localhost\r\nContent-Type: application/octet-stream\r\nContent-Length: {}\r\nx-voice-admission: {}\r\n\r\n", body.len(), std::str::from_utf8(&admission).unwrap()).into_bytes();
+        wire.extend_from_slice(&body);
+        wire
+    }
+    pub(in crate::voice_handoff) fn authenticate(
+        &self,
+        wire: &[u8],
+    ) -> Result<AuthenticatedRequest, Refused> {
+        let mut worker = self.session.header()?;
+        worker.scratch_mut()[..wire.len()].copy_from_slice(wire);
+        worker.set_filled(wire.len())?;
+        worker.authenticate(41891, "http://tauri.localhost")
+    }
+}
 fn request(
     keys: &Keys,
     sequence: u64,
@@ -54,6 +100,7 @@ fn paid_fixed_storage_and_original_control_lane_cover_codec_peak() {
     use hmac::Hmac;
     use sha2::Sha256;
     let state = std::mem::size_of::<HeaderWorker>()
+        .max(std::mem::size_of::<AuthenticatedRequest>())
         .max(std::mem::size_of::<Incoming>())
         .max(std::mem::size_of::<PreparedReply>())
         .max(std::mem::size_of::<CompletedReply>());
@@ -61,6 +108,9 @@ fn paid_fixed_storage_and_original_control_lane_cover_codec_peak() {
     // known live codec temporaries, canonical encoding and a reserved 1 KiB for the future IO
     // wrapper. That wrapper still requires its own actual layout/copy/collection proof.
     let peak = std::mem::size_of::<Session>()
+        + std::mem::size_of::<PhysicalPosition>()
+        + 2 * std::mem::size_of::<usize>()
+        + std::mem::size_of::<PhysicalHold>()
         + std::mem::size_of::<WorkLane>()
         + 2 * std::mem::size_of::<usize>()
         + 2 * std::mem::size_of::<usize>()
@@ -512,5 +562,76 @@ fn concurrent_header_claims_share_one_position_until_the_actual_winner_drops() {
         retire.wait();
     });
     assert_eq!(winners.load(std::sync::atomic::Ordering::Acquire), 1);
+    assert!(session.header().is_ok());
+}
+
+#[test]
+fn actual_detached_hold_keeps_the_original_session_busy_after_header_cancellation() {
+    let pool = Arc::new(Resources::default());
+    let (session, _browser) = session(pool.clone(), [3; 32]);
+    let worker = session.header().unwrap();
+    let hold = worker.hold().unwrap();
+    assert!(hold.belongs_to(&session));
+    assert!(matches!(worker.hold(), Err(Refused::Capacity)));
+    drop(worker);
+    assert!(matches!(session.header(), Err(Refused::Capacity)));
+    assert_eq!(session.fixture_counts(), (true, 0, 0));
+    let paid = pool.counts();
+    let weak = Arc::downgrade(&session);
+    drop(session);
+    assert!(weak.upgrade().is_some());
+    assert_eq!(pool.counts(), paid);
+    drop(hold);
+    assert!(weak.upgrade().is_none());
+    assert_eq!(pool.counts(), (0, 0));
+}
+
+#[test]
+fn admitted_opened_request_and_completed_reply_share_the_same_unique_detached_hold() {
+    let (session, browser) = session(Arc::new(Resources::default()), [3; 32]);
+    let (_, wire) = request(&browser, 1, Operation::Input, BodyKind::Control, &[1]);
+    let mut frame = incoming(&session, &wire, None).unwrap();
+    assert!(matches!(frame.hold_position(), Err(Refused::Body)));
+    frame.open().unwrap();
+    let hold = frame.hold_position().unwrap();
+    assert!(matches!(frame.hold_position(), Err(Refused::Capacity)));
+    let reply = frame
+        .reply(BodyKind::Control, 0, None)
+        .unwrap()
+        .seal()
+        .unwrap();
+    drop(reply);
+    assert!(matches!(session.header(), Err(Refused::Capacity)));
+    assert_eq!(session.fixture_counts(), (true, 1, 1));
+    drop(hold);
+    assert_eq!(session.fixture_counts(), (false, 1, 1));
+    assert!(session.header().is_ok());
+}
+
+#[test]
+fn concurrent_detached_hold_claims_cannot_multiply_the_prepaid_physical_owner() {
+    let (session, _browser) = session(Arc::new(Resources::default()), [3; 32]);
+    let worker = session.header().unwrap();
+    let ready = std::sync::Barrier::new(9);
+    let held = std::sync::Barrier::new(9);
+    let winners = std::sync::atomic::AtomicUsize::new(0);
+    std::thread::scope(|scope| {
+        for _ in 0..8 {
+            scope.spawn(|| {
+                ready.wait();
+                let hold = worker.hold();
+                if hold.is_ok() {
+                    winners.fetch_add(1, Ordering::SeqCst);
+                }
+                held.wait();
+                drop(hold);
+            });
+        }
+        ready.wait();
+        held.wait();
+    });
+    assert_eq!(winners.load(Ordering::SeqCst), 1);
+    assert!(matches!(session.header(), Err(Refused::Capacity)));
+    drop(worker);
     assert!(session.header().is_ok());
 }

@@ -5,6 +5,7 @@
 //! This is deliberately a finite pilot: pending, live and drained rows share 32 positions. A
 //! live owner cannot evict old uncertain history to make space. Physical reply/control-flight
 //! prepayment, authenticated browser drainage and live dispatch are separate integration gates.
+use super::channel::{AuthenticatedRequest, BodyKind, Operation};
 use super::custody::{CopyCustody, Phase, PreparedPhase};
 use crate::voice_authority::SelectedHandoffOwner;
 use catcoms_sync::voice_v2::crypto_actions::{
@@ -24,6 +25,27 @@ const ROW_BYTES: usize = 2048;
 pub(crate) struct RowId {
     slot: usize,
     serial: u64,
+}
+impl RowId {
+    /// Canonical fixed metadata only: native index slot + monotonically increasing serial.
+    /// Every operational consumer must independently resolve original provenance/purpose.
+    pub(super) fn logical(self) -> [u8; 16] {
+        let mut bytes = [0; 16];
+        bytes[..8].copy_from_slice(&(self.slot as u64).to_be_bytes());
+        bytes[8..].copy_from_slice(&self.serial.to_be_bytes());
+        bytes
+    }
+    pub(super) fn from_logical(bytes: [u8; 16]) -> Result<Self, VoiceError> {
+        let slot = usize::try_from(u64::from_be_bytes(
+            bytes[..8].try_into().expect("fixed slot"),
+        ))
+        .map_err(|_| VoiceError::Unauthorized)?;
+        let serial = u64::from_be_bytes(bytes[8..].try_into().expect("fixed serial"));
+        if slot >= ROWS || serial == 0 {
+            return Err(VoiceError::Unauthorized);
+        }
+        Ok(Self { slot, serial })
+    }
 }
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Purpose {
@@ -158,6 +180,36 @@ impl ResolvedRow {
 }
 
 impl Ledger {
+    /// Capacity ONLY after canonical header authentication. The opaque request fixes the
+    /// exact header RowId; no unauthenticated/reparsed logical ID can trigger this lookup.
+    /// Compare the original grant allocation/executor/lease, then return only its existing
+    /// Phase, never an Action, engine, input, receipt or retry capability. No live-grant
+    /// upgrade, Clock, new row/payment or worker mutation occurs here.
+    ///
+    /// Full Purpose is inside the encrypted body. After intake/decryption the dispatcher
+    /// MUST match that full purpose and the SAME header RowId via resolve before operations.
+    /// A same-owner wrong-purpose body can consume only its bounded prepaid intake before
+    /// refusal; it cannot cause a Root effect. Closed Phase absence never proves drainage:
+    /// exact historical terminal recovery uses a separately bounded Control operation.
+    pub(super) fn intake_phase(
+        &self,
+        selected: &SelectedHandoffOwner,
+        authenticated: &AuthenticatedRequest,
+    ) -> Result<Arc<Phase>, VoiceError> {
+        if authenticated.operation() != Operation::Result || authenticated.kind() != BodyKind::Data
+        {
+            return Err(VoiceError::Unauthorized);
+        }
+        let row = self.row(RowId::from_logical(authenticated.logical())?)?;
+        if !row.key.matches(selected, row.key.purpose) {
+            return Err(VoiceError::Unauthorized);
+        }
+        let state = row.state.lock().unwrap_or_else(|error| error.into_inner());
+        match &state.body {
+            Body::Live(live) => Ok(live.phase.clone()),
+            Body::Pending(_) | Body::Drained => Err(VoiceError::Capacity),
+        }
+    }
     /// Recover a lost factory reply even when its caller never received a RowId. Search only
     /// the finite paid index using the ORIGINAL selected grant/lease/executor/full purpose.
     /// This historical lookup requires no live grant/current selection, takes no data loan,

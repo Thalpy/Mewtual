@@ -398,6 +398,25 @@ pub(super) struct Route {
     public: Arc<SetupOutput>,
 }
 impl Route {
+    /// Only this immutable native row supplies selection. Request labels are lookup hints,
+    /// never a substitute for the allocation which owns this Session and its payments.
+    pub(super) fn selected(&self) -> &Arc<SelectedHandoffOwner> {
+        &self.row.selected
+    }
+    /// Pure first-effect fence. Repeat under the SAME original UI commit as close_row;
+    /// otherwise a retained Route could start actor work after trusted channel collection.
+    /// Coordinator -> Row is the existing lock order. This grants no Root authorization.
+    pub(super) fn require_open(&self) -> Result<(), Refused> {
+        let state = self
+            .row
+            .state
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if state.closed || state.pending || !self.row.selected.lease().is_live() {
+            return Err(Refused::Binding);
+        }
+        Ok(())
+    }
     pub(super) fn session(&self) -> &Arc<Session> {
         &self.session
     }

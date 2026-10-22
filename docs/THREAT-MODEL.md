@@ -2881,3 +2881,32 @@ post-inspection/reveal checks observe the original authority synchronously. An a
 synchronous storage/OS action cannot be recalled; verified files already published are retained
 on subsequent refusal. Whole jobs (including peer-busy sleepers and staged range/search state)
 are separately bounded4/actor and8/process, not just at actual lower request admission.
+
+## Native action handoff custody (22 October continuation)
+
+The native factory now accepts only an actual retained channel Route and derives selection
+from that row. It repeats the row's open-state and original generation/selection checks under
+the SAME UI commit used by trusted channel collection. A close which wins before admission
+prevents work; admitted detached actor work retains that commit after caller loss. Request
+labels, a valid channel MAC, RowId or historical receipt never replace current effect authority.
+
+An opaque authenticated header may select only its original bounded result Phase before
+body intake. The header is parsed/authenticated once and remains with its original physical
+worker. After AEAD, the future dispatcher must resolve the SAME RowId and complete decrypted
+purpose using the Route's selected owner before any operation. That dispatcher is not enabled.
+Closed/missing Phase capacity never means native or browser work drained; historical control
+recovery has a separate bounded path.
+
+The trusted native result bridge pins the actual paid buffer without a byte copy. Slice-owner
+callbacks run once before admission, outside protocol/native locks. One private actor Flight
+per body prevents duplicate envelopes and uncollected outputs from sharing one fixed payment.
+Actual queued commands/completions retain the original body after caller cancellation. Root's
+grant/action/tag checks remain authoritative. This generic Rust constructor is for trusted
+prepaid owners; its inline-size cap does not bound arbitrary nested heaps. It is not a renderer
+API, authentication primitive, total heap/RSS bound or zeroization guarantee.
+
+Plan closure and actual last-owner release remain distinct. Explicit original-loan retirement
+cannot adopt a replacement Workflow or declare held inputs/lower work drained. Browser v10
+shares actual channel/provider execution, retains each action's exact adapter, and keeps cleanup
+transport until linked SDK/RPC work settles. Framed action/final ACK delivery, safe historical
+collection, normal ingress, SDP/RTC, relay and independent physical acceptance remain open.
