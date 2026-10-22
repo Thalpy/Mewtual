@@ -11,6 +11,74 @@ export function isCurrentVoiceRoom(
 }
 
 /**
+ * Which signalling protocol owns this device's CURRENT call (VOICE-SIGNALLING-V2.md, "Ownership
+ * and supported versions").
+ *
+ * The mode is pinned when the join starts and never changes while that join lives. A V2 join does
+ * not fall back to legacy on a timeout, a missing capability field, a helper change, a failed
+ * transport or a disabled forwarding switch: every one of those is something an attacker or an
+ * unlucky network can produce, and none of them is consent to weaker authentication. The only
+ * way out of V2 is leaving the call; the next join chooses again.
+ */
+export type CallSignalMode = "legacy" | "v2";
+
+/** Where a call signal is addressed: the UI server id and the channel id that names the room. */
+type CallRoomAddress = Readonly<{
+  mode: CallSignalMode;
+  inCall: boolean;
+  callServer: number | null;
+  callChannel: string;
+  server: number;
+  channel: unknown;
+}>;
+
+/** True when a legacy signal names the room a V2 join currently protects. */
+function addressesProtectedRoom(input: CallRoomAddress): boolean {
+  return (
+    input.mode === "v2" &&
+    input.inCall &&
+    typeof input.channel === "string" &&
+    isCurrentVoiceRoom(input.callServer, input.callChannel, input.server, input.channel)
+  );
+}
+
+/**
+ * May an incoming LEGACY `call-signal` reach the legacy handler at all?
+ *
+ * Inside a V2 call every legacy hello, heartbeat (`voice-ping`), offer, answer, ICE, bye and juke
+ * addressed to that room is excluded before it can write presence, create a peer, renegotiate or
+ * tear anything down. The legacy signal's signature binds no recipient, join or replay identity,
+ * so it cannot be a writer into upgraded state, and an unknown `type` is excluded too rather than
+ * guessed at. Signals for OTHER rooms keep their legacy presence-only meaning: the local device is
+ * not in those rooms, and the legacy handler never creates peers outside the current room.
+ *
+ * In a wholly legacy call (mode "legacy") nothing changes: this always says "handle".
+ */
+export function legacyCallSignalAdmission(input: CallRoomAddress): "handle" | "exclude" {
+  return addressesProtectedRoom(input) ? "exclude" : "handle";
+}
+
+/**
+ * May this device SEND a legacy signal? Inside a V2 call nothing legacy goes to its room: a legacy
+ * hello or heartbeat would invite older builds to open a legacy edge into the protected call, and
+ * a legacy bye could still dismiss us on a peer whose own call is legacy. V2 announcements, the
+ * native bye and SDP/ICE travel through the native V2 path instead.
+ */
+export function legacyCallSignalEgress(input: CallRoomAddress): "send" | "suppress" {
+  return addressesProtectedRoom(input) ? "suppress" : "send";
+}
+
+const LEGACY_SIGNAL_KINDS = new Set(["hello", "voice-ping", "offer", "answer", "ice", "bye", "juke"]);
+
+/**
+ * A diagnostics-safe label for a remote legacy signal's `type`. The field is chosen by the sender,
+ * so only the known protocol words are recorded; anything else is "other", never the raw text.
+ */
+export function legacyCallSignalKind(type: unknown): string {
+  return typeof type === "string" && LEGACY_SIGNAL_KINDS.has(type) ? type : "other";
+}
+
+/**
  * Decide how a room heartbeat should repair an incomplete peer edge. Heartbeats are durable
  * reconciliation, not presence-only decoration: the one-shot hello or any SDP reply may be lost.
  */

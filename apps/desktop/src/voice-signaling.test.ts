@@ -9,10 +9,53 @@ import {
   hangupTargets,
   heartbeatRecovery,
   isCurrentVoiceRoom,
+  legacyCallSignalAdmission,
+  legacyCallSignalEgress,
+  legacyCallSignalKind,
   mergePeerState,
   videoSlotPlan,
+  type CallSignalMode,
   type SlotDirection,
 } from "./voice-signaling.ts";
+
+const room = (mode: CallSignalMode, server: number, channel: unknown, inCall = true) => ({
+  mode, inCall, callServer: 7, callChannel: "general", server, channel,
+});
+
+test("a V2 call excludes every legacy signal for its own room before any handler runs", () => {
+  // The protected room is (server 7, general). Same channel name on another server is another room.
+  assert.equal(legacyCallSignalAdmission(room("v2", 7, "general")), "exclude");
+  assert.equal(legacyCallSignalAdmission(room("v2", 8, "general")), "handle", "other server, other room");
+  assert.equal(legacyCallSignalAdmission(room("v2", 7, "random")), "handle", "other room keeps presence-only legacy meaning");
+  // A malformed or missing channel never matches the protected room, and is then handled by the
+  // legacy path's own parse/room checks, which already ignore it.
+  assert.equal(legacyCallSignalAdmission(room("v2", 7, 7)), "handle");
+  assert.equal(legacyCallSignalAdmission(room("v2", 7, undefined)), "handle");
+  // A stale mode after leaving cannot exclude anything: no call, nothing protected.
+  assert.equal(legacyCallSignalAdmission(room("v2", 7, "general", false)), "handle");
+});
+
+test("a wholly legacy call keeps its exact legacy behaviour", () => {
+  for (const channel of ["general", "random"]) {
+    assert.equal(legacyCallSignalAdmission(room("legacy", 7, channel)), "handle");
+    assert.equal(legacyCallSignalEgress(room("legacy", 7, channel)), "send");
+  }
+});
+
+test("a V2 call sends nothing legacy into its own room", () => {
+  assert.equal(legacyCallSignalEgress(room("v2", 7, "general")), "suppress");
+  assert.equal(legacyCallSignalEgress(room("v2", 8, "general")), "send");
+  assert.equal(legacyCallSignalEgress(room("v2", 7, "general", false)), "send");
+});
+
+test("only known legacy signal words reach diagnostics", () => {
+  for (const kind of ["hello", "voice-ping", "offer", "answer", "ice", "bye", "juke"]) {
+    assert.equal(legacyCallSignalKind(kind), kind);
+  }
+  assert.equal(legacyCallSignalKind("my secret text"), "other");
+  assert.equal(legacyCallSignalKind(undefined), "other");
+  assert.equal(legacyCallSignalKind({ toString: () => "offer" }), "other");
+});
 
 test("a hangup reaches everyone with an edge, not only whoever the roster calls online", () => {
   // The defect this exists for: `bob` is being talked to over a live WebRTC edge while the mesh

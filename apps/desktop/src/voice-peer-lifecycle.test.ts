@@ -3,7 +3,7 @@ import test from "node:test";
 import { readFileSync } from "node:fs";
 import ts from "typescript";
 import { MediaCaptureSession } from "./media-capture.ts";
-import { heartbeatRecovery, isCurrentVoiceRoom } from "./voice-signaling.ts";
+import { heartbeatRecovery, isCurrentVoiceRoom, legacyCallSignalAdmission, legacyCallSignalKind, mergePeerState } from "./voice-signaling.ts";
 import { mappableIcePort, mappingAddressPolicy, routerMappedCandidate, shouldSignalHostCandidate, mappedIceIsCurrent } from "./callroutes.ts";
 
 const MEMBER = "a".repeat(64);
@@ -25,13 +25,20 @@ function deferred<T = void>() {
 
 /** Real App handlers, with RTC operations that can be held across peer/call replacement. */
 function fixture() {
-  return new Function("MediaCaptureSession", "heartbeatRecovery", "isCurrentVoiceRoom", "mappableIcePort", "mappingAddressPolicy", "routerMappedCandidate", "shouldSignalHostCandidate", "mappedIceIsCurrent", `
+  return new Function("MediaCaptureSession", "heartbeatRecovery", "isCurrentVoiceRoom", "mappableIcePort", "mappingAddressPolicy", "routerMappedCandidate", "shouldSignalHostCandidate", "mappedIceIsCurrent", "legacyCallSignalAdmission", "legacyCallSignalKind", "mergePeerState", `
     let locked = false, inCall = true, callServer = 1, callChannel = "7", callSelfId = "b".repeat(64);
+    let callSignalMode = "legacy";
     const callLifecycleSession = new MediaCaptureSession();
     let activeCallLease = callLifecycleSession.begin();
     const callPeers = {}, waitingIce = {};
     let callParticipants = [], callPeerStates = {}, remoteStreams = {}, peerVideoCodec = {}, peerTransport = {};
-    const calls = { attached: [], removed: [], signals: [], stats: [], local: [], remote: [], ice: [], maps: [], stopped: 0, closed: 0, mappingEnds: 0, mappingDestroy: 0 };
+    const calls = { attached: [], removed: [], signals: [], stats: [], local: [], remote: [], ice: [], maps: [], stopped: 0, closed: 0, mappingEnds: 0, mappingDestroy: 0, diags: [], presence: [], dropped: [], juke: [] };
+    const diagRecord = (event) => calls.diags.push(event);
+    // Presence and jukebox owners the legacy handler writes before/after its room check.
+    const roomMembers = () => [], maybeNotifyRoom = () => {};
+    const recordPresence = (...args) => calls.presence.push(args);
+    const jukeAnnounceTo = (...args) => calls.juke.push(args), jukeRecv = (...args) => calls.juke.push(args);
+    const capVideo = () => {};
     const mappedCallPorts = new Map(), mappingGates = [], routeGates = [];
     let callMappedRoutes = 0;
     const invoke = async (command, args) => {
@@ -96,7 +103,8 @@ function fixture() {
     // production teardown, including track stops and peer closure, rather than a copied cleanup.
     const stopStudioAudio = () => {}, instReleaseAll = () => {}, clearScreenAudioSources = () => {},
       stopDrawClaims = () => {}, stopJamMetTimer = () => {}, jamStopPlayback = () => {},
-      jukeReset = () => {}, stopMeters = () => {}, onDeviceChange = () => {}, dropPresence = () => {},
+      jukeReset = () => {}, stopMeters = () => {}, onDeviceChange = () => {},
+      dropPresence = (...args) => calls.dropped.push(args),
       announceHangup = () => {};
     const videoCaptureSession = new MediaCaptureSession(), screenAudioCaptureSession = new MediaCaptureSession(), micCaptureSession = new MediaCaptureSession();
     const navigator = { mediaDevices: { removeEventListener() {} } };
@@ -124,6 +132,8 @@ function fixture() {
         localStream = stream; camStream = stream;
       },
       signal(id, value) { return handleCallSignal(id, btoa(JSON.stringify({ callId: "7", ...value })), 1); },
+      signalRoom(id, server, room, value) { return handleCallSignal(id, btoa(JSON.stringify({ callId: room, ...value })), server); },
+      mode(value) { if (value !== undefined) callSignalMode = value; return callSignalMode; },
       replace(id) { delete callPeers[id]; delete waitingIce[id]; return createPeer(id); },
       invalidate() { callLifecycleSession.invalidate(); },
       lockBeforeCleanup() { locked = true; },
@@ -145,8 +155,57 @@ function fixture() {
       states() { return callPeerStates; },
       transport() { return { peerVideoCodec, peerTransport }; },
     };
-  `)(MediaCaptureSession, heartbeatRecovery, isCurrentVoiceRoom, mappableIcePort, mappingAddressPolicy, routerMappedCandidate, shouldSignalHostCandidate, mappedIceIsCurrent);
+  `)(MediaCaptureSession, heartbeatRecovery, isCurrentVoiceRoom, mappableIcePort, mappingAddressPolicy, routerMappedCandidate, shouldSignalHostCandidate, mappedIceIsCurrent, legacyCallSignalAdmission, legacyCallSignalKind, mergePeerState);
 }
+
+const LEGACY_KINDS = ["hello", "voice-ping", "offer", "answer", "ice", "bye", "juke", "made-up"];
+const legacyBody = (type: string) => ({ type, mic: 0, inst: 0, sdp: { type: "offer", sdp: "legacy" }, candidate: { candidate: "legacy ICE" } });
+
+test("a V2 join's room admits no legacy writer: presence, peers, SDP, ICE, juke and bye are all excluded", async () => {
+  const app = fixture();
+  app.mode("v2");
+  for (const type of LEGACY_KINDS) await app.signal(MEMBER, legacyBody(type));
+  assert.equal(app.current(MEMBER), undefined, "no legacy path may create a peer in the V2 room");
+  assert.deepEqual(app.calls.presence, [], "legacy hello/heartbeat cannot renew presence");
+  assert.deepEqual(app.calls.dropped, [], "legacy bye cannot drop presence");
+  assert.deepEqual(app.calls.removed, [], "legacy bye cannot remove anything");
+  assert.deepEqual(app.calls.juke, []);
+  assert.equal(app.calls.remote.length + app.calls.local.length + app.calls.ice.length, 0);
+  assert.deepEqual(app.calls.diags.map((d: any) => d.fields.kind), [...LEGACY_KINDS.slice(0, 7), "other"],
+    "each exclusion is diagnosed by protocol word only, never by remote text");
+  // Stripped capability fields do not lower the protection: a bare heartbeat is excluded too.
+  await app.signal(MEMBER, { type: "voice-ping" });
+  assert.equal(app.current(MEMBER), undefined);
+});
+
+test("a wholly legacy call keeps its legacy behaviour for the same signals", async () => {
+  const app = fixture();
+  await app.signal(MEMBER, { type: "voice-ping", mic: 1, inst: 0 });
+  assert.ok(app.current(MEMBER), "a legacy heartbeat still repairs a missing peer");
+  assert.equal(app.calls.presence.length, 1);
+  await app.signal(MEMBER, { type: "bye" });
+  assert.equal(app.current(MEMBER), undefined, "and a legacy bye still ends it");
+  assert.equal(app.calls.dropped.length, 1);
+  assert.deepEqual(app.calls.diags, []);
+});
+
+test("V2 mode leaves other rooms' legacy presence meaning intact", async () => {
+  const app = fixture();
+  app.mode("v2");
+  await app.signalRoom(MEMBER, 1, "8", { type: "bye" }); // another channel on the call server
+  await app.signalRoom(MEMBER, 2, "7", { type: "hello", mic: 0 }); // same channel id, other server
+  assert.equal(app.calls.dropped.length, 1);
+  assert.equal(app.calls.presence.length, 1);
+  assert.equal(app.current(MEMBER), undefined, "other rooms never create peers in either mode");
+  assert.deepEqual(app.calls.diags, []);
+});
+
+test("leaving resets the pinned mode, so a V2 join cannot leak into the next call", () => {
+  const app = fixture();
+  app.mode("v2");
+  app.destroy();
+  assert.equal(app.mode(), "legacy");
+});
 
 test("an old default-route lookup cannot change a replacement call's candidate filter", async () => {
   for (const retire of ["lockBeforeCleanup", "rejoinBeforeCleanup"]) {
