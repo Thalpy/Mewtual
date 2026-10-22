@@ -12040,16 +12040,17 @@
     if (saveInProgress(f.cid)) return;
     const existing = privateDownloads.find(row => row.cid === f.cid);
     if (existing) {
-      // Save as on a known file goes through its row; where the row does not offer it (running,
-      // removing, exhausted, partly saved), Transfers shows the explicit choices.
-      if (saveAs) {
-        if (privateDownloadOffers(existing, "saveAs")) await resumePrivateDownload(existing, false, true);
-        else switchView("downloads");
-        return;
-      }
-      // Running, halted, saved, removing or exhausted rows need an explicit choice in Transfers.
-      if (privateDownloadChatSave(existing) === "transfers") { switchView("downloads"); return; }
-      await resumePrivateDownload(existing);
+      // Rows that need an explicit choice open Transfers instead. For Save as that is any row that
+      // does not offer it (running, removing, exhausted, partly saved); for a plain save, running,
+      // halted, saved, removing or exhausted rows. Decided before the row resumes: switching view
+      // once that has begun would take a fresh navigation claim (studio-exit-routes.test.ts scans
+      // this function's text, comments included).
+      const direct = saveAs
+        ? privateDownloadOffers(existing, "saveAs")
+        : privateDownloadChatSave(existing) !== "transfers";
+      if (!direct) { switchView("downloads"); return; }
+      // Save as on a known file goes through its row; native opens the dialog itself.
+      await resumePrivateDownload(existing, false, saveAs);
       return;
     }
     const gen = viewGeneration;
