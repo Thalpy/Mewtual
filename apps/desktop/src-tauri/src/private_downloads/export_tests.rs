@@ -330,6 +330,41 @@ fn a_session_dropped_on_the_async_side_closes_on_the_blocking_pool() {
     });
 }
 
+/// Review M-5 and combined review LOW 4: after publication the record is kept (with "Clear ...
+/// to remove it") only when a later Clear can still settle the staging name, a panicking worker
+/// never turns the committed save into an error, and a shared folder releases the record with
+/// the saved-row notice about the temporary copy.
+#[test]
+fn after_publication_keeps_the_record_only_when_clear_can_still_help() {
+    for kept in [PartialRemoval::Unchecked, PartialRemoval::FolderUnreachable] {
+        assert_eq!(after_publication(Ok(Ok(kept))), (false, None));
+    }
+    assert_eq!(
+        after_publication(Ok(Err(ExportError::Inactive))),
+        (false, None)
+    );
+    assert_eq!(
+        after_publication(Err("The save worker stopped unexpectedly.".into())),
+        (false, None)
+    );
+    assert_eq!(
+        after_publication(Ok(Ok(PartialRemoval::KeptSaved))),
+        (true, None)
+    );
+    let (released, note) = after_publication(Ok(Ok(PartialRemoval::SharedFolder)));
+    assert!(released);
+    let note = note.unwrap();
+    assert!(
+        note.contains("temporary .mewtual-part copy of the saved file"),
+        "{note}"
+    );
+    assert!(!note.contains("partly saved file"), "{note}");
+    assert_eq!(
+        after_publication(Ok(Ok(PartialRemoval::LeftInPlace))),
+        (true, PartialRemoval::LeftInPlace.notice(true))
+    );
+}
+
 /// A folder the user picked in Save as, beside (not inside) the Downloads folder.
 fn chosen_place(root: &tempfile::TempDir, name: &str) -> (PathBuf, Destination) {
     let folder = root.path().join("Chosen place");

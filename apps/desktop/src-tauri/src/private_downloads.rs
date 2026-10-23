@@ -955,6 +955,10 @@ pub(super) const STAGING_LEFT: &str = "A temporary second name for the saved fil
 /// Shown when Save new copy goes ahead although the old partial could not be reached.
 const OLD_PARTIAL_UNREACHABLE: &str =
     "The folder with the old partly saved file is unavailable, so that file was left in place.";
+/// The same for Save another copy of a saved row (combined review LOW 1): the earlier save's
+/// files are its saved file and possibly a temporary copy, never "a partly saved file".
+const OLD_SAVED_UNREACHABLE: &str =
+    "The folder of the earlier saved copy is unavailable, so its files there were left in place.";
 
 /// "Save new copy" / "Save another copy": remove our proven partial (never the final name), then
 /// forget the journal. Returns the intent to use next and, when a file of the old save stays on
@@ -990,21 +994,25 @@ pub(super) async fn abandon_sequence(
     claim: CleanupClaim,
     expected_intent: u64,
 ) -> Result<(u64, Option<&'static str>), String> {
-    let Some(saved) = ports.export_state().await? else {
+    if ports.export_state().await?.is_none() {
         return Ok((expected_intent, None));
-    };
-    let published = matches!(saved, ExportState::Published(_));
+    }
     let retired = ports.retire(expected_intent).await?;
-    // Re-read under the new intent: the journal being deleted is the one just retired.
+    // Re-read under the new intent: the journal being deleted is the one just retired, and
+    // whether it was already Published comes from this same read (combined review LOW 2: a live
+    // writer can record Published between the first read and the retire, and a stale "not
+    // published" would delete a staging name without first proving the final name ours).
     let Some(saved) = ports.export_state().await? else {
         return Err(STALE_DOWNLOAD.into());
     };
+    let published = matches!(saved, ExportState::Published(_));
     let journal = saved.journal().clone();
     // A folder that cannot be reached is usually why the user wants a new copy; the old partial
     // then stays wherever it is, and the user is told. A reachable partial that cannot be checked
     // is not forgotten.
     let notice =
         match delete_owned(ports, journal, published, &claim).await? {
+            Ok(PartialRemoval::FolderUnreachable) if published => Some(OLD_SAVED_UNREACHABLE),
             Ok(PartialRemoval::FolderUnreachable) => Some(OLD_PARTIAL_UNREACHABLE),
             Ok(outcome) if outcome.settled() => outcome.notice(published),
             Ok(_) | Err(_) => return Err(
@@ -1511,20 +1519,24 @@ pub(super) struct Exported {
     pub(super) staging_note: Option<&'static str>,
 }
 
-/// Review M-5: the staging name of a saved file stays because other accounts can change the
-/// folder, so nothing there is deleted automatically, now or by Clear.
-pub(super) const STAGING_SHARED: &str = "Other accounts can change this folder, so the temporary .mewtual-part copy of the saved file was left there. Delete it yourself if you no longer need it.";
-
 /// Review M-5: map what happened to our staging name after publication to (may the record be
 /// released, what to tell the user). Only a name that could not be checked or deleted right now
-/// keeps the record, because only then can a later Clear still remove it.
+/// keeps the record, because only then can a later Clear still remove it; a folder other accounts
+/// may change (`SharedFolder`, where Clear would not delete it either) releases the record with
+/// the saved-row notice about the temporary copy.
+///
+/// It takes the blocking worker's own result too (combined review LOW 4): Published is already
+/// recorded here, so a worker that panicked must not turn the committed save into an error; it
+/// keeps the record (a later Clear settles the staging name) like any outcome that could not be
+/// checked.
 fn after_publication(
-    outcome: Result<PartialRemoval, catcoms_storage::kept::ExportError>,
+    worker: Result<Result<PartialRemoval, catcoms_storage::kept::ExportError>, String>,
 ) -> (bool, Option<&'static str>) {
-    match outcome {
-        Ok(PartialRemoval::Unchecked | PartialRemoval::FolderUnreachable) | Err(_) => (false, None),
-        Ok(PartialRemoval::SharedFolder) => (true, Some(STAGING_SHARED)),
-        Ok(outcome) => (true, outcome.notice(true)),
+    match worker {
+        Ok(Ok(PartialRemoval::Unchecked | PartialRemoval::FolderUnreachable))
+        | Ok(Err(_))
+        | Err(_) => (false, None),
+        Ok(Ok(outcome)) => (true, outcome.notice(true)),
     }
 }
 
@@ -1617,7 +1629,7 @@ pub(super) async fn export_sequence(
                     // The caller releases the record next; drop our second (staging) name first,
                     // and keep the record if that cannot be settled (review L3, M-5).
                     let (staging_cleared, staging_note) = after_publication(
-                        blocking(move || remove_partial(&journal, true, &mut OsCryptoRng)).await?,
+                        blocking(move || remove_partial(&journal, true, &mut OsCryptoRng)).await,
                     );
                     return Ok(Some(Exported {
                         path,
@@ -1765,7 +1777,7 @@ pub(super) async fn export_sequence(
     // before Published; the removal flushes the folder itself on Unix.
     let session = file.take();
     let (staging_cleared, staging_note) =
-        after_publication(blocking(move || session.finish(&mut OsCryptoRng)).await?);
+        after_publication(blocking(move || session.finish(&mut OsCryptoRng)).await);
     Ok(Some(Exported {
         path,
         staging_cleared,

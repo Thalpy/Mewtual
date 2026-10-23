@@ -13828,15 +13828,49 @@ fn create_download(
 
 /// Write a whole small artefact (a guide image, a layout export) as one download.
 fn write_download(downloads: &Path, requested_name: &str, bytes: &[u8]) -> Result<PathBuf, String> {
-    let (mut file, path) = create_download(downloads, requested_name)?;
+    write_download_held(downloads, requested_name, bytes).map_err(FailedWrite::clean_up)
+}
+
+/// A whole-file download write that failed, with the file it created still open when there is
+/// one, so the caller can remove it after releasing any guard it holds (combined review LOW 3:
+/// the verified removal is a rename, an unlink and a folder flush on Unix, never to be run under
+/// the session commit guard).
+struct FailedWrite {
+    error: String,
+    held: Option<(std::fs::File, PathBuf)>,
+}
+impl FailedWrite {
+    /// Remove the created file (PR51 H1: only while its name still holds this very file) and
+    /// return the error with a note when it had to stay.
+    fn clean_up(self) -> String {
+        match self.held {
+            Some((file, path)) => {
+                let removal = remove_staging(&file, &path);
+                let id = catcoms_storage::kept::session_id(&file).ok();
+                format!(
+                    "{}{}",
+                    self.error,
+                    left_in_place(&path, &removal, id, Leftover::Partial)
+                )
+            }
+            None => self.error,
+        }
+    }
+}
+
+/// [`write_download`] without the cleanup, for a caller that must release a guard first.
+fn write_download_held(
+    downloads: &Path,
+    requested_name: &str,
+    bytes: &[u8],
+) -> Result<PathBuf, FailedWrite> {
+    let (mut file, path) = create_download(downloads, requested_name)
+        .map_err(|error| FailedWrite { error, held: None })?;
     if let Err(error) = file.write_all(bytes) {
-        // PR51 H1: only while the name still holds the file this call created and still holds.
-        let removal = remove_staging(&file, &path);
-        let id = catcoms_storage::kept::session_id(&file).ok();
-        return Err(format!(
-            "{error}{}",
-            left_in_place(&path, &removal, id, Leftover::Partial)
-        ));
+        return Err(FailedWrite {
+            error: error.to_string(),
+            held: Some((file, path)),
+        });
     }
     Ok(path)
 }
@@ -13910,8 +13944,8 @@ fn left_in_place(
     match at {
         SessionAt::Absent | SessionAt::Other => String::new(),
         SessionAt::Ours if shared => format!(
-            " Other accounts can change this folder, so the {subject} was left in place; delete \
-             it yourself."
+            " This folder may be changed by other accounts, so the {subject} was left in place; \
+             delete it yourself."
         ),
         SessionAt::Ours => format!(" The {subject} could not be removed; delete it yourself."),
         SessionAt::Unknown => {
@@ -14738,8 +14772,15 @@ where
         return Err("the sheet export is not a Mewtual sheet transcript".into());
     }
     before_commit.await;
-    let _commit = require_ui_session_generation(state, generation).await?;
-    let path = write_download(downloads, name, svg.as_bytes())?;
+    let commit = require_ui_session_generation(state, generation).await?;
+    let path = match write_download_held(downloads, name, svg.as_bytes()) {
+        Ok(path) => path,
+        Err(failed) => {
+            // Combined review LOW 3: clean up a failed write only after releasing the guard.
+            drop(commit);
+            return Err(failed.clean_up());
+        }
+    };
     let warning = reveal(&path)
         .err()
         .map(|error| format!("The sheet was saved, but Downloads could not be opened: {error}"));
@@ -14921,7 +14962,15 @@ async fn stream_download_staged(
                 }
             })
             .await
-            .unwrap_or_default();
+            // Combined review LOW 4: a settling worker that panicked removed nothing we know of;
+            // say so instead of staying silent (no filesystem check on the async runtime).
+            .unwrap_or_else(|_| {
+                let name = staging
+                    .file_name()
+                    .map(|name| name.to_string_lossy().into_owned())
+                    .unwrap_or_default();
+                format!(" Mewtual could not check \"{name}\", so it may have been left in place.")
+            });
             Ok((path, note))
         }
         Err(error) => {
@@ -20581,7 +20630,7 @@ mod tests {
 
         assert_eq!(std::fs::read(&path).unwrap(), b"verified bytes");
         assert!(
-            note.contains("Other accounts can change this folder"),
+            note.contains("This folder may be changed by other accounts"),
             "{note}"
         );
         assert!(note.contains("\"w.bin.part\""), "{note}");
@@ -20835,7 +20884,7 @@ mod tests {
         let shared =
             settle_published_staging_with(&file, &staging, |_, _| Ok(SessionRemoval::SharedFolder));
         assert!(
-            shared.contains("Other accounts can change this folder"),
+            shared.contains("This folder may be changed by other accounts"),
             "{shared}"
         );
         // Review M-4: once the name holds somebody else's file, nothing tells the user to delete it.

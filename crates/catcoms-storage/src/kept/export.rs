@@ -691,9 +691,13 @@ pub fn confirm_staging_links(
         // Re-review LOW B: also reached when the probe name is not provably our own file (a
         // transient hold by an indexer, or a swapped name), so say "confirmed", not only
         // "removed". Refusing is the safe direction; the user can try again.
+        // Combined review LOW 6: on a folder that gives no file numbers (some SMB servers) the
+        // empty reservation and probe name cannot be proven ours, so they stay; say so.
         LinkProbe::Inconclusive => ExportError::Local {
             retryable: false,
-            reason: "a temporary name in that folder could not be confirmed or removed".into(),
+            reason: "a temporary name in that folder could not be confirmed or removed; empty \
+                     temporary files may remain there"
+                .into(),
         },
         LinkProbe::NoDescriptor => ExportError::Local {
             retryable: false,
@@ -1342,8 +1346,10 @@ impl PartialRemoval {
     pub fn settled(&self) -> bool {
         !matches!(self, Self::FolderUnreachable | Self::Unchecked)
     }
-    /// After publication: whether no staging name of ours can remain (PR51 H1). A name left in
-    /// place for any reason keeps the Published row, so the user is told about the second name.
+    /// After publication: whether no staging name of ours can remain (PR51 H1). Descriptive only:
+    /// native decides whether to keep the Published record from the outcome itself (it keeps it
+    /// only for `Unchecked` and `FolderUnreachable`, the outcomes a later Clear can still
+    /// improve; see `after_publication` in native).
     pub fn cleared_staging(&self) -> bool {
         matches!(
             self,
@@ -1355,8 +1361,14 @@ impl PartialRemoval {
     pub fn notice(&self, saved: bool) -> Option<&'static str> {
         match self {
             Self::Removed | Self::FolderUnreachable | Self::Unchecked => None,
+            // Combined review LOW 1: "may be changed" also covers network and FUSE folders, where
+            // Mewtual cannot tell who can change them. Reported only for a name proven ours
+            // (review M-A). A saved row names the temporary copy, never the saved file.
+            Self::SharedFolder if saved => Some(
+                "This folder may be changed by other accounts, so Mewtual deletes nothing there automatically and left the temporary .mewtual-part copy of the saved file in place. Delete that copy yourself if you no longer need it.",
+            ),
             Self::SharedFolder => Some(
-                "Other accounts can change the folder with the partly saved file, so Mewtual left it in place. Delete it yourself if you no longer need it.",
+                "This folder may be changed by other accounts, so Mewtual deletes nothing there automatically and left the partly saved file in place. Delete it yourself if you no longer need it.",
             ),
             Self::KeptOnlyCopy => Some(
                 "The saved file was no longer in its folder, so its copy under the temporary .mewtual-part name was kept. Rename that file to keep it.",

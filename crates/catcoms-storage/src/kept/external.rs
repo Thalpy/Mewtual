@@ -1026,13 +1026,13 @@ pub(super) fn remove_verified(
             Some(pinned) => pinned,
             None => return Ok(Verified::FolderChanged),
         };
-        if pinned.shared {
-            return Ok(Verified::Shared);
-        }
         // Review M-2: verify at the original name first, so an object that is not ours (a
         // directory, a link, the user's own file) is never renamed at all. Only a swap between
         // this check and the rename below can still move a foreign object aside, and the second
-        // check at the aside name catches that.
+        // check at the aside name catches that. Combined review M-A: this read-only check also
+        // comes before the shared-folder answer, so `Shared` (which tells the user to delete the
+        // leftover) is reported only for a name that holds our own file; a missing or foreign
+        // name is `Missing` or `NotOurs` there too.
         match open_at_nofollow(&pinned.dir, leaf) {
             Ok(Some(file)) => {
                 if verify(&file, expected)?.is_none() {
@@ -1042,6 +1042,9 @@ pub(super) fn remove_verified(
             Ok(None) => return Ok(Verified::NotOurs),
             Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Verified::Missing),
             Err(error) => return Err(error),
+        }
+        if pinned.shared {
+            return Ok(Verified::Shared);
         }
         let aside = aside_name(rng);
         match rename_no_replace(&pinned.dir, leaf, &aside) {
@@ -1533,9 +1536,10 @@ fn session_changed() -> io::Error {
 /// macOS it does: without the check nothing proves the final name is ours.
 ///
 /// Errors: `AlreadyExists` (the final name is taken; nothing was linked), `NotFound` (the staging
-/// name is gone, the folder changed, or Linux has no `/proc`; nothing was linked), `InvalidData`
-/// (a name holds another object; nothing of ours is reported published), `Unsupported` (no file
-/// number to check against), or the link's own error.
+/// name is gone or the folder changed; nothing was linked), `Unsupported` (no file number to check
+/// against, or on Linux and Android a definite no-link from the descriptor: no `/proc`, the object
+/// has no names left, or another device), `InvalidData` (a name holds another object; nothing of
+/// ours is reported published), or the link's own error.
 pub(super) fn publish_session(
     file: &File,
     folder: &Path,

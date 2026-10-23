@@ -54,6 +54,9 @@ struct Fake {
     deletes: std::sync::atomic::AtomicUsize,
     /// The presence check never returns (a dead share; folder identity blocks forever).
     presence_hangs: std::sync::atomic::AtomicBool,
+    /// A live writer records Published just as Save new copy retires the journal (combined
+    /// review LOW 2).
+    publish_on_retire: std::sync::atomic::AtomicBool,
 }
 impl Fake {
     fn new(journal: &ExportJournal) -> (Arc<Self>, mpsc::Sender<()>, mpsc::Receiver<()>) {
@@ -70,6 +73,7 @@ impl Fake {
             entered: StdMutex::new(Some(entered)),
             deletes: Default::default(),
             presence_hangs: Default::default(),
+            publish_on_retire: Default::default(),
         });
         (fake, release, inside)
     }
@@ -140,6 +144,14 @@ impl CleanupPorts for Arc<Fake> {
         let mut record = self.record.lock().unwrap();
         if record.intent != expected || record.deleting || record.export.is_none() {
             return Err(STALE_DOWNLOAD.into());
+        }
+        if self
+            .publish_on_retire
+            .load(std::sync::atomic::Ordering::SeqCst)
+        {
+            if let Some(ExportState::Writing(journal)) = record.export.take() {
+                record.export = Some(ExportState::Published(journal));
+            }
         }
         record.intent += 1;
         Ok(record.intent)
@@ -333,6 +345,23 @@ async fn a_stale_save_new_copy_deletes_nothing() {
     );
     assert!(staging.exists());
     assert_eq!(fake.deletes.load(std::sync::atomic::Ordering::SeqCst), 0);
+}
+
+/// Combined review LOW 2: Save new copy decides whether the old save was already Published from
+/// the read made after its retire, so a live writer that records Published in between cannot make
+/// it delete a staging name whose final name was never proven ours (here none exists, so the
+/// staging name is the only copy and must be kept).
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn save_new_copy_reads_published_after_its_retire() {
+    let (_root, staging, journal) = partial();
+    let (fake, release, _inside) = Fake::new(&journal);
+    drop(release);
+    fake.publish_on_retire
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    let claim = CleanupClaim::acquire(7, id(0xA7)).unwrap();
+    let (_intent, notice) = abandon_sequence(&fake, claim, 3).await.unwrap();
+    assert_eq!(notice, PartialRemoval::KeptOnlyCopy.notice(true));
+    assert!(staging.exists(), "the only copy is kept");
 }
 
 /// Second review R2-M3: Save new copy goes ahead although the old partial's folder is unreachable

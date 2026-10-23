@@ -892,6 +892,63 @@ fn unix_never_deletes_automatically_in_a_folder_other_accounts_can_modify() {
 
 #[cfg(unix)]
 #[test]
+fn unix_a_shared_folder_tells_the_user_to_delete_only_its_own_file() {
+    // Combined review M-A: in a folder other accounts can modify, the user is told to delete the
+    // leftover only when the name still holds Mewtual's own file. A name the user already deleted,
+    // or one now holding someone else's file, never produces "Delete it yourself".
+    use std::os::unix::fs::PermissionsExt;
+    for case in ["missing", "foreign", "saved-missing"] {
+        let fx = fixture();
+        let mut store = open(&fx.vault);
+        let (id, lease) = completed(&mut store);
+        let mut file = started(&mut store, &lease, &fx.downloads);
+        let published = case == "saved-missing";
+        if published {
+            write_all(&mut file);
+            publish(&mut store, &lease, &mut file);
+        } else {
+            file.accept(0, CHUNKS[0]).unwrap();
+        }
+        drop(file);
+        let journal = store
+            .cancel_download(id)
+            .unwrap()
+            .unwrap()
+            .journal()
+            .clone();
+        match case {
+            "foreign" => {
+                fs::remove_file(staging(&fx.downloads)).unwrap();
+                fs::write(staging(&fx.downloads), b"someone else's file").unwrap();
+            }
+            _ => fs::remove_file(staging(&fx.downloads)).unwrap(),
+        }
+        fs::set_permissions(&fx.downloads, fs::Permissions::from_mode(0o777)).unwrap();
+        let outcome = remove_partial(&journal, published, &mut rng()).unwrap();
+        let expected = match case {
+            "missing" => PartialRemoval::Removed,
+            "foreign" => PartialRemoval::LeftInPlace,
+            _ => PartialRemoval::KeptSaved,
+        };
+        assert_eq!(outcome, expected, "{case}");
+        assert!(
+            !outcome
+                .notice(published)
+                .is_some_and(|notice| notice.contains("Delete it yourself")),
+            "{case}"
+        );
+        if case == "foreign" {
+            assert_eq!(
+                fs::read(staging(&fx.downloads)).unwrap(),
+                b"someone else's file"
+            );
+        }
+        fs::set_permissions(&fx.downloads, fs::Permissions::from_mode(0o755)).unwrap();
+    }
+}
+
+#[cfg(unix)]
+#[test]
 fn unix_finds_a_partial_a_crash_left_at_a_removing_name() {
     // PR51 H1: a crash between the rename aside and the unlink leaves our plaintext at a random
     // "removing" name. Keep must still see it, and the next Remove must find it by identity.
