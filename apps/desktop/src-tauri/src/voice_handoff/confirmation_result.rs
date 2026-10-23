@@ -169,8 +169,8 @@ async fn prepare(
     let context = context.upgrade().ok_or(Refused::Closed)?;
     let (original, identity, tag, output_range) = decode_result(&context, route, incoming)?;
     {
-        // Drop the history snapshot before first-effect awaits. Its dynamic receipt owners
-        // are not needed for admission and must not coexist with the later worker graph.
+        // Scope fixed history metadata before first-effect awaits: admission needs only
+        // the original action identity, not a retained copy of the full status graph.
         let status = original.reconcile()?;
         if status.action != Some((identity.serial, identity.version, identity.input_tag)) {
             return Err(Refused::Protocol(VoiceError::Unauthorized));
