@@ -1,5 +1,22 @@
 # Mewtual; Handover
 
+## Browser fixed-history cleanup correction (23 October; combined gates pending)
+
+The combined draft now keeps linked chain history and its actual global row positions paid
+after owner End, independently of drained SDK/I/O buffers. Pending native parent finalization
+and lost channel collection cannot release metadata that the channel still retains. Actual
+unlink after exact final ACK and channel collection releases those claims for a retired owner.
+The retained broker version is16; an older broker refuses replacement until reload.
+
+Five new regressions reproduced the early refund before the fix. Re-review also found that
+unlink-before-owner-End leaked occupied action slots; centralized final history collection
+now handles either ordering. All212 focused browser cases pass, including all nine child
+histories under global row pressure, completed ActionRecords, reverse-order Derive-only and
+child cleanup, and a lost collection reply after final ACK. The preceding frontend run passed
+2,625 tests, Svelte and build, but predates that last reverse-order fix; complete current gates
+must be repeated. Native combined compilation still waits for the single full Root suite
+described below. This is an inactive adapter correction, not live V2, unknown-Begin or RTC acceptance.
+
 ## Combined continuation integration (23 October; native validation pending)
 
 `communication-confirmation-begin` now merges reviewed Result92c7df7c, known-child browser

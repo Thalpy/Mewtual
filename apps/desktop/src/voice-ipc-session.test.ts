@@ -641,6 +641,78 @@ test("several historical children retain separate fixed claims without manufactu
   assert.deepEqual(f.rowBudget(), { reserved: 3, actions: 1 });
 });
 
+for (const mode of ["idle", "accepted", "historical", "failed-input"] as const) test(`known child ${mode} keeps fixed custody through Pending parent final after owner End`, async t => {
+  const f = await fixture(t), child = await framedConfirmation(f); await child.derive();
+  const baseline = f.broker.counts().bytes, handle = child.handle();
+  if (mode === "accepted") assert.equal((await handle.attempt()).kind, "accepted");
+  if (mode === "historical") { child.historical(); assert.equal((await handle.attempt()).kind, "status"); }
+  if (mode === "failed-input") { child.loseInput(); assert.equal((await handle.attempt()).kind, "uncertain"); }
+  child.parent.pendingFinal(); f.owner.retire(); let closed = false;
+  const closure = child.channel.close().then(() => { closed = true; });
+  await until(() => child.parent.planCalls() === 1 && f.timers().delays.includes(1000));
+  assert.equal(closed, false); assert.equal(child.counts().returns, 1);
+  assert.equal(f.broker.counts().bytes, baseline - 96 * 1024 - 10 * 2048,
+    "SDK drainage releases variable buffers and unused rows, while the linked history stays paid");
+  assert.deepEqual(f.rowBudget(), mode === "accepted" ? { reserved: 0, actions: 2 } : { reserved: 1, actions: 1 },
+    "both descriptor and adopted ActionRecord claims survive owner End until actual unlink");
+  f.advance(1000); await until(() => child.parent.planCalls() === 2 && f.timers().delays.includes(1000));
+  assert.equal(child.parent.finalCounts().finalCalls, 0);
+  child.parent.pendingFinal(false); f.advance(1000); await closure;
+  assert.equal(child.parent.finalCounts().finalAcknowledged, true);
+  await until(() => f.broker.counts().bytes === 0);
+  assert.equal(f.broker.counts().bytes, 0); assert.deepEqual(f.rowBudget(), { reserved: 0, actions: 0 });
+});
+
+test("nine retained child histories count toward pressure until final ACK and actual channel unlink", async t => {
+  const f = await fixture(t), child = await framedConfirmation(f); await child.derive();
+  child.historical(); assert.equal((await child.handle().attempt()).kind, "status");
+  for (let n = 0; n < 8; n++) assert.equal((await child.nextHistorical().attempt()).kind, "status");
+  const baseline = f.broker.counts().bytes;
+  child.parent.pendingFinal(); f.owner.retire(); const closure = child.channel.close();
+  await until(() => child.parent.planCalls() === 1 && f.timers().delays.includes(1000));
+  const held = baseline - 96 * 1024 - 2 * 2048;
+  assert.equal(f.broker.counts().bytes, held);
+  assert.deepEqual(f.rowBudget(), { reserved: 9, actions: 1 });
+  const pressureOwner = createVoiceCryptoOwner("pressure-owner", hash(40), () => true);
+  t.after(() => pressureOwner.retire());
+  const key = await real.generateKey({ name: "AES-GCM", length: 256 }, false, ["encrypt", "decrypt"]);
+  const pair = f.broker.createPair(pressureOwner, key, key, "pressure-domain");
+  const native = { async admitAction() { throw new Error("unused pressure admission"); },
+    async commitConfirmation() { throw new Error("unused pressure commit"); }, async settleAction() {} };
+  const input = (n: number) => ({ action: String(n), version: "1", inputTag: hash(n), handshake: hash(41),
+    deliveryToken: String(n), kind: "hello" as const, sequence: "1", aad: new Uint8Array(), ciphertext: new Uint8Array(16) });
+  for (let n = 1; n <= 22; n++) f.broker.registerConfirmation(pressureOwner, pair, native, input(n));
+  assert.throws(() => f.broker.registerConfirmation(pressureOwner, pair, native, input(23)), /capacity/,
+    "ten retained chain slots leave only22 of the original32 global positions");
+  f.loseCollection(); child.parent.pendingFinal(false); f.advance(1000);
+  await until(() => child.parent.finalCounts().finalAcknowledged && f.counts().collections === 1 && f.timers().delays.includes(1000));
+  assert.deepEqual(f.rowBudget(), { reserved: 9, actions: 23 }, "final proof alone does not unlink channel-held metadata");
+  assert.throws(() => f.broker.registerConfirmation(pressureOwner, pair, native, input(23)), /capacity/);
+  f.advance(1000); await closure;
+  assert.deepEqual(f.rowBudget(), { reserved: 0, actions: 22 });
+  f.broker.registerConfirmation(pressureOwner, pair, native, input(23));
+  pressureOwner.retire(); await until(() => f.broker.counts().bytes === 0);
+});
+
+for (const withChild of [false, true]) test(`${withChild ? "accepted child" : "Derive-only"} collection before owner End releases the same global records afterward`, async t => {
+  const f = await fixture(t), channel = f.channel(); await channel.status();
+  if (withChild) {
+    const child = await framedConfirmation(f); await child.derive();
+    assert.equal((await child.handle().attempt()).kind, "accepted");
+  } else {
+    const parent = await framedDerivation(f);
+    const ready = await f.broker.nativeDerivationFromChannel(f.owner, channel, f.key, historyPurpose, parent.row, parent.identity).attempt();
+    assert.equal(ready.kind, "ready"); if (ready.kind !== "ready") throw new Error("original derivation required");
+    assert.equal((await ready.derivation.attempt()).kind, "accepted");
+  }
+  await channel.close(); await until(() => f.broker.counts().active === 0);
+  assert.ok(f.owner.isCurrent());
+  assert.deepEqual(f.rowBudget(), { reserved: 0, actions: withChild ? 2 : 1 }, "live owner retains completed identities");
+  f.owner.retire();
+  assert.deepEqual(f.rowBudget(), { reserved: 0, actions: 0 }, "owner retirement after unlink collects every occupied record");
+  assert.equal(f.broker.counts().bytes, 0);
+});
+
 test("known child completion cannot renew the original browser deadline or encryption allocator", async t => {
   const f = await fixture(t), child = await framedConfirmation(f); await child.derive();
   f.advance(10_000); const handle = child.handle(); assert.equal((await handle.attempt()).kind, "accepted");
@@ -1286,7 +1358,7 @@ test("absolute IO deadline aborts stale-port fetch but retains custody until act
   assert.equal((await channel.status()).kind, "ready"); assert.deepEqual(f.counts().tx, [2n]);
 });
 
-for (const version of [7, 8, 9, 10, 11, 12, 13, 14]) test(`HMR refuses v${version} retained pool rather than creating a second channel allocator`, () => {
+for (const version of [7, 8, 9, 10, 11, 12, 13, 14, 15]) test(`HMR refuses v${version} retained pool rather than creating a second channel allocator`, () => {
   const host = { [Symbol.for("mewtual.voice.crypto-broker.v2")]: { version } };
   const native = { async admit() { return ""; }, async settle() {}, async commitInbound() {} };
   assert.throws(() => windowVoiceCryptoBroker(native, host, real), /reload required/);

@@ -409,7 +409,7 @@ function context(label: string, transcript: Uint8Array): Uint8Array<ArrayBuffer>
  * unsettled work. Revoking an owner never frees a running promise; only its real settlement does.
  * A derive pipeline uses one permit for sequential import/ECDH/HKDF work, never parallel calls. */
 export class VoiceCryptoBroker {
-  readonly version = 15;
+  readonly version = 16;
   readonly subtle: SubtleCrypto;
   private readonly native: VoiceCryptoAdmission;
   private active = 0;
@@ -577,6 +577,11 @@ export class VoiceCryptoBroker {
       collected: () => {
         if (historyPaid) { historyPaid = false; this.refund(owner, IPC_CONTROL_BYTES); }
         this.ipcChannels.delete(owner.token);
+      },
+      unlinked: chain => {
+        // Actual native final ACK and channel collection have removed the last channel
+        // reference. Owner End alone cannot release these still-retained fixed objects.
+        if (!chain.owner.isCurrent()) this.releaseChainHistory(chain);
       },
     });
     this.ipcChannels.set(owner.token, channel);
@@ -944,7 +949,7 @@ export class VoiceCryptoBroker {
     this.pump();
   }
   private releaseChainHistory(chain: BrowserChain): void {
-    if (chain.running || chain.continuation?.running || chain.fixedBytes === 0) return;
+    if (chain.running || chain.continuation?.running || chain.channel?.retainsHistory(chain) || chain.fixedBytes === 0) return;
     const fixed = chain.fixedBytes; chain.fixedBytes = 0; chain.unsubscribe();
     for (const intake of chain.confirmations.values()) {
       if (intake.rowClaim) { intake.rowClaim = false; this.reservedRows--; }
@@ -958,6 +963,10 @@ export class VoiceCryptoBroker {
       for (const [row, intake] of intakes) if (intake.transferred && intake.outcome?.kind === "ready" && intake.outcome.chain === chain.handle) intakes.delete(row);
       if (!intakes.size) this.intakes.delete(chain.owner);
     }
+    // Either owner retirement or native unlink can happen last. Protected records have
+    // no individual retirement subscription, so collect their SAME global slots here in
+    // both orderings, after fixed custody and actual local/channel work have ended.
+    for (const record of chain.records.values()) this.releaseAction(record);
   }
 
   registerProtectedDerivation(owner: VoiceCryptoOwner, plan: VoiceCryptoChain, native: VoiceDerivationNative, input: VoiceDerivationInput): VoiceDerivationHandle {
@@ -1575,6 +1584,11 @@ export class VoiceCryptoBroker {
 
   private releaseAction(record: ActionRecord): void {
     if (record.released) return;
+    // A channel retains the same fixed record after local SDK/I/O drainage, while native
+    // Plan-final may still be Pending. Preserve its actual global row position as well as
+    // the chain's byte payment until cleanup unlinks that metadata. Variable input is
+    // zeroed separately by drainChain; this guard does not keep the physical lane busy.
+    if (record.chain?.channel?.retainsHistory(record.chain)) return;
     record.released = true; record.unsubscribe();
     record.input?.aad.fill(0); record.input?.ciphertext.fill(0);
     record.input = null; record.pair = null;
@@ -1616,6 +1630,7 @@ export class VoiceCryptoBroker {
 type IpcKeys = Readonly<{ requestMac: CryptoKey; requestBody: CryptoKey; responseMac: CryptoKey; responseBody: CryptoKey }>;
 type IpcCustody = Readonly<{
   begin(): void; end(): void; setupDrained(): void; closed(): void; collected(): void;
+  unlinked(chain: BrowserChain): void;
 }>;
 function ipcBytes(hex: string): Uint8Array<ArrayBuffer> {
   const bytes = new Uint8Array(hex.length / 2);
@@ -1736,6 +1751,9 @@ class RetainedIpcChannel {
     }
     this.linked = chain;
   }
+  /** Fixed history custody is independent of actual SDK/I/O drainage. Pending native
+   * finalization must not release either its byte payment or its global row claims. */
+  retainsHistory(chain: BrowserChain): boolean { return this.linked === chain; }
   reserveIntake(intake: ChainIntake): void {
     if (!this.canLink() || this.intake || intake.channel !== this || intake.owner !== this.selected.owner || intake.key !== this.selected.key) throw new Error("voice intake changed");
     this.intake = intake;
@@ -2242,8 +2260,10 @@ class RetainedIpcChannel {
       }
     }
     this.drained = true;
+    const linked = this.linked;
     this.linked = null;
     this.terminalAction = null;
+    if (linked) this.custody.unlinked(linked);
     this.custody.setupDrained(); this.custody.closed(); this.completion.resolve();
   }
 
@@ -2319,7 +2339,7 @@ export function windowVoiceCryptoBroker(
   const host = window as Record<symbol, unknown>;
   const previous = host[BROKER] as VoiceCryptoBroker | undefined;
   if (previous) {
-    if (previous.version !== 15 || typeof previous.nativeConfirmationFromChannel !== "function" || typeof previous.nativeDerivationFromChannel !== "function" || typeof previous.recoverChannelHistory !== "function" || typeof previous.prepareChainFromChannel !== "function" || typeof previous.nativeChannel !== "function" || typeof previous.run !== "function" || typeof previous.selectJoinKey !== "function" || typeof previous.retrySelectedJoinKeys !== "function" ||
+    if (previous.version !== 16 || typeof previous.nativeConfirmationFromChannel !== "function" || typeof previous.nativeDerivationFromChannel !== "function" || typeof previous.recoverChannelHistory !== "function" || typeof previous.prepareChainFromChannel !== "function" || typeof previous.nativeChannel !== "function" || typeof previous.run !== "function" || typeof previous.selectJoinKey !== "function" || typeof previous.retrySelectedJoinKeys !== "function" ||
         typeof previous.registerProtectedConfirmation !== "function" ||
         typeof previous.registerProtectedDerivation !== "function" || typeof previous.registerConfirmation !== "function" || typeof previous.createPair !== "function") {
       throw new Error("voice crypto broker version changed; reload required");
