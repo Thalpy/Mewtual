@@ -216,24 +216,26 @@ async fn prepare(
         }
         request.selector
     };
-    let context = context.upgrade().ok_or(Refused::Closed)?;
-    let row = context.ledger.resolve(
-        route.selected(),
-        Purpose::Derive(selector),
-        RowId::from_logical(incoming.logical())?,
-    )?;
-    {
-        let status = row.reconcile()?;
-        if status.engine.receipt.is_some() || status.engine.settled || status.drained {
-            return Ok(Prepared::History(row.id(), status));
+    let row = {
+        let live = context.upgrade().ok_or(Refused::Closed)?;
+        let row = live.ledger.resolve(
+            route.selected(),
+            Purpose::Derive(selector),
+            RowId::from_logical(incoming.logical())?,
+        )?;
+        {
+            let status = row.reconcile()?;
+            if status.engine.receipt.is_some() || status.engine.settled || status.drained {
+                return Ok(Prepared::History(row.id(), status));
+            }
         }
-    }
+        row
+    };
     // Request decoding and the historical snapshot end before suspension. Neither belongs
     // to the binding/commit future or duplicates its later actual Work/input owners.
-    crate::check_voice_binding_in(&context.servers, route.selected().binding())
-        .await
-        .map_err(|_| Refused::Closed)?;
-    let _commit = context.commit.clone().lock_owned().await;
+    let commit = super::factory::preflight_binding(context, route).await?;
+    let _commit = commit.lock_owned().await;
+    let context = context.upgrade().ok_or(Refused::Closed)?;
     context
         .gate()
         .require_unlocked()

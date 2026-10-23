@@ -77,18 +77,7 @@ async fn ensure(
         return Err(Refused::Closed);
     }
     let selected = route.selected().clone();
-    let commit = {
-        let live = context.upgrade().ok_or(Refused::Closed)?;
-        {
-            let authority = live.authority.lock().unwrap_or_else(|e| e.into_inner());
-            require_current_selection(live.gate(), &authority, &selected)?;
-            route.require_open().map_err(|_| Refused::Closed)?;
-        }
-        check_voice_binding_in(&live.servers, selected.binding())
-            .await
-            .map_err(|_| Refused::Closed)?;
-        live.commit.clone()
-    }; // caller loss may detach Begin: do NOT pin a mounted store during this UI wait
+    let commit = preflight_binding(context, route).await?;
     let commit = commit.lock_owned().await;
     let context = context.upgrade().ok_or(Refused::Closed)?;
     context

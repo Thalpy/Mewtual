@@ -1,5 +1,26 @@
 # Threat model; client integrity & enforcement boundaries
 
+## Binding preflight lifetime (23 October; native draft, validation pending)
+
+Native factories, Input, engine admission and Result resolve their original Actor in a scoped
+context, then await its binding query with that Actor alone. Store and registry ownership do
+not cross this pre-admission query. The original commit handle is obtained only after the
+query; UI wait likewise holds no upgraded app context. Final preparation freshly upgrades and
+repeats existing generation, selection, server/Route and grant checks. Clock sampling remains
+after blocking preparation and before the unchanged nonblocking final engine fences.
+
+Server-map contention and pre-engine resumable/store contention return retryable Capacity
+before effects or engine charge. They preserve original authority/deadlines and never refund an
+ambiguous network attempt. Parked-query/caller-loss, Input UI-wait and actual contention/retry
+regressions are written; native compilation is pending. After publication admission the actual
+commit/paid work still orders lock against that work until it drains.
+
+An abandoned read-only binding query can remain in the Actor's separate64-entry metadata
+mailbox after its unadmitted Input handler is cancelled. Physical idle proves that handler's
+payload/position collection, not dequeue of every read-only Actor command. This existing Actor
+queue baseline is independent of the native handoff inventory; effect workers retain their
+actual task/payment/physical ownership through query and publication/output drainage.
+
 ## Lost child Begin and fixed browser custody (23 October; inactive draft)
 
 First Begin publishes one original prepaid purpose before any transport/SDK callback. Unknown,

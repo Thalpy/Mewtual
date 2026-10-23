@@ -107,6 +107,19 @@ impl Context {
     }
 }
 impl LiveContext {
+    /// Observe the actual mount without suspending before engine admission. This is only
+    /// a preflight: callers repeat original generation/authority checks at the final fence.
+    /// Keep resumable -> store ordering; local contention spends no effect authority.
+    pub(super) fn try_unlocked(&self) -> Result<bool, catcoms_sync::voice_v2::VoiceError> {
+        use catcoms_sync::voice_v2::VoiceError;
+        let resumable = self
+            .resumable
+            .try_lock()
+            .map_err(|_| VoiceError::Capacity)?;
+        let store = self.store.try_lock().map_err(|_| VoiceError::Capacity)?;
+        Ok(*resumable && store.is_some())
+    }
+
     pub(super) fn gate(&self) -> UiSessionGate<'_> {
         UiSessionGate {
             resumable: &self.resumable,

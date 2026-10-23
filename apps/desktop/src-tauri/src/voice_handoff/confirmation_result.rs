@@ -8,7 +8,6 @@ use super::custody::PublicationCustody;
 use super::factory::Refused;
 use super::ledger::{Status, Work};
 use super::requests::{confirmation::Request, Action, Kind};
-use crate::check_voice_binding_in;
 use catcoms_app::{ServerActor, VoiceConfirmationBody};
 use catcoms_sync::voice_v2::crypto_actions::CryptoOperation;
 use catcoms_sync::voice_v2::{CallGrant, VoiceError};
@@ -232,21 +231,7 @@ async fn prepare(
     output_range: Range<usize>,
 ) -> Result<Admitted, Refused> {
     let selected = route.selected();
-    let commit = {
-        let live = context.upgrade().ok_or(Refused::Closed)?;
-        {
-            let authority = live
-                .authority
-                .lock()
-                .unwrap_or_else(|error| error.into_inner());
-            super::factory::require_current_selection(live.gate(), &authority, selected)?;
-            route.require_open().map_err(|_| Refused::Closed)?;
-        }
-        check_voice_binding_in(&live.servers, selected.binding())
-            .await
-            .map_err(|_| Refused::Closed)?;
-        live.commit.clone()
-    }; // no upgraded mounted store/Coordinator/registry survives a parked UI commit wait
+    let commit = super::factory::preflight_binding(context, route).await?;
     let commit = commit.lock_owned().await;
     let context = context.upgrade().ok_or(Refused::Closed)?;
     context
@@ -415,6 +400,54 @@ mod tests {
     /// Exercises this actual paid worker, not the child decoder: the native Derive fixture
     /// deliberately cannot publish a confirmation result. Lock must refuse before that
     /// operation check, while the uncollected failure still pays its real task/physical lane.
+    #[tokio::test]
+    async fn caller_loss_during_binding_query_keeps_paid_worker_without_mounted_context() {
+        use super::super::derivation_result::tests::Case;
+        use super::super::factory::tests::park;
+        use std::future::{poll_fn, Future};
+        use std::task::Poll;
+        let case = Case::new().await;
+        let phase = case.row().work().unwrap().phase().clone();
+        let incoming = case.frame(1, &case.bytes());
+        let work = case.row().work().unwrap();
+        let payment = work.phase().copy(TASK_BYTES).unwrap();
+        let physical = incoming.hold_position().unwrap();
+        let parked = park(&case.native.actor).await;
+        let store_owners = Arc::strong_count(&case.native.state.store);
+        let server_owners = Arc::strong_count(&case.native.state.servers);
+        let mut worker = Box::pin(run(Worker {
+            context: Some(case.context.clone()),
+            route: Some(case.route.clone()),
+            work,
+            tag: case.action.output_tag(&[]).unwrap(),
+            output: 187..187,
+            publication: Some(Arc::new(PublicationCustody::preparing(physical, payment))),
+            incoming,
+        }));
+        assert!(poll_fn(|cx| Poll::Ready(worker.as_mut().poll(cx).is_pending())).await);
+        assert_eq!(Arc::strong_count(&case.native.state.store), store_owners);
+        assert_eq!(Arc::strong_count(&case.native.state.servers), server_owners);
+        assert!(case.route.session().fixture_counts().0);
+        assert_eq!(phase.copy(TASK_BYTES).err(), Some(VoiceError::Capacity));
+        let caller = tokio::spawn(worker);
+        drop(caller); // actual detached worker, never a fabricated completed/drained bit
+        crate::register_ui_lock_request(&case.native.state);
+        drop(parked);
+        tokio::time::timeout(
+            std::time::Duration::from_secs(15),
+            case.route.session().fixture_wait_physical_idle(),
+        )
+        .await
+        .unwrap();
+        assert!(case.action.terminal_status().receipt.is_none());
+        drop(phase.copy(16 * 1024).unwrap());
+        crate::lock_session_inner(&case.native.state, None)
+            .await
+            .unwrap();
+        case.retire();
+        case.native.close().await;
+    }
+
     #[tokio::test]
     async fn pre_admission_refusal_keeps_actual_task_payment_and_position_until_collection() {
         use super::super::derivation_result::tests::Case;

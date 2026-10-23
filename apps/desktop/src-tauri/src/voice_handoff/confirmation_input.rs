@@ -58,18 +58,20 @@ async fn prepare(
     route: &Route,
     incoming: &Incoming,
 ) -> Result<Prepared, Refused> {
-    let context = context.upgrade().ok_or(Refused::Closed)?;
-    let row = decode_input(&context, route, incoming)?;
-    {
-        let status = row.reconcile()?;
-        if status.engine.receipt.is_some() || status.engine.settled || status.drained {
-            return Ok(Prepared::History(row.id(), status));
+    let row = {
+        let live = context.upgrade().ok_or(Refused::Closed)?;
+        let row = decode_input(&live, route, incoming)?;
+        {
+            let status = row.reconcile()?;
+            if status.engine.receipt.is_some() || status.engine.settled || status.drained {
+                return Ok(Prepared::History(row.id(), status));
+            }
         }
-    }
-    crate::check_voice_binding_in(&context.servers, route.selected().binding())
-        .await
-        .map_err(|_| Refused::Closed)?;
-    let _commit = context.commit.clone().lock_owned().await;
+        row
+    };
+    let commit = super::factory::preflight_binding(context, route).await?;
+    let _commit = commit.lock_owned().await;
+    let context = context.upgrade().ok_or(Refused::Closed)?;
     context
         .gate()
         .require_unlocked()

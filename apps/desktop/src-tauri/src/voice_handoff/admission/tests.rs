@@ -15,6 +15,67 @@ fn frame(case: &Case, sequence: u64, engine_bytes: usize) -> Incoming {
     )
 }
 
+#[tokio::test]
+async fn preflight_map_and_mount_contention_refuse_without_engine_charge_then_exact_retry_admits() {
+    use super::super::service::tests::opened_reply;
+    for contested in 0..3 {
+        let case = Case::unadmitted().await;
+        let servers = if contested == 0 {
+            Some(case.native.state.servers.lock().await)
+        } else {
+            None
+        };
+        let resumable = if contested == 1 {
+            Some(case.native.state.session_resumable.lock().await)
+        } else {
+            None
+        };
+        let store = if contested == 2 {
+            Some(case.native.state.store.lock().await)
+        } else {
+            None
+        };
+        let before = case.selected.resources().counts();
+        let size = case.action.engine_bytes();
+        let incoming = frame(&case, 1, size);
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            admit(&case.context, &case.route, incoming),
+        )
+        .await;
+        drop(store);
+        drop(resumable);
+        drop(servers); // release before asserting a timeout failure
+        let reply = result
+            .expect("pre-admission contention must never wait")
+            .unwrap();
+        let mut body = case.bytes()[..153].to_vec();
+        body.extend_from_slice(&(size as u32).to_be_bytes());
+        assert_eq!(
+            opened_reply(&case.public, (1, 2, 0, case.id.logical()), &body, &reply),
+            [1, 3, 7]
+        );
+        assert_eq!(
+            case.selected.resources().counts(),
+            before,
+            "no engine or extra task was charged on local refusal"
+        );
+        drop(reply);
+        let reply = admit(&case.context, &case.route, frame(&case, 2, size))
+            .await
+            .unwrap();
+        let permit = opened_reply(&case.public, (2, 2, 0, case.id.logical()), &body, &reply);
+        assert_eq!(
+            &permit[..2],
+            &[1, 6],
+            "same original action remains eligible after pressure clears"
+        );
+        drop(reply);
+        case.retire();
+        case.native.close().await;
+    }
+}
+
 /// Holds an ACTUAL native Coordinator/Route mutex on this test thread while a separate
 /// synchronous admission thread uses the real final helper. Clock callbacks themselves
 /// never block. Always release the guard before joining so a regression fails, not hangs.

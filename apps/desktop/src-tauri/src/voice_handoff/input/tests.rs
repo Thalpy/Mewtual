@@ -13,6 +13,64 @@ fn frame(case: &Case, sequence: u64, logical: [u8; 16]) -> Incoming {
 }
 
 #[tokio::test]
+async fn input_waits_for_binding_or_ui_without_pinning_mounted_context() {
+    use super::super::factory::tests::park;
+    use std::{
+        future::{poll_fn, Future},
+        sync::Arc,
+        task::Poll,
+    };
+    for ui_wait in [false, true] {
+        let case = Case::new().await;
+        let parked = if ui_wait {
+            None
+        } else {
+            Some(park(&case.native.actor).await)
+        };
+        let boundary = if ui_wait {
+            Some(
+                case.native
+                    .state
+                    .ui_session_commit
+                    .clone()
+                    .lock_owned()
+                    .await,
+            )
+        } else {
+            None
+        };
+        let store_owners = Arc::strong_count(&case.native.state.store);
+        let server_owners = Arc::strong_count(&case.native.state.servers);
+        let before = case.selected.resources().counts();
+        let mut pending = Box::pin(pull(
+            &case.context,
+            &case.route,
+            frame(&case, 1, case.id.logical()),
+        ));
+        assert!(poll_fn(|cx| Poll::Ready(pending.as_mut().poll(cx).is_pending())).await);
+        if ui_wait {
+            case.native.actor.member_count().await; // actual previous binding query was handled
+            assert!(poll_fn(|cx| Poll::Ready(pending.as_mut().poll(cx).is_pending())).await);
+        }
+        assert_eq!(Arc::strong_count(&case.native.state.store), store_owners);
+        assert_eq!(Arc::strong_count(&case.native.state.servers), server_owners);
+        assert_eq!(case.selected.resources().counts(), before);
+        assert!(case.route.session().fixture_counts().0);
+        // Actual caller loss before admission, with no invented input loan.
+        drop(pending);
+        // The read-only VoiceV2Context command may still occupy the separately bounded
+        // Actor mailbox until parked is released. Physical idle is not its dequeue proof.
+        assert!(!case.route.session().fixture_counts().0);
+        drop(boundary);
+        drop(parked);
+        case.native.actor.member_count().await;
+        assert!(case.action.terminal_status().receipt.is_none());
+        case.retire();
+        case.native.close().await;
+    }
+}
+
+#[tokio::test]
 async fn input_uses_only_original_prepaid_copy_capacity_under_ordinary_pool_pressure() {
     use catcoms_sync::voice_v2::resources::ResourceKind;
     let case = Case::new().await;

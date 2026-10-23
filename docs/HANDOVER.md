@@ -24,6 +24,15 @@ Do not publish this as completed live V2, native/browser acceptance or RTC. Prod
 dispatch, complete WebCrypto/native confirmation, SDP/ICE/RTC, live/group adapter, media relay
 and combined/physical acceptance remain unfinished. Only one desktop is available.
 
+The subsequent lifetime audit found the same broad ownership during preflight Actor queries
+in both factories, Input, admission and Result. One shared preflight now resolves the exact
+Actor without retaining Store/registries while awaiting that query, obtains the original
+commit handle afterward, and leaves all final authority checks in place after fresh upgrade.
+Unadmitted server-map/resumable/store contention returns Capacity without an engine charge.
+New actual parked-query/caller-loss, Input UI-wait and contention/exact-retry regressions are
+written and awaiting native compilation. Root's1,249 App unit tests have passed; the remaining
+Root crates/integration tests are still running. None of this enables production V2 effects.
+
 ## Browser fixed-history cleanup correction (23 October; combined gates pending)
 
 The combined draft now keeps linked chain history and its actual global row positions paid

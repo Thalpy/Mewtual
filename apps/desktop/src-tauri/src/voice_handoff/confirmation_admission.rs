@@ -44,27 +44,25 @@ async fn prepare(
     {
         return Err(VoiceError::Unauthorized.into());
     }
+    let (row, identity, engine_bytes) = {
+        let live = context.upgrade().ok_or(Refused::Closed)?;
+        let (row, identity, engine_bytes) = decode_admission(&live, route, incoming)?;
+        {
+            let status = row.reconcile()?;
+            if status.action != Some((identity.serial, identity.version, identity.input_tag)) {
+                return Err(VoiceError::Unauthorized.into());
+            }
+            if status.engine.receipt.is_some() || status.engine.settled || status.drained {
+                return super::replies::status(row.id(), &status)
+                    .map(Encoded::History)
+                    .map_err(Into::into);
+            }
+        }
+        (row, identity, engine_bytes)
+    };
+    super::factory::preflight_binding(context, route).await?;
     let context = context.upgrade().ok_or(Refused::Closed)?;
-    let (row, identity, engine_bytes) = decode_admission(&context, route, incoming)?;
-    {
-        let status = row.reconcile()?;
-        if status.action != Some((identity.serial, identity.version, identity.input_tag)) {
-            return Err(VoiceError::Unauthorized.into());
-        }
-        if status.engine.receipt.is_some() || status.engine.settled || status.drained {
-            return super::replies::status(row.id(), &status)
-                .map(Encoded::History)
-                .map_err(Into::into);
-        }
-    }
-    crate::check_voice_binding_in(&context.servers, route.selected().binding())
-        .await
-        .map_err(|_| Refused::Closed)?;
-    context
-        .gate()
-        .require_unlocked()
-        .await
-        .map_err(|_| Refused::Closed)?;
+    super::factory::require_unlocked_now(&context, route.selected())?;
     let work = row.work()?;
     // Clock runs BEFORE acquiring even the async UI commit. A busy native fence is a
     // proven local, retryable refusal; no engine is admitted and no attempt is refunded.
