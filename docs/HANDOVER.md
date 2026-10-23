@@ -1,5 +1,33 @@
 # Mewtual; Handover
 
+## Hosted onward-chat failure and correction (23 October; validation in progress)
+
+The pushed Derive checkpoint `583794de` has a failing Linux native job in PR #53:
+`six_client_native_reversed_reopen_gossip_loss_and_command_load`,694 pass/1 fail. In the90s
+bridge4/clients5+6 phase, bridge4 and client6 held15 original operations while client5 held14.
+The log is saved at `target/pr53-linux-job.log` in the progress checkout. It shows the periodic
+fallback still armed; permanent data loss is NOT established. The old request trace lacks document
+and frontier metadata, so exact attribution of its last kind19 request remains a hypothesis.
+
+A new deterministic three-peer regression independently reproduced a concrete prompt-recovery
+hole: two successive bridge acquisitions under the SAME unchanged clock; wave1 recovered and
+completed, wave2 remained suppressed by the previous30s hint allowance. Its red log is
+`target/chat-onward-two-wave-before.log`. The fix re-arms only after fully accepted signed
+incremental history from that exact document/responder actually adds new original operations.
+Empty/duplicate/cursor-only answers, other-source/local progress and malformed-tail prefixes
+cannot refill it. Original request/queue limits, membership, signatures, cursors and dirty-wait
+checks remain. No timeout was increased and no exact-history oracle was relaxed.
+
+The wider21-test recovery wait set passes, including successful MORE/PAGE progress and duplicate/
+advancing-empty page rejection. All seven native transport/trace tests pass. Fixture-only trace
+now records bounded document/id/head-count/frontier-digest/resume metadata and a RAW UNVERIFIED
+response marker, retaining no payload. That metadata cannot prove signature acceptance,
+knownness or import. Actual-diff re-review found no actionable findings after the MORE/PAGE and
+documentation corrections. The unchanged hostile six-client replay passes in272.83s, including
+the failed hosted phase. This is supporting evidence, not proof of the sole hosted cause.
+All2,531 frontend tests and Svelte checks (zero errors/warnings) also pass. Full Root/native
+combined validation remains pending; keep V2 disabled.
+
 ## V2 native Source progress (23 October; full validation in progress)
 
 Continue in `target/communication-v2-progress-worktree`, branch `communication-v2-progress`.
@@ -39,8 +67,12 @@ under full ordinary pressure, actual protected publication/native pump/signed tr
 ACK/End/late-Lower retirement, revised-limit fairness, closed-phase slot release, borrowed cache
 retry, and current50-member Actor-map rejection. The latter checks current membership/owners;
 it does not instrument heap allocation. Native handoff **221 tests pass**, including unchanged
-row/codec layout guards. Full Root validation is now running; full native/frontend and native
-check remain pending for this increment. Strict Root Clippy passes. Read-only actual-diff review
+row/codec layout guards. Full Root/native/frontend and native check remain pending for this increment. The initial
+all-feature run reused a stale test executable and was stopped/excluded. Its affected sync/app/
+replication metadata (318files,493870bytes) was preserved under
+`target/source-pump-metadata-backup`; compiled dependencies/binaries were not cleaned. Fresh strict
+Root Clippy and all-feature no-run rebuild pass from this checkout. The newer chat correction
+above still needs fresh combined gates. Read-only actual-diff review
 resolved the unpaid roster-copy MEDIUM and clarified the32-preparation bound; no blocker/high/
 medium remains in this slice. Logs are `target/native-progress-*.log` in this checkout.
 

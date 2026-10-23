@@ -35,6 +35,22 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         }
     }
 
+    /// New verified signed history from this authenticated responder discharges its previous
+    /// hint's no-progress allowance. A bridge can acquire another bubble immediately after
+    /// serving the first; the next unknown frontier must be able to reopen that exact search.
+    /// Call only AFTER a fully accepted signed response applies at least one new operation.
+    /// Empty/duplicate/cursor-only answers, local edits, another source and partial-error
+    /// imports cannot replenish this member's grant. Existing request/queue limits still apply.
+    pub(super) fn note_verified_frontier_progress(
+        &mut self,
+        doc_type: DocType,
+        doc_id: u128,
+        responder: DeviceId,
+    ) {
+        self.catchup_frontier_hints
+            .remove(&(doc_type, doc_id, responder));
+    }
+
     /// A verified current member's unknown hashes justify one bounded reverse read, not trust
     /// in the claimed operations. The normal response signature, membership, ciphertext and
     /// signed-operation checks still decide what may be imported. No document or route is opened.

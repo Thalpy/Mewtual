@@ -696,7 +696,11 @@ existing authenticated Since decoding (at most 512 hashes), for a best-effort re
 hint on an already-held document. The 256-entry hint table binds document/full DeviceId, preserving
 its 30-second budget across transport identity changes. Original pending waits retain a dirty
 completeness bit through compatibility fallback; older replies cannot retire newer admitted work.
-No wire encoding, signed transcript, import validation or dial permission changes.
+No wire encoding, signed transcript, import validation or dial permission changes. A fully
+accepted signed incremental answer that imports new original operations
+re-arms only its exact document/authenticated responder. No re-arm follows empty/duplicate/
+cursor-only replies, local edits, another provider or partial-error imports; the verified prefix
+still remains in history and retains its recovery obligation.
 
 Automatic delivery receipts use the same bounded detached submission owner as repair forwards.
 No local notification ACK precedes owned inbound/response polling. A persistent class turn changes

@@ -42,8 +42,11 @@ The 30-second owned fallback, original response waits, source cooldowns and curs
 
 Serving a current authenticated `KIND_CATCHUP_SINCE` request can also expose a reverse gap: its
 bounded frontier names changes this already-open document does not hold. One best-effort reverse
-read is admitted per document/full member per 30 seconds, under a 256-entry table. Known ancestors
-cause no wake; unknown hashes are hints, never evidence that valid operations exist. An unexpired
+read is admitted per document/full member per30seconds without verified progress, under a256-entry
+table. A fully accepted signed incremental response importing new original operations re-arms only
+that same document/authenticated responder. This lets successive bubble acquisitions reopen a
+completed search without waiting for a timer. Empty/duplicate/cursor-only replies, local edits,
+other-source imports and rejected tails cannot refill that allowance. Known ancestors cause no wake; unknown hashes are hints, never evidence that valid operations exist. An unexpired
 full table refuses hints while normal serving continues. A full recovery queue likewise retains
 existing work and falls back to periodic reconciliation; prompt saturated admission is not claimed.
 Only that requester's previous completeness answer is forgotten. A pending older response retains

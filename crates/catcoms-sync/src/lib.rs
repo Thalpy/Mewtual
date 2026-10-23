@@ -12503,6 +12503,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
                 // proved, and gave a modified peer a way around the non-progress bound by simply
                 // saying "done" instead of "more".
                 if applied > 0 {
+                    self.note_verified_frontier_progress(doc_type, doc_id, responder);
                     // It gave us something and says that is all it has. The search starts again
                     // from the new version.
                     self.clear_sources_checked(doc_type, doc_id);
@@ -12608,6 +12609,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
                 // controls here, so believing it forever is not: a round that moves nothing is
                 // counted, and an unbroken run of them sends the next request somewhere else.
                 if applied > 0 {
+                    self.note_verified_frontier_progress(doc_type, doc_id, responder);
                     self.clear_catchup_stall(peer, doc_type, doc_id);
                     // Remembered only when the round actually moved us, and never refreshed by a
                     // round that did not. A claim is authority to keep a document open against
@@ -19106,7 +19108,7 @@ mod tests {
     /// Tests that want to put particular bytes in front of a requester still have to be a member
     /// to be listened to, which is the point of the signature. What stays forgeable here is the
     /// content: the marker and the bundle are whatever the test chooses.
-    fn signed_catchup_answer(
+    pub(super) fn signed_catchup_answer(
         server: &mut Member,
         from: PeerId,
         data: &[u8],

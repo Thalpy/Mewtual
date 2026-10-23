@@ -775,9 +775,13 @@ acceptance remain unfinished; none of this implements live voice V2 or media rel
 
 A signed current-epoch Since requester can hint that a held document lacks its frontier. This
 cannot open a document, create membership/source proof, dial a peer or authorize imported data.
-Unknown hashes need not exist. At most one hint/document/full member is admitted each 30 seconds;
-256 retained entries refuse new identities when full after expiry pruning, and endpoint rotation
-cannot refill the same member's budget. Actual connectivity/local membership are required. Hints
+Unknown hashes need not exist. Without verified progress, at most one hint/document/full member
+is admitted each30seconds. A fully accepted signed incremental response which imports new
+original signed operations re-arms only that document/authenticated responder. Empty/duplicate/
+cursor-only replies, local edits, another source and partial-error imports cannot refill it.
+A valid prefix still remains additive and queued for recovery after a rejected tail. The256
+retained entries refuse new identities when full after expiry pruning; endpoint rotation cannot
+refill the same member's budget. Actual connectivity/local membership are required. Hints
 use the existing bounded recovery queue without evicting work; saturation can defer them until
 periodic reconciliation. A dirty bit on an older owned wait prevents stale empty completion from
 erasing newer admitted intent, even through legacy fallback or hint-table expiry. This adds bounded
