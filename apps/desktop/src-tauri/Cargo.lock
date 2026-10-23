@@ -588,6 +588,7 @@ dependencies = [
  "automerge",
  "base64 0.22.1",
  "blake3",
+ "bytes",
  "catcoms-crypto",
  "catcoms-discovery",
  "catcoms-mls",

@@ -151,16 +151,22 @@ async fn registered_lock_while_waiting_for_store_is_observed_after_the_actual_aw
 
 #[tokio::test]
 async fn a_missing_late_owner_refuses_factory_before_any_actor_query_or_new_payment() {
-    use crate::voice_handoff::factory::tests::{park, selection};
+    use crate::voice_handoff::factory::tests::{channel_route, park, physical, selection};
     use crate::voice_handoff::factory::{ensure_derivation_row, Refused};
     let f = Fixture::new().await;
     let mut context = Context::new(&f.state);
     let (_owner, selected, selector) = selection(&f).await;
+    let route = channel_route(&f, &selected).await;
     let before = strong_counts(&f.state);
     let counts = selected.resources().counts();
     context.ledger = Weak::new(); // eight earlier upgrades succeed before the ninth refuses
     let parked = park(&f.actor).await;
-    let mut pending = Box::pin(ensure_derivation_row(&context, selected, selector));
+    let mut pending = Box::pin(ensure_derivation_row(
+        &context,
+        &route,
+        selector,
+        physical(&route),
+    ));
     assert!(
         matches!(
             poll_fn(|cx| Poll::Ready(pending.as_mut().poll(cx))).await,

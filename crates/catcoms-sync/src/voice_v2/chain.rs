@@ -11,6 +11,7 @@
 use super::crypto_actions::{slots, CryptoAction, Key};
 use super::resources::{ByteBudget, Credit, Reservation, ResourceKind, Resources, WorkLane};
 use super::{CallLease, DeviceId, Nonce, Scope, VoiceError};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, Weak};
 
 pub(super) const ROW_BYTES: usize = 1536;
@@ -73,7 +74,17 @@ impl Binding {
 // owner too. No reference points from this owner back into Workflow/control/actions.
 pub(super) struct PlanBinding {
     value: Binding,
+    // Original fixed history already owns this paid allocation without owning Workflow.
+    // Only Workflow's LAST field publisher can establish variable-capacity retirement.
+    workflow_drained: AtomicBool,
     _metadata: Credit,
+}
+impl PlanBinding {
+    // The original fixed payment already retains this exact pool. Borrow it rather than
+    // adding duplicate pool owners to HistoryPlan and Workflow inside the 2KiB allowance.
+    fn resources(&self) -> &Arc<Resources> {
+        self._metadata.resources()
+    }
 }
 impl std::ops::Deref for PlanBinding {
     type Target = Binding;
@@ -118,7 +129,6 @@ impl Candidates {
     }
 }
 struct HistoryPlan {
-    resources: Arc<Resources>,
     binding: Arc<PlanBinding>,
     live: CallLease,
     bytes: Arc<Reservation>,
@@ -130,7 +140,6 @@ struct HistoryPlan {
 /// Capacity only. No action or registry cell can be stored here: those owners can themselves
 /// retain actual input credits, which would form an uncollectable custody cycle.
 pub struct Workflow {
-    resources: Arc<Resources>,
     binding: Arc<PlanBinding>,
     live: CallLease,
     control: Weak<PreparedChain>,
@@ -139,7 +148,44 @@ pub struct Workflow {
     lowers: [Arc<WorkLane>; 2],
     packets: super::packets::ConfirmationCapacity,
     state: Mutex<WorkflowState>,
+    // MUST remain last. Arc's weak strong_count reaches0 BEFORE Drop/field destruction;
+    // neither that count nor Workflow::close proves its actual capacity fields returned.
+    // None occurs only when a deterministic test parks this exact original publisher.
+    _retirement: Option<RetirementPublisher>,
 }
+struct RetirementPublisher(Arc<PlanBinding>);
+impl Drop for RetirementPublisher {
+    fn drop(&mut self) {
+        // All preceding Workflow fields have actually dropped. Credits return reservation
+        // bytes/lane ownership before their custody can trigger Workflow's last drop. Keep
+        // the original fixed metadata paid through this publication and every observer.
+        self.0.workflow_drained.store(true, Ordering::Release);
+    }
+}
+
+/// Observation of the ORIGINAL retired variable confirmation Workflow. This retains only
+/// its already-paid fixed binding, never Workflow, an engine, key, action or effect authority.
+/// It proves that Workflow's variable capacity owners have returned, not that fixed history
+/// metadata or independently retained packet-table slots disappeared. No constructor by ID,
+/// Clone, serialization or conversion back to a grant/control owner exists.
+pub struct ConfirmationRetirement {
+    binding: Arc<PlanBinding>,
+}
+impl ConfirmationRetirement {
+    /// Caller-owned witness storage, NOT a wire-body size or a new reserve. The native
+    /// adapter must also count its enclosing state/task/output in already-paid control memory.
+    /// The flag/publisher remain in the original separately paid2KiB retained heap graph.
+    pub const OBSERVER_MEMORY_BYTES: usize = std::mem::size_of::<usize>();
+
+    /// True only after this ORIGINAL variable Workflow's fields and credited owners retired.
+    /// Fixed history metadata and independently retained packet-table slots are separate.
+    /// This is a monotonic snapshot only: no waiter, wakeup or scheduling guarantee exists.
+    /// Retain the SAME witness across cancelled work; a missing witness never proves drainage.
+    pub fn is_drained(&self) -> bool {
+        self.binding.workflow_drained.load(Ordering::Acquire)
+    }
+}
+redacted_debug!(ConfirmationRetirement);
 struct WorkflowState {
     closed: bool,
     // One IPC owner for the entire chain, including distinct rows. A lost renderer reply may
@@ -158,6 +204,43 @@ struct WorkflowState {
 pub struct HandoffLoan {
     workflow: Arc<Workflow>,
     _credit: Credit,
+}
+impl HandoffLoan {
+    /// Irreversibly retire this ORIGINAL confirmation plan after a derivation-only handoff.
+    /// Ordinary loan Drop only returns copy capacity to an open Workflow; it does not close
+    /// the plan. This explicit native capability closes that exact plan without a lookup by
+    /// handshake ID, a replacement grant, or retaining a strong control owner in history.
+    ///
+    /// The trusted adapter must first establish actual browser/provider/RPC drainage and
+    /// engine settlement. Call outside Engine/Group/Policy/native registry guards: close may
+    /// retire unstarted actions and release credits. The consumed loan drops LAST. Other
+    /// credited inputs, engines, lower work or copy owners still retain the original Workflow;
+    /// returning from this method is closure, never evidence that all96KiB has drained.
+    /// This ends the confirmation plan, so it is not the future SDP phase-transfer API.
+    pub fn retire_confirmation(self) {
+        drop(self.retire_confirmation_observed());
+    }
+
+    /// Same irreversible original-plan closure, with a fixed observer for actual VARIABLE
+    /// Workflow retirement. First drain selected browser/provider/RPC work and settle its
+    /// engine; call outside native/Engine/Group/Policy guards. Returning the observer proves
+    /// closure only; delayed input/lower/copy owners may still keep is_drained false.
+    /// Successful Derive->Hello/Proof/Finish continuation must use ordinary loan Drop instead:
+    /// this closes the entire confirmation plan and is not SDP phase transfer or RTC readiness.
+    pub fn retire_confirmation_observed(self) -> ConfirmationRetirement {
+        let retired = ConfirmationRetirement {
+            binding: self.workflow.binding.clone(),
+        };
+        if let Some(control) = self.workflow.control.upgrade() {
+            control.close();
+        } else {
+            // The exact control was already destroyed; the loan still owns its original
+            // Workflow. It must not become an open reserve just because its control is gone.
+            self.workflow.close();
+        }
+        drop(self);
+        retired
+    }
 }
 impl Drop for HandoffLoan {
     fn drop(&mut self) {
@@ -216,7 +299,7 @@ impl RowIssue {
         let ByteBudget::Workflow(workflow) = budget else {
             return Err(VoiceError::Scope);
         };
-        if Arc::ptr_eq(resources, &self.plan.resources)
+        if Arc::ptr_eq(resources, self.plan.binding.resources())
             && Arc::ptr_eq(slots, &self.plan.pool)
             && scope == self.plan.binding.scope
             && call.is_same(&self.plan.binding.call)
@@ -293,7 +376,7 @@ impl HistoryPlan {
         }
         let ticket = state.serial.checked_add(1).ok_or(VoiceError::Capacity)?;
         let record = ByteBudget::Reserved(self.bytes.clone()).charge(
-            &self.resources,
+            self.binding.resources(),
             self.binding.scope.group,
             ROW_BYTES,
             ResourceKind::Retained,
@@ -334,17 +417,16 @@ impl PreparedChain {
             return Err(VoiceError::Unauthorized);
         }
         let packets = packet_slots.reserve_confirmation(binding.low)?;
-        let binding = Arc::new(PlanBinding {
-            _metadata: resources.charge(
-                binding.scope.group,
-                METADATA_BYTES,
-                ResourceKind::Retained,
-            )?,
-            value: binding,
-        });
+        // Pay the original fixed graph before allocating its lease, binding or publisher.
+        let metadata =
+            resources.charge(binding.scope.group, METADATA_BYTES, ResourceKind::Retained)?;
         let live = CallLease::default();
+        let binding = Arc::new(PlanBinding {
+            _metadata: metadata,
+            value: binding,
+            workflow_drained: AtomicBool::new(false),
+        });
         let history = Arc::new(HistoryPlan {
-            resources: resources.clone(),
             binding: binding.clone(),
             live: live.clone(),
             bytes: resources.reserve(binding.scope.group, ROWS * ROW_BYTES)?,
@@ -377,8 +459,7 @@ impl PreparedChain {
                 closed: false,
                 actions: std::array::from_fn(|_| Weak::new()),
                 workflow: Some(Arc::new(Workflow {
-                    resources: resources.clone(),
-                    binding,
+                    binding: binding.clone(),
                     live,
                     control: control.clone(),
                     reserve,
@@ -389,6 +470,7 @@ impl PreparedChain {
                         closed: false,
                         handoff_busy: false,
                     }),
+                    _retirement: Some(RetirementPublisher(binding)),
                 })),
             }),
         });
@@ -436,7 +518,7 @@ impl PreparedChain {
         mono: u64,
     ) -> bool {
         self.binding.same(binding)
-            && Arc::ptr_eq(resources, &self.history.resources)
+            && Arc::ptr_eq(resources, self.history.binding.resources())
             && Arc::ptr_eq(slots, &self.history.pool)
             && mono < self.binding.deadline
             && self.binding.live()
@@ -491,7 +573,7 @@ impl Workflow {
         bytes: usize,
         kind: ResourceKind,
     ) -> Result<Credit, VoiceError> {
-        if !Arc::ptr_eq(resources, &self.resources) || group != self.binding.scope.group {
+        if !Arc::ptr_eq(resources, self.binding.resources()) || group != self.binding.scope.group {
             return Err(VoiceError::Scope);
         }
         let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
@@ -552,7 +634,7 @@ impl Workflow {
             return Err(VoiceError::Capacity);
         }
         let credit = self.charge_locked(
-            &self.resources,
+            self.binding.resources(),
             self.binding.scope.group,
             bytes,
             ResourceKind::Retained,

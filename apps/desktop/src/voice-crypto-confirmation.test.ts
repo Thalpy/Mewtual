@@ -374,7 +374,7 @@ for (const fault of ["owner", "action", "resultTag", "confirmation", "extra"]) t
   await flush(); f.owner.retire(); assert.equal(f.broker.counts().bytes, 0);
 });
 
-test("retained HMR broker shares the exact action record and original stateless adapter", async () => {
+test("retained HMR broker shares the exact action record only with its original native adapter", async () => {
   const f = await fixture(), input = await f.input(), handle = f.register(input);
   f.lose(); assert.equal((await handle.attempt()).kind, "uncertain");
   const url = new URL("./voice-crypto.ts", import.meta.url); url.search = "confirmation-hmr";
@@ -385,7 +385,11 @@ test("retained HMR broker shares the exact action record and original stateless 
     async commitConfirmation() { throw new Error("wrong adapter"); }, async settleAction() {},
   };
   assert.equal(retained, f.broker);
-  const pulled = retained.registerConfirmation(f.owner, f.right, replacement, input);
+  // v10 binds adapters per original row. A remount must reuse that retained adapter rather
+  // than offer new callbacks that could target another channel; it cannot replace or silently
+  // adopt the first channel's adapter. The original uncertain action still recovers unchanged.
+  assert.throws(() => retained.registerConfirmation(f.owner, f.right, replacement, input), /identity changed/);
+  const pulled = retained.registerConfirmation(f.owner, f.right, f.native, input);
   assert.equal(pulled, handle); assert.equal((await pulled.attempt()).kind, "accepted");
   assert.equal(f.counts().decrypts, 1); await flush(); f.owner.retire();
 });

@@ -1,5 +1,87 @@
 # Mewtual; Architecture
 
+## Original final proof and retained cleanup cadence (22 October)
+
+A compacted final-intent native Row retains the same already-paid Arc<Phase>. Its drained
+state owns the original fixed Root observer, with no variable loan or Action/Input/Workflow.
+Ordinary continuation retains no Phase. Compaction drops Live outside native guards before
+requiring Root readiness; local compaction cannot imply whole Workflow retirement. Native
+snapshots borrow the same Phase under Row -> Phase without Root callbacks or allocation.
+
+Channel preflight and independent history GC additionally require a requested final proof to
+be ready. Dead lease, actual physical-session proof, sole indexed ownership and monotonic
+serials remain independent GC conditions. Existing fixed Row/Phase payments fund retention.
+
+Root provides no notification into Row/browser. Broker v12's exact setup/channel cleanup uses
+one injected-Clock timer per waiting original driver after an actual refused RPC. Timer and
+availability resolve one existing Signal; cancellation checks the original wait identity.
+Each refusal starts a fresh interval, so large jumps cannot create a catch-up burst. Actual
+SDK/read/linked drainage still precedes cleanup; no pending RPC is overlapped. General action
+retry behavior is unchanged. Older retained brokers refuse adoption.
+
+Final wire remains disabled. Authenticated post-End final exchange/issuance/ACK must retain
+original framing keys and compose with this cadence before normal cleanup closes routing.
+HANDOVER records source-specific tests and the remaining Actor/WebView/live V2 boundaries.
+
+
+## Original-session read-only action history (22 October)
+
+Production native loopback ingress accepts Status9 and, only with the original application
+Context, Begin8(retry=false) existing-history lookup. Exact MAC/session/Control/length/logical
+checks precede body admission. The opened full purpose selects the SAME original native
+allocation/executor/lease; reconciliation observes an existing Root action, never a factory,
+new grant/Work/Phase or actor effect. End/lock does not erase history. Missing history refuses.
+Status9 alone acknowledges original setup; its old grammar and no-Context behavior are preserved.
+
+Browser broker v11 retains the original established channel, keys, directional counters and
+shared paid driver for the one history query. Exact owner/handle identity precedes callbacks;
+purpose is copied/validated and original liveness rechecked before admission. Identical queries
+coalesce the same promise; competing purposes return busy, and Status returns uncertain while
+history occupies the driver. History cannot start setup/key construction. Authenticated replies
+bind the original request, MAC, RX and optional expected native RowId before strict metadata
+parsing. Refusals never close/refund the channel or acknowledge setup. End retains actual query,
+SDK/IO/cancellation and original keys/payment until the existing driver drains and cleanup finishes.
+
+One fixed242-byte status or3-byte refusal describes native history; exact u64s stay strings.
+localDrained is not whole96KiB Workflow retirement. Native Derive publishes only actual Derived;
+an actor error with no terminal result remains no receipt. Other generic codec outcomes confer
+no effect authority or implemented adapter. Factory/action execution, ACK/settlement/phase/final
+wiring, final issuance/retry coordination and normal production Actor/MLS success remain unfinished. Historical
+checkpoint claims below are scoped to their source; HANDOVER records current test provenance.
+
+## Original confirmation Workflow retirement observer (22 October)
+
+The inactive native handoff can now obtain ConfirmationRetirement by consuming the original
+HandoffLoan through retire_confirmation_observed. Ordinary loan Drop still returns the16KiB
+action phase to the OPEN96KiB Workflow; final retirement closes the whole original plan.
+Derive -> Hello/Proof/Finish continuation must not use final retirement between those steps.
+The existing unit-returning retire_confirmation remains a compatibility wrapper.
+
+The observer retains only the original already-paid PlanBinding, never Workflow or effect
+authority. A LAST Workflow field publishes readiness after actual reserve/lane/packet capacity
+fields destruct. Raw Weak strong_count zero is insufficient: it precedes value/field Drop.
+Delayed input/lower/copy credits retain Workflow through actual custody; Credit returns bytes
+and lane ownership before that custody can cause the last drop. This proves variable Workflow
+retirement, not disappearance of fixed history/action metadata or independent packet-table slots.
+
+The separate monotonic flag provides a snapshot only. There is no waiter, notification channel,
+or scheduling guarantee. The original fixed metadata credit already owns the exact Resources
+pool; Workflow and HistoryPlan borrow it through their original binding instead of retaining
+two redundant pool pointers. Payment precedes lease/binding allocation. The flag and LAST
+publisher must fit the unchanged2KiB retained graph; caller witness storage has a separate
+pointer-sized memory guard. Native must also fund its enclosing state/task/output in existing
+control capacity. The inactive native Phase stores the SAME returned witness before publishing local loan
+completion. Its ConfirmationStatus snapshot distinguishes NotRequested, Closing, Draining and
+Drained; local is_drained still means only16KiB return. Ordinary closure cannot be relabelled
+after returning the original loan. No production consumer or retry coordinator is wired yet.
+If existing ledger compaction drops Phase, its lost witness is NOT full-retirement evidence;
+final-proof capture/transfer remains future work.
+
+Native must retain the SAME witness across cancelled work; a missing witness is never drainage.
+Future progress needs a bounded existing driver or injected-Clock cadence, not a busy loop,
+per-query task or fresh reservation. Preserve Control until final delivery. Browser adapter/normal
+Actor handoff, phase transfer and live V2 remain unfinished; production ingress serves Status only.
+
 ## App-owned status bootstrap and session collection (21 October)
 
 Source bac90cfa connects the retained browser channel to application-owned native bootstrap.
@@ -17,8 +99,9 @@ no cached authorization snapshot or second commit mutex is introduced. The detac
 worker retains only its actual actor, original selection/grant/commit and paid work owners.
 
 Weak references retain the original inline Arc allocations after their values drop. The fixed
-listener payment is now32KiB, up8KiB from24KiB, covering a32,256-byte measured Windows native
-peak including those allocations/control blocks and context wrappers. This spends more of the
+listener payment remains32KiB, up8KiB from24KiB. The original weak-context Windows native
+peak was32,256 bytes; retaining one fixed header allocation across stages reduces the current
+measured peak to19,984 bytes, including context allocations/control blocks and wrappers. This spends more of the
 same2MiB process cap, without changing group or engine limits. Context drops before the IO
 credit; completed/uncollected native output retains that same original payment. Other platform
 layouts still fail closed if their measured peak does not fit.
@@ -42,12 +125,37 @@ An original native 8 KiB Crypto credit stays paid through real browser setup/out
 Separate original control capacity remains within the existing group/process/eight-Crypto and
 two-browser-position limits. IO expiry aborts actual reads but never proves SDK/cancel drainage.
 
-Final collection closes routing first, then detaches native Session/public/setup owners only
-after browser SDK/IO and buffers drain. Paid weak witnesses track independent headers, completed
+Explicit setup-failure and final channel collection first acquire the original shared UI commit
+and check the action ledger using the actual retained selected owner. Every matching action
+must already be compacted or explicitly closed as a native Pending before routing closes.
+Open/Closing Pending or Live work returns Capacity with
+Control still open, so receipt ACK, settlement and phase cleanup remain reachable. Factory
+admission uses that same commit; the check and closure cannot race a new Pending factory.
+Only then does final collection detach native Session/public/setup owners after browser SDK/IO
+and buffers drain. Paid weak witnesses track independent headers, completed
 replies and public outputs. A slot is reusable only when its original lease is permanently dead,
 no setup is pending and every actual owner has drained. Serial IDs never reset. Housekeeping
 runs outside Coordinator before new controller/owner/key admission, including late last-owner
 drops after the collection reply. No uncertain history is evicted to make capacity.
+
+Physical channel collection transfers an opaque native-only original-Row witness to the action
+ledger, after releasing all bootstrap registry locks. It records original grant allocation,
+executor and lease provenance without upgrading current authority. The separate bounded32-slot
+sweep reclaims only actual compacted Body::Drained or explicitly ClosedPending records with
+this proof, a permanently dead
+lease and no other Row owner. Evidence persists through late metadata/cleanup handles; every
+ordinary collection hook sweeps even without a new channel witness. Resources drop outside all
+registry/ledger guards and both serial allocators remain monotonic. Root can independently retain
+its own history, lower work and input owners; this collection is not proof of full Workflow
+drainage. The inactive Pending closure adapter validates the actual opened Session, exact
+header RowId and complete original purpose. It refuses a live worker, publishes Closing while
+actual PreparedPhase/selected owners retire outside all guards, then records ClosedPending.
+Begin cannot restart a Closing/Closed row. This separate local terminal leaves action/receipt
+absent and engine.settled, acknowledged and drained FALSE: Root publication may be uncertain.
+Indexed slot/serial/Row pointer are rechecked even for a retained native handle, so orphaned
+unstarted records cannot be mutated after removal/reuse. The original physical request excludes
+uncollected factory work/output. Real browser SDK/RPC drainage remains a protocol precondition;
+the retained broker's authenticated Pending closure and production action dispatch remain open.
 
 Action lookup now produces a native-only ResolvedRow only after checking the actual original
 grant allocation, executor, lease and complete purpose. It retains the paid Row through delayed
@@ -64,7 +172,9 @@ pure historical lookup must not prevent an idle Pending worker from resuming on 
 This service still handles authenticated Status only. Factory/action input, result, exact
 receipt ACK, settlement, phase closure and final delivery remain open. Starting the local
 listener does not enable V2 signalling, SDP/ICE/RTC or legacy-mode isolation. The action ledger's
-separate finite history also needs collection. Relay and combined/physical acceptance remain
+separate finite history now has physical collection of Drained or explicitly ClosedPending
+records; browser Pending closure remains open.
+Relay and combined/physical acceptance remain
 open. Earlier checkpoint sections below retain their historical scope; HANDOVER has current
 gate provenance and platform limits.
 
@@ -1727,3 +1837,71 @@ epoch/member/policy changes even without voice attached. Its sole publisher is t
 field, so Drop ends it before transport/MLS/store fields. Neither observer owns those publishers.
 Actual lower accounting remains held through transport retirement. This supplies no bridge peer
 standing or native entry consent; those additional scopes remain separate.
+
+### Native confirmation result ownership (22 October continuation)
+
+The inactive native action path now composes an original buffer with actor delivery without
+copying that buffer. A trusted `VoiceConfirmationBody` pins one prepaid owner with
+`Bytes::from_owner` outside native/Root guards. The pinned bytes implementation calls the
+owner's slice callback once at construction; the actor reads only the cached immutable slice.
+One private Flight per body covers queueing and completed-but-uncollected output. A lost caller
+does not release the original buffer/payment while the actual command or output remains alive.
+The existing Root seal/open methods still validate the actual grant, action and result tag.
+
+Native Phase reserves4KiB actor metadata from its ORIGINAL16KiB loan before taking a result
+buffer. Local refusal returns that exact buffer for retry. This payment is independent of a
+future detached dispatcher task; neither a queue slot nor a receipt proves Phase drainage.
+Explicit confirmation retirement consumes the original HandoffLoan to close its original plan,
+outside native locks. Ordinary loan return leaves the96KiB Workflow open. Actual input/lower/
+copy owners continue to retain the original Workflow after closure.
+
+Browser broker v10 can lend a Ready channel's existing execution position to its exact selected
+key/chain. Provider/digest work and same-channel IO share that lane; RPC waits occur outside
+provider ownership to avoid self-deadlock. Every row retains its original native adapter.
+These ownership primitives do not enable action opcodes: the application listener still serves
+Status only. Framed action dispatch, complete final ACK/collection, proven-pair actor ingress,
+SDP transfer, live V2 and physical acceptance remain separate unfinished work.
+
+### Native physical shutdown and private request grammar (22 October continuation)
+
+The application service now closes its listener, latches Registry shutdown under Index, and
+closes every original Row's first-effect fence. No later bootstrap or retained Route may create
+new work. It then closes header admission on each original Session and waits for that Session's
+actual physical position outside Index/Row/UIcommit/Coordinator guards. Retirement witnesses
+also find a Session whose only remaining owner is a detached worker or completed reply. A single
+in-place Notify waiter observes last-owner collection; socket loss, End and timeouts do not
+replace it. The service task/output retains its original process payment throughout this wait.
+SDK/actor cleanup follows Host completion. This is native physical collection, not proof that
+browser SDK work or the complete96KiB Workflow drained.
+
+An authenticated, opened Data request can transfer its original buffer into the Phase-funded
+actor body without copying it, leaving only an empty body placeholder with the same affine
+response nonce. Local range/foreign-Phase/capacity refusal restores that exact buffer. The
+eventual dispatcher still must resolve the complete decrypted purpose and original header RowId,
+fund detached task metadata separately, and retain the unique physical hold through real result
+work and output collection. The extraction primitive supplies no such effect authority itself.
+
+Private version1 action plaintext has a fixed full selector prefix and closed per-operation
+lengths. Native borrows at most528 output bytes; the browser constructs one prepaid bounded
+request. Shared public vectors pin full-width u64 fields. Receipt ACK digests bind the actual
+native transition and exclude observational retirement, matching Root's same_transition.
+This grammar is inert: production continues to serve Status only. Pending closure, native proof
+of final delivery, safe32-row purpose history collection and the complete action adapter remain
+required before enablement. FinalACK alone must never remove history from a still-live Session.
+
+The inactive derivation-result executor now consumes the actual opened Incoming and checks
+its Session allocation against Route before lookup. It resolves the authenticated header RowId,
+complete selector and native serial/version/input tag, and accepts only an empty Derive output
+with its actual empty-output hash. Historical receipt recovery precedes current eligibility and
+takes no additional Phase contribution, Work or task; the already-paid Data body remains owned.
+Current effects repeat original UI/selection/Route checks under UIcommit and call the actual
+ServerActor/Root method. Detached Worker and completed Response retain Work/task custody before
+Incoming in field-drop order, keeping shutdown behind real publication and output collection.
+The measured future/output/command envelope must fit8KiB from the original16KiB loan. Incoming
+stays inline; both future and output storage count. Its single fixed4KiB header-scratch backing
+allocation is explicitly counted/prepaid by the unchanged12KiB Session control envelope. Moving
+that affine scratch handle does not reserve another inline4KiB in each async state; its full
+backing storage is counted, zeroized and freed before physical idle can be published.
+This narrow empty-marker executor does not construct the separate seal/open body bridge. Its
+actor fixtures deliberately require rejection of a synthetic foreign pair; successful normal
+production-pair publication, listener dispatch and the browser action adapter remain unproved.

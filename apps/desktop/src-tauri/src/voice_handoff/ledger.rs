@@ -5,7 +5,8 @@
 //! This is deliberately a finite pilot: pending, live and drained rows share 32 positions. A
 //! live owner cannot evict old uncertain history to make space. Physical reply/control-flight
 //! prepayment, authenticated browser drainage and live dispatch are separate integration gates.
-use super::custody::{CopyCustody, Phase, PreparedPhase};
+use super::channel::{AuthenticatedRequest, BodyKind, Operation};
+use super::custody::{ConfirmationStatus, CopyCustody, Phase, PreparedPhase};
 use crate::voice_authority::SelectedHandoffOwner;
 use catcoms_sync::voice_v2::crypto_actions::{
     CryptoAction, CryptoOperation, CryptoResultReceipt, CryptoResultStatus,
@@ -25,6 +26,27 @@ pub(crate) struct RowId {
     slot: usize,
     serial: u64,
 }
+impl RowId {
+    /// Canonical fixed metadata only: native index slot + monotonically increasing serial.
+    /// Every operational consumer must independently resolve original provenance/purpose.
+    pub(super) fn logical(self) -> [u8; 16] {
+        let mut bytes = [0; 16];
+        bytes[..8].copy_from_slice(&(self.slot as u64).to_be_bytes());
+        bytes[8..].copy_from_slice(&self.serial.to_be_bytes());
+        bytes
+    }
+    pub(super) fn from_logical(bytes: [u8; 16]) -> Result<Self, VoiceError> {
+        let slot = usize::try_from(u64::from_be_bytes(
+            bytes[..8].try_into().expect("fixed slot"),
+        ))
+        .map_err(|_| VoiceError::Unauthorized)?;
+        let serial = u64::from_be_bytes(bytes[8..].try_into().expect("fixed serial"));
+        if slot >= ROWS || serial == 0 {
+            return Err(VoiceError::Unauthorized);
+        }
+        Ok(Self { slot, serial })
+    }
+}
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Purpose {
     Derive(PairSelector),
@@ -33,10 +55,21 @@ pub(crate) enum Purpose {
 /// Unknown rows are errors, never an assertion that an engine, phase or reply has drained.
 #[derive(Clone, PartialEq, Eq)]
 pub(crate) struct Status {
+    pub pending: PendingStatus,
     pub action: Option<(u64, u64, [u8; 32])>,
     pub engine: CryptoResultStatus,
     pub acknowledged: bool,
     pub drained: bool,
+}
+/// Native preparation closure is distinct from an attached action's Phase/engine drainage.
+/// A lost actor reply may hide a published Root pair. `Closed` records only that this native
+/// Pending can never resume; it does not assert Root absence, settlement or Workflow drainage.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PendingStatus {
+    NotPending,
+    Open,
+    Closing,
+    Closed { actor_handoff: bool },
 }
 struct Key {
     grant: Weak<CallGrant>,
@@ -58,6 +91,37 @@ struct Pending {
     worker: bool,
     handed_off: bool,
 }
+/// Own the actual local preparation between Closing and Closed. Cancellation/unwind cannot
+/// publish closure before owners drop. Production retires this synchronously outside native
+/// guards; deterministic tests can retain the SAME ticket at this actual transition boundary.
+struct PendingRetirement {
+    row: Arc<Row>,
+    owners: Option<Pending>,
+    actor_handoff: bool,
+}
+impl Drop for PendingRetirement {
+    fn drop(&mut self) {
+        drop(self.owners.take());
+        {
+            let mut state = self
+                .row
+                .state
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            debug_assert!(matches!(state.body, Body::ClosingPending));
+            state.body = Body::ClosedPending;
+            state.status.pending = PendingStatus::Closed {
+                actor_handoff: self.actor_handoff,
+            };
+            // No engine settlement, ACK or Phase drainage is inferred from local closure.
+        }
+        self.row.changed.notify_waiters();
+    }
+}
+enum ClosePending {
+    Existing(Status),
+    Retire(PendingRetirement),
+}
 struct Live {
     selected: Arc<SelectedHandoffOwner>,
     action: Arc<CryptoAction>,
@@ -67,12 +131,22 @@ struct Live {
 }
 enum Body {
     Pending(Pending),
+    ClosingPending,
+    ClosedPending,
     Live(Live),
     Drained,
 }
 struct State {
     body: Body,
     status: Status,
+    // Final-intent compaction keeps the SAME already-paid Phase/witness, but no Action,
+    // input or variable loan. Ordinary continuation does not retain it. This must survive
+    // caller loss and local compaction until actual Root retirement, not weak/missing-row
+    // inference. Phase's own original2KiB credit continues to fund its retained allocation.
+    final_phase: Option<Arc<Phase>>,
+    // Monotonic native-only proof. It is independent of action/Phase drainage and cannot be
+    // inferred from a browser FinalACK, timeout, lease revocation or copied selected fields.
+    session_collected: bool,
 }
 struct Row {
     id: RowId,
@@ -139,11 +213,36 @@ impl ResolvedRow {
     pub(crate) fn reconcile(&self) -> Result<Status, VoiceError> {
         self.ledger.reconcile(self.row.id)
     }
+    /// Native-only snapshot of the ORIGINAL final-plan witness, including after local
+    /// compaction. No grant/Clock/task/allocation or Root callback; this is not final wire
+    /// issuance or a wakeup. Unknown rows remain errors, never retirement evidence.
+    pub(super) fn confirmation_status(&self) -> Result<ConfirmationStatus, VoiceError> {
+        let row = self.ledger.row(self.row.id)?;
+        let state = row.state.lock().unwrap_or_else(|error| error.into_inner());
+        Ok(match &state.body {
+            Body::Live(live) => live.phase.confirmation_status(),
+            Body::Drained => state
+                .final_phase
+                .as_ref()
+                .map_or(ConfirmationStatus::NotRequested, |phase| {
+                    phase.confirmation_status()
+                }),
+            Body::Pending(_) | Body::ClosingPending | Body::ClosedPending => {
+                ConfirmationStatus::NotRequested
+            }
+        })
+    }
     pub(crate) fn acknowledge(&self, receipt: &CryptoResultReceipt) -> Result<(), VoiceError> {
         self.ledger.acknowledge(self.row.id, receipt)
     }
     pub(crate) fn settle(&self) -> Result<Status, VoiceError> {
         self.ledger.settle(self.row.id)
+    }
+    /// Native-only closure after the original authenticated ClosePhase adapter established
+    /// exact Session/RowId/purpose and retained-broker SDK/RPC drainage. This is not a renderer
+    /// boolean or proof of Root settlement. No other consumer may infer those preconditions.
+    pub(super) fn close_pending(&self) -> Result<Status, VoiceError> {
+        self.ledger.close_pending(&self.row)
     }
     /// Historical provenance alone cannot restart data work after End. This early fence is
     /// not the channel's final admission or a replacement for Root's actual effect checks.
@@ -158,6 +257,118 @@ impl ResolvedRow {
 }
 
 impl Ledger {
+    /// Pure cleanup preflight under the caller's original UI commit. No new factory may
+    /// enter until channel closure commits under that SAME mutex. Drained is monotonic;
+    /// unknown rows do not assert SDK drainage, but no original action means there is no
+    /// action Control path to strand. Pending and Live (even settled/ACKed) refuse closure;
+    /// final-intent Drained also requires the SAME actual Root retirement witness to be ready.
+    pub(super) fn channel_may_close(&self, selected: &SelectedHandoffOwner) -> bool {
+        let index = self.index.lock().unwrap_or_else(|error| error.into_inner());
+        index.rows.iter().flatten().all(|row| {
+            if !row.key.matches(selected, row.key.purpose) {
+                return true;
+            }
+            let state = row.state.lock().unwrap_or_else(|error| error.into_inner());
+            matches!(state.body, Body::Drained | Body::ClosedPending)
+                && Self::final_retirement_ready(&state)
+        })
+    }
+
+    /// Local compaction/physical session closure cannot discard a requested final proof.
+    /// Ordinary continuation and explicit ClosedPending require no invented Root witness.
+    /// Final-phase wire dispatch remains disabled until its retained cleanup driver can
+    /// recheck this snapshot: Root has no notification into Row's existing Notify.
+    fn final_retirement_ready(state: &State) -> bool {
+        state
+            .final_phase
+            .as_ref()
+            .is_none_or(|phase| phase.confirmation_status() == ConfirmationStatus::Drained)
+    }
+
+    /// Accept only the actual bootstrap registry's last-owner proof, after all its locks
+    /// have been released. The full original grant allocation/executor/lease must match;
+    /// equal public labels in a replacement generation do not authorize removal of history.
+    /// Remember this before attempting collection: delayed ResolvedRow/cleanup owners may
+    /// legitimately keep the record alive after its one original channel witness is gone.
+    pub(super) fn channel_collected(&self, collected: super::bootstrap::CollectedChannel) {
+        {
+            let index = self.index.lock().unwrap_or_else(|error| error.into_inner());
+            for row in index.rows.iter().flatten() {
+                if row.key.matches(collected.selected(), row.key.purpose) {
+                    row.state
+                        .lock()
+                        .unwrap_or_else(|error| error.into_inner())
+                        .session_collected = true;
+                }
+            }
+        }
+        // Selected owners, credits and weak control blocks may have nontrivial destructors.
+        // In particular the channel witness MUST NOT drop while either index is locked.
+        drop(collected);
+    }
+
+    /// Bounded history reclamation, never uncertain-history eviction. Phase/engine/receipt
+    /// compaction and actual channel collection are separate prerequisites. An original live
+    /// Session must retain its purpose even after FinalACK, otherwise a fresh Begin could
+    /// allocate another pending factory on that same purpose. Dead leases cannot be revived.
+    /// Pending (including a possibly published Root pair), Live and final-unready rows remain
+    /// untouched. A later bounded collection hook observes Root readiness without a new wake.
+    pub(super) fn collect_retired(&self) {
+        let mut removed: [Option<Arc<Row>>; ROWS] = std::array::from_fn(|_| None);
+        {
+            let mut index = self.index.lock().unwrap_or_else(|error| error.into_inner());
+            for (slot, retired) in index.rows.iter_mut().zip(&mut removed) {
+                let reclaim = slot.as_ref().is_some_and(|row| {
+                    if row.key.lease.is_live() || Arc::strong_count(row) != 1 {
+                        return false;
+                    }
+                    let state = row.state.lock().unwrap_or_else(|error| error.into_inner());
+                    state.session_collected
+                        && matches!(state.body, Body::Drained | Body::ClosedPending)
+                        && Self::final_retirement_ready(&state)
+                });
+                if reclaim {
+                    *retired = slot.take();
+                }
+            }
+        }
+        // Never run original credit/lease/weak-grant destruction under native index/state
+        // guards. The index serial deliberately survives collection and slot reuse.
+        drop(removed);
+    }
+
+    /// Capacity ONLY after canonical header authentication. The opaque request fixes the
+    /// exact header RowId; no unauthenticated/reparsed logical ID can trigger this lookup.
+    /// Compare the original grant allocation/executor/lease, then return only its existing
+    /// Phase, never an Action, engine, input, receipt or retry capability. No live-grant
+    /// upgrade, Clock, new row/payment or worker mutation occurs here.
+    ///
+    /// Full Purpose is inside the encrypted body. After intake/decryption the dispatcher
+    /// MUST match that full purpose and the SAME header RowId via resolve before operations.
+    /// A same-owner wrong-purpose body can consume only its bounded prepaid intake before
+    /// refusal; it cannot cause a Root effect. Closed Phase absence never proves drainage:
+    /// exact historical terminal recovery uses a separately bounded Control operation.
+    pub(super) fn intake_phase(
+        &self,
+        selected: &SelectedHandoffOwner,
+        authenticated: &AuthenticatedRequest,
+    ) -> Result<Arc<Phase>, VoiceError> {
+        if authenticated.operation() != Operation::Result || authenticated.kind() != BodyKind::Data
+        {
+            return Err(VoiceError::Unauthorized);
+        }
+        let row = self.row(RowId::from_logical(authenticated.logical())?)?;
+        if !row.key.matches(selected, row.key.purpose) {
+            return Err(VoiceError::Unauthorized);
+        }
+        let state = row.state.lock().unwrap_or_else(|error| error.into_inner());
+        match &state.body {
+            Body::Live(live) => Ok(live.phase.clone()),
+            Body::Pending(_) | Body::ClosingPending | Body::ClosedPending | Body::Drained => {
+                Err(VoiceError::Capacity)
+            }
+        }
+    }
     /// Recover a lost factory reply even when its caller never received a RowId. Search only
     /// the finite paid index using the ORIGINAL selected grant/lease/executor/full purpose.
     /// This historical lookup requires no live grant/current selection, takes no data loan,
@@ -236,6 +447,9 @@ impl Ledger {
                     }));
                 }
             }
+            if matches!(state.body, Body::ClosingPending) {
+                return Err(VoiceError::Capacity);
+            }
             return Ok(Begin::Existing(row.id));
         }
         let slot = index
@@ -259,6 +473,8 @@ impl Ledger {
                 purpose,
             },
             state: Mutex::new(State {
+                final_phase: None,
+                session_collected: false,
                 body: Body::Pending(Pending {
                     selected,
                     prepared: Some(prepared),
@@ -266,6 +482,7 @@ impl Ledger {
                     handed_off: false,
                 }),
                 status: Status {
+                    pending: PendingStatus::Open,
                     action: None,
                     engine: CryptoResultStatus {
                         settled: false,
@@ -307,6 +524,55 @@ impl Ledger {
             .status
             .clone();
         Ok(status)
+    }
+    /// Close only this original native preparation, never a potentially published Root pair.
+    /// State excludes both a retrying Registration and another closer. Move actual owners
+    /// out, release ALL native guards, destroy them, then publish completion. Observers and
+    /// Begin see Closing/Capacity until destruction finishes; no early success on last drop.
+    fn close_pending(&self, row: &Arc<Row>) -> Result<Status, VoiceError> {
+        match self.prepare_pending_close(row)? {
+            ClosePending::Existing(status) => Ok(status),
+            ClosePending::Retire(retired) => {
+                drop(retired);
+                self.status(row.id)
+            }
+        }
+    }
+    fn prepare_pending_close(&self, row: &Arc<Row>) -> Result<ClosePending, VoiceError> {
+        let pending = {
+            // Old metadata may outlive removal of a demonstrably unstarted Registration.
+            // Validate indexed identity before any mutation, including repeated closure.
+            // Same Index -> State order as begin/Registration::drop; owners leave both guards.
+            let index = self.index.lock().unwrap_or_else(|error| error.into_inner());
+            if !index
+                .rows
+                .get(row.id.slot)
+                .and_then(Option::as_ref)
+                .is_some_and(|indexed| indexed.id == row.id && Arc::ptr_eq(indexed, row))
+            {
+                return Err(VoiceError::Unauthorized);
+            }
+            let mut state = row.state.lock().unwrap_or_else(|error| error.into_inner());
+            match &state.body {
+                Body::ClosedPending => return Ok(ClosePending::Existing(state.status.clone())),
+                Body::ClosingPending => return Err(VoiceError::Capacity),
+                Body::Pending(pending) if !pending.worker && state.status.action.is_none() => {}
+                Body::Pending(_) => return Err(VoiceError::Capacity),
+                Body::Live(_) | Body::Drained => return Err(VoiceError::Unauthorized),
+            }
+            state.status.pending = PendingStatus::Closing;
+            let Body::Pending(pending) = std::mem::replace(&mut state.body, Body::ClosingPending)
+            else {
+                unreachable!("checked Pending")
+            };
+            pending
+        };
+        let actor_handoff = pending.handed_off;
+        Ok(ClosePending::Retire(PendingRetirement {
+            row: row.clone(),
+            owners: Some(pending),
+            actor_handoff,
+        }))
     }
     /// Recover actual terminal/settlement metadata even after phase closure or a native
     /// worker lost its last refresh. This admits no data copy, engine, computation or first
@@ -436,7 +702,9 @@ impl Ledger {
     /// Compact only after the original phase has actually returned its loan, all native work
     /// was collected, engine settlement is observed and any terminal receipt was acknowledged.
     /// The caller must first establish browser closure through the separate authenticated
-    /// protocol; this method never accepts a renderer-provided "drained" boolean.
+    /// protocol; this method never accepts a renderer-provided "drained" boolean. Local
+    /// compaction does NOT wait for full Root retirement: it preserves the original final
+    /// Phase proof instead. Channel closure and history GC check that separate snapshot.
     fn compact(&self, id: RowId) -> Result<bool, VoiceError> {
         // Only wait_compacted's gated sole waiter may call this quiet path in production.
         // Another native caller could otherwise overlap an unnotified quiet observation.
@@ -460,6 +728,15 @@ impl Ledger {
             {
                 return Ok(false);
             }
+            // Retain before detaching Live, under the established Row -> Phase order.
+            // This is an infallible Arc increment, not a new allocation or witness copy.
+            // Do NOT require Root-ready first: dropping Live below may itself release the
+            // last actual Root owner. No callback or destructor runs under these guards.
+            debug_assert!(state.final_phase.is_none());
+            let final_phase = (live.phase.confirmation_status()
+                != ConfirmationStatus::NotRequested)
+                .then(|| live.phase.clone());
+            state.final_phase = final_phase;
             state.status.drained = true;
             if let Some(receipt) = &mut state.status.engine.receipt {
                 receipt.retired = true; // this closed phase can never admit another first effect
@@ -467,7 +744,8 @@ impl Ledger {
             std::mem::replace(&mut state.body, Body::Drained)
         };
         // Native input/action/Workflow owners and affine worker grants must never destruct
-        // beneath State/Index. The retained tombstone contains only fixed evidence and Weak.
+        // beneath State/Index. Compacted history retains only fixed evidence/provenance and,
+        // for final intent, the SAME paid Phase; it owns no Action/Input/Workflow.
         drop(retired);
         row.changed.notify_waiters();
         Ok(true)
@@ -476,6 +754,8 @@ impl Ledger {
     /// authenticated browser closure and closes Phase. Native data drainage and metadata/ACK
     /// readiness are distinct events: observing the first must never lose the second wake.
     /// This future creates no retry timer, new factory, engine or variable data loan.
+    /// ClosedPending returns explicit LOCAL preparation closure with drained=false and
+    /// engine.settled=false, never an attached Phase or Root compaction receipt.
     async fn wait_compacted(&self, id: RowId) -> Result<Status, VoiceError> {
         let row = self.row(id)?;
         if row
@@ -491,7 +771,8 @@ impl Ledger {
             match &state.body {
                 Body::Live(live) => Some(live.phase.clone()),
                 Body::Drained => None,
-                Body::Pending(_) => return Err(VoiceError::Capacity),
+                Body::Pending(_) | Body::ClosingPending => return Err(VoiceError::Capacity),
+                Body::ClosedPending => return Ok(state.status.clone()),
             }
         };
         if let Some(phase) = phase {
@@ -508,6 +789,10 @@ impl Ledger {
             }
         }
     }
+}
+#[cfg(test)]
+pub(super) fn pending_close_layout_bytes() -> usize {
+    std::mem::size_of::<ClosePending>() + std::mem::size_of::<PendingRetirement>()
 }
 impl Registration {
     pub(crate) fn id(&self) -> RowId {
@@ -591,6 +876,7 @@ impl Registration {
                 return Err(VoiceError::Unauthorized);
             }
             state.status.action = Some((action.serial(), action.version(), action.input_tag()));
+            state.status.pending = PendingStatus::NotPending;
             std::mem::replace(
                 &mut state.body,
                 Body::Live(Live {
@@ -771,4 +1057,4 @@ impl Drop for Work {
 }
 
 #[cfg(test)]
-mod tests;
+pub(super) mod tests;

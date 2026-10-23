@@ -7,6 +7,8 @@ import {
   voiceIpcNonce, voiceIpcResponseAad, type VoiceIpcHeader,
 } from "./voice-ipc-frame.ts";
 import { readVoiceIpcResponse } from "./voice-ipc-body.ts";
+import { encodeVoiceIpcAction, type VoiceIpcPurpose } from "./voice-ipc-actions.ts";
+import { decodeVoiceIpcActionReply, isVoiceIpcActionRow, type VoiceIpcActionReply } from "./voice-ipc-replies.ts";
 // The broker survives HMR, so new module instances must use its original owner brand.
 // This is lifecycle bookkeeping within one trusted window, not a security capability.
 const OWNER = Symbol.for("mewtual.voice.crypto-owner.v2");
@@ -176,6 +178,9 @@ const SELECTED_KEY_BYTES = 4096;
 // These browser-side charges cover application-owned copies, not opaque SDK/GC heaps.
 const IPC_SETUP_BYTES = 8 * 1024;
 const IPC_CONTROL_BYTES = 8 * 1024;
+// Only exact, already-started cleanup is retried automatically. A completed refusal starts
+// one new cadence interval; missed ticks cannot create catch-up work or overlap native RPCs.
+const IPC_CLEANUP_RETRY_MS = 1_000;
 
 export type VoiceIpcSetupReply =
   | Readonly<{ owner: string; executor: string; kind: "ready"; port: number; transcript: string }>
@@ -193,6 +198,14 @@ export interface VoiceIpcNative {
 }
 export type VoiceIpcStatus = Readonly<{ kind: "ready" | "closed"; nativeSetupDrained: boolean }> |
   Readonly<{ kind: "uncertain" | "retired" | "failed" }>;
+/** Historical metadata only. Even localDrained/retired receipts grant no call, factory,
+ * Workflow-finalization or unlink authority. Native history refusals do not close a Session. */
+export type VoiceIpcHistoryOutcome = VoiceIpcActionReply |
+  Readonly<{ kind: "uncertain" | "retired" | "failed" | "busy" }>;
+type IpcHistoryRequest = {
+  purpose: VoiceIpcPurpose; expectedRow: string | null;
+  body: Uint8Array<ArrayBuffer>; result: Signal<VoiceIpcHistoryOutcome>;
+};
 export type VoiceIpcChannel = Readonly<{
   /** Coalesces the current physical flight. Later calls spend a fresh original-session TX. */
   status(): Promise<VoiceIpcStatus>;
@@ -212,6 +225,9 @@ type BrowserChain = {
   timer: ReturnType<typeof setTimeout> | null;
   records: Map<number, ActionRecord>; queue: ActionRecord[];
   retainedBytes: number; enginePeak: number;
+  // A channel-linked chain lends its original physical position; logical row serialization
+  // remains separate so admission/result/settlement RPCs can use that SAME channel.
+  channel: RetainedIpcChannel | null; drained: Signal<void>;
 };
 const CHAIN_ROWS = 12;
 const CHAIN_HISTORY = 24 * 1024;
@@ -247,8 +263,32 @@ function signal<T>(): Signal<T> {
   const promise = new Promise<T>(yes => { resolve = yes; });
   return { promise, resolve };
 }
+
+/** Private physical position shared by one channel flight and its one linked provider.
+ * Logical rows stay in the existing bounded chain queue. A queued owner is never forgotten
+ * on End/caller loss: it acquires and runs its final current check inside try/finally, then
+ * passes the position on. This avoids both an unbounded waiter list and abandoned permits. */
+class SharedIpcExecution {
+  private held = false;
+  private waiting: Signal<void> | null = null;
+  private readonly custody: Pick<IpcCustody, "begin" | "end">;
+  constructor(custody: Pick<IpcCustody, "begin" | "end">) { this.custody = custody; }
+  async run<T>(work: () => Promise<T>): Promise<T> {
+    if (this.held) {
+      if (this.waiting) throw new Error("voice channel execution capacity reached");
+      const waiting = signal<void>(); this.waiting = waiting;
+      await waiting.promise;
+    } else this.held = true;
+    this.custody.begin();
+    try { return await work(); }
+    finally {
+      this.custody.end();
+      const waiting = this.waiting; this.waiting = null;
+      if (waiting) waiting.resolve(); else this.held = false;
+    }
+  }
+}
 type ActionRecord = {
-  operation: "confirmation" | "derive" | "protected";
   owner: VoiceCryptoOwner; pair: VoiceCryptoPair | null;
   identity: VoiceConfirmationIdentity; input: VoiceConfirmationInput | null; bytes: number;
   derivation: VoiceDerivationInput | null; chain: BrowserChain | null;
@@ -257,7 +297,11 @@ type ActionRecord = {
   attempt: Signal<ActionOutcome> | null; retry: Signal<void> | null;
   job: Job | null; running: boolean; retired: boolean; drained: boolean; released: boolean;
   unsubscribe: () => void; handle: ActionHandle;
-};
+} & (
+  | { operation: "confirmation"; native: VoiceConfirmationNative }
+  | { operation: "derive"; native: VoiceDerivationNative }
+  | { operation: "protected"; native: VoiceProtectedConfirmationNative }
+);
 function u64(value: string, label: string): bigint {
   if (typeof value !== "string" || !/^[1-9][0-9]{0,19}$/.test(value)) throw new Error("invalid " + label);
   const number = BigInt(value);
@@ -329,7 +373,7 @@ function context(label: string, transcript: Uint8Array): Uint8Array<ArrayBuffer>
  * unsettled work. Revoking an owner never frees a running promise; only its real settlement does.
  * A derive pipeline uses one permit for sequential import/ECDH/HKDF work, never parallel calls. */
 export class VoiceCryptoBroker {
-  readonly version = 9;
+  readonly version = 12;
   readonly subtle: SubtleCrypto;
   private readonly native: VoiceCryptoAdmission;
   private active = 0;
@@ -339,9 +383,6 @@ export class VoiceCryptoBroker {
   private readonly sequences = new Map<string, { owner: VoiceCryptoOwner; highest: bigint; used: Set<bigint> }>();
   // This map and its combined pending/terminal cap survive HMR with this exact broker.
   private readonly actions = new Map<string, ActionRecord>();
-  private confirmationNative: VoiceConfirmationNative | null = null;
-  private derivationNative: VoiceDerivationNative | null = null;
-  private protectedNative: VoiceProtectedConfirmationNative | null = null;
   private readonly joinKeys = new WeakMap<VoiceJoinKeyHandle, JoinKeyRecord>();
   private readonly keys = new Set<JoinKeyRecord>();
   private readonly selectedKeys = new Map<string, SelectedKeyRecord>();
@@ -465,7 +506,7 @@ export class VoiceCryptoBroker {
   /** The only browser Session constructor consumes this broker's EXACT accepted selected
    * key/executor. Generic bound keys, supplied seeds/points or equal owner strings cannot
    * reconstruct it. The original channel and its counters survive component/HMR remounts.
-   * This status-only stage grants no Root, remote-member, action, SDP or RTC authority. */
+   * Setup status and historical reads grant no Root, remote-member, action, SDP or RTC authority. */
   nativeChannel(owner: VoiceCryptoOwner, handle: VoiceJoinKeyHandle, native: VoiceIpcNative,
     transport: typeof fetch = globalThis.fetch): VoiceIpcChannel {
     current(owner);
@@ -505,6 +546,18 @@ export class VoiceCryptoBroker {
     try { channel.observe(); }
     catch (error) { channel.abandon(); throw error; }
     return channel.handle;
+  }
+
+  /** Recover existing action history on this broker's EXACT retained channel. Establish it
+   * with status() first: this method never constructs/reconstructs keys or starts setup.
+   * One paid Control flight coalesces identical requests; another purpose returns busy.
+   * Null expectedRow is only for the first Begin reply, which authenticates the unknown ID. */
+  recoverChannelHistory(owner: VoiceCryptoOwner, handle: VoiceIpcChannel,
+    purpose: VoiceIpcPurpose, expectedRow: string | null = null): Promise<VoiceIpcHistoryOutcome> {
+    const channel = this.ipcChannels.get(owner.token);
+    // Compare actual original allocations BEFORE any owner predicate/callback can run.
+    if (!channel || channel.handle !== handle || !channel.owns(owner)) throw new Error("voice channel identity changed");
+    return channel.history(purpose, expectedRow);
   }
 
   private async waitSelectedKeyRetry(record: SelectedKeyRecord, observed: object): Promise<void> {
@@ -623,6 +676,22 @@ export class VoiceCryptoBroker {
    * serial execution position remain prepaid through close; SDP requires a later phase owner.
    * expires is computed from the ORIGINAL browser request start, never native monotonic time. */
   prepareChain(owner: VoiceCryptoOwner, handle: VoiceJoinKeyHandle, binding: VoiceCryptoChainBinding, expires: number, setup: VoiceDerivationSetup): VoiceCryptoChain {
+    return this.prepareChainInner(owner, handle, binding, expires, setup, null);
+  }
+
+  /** Native-channel adapter only: lend this broker's EXACT retained Ready channel position.
+   * A copied handle, generic key, same-label foreign owner or an unready/closed Session cannot
+   * adopt its payment. No new browser execution position is reserved for the linked chain. */
+  prepareChainFromChannel(owner: VoiceCryptoOwner, channelHandle: VoiceIpcChannel, handle: VoiceJoinKeyHandle,
+    binding: VoiceCryptoChainBinding, expires: number, setup: VoiceDerivationSetup): VoiceCryptoChain {
+    current(owner);
+    const channel = this.ipcChannels.get(owner.token), key = this.joinKeys.get(handle);
+    if (!channel || channel.handle !== channelHandle || !key || !channel.canLend(owner, key)) throw new Error("original ready voice channel required");
+    return this.prepareChainInner(owner, handle, binding, expires, setup, channel);
+  }
+
+  private prepareChainInner(owner: VoiceCryptoOwner, handle: VoiceJoinKeyHandle, binding: VoiceCryptoChainBinding,
+    expires: number, setup: VoiceDerivationSetup, channel: RetainedIpcChannel | null): VoiceCryptoChain {
     current(owner); this.collectChains();
     const key = this.joinKeys.get(handle);
     if (!key || key.owner !== owner || !key.privateKey || !validBinding(binding) ||
@@ -635,14 +704,15 @@ export class VoiceCryptoBroker {
     const stamps = this.chainStamps.get(owner);
     const previous = stamps?.get(binding.handshake);
     if (previous) {
-      if (previous.key !== key || !sameBinding(previous.binding, binding) || previous.expires !== expires || previous.closed ||
+      if (previous.key !== key || previous.channel !== channel || !sameBinding(previous.binding, binding) || previous.expires !== expires || previous.closed ||
           !previous.setup || !sameBytes(previous.setup.localPublicKey, setup.localPublicKey) ||
           !sameBytes(previous.setup.peerPublicKey, setup.peerPublicKey) || !sameBytes(previous.setup.transcript, setup.transcript)) throw new Error("voice chain already retired or changed");
       return previous.handle;
     }
     if ((stamps?.size ?? 0) >= 16 || this.progress.has(owner.group) ||
         this.actions.size + this.reservedRows + CHAIN_ROWS > MAX_ACTIONS ||
-        this.active - this.protectedActive - this.ipcActive + this.protectedPositions + this.ipcPositions >= MAX_ACTIVE) throw new Error("voice chain capacity reached");
+        (!channel && this.active - this.protectedActive - this.ipcActive + this.protectedPositions + this.ipcPositions >= MAX_ACTIVE) ||
+        (channel && !channel.canLink())) throw new Error("voice chain capacity reached");
     const fixed = CHAIN_HISTORY + CHAIN_METADATA;
     this.charge(owner, fixed + CHAIN_VARIABLE);
     const chain: BrowserChain = {
@@ -651,9 +721,11 @@ export class VoiceCryptoBroker {
       rowIssued: false, reservedRows: CHAIN_ROWS, running: false, execution: true,
       variable: true, fixedBytes: fixed, record: null, unsubscribe: () => {}, handle: null!, timer: null,
       records: new Map(), queue: [], retainedBytes: 130 + setup.transcript.length, enginePeak: 0,
+      channel, drained: signal<void>(),
     };
     chain.handle = Object.freeze({ close: () => this.closeChain(chain), isCurrent: () => this.chainCurrent(chain) });
-    this.reservedRows += CHAIN_ROWS; this.protectedPositions++;
+    this.reservedRows += CHAIN_ROWS;
+    if (channel) channel.link(chain); else this.protectedPositions++;
     this.progress.set(owner.group, chain); this.chains.set(chain.handle, chain);
     // Publish the stamp before subscribing: a reentrant owner retirement closes this exact
     // plan and cannot leave a successful, untracked reservation behind.
@@ -692,7 +764,9 @@ export class VoiceCryptoBroker {
     if (!chain.running) this.drainChain(chain);
   }
   private drainChain(chain: BrowserChain): void {
-    if (chain.closed && chain.execution && !chain.running) { chain.execution = false; this.protectedPositions--; }
+    if (chain.closed && chain.execution && !chain.running) {
+      chain.execution = false; if (!chain.channel) this.protectedPositions--;
+    }
     if (chain.closed && chain.variable && !chain.running) {
       if (chain.setup) {
         chain.setup.localPublicKey.fill(0); chain.setup.peerPublicKey.fill(0); chain.setup.transcript.fill(0); chain.setup = null;
@@ -707,6 +781,7 @@ export class VoiceCryptoBroker {
       }
       chain.variable = false; this.refund(chain.owner, CHAIN_VARIABLE);
       if (this.progress.get(chain.owner.group) === chain) this.progress.delete(chain.owner.group);
+      chain.drained.resolve();
     }
     if (!chain.owner.isCurrent()) this.releaseChainHistory(chain);
     this.pump();
@@ -734,7 +809,7 @@ export class VoiceCryptoBroker {
     u64(input.action, "action"); u64(input.version, "action version");
     const id = owner.token + "/" + input.action, previous = this.actions.get(id);
     if (previous) {
-      if (previous.owner !== owner || previous.operation !== "derive" || previous.chain !== chain ||
+      if (previous.owner !== owner || previous.operation !== "derive" || previous.native !== native || previous.chain !== chain ||
           !previous.derivation || !sameDerivation(previous.derivation, input)) throw new Error("native derivation identity changed");
       return previous.handle as VoiceDerivationHandle;
     }
@@ -746,7 +821,7 @@ export class VoiceCryptoBroker {
     const owned = Object.freeze({ ...identity, binding: chain.binding, engineBytes: input.engineBytes,
       localPublicKey: new Uint8Array(input.localPublicKey), peerPublicKey: new Uint8Array(input.peerPublicKey), transcript: new Uint8Array(input.transcript) });
     const record: ActionRecord = {
-      operation: "derive", owner, pair: null, identity, input: null, derivation: owned, protectedInput: null, chain, bytes: 0,
+      operation: "derive", native, owner, pair: null, identity, input: null, derivation: owned, protectedInput: null, chain, bytes: 0,
       status: "queued", outcome: null, attempt: null, retry: null, job: null, running: false,
       retired: false, drained: false, released: false, unsubscribe: () => {}, handle: null!,
     };
@@ -758,7 +833,7 @@ export class VoiceCryptoBroker {
     record.handle = action;
     chain.rowIssued = true; chain.reservedRows--; this.reservedRows--;
     chain.record = record; chain.records.set(0, record); chain.retainedBytes = retained; chain.enginePeak = peak;
-    this.actions.set(id, record); this.derivationNative ??= native;
+    this.actions.set(id, record);
     return action;
   }
 
@@ -789,7 +864,7 @@ export class VoiceCryptoBroker {
     }
     const id = owner.token + "/" + input.action, previous = this.actions.get(id);
     if (previous) {
-      if (previous.owner !== owner || previous.chain !== chain || previous.operation !== "protected" ||
+      if (previous.owner !== owner || previous.chain !== chain || previous.operation !== "protected" || previous.native !== native ||
           !previous.protectedInput || !sameProtectedConfirmation(previous.protectedInput, input)) {
         throw new Error("native protected confirmation identity changed");
       }
@@ -805,14 +880,14 @@ export class VoiceCryptoBroker {
     // owned arrays so caller mutation cannot change input after its native identity is fixed.
     const owned = Object.freeze({ ...input, binding: chain.binding, aad: new Uint8Array(input.aad), body: new Uint8Array(input.body) });
     const record: ActionRecord = {
-      operation: "protected", owner, pair, identity, input: null, derivation: null, protectedInput: owned, chain, bytes: 0,
+      operation: "protected", native, owner, pair, identity, input: null, derivation: null, protectedInput: owned, chain, bytes: 0,
       status: "queued", outcome: null, attempt: null, retry: null, job: null, running: false,
       retired: false, drained: false, released: false, unsubscribe: () => {}, handle: null!,
     };
     record.handle = Object.freeze({ attempt: () => this.attemptAction(record) as Promise<VoiceConfirmationOutcome>,
       inspect: () => record.status, retire: () => this.retireAction(record) });
     chain.records.set(input.row, record); chain.retainedBytes = retained; chain.enginePeak = peak;
-    chain.reservedRows--; this.reservedRows--; this.actions.set(id, record); this.protectedNative ??= native;
+    chain.reservedRows--; this.reservedRows--; this.actions.set(id, record);
     return record.handle as VoiceConfirmationHandle;
   }
 
@@ -889,7 +964,8 @@ export class VoiceCryptoBroker {
 
   /** Register one frozen native confirmation input before crypto. Same identity/input returns
    * the same handle; neither repull nor a new wrapper can restart failed/uncertain computation.
-   * The first stateless native adapter remains captured across HMR, like the ordinary broker. */
+   * Each row retains its exact native adapter across HMR; other channels cannot reroute its
+   * identity, output or settlement through the first adapter registered in this broker. */
   registerConfirmation(
     owner: VoiceCryptoOwner, pair: VoiceCryptoPair, native: VoiceConfirmationNative,
     input: VoiceConfirmationInput,
@@ -912,7 +988,7 @@ export class VoiceCryptoBroker {
     const key = owner.token + "/" + input.action;
     const previous = this.actions.get(key);
     if (previous) {
-      if (previous.owner !== owner || previous.pair !== pair || !previous.input || !sameConfirmation(previous.input, input)) {
+      if (previous.owner !== owner || previous.native !== native || previous.pair !== pair || !previous.input || !sameConfirmation(previous.input, input)) {
         throw new Error("native confirmation identity changed");
       }
       return previous.handle as VoiceConfirmationHandle;
@@ -933,7 +1009,7 @@ export class VoiceCryptoBroker {
       aad: new Uint8Array(input.aad), ciphertext: new Uint8Array(input.ciphertext),
     });
     const record: ActionRecord = {
-      operation: "confirmation", derivation: null, protectedInput: null, chain: null,
+      operation: "confirmation", native, derivation: null, protectedInput: null, chain: null,
       owner, pair, identity, input: owned, bytes, status: "queued", outcome: null,
       attempt: null, retry: null, job: null, running: false, retired: false,
       drained: false, released: false, unsubscribe: () => {}, handle: null!,
@@ -944,7 +1020,6 @@ export class VoiceCryptoBroker {
       retire: () => this.retireAction(record),
     });
     this.actions.set(key, record);
-    this.confirmationNative ??= native;
     try { record.unsubscribe = owner.onRetired(() => this.retireAction(record)); }
     catch (error) { this.releaseAction(record); throw error; }
     return record.handle as VoiceConfirmationHandle;
@@ -1001,9 +1076,11 @@ export class VoiceCryptoBroker {
     const record = chain.queue.shift();
     if (!record) return;
     if (record.retired || !record.job) { this.pumpProtected(chain); return; }
-    chain.running = true; this.active++; this.protectedActive++;
+    chain.running = true;
+    if (!chain.channel) { this.active++; this.protectedActive++; }
     void record.job.start().finally(() => {
-      this.active--; this.protectedActive--; chain.running = false;
+      if (!chain.channel) { this.active--; this.protectedActive--; }
+      chain.running = false;
       this.drainChain(chain); this.pumpProtected(chain);
     });
   }
@@ -1022,10 +1099,11 @@ export class VoiceCryptoBroker {
   }
 
   private async driveAction(record: ActionRecord): Promise<void> {
-    const native = record.operation === "derive" ? this.derivationNative! :
-      record.operation === "protected" ? this.protectedNative! : this.confirmationNative!;
+    const native = record.native;
     let attemptedAdmission = false, admitted = false, historicalOnly = false;
-    let plaintext: Uint8Array<ArrayBuffer> | null = null, resultTag: string | null = null;
+    // A shared owner records provider output before any later check/await can throw. Its
+    // finally clears that actual buffer even when computation never reaches the commit loop.
+    const output: { plaintext: Uint8Array<ArrayBuffer> | null; resultTag: string | null } = { plaintext: null, resultTag: null };
     const live = () => !record.retired && record.owner.isCurrent() && (!record.chain || this.chainCurrent(record.chain));
     try {
       while (live() && !admitted) {
@@ -1057,35 +1135,43 @@ export class VoiceCryptoBroker {
       // Engine failure is permanent for this identity. It is not retryable IPC uncertainty.
       record.status = "computing";
       try {
-        if (record.operation === "derive") {
-          const input = record.derivation!, chain = record.chain!;
-          record.pair = await computeVoicePair(this, record.owner, chain.key.privateKey!,
-            input.peerPublicKey, input.transcript, input.binding.localIsLow, () => live(), true);
-          // Native derivation commits an empty closed marker, never a key export.
-          plaintext = new Uint8Array();
-        } else if (record.operation === "protected") {
-          plaintext = await record.pair!.computeProtectedConfirmation(CONFIRM_COMPUTE, record.protectedInput!);
-        } else plaintext = await record.pair!.computeConfirmation(CONFIRM_COMPUTE, record.input!);
+        const compute = async () => {
+          // This check occurs AFTER acquiring a lent position, inside its try/finally. End may
+          // have won while provider work waited behind a channel read/cancellation flight.
+          if (!live()) throw new Error("voice action retired");
+          if (record.operation === "derive") {
+            const input = record.derivation!, chain = record.chain!;
+            record.pair = await computeVoicePair(this, record.owner, chain.key.privateKey!,
+              input.peerPublicKey, input.transcript, input.binding.localIsLow, () => live(), true);
+            // Native derivation commits an empty closed marker, never a key export.
+            output.plaintext = new Uint8Array();
+          } else if (record.operation === "protected") {
+            output.plaintext = await record.pair!.computeProtectedConfirmation(CONFIRM_COMPUTE, record.protectedInput!);
+          } else output.plaintext = await record.pair!.computeConfirmation(CONFIRM_COMPUTE, record.input!);
+          if (!live()) return;
+          if (output.plaintext.length > (record.protectedInput?.operation === "seal" ? 528 : 512)) throw new Error("invalid confirmation engine result");
+          const digest = new Uint8Array(await this.subtle.digest("SHA-256", output.plaintext));
+          if (digest.length !== 32) throw new Error("invalid confirmation digest");
+          output.resultTag = Array.from(digest, value => value.toString(16).padStart(2, "0")).join("");
+        };
+        if (record.chain?.channel) await record.chain.channel.compute(compute); else await compute();
         if (!live()) return;
-        if (plaintext.length > (record.protectedInput?.operation === "seal" ? 528 : 512)) throw new Error("invalid confirmation engine result");
-        const digest = new Uint8Array(await this.subtle.digest("SHA-256", plaintext));
-        if (digest.length !== 32) throw new Error("invalid confirmation digest");
-        resultTag = Array.from(digest, value => value.toString(16).padStart(2, "0")).join("");
+        if (output.plaintext === null || output.resultTag === null) throw new Error("voice computation produced no result");
       } catch {
         if (live()) this.finishAction(record, Object.freeze({ kind: "failed" }));
         return;
       }
       while (live()) {
         record.status = "committing";
-        const copy = plaintext.slice();
+        const copy = output.plaintext.slice();
         let answer: CommitReply | DerivationCommitReply | null = null;
         try {
-          if (record.operation === "derive") answer = await this.derivationNative!.commitDerivation(record.identity, resultTag);
-          else if (record.operation === "protected") answer = await this.protectedNative!.commitProtectedConfirmation(record.identity, copy, resultTag);
+          if (record.operation === "derive") answer = await record.native.commitDerivation(record.identity, output.resultTag);
+          else if (record.operation === "protected") answer = await record.native.commitProtectedConfirmation(record.identity, copy, output.resultTag);
           else {
             const input = record.input!;
             const packet = Object.freeze({ ...input, aad: input.aad.slice(), ciphertext: input.ciphertext.slice() });
-            answer = await this.confirmationNative!.commitConfirmation(record.identity, packet, copy, resultTag);
+            answer = await record.native.commitConfirmation(record.identity, packet, copy, output.resultTag);
           }
         }
         catch { /* A lost/malformed reply cannot authorize another engine operation. */ }
@@ -1095,15 +1181,27 @@ export class VoiceCryptoBroker {
           if (this.finishDerivationReply(record, answer)) return;
           await this.uncertainAction(record); continue;
         }
-        if (this.finishConfirmationReply(record, answer, resultTag)) return;
+        if (this.finishConfirmationReply(record, answer, output.resultTag)) return;
         await this.uncertainAction(record);
       }
     } finally {
-      plaintext?.fill(0);
+      output.plaintext?.fill(0);
       // Only actual engine and last RPC settlement reaches this fence. Native must latch it,
       // serialized with admission, so delayed admission cannot recreate a retired charge.
       if (attemptedAdmission && !historicalOnly) {
-        try { await native.settleAction(record.identity); } catch { /* Native uncertainty stays charged. */ }
+        if (record.chain?.channel) {
+          // Keep the ORIGINAL cleanup transport and logical owner through lost requests or
+          // replies, even after End. One concrete availability wake retries this exact identity;
+          // neither a rejection nor terminal browser metadata proves native engine drainage.
+          const channel = record.chain.channel;
+          for (;;) {
+            const observed = channel.wakeToken();
+            try { await native.settleAction(record.identity); break; }
+            catch { await channel.waitWake(observed); }
+          }
+        } else {
+          try { await native.settleAction(record.identity); } catch { /* Native uncertainty stays charged. */ }
+        }
       }
       if (record.retired || !record.owner.isCurrent()) this.retireAction(record);
     }
@@ -1224,7 +1322,16 @@ class RetainedIpcChannel {
   private readonly subtle: SubtleCrypto;
   private readonly clock: VoiceIpcClock;
   private readonly custody: IpcCustody;
+  private readonly execution: SharedIpcExecution;
+  private linked: BrowserChain | null = null;
+  // Driver and lent provider may both own cleanup bookkeeping, but share ONE reserved
+  // position and one physical permit. Keep that position visibly active through the last
+  // driver's finally; a microtask gap after SDK release is not whole-channel drainage.
+  private activity = 0;
   private request: Signal<VoiceIpcStatus> | null = null;
+  // At most one original paid read flight, not a request map or independent queue. Its
+  // immutable purpose remains available for coalescing after SDK plaintext is zeroed.
+  private historyRequest: IpcHistoryRequest | null = null;
   private driving = false;
   private retired = false;
   private drained = false;
@@ -1250,12 +1357,90 @@ class RetainedIpcChannel {
     transport: typeof fetch, subtle: SubtleCrypto, clock: VoiceIpcClock, custody: IpcCustody) {
     this.selected = selected; this.native = native; this.transport = transport;
     this.subtle = subtle; this.clock = clock; this.custody = custody;
+    this.execution = new SharedIpcExecution({ begin: () => this.beginActivity(), end: () => this.endActivity() });
     this.handle = Object.freeze({ status: () => this.status(), close: () => {
       this.retire(); this.wake(); return this.completion.promise;
     } });
   }
   belongsTo(selected: SelectedKeyRecord, native: VoiceIpcNative, transport: typeof fetch): boolean {
     return this.selected === selected && this.native === native && this.transport === transport;
+  }
+  owns(owner: VoiceCryptoOwner): boolean { return this.selected.owner === owner; }
+  history(purpose: VoiceIpcPurpose, expectedRow: string | null): Promise<VoiceIpcHistoryOutcome> {
+    if (!this.live()) return Promise.resolve(Object.freeze({ kind: "retired" }));
+    if (expectedRow !== null && !isVoiceIpcActionRow(expectedRow)) throw new Error("invalid voice history row");
+    // Copy exactly four immutable strings, never extra caller properties or a mutable
+    // purpose object. Encode validates canonical hashes/u64 before publishing any request.
+    const selected = Object.freeze({ peer: purpose.peer, join: purpose.join, keyRef: purpose.keyRef, epoch: purpose.epoch });
+    const encoded = encodeVoiceIpcAction(selected, { kind: "begin", retry: false });
+    if (!this.live()) { encoded.body.fill(0); return Promise.resolve(Object.freeze({ kind: "retired" })); }
+    const previous = this.historyRequest;
+    if (previous) {
+      const same = previous.expectedRow === expectedRow && previous.purpose.peer === selected.peer &&
+        previous.purpose.join === selected.join && previous.purpose.keyRef === selected.keyRef && previous.purpose.epoch === selected.epoch;
+      encoded.body.fill(0);
+      return same ? previous.result.promise : Promise.resolve(Object.freeze({ kind: "busy" }));
+    }
+    // History has no constructor path. Preserve the SAME keys/bootstrap and any real
+    // SDK/IO owner already occupying this original driver, including its final cleanup.
+    if (!this.keys || !this.bootstrap || this.request || this.driving) {
+      encoded.body.fill(0); return Promise.resolve(Object.freeze({ kind: "busy" }));
+    }
+    const query: IpcHistoryRequest = { purpose: selected, expectedRow, body: encoded.body, result: signal<VoiceIpcHistoryOutcome>() };
+    this.historyRequest = query;
+    this.start();
+    return query.result.promise;
+  }
+  private beginActivity(): void { if (++this.activity === 1) this.custody.begin(); }
+  private endActivity(): void { if (--this.activity === 0) this.custody.end(); }
+  canLend(owner: VoiceCryptoOwner, key: JoinKeyRecord): boolean {
+    return this.live() && !this.retired && !this.drained && this.keys !== null &&
+      this.selected.owner === owner && this.selected.key === key;
+  }
+  canLink(): boolean { return !this.retired && !this.drained && this.keys !== null && this.linked === null; }
+  link(chain: BrowserChain): void {
+    if (!this.canLink() || chain.channel !== this || chain.owner !== this.selected.owner || chain.key !== this.selected.key) {
+      throw new Error("voice channel chain binding changed");
+    }
+    this.linked = chain;
+  }
+  /** Provider+digest only. Do not wrap the action pump: its RPCs need this same lane. */
+  compute(work: () => Promise<void>): Promise<void> { return this.execution.run(work); }
+  wakeToken(): object { return this.wakeIdentity; }
+  async waitWake(observed: object): Promise<void> {
+    if (this.wakeIdentity !== observed) return;
+    const waiting = this.retry ??= signal<void>();
+    try { await waiting.promise; }
+    finally { if (this.retry === waiting) this.retry = null; }
+  }
+  /** Root's final-retirement snapshot has no notification into the browser. Keep one
+   * original paid cleanup driver alive across temporary native refusals without depending
+   * on remount/availability. Timer and availability resolve the SAME Signal: racing two
+   * asynchronous waiters would leak a waitWake continuation on every expired interval.
+   * This is cleanup only, after actual SDK/IO/linked drainage; it grants no action authority. */
+  private async waitCleanupWake(observed: object): Promise<void> {
+    if (this.wakeIdentity !== observed) return;
+    const waiting = this.retry ??= signal<void>();
+    const deadline = this.clock.now() + IPC_CLEANUP_RETRY_MS;
+    let active = true, timer: unknown = null;
+    const expire = () => {
+      // Cancellation can race a queued callback. An old wait must never wake its successor.
+      if (!active || this.retry !== waiting) return;
+      const remaining = deadline - this.clock.now();
+      if (remaining > 0) timer = this.clock.schedule(expire, Math.max(1, remaining));
+      else waiting.resolve();
+    };
+    try {
+      // Publish the Signal first, then arm ONE timer. The identity recheck also covers a
+      // synchronous availability callback from an injected scheduler during installation.
+      timer = this.clock.schedule(expire, IPC_CLEANUP_RETRY_MS);
+      if (this.wakeIdentity !== observed) waiting.resolve();
+      await waiting.promise;
+    } finally {
+      active = false;
+      if (timer !== null) this.clock.cancel(timer);
+      if (this.retry === waiting) this.retry = null;
+    }
   }
   observe(): void { this.unsubscribe = this.selected.owner.onRetired(() => this.retire()); }
   /** Constructor subscription refusal precedes every RPC/SDK call and may roll back locally. */
@@ -1265,12 +1450,20 @@ class RetainedIpcChannel {
     this.custody.setupDrained(); this.custody.closed(); this.custody.collected();
     this.completion.resolve();
   }
-  wake(): void { this.wakeIdentity = {}; this.retry?.resolve(); }
+  wake(): void {
+    this.wakeIdentity = {}; this.retry?.resolve();
+    // Availability is one bounded wake for retained rows, never a new computation or timer.
+    if (this.linked) for (const record of this.linked.records.values()) record.retry?.resolve();
+  }
   private live(): boolean { return !this.retired && this.selected.owner.isCurrent(); }
   private check(): void { if (!this.live()) throw new Error("voice channel closed"); }
   private retire(): void {
     this.retired = true; this.controller?.abort(); this.wake();
+    this.linked?.handle.close();
     this.request?.resolve(Object.freeze({ kind: "retired" })); this.request = null;
+    // Early observation is not physical completion. Keep the SAME query/body in State and
+    // the existing driver until actual SDK/read/cancellation and native cleanup finish.
+    this.historyRequest?.result.resolve(Object.freeze({ kind: "retired" }));
     if (this.drained) this.collect(); else this.start();
   }
   private collect(): void {
@@ -1278,6 +1471,7 @@ class RetainedIpcChannel {
     this.collected = true; this.unsubscribe(); this.custody.collected();
   }
   private status(): Promise<VoiceIpcStatus> {
+    if (this.historyRequest) return Promise.resolve(Object.freeze({ kind: this.live() ? "uncertain" : "retired" }));
     this.wake();
     if (!this.live()) return Promise.resolve(Object.freeze({ kind: "retired" }));
     if (this.request) return this.request.promise;
@@ -1288,22 +1482,39 @@ class RetainedIpcChannel {
     if (this.driving || this.drained) return;
     // Publish ownership before scheduling a microtask; reentrant End cannot create a second
     // driver. Counts include the actual flight, while its prepaid position also covers idle.
-    this.driving = true; this.custody.begin();
+    this.driving = true; this.beginActivity();
     void Promise.resolve().then(() => this.drive());
   }
   private async drive(): Promise<void> {
     let outcome: VoiceIpcStatus = Object.freeze({ kind: "uncertain" });
+    const history = this.historyRequest;
+    let historical: VoiceIpcHistoryOutcome = Object.freeze({ kind: "uncertain" });
     try {
-      if (this.live() && await this.setup()) outcome = await this.exchange();
+      await this.execution.run(async () => {
+        if (history) {
+          if (this.live() && this.keys && this.bootstrap) historical = await this.exchange(history);
+        } else if (this.live() && await this.setup()) outcome = await this.exchange(null);
+      });
     } catch {
       // Engine/setup validation failure cannot restart construction. Transport/body failures
       // after keys exist remain retryable using fresh physical counters on this SAME Session.
-      if (!this.keys) { this.retired = true; outcome = Object.freeze({ kind: "failed" }); }
+      if (!this.keys) { this.retired = true; outcome = Object.freeze({ kind: "failed" }); historical = Object.freeze({ kind: "failed" }); }
     } finally {
-      if (!this.live()) await this.cleanup();
+      history?.body.fill(0); // the shared execution promise includes real SDK/read cancellation
+      if (!this.live()) {
+        if (history) historical = Object.freeze({ kind: "retired" });
+        this.linked?.handle.close();
+        // Release the physical lane BEFORE waiting for linked SDK/settlement. A provider
+        // may already be queued behind our aborting read and still need this SAME position.
+        // Framing keys and the selected-key/control payment remain until cleanup is last.
+        if (this.linked) await this.linked.drained.promise;
+        await this.execution.run(() => this.cleanup());
+      }
       if (this.terminal) outcome = this.terminal;
       this.request?.resolve(outcome); this.request = null;
-      this.driving = false; this.custody.end(); this.collect();
+      history?.result.resolve(historical);
+      if (this.historyRequest === history) this.historyRequest = null;
+      this.driving = false; this.endActivity(); this.collect();
     }
   }
   private async setup(): Promise<boolean> {
@@ -1365,16 +1576,18 @@ class RetainedIpcChannel {
       return Object.freeze({ requestMac, requestBody, responseMac, responseBody });
     } finally { shared?.fill(0); seed?.fill(0); }
   }
-  private async exchange(): Promise<VoiceIpcStatus> {
+  private exchange(query: null): Promise<VoiceIpcStatus>;
+  private exchange(query: IpcHistoryRequest): Promise<VoiceIpcActionReply>;
+  private async exchange(query: IpcHistoryRequest | null): Promise<VoiceIpcStatus | VoiceIpcActionReply> {
     this.check();
     const keys = this.keys!, bootstrap = this.bootstrap!;
     if (this.tx === 0xffff_ffff_ffff_ffffn) { this.retired = true; throw new Error("voice channel exhausted"); }
     // Debit BEFORE invoking WebCrypto. Even a synchronous failure, refused fetch or lost
     // response permanently spends this physical TX; logical retries never reconstruct it.
-    const request: VoiceIpcHeader = Object.freeze({ direction: 0, operation: 9, kind: 0,
-      slot: bootstrap.slot, sequence: ++this.tx, logical: bootstrap.session, length: 65 });
-    const header = encodeVoiceIpcHeader(request), plaintext = new Uint8Array(49);
-    plaintext[0] = 1; plaintext.set(ipcBytes(bootstrap.session), 1); plaintext.set(this.hash!, 17);
+    const request: VoiceIpcHeader = Object.freeze({ direction: 0, operation: query ? 8 : 9, kind: 0,
+      slot: bootstrap.slot, sequence: ++this.tx, logical: query ? "0".repeat(32) : bootstrap.session, length: query ? 122 : 65 });
+    const header = encodeVoiceIpcHeader(request), plaintext = query ? query.body : new Uint8Array(49);
+    if (!query) { plaintext[0] = 1; plaintext.set(ipcBytes(bootstrap.session), 1); plaintext.set(this.hash!, 17); }
     let sealed: Uint8Array<ArrayBuffer> | null = null, opened: Uint8Array<ArrayBuffer> | null = null;
     let body: Uint8Array<ArrayBuffer> | null = null, response: Response | null = null;
     const controller = new AbortController(); this.controller = controller;
@@ -1404,7 +1617,8 @@ class RetainedIpcChannel {
       let incoming: ReturnType<typeof decodeVoiceIpcAdmission> | null = null;
       body = await readVoiceIpcResponse(response, controller.signal, async admission => {
         const decoded = decodeVoiceIpcAdmission(admission);
-        if (decoded.header.operation !== 9 || decoded.header.kind !== 0 || decoded.header.length !== 19) throw new Error("voice status refused");
+        if (decoded.header.operation !== request.operation || decoded.header.kind !== 0 ||
+            (query ? decoded.header.length !== 19 && decoded.header.length !== 258 : decoded.header.length !== 19)) throw new Error("voice control reply refused");
         const aad = voiceIpcResponseAad(decoded.header, request);
         if (!await this.step(this.subtle.verify("HMAC", keys.responseMac, decoded.tag, aad))) throw new Error("voice response refused");
         if (decoded.header.sequence <= this.rx) throw new Error("voice response replayed");
@@ -1417,6 +1631,9 @@ class RetainedIpcChannel {
       if (!received) throw new Error("voice response refused");
       opened = new Uint8Array(await this.subtle.decrypt({ name: "AES-GCM", iv: voiceIpcNonce(received.header), additionalData: voiceIpcResponseAad(received.header, request) }, keys.responseBody, body));
       this.check();
+      // History closed/stopped are action-history refusals, never channel closure, setup
+      // acknowledgement, a refund, Root readiness or permission to unlink a linked chain.
+      if (query) return decodeVoiceIpcActionReply(opened, query.expectedRow);
       if (opened.length !== 3 || opened[0] !== 1 || (opened[1] !== 1 && opened[1] !== 2) || opened[2] > 1) throw new Error("voice status refused");
       // This proves only native setup drainage. Native never asserts browser/RTC readiness.
       this.custody.setupDrained();
@@ -1447,7 +1664,7 @@ class RetainedIpcChannel {
       try { await this.native.settleSetup(this.selected.owner.token, this.selected.executor); break; }
       catch {
         this.request?.resolve(Object.freeze({ kind: "uncertain" })); this.request = null;
-        if (this.wakeIdentity === observed) { this.retry = signal<void>(); await this.retry.promise; this.retry = null; }
+        await this.waitCleanupWake(observed);
       }
     }
     this.keys = null; this.construction = null;
@@ -1459,10 +1676,11 @@ class RetainedIpcChannel {
       try { await this.native.collectChannel(this.selected.owner.token, this.selected.executor); break; }
       catch {
         this.request?.resolve(Object.freeze({ kind: "uncertain" })); this.request = null;
-        if (this.wakeIdentity === observed) { this.retry = signal<void>(); await this.retry.promise; this.retry = null; }
+        await this.waitCleanupWake(observed);
       }
     }
     this.drained = true;
+    this.linked = null;
     this.custody.setupDrained(); this.custody.closed(); this.completion.resolve();
   }
 }
@@ -1479,7 +1697,7 @@ export function windowVoiceCryptoBroker(
   const host = window as Record<symbol, unknown>;
   const previous = host[BROKER] as VoiceCryptoBroker | undefined;
   if (previous) {
-    if (previous.version !== 9 || typeof previous.nativeChannel !== "function" || typeof previous.run !== "function" || typeof previous.selectJoinKey !== "function" || typeof previous.retrySelectedJoinKeys !== "function" ||
+    if (previous.version !== 12 || typeof previous.recoverChannelHistory !== "function" || typeof previous.prepareChainFromChannel !== "function" || typeof previous.nativeChannel !== "function" || typeof previous.run !== "function" || typeof previous.selectJoinKey !== "function" || typeof previous.retrySelectedJoinKeys !== "function" ||
         typeof previous.registerProtectedConfirmation !== "function" ||
         typeof previous.registerProtectedDerivation !== "function" || typeof previous.registerConfirmation !== "function" || typeof previous.createPair !== "function") {
       throw new Error("voice crypto broker version changed; reload required");

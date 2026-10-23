@@ -1,5 +1,137 @@
 # Next voice milestone: native result recovery
 
+## Current proof retention and cleanup retry candidate (22 October)
+
+The isolated final-proof checkout follows `e560d319`. Compacted final-intent history retains
+the same already-paid Phase and original Root witness. Native snapshots, channel preflight
+and independent history GC preserve unready proof; compaction still drops Live outside locks
+before requiring Root readiness. Ordinary continuation retains none and ClosedPending cannot
+invent Root retirement. All199 focused handoff tests and current complete native676/frontend2456 gates pass,
+with static/build/startup/packaged public-metadata checks. Root3254 retains identical-input
+sourcee560d319 provenance. HANDOVER records exact boundaries; no action-flow acceptance follows.
+
+Broker v12's existing setup/channel cleanup retries temporary native refusals using one
+injected-Clock timer and the same availability Signal/paid driver. Large jumps, stale timer
+callbacks and pending RPCs cannot create duplicate work. The focused browser/request/reply
+suite passes 139/139; HANDOVER records source-specific evidence. General action retries remain
+availability-driven, and older retained brokers refuse HMR adoption.
+
+Still required: authorized factory/input/admission/result/receipt ACK/settlement/phase/final
+adapters and dispatch; authenticated post-End final exchange and original keys through final
+issuance/ACK/retry; normal production Actor/MLS pair success and combined real-WebView/native
+action acceptance. Final dispatch stays disabled. No live V2/RTC, relay or physical acceptance
+is established by these local custody/cleanup improvements.
+
+Before enabling final dispatch, add native original-row issuance/ACK state to channel preflight.
+Its current local-Drained/Root-ready condition is not proof of final delivery: setup cleanup could
+otherwise close Control before the final reply/ACK. Preserve the independent actual physical-owner
+collection proof. ClosedPending with actor_handoff=true cannot mint whole-Workflow proof: Pair
+may have been published before Derive/attachment failed, and this local tombstone owns no Root
+closure capability. Keep final proof separate from the242-byte read-only history response.
+
+The browser action pump must settle its exact action before waiting for whole-chain/final
+retirement. driveAction.finally awaits settleAction before clearing chain.running; making that
+settlement wait for chain drainage would deadlock. Authenticated post-End cleanup must preserve
+original keys and avoid reacquiring the execution lane recursively from current cleanup.
+
+Implement the next derivation delivery slice in this order:
+
+1. Define canonical Input, admitted-permit and separate final-proof replies. The242-byte history
+   response is observation, not an engine-admission permit; it cannot carry another32-byte proof
+   inside its256-byte allowance. Define browser binding.chain as a scoped adapter identity:
+   Root ProtectedCryptoBinding has no public chain serial. Distinguish ordinary16KiB phase
+   return from terminal whole-plan retirement explicitly in the request grammar.
+2. Prepay browser intake before materializing the Input response, then bind its exact action,
+   protected context, points/transcript and engine bytes. Existing prepareChainFromChannel
+   receives input before charging its chain, so it cannot alone fund the earlier Data read.
+3. Compose native factory/Input/result/metadata adapters within the existing listener/codec/
+   task payments. Retain actual Incoming/physical hold through detached factory completion,
+   and actual CryptoInputLease/paid Phase copies through Input response collection. ACK must
+   compare the native digest and pass the actual retained receipt to Root. Metadata cleanup
+   must not hold Work/copies while waiting for their own drainage. Actor refusal stays a refusal.
+4. Prove the complete original-Session cycle under lost replies, End, cancellation, full group/
+   process pressure and completed-but-uncollected output ownership. Keep action settlement
+   independent of whole-chain finalization and add bounded action-cleanup retry coordination.
+5. Establish successful actual Actor discovery before enablement: voice_endpoint/pair.rs requires
+   the actual participant grant, original implicit watcher and proven peer record. The current
+   protected_start fixture reaches private observer state; synthetic grants/selector IDs cannot
+   establish normal ingress. Native adapter/issuance tests can proceed independently, but a
+   production successful pilot needs the actual signed-discovery Actor fixture.
+6. Enable only the exact derivation shapes after those contracts, composed memory guards and
+   acceptance pass. A terminal derivation-only pilot ends its confirmation plan; it cannot
+   claim completed Derive->Hello/Proof/Finish continuation, SDP phase transfer or RTC readiness.
+
+Historical checkpoints below retain their own source scope and do not supersede current status.
+
+
+## Current read-only history integration (22 October)
+
+Unpublished39fb329c supplies original Workflow retirement observation/native snapshot; the
+following WIP connects original-session existing-history recovery end to end. Native production
+now serves Status9 plus context-backed Begin8(false), never factory admission/retry. Browser
+v11 recoverChannelHistory uses its exact established channel/owner, original keys/counters and
+shared paid driver, with canonical242B metadata/3B refusals. Same-query Promise coalescing,
+competing-query busy, authenticated malformed-reply RX spending and retained actual work after
+End are covered. Native focused192 and browser/request/reply130 tests, Svelte check, Root/native strict
+Clippy/format, ambient/deny and native check pass; actual-diff review has no remaining
+blocker/high/medium. Fresh complete local gates also pass: Root3254, native669 including5 ACL, frontend2447;
+Svelte/build/tenflows, native builds/startup and packaged public-metadata probe pass. This
+establishes no normal Actor/MLS/WebView action or live V2/media acceptance. See HANDOVER. HANDOVER is the source/evidence ledger.
+
+Still required: authorized factory, input, admission, result, exact receipt ACK, settlement,
+phase/final adapters and dispatch, final-proof retention across compaction, bounded coordination
+and normal production MLS-pair Actor/browser success. Generic sealed/opened/rejected codec
+variants do not implement their effect adapters. localDrained is not whole Workflow drainage.
+No live V2/RTC/relay/combined/physical acceptance follows. Older checkpoint sections below are
+historical source-specific status and do not supersede this current candidate.
+
+## Original variable-retirement observation candidate (22 October)
+
+The latest unpublished Root/native slice separates ordinary16KiB return from final96KiB plan
+retirement. Original consuming-loan provenance, a LAST field publisher and a non-Clone snapshot
+witness replace missing-row/weak-count inference. Root focus4 passes30 tests with2040/2048 retained
+bytes and8/8 caller witness. Native Phase retains the SAME witness in paid State before local
+completion; its separate snapshot has no wake/scheduling guarantee. Native focus11 passes179 tests
+including unchanged native phase/codec layout guards. Root/native strict Clippy, both format
+checks, ambient/deny and native check pass; full-suite gates remain pending.
+HANDOVER.md records the exact boundaries. Existing compaction may drop this witness; final-proof
+capture/transfer and bounded retry coordination still need implementation. Production remains
+Status only, with no normal successful Actor/browser handoff, live V2 or media acceptance claim.
+
+## Explicit native Pending closure candidate (22 October)
+
+The latest unpublished checkpoint adds an inactive exact authenticated ClosePhase adapter for
+native Pending only. Closing/ClosedPending explicitly terminate local preparation without
+asserting Root publication absence, engine settlement or Phase/96KiB Workflow drainage.
+Indexed native identity, actual owner destruction and physical last-owner GC remain distinct
+boundaries. Native handoff177 focused tests and strict Clippy pass; full gates remain pending.
+HANDOVER.md records source/provenance and unchanged capacity measurements. Browser closure
+wiring, actual action dispatch and normal proven-pair Actor acceptance are still unfinished;
+the production service continues to serve Status only.
+
+## Active action transport checkpoint (22 October)
+
+See the current opening section of HANDOVER.md for exact source and focused/full gate scope.
+PR48 published7dfbb797 contains the fully validated ownership work; the isolated dispatch
+checkout adds physical shutdown collection, fixed shared Rust/TypeScript request vectors,
+in-place result-body transfer, inactive typed derivation-result execution and Drained-only
+native history collection. The latest focused handoff run passes168 tests. It does not enable
+an opcode or establish normal successful Actor/MLS or browser action delivery. Fresh complete
+native/root gates and rebuild/startup remain pending for this unpublished implementation.
+
+Completed compared with the historical design below: one original browser execution lane is
+shared by the linked provider/RPC, full confirmation retirement uses the original consuming
+HandoffLoan capability, actual Route closure is fenced at factory/result admission, detached
+native result ownership is retained through physical shutdown, and compacted native history
+has a private physical-collection proof and monotonic bounded slot reuse. Explicit channel
+closure preserves Control until every original action is compacted under the shared UI commit.
+
+Still open: truthful Pending closure (Root publication may be uncertain), actual opcode and
+browser adapter wiring, exact phase/final-delivery acknowledgements, normal proven-pair Actor
+success and complete workflow/input/lower/copy drainage evidence. The production service
+continues to serve Status only. Historical sections below keep their original source claims;
+they do not supersede the current checkpoint or imply full live V2/media/physical acceptance.
+
 ## Native weak-context and lost-reply checkpoint (22 October)
 
 Frozen runtime source4db3f8249ef7960e11cc40febd2b81f6c3a6018e in

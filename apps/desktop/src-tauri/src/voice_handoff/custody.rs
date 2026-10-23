@@ -2,11 +2,14 @@
 //! exchange positions are separate: holding one through logical settlement would deadlock the
 //! subsequent result/settlement requests. Completed worker/result owners must retain their copy
 //! leases until collection; browser input/engine drainage is a separate selected-executor gate.
+use catcoms_app::{VoiceConfirmationBody, VOICE_CONFIRMATION_BODY_METADATA_BYTES};
 use catcoms_sync::voice_v2::crypto_actions::{
-    CryptoAction, CryptoInput, CryptoInputLease, HandoffLoan, ProtectedCryptoBinding,
+    ConfirmationRetirement, CryptoAction, CryptoInput, CryptoInputLease, HandoffLoan,
+    ProtectedCryptoBinding,
 };
 use catcoms_sync::voice_v2::resources::{Credit, ResourceKind, Resources};
 use catcoms_sync::voice_v2::{CallLease, Scope, VoiceError};
+use std::ops::Range;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use tokio::sync::Notify;
@@ -69,6 +72,8 @@ impl PreparedPhase {
                 copies: 0,
                 bytes: 0,
                 loan: Some(loan),
+                retire_confirmation: false,
+                retirement: None,
             }),
             drained: AtomicBool::new(false),
             changed: Notify::new(),
@@ -89,6 +94,19 @@ struct State {
     copies: usize,
     bytes: usize,
     loan: Option<HandoffLoan>,
+    retire_confirmation: bool,
+    // Original fixed Root witness, never Workflow. Keep it in paid native state across
+    // cancelled/lost callers; no handshakes/IDs or later factory can reconstruct this proof.
+    retirement: Option<ConfirmationRetirement>,
+}
+/// Snapshot of final-plan retirement, separate from this Phase's LOCAL16KiB loan return.
+/// This supplies no wakeup or scheduling guarantee and is not a browser/final-delivery proof.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ConfirmationStatus {
+    NotRequested,
+    Closing,
+    Draining,
+    Drained,
 }
 /// This fixed owner has no strong Action/Input references. Drained history can keep it alive
 /// without retaining the original Workflow. Do not mistake this capacity binding for first-
@@ -132,6 +150,18 @@ impl Buffer {
         &mut self.bytes
     }
 }
+/// Pin this exact paid buffer, including its original backing capacity, without extracting
+/// or duplicating its Vec. Drop the real buffer before the extra actor metadata contribution.
+struct ResultOwner {
+    buffer: Buffer,
+    range: Range<usize>,
+    _metadata: CopyCustody,
+}
+impl AsRef<[u8]> for ResultOwner {
+    fn as_ref(&self) -> &[u8] {
+        &self.buffer.bytes()[self.range.clone()]
+    }
+}
 impl Drop for Buffer {
     fn drop(&mut self) {
         // Best effort within this actual owned buffer, before its custody can report drainage.
@@ -155,6 +185,36 @@ impl CopyCustody {
     }
 }
 impl Phase {
+    /// Reserve actor metadata BEFORE taking the original result buffer. A local refusal
+    /// returns that exact Buffer, allowing an exact retry with no second SDK run or copy.
+    /// Call outside Root/native locks: pinning runs this owner's AsRef and refusal drops
+    /// may release actual credits. This trusted Rust owner is not an IPC constructor.
+    pub(crate) fn result_body(
+        self: &Arc<Self>,
+        buffer: Buffer,
+        range: Range<usize>,
+    ) -> Result<VoiceConfirmationBody, (VoiceError, Buffer)> {
+        if !Arc::ptr_eq(&buffer._custody.phase, self)
+            || range.start > range.end
+            || range.end > buffer.bytes().len()
+            || range.len() > 528
+        {
+            return Err((VoiceError::Bounds, buffer));
+        }
+        let metadata = match self.copy(VOICE_CONFIRMATION_BODY_METADATA_BYTES) {
+            Ok(metadata) => metadata,
+            Err(error) => return Err((error, buffer)),
+        };
+        let owner = ResultOwner {
+            buffer,
+            range,
+            _metadata: metadata,
+        };
+        // Constructor layout/length bounds are established above and by the concrete guard
+        // below. No recoverable capacity refusal occurs after moving the original buffer.
+        // Never add a fallible admission between that move and pinning without returning it.
+        Ok(VoiceConfirmationBody::from_owner(owner).expect("validated paid result owner"))
+    }
     /// Capacity binding for the separately prepaid physical channel, never Root effect authority.
     pub(super) fn uses_pool(&self, resources: &Arc<Resources>, group: [u8; 32]) -> bool {
         Arc::ptr_eq(&self.resources, resources) && self.scope.group == group
@@ -202,6 +262,24 @@ impl Phase {
     pub(crate) fn is_drained(&self) -> bool {
         self.drained.load(Ordering::Acquire)
     }
+    /// Read only the original retained state/atomic: no grant, Clock, allocation or Root call.
+    /// Ordinary Phase drainage remains NotRequested even when End independently closes Root.
+    /// Final-intent compaction retains this SAME paid Phase/witness in the native Row.
+    /// Missing caller handles never establish variable retirement.
+    pub(crate) fn confirmation_status(&self) -> ConfirmationStatus {
+        let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        if !state.retire_confirmation {
+            ConfirmationStatus::NotRequested
+        } else if let Some(retirement) = &state.retirement {
+            if retirement.is_drained() {
+                ConfirmationStatus::Drained
+            } else {
+                ConfirmationStatus::Draining
+            }
+        } else {
+            ConfirmationStatus::Closing
+        }
+    }
     /// The outer serial control-flight owner coalesces the sole cleanup waiter. Its Notified
     /// complete future is prepaid in fixed metadata; do not expose this as unbounded invoke
     /// waiters. The layout test includes this async wrapper, not merely Notify's inner future.
@@ -230,22 +308,59 @@ impl Phase {
         };
         self.finish_draining(loan);
     }
-    fn take_draining(state: &mut State) -> Option<HandoffLoan> {
+    /// Derivation-only pilot closure AFTER selected SDK/RPC drainage and native settlement.
+    /// Unlike ordinary close, explicitly retire the ORIGINAL confirmation plan when the last
+    /// actual local copy owner returns its loan. Root retirement runs outside State below.
+    /// This is not SDP phase transfer or an assertion that other Root lower/input owners drained.
+    pub(crate) fn close_confirmation(&self) -> Result<(), VoiceError> {
+        let loan = {
+            let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+            if matches!(state.stage, Stage::Draining | Stage::Drained) && !state.retire_confirmation
+            {
+                // An ordinary close already returned the only capability. Do not relabel its
+                // historical metadata as full-plan closure or borrow a replacement loan.
+                return Err(VoiceError::Unauthorized);
+            }
+            state.retire_confirmation = true;
+            if state.stage == Stage::Open {
+                state.stage = Stage::Closing;
+            }
+            Self::take_draining(&mut state)
+        };
+        self.finish_draining(loan);
+        Ok(())
+    }
+    fn take_draining(state: &mut State) -> Option<(HandoffLoan, bool)> {
         if state.stage == Stage::Closing && state.copies == 0 {
             state.stage = Stage::Draining;
-            Some(state.loan.take().expect("one original phase loan"))
+            Some((
+                state.loan.take().expect("one original phase loan"),
+                state.retire_confirmation,
+            ))
         } else {
             None
         }
     }
-    fn finish_draining(&self, loan: Option<HandoffLoan>) {
-        let Some(loan) = loan else { return };
-        // Never publish drained before the actual credit/Workflow last drop. A concurrent
-        // close sees Draining and cannot jump ahead of this unique retirement owner.
-        drop(loan);
+    fn finish_draining(&self, loan: Option<(HandoffLoan, bool)>) {
+        let Some((loan, retire_confirmation)) = loan else {
+            return;
+        };
+        // This completion means LOCAL loan return, not the whole Workflow's last drop.
+        // A concurrent close sees Draining and cannot jump ahead of this unique owner.
+        // Root close/drop runs outside State; returned proof stays in SAME paid native State.
+        let retirement = if retire_confirmation {
+            Some(loan.retire_confirmation_observed())
+        } else {
+            drop(loan);
+            None
+        };
         {
             let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
             debug_assert!(state.stage == Stage::Draining && state.copies == 0 && state.bytes == 0);
+            debug_assert!(state.retirement.is_none());
+            // Publish original proof BEFORE local completion/notification. A lost observer
+            // can retry the snapshot without taking or replacing this affine witness.
+            state.retirement = retirement;
             state.stage = Stage::Drained;
         }
         self.drained.store(true, Ordering::Release);
@@ -312,6 +427,235 @@ mod tests {
             assert_eq!(state.bytes, remaining / 2);
             assert_eq!(phase.is_drained(), remaining == 0);
         }
+        assert!(phase.is_drained());
+    }
+
+    #[test]
+    fn explicit_confirmation_close_waits_for_actual_copies_then_retires_the_original_plan() {
+        // Keep the actual join/controller alive: End must not supply the retirement being
+        // tested. A locally returned 16KiB loan alone leaves the 96KiB Workflow open.
+        let (coordinator, _join, action, phase) = phase_fixture();
+        let pool = coordinator.runtime().resources();
+        let copy = phase.buffer(100).unwrap();
+        assert_eq!(
+            phase.confirmation_status(),
+            ConfirmationStatus::NotRequested
+        );
+        action.admit_engine(action.engine_bytes()).unwrap();
+        action.settle_engine();
+        let held = pool.counts();
+        phase.close_confirmation().unwrap();
+        phase.close_confirmation().unwrap();
+        assert_eq!(phase.confirmation_status(), ConfirmationStatus::Closing);
+        assert!(!phase.is_drained());
+        assert_eq!(pool.counts(), held);
+        assert_eq!(phase.copy(0).err(), Some(VoiceError::Unauthorized));
+        drop(copy);
+        assert!(phase.is_drained());
+        assert_eq!(phase.confirmation_status(), ConfirmationStatus::Drained);
+        assert!(pool.counts().0 <= held.0 - 96 * 1024);
+        let retired = pool.counts();
+        phase.close_confirmation().unwrap();
+        phase.close();
+        assert_eq!(pool.counts(), retired, "replay cannot retire another plan");
+    }
+
+    #[test]
+    fn original_root_input_delays_confirmation_snapshot_after_local_phase_drains() {
+        let (coordinator, _join, action, phase) = phase_fixture();
+        let pool = coordinator.runtime().resources();
+        // This is an ACTUAL Root input, intentionally outside native Phase copy bookkeeping.
+        // Returning every native copy therefore cannot prove this owner's retirement.
+        let input = action.input().unwrap();
+        action.admit_engine(action.engine_bytes()).unwrap();
+        action.settle_engine();
+        let pressure = pool
+            .charge(
+                action.protected_binding().unwrap().scope.group,
+                256 * 1024 - pool.counts().0,
+                ResourceKind::Retained,
+            )
+            .unwrap();
+        phase.close_confirmation().unwrap();
+        assert!(phase.is_drained(), "local16KiB loan has actually returned");
+        let pending = pool.counts();
+        for _ in 0..8 {
+            assert_eq!(phase.confirmation_status(), ConfirmationStatus::Draining);
+            phase.close_confirmation().unwrap();
+            phase.close();
+            assert_eq!(
+                pool.counts(),
+                pending,
+                "snapshot/replay admits no replacement capacity"
+            );
+        }
+        // Drop the querying native handle and resolve through the SAME retained phase,
+        // rather than moving the affine Root proof into cancellable caller work.
+        let retained = phase.clone();
+        drop(phase);
+        drop(input);
+        assert_eq!(retained.confirmation_status(), ConfirmationStatus::Drained);
+        let completed = pool.counts();
+        assert_eq!(retained.confirmation_status(), ConfirmationStatus::Drained);
+        assert_eq!(pool.counts(), completed);
+        drop(pressure);
+    }
+
+    #[test]
+    fn original_final_retirement_ticket_cannot_be_overtaken_or_replaced() {
+        let (_coordinator, _join, action, phase) = phase_fixture();
+        action.settle_engine();
+        // Park the SAME production transition ticket before its actual Root close/drop.
+        // Another close sees intent, but cannot publish a witness or completion ahead of it.
+        let loan = {
+            let mut state = phase.state.lock().unwrap();
+            state.retire_confirmation = true;
+            state.stage = Stage::Closing;
+            Phase::take_draining(&mut state)
+        };
+        assert!(loan.is_some());
+        phase.close_confirmation().unwrap();
+        phase.close();
+        assert!(!phase.is_drained());
+        assert_eq!(phase.confirmation_status(), ConfirmationStatus::Closing);
+        assert!(phase.state.lock().unwrap().retirement.is_none());
+        phase.finish_draining(loan);
+        assert!(phase.is_drained());
+        assert_eq!(phase.confirmation_status(), ConfirmationStatus::Drained);
+        phase.close_confirmation().unwrap();
+        assert_eq!(phase.confirmation_status(), ConfirmationStatus::Drained);
+        assert!(phase.state.lock().unwrap().retirement.is_some());
+    }
+
+    #[test]
+    fn result_body_uses_prepaid_phase_capacity_and_its_actual_owner_delays_retirement() {
+        let (coordinator, _join, action, phase) = phase_fixture();
+        let pool = coordinator.runtime().resources();
+        let pressure = pool
+            .charge(
+                action.protected_binding().unwrap().scope.group,
+                256 * 1024 - pool.counts().0,
+                ResourceKind::Retained,
+            )
+            .unwrap();
+        let full = pool.counts();
+        let mut buffer = phase.buffer(528).unwrap();
+        buffer.bytes_mut().fill(9);
+        let body = phase
+            .result_body(buffer, 16..528)
+            .unwrap_or_else(|_| panic!("prepaid body"));
+        assert_eq!(
+            pool.counts(),
+            full,
+            "result pinning takes no ordinary group capacity"
+        );
+        {
+            let state = phase.state.lock().unwrap();
+            assert_eq!(
+                (state.copies, state.bytes),
+                (2, 528 + VOICE_CONFIRMATION_BODY_METADATA_BYTES)
+            );
+        }
+        action.settle_engine();
+        phase.close_confirmation().unwrap();
+        assert!(!phase.is_drained());
+        drop(body);
+        assert!(phase.is_drained());
+        assert!(pool.counts().0 <= full.0 - 96 * 1024);
+        drop(pressure);
+    }
+
+    #[test]
+    fn result_body_capacity_refusal_returns_the_exact_buffer_for_retry_without_a_copy() {
+        let (_coordinator, _join, _action, phase) = phase_fixture();
+        let mut buffer = phase.buffer(528).unwrap();
+        buffer.bytes_mut()[17] = 91;
+        let pointer = buffer.bytes().as_ptr();
+        let pressure = phase
+            .buffer(16 * 1024 - 528 - VOICE_CONFIRMATION_BODY_METADATA_BYTES + 1)
+            .unwrap();
+        let (error, buffer) = match phase.result_body(buffer, 16..528) {
+            Err(refusal) => refusal,
+            Ok(_) => panic!("expected local capacity refusal"),
+        };
+        assert_eq!(error, VoiceError::Capacity);
+        assert_eq!(buffer.bytes().as_ptr(), pointer);
+        assert_eq!(buffer.bytes()[17], 91);
+        drop(pressure);
+        let body = phase
+            .result_body(buffer, 16..528)
+            .unwrap_or_else(|_| panic!("exact retry"));
+        phase.close();
+        assert!(!phase.is_drained());
+        drop(body);
+        assert!(phase.is_drained());
+    }
+
+    #[test]
+    fn result_body_rejects_foreign_phase_bad_ranges_and_lengths_before_taking_the_buffer() {
+        let (_coordinator, _join, _action, phase) = phase_fixture();
+        let (_other, _other_join, _other_action, foreign) = phase_fixture();
+        let buffer = phase.buffer(600).unwrap();
+        let pointer = buffer.bytes().as_ptr();
+        let (error, mut buffer) = foreign.result_body(buffer, 0..528).err().unwrap();
+        assert_eq!(error, VoiceError::Bounds);
+        let reversed = Range { start: 9, end: 8 }; // deliberately invalid input, not iteration
+        for range in [reversed, 0..601, 0..529] {
+            let (error, returned) = phase.result_body(buffer, range).err().unwrap();
+            assert_eq!(error, VoiceError::Bounds);
+            assert_eq!(returned.bytes().as_ptr(), pointer);
+            buffer = returned;
+        }
+        drop(buffer);
+        let layout = std::alloc::Layout::new::<ResultOwner>();
+        assert!(layout.size() <= 128 && layout.align() <= 64);
+    }
+
+    #[test]
+    fn ordinary_phase_drainage_cannot_later_be_relabelled_as_confirmation_retirement() {
+        let (coordinator, _join, action, phase) = phase_fixture();
+        action.settle_engine();
+        let held = coordinator.runtime().resources().counts();
+        phase.close();
+        assert!(phase.is_drained());
+        assert_eq!(
+            phase.confirmation_status(),
+            ConfirmationStatus::NotRequested
+        );
+        assert_eq!(coordinator.runtime().resources().counts(), held);
+        assert_eq!(phase.close_confirmation(), Err(VoiceError::Unauthorized));
+        assert_eq!(
+            phase.confirmation_status(),
+            ConfirmationStatus::NotRequested
+        );
+        assert_eq!(coordinator.runtime().resources().counts(), held);
+    }
+
+    #[test]
+    fn confirmation_close_can_escalate_only_before_the_original_loan_is_taken() {
+        let (coordinator, _join, action, phase) = phase_fixture();
+        let copy = phase.copy(0).unwrap();
+        action.settle_engine();
+        let held = coordinator.runtime().resources().counts();
+        phase.close();
+        assert!(!phase.is_drained());
+        phase.close_confirmation().unwrap();
+        drop(copy);
+        assert!(phase.is_drained());
+        assert!(coordinator.runtime().resources().counts().0 <= held.0 - 96 * 1024);
+
+        let (_coordinator, _join, _action, phase) = phase_fixture();
+        let loan = {
+            let mut state = phase.state.lock().unwrap();
+            state.stage = Stage::Closing;
+            Phase::take_draining(&mut state)
+        };
+        assert_eq!(phase.close_confirmation(), Err(VoiceError::Unauthorized));
+        assert!(
+            !phase.is_drained(),
+            "another owner still holds the ordinary retiring loan"
+        );
+        phase.finish_draining(loan);
         assert!(phase.is_drained());
     }
 

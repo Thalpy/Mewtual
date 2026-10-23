@@ -25,7 +25,7 @@ pub(super) async fn admit_inner(
     let executor = executor(executor_id)?;
     // Collection must be reachable before charging a new generation, including when the
     // final detached old owner drained after its collection reply. No live row is evicted.
-    state.voice_channels.collect_retired();
+    state.voice_channels.collect_retired(&state.voice_handoff);
     let binding = state
         .voice_authority
         .lock()

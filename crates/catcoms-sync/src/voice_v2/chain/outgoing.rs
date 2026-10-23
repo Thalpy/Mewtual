@@ -25,7 +25,7 @@ impl Workflow {
         if state.closed
             || !self.live.is_live()
             || !self.binding.live()
-            || !Arc::ptr_eq(resources, &self.resources)
+            || !Arc::ptr_eq(resources, self.binding.resources())
             || context.scope != self.binding.scope
             || context.epoch != self.binding.epoch
             || context.local != self.binding.local
