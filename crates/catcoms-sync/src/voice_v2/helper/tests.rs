@@ -652,6 +652,12 @@ fn duplicates_changed_permits_and_lost_waiters_never_restore_edge_attempts() {
         );
         assert!(f.admit(incoming.clone()).unwrap().cached);
         drop(lower);
+        // Contract (voice_schedule review): a failed edge also waits its retry gap, so a
+        // scheduler pumping after every completion cannot send all attempts back to back.
+        if attempt < 3 {
+            assert!(f.jobs().is_empty(), "the retry gap holds the next attempt");
+            f.clock.advance_ms(500);
+        }
     }
     assert!(f.jobs().is_empty());
     let mut changed = incoming;

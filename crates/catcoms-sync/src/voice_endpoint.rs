@@ -1,5 +1,7 @@
-//! Native endpoint lifecycle and public controls. Normal kind28 dispatch stays disabled until encrypted ingress,
-//! recoverable pull/confirmation/negotiation and the browser adapter are integrated and reviewed.
+//! Native endpoint lifecycle and public controls. When the local `VoiceRouting` switch enables
+//! service (Disabled by default), kind28 is dispatched and `voice_schedule` pumps these owners.
+//! Encrypted SDP/ICE ingress, recoverable pull/negotiation and the browser adapter are still not
+//! integrated, so live calls remain legacy (voiceV2Activation in the UI).
 //! The sole Root owns every Watcher/LocalJoin; detached jobs borrow only revocable capabilities.
 use super::*;
 use voice_v2::presence::{LocalJoin, Watcher};
@@ -119,6 +121,17 @@ impl EndpointOwners {
         if retired || before != self.observers.len() {
             self.changed();
         }
+    }
+    /// Live native participation or observation needs quiet-network wakes for renewal,
+    /// challenges and proofs (voice_schedule). This reports state only and grants nothing.
+    pub(super) fn needs_schedule(&self) -> bool {
+        // Read liveness, not presence in the map: a revoked owner awaiting prune needs no wake.
+        self.participant.as_ref().is_some_and(|participant| {
+            participant.grant.strong_count() > 0 && participant.lease.is_live()
+        }) || self
+            .observers
+            .values()
+            .any(|observer| observer.lease.is_live())
     }
     pub(super) fn retire_member(&mut self, member: DeviceId) {
         for observer in self.observers.values_mut() {

@@ -51,6 +51,29 @@ test("outbound signals, room broadcasts, hangups and revocation all use full ide
   assert.doesNotMatch(app, /\bcallSelfFp\b/, "the old fingerprint self key is gone");
 });
 
+test("a V2 join's room is gated before any legacy presence write and before any legacy send", () => {
+  // Behaviour is exercised through the real handler in voice-peer-lifecycle.test.ts; these pins
+  // keep the ORDER, which a refactor could silently break: exclusion must precede every write.
+  const handler = body(app, "async function handleCallSignal(");
+  const gate = handler.indexOf("legacyCallSignalAdmission(");
+  assert.ok(gate > 0, "legacy ingress is classified");
+  for (const write of ["recordPresence(", "dropPresence(", "createPeer(", "removePeer(", "jukeRecv(", "setRemoteDescription("]) {
+    const at = handler.indexOf(write);
+    assert.ok(at < 0 || gate < at, `exclusion precedes ${write}`);
+  }
+  const send = body(app, "async function sendSignal(");
+  assert.ok(send.indexOf("legacyCallSignalEgress(") >= 0);
+  assert.ok(send.indexOf("legacyCallSignalEgress(") < send.indexOf('"send_call_signal"'), "egress is gated before the native send");
+  // The mode is pinned before the room becomes current and before the first hello is broadcast.
+  const join = body(app, "async function joinVoice(");
+  const pin = join.indexOf("callSignalMode = voiceV2Activation().available");
+  assert.ok(pin > 0);
+  assert.ok(pin < join.indexOf("inCall = true") && pin < join.indexOf('type: "hello"'));
+  // Leaving resets it only after the hangup has been announced through the gated send.
+  const leave = body(app, "function leaveVoice(");
+  assert.ok(leave.indexOf("announceHangup(") < leave.indexOf('callSignalMode = "legacy"'));
+});
+
 test("jam keeps the published fingerprint seed label while authority is the full identity", () => {
   const create = body(app, "function createPeer(");
   assert.match(create, /openSource\(fp, callJamLabel\(fp\)\)/);

@@ -1,8 +1,8 @@
-//! Application lifetime for the status-only native/browser channel. Bind and constrain CSP
+//! Application lifetime for the setup/history native/browser channel. Bind and constrain CSP
 //! before Tauri creates any windows; enter its IO runtime explicitly during setup. Neither
 //! this owner nor its worker holds an AppHandle/AppState, so application teardown cannot form
 //! a reference cycle. Its weak native context alone grants no call/action authority; the
-//! currently exposed service still handles authenticated Status only.
+//! exposed service handles authenticated Status and original-context read-only history only.
 use super::context::Context;
 use super::service::{BoundServer, Origin, Refused, RunningServer};
 use crate::{voice_runtime, AppState};

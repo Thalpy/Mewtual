@@ -8,6 +8,8 @@ use rand_chacha::ChaCha20Rng;
 use rand_core::SeedableRng;
 use std::future::poll_fn;
 
+mod results;
+
 fn found(seed: u64) -> Server<MemNetwork, ChaCha20Rng> {
     Server::found(
         Hub::new().join(PeerId::from_u64(seed)),

@@ -276,7 +276,7 @@ impl Workflow {
         if state.closed
             || !self.live.is_live()
             || !self.binding.live()
-            || !Arc::ptr_eq(resources, &self.resources)
+            || !Arc::ptr_eq(resources, self.binding.resources())
             || scope != self.binding.scope
             || !call.is_same(&self.binding.call)
             || column(self.binding.low, header.kind).is_err()

@@ -1,7 +1,7 @@
-//! Status-only local handoff IO, owned by the application host when supported.
+//! Setup status and original-history-only local handoff IO, owned by the application host.
 //! A confirmed channel is not a call grant, room proof, action admission or browser-drain proof.
 use super::bootstrap::{Registry, Route};
-use super::channel::{BodyKind, CompletedReply, Incoming};
+use super::channel::{BodyKind, CompletedReply, Incoming, Operation};
 use super::context::Context;
 use super::http;
 use catcoms_rt::Clock;
@@ -15,8 +15,9 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::oneshot;
 
-// Current concrete task/owner/weak-retained allocation peak is 32,256 bytes in Windows native
-// debug tests. Prepay 32 KiB before bind: 8 KiB more fixed cost than the status-only context.
+// Current concrete task/owner/weak-retained allocation peak is19,984 bytes in Windows native
+// debug tests after retaining one fixed scratch allocation across stages (previously32,256).
+// Keep the existing32KiB payment before bind; wiring action dispatch must remeasure this peak.
 // This reduces available bytes within the SAME 2 MiB process cap, never increasing that cap
 // or any group/engine limit. Other layouts still refuse if their actual peak cannot fit.
 // Both runtime admission and the regression below measure the actual nested future.
@@ -220,19 +221,16 @@ impl Drop for RunningServer {
 }
 impl ServerState {
     async fn run(self, mut stop: oneshot::Receiver<()>) -> Completion {
-        loop {
+        let io_failed = loop {
             #[cfg(test)]
             self.phase.store(1, std::sync::atomic::Ordering::Release);
             let accepted = tokio::select! {
                 biased;
-                _ = &mut stop => break,
+                _ = &mut stop => break false,
                 accepted = self.listener.accept() => accepted,
             };
             let Ok((stream, _)) = accepted else {
-                return Completion {
-                    _credit: self.credit.clone(),
-                    io_failed: true,
-                };
+                break true;
             };
             #[cfg(test)]
             self.phase.store(2, std::sync::atomic::Ordering::Release);
@@ -246,15 +244,21 @@ impl ServerState {
             let mut connection = Connection::new(stream);
             tokio::select! {
                 biased;
-                _ = &mut stop => break,
+                _ = &mut stop => break false,
                 _ = expire_at(self.clock.as_ref(), deadline) => {},
-                _ = connection.serve(&self.registry, self.port, self.origin, self.clock.as_ref(), deadline) => {},
+                _ = connection.serve(&self.registry, self.port, self.origin, self.clock.as_ref(), deadline, self.context.as_ref()) => {},
             }
             // Connection fields destroy the stream before any admitted Session/reply owner.
-        }
+        };
+        // Stop accepting sockets first, then fence first effects and collect the ORIGINAL
+        // positions retained by detached action workers/completions. The SDK/actors remain
+        // available until Host::finish observes this actual task completion. Socket expiry
+        // merely dropped Connection; it did not join an admitted actor request.
+        drop(self.listener);
+        self.registry.stop_and_wait_for_physical().await;
         Completion {
             _credit: self.credit.clone(),
-            io_failed: false,
+            io_failed,
         }
     }
 }
@@ -307,6 +311,7 @@ impl<S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin> Connection<S> {
         origin: Origin,
         clock: &dyn Clock,
         deadline: u64,
+        context: Option<&Context>,
     ) -> Result<(), Refused> {
         let method = loop {
             current(clock, deadline)?;
@@ -345,7 +350,12 @@ impl<S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin> Connection<S> {
             current(clock, deadline)?;
             self.incoming = Some(
                 worker
-                    .admit_status(port, origin.value(), route.session_id())
+                    .admit_service_control(
+                        port,
+                        origin.value(),
+                        route.session_id(),
+                        context.is_some(),
+                    )
                     .map_err(|_| Refused::Header)?,
             );
             let incoming = self.incoming.as_mut().ok_or(Refused::Body)?;
@@ -365,24 +375,37 @@ impl<S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin> Connection<S> {
             // for the response first. Coalesced excess is refused by HTTP parsing; later bytes
             // can never become a second request because this connection is always closed.
             current(clock, deadline)?;
-            let plain = incoming.open().map_err(|_| Refused::Body)?;
-            if plain.len() != 49
-                || plain[0] != 1
-                || plain[1..17] != route.session_id()
-                || plain[17..49] != route.hash()
-            {
-                return Err(Refused::Body);
-            }
-            // The retained browser constructs this only after ECDH/HKDF and outgoing seal/MAC
-            // promises have settled. Response crypto uses its separately prepaid control lane.
-            route.acknowledge_setup().map_err(|_| Refused::Body)?;
-            let snapshot = route.snapshot();
-            let incoming = self.incoming.take().ok_or(Refused::Body)?;
-            let mut prepared = incoming
-                .reply(BodyKind::Control, 3, None)
-                .map_err(|_| Refused::Body)?;
-            prepared.plain_mut().copy_from_slice(&snapshot);
-            self.reply = Some(prepared.seal().map_err(|_| Refused::Body)?);
+            incoming.open().map_err(|_| Refused::Body)?;
+            self.reply = Some(match incoming.operation() {
+                Operation::Status => {
+                    let plain = incoming.plain().map_err(|_| Refused::Body)?;
+                    if plain.len() != 49
+                        || plain[0] != 1
+                        || plain[1..17] != route.session_id()
+                        || plain[17..49] != route.hash()
+                    {
+                        return Err(Refused::Body);
+                    }
+                    // ONLY the existing Status9 setup protocol acknowledges constructor/SDK
+                    // drainage. A historical Begin must not invent or advance that evidence.
+                    route.acknowledge_setup().map_err(|_| Refused::Body)?;
+                    let snapshot = route.snapshot();
+                    let incoming = self.incoming.take().ok_or(Refused::Body)?;
+                    let mut prepared = incoming
+                        .reply(BodyKind::Control, 3, None)
+                        .map_err(|_| Refused::Body)?;
+                    prepared.plain_mut().copy_from_slice(&snapshot);
+                    prepared.seal().map_err(|_| Refused::Body)?
+                }
+                Operation::BeginDerive => {
+                    let context = context.ok_or(Refused::Binding)?;
+                    let incoming = self.incoming.take().ok_or(Refused::Body)?;
+                    super::history::recover(context, route, incoming)
+                        .seal()
+                        .map_err(|_| Refused::Body)?
+                }
+                _ => return Err(Refused::Binding), // fail closed if the whitelist ever drifts
+            });
             let reply = self.reply.as_ref().ok_or(Refused::Body)?;
             self.output.reply(origin, reply.body().len())?;
         }
@@ -448,4 +471,4 @@ impl fmt::Write for Output {
 }
 
 #[cfg(test)]
-mod tests;
+pub(super) mod tests;

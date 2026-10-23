@@ -1,5 +1,108 @@
 # Mewtual; Interfaces & Hooks Schema
 
+## Native final snapshot and browser cleanup retry (22 October)
+
+`ResolvedRow::confirmation_status() -> Result<ConfirmationStatus, VoiceError>` reads the
+original Live Phase or the same final-intent Phase retained after local compaction. Unknown
+or removed IDs are errors; Pending/ClosedPending/ordinary continuation report NotRequested,
+never fabricated Root Drained. This native-only snapshot is absent from the 242-byte history
+wire schema. It is neither final issuance, authorization nor a notification API.
+
+Compaction preserves that original paid Phase before detaching Live. Channel closure and
+history GC separately require requested final retirement readiness. No observer clone,
+transfer gap or fresh reservation exists; existing layout guards include the retained pointer.
+
+Broker v12 automatically retries only already-started `settleSetup`/`collectChannel` cleanup
+after an actual rejected RPC. One original driver owns one injected-Clock wait, coalesced
+with availability on the same Signal. A completed refusal starts the next one-second
+interval; no missed-tick replay or pending-RPC overlap occurs. Success cancels the timer;
+stale callbacks cannot wake a successor. Older retained brokers through v11 refuse adoption.
+
+Actual SDK/read/linked-chain drainage still precedes cleanup. General action retries remain
+availability-driven. This does not implement authenticated post-End action/final exchange,
+final issuance/ACK or a production Actor/MLS/WebView action flow. HANDOVER owns test evidence.
+
+
+## Retained history transport (22 October)
+
+VoiceCryptoBroker.recoverChannelHistory(owner, channel, purpose, expectedRow=null) requires the
+actual retained owner allocation/channel handle and an already established original Session.
+It is deliberately non-async so identical pending queries return the SAME stored Promise.
+The exact peer/join/keyRef/epoch selector is copied/validated; null expectedRow is only first
+unknown-ID recovery. A canonical existing RowId pins subsequent metadata. Unready or occupied
+history returns busy without setup, ordinary admission or another queue/driver. Status during
+history returns uncertain. v11 retained brokers reject incompatible older HMR state.
+
+The private wire is Begin8, Control, zero logical header,106 plaintext/122 cipher bytes,
+retry=false. Only the application-context service admits it beside unchanged Status9; a server
+without that context refuses before counter/body admission. Native resolves the original paid
+purpose without a live-grant upgrade or factory rearm. Response is Control with3 or242 plaintext
+bytes (19/258 cipher); Rust/TypeScript share replies/vectors.json. Canonical exact u64 decimal
+strings, RowId, action/receipt identity, fixed padding/flags and native opaque receipt digest
+are checked. The digest is no browser-created Root receipt or ACK authority. localDrained means
+local Phase only. Other generic outcomes are codec compatibility, not enabled effect handlers.
+
+Original session MAC/AEAD/request binding and monotonic spent TX/RX apply. A malformed opened
+body still spends RX. End can resolve an observer retired while actual SDK/read cancellation,
+query/body/key and original paid position remain retained. History refusal closed/stopped/error
+never retires the channel, acknowledges setup or refunds its payment. No raw-key/frame API,
+replacement Session, factory/input/result/ACK/settlement/close/final request is exposed here.
+HANDOVER records focused evidence and pending complete gates; live V2/RTC remains incomplete.
+
+## Original variable Workflow observation (22 October)
+
+HandoffLoan::retire_confirmation_observed consumes the original loan, closes its original
+confirmation plan and returns a native-only non-Clone ConfirmationRetirement. The existing
+retire_confirmation unit API delegates and drops that observer; ordinary loan Drop still closes
+no plan. is_drained observes only the original VARIABLE Workflow's actual last-field retirement.
+It grants no key, engine, packet, call, RTC or replacement-plan authority. Fixed history and
+independent packet slots are outside this signal's scope.
+
+is_drained() -> bool is a monotonic snapshot only, with no waiter, wakeup or scheduling guarantee.
+OBSERVER_MEMORY_BYTES is pointer-sized caller witness storage, not wire size or a new reserve.
+The unchanged2KiB retained graph pays the flag and final publisher. Workflow and HistoryPlan
+borrow the SAME original pool from their binding's metadata credit; all pool-identity checks
+remain exact. Native must also count its enclosing state/task/output in existing paid control
+capacity and retain this SAME witness across cancellation. Missing proof cannot be recreated
+by handshake ID. The inactive native Phase retains the SAME witness in original paid State before publishing
+local completion. confirmation_status distinguishes no final intent (NotRequested), original
+closure still outstanding (Closing), stored witness not yet ready (Draining), and actual
+variable retirement (Drained). It allocates nothing and invokes no Clock/grant/Root callback.
+is_drained still reports only LOCAL16KiB return. Existing compaction may drop Phase/witness;
+absence is never full-retirement proof. Production consumption, final-proof capture/transfer
+and bounded native retry coordination remain unimplemented.
+
+## Native channel/action history collection (22 October)
+
+Registry::collect_retired receives the actual native action Ledger. When the original channel
+row is physically removable (closed, setup finished, dead lease, no independent Session/public
+or Row owners), it transfers a private CollectedChannel witness outside Registry locks. Only
+bootstrap can construct that witness; it has no renderer constructor or serialized identity.
+Ledger remembers it only for the same original grant allocation/executor/lease. A subsequent
+bounded sweep removes only Body::Drained or explicit ClosedPending, plus dead lease plus recorded proof plus sole indexed
+Row ownership. It runs on every collection hook, including an empty registry, so late metadata
+handles cannot strand the one-shot evidence. Missing history is still an error, not a drained
+status. Neither index serial resets when a slot is reused.
+
+Both explicit setup-failure cleanup and final channel collection hold the original UI commit
+across original-selection lookup, Ledger::channel_may_close and routing closure. Every matching
+action must already be compacted or explicitly closed as a native Pending; Capacity leaves Control available for its ACK/settlement/phase
+cleanup. This is not browser SDK or full Root Workflow drainage proof. Production action
+transport remains unfinished; the listener still serves Status only.
+
+The inactive Pending ClosePhase adapter checks the actual opened Incoming belongs to the Route
+Session, then resolves the SAME header RowId and complete decrypted purpose through the actual
+native Ledger. An active Registration refuses. PendingStatus::Closing fences Begin while
+actual local preparation retires outside native guards; Closed { actor_handoff } preserves
+that observed native handoff marker and never recreates a factory on retry. This local terminal
+has action=None, receipt=None, engine.settled=false, acknowledged=false and drained=false.
+wait_compacted may return that explicit local closure; callers MUST inspect its disposition
+instead of treating success as attached-Phase/Root compaction. Slot/serial/pointer checks reject
+removed native handles even on repeated closure. No renderer bool, grant upgrade, task, Clock
+or new variable loan is accepted. Actual retained-broker SDK/RPC drainage must precede the
+request; authentication alone does not prove it. Browser wiring and Root-independent cleanup
+still remain open.
+
 ## App-owned public bootstrap and status channel (21 October)
 
 `setup_voice_channel({owner, executor})` requires the unlocked session and actual selected
@@ -5581,3 +5684,65 @@ Separate whole-job custody admits at most4 read jobs/actor and8/process, without
 staging/head/range allocation or durable Keep run/debit. Sleeps and local/network continuations
 retain the owner until all job buffers retire. Actual lower attempts keep their independent4/8
 custody through real transport retirement; upper cancellation does not refund them.
+
+### Owned native confirmation result bridge (22 October continuation)
+
+Trusted Rust only: `ServerActor::submit_voice_confirmation_result(grant, action, &body, tag)`
+and `commit_voice_confirmation_result(...)` forward sealed/opened results to the existing Root
+methods. `VoiceConfirmationBody::from_owner` accepts a trusted prepaid native owner, at most
+128 inline bytes/alignment64 and528 result bytes. It has no public Clone, serialization,
+mutable bytes or extraction API. The caller must fund the actual backing allocation and the
+4KiB fixed actor contribution for its entire lifetime; a size cap does not bound nested heaps.
+Construction invokes the owner's slice callback once, outside all guards. Root receives only
+the cached immutable slice and independently validates actual native grant/action/tag.
+
+A single body Flight refuses concurrent queueing or reuse while a completed output remains
+uncollected. `VoiceConfirmationCompletion::result()` returns small exact outcome metadata;
+the Completion retains its actual original body until collection. Capacity/Stopped does not
+consume the caller's body or permit recomputation. A receipt is never a drainage assertion.
+Native `Phase::result_body` prepays from the original Phase and returns the same Buffer on
+range, foreign-Phase or local capacity refusal. Detached task/physical Session ownership still
+needs its own bounded accounting in the unfinished dispatcher.
+
+`HandoffLoan::retire_confirmation(self)` closes only its ORIGINAL confirmation plan. It is a
+native capability, not a handshake-ID lookup or SDP transfer. Existing input/engine/lower/copy
+owners may still hold the96KiB Workflow. `Phase::close_confirmation` cannot relabel an ordinary
+already-draining close as full-plan retirement. A local phase-drained bit is not full Workflow
+release. This bridge adds no Tauri command, renderer result API or live dispatch.
+
+### Private action framing and native physical collection (22 October continuation)
+
+Native `Incoming::result_body` requires an actually opened Result/Data frame and an exact native
+output range within its plaintext. It pins the original Phase Buffer in VoiceConfirmationBody;
+range, foreign-Phase and local capacity refusals preserve the same allocation, bytes and request
+metadata. The remaining request retains its original one-use reply nonce. This API does not
+resolve purpose/action authority or fund a detached dispatcher task.
+
+The inactive `requests` codec and `voice-ipc-actions.ts` encode version1 plus the complete peer,
+join, key reference and u64 epoch. Input/Close are105 bytes; Begin106 (canonical retry flag);
+Admit157; Result187 plus at most528 output bytes; receipt ACK185; Settle153; FinalACK137.
+Action-bearing requests include original serial/version/input tag. All integers are big-endian;
+browser u64 values are canonical decimal strings, never numbers. Truncation, trailing bytes,
+unknown versions/flags and zero action serial/version refuse. Existing authenticated framing
+supplies operation and RowId; this decoder authenticates nothing. Begin's routing convention and
+full same-header/purpose/action enforcement are still dispatcher work. Receipt digests have a
+closed binary outcome/error encoding, omit retired and must match the retained native receipt.
+An ACK digest never constructs a Root receipt or grants new protocol authority.
+
+Service shutdown permanently closes Registry and physical Session admission, drops its listener,
+and waits for actual original physical owners, including detached work/completed replies found
+through retirement witnesses. No native guards or UIcommit cross that await. One existing
+process-paid service task supervises the fixed64 Session positions sequentially; no extra queue
+or per-Session task is spawned. This adds neither an action command nor browser drainage proof.
+
+`derivation_result::commit(context, route, incoming)` is an inactive trusted-native executor,
+not a Tauri command. It requires the actual already-opened Result/Data request from that Route's
+Session. Complete purpose and action identity resolve against its SAME authenticated header RowId.
+Nonempty output or a wrong empty-output digest refuses before Work. Existing receipt recovery
+takes no additional data/task contribution or grant upgrade. Current actor admission repeats
+the original UI-generation/selection/channel fences and owns UIcommit through actor completion.
+Its detached Worker/Response keeps the original Work,8KiB task contribution and inline request
+until actual collection; Work/task custody drops before the physical Header. `into_parts`
+returns fixed result metadata plus the still-owned original request for its single Control reply.
+No timeout, caller cancellation, receipt or native task completion acknowledges browser drainage.
+This executor has no listener consumer and does not implement the seal/open result path.

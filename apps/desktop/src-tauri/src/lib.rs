@@ -10875,7 +10875,7 @@ async fn prepare_voice_controller_inner(state: &AppState) -> Result<String, Stri
     // A last detached IO owner may drain after final-close returned. Reclaim only its proven
     // dead history BEFORE any new grant/key admission can be blocked by that paid metadata.
     // This bounded pass is grant-independent and runs outside Coordinator; it refunds no work.
-    state.voice_channels.collect_retired();
+    state.voice_channels.collect_retired(&state.voice_handoff);
     let generation = unlocked_ui_session_generation(state).await?;
     let _commit = require_ui_session_generation(state, generation).await?;
     state
@@ -10898,7 +10898,7 @@ async fn prepare_voice_owner_inner(
     if room_id.to_string() != room {
         return Err("invalid voice room".into());
     }
-    state.voice_channels.collect_retired();
+    state.voice_channels.collect_retired(&state.voice_handoff);
     let generation = unlocked_ui_session_generation(state).await?;
     let (actor, instance, group) = {
         let servers = state.servers.lock().await;
@@ -10947,7 +10947,7 @@ async fn activate_voice_owner_inner(
     state: &AppState,
     candidate: String,
 ) -> Result<VoiceActivation, String> {
-    state.voice_channels.collect_retired();
+    state.voice_channels.collect_retired(&state.voice_handoff);
     // Successful activation consumes its candidate. Resolve the original current installation
     // first, or a lost accepted reply would force a new join/key generation. This is metadata
     // recovery only: never adopt a past grant or skip the actor/UI/native identity checks.
@@ -11082,7 +11082,7 @@ async fn end_voice_owner(state: State<'_, AppState>, owner: String) -> Result<()
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .end(&owner);
-    state.voice_channels.collect_retired();
+    state.voice_channels.collect_retired(&state.voice_handoff);
     Ok(())
 }
 
@@ -11093,7 +11093,7 @@ async fn admit_voice_crypto_inner(
     bytes: usize,
 ) -> Result<String, String> {
     let operation = voice_authority::Operation::parse(&operation)?;
-    state.voice_channels.collect_retired();
+    state.voice_channels.collect_retired(&state.voice_handoff);
     let binding = state
         .voice_authority
         .lock()

@@ -6,9 +6,34 @@ use crate::{
     activate_voice_owner_inner, finalize_unlock_session, lock_session_inner,
     register_ui_lock_request,
 };
+use rand_core::SeedableRng;
 use std::future::{poll_fn, Future};
 use std::pin::Pin;
 use std::task::Poll;
+
+pub(in crate::voice_handoff) fn physical(route: &Route) -> PhysicalHold {
+    // A real unique physical position, not a copied ID. Frame authentication is exercised
+    // by codec/service tests; this helper is solely for actor lifetime/collection barriers.
+    let worker = route.session().header().unwrap();
+    worker.fixture_hold().unwrap()
+}
+pub(in crate::voice_handoff) async fn channel_route(
+    f: &Fixture,
+    selected: &SelectedHandoffOwner,
+) -> Route {
+    let status = crate::voice_handoff::bootstrap::ensure(
+        &f.state,
+        selected.id(),
+        selected.executor(),
+        &mut rand_chacha::ChaCha20Rng::seed_from_u64(83),
+    )
+    .await
+    .unwrap();
+    let crate::voice_handoff::bootstrap::Status::Ready(output) = status else {
+        panic!("ready channel")
+    };
+    f.state.voice_channels.route(output.public().slot).unwrap()
+}
 
 async fn poll_once<F: Future>(mut future: Pin<&mut F>) -> Poll<F::Output> {
     poll_fn(|cx| Poll::Ready(future.as_mut().poll(cx))).await
@@ -67,8 +92,9 @@ async fn registration_rejection_retries_the_same_counted_native_purpose() {
     let f = Fixture::new().await;
     let context = Context::new(&f.state);
     let (_owner, selected, selector) = selection(&f).await;
+    let route = channel_route(&f, &selected).await;
     assert!(matches!(
-        ensure_derivation_row(&context, selected.clone(), selector).await,
+        ensure_derivation_row(&context, &route, selector, physical(&route)).await,
         Err(Refused::Protocol(VoiceError::Unauthorized))
     ));
     let Begin::Factory(first) = f
@@ -82,7 +108,7 @@ async fn registration_rejection_retries_the_same_counted_native_purpose() {
     let first_id = first.id();
     drop(first);
     assert!(matches!(
-        ensure_derivation_row(&context, selected.clone(), selector).await,
+        ensure_derivation_row(&context, &route, selector, physical(&route)).await,
         Err(Refused::Protocol(VoiceError::Unauthorized))
     ));
     let Begin::Factory(retry) = f
@@ -129,13 +155,163 @@ async fn registration_final_generation_fence_refuses_a_registered_lock_before_it
 }
 
 #[tokio::test]
+async fn channel_collection_winning_during_actor_query_refuses_final_factory_admission() {
+    let f = Fixture::new().await;
+    let context = Context::new(&f.state);
+    let (owner, selected, selector) = selection(&f).await;
+    let route = channel_route(&f, &selected).await;
+    let parked = park(&f.actor).await;
+    let mut pending = Box::pin(ensure_derivation_row(
+        &context,
+        &route,
+        selector,
+        physical(&route),
+    ));
+    assert!(poll_once(pending.as_mut()).await.is_pending());
+    crate::voice_handoff::bootstrap::collect_channel(&f.state, &owner, selected.executor())
+        .await
+        .unwrap();
+    assert!(
+        selected.lease().is_live(),
+        "only the original channel closed; End did not win"
+    );
+    assert!(route.require_open().is_err());
+    drop(parked);
+    assert_eq!(pending.as_mut().await.err(), Some(Refused::Closed));
+    assert!(f
+        .state
+        .voice_handoff
+        .lookup_original(&selected, Purpose::Derive(selector))
+        .is_none());
+    drop(pending);
+    f.close().await;
+}
+
+#[tokio::test]
+async fn admitted_factory_holds_channel_collection_behind_actual_actor_completion_after_caller_loss(
+) {
+    let f = Fixture::new().await;
+    let context = Context::new(&f.state);
+    let (owner, selected, selector) = selection(&f).await;
+    let route = channel_route(&f, &selected).await;
+    let boundary = f.state.ui_session_commit.lock().await;
+    let mut pending = Box::pin(ensure_derivation_row(
+        &context,
+        &route,
+        selector,
+        physical(&route),
+    ));
+    assert!(poll_once(pending.as_mut()).await.is_pending());
+    f.actor.member_count().await;
+    assert!(poll_once(pending.as_mut()).await.is_pending());
+    let parked = park(&f.actor).await;
+    drop(boundary);
+    assert!(poll_once(pending.as_mut()).await.is_pending());
+    drop(pending);
+    let mut collection = Box::pin(crate::voice_handoff::bootstrap::collect_channel(
+        &f.state,
+        &owner,
+        selected.executor(),
+    ));
+    assert!(poll_once(collection.as_mut()).await.is_pending());
+    assert!(
+        route.require_open().is_ok(),
+        "collection cannot close ahead of admitted work"
+    );
+    drop(parked);
+    assert!(matches!(
+        collection.as_mut().await,
+        Err(crate::voice_handoff::channel::Refused::Capacity)
+    ));
+    assert!(
+        route.require_open().is_ok(),
+        "actual publication completed, but its uncertain purpose still needs Control cleanup"
+    );
+    assert!(f
+        .state
+        .voice_handoff
+        .lookup_original(&selected, Purpose::Derive(selector))
+        .is_some());
+    drop(collection);
+    f.close().await;
+}
+
+#[tokio::test]
+async fn process_shutdown_waits_for_the_actual_detached_factory_after_request_cancellation() {
+    use crate::voice_handoff::service::{BoundServer, Origin};
+    let f = Fixture::new().await;
+    let context = Context::new(&f.state);
+    let (_owner, selected, selector) = selection(&f).await;
+    let route = channel_route(&f, &selected).await;
+    let runtime = f.state.voice_authority.lock().unwrap().runtime();
+    let running = BoundServer::bind(
+        f.state.voice_channels.clone(),
+        runtime,
+        Origin::PackagedHttp,
+    )
+    .unwrap()
+    .start()
+    .unwrap();
+    let boundary = f.state.ui_session_commit.lock().await;
+    let mut pending = Box::pin(ensure_derivation_row(
+        &context,
+        &route,
+        selector,
+        physical(&route),
+    ));
+    assert!(poll_once(pending.as_mut()).await.is_pending());
+    f.actor.member_count().await;
+    assert!(poll_once(pending.as_mut()).await.is_pending());
+    let parked = park(&f.actor).await;
+    drop(boundary);
+    assert!(poll_once(pending.as_mut()).await.is_pending());
+    drop(pending);
+    let mut finish = Box::pin(running.finish());
+    assert!(poll_once(finish.as_mut()).await.is_pending());
+    // The service must be able to install its fence while the admitted factory owns UIcommit.
+    // Waiting for that mutex here would deadlock shutdown with the still-live actor turn.
+    tokio::time::timeout(std::time::Duration::from_secs(15), async {
+        while route.require_open().is_ok() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    assert!(f.state.ui_session_commit.try_lock().is_err());
+    assert!(poll_once(finish.as_mut()).await.is_pending());
+    drop(parked);
+    let completion = tokio::time::timeout(std::time::Duration::from_secs(15), finish)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(!completion.io_failed);
+    assert!(f.state.ui_session_commit.try_lock().is_ok());
+    assert!(f
+        .state
+        .voice_handoff
+        .lookup_original(&selected, Purpose::Derive(selector))
+        .is_some());
+    assert!(matches!(
+        route.session().header(),
+        Err(crate::voice_handoff::channel::Refused::Binding)
+    ));
+    f.close().await;
+}
+
+#[tokio::test]
 async fn registration_pending_duplicate_returns_only_original_metadata_without_another_actor_turn()
 {
     let f = Fixture::new().await;
     let context = Context::new(&f.state);
     let (_owner, selected, selector) = selection(&f).await;
+    let route = channel_route(&f, &selected).await;
     let boundary = f.state.ui_session_commit.lock().await;
-    let mut pending = Box::pin(ensure_derivation_row(&context, selected.clone(), selector));
+    let mut pending = Box::pin(ensure_derivation_row(
+        &context,
+        &route,
+        selector,
+        physical(&route),
+    ));
     assert!(poll_once(pending.as_mut()).await.is_pending());
     f.actor.member_count().await;
     assert!(poll_once(pending.as_mut()).await.is_pending());
@@ -176,18 +352,27 @@ async fn registration_payment_refusal_before_handoff_calls_no_actor_and_removes_
     let f = Fixture::new().await;
     let context = Context::new(&f.state);
     let (_owner, selected, selector) = selection(&f).await;
+    let route = channel_route(&f, &selected).await;
     let boundary = f.state.ui_session_commit.lock().await;
-    let mut pending = Box::pin(ensure_derivation_row(&context, selected.clone(), selector));
+    let mut pending = Box::pin(ensure_derivation_row(
+        &context,
+        &route,
+        selector,
+        physical(&route),
+    ));
     assert!(poll_once(pending.as_mut()).await.is_pending());
     f.actor.member_count().await;
     assert!(poll_once(pending.as_mut()).await.is_pending());
     let parked = park(&f.actor).await;
     let pool = selected.resources();
     // Leave room for the fixed row+Phase, but less than the independent factory payment.
+    // This fixture now also owns bootstrap's4KiB PROCESS-only index. counts() includes it,
+    // but that charge consumes no group bytes; subtracting the process total alone would
+    // leave an extra4KiB in this group and accidentally allow the factory being tested.
     let pressure = pool
         .charge(
             selected.binding().scope.group,
-            256 * 1024 - pool.counts().0 - 4096 - 1024,
+            256 * 1024 - pool.counts().0 + 4096 - 4096 - 1024,
             ResourceKind::Retained,
         )
         .unwrap();
@@ -216,6 +401,7 @@ async fn registration_detached_worker_holds_commit_after_caller_loss_and_unlock_
     let f = Fixture::new().await;
     let context = Context::new(&f.state);
     let (_owner, selected, selector) = selection(&f).await;
+    let route = channel_route(&f, &selected).await;
     let broad_counts = || {
         [
             Arc::strong_count(&f.state.servers),
@@ -229,7 +415,12 @@ async fn registration_detached_worker_holds_commit_after_caller_loss_and_unlock_
     };
     let before = broad_counts();
     let boundary = f.state.ui_session_commit.lock().await;
-    let mut pending = Box::pin(ensure_derivation_row(&context, selected.clone(), selector));
+    let mut pending = Box::pin(ensure_derivation_row(
+        &context,
+        &route,
+        selector,
+        physical(&route),
+    ));
     assert!(poll_once(pending.as_mut()).await.is_pending());
     f.actor.member_count().await;
     assert!(poll_once(pending.as_mut()).await.is_pending());
@@ -237,6 +428,10 @@ async fn registration_detached_worker_holds_commit_after_caller_loss_and_unlock_
     drop(boundary);
     assert!(poll_once(pending.as_mut()).await.is_pending());
     drop(pending); // dropping JoinHandle's waiter does not abort actual admitted native work
+    assert!(
+        route.session().header().is_err(),
+        "cancelled caller cannot reopen the admitted physical position"
+    );
     assert_eq!(
         broad_counts(),
         before,
@@ -256,7 +451,7 @@ async fn registration_detached_worker_holds_commit_after_caller_loss_and_unlock_
         .await
         .unwrap();
     assert!(matches!(
-        ensure_derivation_row(&context, selected.clone(), selector).await,
+        ensure_derivation_row(&context, &route, selector, physical(&route)).await,
         Err(Refused::Closed)
     ));
     f.close().await;
@@ -266,6 +461,7 @@ async fn registration_detached_worker_holds_commit_after_caller_loss_and_unlock_
 async fn registration_completed_uncollected_error_keeps_factory_payment_until_collection() {
     let f = Fixture::new().await;
     let (_owner, selected, selector) = selection(&f).await;
+    let route = channel_route(&f, &selected).await;
     let Begin::Factory(registration) = f
         .state
         .voice_handoff
@@ -285,6 +481,7 @@ async fn registration_completed_uncollected_error_keeps_factory_payment_until_co
         .unwrap();
     let commit = f.state.ui_session_commit.clone().lock_owned().await;
     let grant = selected.grant().unwrap();
+    let original = selected.clone();
     let work = run(
         registration,
         selected,
@@ -292,7 +489,10 @@ async fn registration_completed_uncollected_error_keeps_factory_payment_until_co
         grant,
         selector,
         commit,
-        credit,
+        FactoryCustody {
+            _physical: physical(&route),
+            _credit: credit,
+        },
     );
     let bytes = worker_layout(&work);
     assert!(
@@ -310,6 +510,22 @@ async fn registration_completed_uncollected_error_keeps_factory_payment_until_co
     ready
         .await
         .expect("factory worker panicked before producing output");
+    // The actual Registration has dropped and is retryable, but its completed native task
+    // STILL owns the physical position. No new authenticated ClosePhase can enter yet.
+    let Begin::Factory(retry) = f
+        .state
+        .voice_handoff
+        .begin(original.clone(), Purpose::Derive(selector))
+        .unwrap()
+    else {
+        panic!("completed factory is locally idle")
+    };
+    let id = retry.id();
+    drop(retry);
+    assert!(
+        route.session().header().is_err(),
+        "completed uncollected factory output still owns its physical position"
+    );
     assert_eq!(pool.counts(), (before.0 + FACTORY_BYTES, before.1));
     let output = task.await.unwrap();
     assert!(matches!(
@@ -318,7 +534,71 @@ async fn registration_completed_uncollected_error_keeps_factory_payment_until_co
     ));
     assert_eq!(pool.counts(), (before.0 + FACTORY_BYTES, before.1));
     drop(output);
+    assert!(route.session().header().is_ok());
     assert_eq!(pool.counts(), before);
+    let crate::voice_handoff::bootstrap::Status::Ready(public) =
+        crate::voice_handoff::bootstrap::ensure(
+            &f.state,
+            original.id(),
+            original.executor(),
+            &mut rand_chacha::ChaCha20Rng::seed_from_u64(83),
+        )
+        .await
+        .unwrap()
+    else {
+        panic!("same original setup")
+    };
+    let mut bytes = vec![1];
+    bytes.extend_from_slice(selector.peer.as_bytes());
+    bytes.extend_from_slice(&selector.join);
+    bytes.extend_from_slice(&selector.key_ref);
+    bytes.extend_from_slice(&selector.epoch.to_be_bytes());
+    let incoming = crate::voice_handoff::service::tests::opened_frame(
+        &public,
+        &route,
+        (1, 6, 0, id.logical()),
+        &bytes,
+        None,
+    );
+    let (closed, incoming) =
+        crate::voice_handoff::pending_close::close(&Context::new(&f.state), &route, incoming)
+            .into_parts();
+    assert!(matches!(
+        closed.unwrap().pending,
+        crate::voice_handoff::ledger::PendingStatus::Closed {
+            actor_handoff: true
+        }
+    ));
+    drop(incoming);
+    f.close().await;
+}
+
+#[tokio::test]
+async fn actual_actor_completion_keeps_original_native_phase_buffer_and_payment_until_collection() {
+    let f = Fixture::new().await;
+    let (_owner, selected, _) = selection(&f).await;
+    // Real native Phase and real mailbox, but this action belongs to another LocalJoin.
+    // Rejecting it is required; this is ownership evidence, not successful pair integration.
+    let (_coordinator, _join, action, phase) = crate::voice_authority::tests::phase_fixture();
+    let buffer = phase.buffer(64).unwrap();
+    let body = phase
+        .result_body(buffer, 0..32)
+        .unwrap_or_else(|_| panic!("paid result body"));
+    let completed = f
+        .actor
+        .submit_voice_confirmation_result(selected.grant().unwrap(), action.clone(), &body, [8; 32])
+        .await
+        .unwrap();
+    assert!(completed.result().is_err());
+    action.settle_engine();
+    phase.close_confirmation().unwrap();
+    drop(body);
+    assert!(
+        !phase.is_drained(),
+        "actual actor output retains the original native copy owner"
+    );
+    drop(completed);
+    assert!(phase.is_drained());
     f.close().await;
 }
 
@@ -327,9 +607,15 @@ async fn actual_store_removed_during_commit_wait_refuses_before_ledger_or_actor_
     let f = Fixture::new().await;
     let context = Context::new(&f.state);
     let (_owner, selected, selector) = selection(&f).await;
+    let route = channel_route(&f, &selected).await;
     let boundary = f.state.ui_session_commit.lock().await;
     let before = selected.resources().counts();
-    let mut pending = Box::pin(ensure_derivation_row(&context, selected, selector));
+    let mut pending = Box::pin(ensure_derivation_row(
+        &context,
+        &route,
+        selector,
+        physical(&route),
+    ));
     assert!(poll_once(pending.as_mut()).await.is_pending());
     f.actor.member_count().await; // the preceding exact context query has completed
     assert!(poll_once(pending.as_mut()).await.is_pending());
@@ -358,11 +644,17 @@ async fn original_selected_allocation_cannot_be_substituted_by_equal_public_owne
     let context = Context::new(&f.state);
     let (_owner, selected, _) = selection(&f).await;
     let (_foreign_owner, other, selector) = selection(&foreign).await;
+    let route = channel_route(&foreign, &other).await;
     assert_eq!(selected.id(), other.id());
     assert_eq!(selected.executor(), other.executor());
     let before = selected.resources().counts();
     let parked = park(&f.actor).await;
-    let mut pending = Box::pin(ensure_derivation_row(&context, other, selector));
+    let mut pending = Box::pin(ensure_derivation_row(
+        &context,
+        &route,
+        selector,
+        physical(&route),
+    ));
     assert!(matches!(
         poll_once(pending.as_mut()).await,
         Poll::Ready(Err(Refused::Closed))
@@ -372,4 +664,30 @@ async fn original_selected_allocation_cannot_be_substituted_by_equal_public_owne
     drop(parked);
     f.close().await;
     foreign.close().await;
+}
+
+#[tokio::test]
+async fn a_physical_owner_from_an_equal_label_foreign_channel_cannot_admit_local_factory_work() {
+    let f = Fixture::new().await;
+    let other = Fixture::new().await;
+    let context = Context::new(&f.state);
+    let (_owner, selected, selector) = selection(&f).await;
+    let (_other_owner, foreign, _) = selection(&other).await;
+    let route = channel_route(&f, &selected).await;
+    let foreign_route = channel_route(&other, &foreign).await;
+    let before = selected.resources().counts();
+    assert!(matches!(
+        ensure_derivation_row(&context, &route, selector, physical(&foreign_route)).await,
+        Err(Refused::Closed)
+    ));
+    assert!(f
+        .state
+        .voice_handoff
+        .lookup_original(&selected, Purpose::Derive(selector))
+        .is_none());
+    assert_eq!(selected.resources().counts(), before);
+    assert!(route.session().header().is_ok());
+    assert!(foreign_route.session().header().is_ok());
+    f.close().await;
+    other.close().await;
 }

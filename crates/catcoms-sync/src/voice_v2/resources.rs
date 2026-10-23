@@ -519,6 +519,12 @@ impl Reservation {
 }
 
 impl Credit {
+    /// Borrow the exact pool that owns this credit without allocating a duplicate owner.
+    /// Fixed plan metadata uses this for pool-identity checks for its whole retained lifetime.
+    pub(super) fn resources(&self) -> &Arc<Resources> {
+        &self.pool
+    }
+
     /// Partition one retained action's already prepaid input bytes from its fixed metadata.
     /// No new charge, refund, authority or slot is created. Both partitions retain any original
     /// phase/count custody until its actual last owner drops; reserved portions return under
@@ -610,6 +616,9 @@ impl Drop for Credit {
         if let Some(reservation) = self.reservation.take() {
             reservation.return_loan(self.bytes);
         }
+        // Automatic lane destruction precedes custody (declaration order). Preserve that
+        // order: Workflow's final retirement publisher relies on every actual byte/lane
+        // return occurring before the last custody Arc can destroy the Workflow itself.
     }
 }
 
