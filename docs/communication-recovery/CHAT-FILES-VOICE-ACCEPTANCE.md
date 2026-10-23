@@ -1,5 +1,115 @@
 # Chat, files and voice implementation evidence
 
+## Validated native handoff and V2 target integration (23 October)
+
+Frozen combined runtime `3f584d6049ef139492f8fa4146b5181bdc080575` integrates native checkpoint `05dcc2c2`
+with target `2f08bde0` (PR #50). The runtime changes were disjoint and remain byte-identical
+to their respective reviewed parents. Both conflicting dated documentation sections are
+retained. The historical isolated results below keep their original source scope; these new
+results validate the combined tree rather than assuming the earlier checkpoints compose.
+
+Production gates are unchanged: VoiceRouting defaults to Disabled, desktop V2 activation is
+unavailable, and native loopback admission remains Status9/existing-history Begin8(false).
+Action/final dispatch stays disabled. Input/permit delivery, atomic native/Root admission,
+action adapters, authenticated browser cleanup after End with keys retained through final ACK,
+and actual Actor/MLS/WebView action acceptance remain unfinished. No SDP/ICE, member-media relay
+or physical audio/network acceptance is established by these local integration checks.
+The external-download worktree and unrelated Main UI changes were not modified.
+
+Complete combined validation, zero failures:
+
+- Root: **3,262 passed**, 24 existing ignored (2442.64s). All eight incoming
+  voice_schedule regressions and both original Root retirement witnesses appear in the actual
+  full log. The actual source-scanner and sync test fingerprints point at this checkout.
+- Native: **685 passed** (680 library plus five ACL; 637.02s), including all
+  **208 focused handoff tests** (194.30s gate). Separate check
+  (44.67s), formatting (5.11s) and strict all-target/
+  all-feature Clippy (65.80s) pass.
+- Frontend: **2,515 passed** (83.83s); Svelte has zero errors/warnings
+  (56.70s), production build (42.39s) and all ten
+  rendered Edge flows (55.77s) pass on the combined source.
+- Focused Root voice: **458 passed** (100.14s gate), including all eight
+  incoming scheduling tests. Root formatting (4.16s), strict Clippy
+  (62.49s), ambient-dependency gate (1.02s) and
+  cargo-deny (11.97s) pass.
+- Native development build (158.72s) and actual application
+  startup (5.34s) pass. These checks exercise startup; action delivery and media remain untested.
+
+The first Root-focused command reported 450 but reused an older absolute-path cache artifact
+which omitted all eight incoming scheduler tests. That run is explicitly EXCLUDED. Thirty
+stale catcoms-sync dependency metadata files (72,704 bytes) were preserved under checked paths,
+not deleted, to force the affected crate to rebuild. The corrected 458 focus and complete Root
+run both require the eight new test names. No suite, test or resource limit was loosened and
+no cache was cleaned. Heavy Cargo commands ran serially.
+
+Read-only integration review independently verified both parent runtime sets and found no
+blocker/high/medium. Its stale central-documentation note is now marked historical. A LOW
+wording follow-up remains in voice-v2-call.ts:18: 'status-only' omits read-only history; the
+actual native whitelist and current canonical docs are correct. Enabled-path policy revocation,
+real dispatch/topology and actual native/WebView actions remain activation prerequisites.
+
+Evidence in the final-proof checkout: target/voice-integration-validation-summary.json,
+voice-integration-gates.jsonl, voice-integration-invalid-evidence.json,
+voice-integration-fingerprint-preservation.json, voice-integration-review.json and referenced
+logs. Validated runtime `3f584d60` is frozen; subsequent evidence changes are documentation only. Hosted
+checks for the final published head must be read separately; no hosted pass is implied here.
+
+## Validated native terminal delivery (23 October)
+
+Frozen runtime `193f220f4761844946740ee7b7d32f870b50722f` passed the complete local suites. This checkpoint implements native
+terminal-delivery state and strict browser decoding. The native/browser action handoff remains
+incomplete, and production final/action dispatch remains disabled. Production V2 signalling/call
+lifecycle and external download resume belong to other agents and were not changed here.
+
+Publication scope: this checkpoint stays on `communication-native-handoff`, based on
+`346062af`. PR #50 advanced the shared communication branch to `2f08bde0` while validation
+ran. That V2 merge is absent from this frozen source. Its code is preserved independently;
+integration and combined validation remain required. The counts below do not validate that merge.
+
+The first close mode is immutable: ordinary Return cannot become whole-plan Retire while copies
+drain. Terminal intent retains the original Session's private identity without retaining keys.
+After actual local/Root owners drain, native records one stable issuance and accepts its exact
+ACK. Normal channel closure waits for ACK. Lost replies recover the same stored state; a correct
+but unissued proof, another row or an equal-hash foreign Session cannot substitute for it.
+Independent physical collection may reclaim unreachable unACKed history without inventing ACK.
+The separate 100-byte Pending/Issued/Acknowledged grammar leaves historical replies read-only.
+Production still serves only Status9 and existing-history Begin8(false).
+
+Validation, zero failures:
+
+- Root: **3,254 passed**, 24 existing ignored, in 2155.38s. The suite ran from
+  the frozen checkout using cached artifacts with Root inputs byte-identical to `e560d319`.
+  The source-scanning construction test was then rebuilt against this checkout and passed
+  (19.44s build; 1.76s tests), so its embedded manifest path checks the changed native source.
+- Native: **680 library plus five ACL tests passed** (824.58s gate), including **208 focused
+  handoff tests** (5.61s tests; 85.28s gate). Separate check (6.59s), formatting (8.97s) and strict
+  all-target/all-feature Clippy (23.64s) pass. No memory, copy or resource cap was increased.
+- Frontend: **2,464 passed** (70.06s); focused codec tests **65/65** and Svelte check with zero
+  errors/warnings pass. Production build (41.05s) and all ten rendered Edge flows (53.66s) passed
+  on `10f55861`; their frontend/build inputs are unchanged by the later native-only correction.
+- Native development build (174.73s) and actual application startup (8.83s) pass on the corrected
+  runtime. No new packaged-WebView action, media or physical-network acceptance is claimed.
+
+Read-only actual-diff design/review/re-review has no remaining actionable blocker/high/medium.
+Destructor tracing corrected CollectedChannel's field order in `193f220f`: its independent
+identity token now drops before the paid Row. No existing deterministic observer sees the tiny
+inter-field credit-return interval; this property is established by Rust destructor tracing
+and review. Actual collector tests cover foreign sessions, late handles and complete GC.
+The initial layout/compile/fixture failures remain in the focused iteration logs. Final state
+fits the existing Row/Phase/Session/bootstrap/Control payments; no limits were loosened.
+
+Evidence: `target/voice-terminal-validation-summary.json`, `voice-terminal-gates.jsonl`,
+`voice-terminal-current-construction.json`, `voice-terminal-review.json` and referenced logs in
+the final-proof checkout. Heavy Cargo jobs ran serially. Older sections retain their own source
+scope; their passed counts are not additional tests of this runtime. Hosted-head CI is unverified.
+
+Still required here: canonical Input/admitted-permit replies, browser intake paid before Input
+fetch, native action adapters, authenticated original-Session browser cleanup after End retaining
+keys through final ACK, and actual Actor/MLS/WebView action acceptance. Engine admission also
+needs a synchronous native/Root commit boundary with Clock callbacks outside locks; it must not
+authorize work using a stale UI/route check. Exact action settlement cannot wait for whole-chain
+retirement. Live V2/RTC, relay, combined rollout and independent physical acceptance remain open.
+
 ## V2 dispatch, scheduling and call driver (22 October, branch `communication-v2-signalling`)
 
 Isolated from `f227b4f7`; details, contract and limits are in

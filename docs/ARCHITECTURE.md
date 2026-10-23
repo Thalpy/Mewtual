@@ -1,5 +1,45 @@
 # Mewtual; Architecture
 
+## Integrated V2 scheduling boundary (23 October)
+
+The target's V2 transport now coexists with native terminal-delivery state. Root routes kind 28
+and drives source/helper/endpoint work only through the local VoiceRouting switch; it defaults
+to Disabled, preserving the old empty response and no V2 scheduling. Forwarding serves bound
+member routes without granting endpoint participation or keys. Direct narrows policy and
+revokes the affected runtime lease; Disabled/Forwarding pauses preserve the native join.
+
+The renderer pins legacy/V2 mode before a join becomes current. V2 rooms exclude legacy
+writers, including delayed hangups, before presence or RTC mutation. Activation remains
+unavailable: the call driver is a contract-tested consumer of a native interface that is not
+implemented. Native loopback action/final dispatch stays disabled. See VOICE-V2-CALL-DRIVER.md
+for exact contracts, retained risks and enablement gates; HANDOVER records combined validation.
+Older claims that kind 28 is undispatched describe the default, not the opt-in test seam.
+
+## Original-channel terminal delivery (23 October)
+
+The inactive adapter distinguishes returning an action's16KiB loan from retiring its whole
+original confirmation plan. First close mode is immutable, even while copies remain.
+PhaseClosure carries the actual original retirement ticket outside Row/Index/Phase guards
+before its destructor closes Root. Pending local closure cannot retire a possibly published
+Root pair or produce a final receipt.
+
+Terminal intent retains the SAME private SessionIdentity before closing Phase. Its transcript
+hash is metadata; native allocation equality establishes provenance. The separate fixed token
+retains no Session/key/Workflow. Live/Drained enum space holds delivery state within existing
+Row capacity. Guards count its allocation across Session, bootstrap and action-history lifetimes.
+
+After local compaction and actual original Root retirement, a bounded native visit stores one
+stable proof over original transcript, RowId, full purpose, action and terminal mode. Even the
+correct predicted proof cannot be ACKed before issuance. Normal setup/channel closure requires
+issuance and exact ACK. Independent GC may discard unACKed history only after dead lease,
+matching physical collection, Root readiness and last metadata-owner drainage, without setting
+ACK. Equal-label/identical-hash foreign Sessions do not supply that physical proof.
+
+A separate100B Control reply binds row/action/mode and distinguishes Pending/Issued/Acknowledged.
+The adapter retains actual Incoming through output collection; it never waits for Root or takes
+Work/Input which could block its own drainage. Production remains Status/read-only-history only.
+Browser post-End final exchange and action delivery remain unfinished.
+
 ## Original final proof and retained cleanup cadence (22 October)
 
 A compacted final-intent native Row retains the same already-paid Arc<Phase>. Its drained

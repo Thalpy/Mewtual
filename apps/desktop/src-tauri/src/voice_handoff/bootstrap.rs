@@ -3,7 +3,7 @@
 //! share64 slots; uncertain rows are never evicted. Collection requires actual independent
 //! owners to drain and the original lease to die permanently; serials never reset on reuse.
 use super::channel::bootstrap::{Prepared, PublicSetup};
-use super::channel::{Refused, Session};
+use super::channel::{Refused, Session, SessionIdentity};
 use crate::voice_authority::SelectedHandoffOwner;
 use crate::{
     check_voice_activation_generation, check_voice_binding, require_unlocked_session, AppState,
@@ -48,6 +48,8 @@ struct State {
 struct Retirement {
     session: Weak<Session>,
     public: Weak<SetupOutput>,
+    // Fixed original identity only; no Session/key/credit is kept alive by final history.
+    identity: Option<Arc<SessionIdentity>>,
 }
 /// Native-only evidence that the ORIGINAL closed channel has no remaining Session, header,
 /// reply, setup ticket or public-output owner and its lease is permanently dead. Only the
@@ -56,9 +58,18 @@ struct Retirement {
 /// Retain the paid Row until the ledger has observed its original provenance; drop it only
 /// outside both registries' guards. This proves channel collection, not action/SDK drainage.
 pub(super) struct CollectedChannel {
+    // Declaration order is custody: this independent token must drop BEFORE the paid Row.
+    // Otherwise its last allocation can outlive bootstrap's metadata credit when no action
+    // Phase or Session remains. The Row's own retirement token is paid until _credit drops.
+    identity: Option<Arc<SessionIdentity>>,
     row: Arc<Row>,
 }
 impl CollectedChannel {
+    pub(super) fn identity(&self) -> Option<&Arc<SessionIdentity>> {
+        // This Row is already detached from the registry and cannot be mutated. A cloned
+        // token in CollectedChannel avoids returning a reference through the State guard.
+        self.identity.as_ref()
+    }
     pub(super) fn selected(&self) -> &SelectedHandoffOwner {
         &self.row.selected
     }
@@ -439,7 +450,14 @@ impl Registry {
         // Registry and Ledger locks NEVER overlap. Persist the evidence even when a delayed
         // ledger handle still retains history; a later sweep must not need a second witness.
         for row in removed.into_iter().flatten() {
-            ledger.channel_collected(CollectedChannel { row });
+            let identity = row
+                .state
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .retirement
+                .as_ref()
+                .and_then(|owners| owners.identity.clone());
+            ledger.channel_collected(CollectedChannel { row, identity });
         }
         // Always sweep, including an empty/uninitialized registry. The original one-shot
         // witness may have arrived before the last cleanup/metadata handle actually dropped.
@@ -565,6 +583,10 @@ impl Row {
             }
             if state.retirement.is_none() {
                 state.retirement = Some(Retirement {
+                    identity: state
+                        .session
+                        .as_ref()
+                        .map(|session| session.identity().clone()),
                     session: state
                         .session
                         .as_ref()
@@ -848,3 +870,5 @@ fn require_selected(
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+pub(super) use tests::installed as fixture_installed;

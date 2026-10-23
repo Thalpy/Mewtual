@@ -41,6 +41,7 @@ test("fixed hashes, flags, engine sizes and result sizes are checked without mut
     assert.throws(() => encodeVoiceIpcAction({ ...vectors.purpose, [field]: bad }, { kind: "input" }));
   }
   for (const retry of [0, 1, "true", null]) assert.throws(() => encodeVoiceIpcAction(vectors.purpose, { kind: "begin", retry } as VoiceIpcActionRequest));
+  for (const mode of [undefined, null, 0, 1, "", "ordinary", "terminal"]) assert.throws(() => encodeVoiceIpcAction(vectors.purpose, { kind: "close", mode } as VoiceIpcActionRequest));
   for (const engineBytes of [-1, 1.5, NaN, Infinity, 0x100000000]) assert.throws(() => encodeVoiceIpcAction(vectors.purpose, { kind: "admit", identity: vectors.identity, engineBytes }));
   const output = new Uint8Array(529).fill(91), tag = "55".repeat(32);
   assert.throws(() => encodeVoiceIpcAction(vectors.purpose, { kind: "result", identity: vectors.identity, tag, output }));

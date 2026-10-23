@@ -7,6 +7,7 @@ use rand_chacha::ChaCha20Rng;
 use rand_core::SeedableRng;
 
 mod action_history;
+pub(in crate::voice_handoff) use action_history::installed;
 mod collection;
 
 const POINT: &str = "046b17d1f2e12c4247f8bce6e563a440f277037d812deb33a0f4a13945d898c2964fe342e2fe1a7f9b8ee7eb4a7c0f9e162bce33576b315ececbb6406837bf51f5";
@@ -101,6 +102,7 @@ fn fixed_index_and_row_graph_fit_their_separate_real_payments() {
     // Include retained row, its Arc, preparation, Session result/projection and a second
     // returned descriptor copy. SelectedHandoffOwner has its separate original paid owner.
     let row = std::mem::size_of::<Row>()
+        + std::mem::size_of::<SessionIdentity>() + 2 * std::mem::size_of::<usize>()
         + arc_words
         + std::mem::size_of::<Ticket>()
         + std::mem::size_of::<SetupOutput>()

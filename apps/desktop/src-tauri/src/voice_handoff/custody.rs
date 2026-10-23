@@ -89,6 +89,14 @@ enum Stage {
     Draining,
     Drained,
 }
+/// The first explicit close fixes the meaning of this original loan. Returning an action
+/// phase permits confirmation continuation; retiring closes its entire original Workflow.
+/// An ordinary close cannot be upgraded while a delayed copy still owns the loan.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum CloseMode {
+    Return,
+    Retire,
+}
 struct State {
     stage: Stage,
     copies: usize,
@@ -121,6 +129,18 @@ pub(crate) struct Phase {
     drained: AtomicBool,
     changed: Notify,
     _metadata: Credit,
+}
+/// The SAME original loan between local close admission and actual Root retirement. Move it
+/// out of all Row/Phase guards before dropping it. Unwind cannot publish local completion
+/// ahead of Root: Drop performs the one original retirement and publishes its actual witness.
+pub(super) struct PhaseClosure {
+    phase: Arc<Phase>,
+    loan: Option<(HandoffLoan, bool)>,
+}
+impl Drop for PhaseClosure {
+    fn drop(&mut self) {
+        self.phase.finish_draining(self.loan.take());
+    }
 }
 pub(crate) struct CopyCustody {
     phase: Arc<Phase>,
@@ -299,36 +319,47 @@ impl Phase {
     /// native input, buffers and completed/uncollected workers still hold the variable loan.
     /// The separately paid control flight must own the proof's eventual physical response.
     pub(crate) fn close(&self) {
-        let loan = {
-            let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
-            if state.stage == Stage::Open {
-                state.stage = Stage::Closing;
-            }
-            Self::take_draining(&mut state)
-        };
-        self.finish_draining(loan);
+        // Best-effort local cleanup cannot change a previously selected terminal mode.
+        // The authenticated adapter uses close_mode directly and reports a mismatch.
+        let _ = self.close_mode(CloseMode::Return);
     }
     /// Derivation-only pilot closure AFTER selected SDK/RPC drainage and native settlement.
     /// Unlike ordinary close, explicitly retire the ORIGINAL confirmation plan when the last
     /// actual local copy owner returns its loan. Root retirement runs outside State below.
     /// This is not SDP phase transfer or an assertion that other Root lower/input owners drained.
     pub(crate) fn close_confirmation(&self) -> Result<(), VoiceError> {
-        let loan = {
-            let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
-            if matches!(state.stage, Stage::Draining | Stage::Drained) && !state.retire_confirmation
-            {
-                // An ordinary close already returned the only capability. Do not relabel its
-                // historical metadata as full-plan closure or borrow a replacement loan.
-                return Err(VoiceError::Unauthorized);
-            }
-            state.retire_confirmation = true;
-            if state.stage == Stage::Open {
-                state.stage = Stage::Closing;
-            }
-            Self::take_draining(&mut state)
-        };
+        self.close_mode(CloseMode::Retire)
+    }
+    /// Idempotent only for the SAME closure mode, even before the last copy returns. Fix
+    /// intent under State, then retire Root outside the guard. No browser flag establishes
+    /// settlement or SDK drainage: the trusted adapter must establish those independently.
+    pub(super) fn close_mode(&self, mode: CloseMode) -> Result<(), VoiceError> {
+        let loan = self.prepare_close(mode)?;
         self.finish_draining(loan);
         Ok(())
+    }
+    /// Pure local admission under the established Row -> Phase lock order. The returned
+    /// ticket owns any actual Root loan; its caller MUST drop it outside every native guard.
+    pub(super) fn begin_close(
+        self: &Arc<Self>,
+        mode: CloseMode,
+    ) -> Result<PhaseClosure, VoiceError> {
+        Ok(PhaseClosure {
+            phase: self.clone(),
+            loan: self.prepare_close(mode)?,
+        })
+    }
+    fn prepare_close(&self, mode: CloseMode) -> Result<Option<(HandoffLoan, bool)>, VoiceError> {
+        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        let retire = mode == CloseMode::Retire;
+        if state.stage != Stage::Open && state.retire_confirmation != retire {
+            return Err(VoiceError::Unauthorized);
+        }
+        state.retire_confirmation = retire;
+        if state.stage == Stage::Open {
+            state.stage = Stage::Closing;
+        }
+        Ok(Self::take_draining(&mut state))
     }
     fn take_draining(state: &mut State) -> Option<(HandoffLoan, bool)> {
         if state.stage == Stage::Closing && state.copies == 0 {
@@ -401,6 +432,11 @@ mod tests {
             .max(std::mem::size_of::<Buffer>())
             .max(std::mem::size_of::<InputCustody>());
         let bytes = std::mem::size_of::<Phase>()
+            // A terminal native row retains this SAME Phase/payment until its delivery
+            // token drops (Live field order / State body before final_phase). Count the
+            // full independent token allocation here, rather than hiding it in Row's cap.
+            + std::mem::size_of::<super::super::channel::SessionIdentity>()
+            + 2 * std::mem::size_of::<usize>()
             + 2 * std::mem::size_of::<usize>()
             + COPY_OWNERS * wrapper
             + std::mem::size_of_val(&waiter);
@@ -632,17 +668,21 @@ mod tests {
     }
 
     #[test]
-    fn confirmation_close_can_escalate_only_before_the_original_loan_is_taken() {
+    fn ordinary_closing_cannot_escalate_while_the_original_copy_still_holds_the_loan() {
         let (coordinator, _join, action, phase) = phase_fixture();
         let copy = phase.copy(0).unwrap();
         action.settle_engine();
         let held = coordinator.runtime().resources().counts();
         phase.close();
         assert!(!phase.is_drained());
-        phase.close_confirmation().unwrap();
+        assert_eq!(phase.close_confirmation(), Err(VoiceError::Unauthorized));
         drop(copy);
         assert!(phase.is_drained());
-        assert!(coordinator.runtime().resources().counts().0 <= held.0 - 96 * 1024);
+        assert_eq!(
+            phase.confirmation_status(),
+            ConfirmationStatus::NotRequested
+        );
+        assert_eq!(coordinator.runtime().resources().counts(), held);
 
         let (_coordinator, _join, _action, phase) = phase_fixture();
         let loan = {

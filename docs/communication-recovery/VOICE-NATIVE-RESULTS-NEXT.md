@@ -1,5 +1,66 @@
 # Next voice milestone: native result recovery
 
+## Validated target integration (23 October)
+
+Combined runtime `3f584d6049ef139492f8fa4146b5181bdc080575` includes target `2f08bde0` and passed complete
+Root 3,262, native 685 (including five ACL) and frontend 2,515 tests, with zero failures.
+Focused Root 458/native 208, static checks, production frontend build, all ten Edge flows,
+native development build and actual startup pass. HANDOVER records exact commands, durations,
+current-source fingerprints and the excluded stale 450-test run. Both reviewed runtime source
+sets and both documentation histories are preserved. A read-only integration review found no
+blocker/high/medium. The stale driver integration note is now historical; its status-only
+source comment remains a recorded LOW wording follow-up in the V2 owner's area.
+
+Production activation and action/final dispatch remain disabled. The seven remaining native/
+browser implementation steps below are unchanged. Do not interpret combined local suites as
+an actual Actor/MLS/WebView action cycle, live SDP/ICE, member relay or physical acceptance.
+
+## Validated terminal delivery; remaining handoff work (23 October)
+
+Frozen runtime `193f220f4761844946740ee7b7d32f870b50722f` passed Root 3,254, native 685 (including five ACL) and frontend
+2,464 tests with zero failures, plus native static/build/startup and unchanged-input frontend
+check/build/ten-flow gates. HANDOVER records exact source, cache provenance, durations, review
+and failed iteration logs. This is a bounded terminal-delivery slice, not a complete action flow.
+
+Implemented but inactive: immutable Return/Retire, original-row/Session terminal intent, separate
+100-byte final replies, stable stored issuance/exact ACK, normal close gated by ACK and independent
+physical-identity GC. Production still accepts Status9 and existing-history Begin8(false) only.
+Historical sections below describe their original checkpoints; they do not reopen these fixed
+native terminal-state gaps or establish current production action dispatch.
+
+Remaining implementation order:
+
+1. Add canonical Input/admitted-permit replies binding exact row/action, protected context,
+   native points/transcript and engine bytes. Scope.room is u128; u64 browser values stay exact
+   decimal strings. Root exposes no public chain serial: binding.chain is an original Phase's
+   scoped adapter identity, never renderer-created authority or a fresh confirmation-row ID.
+2. Prepay one affine browser intake before reading Data. Claim existing chain/row/group/channel
+   capacity before fetch, coalesce duplicates and transfer that same claim into the chain without
+   a refund/recharge, renewed deadline or new execution position. Publish before callbacks.
+3. Keep the actual native CryptoInputLease, paid Phase and physical Incoming alive through
+   serialization, sealing, socket write and output collection. Payload custody must drop before
+   the last header worker; measure the composed wrappers under existing limits.
+4. Add a synchronous, non-escaping native/Root engine-admission commit. Current admit_engine
+   samples injected Clock under Engine; it cannot be called under Coordinator/Route guards.
+   Sample the original Clock outside locks, then let trusted native code hold its short final
+   UI/selection/route fence while immediately consuming a no-Clock Root step. No await, reusable
+   observation or renderer-supplied timestamp may bridge that commit. Reentrant Clock tests must
+   find Engine/native gates available, and lock/revocation in either callback must refuse admission.
+5. Implement the remaining result/receipt ACK/settlement adapters using the original native
+   action and receipt, not a renderer digest as authority. Emit a permit only after actual native
+   admission. Exact action settlement waits for that action's SDK/result RPCs, never chain/final
+   drainage: driveAction clears chain.running only after settleAction returns.
+6. Add authenticated original-Session cleanup after End. Preserve keys/counters through final
+   issuance/ACK; do not weaken fresh-work owner checks. Cleanup already owns the execution lane
+   and must not recursively acquire it. Add bounded Clock/availability coordination for action
+   cleanup without overlapping pending RPCs or treating cancellation as actual drainage.
+7. Prove actual Actor/MLS discovery and a complete native/WebView action cycle before enablement.
+   The existing protected_start fixture calls private observers and is not normal signed ingress.
+   Coordinate that positive fixture with the production V2 owner without taking over its lifecycle.
+
+Production V2 signalling/call lifecycle and external download resume remain other agents' work.
+No live V2/RTC, member relay, combined or physical audio/network acceptance follows from this slice.
+
 ## Current proof retention and cleanup retry candidate (22 October)
 
 The isolated final-proof checkout follows `e560d319`. Compacted final-intent history retains

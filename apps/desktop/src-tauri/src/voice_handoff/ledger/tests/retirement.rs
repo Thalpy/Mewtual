@@ -78,7 +78,10 @@ fn compacted_final_history_retains_original_proof_until_actual_root_input_drops(
         row.confirmation_status().unwrap(),
         ConfirmationStatus::Drained
     );
-    assert!(ledger.channel_may_close(&selected));
+    assert!(
+        !ledger.channel_may_close(&selected),
+        "Root retirement alone is not final delivery"
+    );
     drop(pressure);
 }
 
@@ -107,7 +110,10 @@ fn already_retired_compaction_keeps_the_same_original_phase() {
         row.confirmation_status().unwrap(),
         ConfirmationStatus::Drained
     );
-    assert!(ledger.channel_may_close(&selected));
+    assert!(
+        !ledger.channel_may_close(&selected),
+        "no original Session final issuance/ACK"
+    );
     let state = row.row.state.lock().unwrap();
     assert!(Arc::ptr_eq(state.final_phase.as_ref().unwrap(), &phase));
 }
@@ -161,15 +167,18 @@ fn concurrent_compaction_keeps_same_original_phase_without_replacing_proof() {
     action.settle_engine();
     phase.close_confirmation().unwrap();
     drop(work);
+    let row = ledger
+        .resolve(&selected, Purpose::Derive(selector), id)
+        .unwrap();
     let barrier = std::sync::Barrier::new(2);
     std::thread::scope(|scope| {
         let a = scope.spawn(|| {
             barrier.wait();
-            ledger.compact(id)
+            row.try_compact()
         });
         let b = scope.spawn(|| {
             barrier.wait();
-            ledger.compact(id)
+            row.try_compact()
         });
         // The existing sole-observation gate may temporarily refuse the other contender.
         for result in [a.join().unwrap(), b.join().unwrap()] {

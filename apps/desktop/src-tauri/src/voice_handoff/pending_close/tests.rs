@@ -65,6 +65,7 @@ impl Case {
         bytes.extend_from_slice(&self.selector.join);
         bytes.extend_from_slice(&self.selector.key_ref);
         bytes.extend_from_slice(&self.selector.epoch.to_be_bytes());
+        bytes.push(0); // explicit ordinary return, never whole-Workflow retirement
         bytes
     }
     fn frame(&self, sequence: u64, operation: u8, logical: [u8; 16], bytes: &[u8]) -> Incoming {

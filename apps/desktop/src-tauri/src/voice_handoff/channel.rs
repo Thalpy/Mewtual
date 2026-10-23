@@ -55,6 +55,10 @@ pub(super) struct Session {
     group: [u8; 32],
     slot: u8,
     keys: Keys,
+    // A separate, fixed paid allocation identifies this exact Session without retaining its
+    // keys, counters or credits in final action history. Equal transcript bytes alone never
+    // establish native provenance. Every Session receives its own fresh allocation.
+    identity: Arc<SessionIdentity>,
     counters: Mutex<Counters>,
     idle: tokio::sync::Notify,
     _control: Credit,
@@ -64,7 +68,11 @@ pub(super) struct Session {
     // Terminal browser control cannot depend on a fresh slot when other work fills the pool.
     control_lane: Arc<WorkLane>,
 }
+pub(super) struct SessionIdentity(pub(super) [u8; 32]);
 impl Session {
+    pub(super) fn identity(&self) -> &Arc<SessionIdentity> {
+        &self.identity
+    }
     #[cfg(test)]
     pub(super) fn fixture_counts(&self) -> (bool, u64, u64) {
         let counters = self
@@ -105,6 +113,13 @@ impl Session {
         rng.fill_bytes(seed.as_mut());
         let keys = Keys::new(&seed);
         Ok(Arc::new(Self {
+            identity: Arc::new(SessionIdentity({
+                use sha2::{Digest, Sha256};
+                let mut hash = Sha256::new();
+                hash.update(b"native fixture session identity");
+                hash.update(seed.as_ref());
+                hash.finalize().into()
+            })),
             resources,
             group,
             slot,

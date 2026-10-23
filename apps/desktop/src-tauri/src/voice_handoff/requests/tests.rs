@@ -36,7 +36,11 @@ fn native_browser_vectors_preserve_complete_purpose_identity_and_borrow_the_exac
         let source = &case["request"];
         match request.kind {
             Kind::Begin { retry } => assert_eq!(retry, source["retry"].as_bool().unwrap()),
-            Kind::Input | Kind::ClosePhase => assert_eq!(bytes.len(), 105),
+            Kind::Input => assert_eq!(bytes.len(), 105),
+            Kind::ClosePhase { mode } => {
+                assert_eq!(bytes.len(), 106);
+                assert_eq!(mode == CloseMode::Retire, source["mode"] == "retire");
+            }
             Kind::Admit {
                 action,
                 engine_bytes,
@@ -118,7 +122,7 @@ fn flags_zero_identities_and_result_length_are_closed_while_epoch_zero_remains_v
                 assert!(Request::decode(operation, &changed).is_err());
             }
         }
-        if operation == Operation::BeginDerive {
+        if matches!(operation, Operation::BeginDerive | Operation::ClosePhase) {
             for flag in [2, 255] {
                 bytes[105] = flag;
                 assert!(Request::decode(operation, &bytes).is_err());
