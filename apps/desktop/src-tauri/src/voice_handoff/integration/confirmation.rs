@@ -514,25 +514,27 @@ async fn framed_submission(
     body.extend_from_slice(&output_tag);
     body.extend_from_slice(&(output.len() as u16).to_be_bytes());
     body.extend_from_slice(output);
-    let (phase, lose_waiter) = {
+    let (phase, role, operation, original_deadline) = {
         let work = row.work().unwrap();
         (
             work.phase().clone(),
-            work.action().protected_row().unwrap() == 1
-                && work.action().operation() == CryptoOperation::EncryptConfirmation,
+            work.action().protected_row().unwrap(),
+            work.action().operation(),
+            work.action().protected_binding().unwrap().deadline,
         )
     };
-    let header = (
-        route.session().fixture_counts().1 + 1,
-        3,
-        1,
-        row.id().logical(),
-    );
-    let incoming = opened_frame(&public, &route, header, &body, Some(&phase));
+    let clock = crate::voice_runtime(state).clock();
     let context = context::Context::new(state);
-    if lose_waiter {
+    if role == 1 && operation == CryptoOperation::EncryptConfirmation {
         use std::future::{poll_fn, Future};
         use std::task::Poll;
+        let header = (
+            route.session().fixture_counts().1 + 1,
+            3,
+            1,
+            row.id().logical(),
+        );
+        let incoming = opened_frame(&public, &route, header, &body, Some(&phase));
         let actor = actor(state, selected).await;
         // Drive the ACTUAL outer handler up to its UI-commit await. A FIFO actor query
         // completes the preceding binding observation, then the existing durable Ready
@@ -591,26 +593,155 @@ async fn framed_submission(
         assert!(!route.session().fixture_counts().0);
         let status = row.reconcile().unwrap();
         assert_eq!(
-            status.engine.receipt.as_ref().unwrap().output_tag,
+            status
+                .engine
+                .receipt
+                .as_ref()
+                .expect("detached original publication must finish before any replay")
+                .output_tag,
             output_tag
         );
         recover_child_history(state, selected, parent, purpose, row, selector, &status).await;
         return;
     }
-    let response = confirmation_result::commit(&context, &route, incoming)
+    // Force one real, authenticated local refusal on Finish. The actual native worker
+    // observes the held registry; it must not manufacture a terminal result. Releasing
+    // that fence must allow this SAME genuine child result to reach its original Root
+    // receipt, before crypto_and_return's later typed retry can hide a missing handoff.
+    let mut inject_capacity = role == 3 && operation == CryptoOperation::EncryptConfirmation;
+    let mut capacity_refusals = 0u32;
+    loop {
+        assert!(
+            clock.monotonic_ms() < original_deadline,
+            "original confirmation deadline exhausted: role {role}, operation {operation:?}, action {serial}, capacity refusals {capacity_refusals}"
+        );
+        let pressure = if inject_capacity {
+            Some(state.servers.lock().await)
+        } else {
+            None
+        };
+        let header = (
+            route.session().fixture_counts().1 + 1,
+            3,
+            1,
+            row.id().logical(),
+        );
+        let response = confirmation_result::commit(
+            &context,
+            &route,
+            opened_frame(&public, &route, header, &body, Some(&phase)),
+        )
         .await
-        .unwrap();
-    let reply = response.seal().unwrap();
-    let status = row.reconcile().unwrap();
-    assert!(status.action == Some((serial, version, tag)));
-    assert_eq!(
-        status.engine.receipt.as_ref().unwrap().output_tag,
-        output_tag
-    );
-    assert_eq!(
-        opened_reply(&public, header, &body, &reply),
-        replies::status(row.id(), &status).unwrap()
-    );
+        .expect("actual original result worker must fit its unchanged payment");
+        let reply = response.seal().unwrap();
+        // Authenticate and classify BEFORE assuming that publication produced a receipt.
+        // A Capacity reply is neither terminal failure nor evidence that no work exists.
+        let plain = opened_reply(&public, header, &body, &reply);
+        drop(reply); // collect Work/task/output/physical ownership before retransmission
+        assert!(!route.session().fixture_counts().0);
+        let status = row.reconcile().unwrap();
+        assert!(status.action == Some((serial, version, tag)));
+        let capacity = replies::refused(factory::Refused::Protocol(VoiceError::Capacity));
+        if inject_capacity {
+            assert_eq!(plain, capacity, "held native registry must refuse locally");
+            assert!(status.engine.receipt.is_none());
+            inject_capacity = false;
+        }
+        drop(pressure);
+        if plain == capacity {
+            capacity_refusals += 1;
+            eprintln!("native confirmation exact result retry {capacity_refusals}; role {role}; operation {operation:?}; action {serial}; remaining original ms {}", original_deadline.saturating_sub(clock.monotonic_ms()));
+            // Keep the immutable body/output/action/permit/Phase and original deadline.
+            // Only the collected physical request's sequence changes. No refunds or new
+            // factories are permitted, even if an earlier reply's publication was lost.
+            clock.sleep(Duration::from_secs(1)).await;
+            continue;
+        }
+        assert!(
+            same_result_observation(&plain, &replies::status(row.id(), &status).unwrap()),
+            "unexpected authenticated confirmation reply {plain:?}: role {role}, operation {operation:?}, action {serial}, capacity refusals {capacity_refusals}"
+        );
+        assert_eq!(
+            status
+                .engine
+                .receipt
+                .as_ref()
+                .expect("canonical native result must contain its actual terminal receipt")
+                .output_tag,
+            output_tag
+        );
+        break;
+    }
+}
+
+/// Compare the authenticated reply with a later canonical native observation. Root's
+/// receipt.retired is observational (same_transition excludes it): crossing expiry can
+/// change only that bit from0 to1 between sealing and reconciliation. No other field,
+/// receipt disappearance, backward transition or noncanonical boolean is acceptable.
+fn same_result_observation(reply: &[u8], later: &[u8; replies::STATUS_BYTES]) -> bool {
+    reply == later
+        || (reply.len() == replies::STATUS_BYTES
+            && reply[69] == 1
+            && later[69] == 1
+            && reply[207] == 0
+            && later[207] == 1
+            && reply[..207] == later[..207]
+            && reply[208..] == later[208..])
+}
+
+#[test]
+fn result_observation_allows_only_forward_retirement_of_the_same_canonical_receipt() {
+    use catcoms_sync::voice_v2::crypto_actions::{CryptoResultReceipt, CryptoResultStatus};
+    let mut logical = [0; 16];
+    logical[15] = 1;
+    let id = ledger::RowId::from_logical(logical).unwrap();
+    // These are metadata-only codec inputs, not fabricated action/engine authority. Cover
+    // rejected as well as accepted outcomes: retirement never changes the original result.
+    for outcome in [
+        CryptoOutcome::Opened,
+        CryptoOutcome::Rejected(VoiceError::Freshness),
+    ] {
+        let mut status = ledger::Status {
+            pending: ledger::PendingStatus::NotPending,
+            action: Some((7, 3, [9; 32])),
+            engine: CryptoResultStatus {
+                settled: false,
+                receipt: Some(CryptoResultReceipt {
+                    action: 7,
+                    input_tag: [9; 32],
+                    output_tag: [8; 32],
+                    outcome,
+                    retired: false,
+                }),
+            },
+            acknowledged: false,
+            drained: false,
+        };
+        let original = replies::status(id, &status).unwrap();
+        status.engine.receipt.as_mut().unwrap().retired = true;
+        let retired = replies::status(id, &status).unwrap();
+        assert!(same_result_observation(&original, &original));
+        assert!(same_result_observation(&original, &retired));
+        assert!(!same_result_observation(&retired, &original));
+        // A relaxed observational comparison must never hide even one changed binding,
+        // digest, outcome, ACK, settlement, drainage, reserved byte or invalid boolean.
+        for index in 0..replies::STATUS_BYTES {
+            if index == 207 {
+                continue;
+            }
+            let mut changed = retired;
+            changed[index] ^= 1;
+            assert!(
+                !same_result_observation(&original, &changed),
+                "byte {index}"
+            );
+        }
+        let mut invalid = retired;
+        invalid[207] = 2;
+        assert!(!same_result_observation(&original, &invalid));
+        assert!(!same_result_observation(&original[..241], &retired));
+        assert!(!same_result_observation(&[1, 3, 7], &retired));
+    }
 }
 
 /// Test-only canonical request prefix; renderer/native shared vectors test this grammar.
