@@ -174,7 +174,7 @@ export type VoiceV2Diagnostic = Readonly<{ code: string; fields?: Readonly<Recor
 export type VoiceV2Phase = "starting" | "joined" | "rejoining" | "uncertain" | "ended" | "unavailable";
 export type VoiceV2Signalling =
   | "waiting-pair" | "pair-unavailable" | "paired" | "offering" | "answering"
-  | "offer-submitted" | "answer-submitted" | "negotiated" | "refused" | "uncertain" | "failed";
+  | "offer-submitted" | "answer-submitted" | "negotiated" | "refused" | "uncertain" | "unresolved";
 export type VoiceV2Media = "none" | "connecting" | "connected" | "failed";
 
 export type VoiceV2PeerSnapshot = Readonly<{
@@ -639,15 +639,20 @@ export class VoiceV2Call {
       this.#diag("VOICE.V2.STALE_JOIN", { kind: reason });
       return;
     }
-    const dead = record.media === "failed" || record.signalling === "failed" || record.signalling === "refused";
+    // Dead means definitive evidence only: RTC failure (no V2 ICE restart can revive it), or an
+    // authoritative native refusal with no working media. An `unresolved` submit is unknown, not
+    // failed: native may have delivered it and the call may be connected or still connecting.
+    const dead = record.media === "failed" || (record.signalling === "refused" && record.media !== "connected");
     if (!tearDown && record.pc !== null && !dead) {
       // Observation expiry is not pair retirement. An established pair may be mid-reconnect
       // (RTC "disconnected" reads as connecting), and native keeps the pair across discovery
       // expiry without a new confirmation, so a destroyed record could never be re-paired for this
       // join. Keep the connection and its OfferId, report stale presence, and let renewal of the
       // same join restore it. Only bye, removal, retirement or a confirmed replacement end it, or
-      // the pair turning out dead (failed media or negotiation, here or later in #wire): V2 has
-      // no renegotiation, so a stale dead pair would otherwise linger as a phantom participant.
+      // definitive evidence that the pair is dead (RTC failure, here or later in #wire, or an
+      // authoritative refusal without working media): V2 has no renegotiation, so a stale dead
+      // pair would otherwise linger as a phantom participant. An unknown submit outcome is not
+      // such evidence and never retires a pair.
       record.presence = "stale";
       this.#changed();
       return;
@@ -875,9 +880,15 @@ export class VoiceV2Call {
   async #submit(generation: number, record: PeerRecord, action: VoiceV2Action): Promise<VoiceV2SubmitResult | null> {
     const lease = this.#lease;
     if (!lease) return null;
-    const started = this.#deps.clock.now();
+    const deadline = this.#deps.clock.now() + VOICE_V2_RECEIPT_MS;
     for (let tries = 0; ; tries++) {
       if (!this.#live(generation, record)) return null;
+      // Every offer/answer retry is dispatched only inside the receipt window, checked against
+      // the absolute deadline immediately before the call: the sleep below may resume far later
+      // than requested (suspension, a stalled event loop).
+      if (tries > 0 && action.kind !== "ice" && this.#deps.clock.now() >= deadline) {
+        return this.#unresolved(generation, record, action);
+      }
       try {
         const result = await this.#deps.native.submit(lease.lease, action);
         if (!result || result.action !== action.action || (result.status !== "submitted" && result.status !== "refused")) {
@@ -906,23 +917,29 @@ export class VoiceV2Call {
             record.signalling = "uncertain";
             this.#changed();
           }
-          // Stop before a retry would land outside the window, not after it: a reply to an attempt
-          // sent once the cached result may be gone could not be told apart from a fresh action.
+          // Also stop before a scheduled retry would land outside the window: a reply to an
+          // attempt sent once the cached result may be gone could not be told from a fresh action.
           const delay = VOICE_V2_RETRY_MS[Math.min(tries, VOICE_V2_RETRY_MS.length - 1)];
-          if (this.#deps.clock.now() - started + delay >= VOICE_V2_RECEIPT_MS) {
-            // The cached result may be gone: further retries could neither recover the original
-            // OfferId nor be distinguished from a new action. Stop and say so, actionably.
-            if (this.#live(generation, record)) {
-              record.signalling = "failed";
-              this.#diag("VOICE.V2.SUBMIT_FAILED", { kind: action.kind });
-              this.#changed();
-            }
-            return null;
-          }
+          if (this.#deps.clock.now() + delay >= deadline) return this.#unresolved(generation, record, action);
         }
         await this.#deps.clock.sleep(VOICE_V2_RETRY_MS[Math.min(tries, VOICE_V2_RETRY_MS.length - 1)]);
       }
     }
+  }
+
+  /**
+   * The receipt window closed without an answer to an offer/answer submit. The outcome is
+   * UNKNOWN, not failed: native may have committed and delivered it, and the media may be
+   * connected or still connecting. Report it actionably, retry no more, and never treat it as
+   * evidence that the pair is dead.
+   */
+  #unresolved(generation: number, record: PeerRecord, action: VoiceV2Action): null {
+    if (this.#live(generation, record)) {
+      record.signalling = "unresolved";
+      this.#diag("VOICE.V2.SUBMIT_UNRESOLVED", { kind: action.kind });
+      this.#changed();
+    }
+    return null;
   }
 
   #refused(record: PeerRecord, reason: string): void {
@@ -967,7 +984,7 @@ export class VoiceV2Call {
  */
 export function describeVoiceV2Peer(peer: VoiceV2PeerSnapshot): string {
   if (peer.media === "connected") return peer.presence === "stale" ? "Connected, presence not renewed" : "Connected";
-  if (peer.signalling === "failed") return "Signalling failed, leave and rejoin to retry";
+  if (peer.signalling === "unresolved") return "Signalling outcome unknown, leave and rejoin if there is no audio";
   if (peer.media === "failed") return "Signalling done, no media route";
   if (peer.presence === "stale") return "Presence not renewed, keeping the call open";
   switch (peer.signalling) {

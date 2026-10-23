@@ -865,7 +865,55 @@ test("lost offer replies are recovered by exact retry inside the receipt window,
   assert.equal(new Set(offers.map((s) => JSON.stringify(s.action))).size, 1, "every retry is the exact original action");
 });
 
-test("an offer whose replies stay lost past the receipt window fails explicitly and stops retrying", async () => {
+test("an answer whose receipts are all lost cannot let presence expiry close a connected call", async () => {
+  // Re-review P2: exhausted receipt recovery was treated as "dead" by expiry cleanup, although
+  // native had delivered the answer and the call was connected.
+  for (const media of ["connected", "connecting"] as const) {
+    const h = harness();
+    const lease = await joined(h);
+    h.native.loseSubmit = 99; // native commits and routes the answer; every reply is lost
+    h.native.push(lease, { kind: "peer", identity: LOW, join: join(1) });
+    h.native.push(lease, { kind: "paired", identity: LOW, join: join(1) });
+    h.native.push(lease, { kind: "offer", identity: LOW, join: join(1), offer: offerOf(3), sdp: "offer" });
+    await settle();
+    assert.equal(h.native.answers().length, 1, "the answer was submitted (and committed natively)");
+    const pc = h.pcs[0];
+    // The remote received it: RTC progresses before local receipt recovery gives up.
+    pc.state(media === "connected" ? "connected" : "connecting");
+    for (let i = 0; i < 8; i++) { h.advance(4_000); h.wake(); await settle(); }
+    assert.equal(h.peer(LOW)?.signalling, "unresolved", "an unknown outcome, not a failure");
+    h.native.push(lease, { kind: "peer-gone", identity: LOW, join: join(1), reason: "expired" });
+    await settle();
+    assert.equal(pc.closed, false, `${media}: the same connection stays open`);
+    assert.equal(h.peer(LOW)?.presence, "stale");
+    h.native.push(lease, { kind: "peer", identity: LOW, join: join(1) }); // same join renews
+    await settle();
+    assert.equal(h.peer(LOW)?.presence, "fresh");
+    assert.equal(h.pcs.length, 1, "no new connection");
+    h.native.push(lease, { kind: "ice", identity: LOW, join: join(1), offer: offerOf(3), candidate: { candidate: "same negotiation" } });
+    await settle();
+    assert.equal((pc.ice.at(-1) as any).candidate, "same negotiation", "the same negotiation identity still applies");
+    if (media === "connected") assert.equal(describeVoiceV2Peer(h.peer(LOW)!), "Connected");
+  }
+});
+
+test("a retry timer that resumes after the receipt window dispatches nothing", async () => {
+  // Re-review P3: the deadline is checked immediately before every retry dispatch, not only
+  // before scheduling a sleep that may resume much later (suspension, stalled event loop).
+  const h = harness();
+  const lease = await joined(h);
+  h.native.loseSubmit = 99;
+  h.native.push(lease, { kind: "peer", identity: HIGH, join: join(1) });
+  h.native.push(lease, { kind: "paired", identity: HIGH, join: join(1) });
+  await settle();
+  assert.equal(h.native.offers().length, 1, "first attempt; its 250 ms retry is now scheduled");
+  h.advance(25_000); // the timer resumes 25 s late
+  h.wake(); await settle();
+  assert.equal(h.native.offers().length, 1, "no submit after the window closed");
+  assert.equal(h.peer(HIGH)?.signalling, "unresolved");
+});
+
+test("an offer whose replies stay lost past the receipt window ends unresolved and stops retrying", async () => {
   const h = harness();
   const lease = await joined(h);
   h.native.loseSubmit = 99;
@@ -878,10 +926,10 @@ test("an offer whose replies stay lost past the receipt window fails explicitly 
   let clockNow = firstAt;
   h.native.submit = (leaseId, action) => { sentAt.push(clockNow); return original(leaseId, action); };
   for (let i = 0; i < 8; i++) { h.advance(4_000); clockNow += 4_000; h.wake(); await settle(); }
-  assert.equal(h.peer(HIGH)?.signalling, "failed");
+  assert.equal(h.peer(HIGH)?.signalling, "unresolved", "the outcome is unknown, so it is not called failed");
   assert.ok(sentAt.every((at) => at - firstAt < 20_000), "no retry is sent after the receipt window");
-  assert.equal(describeVoiceV2Peer(h.peer(HIGH)!), "Signalling failed, leave and rejoin to retry");
-  assert.ok(h.diags.includes("VOICE.V2.SUBMIT_FAILED"));
+  assert.equal(describeVoiceV2Peer(h.peer(HIGH)!), "Signalling outcome unknown, leave and rejoin if there is no audio");
+  assert.ok(h.diags.includes("VOICE.V2.SUBMIT_UNRESOLVED"));
   const attempts = h.native.offers().length;
   for (let i = 0; i < 4; i++) { h.advance(4_000); h.wake(); await settle(); }
   assert.equal(h.native.offers().length, attempts, "no hidden retries once failed");
