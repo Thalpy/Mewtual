@@ -536,6 +536,16 @@ Rust interfaces:
   is reported with the saved result. `ExportPorts::flush(journal)` is the folder flush the export
   sequence runs after the link and before Published or RecoverPublished (the Resume preflight's
   recovery flushes too).
+- Second user review (R2-, 23 October): the renderer tracks Pause/Remove/Keep (and the
+  pre-acquisition part of Resume) per download ID (`privateDownloadBusy` is a map), so a stalled
+  Remove never disables other rows. `choose_destination` holds the one-dialog turn only while the
+  chooser runs and validates afterwards on a bounded pool (`choose_destination_with` is its test
+  seam; `VALIDATION_BUSY` when four checks are still stalled). `report_left_behind` attaches Save
+  new copy's old-partial notice to every result after the abandon, success or failure.
+  `ChoiceRefusal::NoLinks` (Unix: FAT, vfat, exFAT refused at validation). `DownloadReady::
+  export_custody()` (catcoms-app, read-only) feeds `OnPool::with_custody`, so a session closed on
+  the blocking pool keeps the export permit until the close finishes (`ExportPorts::custody`,
+  `SaveSource::custody`).
   Contracts and the support matrix:
   [EXTERNAL-DOWNLOAD-RESUME](communication-recovery/EXTERNAL-DOWNLOAD-RESUME.md#pr51-review-user-at-86664d94-design-note).
 - Remove, Keep partly saved file and Save new copy share one process-wide cleanup claim per

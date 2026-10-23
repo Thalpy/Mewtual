@@ -837,7 +837,10 @@ user-private groups) are fixed or settled in the design document. Open: Unix beh
 Linux CI, macOS is not built in CI, ReFS is unverified, a Published row whose final name was lost
 still reads "Saved" until cleared, on default user-private-group systems every save leaves a
 temporary copy for the user to delete, and no test pins a Remove landing between the flush and
-Published.
+Published. The user's second review of `86664d94` (R2-M1 to R2-M3, R2-L1: a stalled Remove
+disabling other rows, the Save as turn held across validation, Save new copy's old-partial notice
+lost on failure, deferred closes escaping export capacity) is fixed; dispositions in the design
+document.
 
 ## Chat history adversarial checkpoint (2026-10-20)
 

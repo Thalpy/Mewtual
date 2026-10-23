@@ -545,7 +545,13 @@ writer keeps those properties.
   `CONIN$`, and `%`, which the Windows dialog would expand into another path). Lock cannot close
   an open OS dialog, so the suggested name and folder stay on screen until the user closes it
   (the choice is then discarded); Lock does release the one-dialog turn, so a dialog that never
-  answers cannot block later Save as attempts after Lock or a server replacement. A cloud-synced or shared chosen folder (for example OneDrive Desktop or Documents)
+  answers cannot block later Save as attempts after Lock or a server replacement. The turn ends
+  when the dialog answers; validating the picked place (which reads that folder and can stall on a
+  dead share) runs afterwards with cancellation still observed, and a stalled check keeps one of
+  four validation slots until the filesystem answers, after which further Save as attempts are
+  refused until one returns (second review R2-M2). If Save new copy abandons an old partial it
+  cannot reach, the notice saying so travels with every later result of that save, failures
+  included (R2-M3). A cloud-synced or shared chosen folder (for example OneDrive Desktop or Documents)
   uploads the partial plaintext and the probe name as they are written. A chosen folder inside the
   app's own data or vault folder is not refused (documented, not enforced).
 - **Fences.** In-session journal transitions require the original export lease; the Resume
