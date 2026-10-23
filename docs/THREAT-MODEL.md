@@ -1,5 +1,24 @@
 # Threat model; client integrity & enforcement boundaries
 
+## Lost child Begin and fixed browser custody (23 October; inactive draft)
+
+First Begin publishes one original prepaid purpose before any transport/SDK callback. Unknown,
+Pending(row) and attached(row, action) remain distinct; a Pending row never supplies an invented
+engine identity. Only an authenticated response on the same Session can adopt the original row
+and exact action. Retries preserve keys, counters, claim and the original deadline.
+
+After End, actual SDK/read/cancel drainage completes independently of native cleanup. The same
+channel driver uses history-only Begin(false), then exact Pending Return or attached settlement,
+receipt ACK and Return. A refusal never proves absence. Parent Plan-final still checks every
+actual child and atomically freezes new adoption; only its exact final issuance/ACK covers an
+unknown absent child. The Session request floor and physical ownership fence a delayed old Begin.
+Fixed history bytes and global row positions remain charged until actual channel unlink and
+owner retirement, in either order; local buffer drainage does not refund retained metadata.
+
+Framed WebCrypto mocks cover lost Begin/Return/final replies, Pending adoption, End during actual
+transport, changed rows and occupied-slot pressure. Combined native verification and the complete
+native/WebCrypto/RTC path remain pending. Production effect dispatch remains disabled.
+
 ## Detached Begin waiting for UI admission (23 October; combined native draft)
 
 Start/Respond/Incoming Begin may outlive its socket caller. Its common confirmation factory

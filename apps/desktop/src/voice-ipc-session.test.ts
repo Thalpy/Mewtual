@@ -151,7 +151,7 @@ async function fixture(t: TestContext, sharedBroker?: VoiceCryptoBroker, identit
     let actionReply: { kind: 0 | 1; body: Uint8Array } | null = null;
     if (request.header.operation === 9) {
       assert.deepEqual(opened, new Uint8Array(Buffer.concat([Buffer.from([1]), session, transcriptHash])));
-    } else if (request.header.operation === 8) {
+    } else if (request.header.operation === 8 && opened[0] !== 2) {
       assert.equal(request.header.operation, 8); assert.equal(request.header.kind, 0);
       assert.equal(request.header.logical, "0".repeat(32)); assert.equal(request.header.length, 122);
       assert.deepEqual(opened, encodeVoiceIpcAction(historyPurpose, { kind: "begin", retry: false }).body);
@@ -423,8 +423,12 @@ async function framedConfirmation(f: Awaited<ReturnType<typeof fixture>>) {
   let lostInput = false, lostResult = false, lostReturn = false, historical = false, rejected = false;
   let alter: ((data: Uint8Array) => Uint8Array) | null = null, onInput: (() => void) | null = null;
   let holdSettle: ReturnType<typeof gate> | null = null;
+  let beginMode: "attached" | "pending" | "absent" = "attached", lostBegin = false;
+  let holdBegin: ReturnType<typeof gate> | null = null, beginAlter: ((data: Uint8Array) => Uint8Array) | null = null;
+  let onBegin: (() => void) | null = null;
+  const begins: boolean[] = [];
   const receipt = hash(92);
-  parent.beforeFinal(() => assert.ok(returned, "parent final cannot overtake original child Return"));
+  parent.beforeFinal(() => assert.ok(returned || beginMode === "absent", "parent final cannot overtake original child Return"));
   const status = () => {
     const bytes = Buffer.alloc(242); bytes[0] = 1; Buffer.from(row, "hex").copy(bytes, 2); bytes[19] = 1;
     integer(BigInt(identity.action), 8).copy(bytes, 20); integer(BigInt(identity.version), 8).copy(bytes, 28); Buffer.from(identity.inputTag, "hex").copy(bytes, 36);
@@ -438,11 +442,30 @@ async function framedConfirmation(f: Awaited<ReturnType<typeof fixture>>) {
     }
     return { kind: 0 as const, body: bytes };
   };
-  f.cleanup(() => { holdSettle?.release(); f.clearBodyStall(); });
+  const pendingStatus = () => {
+    const bytes = Buffer.alloc(242); bytes[0] = 1; Buffer.from(row, "hex").copy(bytes, 2); bytes[18] = returned ? 3 : 1;
+    return { kind: 0 as const, body: bytes };
+  };
+  f.cleanup(() => { holdSettle?.release(); holdBegin?.release(); f.clearBodyStall(); });
   parent.childReplies(async (header, opened) => {
-    assert.equal(header.logical, row); assert.equal(opened[0], 2);
+    assert.equal(header.logical, header.operation === 8 ? "0".repeat(32) : row); assert.equal(opened[0], 2);
     assert.ok(parent.wasReturned(), "native child use follows actual parent Return");
     const exact = (request: Parameters<typeof encodeVoiceIpcConfirmationAction>[1]) => assert.deepEqual(opened, encodeVoiceIpcConfirmationAction(purpose, request).body);
+    if (header.operation === 8) {
+      const retry = opened.at(-1) === 1; exact({ kind: "begin", retry }); begins.push(retry);
+      assert.deepEqual(f.rowBudget(), { reserved: retry ? 11 : 1, actions: 1 },
+        "original descriptor claim precedes Begin; End refunds only unused rows");
+      if (holdBegin) await holdBegin.promise;
+      onBegin?.();
+      if (lostBegin) { lostBegin = false; throw new Error("native Begin admitted; reply lost"); }
+      if (beginMode === "absent") return { kind: 0, body: new Uint8Array([1, 3, 5]) };
+      const reply = beginMode === "pending" ? pendingStatus() : status();
+      return beginAlter ? { ...reply, body: beginAlter(reply.body) } : reply;
+    }
+    if (beginMode === "pending") {
+      assert.equal(header.operation, 6, "Pending has no action to admit, compute or settle");
+      exact({ kind: "close", mode: "return" }); returns++; returned = true; return pendingStatus();
+    }
     if (header.operation === 1) {
       inputs++; exact({ kind: "input" }); onInput?.();
       assert.ok(f.broker.counts().bytes >= 128 * 1024, "same original envelope paid before Data read");
@@ -476,6 +499,13 @@ async function framedConfirmation(f: Awaited<ReturnType<typeof fixture>>) {
   });
   return { channel, parent, ready, purpose, row, identity,
     handle: () => f.broker.nativeConfirmationFromChannel(f.owner, channel, ready.chain, purpose, row, identity),
+    begin: () => f.broker.nativeConfirmationFromChannel(f.owner, channel, ready.chain, purpose),
+    begins: () => [...begins],
+    beginMode(value: typeof beginMode) { beginMode = value; },
+    alterBegin(value: typeof beginAlter) { beginAlter = value; },
+    onBegin(work: typeof onBegin) { onBegin = work; },
+    loseBegin() { lostBegin = true; },
+    holdBegin() { holdBegin = gate(); return holdBegin; },
     derive: () => ready.derivation.attempt(),
     counts: () => ({ inputs, admissions, results, acknowledgements, settlements, returns }),
     output: () => output,
@@ -512,6 +542,112 @@ test("known child uses original derived keys through framed Input, permit, resul
   const tx = f.counts().tx; assert.ok(tx.every((value, index) => index === 0 || value > tx[index - 1]));
   assert.throws(() => f.broker.nativeConfirmationFromChannel(f.owner, child.channel, child.ready.chain, child.purpose, child.row,
     { ...child.identity, version: "4" }), /identity changed/);
+});
+
+test("first child Begin publishes one original claim and coalesces through authenticated adoption", async t => {
+  const f = await fixture(t), child = await framedConfirmation(f); await child.derive();
+  const baseline = f.broker.counts().bytes, handle = child.begin();
+  assert.equal(child.begin(), handle); assert.deepEqual(f.rowBudget(), { reserved: 11, actions: 1 });
+  const pending = handle.attempt(); assert.equal(handle.attempt(), pending);
+  assert.equal((await pending).kind, "accepted"); assert.deepEqual(child.begins(), [true]);
+  assert.equal(child.handle(), handle, "authenticated adoption retains the same descriptor/handle");
+  assert.equal(f.broker.counts().bytes, baseline); assert.deepEqual(f.rowBudget(), { reserved: 10, actions: 2 });
+});
+
+test("lost Begin retries the same purpose without replacing its original pair or deadline", async t => {
+  const f = await fixture(t), child = await framedConfirmation(f); await child.derive(); child.loseBegin();
+  const pair = child.ready.derivation.pair(), handle = child.begin(), baseline = f.broker.counts().bytes;
+  assert.equal((await handle.attempt()).kind, "uncertain"); assert.equal(child.counts().inputs, 0);
+  assert.equal((await handle.attempt()).kind, "accepted"); assert.deepEqual(child.begins(), [true, true]);
+  assert.equal(child.ready.derivation.pair(), pair); assert.equal(f.broker.counts().bytes, baseline);
+  assert.equal(child.counts().admissions, 1); assert.equal(child.counts().results, 1);
+});
+
+test("Pending Begin has no invented action and later adopts only its original authenticated row", async t => {
+  const f = await fixture(t), child = await framedConfirmation(f); await child.derive(); child.beginMode("pending");
+  const handle = child.begin(), pending = await handle.attempt();
+  assert.equal(pending.kind, "status"); if (pending.kind !== "status") throw new Error("actual Pending required");
+  assert.equal(pending.pending, "open"); assert.equal(pending.identity, null);
+  assert.equal(child.counts().inputs, 0); assert.equal(child.counts().admissions, 0);
+  child.beginMode("attached"); assert.equal((await handle.attempt()).kind, "accepted");
+  assert.deepEqual(child.begins(), [true, true]); assert.deepEqual(f.rowBudget(), { reserved: 10, actions: 2 });
+});
+
+for (const mode of ["attached", "pending"] as const) test(`lost Begin ${mode} after End uses history-only recovery and exact original Return`, async t => {
+  const f = await fixture(t), child = await framedConfirmation(f); await child.derive(); child.beginMode(mode); child.loseBegin();
+  const handle = child.begin(); assert.equal((await handle.attempt()).kind, "uncertain");
+  child.parent.pendingFinal(); f.owner.retire(); let closed = false;
+  const closure = child.channel.close().then(() => { closed = true; });
+  await until(() => child.parent.planCalls() === 1 && f.timers().delays.includes(1000));
+  assert.equal(closed, false); assert.deepEqual(child.begins(), [true, false]);
+  assert.equal(child.counts().inputs, 0); assert.equal(child.counts().admissions, 0); assert.equal(child.counts().returns, 1);
+  assert.equal(child.counts().settlements, mode === "attached" ? 1 : 0);
+  assert.deepEqual(f.rowBudget(), { reserved: 1, actions: 1 }, "unknown intake cannot refund its fixed slot before parent final/unlink");
+  child.parent.pendingFinal(false); f.advance(1000); await closure;
+  await until(() => f.broker.counts().bytes === 0); assert.deepEqual(f.rowBudget(), { reserved: 0, actions: 0 });
+});
+
+test("unknown absent Begin retains its claim through refused lookup, Pending Plan-final and lost final ACK", async t => {
+  const f = await fixture(t), child = await framedConfirmation(f); await child.derive(); child.beginMode("absent");
+  const baseline = f.broker.counts().bytes; child.begin(); // End BEFORE any Begin(true)
+  child.parent.pendingFinal(); f.owner.retire(); let closed = false;
+  const closure = child.channel.close().then(() => { closed = true; });
+  await until(() => child.parent.planCalls() === 1 && f.timers().delays.includes(1000));
+  const held = baseline - 96 * 1024 - 10 * 2048;
+  assert.equal(closed, false); assert.equal(f.broker.counts().bytes, held);
+  assert.deepEqual(child.begins(), [false]); assert.deepEqual(f.rowBudget(), { reserved: 1, actions: 1 });
+  assert.equal(child.counts().settlements, 0); assert.equal(child.counts().returns, 0);
+  f.advance(1000); await until(() => child.parent.planCalls() === 2 && f.timers().delays.includes(1000));
+  assert.equal(f.broker.counts().bytes, held); assert.deepEqual(child.begins(), [false, false]);
+  child.parent.pendingFinal(false); child.parent.loseFinalReplies(); f.advance(1000);
+  await until(() => child.parent.planCalls() === 3 && f.timers().delays.includes(1000));
+  f.advance(1000); await until(() => child.parent.finalCounts().finalCalls === 1 && f.timers().delays.includes(1000));
+  assert.equal(closed, false); assert.equal(f.broker.counts().bytes, held);
+  assert.deepEqual(f.rowBudget(), { reserved: 1, actions: 1 });
+  f.advance(1000); await closure; await until(() => f.broker.counts().bytes === 0);
+  assert.ok(child.begins().every(retry => !retry), "End never starts/adopts new work");
+});
+
+test("End during actual Begin transport waits for its real drainage before history recovery", async t => {
+  const f = await fixture(t), child = await framedConfirmation(f); await child.derive();
+  const hold = child.holdBegin(), pending = child.begin().attempt(); await until(() => child.begins().length === 1);
+  f.owner.retire(); let closed = false; const closure = child.channel.close().then(() => { closed = true; });
+  await new Promise<void>(yes => setImmediate(yes));
+  assert.equal(closed, false); assert.deepEqual(child.begins(), [true]); assert.ok(f.broker.counts().bytes >= 96 * 1024);
+  hold.release(); assert.equal((await pending).kind, "retired"); await closure;
+  assert.deepEqual(child.begins(), [true, false]); assert.equal(child.counts().admissions, 0); assert.equal(child.counts().returns, 1);
+});
+
+test("End during Begin SDK retains its original envelope until the actual provider settles", async t => {
+  const f = await fixture(t), child = await framedConfirmation(f); await child.derive(); child.beginMode("absent");
+  const held = f.holdWhen((name, args) => name === "encrypt" && new Uint8Array((args[0] as AesGcmParams).additionalData as ArrayBuffer)[6] === 8);
+  const pending = child.begin().attempt(); await until(held.entered);
+  f.owner.retire(); let closed = false; const closure = child.channel.close().then(() => { closed = true; });
+  await new Promise<void>(yes => setImmediate(yes));
+  assert.equal(closed, false); assert.deepEqual(child.begins(), []); assert.ok(f.broker.counts().bytes >= 96 * 1024);
+  held.release(); assert.equal((await pending).kind, "retired"); await closure;
+  assert.deepEqual(child.begins(), [false]); assert.equal(child.counts().admissions, 0); assert.equal(child.counts().returns, 0);
+});
+
+test("End during unknown Begin read waits for actual reader cancellation before native recovery", async t => {
+  const f = await fixture(t), child = await framedConfirmation(f); await child.derive();
+  let cancel: ReturnType<typeof f.stallBody> | null = null;
+  child.onBegin(() => { if (cancel === null) cancel = f.stallBody(); });
+  const pending = child.begin().attempt(); await until(() => child.begins().length === 1);
+  f.owner.retire(); let closed = false; const closure = child.channel.close().then(() => { closed = true; });
+  await until(() => cancel !== null && cancel.entered());
+  assert.equal(closed, false); assert.deepEqual(child.begins(), [true]); assert.ok(f.broker.counts().bytes >= 96 * 1024);
+  f.clearBodyStall(); cancel!.release(); assert.equal((await pending).kind, "retired"); await closure;
+  assert.deepEqual(child.begins(), [true, false]); assert.equal(child.counts().inputs, 0); assert.equal(child.counts().returns, 1);
+});
+
+test("Pending Begin cannot change its authenticated row on later adoption", async t => {
+  const f = await fixture(t), child = await framedConfirmation(f); await child.derive(); child.beginMode("pending");
+  const handle = child.begin(); assert.equal((await handle.attempt()).kind, "status");
+  child.beginMode("attached"); child.alterBegin(bytes => { bytes[2] ^= 1; return bytes; });
+  assert.equal((await handle.attempt()).kind, "uncertain"); assert.equal(child.counts().inputs, 0); assert.equal(child.counts().admissions, 0);
+  child.alterBegin(null); assert.equal((await handle.attempt()).kind, "accepted");
+  assert.deepEqual(child.begins(), [true, true, true]);
 });
 
 test("known child waits for actual derivation settlement before lending its phase", async t => {
@@ -1358,7 +1494,7 @@ test("absolute IO deadline aborts stale-port fetch but retains custody until act
   assert.equal((await channel.status()).kind, "ready"); assert.deepEqual(f.counts().tx, [2n]);
 });
 
-for (const version of [7, 8, 9, 10, 11, 12, 13, 14, 15]) test(`HMR refuses v${version} retained pool rather than creating a second channel allocator`, () => {
+for (const version of [7, 8, 9, 10, 11, 12, 13, 14, 15, 16]) test(`HMR refuses v${version} retained pool rather than creating a second channel allocator`, () => {
   const host = { [Symbol.for("mewtual.voice.crypto-broker.v2")]: { version } };
   const native = { async admit() { return ""; }, async settle() {}, async commitInbound() {} };
   assert.throws(() => windowVoiceCryptoBroker(native, host, real), /reload required/);
@@ -1578,7 +1714,12 @@ test("Derive intake and terminal Control payload graphs fit their separate origi
   // Original purpose/row/action strings, one stored final proof, native bootstrap, decoded
   // fixed status/final metadata and wrappers. No history query is live during terminal
   // cleanup; the decoded action graph ends before reading the separate final proof.
-  const controlBuffers = 2 * (185 + 16) + 2 * (242 + 16) + 144 + 288 + 4 * 40 + 2 * 32 + 2 * 12 + 1;
+  // Start(previous) has the largest child selector: its154-byte prefix plus80-byte ACK.
+  // The same paid child descriptor/RPC closure is borrowed, never copied into Control.
+  const childAck = encodeVoiceIpcConfirmationAction({ parent: historyPurpose, parentRow: "0".repeat(31) + "1",
+    request: { kind: "start", predecessor: hash(10) } }, { kind: "ack", identity: { action: "1", version: "1", inputTag: hash(11) }, digest: hash(12) });
+  assert.equal(childAck.body.length, 234); childAck.body.fill(0);
+  const controlBuffers = 2 * (234 + 16) + 2 * (242 + 16) + 144 + 288 + 4 * 40 + 2 * 32 + 2 * 12 + 1;
   const descriptor = 2 * (3 * 64 + 20 + 32 + 2 * 20 + 64 + 64);
   const decoded = 2 * 1024; // bounded fixed status/final graph, including exact-u64 strings
   const wrappers = 3 * 1024 + 2 * "retire-plan".length; // retained fixed final-mode discriminator

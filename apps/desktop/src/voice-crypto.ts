@@ -126,9 +126,9 @@ export type VoiceChannelDerivationOutcome =
   | Readonly<{ kind: "ready"; chain: VoiceCryptoChain; derivation: VoiceDerivationHandle }>
   | VoiceIpcActionReply | Readonly<{ kind: "uncertain" | "retired" }>;
 export type VoiceChannelDerivationHandle = Readonly<{ attempt(): Promise<VoiceChannelDerivationOutcome> }>;
-/** An inactive continuation of the SAME original derivation chain. The caller has already
- * recovered the authenticated child row/action. This API does not create a child or recover
- * an unknown Begin, and its receipts confer no RTC readiness. */
+/** Inactive continuation of the SAME original derivation chain. A first/lost Begin keeps
+ * its original purpose and prepaid claim until authenticated history or parent-final cleanup
+ * resolves it. Neither a historical result nor a cleanup proof confers RTC readiness. */
 export type VoiceChannelConfirmationOutcome = VoiceConfirmationOutcome | VoiceIpcActionReply;
 export type VoiceChannelConfirmationHandle = Readonly<{ attempt(): Promise<VoiceChannelConfirmationOutcome> }>;
 /** Opaque: only the creating broker's WeakMap contains the non-extractable private key. */
@@ -244,8 +244,8 @@ type BrowserChain = {
   channel: RetainedIpcChannel | null; drained: Signal<void>;
 };
 type ConfirmationIntake = {
-  chain: BrowserChain; purpose: VoiceIpcConfirmationPurpose; row: string; identity: VoiceIpcActionIdentity;
-  native: VoiceProtectedConfirmationNative; record: ActionRecord | null;
+  chain: BrowserChain; purpose: VoiceIpcConfirmationPurpose; row: string | null; identity: VoiceIpcActionIdentity | null;
+  native: VoiceProtectedConfirmationNative | null; record: ActionRecord | null;
   handle: VoiceChannelConfirmationHandle; pending: Signal<VoiceChannelConfirmationOutcome> | null;
   running: boolean; returned: boolean; outcome: VoiceChannelConfirmationOutcome | null;
   // Fixed history is claimed at publication, before Input. Until an ActionRecord adopts
@@ -409,7 +409,7 @@ function context(label: string, transcript: Uint8Array): Uint8Array<ArrayBuffer>
  * unsettled work. Revoking an owner never frees a running promise; only its real settlement does.
  * A derive pipeline uses one permit for sequential import/ECDH/HKDF work, never parallel calls. */
 export class VoiceCryptoBroker {
-  readonly version = 16;
+  readonly version = 17;
   readonly subtle: SubtleCrypto;
   private readonly native: VoiceCryptoAdmission;
   private active = 0;
@@ -1075,11 +1075,11 @@ export class VoiceCryptoBroker {
     return record.handle as VoiceConfirmationHandle;
   }
 
-  /** Continue a known authenticated child on the original channel, keys, deadline and
-   * reserved rows. Row/purpose/identity are hints until native resolves them again. This
-   * deliberately does not implement first Begin or unknown-row lost-Begin recovery. */
+  /** Continue the original purpose on the SAME channel, keys, deadline and prepaid rows.
+   * Omit BOTH row/identity for first Begin or lost-Begin recovery. Supplied known identities
+   * are only hints until native resolves them again; they cannot replace an unknown intent. */
   nativeConfirmationFromChannel(owner: VoiceCryptoOwner, channelHandle: VoiceIpcChannel, plan: VoiceCryptoChain,
-    purpose: VoiceIpcConfirmationPurpose, row: string, identity: VoiceIpcActionIdentity): VoiceChannelConfirmationHandle {
+    purpose: VoiceIpcConfirmationPurpose, row?: string, identity?: VoiceIpcActionIdentity): VoiceChannelConfirmationHandle {
     const channel = this.ipcChannels.get(owner.token), chain = this.chains.get(plan);
     if (!channel || channel.handle !== channelHandle || !channel.owns(owner) || !chain || chain.owner !== owner || chain.channel !== channel) {
       throw new Error("original voice continuation required");
@@ -1095,16 +1095,17 @@ export class VoiceCryptoBroker {
     }
     const hint: VoiceIpcConfirmationPurpose = Object.freeze({ parent: Object.freeze({ peer: purpose.parent.peer, join: purpose.parent.join,
       keyRef: purpose.parent.keyRef, epoch: purpose.parent.epoch }), parentRow: purpose.parentRow, request });
-    const original = Object.freeze({ action: identity.action, version: identity.version, inputTag: identity.inputTag });
-    const validation = encodeVoiceIpcConfirmationAction(hint, { kind: "admit", identity: original, engineBytes: 0 }); validation.body.fill(0);
-    if (!isVoiceIpcActionRow(row) || row === hint.parentRow || !channel.matchesParent(chain, hint)) throw new Error("voice continuation parent changed");
+    if ((row === undefined) !== (identity === undefined)) throw new Error("complete voice continuation identity required");
+    const original = identity ? Object.freeze({ action: identity.action, version: identity.version, inputTag: identity.inputTag }) : null;
+    const validation = encodeVoiceIpcConfirmationAction(hint, original ? { kind: "admit", identity: original, engineBytes: 0 } : { kind: "begin", retry: false }); validation.body.fill(0);
+    if ((row !== undefined && (!isVoiceIpcActionRow(row) || row === hint.parentRow)) || !channel.matchesParent(chain, hint)) throw new Error("voice continuation parent changed");
     // Every retained child shares the one already-frozen original selector. Do not retain
     // nine independent parent graphs in the fixed per-row history payment.
     const selected = channel.retainChildPurpose(chain, hint);
     const key = request.kind === "start" ? "start/" + request.predecessor : request.kind === "respond" ? "respond/" + request.triggerRow : "incoming/" + request.role;
     const prior = () => {
       const previous = chain.confirmations.get(key);
-      if (previous && (previous.row !== row || previous.identity.action !== original.action || previous.identity.version !== original.version ||
+      if (previous && original && (previous.row !== row || previous.identity?.action !== original.action || previous.identity.version !== original.version ||
           previous.identity.inputTag !== original.inputTag)) throw new Error("voice continuation identity changed");
       return previous;
     };
@@ -1117,8 +1118,8 @@ export class VoiceCryptoBroker {
     // Four maximum frame/input copies plus a conservative16KiB engine ceiling overlap
     // retained chain inputs. They are a slice of the original96KiB, never a fresh charge.
     if (chain.retainedBytes + Math.max(chain.enginePeak, 16 * 1024) + 4 * 2064 > CHAIN_VARIABLE) throw new Error("voice continuation intake capacity reached");
-    const intake: ConfirmationIntake = { chain, purpose: selected, row, identity: original,
-      native: channel.confirmationNative(selected, row, original), record: null, handle: null!, pending: null,
+    const intake: ConfirmationIntake = { chain, purpose: selected, row: row ?? null, identity: original,
+      native: original ? channel.confirmationNative(selected, row!, original) : null, record: null, handle: null!, pending: null,
       running: false, returned: false, outcome: null, rowClaim: true };
     intake.handle = Object.freeze({ attempt: () => {
       if (intake.outcome) return Promise.resolve(intake.outcome);
@@ -1128,7 +1129,7 @@ export class VoiceCryptoBroker {
       return answer;
     } });
     // Publish before any transport, subscription, engine or scheduler callback. End sees
-    // this known child even if its first attempt/Input has never been made.
+    // this purpose even if its Begin was never attempted or its row reply was lost.
     chain.reservedRows--; // claimed history cannot be refunded as unused by End
     // Global reservedRows stays charged until SAME-claim ActionRecord transfer or actual
     // history collection. A historical/no-Input descriptor still occupies one logical slot.
@@ -1155,12 +1156,19 @@ export class VoiceCryptoBroker {
       await chain.record!.physicalDrained.promise;
       await channel.returnDerivation();
       if (!chain.closed) {
+        if (!intake.identity) {
+          outcome = await channel.beginConfirmation(intake);
+          // Pending has a row but no action. Never invent an identity for engine/settlement.
+          // A later exact attempt may adopt that SAME row after native attaches its action.
+          if (!intake.identity || chain.closed) return;
+          outcome = Object.freeze({ kind: "uncertain" }); // do not retain a second decoded history graph across Input/SDK
+        }
         const answer = await channel.pullConfirmation(intake);
         if (!("binding" in answer)) { outcome = answer; cleanup = answer.kind === "status"; }
         else {
           input = answer;
           if (this.chainCurrent(chain)) {
-            const handle = this.registerProtectedConfirmationInner(chain.owner, chain.handle, intake.native, input, intake);
+            const handle = this.registerProtectedConfirmationInner(chain.owner, chain.handle, intake.native!, input, intake);
             intake.record = this.actions.get(chain.owner.token + "/" + input.action)!;
             // The decoder's temporary owned arrays end BEFORE computation; registration
             // copied them under the same prechecked envelope, retaining immutable input.
@@ -1179,7 +1187,7 @@ export class VoiceCryptoBroker {
       // End after any ambiguous read must close the ORIGINAL known child. A running
       // read/cancel keeps this owner until its real finally, never just until abort().
       cleanup ||= chain.closed;
-      if (cleanup) {
+      if (cleanup && intake.identity) {
         for (;;) {
           const observed = channel.wakeToken();
           try {
@@ -1190,7 +1198,7 @@ export class VoiceCryptoBroker {
               // Retained historical replies share the original immutable row/action strings
               // with their descriptor. Do not retain duplicate decoded identity/backing
               // strings in each of nine fixed-history rows. Full Sealed metadata remains.
-              outcome = returned.kind === "status" ? Object.freeze({ ...returned, row: intake.row,
+              outcome = returned.kind === "status" ? Object.freeze({ ...returned, row: intake.row!,
                 identity: returned.identity ? intake.identity : null,
                 receipt: returned.receipt ? Object.freeze({ ...returned.receipt,
                   action: intake.identity.action, inputTag: intake.identity.inputTag }) : null }) : returned;
@@ -1203,6 +1211,10 @@ export class VoiceCryptoBroker {
         }
         intake.outcome = chain.closed ? Object.freeze({ kind: "retired" }) : outcome;
       }
+      // An unknown/Pending Begin transfers only its native cleanup obligation to the
+      // already-paid channel driver. It must not await parent proof while that driver is
+      // waiting for this actual SDK/I/O drainage. Fixed metadata/row claims remain retained.
+      if (chain.closed && !intake.identity) intake.outcome = Object.freeze({ kind: "retired" });
       intake.running = false;
       this.observeConfirmation(intake, intake.outcome ?? outcome);
       this.drainChain(chain);
@@ -1781,21 +1793,45 @@ class RetainedIpcChannel {
       request, "status", true, opened => decodeVoiceIpcActionReply(opened, original.row)));
     this.derivationReturned = true;
   }
+  /** Only authenticated metadata from the SAME framed Session can resolve an unknown
+   * purpose. Pending and attached identities are separate states; neither may change row. */
+  private observeConfirmationBegin(intake: ConfirmationIntake, reply: VoiceIpcActionReply): VoiceIpcActionReply {
+    if (reply.kind !== "status") return reply; // generic refusal is never absence proof
+    if (reply.row === intake.purpose.parentRow || (intake.row !== null && intake.row !== reply.row)) throw new Error("voice Begin row changed");
+    if (intake.identity && (!reply.identity || intake.identity.action !== reply.identity.action ||
+        intake.identity.version !== reply.identity.version || intake.identity.inputTag !== reply.identity.inputTag)) throw new Error("voice Begin identity changed");
+    if (!intake.identity && reply.identity?.action === intake.chain.record?.identity.action) throw new Error("voice Begin reused parent action");
+    intake.row = reply.row;
+    if (!intake.identity && reply.identity) {
+      intake.identity = reply.identity;
+      intake.native = this.confirmationNative(intake.purpose, reply.row, reply.identity);
+    }
+    return reply;
+  }
+  beginConfirmation(intake: ConfirmationIntake): Promise<VoiceIpcActionReply> {
+    if (this.linked !== intake.chain || intake.chain.continuation !== intake || !intake.running || intake.chain.closed ||
+        !this.matchesParent(intake.chain, intake.purpose)) throw new Error("original Begin intent required");
+    return this.actionRpc(intake.purpose.parent, "0".repeat(32), { kind: "begin", retry: true }, "status", false,
+      opened => this.observeConfirmationBegin(intake, decodeVoiceIpcActionReply(opened, intake.row)), intake.purpose);
+  }
   pullConfirmation(intake: ConfirmationIntake): Promise<VoiceProtectedConfirmationInput | VoiceIpcActionReply> {
     if (this.linked !== intake.chain || intake.chain.continuation !== intake || !intake.running ||
         !intake.chain.variable || intake.chain.closed || !this.derivationReturned || !this.matchesParent(intake.chain, intake.purpose)) {
       throw new Error("original prepaid confirmation intake required");
     }
-    return this.actionRpc(intake.purpose.parent, intake.row, { kind: "input" }, "input", false, (opened, kind) => {
-      if (kind === 0) return decodeVoiceIpcActionReply(opened, intake.row);
-      return decodeVoiceIpcConfirmationInput(opened, { row: intake.row, parent: intake.purpose.parentRow,
-        identity: intake.identity, bootstrap: this.bootstrap!, binding: intake.chain.binding });
+    if (!intake.row || !intake.identity || !intake.native) throw new Error("attached confirmation required");
+    const row = intake.row, identity = intake.identity;
+    return this.actionRpc(intake.purpose.parent, row, { kind: "input" }, "input", false, (opened, kind) => {
+      if (kind === 0) return decodeVoiceIpcActionReply(opened, row);
+      return decodeVoiceIpcConfirmationInput(opened, { row, parent: intake.purpose.parentRow,
+        identity, bootstrap: this.bootstrap!, binding: intake.chain.binding });
     }, intake.purpose);
   }
   returnConfirmation(intake: ConfirmationIntake): Promise<VoiceIpcActionReply> {
-    if (this.linked !== intake.chain || !this.matchesParent(intake.chain, intake.purpose)) throw new Error("original child cleanup required");
-    return this.returnAction(intake.row, intake.identity, request => this.actionRpc(intake.purpose.parent, intake.row,
-      request, "status", true, opened => decodeVoiceIpcActionReply(opened, intake.row), intake.purpose));
+    if (this.linked !== intake.chain || !intake.row || !intake.identity || !this.matchesParent(intake.chain, intake.purpose)) throw new Error("original child cleanup required");
+    const row = intake.row, identity = intake.identity;
+    return this.returnAction(row, identity, request => this.actionRpc(intake.purpose.parent, row,
+      request, "status", true, opened => decodeVoiceIpcActionReply(opened, row), intake.purpose));
   }
   private async returnAction(row: string, identity: VoiceIpcActionIdentity,
     rpc: (request: VoiceIpcConfirmationRequest) => Promise<VoiceIpcActionReply>): Promise<VoiceIpcActionReply> {
@@ -1935,7 +1971,8 @@ class RetainedIpcChannel {
     response: "input" | "permit" | "status", afterEnd: boolean,
     decode: (opened: Uint8Array<ArrayBuffer>, kind: VoiceIpcHeader["kind"]) => T,
     child: VoiceIpcConfirmationPurpose | null = null): Promise<T> {
-    if (this.actionBusy || this.request || this.historyRequest || !isVoiceIpcActionRow(row) ||
+    const unknownBegin = child !== null && action.kind === "begin" && row === "0".repeat(32);
+    if (this.actionBusy || this.request || this.historyRequest || (!unknownBegin && !isVoiceIpcActionRow(row)) ||
         (afterEnd && action.kind !== "ack" && action.kind !== "settle" && action.kind !== "close" && action.kind !== "close-plan" && action.kind !== "final")) throw new Error("voice channel busy");
     this.actionBusy = true;
     let encoded: ReturnType<typeof encodeVoiceIpcAction> | null = null;
@@ -2239,6 +2276,7 @@ class RetainedIpcChannel {
     while (this.attempted) {
       const observed = this.wakeIdentity;
       try {
+        await this.cleanupConfirmationIntents();
         if (this.terminalAction && !this.finalAcknowledged) await this.retireOriginalAction();
         await this.native.settleSetup(this.selected.owner.token, this.selected.executor); break;
       }
@@ -2265,6 +2303,42 @@ class RetainedIpcChannel {
     this.terminalAction = null;
     if (linked) this.custody.unlinked(linked);
     this.custody.setupDrained(); this.custody.closed(); this.completion.resolve();
+  }
+
+  /** Already inside the original execution lane, after actual local SDK/I/O drained.
+   * History-only Begin(false) advances the SAME Session request floor, fencing a delayed
+   * old Begin. Missing/refused history stays unresolved: parent Plan-final must still check
+   * every actual child and freeze new adoption before its exact final ACK covers absence.
+   * Do not recurse through actionRpc/execution.run or wait here for that parent proof. */
+  private async cleanupConfirmationIntents(): Promise<void> {
+    const chain = this.linked;
+    if (!chain || this.finalAcknowledged) return;
+    for (const intake of chain.confirmations.values()) {
+      if (intake.returned) continue;
+      if (intake.running || (intake.record && !intake.record.drained)) throw new Error("actual child work still running");
+      const rpc = async (request: VoiceIpcConfirmationRequest, row: string): Promise<VoiceIpcActionReply> => {
+        const encoded = encodeVoiceIpcConfirmationAction(intake.purpose, request);
+        try { return await this.framed(encoded.operation, encoded.kind, row, encoded.body, true,
+          (kind, length) => kind === 0 && (length === 19 || length === 258),
+          opened => decodeVoiceIpcActionReply(opened, intake.row)); }
+        finally { encoded.body.fill(0); }
+      };
+      try {
+        if (!intake.identity) this.observeConfirmationBegin(intake, await rpc({ kind: "begin", retry: false }, "0".repeat(32)));
+        if (!intake.row) continue; // not proof of absence; still require actual parent-final
+        if (intake.identity) {
+          await this.returnAction(intake.row, intake.identity, request => rpc(request, intake.row!));
+        } else {
+          // Pending has no engine identity. Its exact Return is the only child fence here.
+          const reply = await rpc({ kind: "close", mode: "return" }, intake.row);
+          if (reply.kind !== "status" || (reply.pending !== "closed-handed" && reply.pending !== "closed-unhanded")) continue;
+        }
+        intake.returned = true;
+      } catch {
+        // Lost/refused history/Return keeps this SAME fixed intent and row claim. Native
+        // Plan-final either proves all children closed or refuses for the next bounded tick.
+      }
+    }
   }
 
   /** Already inside the SAME execution lane, after intake/SDK/result settlement drainage.
@@ -2339,7 +2413,7 @@ export function windowVoiceCryptoBroker(
   const host = window as Record<symbol, unknown>;
   const previous = host[BROKER] as VoiceCryptoBroker | undefined;
   if (previous) {
-    if (previous.version !== 16 || typeof previous.nativeConfirmationFromChannel !== "function" || typeof previous.nativeDerivationFromChannel !== "function" || typeof previous.recoverChannelHistory !== "function" || typeof previous.prepareChainFromChannel !== "function" || typeof previous.nativeChannel !== "function" || typeof previous.run !== "function" || typeof previous.selectJoinKey !== "function" || typeof previous.retrySelectedJoinKeys !== "function" ||
+    if (previous.version !== 17 || typeof previous.nativeConfirmationFromChannel !== "function" || typeof previous.nativeDerivationFromChannel !== "function" || typeof previous.recoverChannelHistory !== "function" || typeof previous.prepareChainFromChannel !== "function" || typeof previous.nativeChannel !== "function" || typeof previous.run !== "function" || typeof previous.selectJoinKey !== "function" || typeof previous.retrySelectedJoinKeys !== "function" ||
         typeof previous.registerProtectedConfirmation !== "function" ||
         typeof previous.registerProtectedDerivation !== "function" || typeof previous.registerConfirmation !== "function" || typeof previous.createPair !== "function") {
       throw new Error("voice crypto broker version changed; reload required");

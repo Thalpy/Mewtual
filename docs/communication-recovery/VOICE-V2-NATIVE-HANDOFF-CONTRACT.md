@@ -11,6 +11,16 @@ authorization and prepaid encrypted handoff for byte-bearing work. The browser c
 authorized WebCrypto; Root still owns identity, membership, reservation, signatures, replay,
 confirmation and final application. A browser projection never replaces those owners.
 
+The inactive child adapter `nativeConfirmationFromChannel` retains one original purpose and
+prepaid claim. Supplying both row/action hints continues a known child; omitting both performs
+first/lost Begin on that same descriptor. Authenticated Pending has no action identity. Only
+same-Session history may adopt its original row/action. End stops Begin(true), drains actual
+local SDK/I/O, and transfers unresolved cleanup to the original channel driver. Begin(false)
+plus exact Return handles existing children; refusal alone never proves absence. Exact native
+parent Plan-final issuance/ACK must cover any still-unknown child before channel collection.
+Fixed history/row custody lasts through actual unlink and owner retirement in either order.
+These draft adapters do not activate production dispatch or implement `VoiceV2Native`/RTC.
+
 - `start(server, room, attempt)` selects one current native join. A lost reply repeats the
   same attempt and returns its original result. Server incarnation, UI-session generation,
   membership, epoch and local protocol policy must remain current at first publication.

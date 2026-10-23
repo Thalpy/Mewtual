@@ -1,5 +1,29 @@
 # Mewtual; Handover
 
+## First/lost child Begin draft (23 October; native gates pending)
+
+The current isolated continuation now supports first/lost child Begin through the same
+browser descriptor, purpose, prepaid slot, keys and deadline. It distinguishes Unknown,
+Pending(row) and attached(row, action). After End, actual SDK/read/cancel drainage unblocks
+the original channel driver; history-only lookup and exact child Return precede parent
+Plan-final. Refusal does not prove absence. Fixed history/row payment survives until actual
+channel unlink and owner retirement in either order. Broker17 refuses older retained shapes.
+
+All223 focused browser cases and the complete2,638-test frontend suite pass. Current Svelte
+reports zero errors/warnings and the production build passes (38.53s). Mocks exercise actual WebCrypto/framing but do not establish
+native replay-floor/factory ordering or a complete native/browser cycle. Two new native
+regressions use actual Header admission to target delayed lower-sequence Begin versus higher
+history/Plan-final, and an already-admitted detached Begin retaining the physical position.
+Those tests are written but uncompiled. Review also found Plan-final retaining LiveContext at
+its UI wait; that wait now retains only the original commit Arc and freshly rechecks context
+and canonical cleanup routing afterward, with cancellation and teardown regressions pending.
+
+The single Root full suite is still running in frozen deadline/Tokio5388993f; combined Root
+inputs remain identical. The combined native Begin/Result/Tokio checkout has not compiled.
+Do not publish this as completed live V2, native/browser acceptance or RTC. Production effect
+dispatch, complete WebCrypto/native confirmation, SDP/ICE/RTC, live/group adapter, media relay
+and combined/physical acceptance remain unfinished. Only one desktop is available.
+
 ## Browser fixed-history cleanup correction (23 October; combined gates pending)
 
 The combined draft now keeps linked chain history and its actual global row positions paid
