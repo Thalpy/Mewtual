@@ -2,6 +2,7 @@ import { mockIPC, mockWindows } from "@tauri-apps/api/mocks";
 import type { InvokeArgs } from "@tauri-apps/api/core";
 import { pageOfList, type PageRequest, type UnreadProbe } from "./message-paging.ts";
 import { visualStudioFixtureResponse } from "./visual-studio-fixture.ts";
+import { createVisualFileUploads } from "./visual-file-uploads.ts";
 
 export const VISUAL_FIXTURE_NOW = Date.UTC(2026, 7, 20, 12, 0, 0);
 
@@ -176,6 +177,10 @@ export function visualFixtureResponse(command: string, payload: InvokeArgs = {},
       return servers;
     }
     if (command === "get_channels" && args.server === 1) return [{ id: "1", name: "general" }, { id: "2", name: "design" }, { id: "3", name: "field-notes" }];
+    // Studio exports bind a full native device identity, not the descriptive stand-ins used
+    // by the old chat-only fixture. Install these before App first loads its roster.
+    if (command === "get_members") return (visualFixtureResponse(command, payload) as {fingerprint: string; identity: string; you: boolean}[]).map(member => ({...member, identity: member.fingerprint.repeat(2)}));
+    if (command === "get_roles") return Object.fromEntries(Object.entries(visualFixtureResponse(command, payload) as Record<string, string>).map(([identity, role]) => [identity.split("-")[0].repeat(2), role]));
     const channel = args.channel === "1" ? "general" : args.channel === "2" ? "design" : args.channel === "3" ? "notes" : args.channel;
     return visualFixtureResponse(command, { ...args, ...(channel === undefined ? {} : { channel }) });
   }
@@ -723,9 +728,16 @@ export function installVisualFixture(name: string): void {
   // The existing DEV+localhost entry point still owns availability and readiness. Nothing in
   // production recognizes this flag, and default chat fixtures remain byte-for-byte unchanged.
   const studio = new URLSearchParams(window.location.search).get("studio") === "1";
+  const uploads = studio ? createVisualFileUploads(ME.repeat(2)) : null;
   mockIPC(
     (command, payload) => {
-      const response = visualFixtureResponse(command, payload, studio);
+      const args = payload as Record<string, unknown> ?? {};
+      const fileResponse = uploads?.response(command, args);
+      let response = fileResponse?.handled ? fileResponse.value : visualFixtureResponse(command, payload, studio);
+      if (uploads && command === "get_files") {
+        const list = response as { files: unknown[]; has_peers: boolean };
+        response = { ...list, files: [...list.files, ...uploads.files(Number(args.server))] };
+      }
       // `get_moderation` is the final awaited load in switchServer. Once it has returned, wait for
       // fonts and the next task so Svelte can flush its pending microtasks. Do not use
       // requestAnimationFrame here: screenshot browsers intentionally run in the background and

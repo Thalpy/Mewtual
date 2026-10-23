@@ -30,13 +30,23 @@ pub(crate) async fn publish_pixa(
     server: u64,
     bytes_b64: String,
 ) -> Result<creative_blobs::PixPublication, String> {
-    let generation = unlocked_ui_session_generation(&state).await?;
-    let (lease, signal) = claim_internal_inline_download(&state)?;
+    publish_pixa_with_state(&state, server, bytes_b64).await
+}
+
+/// Same native custody path without Tauri's injected `State` wrapper, for composed adapter
+/// acceptance. Keep cancellation, unlock-generation and actor-incarnation fences here.
+pub(super) async fn publish_pixa_with_state(
+    state: &AppState,
+    server: u64,
+    bytes_b64: String,
+) -> Result<creative_blobs::PixPublication, String> {
+    let generation = unlocked_ui_session_generation(state).await?;
+    let (lease, signal) = claim_internal_inline_download(state)?;
     let cancellation = RequestCancellation::new(signal, Some(lease.request_keepalive()));
     let bytes = decode_animation_input(&bytes_b64)?;
-    let (actor, instance) = actor_instance_of(&state, server).await?;
+    let (actor, instance) = actor_instance_of(state, server).await?;
     let published = actor.publish_pixa(bytes, Some(cancellation)).await?;
-    creative_blobs::finish_response(&state, server, instance, generation, || published.into()).await
+    creative_blobs::finish_response(state, server, instance, generation, || published.into()).await
 }
 
 /// Locally encode the validated visual frames. The fixed name accepts no renderer path, and the

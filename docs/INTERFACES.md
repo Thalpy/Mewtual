@@ -1,6 +1,265 @@
 # Mewtual; Interfaces & Hooks Schema
 
-## Current Gate 6 caller status (2026-10-14)
+## Optional desktop invite refresh (2026-10-18)
+
+`get_invite(server)` returns `null` when there is no stored invite or this exact current device
+has the member role. Background network refreshes therefore withdraw any retained code without
+raising an invite-permission error. The native bridge checks the full device identity's role
+before refresh and again after it completes, including failures during demotion. Missing role
+state and operational failures for a permitted device remain errors. The stored code is retained
+for existing network/restart state; this optional read does not grant or revoke admission.
+Explicit `mint_invite_fresh` remains owner/admin gated, and join-time authorization is unchanged.
+Roles on non-owner devices still have the existing published-roster freshness limitations.
+
+## Studio departure scope, restored-work reach and App exit routes (2026-10-18)
+
+`StudioSession.navigate(action)` (sidebar and Music) saves only the document being left: records
+in that document's lane must reach a definite receipt or the open is vetoed. With no document open
+nothing is left, so nothing is saved first. Records held for any other document keep their state,
+so opening a restored document never requires its own held work to save. Restored work is sent
+only by explicit Save or retry, or by leaving its own document. That document's departure Save
+awaits its own lane first. Only then does it release, without awaiting, its records in the shared
+Index lane.
+
+Two save workers run at once (`SAVE_WORKERS`), at most one per lane, with each lane's records
+still in queue order. A document lane and the shared Index lane can therefore both be in flight,
+so a departure's document Save (including an edit made while leaving) does not wait on its own
+Index half's receipt. Workers are not reserved per lane: two other lanes, such as a Create and
+another document's Save, can hold both, and the next Save then waits for one of them to answer.
+The most recently started Save still awaited has its records go ahead of other lanes' runnable
+heads, but it does not preempt a save already in flight. A record taken by a worker is marked
+synchronously, because it stays `queued` through its admission read, so no second worker takes it.
+
+This is renderer scheduling only. The server's actor runs Studio operations one at a time, so an
+Index operation that is slow inside the actor still delays the document's Save there. More
+workers would buy nothing natively and would compete for the bridge's four shared inline slots.
+Every Studio IPC call holds one of those slots for its round trip, as do blob fetches, chat inline
+downloads and the native receiver's passes.
+
+Three native refusals are raised before execution, that is before the execution lease is
+transferred to the actor, so the operation never runs and nothing of it can have been written. (The
+actor may already have signalled Ready, as it always has in the storage-busy case, but it receives
+no lease and so does not execute.)
+
+- "Studio actor busy; retry": the 5 s rendezvous was lost.
+- "too many inline downloads are already active": the slot pool was full.
+- "Studio storage busy; retry the same request": `authorize`'s locks were busy before the lease
+  was sent.
+
+`nativeNoWrite` classifies exactly these. A queued Save, or the plain document or Index read
+(`refreshDoc`, `refreshIndex`), refused this way is resent automatically, the same request after
+250, 500 and 1000 ms, without counting the visit unless an earlier attempt was already uncertain
+(see below). The overlay, recovery, fault and blob reads are
+not resent; a refusal there shows as their ordinary read error until the next refresh. The
+backoffs total 1.75 s, but "Studio actor busy" itself arrives only after its 5 s rendezvous, so a
+Save refused that way four times takes about 22 s and a departure's 10 s timeout reports it as
+still saving. Only when the resends are used up does the Save settle. It settles as not written
+only when no earlier attempt of it was uncertain. It then stays uncounted, so the member's retry is
+admitted afresh against the current history, and reauthor is available subject to the record
+kind's usual restrictions. A record whose earlier attempt was uncertain (it failed after dispatch,
+and the member retried its exact request) stays uncertain, keeps its original request and cannot
+be reauthored. Later refusals cannot show what that first attempt did. Every other native error
+stays uncertain, including the few rarer refusals that also precede the lease (a server change
+before commit, a cancelled request, a lease-send expiry); that errs toward "may have committed".
+`studio-native-no-write.test.ts` pins all three texts to their single pre-execution sites in the
+Rust sources.
+A partial departure Save leaves the shared five-second deadline running for uncovered records.
+`saveBeforeLeaving()` (leaving the Studio, a channel, a server or the window) still covers every
+record. Before a first delivery, admission reads a record's document when no view of it is held
+(restored or evicted) and compares the authoring binding with that fresh view. That read runs
+while the record is still `queued` and uncounted, so a lock during it restores the record as
+unsent. An unreadable document ("could not read"), a read overtaken by a newer one ("still
+reading"), an unread channel Index and a changed server group are all refused as no-write
+without counting an attempt, so a retry is admitted afresh.
+
+`studio-exit.ts` `createStudioExit(host)` is the gate for App routes that change the main pane
+directly (`view`, the inbox, DM home, the add-server and vault-change screens). `begin()` claims
+navigation for one user action and returns a `StudioRoute`: `current()` (no newer action, lock,
+reload or Studio channel/server change since: the claim includes the Studio session's lease),
+`leave()` (may this action change the main pane now, saving first when the Studio is on screen
+with work) and `scope()` (the same for a channel/server change, counting any retained edit). None
+of the three renews the claim, and a departure runs at most 16 Saves before refusing. An action
+that awaits anything carries its route across the await and asks `leave()` again right before
+the screen changes, so a response that outlived a newer action is discarded and work drawn
+meanwhile is saved first. Because moving the channel under a mounted Studio ends the lease, a
+composite action changes the surface before the channel. `release()` is `begin().leave()` and
+`leaveThen(go)` runs `go(route)` synchronously when nothing needs saving. A navigation call made
+without a route after an await is a new action of its own; `studio-exit-routes.test.ts` lists the
+few such calls (a completed join, channel reconciliation, a lost moderation permission) with their
+reasons, and every other one carries its function's route.
+
+In App, `switchView(v, route?)`, `switchServer(id, committed?, route?)`, `switchTo(id, keepSearch?,
+route?)`, `openWikiPage(name, opts?, route?)` and `openStatusRef(id, route?)` take the action's
+route (a standalone call begins its own). `switchServer`/`switchTo` resolve `Promise<boolean>`
+(false when the switch never happened) and stay synchronous up to their first await when the route
+is current and the Studio holds nothing. `switchServer` resolves after the new server's batch
+read; `committed` runs in the turn it commits. Composite routes use `arriveAtServer(id, route)`.
+Every `openServerSettings` request begins a route, including one for the server already on
+screen, so a newer request retires an older one still waiting to switch; the dialog opens in
+the committed turn for the requested, still-current request only. Like any newer action it also
+retires other in-flight navigation (a pending sidebar open, a deferred tab change). `openWikiPage`
+resolves `true` only when it opened a page; Rename, Delete and new-page edit mode act only on the
+page their own request opened. No IPC, wire or persistence format changes.
+
+A server whose native session has ended accepts no Studio Save, so moving off it never waits on
+one. App's `serverGone(id, left)` handles both a leave and a closure:
+
+1. It retires the Studio's scope for that server without saving (`StudioSession.retireServer`).
+2. It takes a forced edge to no server.
+3. It begins a fresh `switchServer` to the next server. With the scope retired, that switch has
+   nothing to save.
+
+`server-closed` arrives through `serverClosed(id)`. The stopping actor emits it before
+`leave_server` returns, so while that server's leave is in flight (`leavingServers`) the event
+only records itself, and the leave's outcome decides:
+
+- If `leave_server` succeeds, it is a leave (`left`).
+- If it fails after the actor stopped, it is a closure.
+
+Otherwise the event is a closure.
+
+A closure keeps the server's unsaved records as a restored draft (`keep`, the same encoding lock
+uses), and an interrupted delivery comes back uncertain. The draft waits until that channel is
+open again. A lock does not restart a stopped actor: the node stays online and the next unlock
+lists the server again, still stopped. In practice, then, the draft waits until Mewtual restarts,
+and it is persisted in the continuity snapshot until then. Like any waiting draft it refuses new
+Studio edits meanwhile. The Studio sidebar shows it (`StudioSession.waitingDraft`) with an armed
+discard (`discardWaitingDraft()`), which also frees a draft whose channel was deleted.
+
+A leave drops the server's records, along with any waiting restored draft for it, which could
+never install. A toast names the server and says which happened, including a stroke that could not
+be kept ("partial").
+
+`leaveServer` settles first. With unsaved Studio work for that server, it runs the Save gate
+(`route.scope()`) while the actor can still take it. If that Save refuses, so does the leave; if a
+newer action retires the attempt, a toast says the leave was cancelled. With a restored draft for
+that server still waiting for its channel, it refuses and asks the member to save or discard the
+draft there. A draft App holds before the Studio loads is matched by its `scope.server`. Neither
+`leaveServer` nor `serverGone` touches the session while locked, and a leave error never replaces
+the lock screen's message.
+
+During a window close, `serverGone` still retires the scope: the close's input hold is kept, and a
+snapshot the close takes afterwards carries the kept draft. If the close is abandoned, the app is
+on no server, not the removed one. When a lock's continuity capture fails, the lock still proceeds
+and the lock screen keeps the "latest Studio edits could not be saved" warning (`error`).
+
+`preparePixa` (Play, `.pixa` download, Post, a published version, GIF export) captures the
+working model and, in the same turn, each of its frames' unsaved PIX. It then prepares from those,
+so an autosave receipt landing during a frame read cannot turn a `draft:` placeholder into a CID
+lookup.
+
+Studio's editor renders a document's retained requests whatever its read state: with no model
+(read error, absent, still reading), attention records keep their exact retry and armed discard
+beside the read error. Restored queued records awaiting an explicit Save
+(`StudioSession.awaitsExplicitSave(id)`) show a Save and armed discard in every editor state. A
+Save inside a document's editor is `StudioSession.saveDocument(id)`: it releases and awaits only
+that document's records, so other documents' restored work stays held and another document's
+failure cannot refuse it. "That document's records" is `affectedObject(s) === id`, which also
+drives `pendingFor(id)` and the sidebar's held rows. An ordinary Index record names the entry as
+`object`. A Closing or Unconfirmed Index record keeps the channel Index as its native target
+(`object: null`, unchanged) and names the entry in `op.object`; an Index recovery record of one
+entry names it in `edit.choice.id`. Both halves of a rename are therefore one document's work on
+every route. The Index lane is shared, so one of these Index
+records can sit behind another document's failed, uncertain or restored-held Index record. The
+Save then refuses at once and names that record ("waits behind an unsaved edit (…)"); what could
+run was released and still runs. Leaving a document also releases, without awaiting, its records
+in the Index lane, so the departure never waits on that shared lane. Playback and export treat a
+document as a draft only for its own content records; Index records about it never put media on
+the draft path, though their failures still refuse it. A discard confirmation is armed for one
+record in one state and lapses when that record's status changes.
+
+## Studio local working state and Save boundaries (2026-10-18)
+
+`StudioSession` production `autosaveMs=5000` stages ordinary edits locally. `workingModel`,
+`workingScore` and `workingIndex` are display/preview projections, distinct from authenticated
+`doc.view` and raw registers. `save()` stages the current raster and awaits a fixed revision;
+`saveBeforeLeaving()` additionally captures edits made while awaiting ACKs and vetoes navigation
+on failure or timeout. `beforeSave` stages interrupted strokes without ending playback. Default
+zero-delay constructor/injected-IPC seams retain immediate behavior for existing unit tests;
+buffer regressions explicitly use the production delay. No protocol/batch command is added.
+
+Optional UI continuity `studioDraft` is a versioned JSON string containing original scope/group,
+owned base64 PIX and complete queue/retry requests. Decode is closed and bounded; invalid data
+rejects loading rather than silently deleting one retry. Queue restoration never supplies native
+authority or automatically dispatches. The native envelope retains a 1 MiB non-Studio budget,
+adds a 12 MiB Studio sub-budget and a 16 MiB combined physical/plaintext cap. Older envelopes
+without the field remain valid; older binaries with a 1 MiB cap may refuse a larger new envelope.
+
+## Studio Save delivery and editor switching (2026-10-18)
+
+Document Read and Create/Apply use separate native latest-request lanes. A Save supersedes older
+document projections and Save responses; a later refresh supersedes projections only. Both retain
+UI-session, actor-incarnation and cancellation checks. This changes no IPC payload or wire format.
+Frontend read-admission serials distinguish receipt completion from projection currency. A later
+read prevents an older ACK from replacing its view; awaited reconciliation runs before dependent
+Saves. Opening a newly created document with `read:false` does not advance those serials.
+`StudioSession.beforeDocumentClose` flushes the mounted editor before a different document replaces
+it; a synchronous refusal vetoes switching. Enqueued saves keep their original pixels and retry
+identity after navigation. The sidebar's Open indicator describes the one current editor, not the
+protocol's persistent Open epoch phase.
+
+## Studio sync observation event (2026-10-18)
+
+`studio-sync-state` carries
+`{server,instance,sequence,paused,cause,detail}`. `instance` and `sequence` are canonical decimal
+u64 strings, never JavaScript numbers. The native server incarnation orders replaced actors;
+sequence orders states within one actor. `cause` is `"background"|"incoming"|null`; detail is
+the actual local failure bounded to 512 characters at origin (the frontend accepts at most 2048).
+Resumed observations have null cause/detail. These fields are private local diagnostics, not
+settlement evidence, peer identity or authoring authority.
+
+Actor emits the new state before the retained legacy `studio-receive-paused` event. Whole-run
+successful explicit access emits current state, including the initial healthy sequence-zero state;
+failed access and read-only fault/lifecycle inspection do not imply resume. The frontend ignores
+older incarnations/sequences and duplicate events, and uses legacy Read/Save inference only until
+an authoritative observation exists. Up to 128 recent locally selected server observations survive
+channel/server navigation; reset/lock clears all private details. Cold/evicted scopes immediately
+read Index to reconcile current state; their previous ordering watermark is unavailable until
+fresh state arrives. No receiver event creates an invalidation/read feedback loop.
+
+PIXA inline previews and Studio Post to chat reuse the contracts described in
+[GATE7-UI-HANDOFF](GATE7-UI-HANDOFF.md): streamed fileshare upload returns the attachment CID;
+publication of a separate Studio reference remains a different action.
+
+## Gate 7 UI completion candidate (2026-10-17)
+
+The current [UI handoff](GATE7-UI-HANDOFF.md) supersedes historical absence claims for PIXA
+deck/global viewing, explicit repair and direct Closing local-draft Save. New main-window commands:
+
+- `studio_fault_read({server,channel,object?,objectKind?,scope:"source"|"registry"})` returns the
+  actual source/derived Registry bucket, source phase, two candidate receipt hashes and their
+  close/seed/epoch labels, current `mayDecide/blockedBy`, held repair and last local attempt.
+- `studio_fault_repair({...target,scope,decision:{receiptA,receiptB,selected}})` accepts no receipt
+  bytes, tenure, sequence, author or seed. The existing actor/store derives these and rechecks the
+  current durable owner and candidate pair. `{kind:"faultRepairStarted",start:"scheduled"|"busy",
+  refreshRequired:true}` is scheduling evidence only. Withheld scheduled/dropped replies are uncertain.
+- `studio_closing_overlay_save_begin({...target})` returns `closingOverlaySaveTicket` with exact
+  basis/branch and `provenance:"closing"`, or a typed `closingOverlaySave` refusal.
+- `studio_closing_overlay_save({...target,save:{basis,branch,nonce,body}})` retains existing Flow-S
+  saved/pending/busy/paused/refused/disposed/handedOff vocabulary, with a distinct Closing envelope
+  and saved provenance. Saved means localOnly/provisional, never a shared Apply or receipt. Exact
+  accepted/terminal retries precede current close/source/tenure admission. Fresh work requires the
+  actual signed close held in this vault's owner journal; ordinary peers generally lack it.
+
+`download_file` now accepts optional `maxBytes`, which can only tighten its native 16-MiB cap.
+The authenticated manifest plan is checked before allocation/fetch. PIXA callers request9MiB,
+check listing/encoded/decoded lengths and use the complete existing PIXA parser. Shared deck PIXA
+reuses existing queue/CID/offset/pause/DJ transport; old builds cannot render the new media kind.
+No wire or persistence format is added. File details exposes the global viewer from Files and
+chat/wiki references; Play uses the same archival engine and authored music/SFX horizon.
+
+Verification remains in [GATE7-ACCEPTANCE](GATE7-ACCEPTANCE.md); these contracts alone do not
+establish audible hardware or two-desktop release evidence.
+
+## Gate 7 current caller contract (2026-10-17)
+
+Gate 6 is owner-accepted and merged at `82631a81`. [GATE7-UI-HANDOFF](GATE7-UI-HANDOFF.md)
+maps every current canonical Studio surface to its production command/event, bounds and
+recovery/retry behavior. Explicit Score family binding and all nine settlement states apply.
+No new native repair or direct Closing Save command is exposed. Dated records below remain
+checkpoint evidence; [GATE7-ACCEPTANCE](GATE7-ACCEPTANCE.md) records the new verification.
+
+## Gate 6 caller checkpoint (2026-10-14)
 
 Score/Sound/linked Music/PIXA/GIF production callers and the existing `.jamtake` archival consumer
 are connected in the candidate. The leaf codec contracts below remain pure APIs, not a claim
@@ -1186,7 +1445,8 @@ explicit Studio access; new traffic cannot restart it. Pre-drain failure retains
 an ingest error may already have consumed it. `studio-receive-paused` carries `{server}` once on
 that transition; UI should warn and offer explicit reopen/retry, not call it a settlement fault
 or proof of local corruption. Authenticated missing-dependency/causal-invalid input can also pause.
-This warning event still needs the user-owned UI listener; it is not a persistent UI status query.
+The retained legacy warning is supplemented by the ordered `studio-sync-state` contract above;
+the UI no longer infers a current pause from a stale legacy event after observing that contract.
 The mounted store now retains at most one verified owned Studio source of at most 8 MiB encoded
 input. `with_studio_source` reuses it for explicit views; an independent Index/list refresh preserves
 opened art while warming only the Index footprint. `receive_studio_step_reusing` takes the unit
@@ -3857,6 +4117,137 @@ The additive `BlobStore` keep methods fail closed on unsupported stores. `KeptBl
 verifies, flushes and separately owns copies; ordinary put/delete/staging target primary storage.
 Remote confirmations and automated retention/eviction are not part of this interface.
 
+### Pre-upload video editing (frontend only)
+
+`embedMedia` (chat and announcement composers), `wikiEmbed` and `uploadFile` (Files tab) in
+App.svelte send each video whose declared type is `video/mp4`, `video/quicktime` or `video/webm`
+(`editableContainer`) through `reviewForUpload` → `reviewVideo(file, position, scope, context)`
+before upload, one at a time, when the WebView has WebCodecs (`webCodecsAvailable`) and the batch
+was not started with Shift (`asIs`: Shift+drop, or Shift+click on the picker label via the
+`shiftPick` action; see `upload-intent.ts`, which also explains why paste has no Shift form).
+Other files, and every file in a WebView without WebCodecs, upload exactly as before. No native
+command is added or changed; the main window's `dragDropEnabled` is `false` so file drops reach
+the page, `installFileDropGuard(window, document)` handles drops outside every zone (see the threat
+model; its iframe rule and the `.shift-pick` rule are in `drag-drop.css`, imported by `main.ts`,
+never inline), every file drop zone's `dragover` is `acceptFileDrag` (files only, effect `copy`),
+and every drop handler returns early on a drop that carries no files.
+
+- `VideoEditorContext` is `"chat" | "status" | "wiki" | "files"`, required on both the editor and
+  `VideoReviewQueue.request`. `editorWords(context)` gives the editor's ONE action ("post now" in
+  chat and announcements, "embed" in the wiki, "upload" in Files), its past tense for messages, and
+  `posts`: whether that action also sends. There is no separate attach, "as is" or "don't upload";
+  leaving is the ×/Esc, which asks "Discard this clip?" when anything was trimmed, removed or cut.
+- A result with `post: true` makes `embedMedia` snapshot the composer (`composerState`: text, and
+  for chat the reply target) when the editor answers, attach the file, and then call
+  `postFromComposer` only if the composer is unchanged; that runs `send()` or `postStatus()` and
+  returns `{started, settled}`: whether a send actually started (each sets its in-flight flag
+  before its first await), and a promise that resolves (never rejects) to what it came to. In a
+  batch the next file waits for `settled`, so it is attached to the emptied composer, not added to
+  the message being sent; a move away while the send runs ends the batch there (2026-10-20
+  review). `send()` and `postStatus()` resolve to a `SendOutcome` (`message-send.ts`): `refused`
+  (nothing submitted); `failed` (nothing sealed, or a sealed identity blocked from automatic
+  retry, including a not-accepted superseded result); `sent` (accepted and saved durably);
+  `uncertain` (may have gone or will by itself: accepted without a durable save, a not-accepted
+  pending result, a throw whose sealed identity stays pending and retries quietly, a throw after
+  dispatch that is not a definite native refusal even if Pending messages resolved the entry
+  meanwhile, or an identity taken over by a lock or the pending-message work). `send()` keeps
+  that evidence itself (`mayHaveGone`, set by `submitPendingSend`'s `onDispatch` or by reusing an
+  identity not marked `not_accepted`), never reading it back from `pendingSends`. "Not a
+  definite native refusal" means `sendRefusedUnaccepted` (`pending-sends.ts`) is false. That
+  classifier answers a different question from `pendingSendRetryBlock`: it also counts
+  `CHAT_SEND_CAPACITY` and `CHAT_SEND_DOCUMENT_PENDING`, which the native side raises only for a
+  token it holds no record of, yet which leave a retained entry retrying. An
+  announcement is never `uncertain`. The
+  toast reports that outcome, before a move away ends the batch, and never the composer's
+  contents, which cannot tell a sent message whose draft was kept from an unsent one: "sent",
+  "not confirmed yet: don't send it again", "not sent" (an announcement: "may not have posted:
+  check the feed before posting again", since `post_status` has no retry token), "not sent yet:
+  press Send when ready", besides "not sent: the message changed" before a send.
+  `postStatus()` now refuses re-entry (`statusPosting`) and clears the box only if it still holds
+  what was posted.
+- `VIDEO_EDITOR_SHORTCUTS` (`video-editor-ui.ts`) is the Keybinds page's "Video editor" list.
+- `VideoEditor.svelte` props: `file`, `capBytes` (the server's `fileSizeLimit`, else the 1 GiB
+  protocol ceiling), optional `position` ("2 of 3"), `context`, `onfinish(result)`, `passKey(e)`
+  (keys the modal lets through to the app: App passes Lock and push-to-talk), and test seams
+  `probe`/`exporter`/`thumbnails`. `onfinish` fires exactly once; an editor unmounted before it
+  answered answers `skip` on its way out.
+- `VideoEditorResult` (`video-export.ts`): `{kind:"original", post?}` uploads the picked bytes
+  unchanged; `{kind:"edited", file, post?}` uploads a re-encode named
+  `editedFileName(name, container)` with type `video/mp4` or `video/webm`; `{kind:"skip"}` uploads
+  nothing for that file.
+- `VideoReviewQueue` (`video-review.ts`) is the host side: one editor open at a time, later
+  requests wait their turn (they never close the open one), `finish(id, result)` ignores any id
+  but the open review's, and `rescope(scope)` settles every review bound to an old scope as
+  `skip`, reporting the closed editor's context for the message. App mounts the editor in a keyed
+  `{#each}` so each instance answers under its own id.
+- `embedMedia`, `wikiEmbed` and `uploadFile` bind a batch to `videoEditorScope` (lock state, server,
+  channel) and to `videoScopeEpoch` (bumped on every scope change, so a round trip away and back
+  still counts); the wiki batch also to its page and the Files batch to its folder. Each checks
+  before every item, after every review and after every upload. Once anything has
+  changed, nothing more is reviewed or uploaded and nothing is attached to the composer now on
+  screen; toasts say so (not on lock), including for queued reviews dropped by the change.
+  Mouse back/forward buttons do nothing while an editor is open.
+- The editor is modal at z-index 59: below the call bar, incoming-call prompt and floating call
+  stage (60), above ordinary overlays. It keeps focus (a backdrop press, focus landing outside,
+  and focus dropping to `<body>` when a focused control is disabled all return it), yields focus
+  to the next queued editor, suppresses context menus over itself, and stops every key except
+  those `passKey` lets through. App's `videoEditorPassKey` passes Ctrl/Cmd+L and an unmodified
+  push-to-talk press only; the editor `preventDefault`s a passed unmodified key so it cannot also
+  press a focused button.
+- `video-edit.ts` is the pure model (cuts, removed pieces, trim handles, undo/redo, the export
+  plan and per-frame/per-chunk mapping). `video-export.ts` owns the Mediabunny pipeline:
+  `probeVideo`, `filmstrip`, `exportEditedVideo`, and `CappedBytes`. The export rejects with
+  `ExportCanceledError`, `OutputTooLargeError`, or an `Error` whose message is a sentence for the
+  person; library errors are replaced by a generic sentence and kept on `cause`.
+- Mediabunny (MPL-2.0, pinned 1.61.3) is imported dynamically, so it is a separate chunk loaded
+  only when an editor opens. See the threat model's pre-upload video editing boundary.
+
+**Clip maker (2026-10-20).** The editor edits a `ClipDoc` (`clip-doc.ts`): `layers[0]` is the
+picked video with its cut list and defines the output timeline; `layers[1..2]` are added videos,
+picture in picture; `overlays` (text in a chat text effect, or a picture) carry keyframes; `audio`
+items are music or sound effects. All times except layer 0's own are OUTPUT time. Media is
+referenced by `source` id into the session's `MediaBin` (`clip-media.ts`; `"base"` is the picked
+file). The host contract is unchanged except for one optional prop and one test seam:
+
+- `music?: ClipMusicSource | null` (`clip-music.ts`): `list()` gives the channel's visible Studio
+  songs `{id, title}`; `load(id)` gives `{take, gridMs}` from `scorePlaybackFromNative`, or rejects
+  with the Studio's own sentence (unresolved conflicts, missing recipe). `load` lists the index
+  again first and refuses a song that is no longer offered (expired or deleted since the list was
+  shown) before reading its content, and the editor asks `list` once more when a composed clip is
+  posted (`checkSongsOffered`), refusing the post with a sentence if a song the clip sounds is gone
+  or the list cannot be read. Songs are kept in the bin under `songKey(id)`. App builds it with
+  `studioMusic(ipc, {server, channel}, myIdentity)` for the active channel when there is one and an
+  identity; the editor is closed by `videoEditorScope` on any channel change, so a review never
+  reads another channel. Read only when the Music tab opens.
+- `composer?` defaults to `exportClip(doc, media, {capBytes, signal, onProgress, container, name})`
+  (`clip-export.ts`), with the same rejections as `exportEditedVideo`.
+- Outcome rule: `isUntouched(doc)` gives `original`; `!needsCompositor(doc)` (only layer 0's cuts
+  changed) gives `edited` from `exportEditedVideo(file, layers[0].edit)`; anything else gives
+  `edited` from `composer`. `VideoEditorResult` is unchanged.
+- Keys added: R (record motion for the selected overlay), L (library), and Delete removes the
+  selected overlay, sound or layer before it falls back to the piece. Keys typed into the
+  inspector's fields, sliders or the effect list are theirs: no editor shortcut fires.
+- Files dropped on the editor go onto the clip (by type; refused types and over-size files get a
+  footer notice) and never reach the page behind it.
+- Heavy work (a song's read and render, a picture, sound or `.jamtake` decode) runs one job at a
+  time across every editor (`JobQueue` in `clip-media.ts`, one instance in `VideoEditor.svelte`'s
+  module script). Each job is admitted against the bin before it allocates (`MediaBin.room`, passed
+  as `admit` to `renderTakeOffline`, `decodeSoundFile` and `decodeImageFile`), and a job reached
+  after its editor answered does nothing. `JobQueue.run(job, signal, stage)` holds the queue
+  until the job settles. `signal` aborting (the editor answered, or "stop adding") lets go of it
+  sooner by its `JobStage` at that moment: `"light"` (nothing large allocated yet, e.g. waiting
+  on an IPC read) at once and uncounted; `"heavy"` (admitted, holding a decode's output) only
+  while fewer than `looseLimit` (1) heavy jobs let go of early are unsettled, otherwise it keeps
+  its turn until one ends or it settles itself; `"pinned"` (an offline render) never. The
+  editor's `heavy(gone, job)` hands the job a `HeavyStep`: `admit` (the bin's room check; passing
+  it makes the job heavy) and `rendering()` (pins it). An abort never lets later jobs past one
+  queued before it. `JobQueue.loose` reports the unsettled early releases. The post button is
+  disabled ("Still adding to the clip") while any add is pending, with a "stop adding" button
+  beside it that gives up on every pending add (each drops its result and its job's signal
+  aborts). A file dropped while "Discard this clip?" shows is kept from the page but not added.
+  `decodeImageFile(file, admit?, signal?)` checks `signal` after every await and closes what it
+  holds before rejecting. `mixClipSound`'s `SoundLoader` now receives the mix's `signal`.
+
 ## 13. Call identity and Flipnote frame claims  *(Gate 5; desktop WebRTC; docs/GATE5-DESIGN.md)*
 
 **Call signal identity (C0d).** `KIND_CALL_SIGNAL`'s wire is unchanged: the sender's Ed25519 key is
@@ -4052,7 +4443,8 @@ Authored durations now reach the same engine through engine-minted archival even
 including the existing local/shared `.jamtake` consumer; raw live notes keep the 30s lost-off
 watchdog. Combined events/seek reconstruction are bounded per tick, suspended remote playback
 cannot resume the context and pending download cancellation survives Deafen/navigation edges.
-Shared-deck PIXA media-kind/consensus and a standalone global viewer remain later Gate 7/UI work.
+Shared-deck PIXA, a global viewer and bounded silent inline previews are implemented through the
+existing transport/file-reader/StudioAudioSession paths; see the current Gate 7 handoff above.
 
 The static Rust `ScoreOp` codec and frontend types are reused by the implemented typed Score
 target/native/session path. Shared canonical vectors and exact bounds remain documented in

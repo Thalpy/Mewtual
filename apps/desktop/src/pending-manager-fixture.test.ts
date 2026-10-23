@@ -1,9 +1,9 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import ts from "typescript";
-import { addPendingSend, matchingPendingSend, pendingSendRetryBlock, resolvePendingSend } from "./pending-sends.ts";
+import { addPendingSend, matchingPendingSend, pendingSendRetryBlock, resolvePendingSend, sendRefusedUnaccepted } from "./pending-sends.ts";
 import { MAX_DRAFT_CHARS, planLegacyReadMarkMigration, sanitizeUiContinuity } from "./ui-continuity.ts";
-import { persistenceWarning, sendAndRefresh } from "./message-send.ts";
+import { persistenceWarning, sendAndRefresh, sendOutcome } from "./message-send.ts";
 import { NativeVaultLockCoordinator } from "./window-close.ts";
 
 export function deferred<T = void>() {
@@ -29,14 +29,18 @@ function productionCloseCallback() {
 
 /** Shared test fixture for real App save queue, hydration, decisions and submit/retry. */
 export function pendingManagerApp(initial: unknown) {
-  const dependencies = { initial, addPendingSend, matchingPendingSend, pendingSendRetryBlock, resolvePendingSend,
-    MAX_DRAFT_CHARS, planLegacyReadMarkMigration, sanitizeUiContinuity, persistenceWarning, sendAndRefresh, NativeVaultLockCoordinator };
+  const dependencies = { initial, addPendingSend, matchingPendingSend, pendingSendRetryBlock, resolvePendingSend, sendRefusedUnaccepted,
+    MAX_DRAFT_CHARS, planLegacyReadMarkMigration, sanitizeUiContinuity, persistenceWarning, sendAndRefresh, sendOutcome, NativeVaultLockCoordinator };
   return new Function(...Object.keys(dependencies), `
     let locked = false, uiStateReady = false, uiStateLoadGeneration = 1, uiStateSaveTimer;
     let uiStateSaveChain = Promise.resolve(), uiStateSaveFailed = false, uiStateFailureToast = 0;
     let pendingSends = {}, recoveredSendDrafts = {}, pendingSendErrors = {}, pendingSendResolution = null;
     let retryingPendingSends = false, pendingManagerOpen = false, sending = false;
     let windowCloseInFlight = false, unlocking = false, closeAfterContinuityError = false;
+    // These chat tests leave the lazy Studio chunk unmounted. Keep its real continuity
+    // fallback and close hooks in scope so the extracted App functions run unchanged.
+    let studioSnapshot = null, studioRestore = null, restoredStudioDraft = null;
+    const studioBeginClose = null, studioSave = null;
     let drafts = {}, readMarks = {}, statusCursors = {}, fileTrustPolicies = {}, latePast = {}, embedAutoLoad = false;
     let servers = [], cur = null, activeServerId = null, draft = "", replyingTo = "", draftRevisions = {};
     let pendingSendNonce = 0, mentionQuery = null, chatStickToBottom = false, tailLoaded = false;

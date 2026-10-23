@@ -1,4 +1,5 @@
-//! Explicit local core/store foundation. No actor command, native Save or replay is enabled.
+//! Local Closing draft core/store foundation. The actor's ticketed Closing control derives its
+//! close from the sealed journal and schedules the same Flow-S stages; handoff remains separate.
 use super::*;
 use crate::store::EpochStudioBudget;
 use catcoms_replication::studio::{

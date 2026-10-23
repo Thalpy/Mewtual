@@ -13,6 +13,7 @@ mod copy_capture;
 mod disposal;
 mod eligibility;
 mod handoff;
+mod retry_ack;
 mod source_version;
 mod typed_object;
 

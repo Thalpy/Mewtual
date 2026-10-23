@@ -37,6 +37,103 @@ async function harness(opts: { ipc?: FakeIpc } = {}) {
 
 const docView = (frames = [{ id: F1, cid: id64(1), bytes: pixBytes(1).length }], extra: { epochId?: string; phase?: string } = {}) => ordinaryView(flipnoteContent({ frames }), extra);
 
+test("a Save receipt resolves without rolling back a newer object or Index read", async () => {
+  for (const index of [false, true]) {
+    const h = await harness(), ack = deferred<unknown>();
+    const view = (title: string, epoch: number) => index
+      ? ordinaryView(indexContent({ objects: { [OBJ]: indexEntry({ title }) } }), { epochId: id32(epoch), epoch: String(epoch) })
+      : ordinaryView(flipnoteContent({ title, frames: [] }), { epochId: id32(epoch), epoch: String(epoch) });
+    h.ipc.on("studio_list", () => index ? view("initial", 1) : ordinaryView(indexContent()));
+    h.ipc.on("studio_read", () => view("initial", 1));
+    h.ipc.on(index ? "studio_apply_index" : "studio_apply", () => ack.promise);
+    h.session.setScope({ server: SERVER, channel: CHANNEL }); if (!index) h.session.open(OBJ); await h.sync();
+    if (index) h.session.renameEntry(OBJ, "saved earlier"); else h.session.setTitle(OBJ, "saved earlier");
+    h.ipc.on(index ? "studio_list" : "studio_read", () => view("newer remote value", 2));
+    if (index) await h.session.refreshIndex(); else await h.session.refreshDoc(OBJ);
+    ack.resolve(view("saved earlier", 1)); await settle(4);
+    assert.equal(index ? h.session.indexModel?.entries[0].title : h.session.doc?.model?.title, "newer remote value");
+    assert.equal(index ? h.session.index?.epochId : h.session.doc?.view?.epochId, id32(2));
+    assert.equal(h.session.saves.length, 0, "receipt remains a definite acknowledgement");
+    await h.sync();
+    assert.equal(index ? h.session.indexModel?.entries[0].title : h.session.doc?.model?.title, "newer remote value");
+  }
+});
+
+test("a Read already pending before Save cannot overwrite its acknowledged projection", async () => {
+  const h = await harness(), oldRead = deferred<unknown>();
+  h.ipc.on("studio_list", () => ordinaryView(indexContent()));
+  h.ipc.on("studio_read", () => docView([]));
+  h.session.setScope({ server: SERVER, channel: CHANNEL }); h.session.open(OBJ); await h.sync();
+  h.ipc.on("studio_read", () => oldRead.promise); const reading = h.session.refreshDoc(OBJ);
+  const saved = ordinaryView(flipnoteContent({ title: "saved newer", frames: [] }));
+  h.ipc.on("studio_apply", () => saved); h.session.setTitle(OBJ, "saved newer"); await settle(4);
+  oldRead.resolve(ordinaryView(flipnoteContent({ title: "old pending read", frames: [] }))); await reading;
+  assert.equal(h.session.doc?.model?.title, "saved newer"); assert.equal(h.session.saves.length, 0);
+});
+
+test("Create then open without reading saves its initial frame, including after an overlapping absence read", async () => {
+  for (const overlap of [false, true, "read-fails"] as const) {
+    const h = await harness(), created = deferred<unknown>(), pix = pixBytes();
+    h.ipc.on("studio_list", () => ordinaryView(indexContent()));
+    h.ipc.on("studio_create", () => created.promise);
+    h.ipc.on("publish_pix", () => ({ cid: id64(5), bytes: pix.length }));
+    h.ipc.on("studio_apply", a => {
+      const op = JSON.parse(String(a.body));
+      return ordinaryView(flipnoteContent({ frames: [{ id: op.frame, cid: op.cid, bytes: op.bytes }] }));
+    });
+    h.session.setScope({ server: SERVER, channel: CHANNEL }); await h.sync();
+    const object = h.session.createFlipnote("new"); h.session.open(object, { read: false }); h.session.insertFrame(object, null, pix);
+    if (overlap) {
+      h.ipc.on("studio_read", () => null); await h.session.refreshDoc(object);
+      h.ipc.on("studio_read", () => { if (overlap === "read-fails") throw new Error("read unavailable"); return docView([]); });
+    }
+    created.resolve(docView([])); await h.sync();
+    if (overlap === "read-fails") {
+      assert.equal(h.calls("studio_apply").length, 0);
+      assert.equal(h.session.saves[0].status, "blocked", "no Apply was sent, so the first frame is known not written");
+      assert.equal(h.session.saves[0].mayHaveCommitted, false);
+    } else {
+      assert.equal(h.calls("studio_apply").length, 1); assert.equal(h.calls("studio_apply")[0].args.object, object);
+      assert.equal(h.session.saves.length, 0); assert.equal(h.session.doc?.model?.frames.length, 1);
+    }
+    if (!overlap) assert.equal(h.calls("studio_read").length, 0, "read:false navigation is not read admission");
+  }
+});
+
+test("switching commits the previous editor first and retains an uncertain Save offscreen", async () => {
+  const h = await harness(), other = id32(0x0c), ack = deferred<unknown>(), pix = pixBytes(2);
+  h.ipc.on("studio_list", () => ordinaryView(indexContent()));
+  h.ipc.on("studio_read", () => docView());
+  h.ipc.on("publish_pix", () => ({ cid: id64(2), bytes: pix.length }));
+  h.ipc.on("studio_apply", () => ack.promise);
+  h.session.setScope({ server: SERVER, channel: CHANNEL }); h.session.open(OBJ); await h.sync();
+  let dirty = true;
+  const remove = h.session.beforeDocumentClose(() => {
+    assert.equal(h.session.doc?.object, OBJ, "flush precedes replacing the editor");
+    if (dirty) { h.session.saveFrame(OBJ, F1, pix); dirty = false; }
+  });
+  h.session.open(other); remove(); await h.sync();
+  assert.equal(dirty, false); assert.equal(h.session.doc?.object, other);
+  assert.equal(h.calls("studio_apply")[0].args.object, OBJ);
+  ack.reject(new Error("response lost")); await h.sync();
+  assert.equal(h.session.doc?.object, other, "old completion cannot replace the new editor");
+  assert.equal(h.session.saves[0].status, "uncertain");
+  assert.deepEqual(h.session.unsavedPix(OBJ, F1), pix);
+  const exact = h.calls("studio_apply")[0].args;
+  h.ipc.on("studio_apply", () => docView()); h.session.retry(h.session.saves[0].id); await h.sync();
+  assert.deepEqual(h.calls("studio_apply")[1].args, exact); assert.equal(h.session.saves.length, 0);
+  assert.equal(h.session.doc?.object, other);
+});
+
+test("a failed editor flush vetoes switching and keeps the current document", async () => {
+  const h = await harness(); h.session.setScope({ server: SERVER, channel: CHANNEL }); h.session.open(OBJ, { read: false });
+  const old = h.session.doc;
+  const remove = h.session.beforeDocumentClose(() => { throw new Error("pixels could not be queued"); });
+  assert.throws(() => h.session.open(id32(0x0c)), /could not be queued/);
+  assert.equal(h.session.doc, old); assert.throws(() => h.session.open(null), /could not be queued/);
+  remove(); h.session.open(null); assert.equal(h.session.doc, null);
+});
+
 test("setting the scope lists the channel once per coalesced window and a stale list is dropped", async () => {
   const h = await harness();
   const first = deferred<unknown>();
@@ -126,6 +223,51 @@ test("an awaiting-tenure edit stays local and retries the exact ticket, nonce an
   assert.equal(h.session.saves.length, 0);
   assert.equal(h.session.doc?.model?.fps, 8, "the retained branch projection, not the preview base, is displayed");
   assert.equal(h.session.overlay?.inspection?.kind, "local-draft");
+});
+
+test("Closing edits use a distinct local ticket and freeze identity across pending and source replacement", async () => {
+  const h = await harness(); let phase = "closing", visits = 0;
+  h.ipc.on("studio_list", () => ordinaryView(indexContent()));
+  h.ipc.on("studio_read", () => docView([], { phase }));
+  h.ipc.on("studio_closing_overlay_save_begin", a => ({ v: 1, kind: "closingOverlaySaveTicket", channel: a.channel, object: a.object, basis: id64(1), branch: id64(2), provenance: "closing" }));
+  h.ipc.on("studio_closing_overlay_save", a => ++visits === 1
+    ? { v: 1, kind: "closingOverlaySave", channel: a.channel, object: a.object, state: "pending", retry: "sameRequest" }
+    : { v: 1, kind: "closingOverlaySave", channel: a.channel, object: a.object, state: "saved", basis: id64(1), accepted: 1, localOnly: true, provisional: true, provenance: "closing" });
+  h.session.setScope({ server: SERVER, channel: CHANNEL }); h.session.open(OBJ); await h.sync();
+  assert.equal(h.session.canEdit(OBJ), true); assert.ok("refused" in h.session.editableEpoch(OBJ), "Closing never supplies ordinary Apply authority");
+  h.session.setTitle(OBJ, "local while rotating"); await h.sync();
+  const first = h.calls("studio_closing_overlay_save")[0].args;
+  assert.equal(h.session.saves[0].status, "uncertain"); assert.equal(h.session.canReauthor(h.session.saves[0].id), false);
+  phase = "open"; await h.session.refreshDoc(OBJ);
+  h.session.retry(h.session.saves[0].id); await h.sync();
+  assert.deepEqual(h.calls("studio_closing_overlay_save")[1].args, first);
+  assert.equal(h.calls("studio_closing_overlay_save_begin").length, 1);
+  assert.equal(h.calls("studio_unconfirmed_overlay_save").length, 0); assert.equal(h.calls("studio_apply").length, 0);
+  assert.equal(h.session.saves.length, 0);
+});
+
+test("a missing signed close is a typed no-write refusal retaining unsaved Closing pixels", async () => {
+  const h = await harness(), pix = pixBytes(2);
+  h.ipc.on("studio_list", () => ordinaryView(indexContent())); h.ipc.on("studio_read", () => docView([], { phase: "closing" }));
+  h.ipc.on("publish_pix", () => ({ cid: id64(2), bytes: pix.length }));
+  h.ipc.on("studio_closing_overlay_save_begin", a => ({ v: 1, kind: "closingOverlaySave", channel: a.channel, object: a.object, state: "refused", reason: "receiptChanged", retry: "newTicket" }));
+  h.session.setScope({ server: SERVER, channel: CHANNEL }); h.session.open(OBJ); await h.sync();
+  h.session.saveFrame(OBJ, F1, pix); await h.sync();
+  assert.equal(h.session.saves[0].status, "blocked"); assert.equal(h.session.saves[0].mayHaveCommitted, false);
+  assert.deepEqual(h.session.unsavedPix(OBJ, F1), pix); assert.equal(h.calls("studio_closing_overlay_save").length, 0);
+});
+
+test("pending fault observations retire on matching object and Index invalidations", async () => {
+  const h = await harness(); h.ipc.on("studio_list", () => ordinaryView(indexContent()));
+  h.session.setScope({ server: SERVER, channel: CHANNEL }); await h.sync();
+  for (const object of [OBJ, null]) {
+    const gate = deferred<unknown>(); h.ipc.on("studio_fault_read", () => gate.promise);
+    const pending = h.session.readFault(object, "source"), before = h.session.faultGeneration;
+    h.ipc.emit("settlement-changed", { server: SERVER, channel: CHANNEL, object, docType: object ? 16 : 15, logicalKey: object ?? id32(7), state: "repairing" });
+    assert.equal(h.session.faultGeneration, before + 1);
+    gate.resolve({ v: 1, kind: "fault", channel: CHANNEL, object, scope: { kind: "source" }, source: { phase: "open" }, candidates: null, repair: null, lastAttempt: null, mayDecide: false, blockedBy: "noFault", waiting: 0, preservedOperations: 0 });
+    assert.equal(await pending, null, "notification invalidates a read even before it has an observation");
+  }
 });
 
 test("an awaiting-tenure Index edit is read back from its local overlay for the sidebar", async () => {
@@ -861,12 +1003,14 @@ test("a frame save publishes then applies with the view's epoch, and an uncertai
   const pix = pixBytes(3);
   h.ipc.on("publish_pix", (a) => ({ cid: id64(0xc3), bytes: base64ToBytes(String(a.bytesB64)).length }));
   let applies = 0;
-  h.ipc.on("studio_apply", () => { applies++; throw new Error("Studio storage busy; retry the same request"); });
+  // A failure after dispatch: uncertain. (The bridge's pre-dispatch "busy" refusals are definite
+  // no-writes since nativeNoWrite, and are resent automatically.)
+  h.ipc.on("studio_apply", () => { applies++; throw new Error("Studio transaction expired, cancelled or server stopped"); });
   h.session.saveFrame(OBJ, F1, pix);
   await h.sync();
   const rec = h.session.saves[0];
   assert.equal(rec.status, "uncertain");
-  assert.match(rec.error, /busy/);
+  assert.match(rec.error, /expired/);
   assert.ok(rec.kind === "frame");
   assert.deepEqual(rec.pix, pix, "the unsaved pixels stay on the record");
   assert.deepEqual(h.session.unsavedPix(OBJ, F1), pix);
@@ -922,7 +1066,7 @@ test("create freezes object, nonce, title and timestamp; a retry after failure r
   h.ipc.on("studio_list", () => ordinaryView(indexContent()));
   h.session.setScope({ server: SERVER, channel: CHANNEL });
   await h.sync();
-  h.ipc.on("studio_create", () => { throw new Error("Studio actor busy; retry"); });
+  h.ipc.on("studio_create", () => { throw new Error("Studio transaction expired, cancelled or server stopped"); });
   const object = h.session.createFlipnote("moon cat");
   await h.sync();
   h.tick(5_000);
@@ -1035,6 +1179,41 @@ test("events for another server or channel are ignored; matching ones coalesce i
   h.session.open(OBJ);
   await h.sync();
   assert.equal(h.session.receivePaused, false, "a successful explicit read resumes the receiver");
+});
+
+test("all nine native settlement states invalidate media and reread the matching document and recovery", async () => {
+  const h = await harness();
+  h.ipc.on("studio_list", () => ordinaryView(indexContent()));
+  h.ipc.on("studio_read", () => docView());
+  h.ipc.on("studio_recovery_list", () => recoveryListing({ object: OBJ }));
+  h.session.setScope({ server: SERVER, channel: CHANNEL });
+  h.session.open(OBJ);
+  h.session.watchRecovery(OBJ);
+  await h.sync();
+  // Pin the native vocabulary independently: a companion refreshRequired notice must not
+  // conceal rejection of repairing/storageRefused at the documented frontend boundary.
+  for (const state of ["open", "closing", "settled", "fault", "recoveryAvailable",
+    "recoveryEvictionPending", "refreshRequired", "repairing", "storageRefused"]) {
+    const reads = h.calls("studio_read").length, recovery = h.calls("studio_recovery_list").length;
+    const media = h.session.mediaGeneration;
+    for (const foreign of [{ server: SERVER + 1, channel: CHANNEL }, { server: SERVER, channel: "9" }]) {
+      h.ipc.emit("settlement-changed", { ...foreign, object: OBJ, logicalKey: OBJ, docType: 16, state });
+    }
+    assert.equal(h.session.mediaGeneration, media, `${state} cannot invalidate a different scope`);
+    h.ipc.emit("settlement-changed", { server: SERVER, channel: CHANNEL, object: OBJ,
+      logicalKey: OBJ, docType: 16, state });
+    assert.equal(h.session.mediaGeneration, media + 1, `${state} revokes prepared media immediately`);
+    await h.sync();
+    assert.equal(h.calls("studio_read").length, reads + 1, `${state} rereads the object`);
+    assert.equal(h.calls("studio_recovery_list").length, recovery + 1, `${state} rereads recovery`);
+  }
+  const media = h.session.mediaGeneration, reads = h.calls("studio_read").length;
+  h.ipc.emit("settlement-changed", { server: SERVER, channel: CHANNEL, object: OBJ,
+    logicalKey: OBJ, docType: 16, state: "repairGranted" });
+  await h.sync();
+  assert.equal(h.session.mediaGeneration, media, "unknown state cannot acquire contract meaning");
+  assert.equal(h.calls("studio_read").length, reads);
+  h.session.detach();
 });
 
 test("reset forgets scoped state, pending saves and held pixels; late results do not repopulate it", async () => {

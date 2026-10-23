@@ -356,7 +356,7 @@ pub(crate) enum UnconfirmedSaveVisit {
 
 /// A budget from a completed five-family inventory, as every lifecycle control takes one. Called
 /// only by a stage that will spend it, so a visit that finds the slot busy costs no scan.
-fn save_budget<T: MeshTransport + 'static, R: CryptoRngCore>(
+pub(super) fn save_budget<T: MeshTransport + 'static, R: CryptoRngCore>(
     server: &mut Server<T, R>,
     store: &mut ServerStore,
     id: u64,

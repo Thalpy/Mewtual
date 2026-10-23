@@ -139,7 +139,7 @@ You're now in a shared, encrypted `#general` channel. Type and send.
   short three-pip news cue configured under **Settings → Notifications**; the **♪** chip in a
   server's **Announcements** header is a shortcut to that server's own switch.
 
-### Studio: flipnotes, sound and music (Gate 6 candidate)
+### Studio: flipnotes, sound and music
 
 Open a channel's **Studio**, then choose **new flipnote** or **new score**. Art uses the existing
 frame editor. Scores use a paged sixteenth-step grid: choose a recipe or drum, enter the creator's
@@ -164,8 +164,9 @@ Recovery **Restore** adds absent content without overwriting; **Copy** is an exp
 replacement/removal, not an atomic restore or proof that every conflict alternative was preserved.
 Unavailable media remains an honest refusal. Recovery/draft backups are private recovery formats,
 not playable `.pixa` files. Direct Closing Save and unfinished native repair controls remain unavailable.
-Gate 6 is locally verified but awaits hosted acceptance; global/shared-deck PIXA viewing and
-two-real-client release acceptance remain later work. See [the exact evidence ledger](GATE6-ACCEPTANCE.md).
+Gate 6 is owner-accepted. Global/shared-deck PIXA viewing remains unavailable; audible hardware
+and two desktop UI release observations need separate evidence. See the
+[current acceptance ledger](GATE7-ACCEPTANCE.md) and [UI contract handoff](GATE7-UI-HANDOFF.md).
 
 ### Server Space
 

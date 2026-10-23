@@ -23,6 +23,7 @@
     "dompurify": "^3.4.11",
     "jsqr": "^1.4.0",
     "marked": "^18.0.5",
+    "mediabunny": "1.61.3",
     "qrcode": "^1.5.4"
   },
   "devDependencies": {

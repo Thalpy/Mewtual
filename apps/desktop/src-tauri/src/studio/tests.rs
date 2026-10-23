@@ -6,6 +6,7 @@ use catcoms_rt::{Hub, ManualClock, PeerId};
 use rand_chacha::ChaCha20Rng;
 use rand_core::SeedableRng;
 use std::future::Future;
+mod export_acceptance;
 /// The shared genuine-accepted-draft fixture, declared once for the whole Studio test tree.
 /// `#[path]`-including it from two test modules would compile two unrelated copies of it.
 #[path = "../../../../../crates/catcoms-app/tests/support/studio_inspection.rs"]
@@ -14,6 +15,7 @@ mod preview;
 mod receiver;
 mod recovery;
 mod recovery_restore;
+mod sync_state;
 
 #[test]
 fn score_diagnostics_distinguish_effective_removal_from_raw_winner() {
@@ -221,6 +223,34 @@ fn every_destructive_or_copy_success_is_classified_before_a_final_fence() {
     );
 }
 
+#[test]
+fn scheduled_repair_is_uncertain_when_a_final_session_fence_withholds_its_reply() {
+    use app::studio::{StudioControlResponse as R, StudioFaultScope, StudioRepairStart};
+    for (start, expected) in [
+        (StudioRepairStart::Scheduled, Some(WithheldWrite::Repair)),
+        (StudioRepairStart::Busy, None),
+    ] {
+        assert_eq!(
+            withheld_write(&InvokeResponse::Control(R::RepairStarted {
+                target: StudioTarget::Index { channel: [7; 16] },
+                scope: StudioFaultScope::Source,
+                start
+            })),
+            expected
+        );
+    }
+}
+
+#[test]
+fn closing_scheduled_save_uses_the_same_uncertain_delivery_classification() {
+    let response =
+        InvokeResponse::Control(app::studio::StudioControlResponse::ClosingOverlaySaved {
+            target: StudioTarget::Index { channel: [7; 16] },
+            outcome: app::studio::StudioUnconfirmedSaveOutcome::Scheduled,
+        });
+    assert_eq!(withheld_write(&response), Some(WithheldWrite::Save));
+}
+
 #[tokio::test]
 async fn native_studio_superseded_view_is_rejected_after_conversion() {
     let (_root, state, actor, task, drain) = fixture().await;
@@ -255,6 +285,27 @@ async fn native_studio_superseded_view_is_rejected_after_conversion() {
 
 fn rng() -> ChaCha20Rng {
     ChaCha20Rng::seed_from_u64(81)
+}
+
+#[tokio::test]
+async fn native_studio_refresh_during_create_keeps_the_durable_save_receipt() {
+    let (_root, state, actor, task, drain) = fixture().await;
+    let saved = invoke_custody(&state, 7, InvokeRequest::Document(create()), |response| {
+        let InvokeResponse::Document(Some(read)) = response else {
+            panic!("missing created view");
+        };
+        let value = read_view(read)?;
+        // The overlay/recovery refresh can start before the renderer receives Create/Save.
+        // This used to replace the same token and turn a successful first-frame Save uncertain.
+        drop(requests::ViewRequest::begin(&state, 7, target()));
+        Ok(value)
+    })
+    .await
+    .unwrap();
+    assert_eq!(saved["content"]["title"]["selected"]["value"], "moon cat");
+    actor.shutdown().await;
+    task.await.unwrap();
+    drain.await.unwrap();
 }
 fn channel() -> String {
     catcoms_app::channel_id("general").to_string()
@@ -381,6 +432,142 @@ async fn native_studio_save_restart_reopen_real_blob_and_complete_projection() {
             .len(),
         64
     );
+    // Gate 7 keeps all object families and media references in the SAME sealed-vault restart.
+    // Parser-only/native-shaped fixtures would miss a saved wrapper, custody or family mismatch.
+    let score_target = StudioTarget::Score {
+        channel: target().channel(),
+        object: [6; 16],
+    };
+    let score_created = invoke(
+        &state,
+        7,
+        StudioRequest::CreateScore {
+            channel: target().channel(),
+            object: [6; 16],
+            nonce: [21; 16],
+            title: "linked music".into(),
+            ts: 123,
+        },
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    let score_saved = invoke(
+        &state,
+        7,
+        apply_request_with_kind(
+            &channel(),
+            Some(&hex::encode([6; 16])),
+            Some("score"),
+            score_created["epochId"].as_str().unwrap(),
+            &hex::encode([22; 16]),
+            String::from_utf8(
+                ScoreOp::SetCell {
+                    step: 15,
+                    row: 24,
+                    value: ScoreCell::Drum { pad: 9 },
+                }
+                .encode()
+                .unwrap(),
+            )
+            .unwrap(),
+        )
+        .unwrap(),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    let vectors: Value = serde_json::from_str(include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../../crates/catcoms-replication/tests/fixtures/studio-export-v1.json"
+    )))
+    .unwrap();
+    let descriptor = app::studio::types::StudioPatch::new(&vectors["patch"]).unwrap();
+    let patch = descriptor.id();
+    let package = hex::decode(vectors["pixaHex"].as_str().unwrap()).unwrap();
+    let package_cid = actor.publish_pixa(package.clone(), None).await.unwrap().cid;
+    for (nonce, op) in [
+        (23, FlipnoteOp::SetPatch { patch, descriptor }),
+        (
+            24,
+            FlipnoteOp::SetSfx {
+                sfx: [2; 16],
+                frame: [1; 16],
+                patch,
+                note: 60,
+                duration_ms: 120,
+            },
+        ),
+        (
+            25,
+            FlipnoteOp::SetHeader(FlipnoteHeader::Score(Some([6; 16]))),
+        ),
+        (
+            26,
+            FlipnoteOp::SetExport {
+                export: [3; 16],
+                cid: *Cid::from_hex(&package_cid).unwrap().as_bytes(),
+                bytes: package.len() as u64,
+                expiry: StudioExpiry::Never,
+            },
+        ),
+    ] {
+        invoke(
+            &state,
+            7,
+            apply_request(
+                &channel(),
+                Some(&hex::encode([7; 16])),
+                created["epochId"].as_str().unwrap(),
+                &hex::encode([nonce; 16]),
+                String::from_utf8(op.encode().unwrap()).unwrap(),
+            )
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    }
+    let saved = invoke(&state, 7, StudioRequest::Read { target: target() })
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        saved["content"]["sound"]["readiness"]["missingFrames"],
+        json!([])
+    );
+    assert_eq!(
+        saved["content"]["sound"]["readiness"]["missingPatches"],
+        json!([])
+    );
+    assert_eq!(
+        saved["content"]["sound"]["records"][format!("s/{}", hex::encode([2; 16]))]["selected"]
+            ["value"]["duration_ms"],
+        120
+    );
+    assert_eq!(score_saved["content"]["kind"], "score");
+    assert_eq!(
+        score_saved["content"]["cells"]["15:24"]["register"]["selected"]["value"],
+        json!({"k":"d","pad":9})
+    );
+    let records = saved["content"]["sound"]["records"].as_object().unwrap();
+    assert_eq!(
+        records["h/score"]["selected"]["value"]["value"],
+        hex::encode([6; 16])
+    );
+    assert_eq!(
+        records[&format!("p/{}", hex::encode(patch))]["selected"]["value"]["descriptor"],
+        vectors["patch"]
+    );
+    let export = records
+        .values()
+        .map(|r| &r["selected"]["value"])
+        .find(|v| v["op"] == "set_export")
+        .expect("export must be present in native DTO");
+    assert_eq!(export["cid"], package_cid);
+    assert_eq!(export["bytes"], package.len());
+    assert_eq!(export["export"], hex::encode([3; 16]));
+    assert_eq!(saved["publication"], "local");
+    assert_eq!(saved["provisional"], true);
     actor.shutdown().await;
     task.await.unwrap();
     drain.await.unwrap();
@@ -421,6 +608,42 @@ async fn native_studio_save_restart_reopen_real_blob_and_complete_projection() {
         saved
     );
     assert_eq!(invoke(&state, 7, request()).await.unwrap().unwrap(), saved);
+    assert_eq!(
+        invoke(
+            &state,
+            7,
+            StudioRequest::Read {
+                target: score_target
+            }
+        )
+        .await
+        .unwrap()
+        .unwrap(),
+        score_saved
+    );
+    assert!(
+        invoke(
+            &state,
+            7,
+            StudioRequest::Read {
+                target: StudioTarget::Flipnote {
+                    channel: target().channel(),
+                    object: [6; 16],
+                }
+            }
+        )
+        .await
+        .is_err(),
+        "native callers cannot reinterpret the reopened Score as art"
+    );
+    assert_eq!(
+        actor
+            .request_blob_bounded(Cid::from_hex(&package_cid).unwrap(), package.len(), None)
+            .await
+            .unwrap()
+            .unwrap(),
+        package
+    );
     assert_eq!(
         actor
             .request_blob_bounded(Cid::from_hex(&cid).unwrap(), pix.len(), None)

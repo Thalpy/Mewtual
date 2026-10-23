@@ -513,6 +513,7 @@ test("every non-bootstrap native command visibly crosses the unlocked-session ga
     ["studio/copy.rs", "InvokeContext::new|invoke_control"],
     ["studio/lifecycle.rs", "invoke_control|invoke_archive|two_visit_archive"],
     ["studio/recovery.rs", "invoke_control|invoke_custody"],
+    ["studio/fault.rs", "invoke_control"],
     ["studio/inspection.rs", "read"],
   ]);
   for (const [command, { file, segment }] of segments) {

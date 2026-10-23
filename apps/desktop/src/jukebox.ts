@@ -8,6 +8,7 @@
  */
 
 import { deckDriver, deckSources } from "./deck-players.ts";
+import { PIXA_EXT, PIXA_MIME } from "./pixa-media.ts";
 
 /**
  * What a queued track is, as far as the deck cares.
@@ -25,6 +26,7 @@ export type MediaKind =
   | "audio"
   | "video"
   | "take"
+  | "pixa"
   | "linked-audio"
   | "linked-video"
   | "other";
@@ -92,6 +94,7 @@ const AUDIO_EXT = new Set(["mp3", "m4a", "aac", "ogg", "oga", "opus", "flac", "w
  */
 export function mediaKind(name: string, mime = ""): MediaKind {
   const trimmedMime = mime.trim().toLowerCase();
+  if (trimmedMime === PIXA_MIME || name.trim().toLowerCase().endsWith(PIXA_EXT)) return "pixa";
   if (trimmedMime === JAM_TAKE_MIME || name.trim().toLowerCase().endsWith(JAM_TAKE_EXT)) return "take";
   const type = trimmedMime.split("/")[0];
   if (type === "video") return "video";
@@ -104,7 +107,7 @@ export function mediaKind(name: string, mime = ""): MediaKind {
 }
 
 /** What the "add from share" picker is currently listing. */
-export type MediaFilter = "all" | "audio" | "video" | "take";
+export type MediaFilter = "all" | "audio" | "video" | "take" | "pixa";
 
 /** The least a file has to say for the picker to place it. */
 export type MediaChoice = { cid: string; name: string; mime: string };
@@ -158,7 +161,7 @@ export function deckSurface(
   focusOpen: boolean,
   dockOpen: boolean,
 ): DeckSurface {
-  if (!playing || (kind !== "video" && kind !== "linked-video")) return "none";
+  if (!playing || (kind !== "video" && kind !== "linked-video" && kind !== "pixa")) return "none";
   if (focusOpen) return "focus";
   return dockOpen ? "dock" : "none";
 }

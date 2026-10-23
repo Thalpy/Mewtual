@@ -6,11 +6,21 @@ import { FLIPNOTE_H, FLIPNOTE_W } from "./studio-contract.ts";
 import { base64ToBytes, flipnoteModel, parseFlipnoteView, parseIndexView, parseOverlayInspection, parseOverlayLifecycle, parseRecoveryListing, parseScoreView, scoreModel } from "./studio-native.ts";
 import { VISUAL_FIXTURE_NOW, visualFixtureResponse } from "./visual-fixture.ts";
 import { VISUAL_STUDIO_ART, VISUAL_STUDIO_CONFLICT_ART, VISUAL_STUDIO_CONFLICT_SCORE, VISUAL_STUDIO_GROUP, VISUAL_STUDIO_ME, VISUAL_STUDIO_PATCH, VISUAL_STUDIO_SCORE } from "./visual-studio-fixture.ts";
+import { parseFaultView } from "./studio-fault.ts";
 
 const target = { server: 1, channel: "1" };
 const response = (command: string, args: Record<string, unknown> = {}) => visualFixtureResponse(command, { ...target, ...args }, true);
 const readArt = (object = VISUAL_STUDIO_ART) => parseFlipnoteView(response("studio_read", { object }));
 const readScore = (object = VISUAL_STUDIO_SCORE) => parseScoreView(response("studio_read", { object, objectKind: "score" }));
+
+test("visual repair status has no invented fault authority and all repair/Closing writes refuse", () => {
+  const t = { ...target, object: VISUAL_STUDIO_ART };
+  for (const scope of ["source", "registry"] as const) {
+    const view = parseFaultView(response("studio_fault_read", { object: t.object, scope }), t, scope);
+    assert.equal(view.mayDecide, false); assert.equal(view.phase, "open"); assert.deepEqual(view.candidates, []);
+  }
+  for (const command of ["studio_fault_repair", "studio_closing_overlay_save_begin", "studio_closing_overlay_save"]) assert.throws(() => response(command, { object: t.object }), /does not implement/);
+});
 
 test("Studio opt-in remaps channels without changing the default chat fixture or its readiness contract", () => {
   const base = visualFixtureResponse("resume_session") as { channel: string; channels: { id: string }[] }[];
@@ -20,6 +30,10 @@ test("Studio opt-in remaps channels without changing the default chat fixture or
   assert.deepEqual(response("get_channels"), studio[0].channels);
   assert.deepEqual(response("get_messages"), visualFixtureResponse("get_messages", { server: 1, channel: "general" }));
   assert.deepEqual(response("get_messages", { channel: "2" }), visualFixtureResponse("get_messages", { server: 1, channel: "design" }));
+  const members = response("get_members") as {identity: string; you: boolean}[];
+  assert.ok(members.every(member => /^[0-9a-f]{64}$/.test(member.identity)));
+  assert.equal(members.find(member => member.you)?.identity, VISUAL_STUDIO_ME);
+  assert.equal((response("get_roles") as Record<string, string>)[VISUAL_STUDIO_ME], "owner");
   assert.throws(() => visualFixtureResponse("studio_list", target), /does not implement/);
 });
 

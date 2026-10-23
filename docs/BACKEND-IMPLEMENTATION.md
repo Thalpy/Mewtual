@@ -9,7 +9,17 @@ Frontend integration is tracked separately in [FLIPNOTE-UI-HOOKS](FLIPNOTE-UI-HO
 native commands/events, retry rules and explicitly unavailable controls. Update it alongside
 every bridge-facing slice; UI layout and rendering remain user-owned.
 
-Current Gate 6 work (2026-10-14): Gate 5 is owner-accepted and merged in PR #43 at
+Current status (2026-10-18): Gate 7 implementation and complete local acceptance checks pass.
+The owner accepts Gate 6 and PR #44 is merged at `82631a81`.
+Gate 7 composes lifecycle acceptance and the current production UI contract, tracked in
+[GATE7-ACCEPTANCE](GATE7-ACCEPTANCE.md) and [GATE7-UI-HANDOFF](GATE7-UI-HANDOFF.md).
+The verified implementation includes shared-deck/global PIXA viewing, explicit
+source/Registry fault repair and separate ticketed Closing local-draft Save. Fresh Closing
+authoring requires the signed close held in the local owner journal; it is not available on
+every ordinary peer. Native audible/two-desktop/platform release observations remain separate;
+the owner explicitly defers the unavailable two-desktop observation. See the ledger for checks.
+
+Gate 6 checkpoint (2026-10-14; historical): Gate 5 is owner-accepted and merged in PR #43 at
 `7cbe8cbe131e1be8e672d04341c31a1d2b52a98d`. Export foundations/nonce correction are PR #44
 (`0fe17691fa353cee9b37dc85d4ea4149a5aa8ec5`); stacked PR #45 is an implemented integration
 candidate at verified code checkpoint `818e711641bc8193af5cde3be8e56d4817c475f9`. Typed Score/SFX/recipes/links/exports,
@@ -61,24 +71,20 @@ connection to any existing reclamation path are required before promising retain
 
 ## Fixed delivery gates
 
-These are ordered integration milestones, not equal-sized percentages. Index/art milestones
-through Gate 3 are implemented; wider sound/export coverage still belongs to Gate 6.
-The first user-observable target is gate 2: **create, save, restart, reopen** through real backend
-commands. Its Index/art native-path and reference-protection tests now pass; that art milestone
-is implemented; Gates 4 and 5 have since merged, and the active work is Gate 6. Wider sound/export families remain Gate 6
-work, so this does not close every family in the seven full gates. Gate 1 begins with typed Studio
-operations; it does not wait for P1 support
-for unrelated document types. Tests and review accompany each slice, not only gate 7.
+These are ordered integration milestones, not equal-sized percentages. Gates 1–6 supply the
+owner-accepted baseline, including sound/Score/export through the existing P1 paths. Gate 7
+composes the production adapter lifecycle and its UI handoff. Gates do not wait for P1 support
+for unrelated document types. Tests and review accompany each slice, not only Gate 7.
 
 | Gate | Remaining work | Completion evidence |
 |---|---|---|
-| 1. Typed Flipnote documents | Index/art milestone implemented; Gate 6 candidate extends the same closed domain grammar, causal projections, conflicts/deletions, exact checkpoint/recovery and caps to Score/SFX/recipes/links/exports. | Existing baseline evidence remains; final combined sound/Score evidence after the reviewed SoundRecord recovery correction are tracked in `GATE6-ACCEPTANCE.md`. Unsupported future families still refuse. |
-| 2. Durable one-device Save/Load | Index/art milestone implemented; Gate 6 candidate extends accounted P1/vault/native create/read/apply and conservative source/seed/intent/recovery holds to Score/sound/export. Local SetExport requires actual held validated PIXA before a durable reference. | Actor/native tests cover real CIDs, retries and restart/reopen; final post-SoundRecord root/native verification is pending. Open edits remain provisional; reference publication is separate from blob custody or a receipt. |
-| 3. Two-member collaboration and joining | Index/art milestone implemented; Gate 6 candidate adds typed Score/Flipnote sound to the existing authenticated page/seed/tail, dependency, unopened-key and handoff paths rather than another transport. | Real actor typed Score joining/catch-up/reopen regressions supplement the earlier Index/art evidence. Final combined suites are pending; production two-real-client release acceptance remains Gate 7. Existing byte/work/cold-reconstruction rails remain, not arbitrary-size latency qualification. |
-| 4. Rotation and recovery in the running app | **Merged and owner-accepted Gate 4 baseline.** Accounted settlement/rotation, Registry maintenance, repeated tenure, signed repair and registered local-draft lifecycle/ticketed Unconfirmed Save remain in use. P5 was promoted only for that bounded reviewed lifecycle. Direct Closing Save and native unfinished repair commands remain unavailable. | `GATE4-ACCEPTANCE.md` retains exact integration/review evidence. Gate 6 reuses this boundary, does not reopen or broaden it. Unconfirmed is local/non-transferable; backup export is not PIXA, and manual recovery is not settlement. |
+| 1. Typed Flipnote documents | Accepted baseline includes the closed grammar, causal projections, conflict/deletion evidence, exact checkpoint/recovery and caps for Index/art/Score/SFX/recipes/links/exports. | `GATE6-ACCEPTANCE.md` preserves implementation/review evidence; `GATE7-ACCEPTANCE.md` records composed current validation. Unsupported future families still refuse. |
+| 2. Durable one-device Save/Load | Accepted baseline uses accounted P1/vault/native create/read/apply and conservative source/seed/intent/recovery holds across all supported families. Local SetExport requires actual held validated PIXA before a durable reference. | Gate 7 expands the single native restart regression across art/Score/sound/link/export together. Open edits remain provisional; publication, custody, delivery and receipts are distinct. |
+| 3. Two-member collaboration and joining | Accepted baseline uses authenticated page/seed/tail, dependency, unopened-key and handoff paths for typed Score/Flipnote sound. | Gate 7 adds two real TCP actors with cold Index/art/Score joining, exact peer media fetch and offline reopen, plus cold member installation of a runtime-issued rotated checkpoint. Desktop/audio/platform release observations remain separately disclosed. Byte/work/cold-reconstruction rails are not arbitrary-size latency qualification. |
+| 4. Rotation and recovery in the running app | **Merged and owner-accepted Gate 4 baseline.** Accounted settlement/rotation, Registry maintenance, repeated tenure, signed repair and registered local-draft lifecycle/ticketed Unconfirmed Save remain in use. P5 was promoted only for that bounded reviewed lifecycle. Direct Closing Save and native fault-repair controls are later Gate 7 additions documented above. | `GATE4-ACCEPTANCE.md` retains exact integration/review evidence. Gate 6 reuses this boundary, does not reopen or broaden it. Unconfirmed is local/non-transferable; backup export is not PIXA, and manual recovery is not settlement. |
 | 5. Collaborative frame claims | **Merged and owner-accepted in PR #43**, baseline `7cbe8cbe131e1be8e672d04341c31a1d2b52a98d` (2026-10-13). Full-device call identity, shared RT admission, ordered draw Claim/Ask/Pass, delivery retries, disconnect handling and receiver-observed countdowns are connected. D1 untargeted Pass is owner-confirmed. | `GATE5-DESIGN.md` preserves focused identity/replay/collision/UI and separate-process real-WebRTC evidence. Claims remain advisory, never edit locks. macOS old/new-build stream-8 behavior remains stated as unverified; WebKitGTK as tested had no WebRTC. Do not erase these compatibility/release residuals or infer a new two-real-client acceptance run. |
-| 6. Sound and export | **Implemented integration candidate, NOT yet accepted.** Typed/persisted linked Scores, frame SFX/recipes, 64-patch union, authored playback, deterministic takes, exact PIXA publication/readback/export records, Sound/Music UI and local visual-only GIF are connected. Local emoji JSON import is bounded; shared emoji catalog/chat clicks are not included. Backend SoundRecord explicit recovery is implemented and bounded-reviewed. | Golden/maximal/malformed/ownership and focused integration tests plus bounded reviews are recorded in `GATE6-ACCEPTANCE.md`. Frontend 1555/1555/check/build and host nine-flow evidence exist at the ledger's stated checkpoints. Cumulative code review is clear; fresh root/native/startup and exact-head hosted/Linux CI evidence remain PENDING. |
-| 7. Flipnote backend acceptance and UI handoff | Run the complete create/save/restart/share/join/rotate/recover/export flow through production adapters, including failure paths. Publish Markdown for the real commands, events, limits and recovery behavior. | Backend acceptance tests and mandatory suites pass, adversarial blocker/high findings are resolved, and every canonical UI dependency maps to a working command/event or explicitly user-owned rendering work. |
+| 6. Sound and export | **Owner-accepted; merged PR #44 at `82631a81`.** Typed/persisted linked Scores, frame SFX/recipes, 64-patch union, authored playback, deterministic takes, exact PIXA publication/readback/export records, Sound/Music UI, local visual-only GIF and backend SoundRecord recovery are connected. | `GATE6-ACCEPTANCE.md` preserves exact dated evidence and accepted residual limitations. Owner acceptance does not relabel historical pending checks as passes. |
+| 7. Flipnote backend acceptance and UI handoff | **Implemented; complete local acceptance passed.** Composition/export, persisted receive-only restart, independent live-content preservation, event compatibility and production UI handoff are verified. Subsequent opening/retry, save/navigation and playback corrections include five-second local working edits and bounded orderly-lock continuity. | `GATE7-ACCEPTANCE.md` records the passing complete root/native/frontend suites, lint/build/browser/startup checks and actual-diff reviews. Both native six-client cases now pass; earlier failures remain dated history. `GATE7-UI-HANDOFF.md` maps each dependency. The owner defers two desktops; hardware/platform and synchronous full-scan latency qualifications remain explicit. The subsequent chat/files/voice programme has separate acceptance. |
 
 Runtime ownership and storage admission are prerequisites within gates 2-4, not optional polish
 after exposing writes. A successful small local-save test does not close shared editing or P1.

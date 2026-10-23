@@ -7,6 +7,8 @@ import type { JamTake } from "./jam-contract.ts";
 import type { JamArchivalPlayback } from "./jam-engine.ts";
 import { exportScorePlayback, type ScoreExportInput, type ScorePlayback } from "./studio-export.ts";
 import { deferred } from "./studio-testkit.ts";
+import { decodePixa, encodePixa } from "./pixa.ts";
+import { pixaFrameAt } from "./pixa-media.ts";
 const take: JamTake = { v: 1, group: "group", call: "call", met: { bpm: 120, bpb: 4 }, parts: ["author"], lanes: [{ src: 0, sn: "a".repeat(16) }], patches: [], events: [{ ms: 0, lane: 0, n: 60, on: 1, w: "sine", q: 0 }, { ms: 90_000, lane: 0, n: 60, on: 0, q: 1 }] };
 /** A generic take has no Score grid; zero keeps the take-derived horizon. */
 const playback = (value: JamTake): ScorePlayback => ({ take: value, gridMs: 0 });
@@ -32,6 +34,20 @@ function harness() {
   audio.setScope({ generation: 1, server: 1, channel: "channel", membership: 1 }, false);
   return { audio, context, now: (ms: number) => { now = ms; }, prepared: () => prepared, resumes: () => resumes, revoked: () => revoked, fail: () => { fail = true; } };
 }
+
+test("looping pictures keep moving through long SFX without restarting or shortening that sound", async () => {
+  const p = decodePixa(Buffer.from(vector.pixaHex, "hex"));
+  const animation = { ...p, fps: 2, frames: [p.frames[0], p.frames[0]], take: { ...p.take, patches: [vector.patch] }, sfx: [{ frame: 0, patch: 0, note: 60, durationMs: 5000 }] };
+  const h = harness(); assert.equal(await h.audio.start("flipnote", async () => encodePixa(animation), true), true);
+  for (const [ms, frame] of [[0, 0], [500, 1], [1000, 0], [1500, 1], [4500, 1]]) {
+    h.now(ms); await h.audio.tick();
+    assert.equal(pixaFrameAt(animation, h.audio.state.elapsedMs, true), frame);
+    assert.equal(h.audio.state.state, "playing"); assert.equal(h.prepared(), 1, "one authored held sound, no duplicate attacks");
+  }
+  assert.equal(pixaFrameAt(animation, 4500, false), 1, "one-shot playback still holds its last picture");
+  h.now(6000); await h.audio.tick(); assert.equal(h.prepared(), 2, "whole-package audio loops only after the release horizon");
+  h.audio.stop(); h.now(12000); await h.audio.tick(); assert.equal(h.prepared(), 2);
+});
 test("Studio resumes in the gesture turn and stale preparation cannot return after Deafen ABA", async () => {
   const h = harness(), prep = deferred<ScorePlayback>(); h.context.state = "suspended";
   const start = h.audio.start("score", () => prep.promise, false); assert.equal(h.resumes(), 1); assert.equal(h.audio.state.state, "preparing");

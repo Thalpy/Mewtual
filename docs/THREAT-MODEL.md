@@ -1,6 +1,274 @@
 # Threat model; client integrity & enforcement boundaries
 
-## Current Gate 6 enforcement status (2026-10-14; candidate, not final acceptance)
+## Pre-upload video editing boundary (2026-10-19)
+
+A video added to the chat or announcement composer, a wiki page or the Files tab opens
+`VideoEditor.svelte` before upload, unless Shift was held through the drop or the picker click.
+This is a sender-side product feature with no protocol, wire or native-command change: the result
+is an ordinary `File` that goes through the existing `begin_file_upload` path, limits and
+magic-byte check.
+
+What the honest sender's client guarantees:
+
+- **Removed time is absent from the uploaded bytes.** An edited video is decoded and re-encoded
+  from the kept frames only (`copy: false`); no packet is ever copied. A packet copy would have to
+  start on a key frame and so could carry seconds of cut footage into the file, hidden from a
+  player but present for anyone holding the bytes. A frame is encoded only for the part of its
+  display time inside a kept range: a frame wholly inside removed time is never encoded, and the
+  frame already on screen at a cut point (it began up to one frame earlier) opens the next range,
+  which is also what the preview shows there. Mediabunny's encoder-support probe encodes one frame
+  into a discarded null target that never reaches the output. Verified against real codecs in
+  headless Edge (MP4, MOV, WebM), not only in unit tests.
+- **Descriptive metadata is not carried into edited uploads.** The output container is written
+  fresh with an empty tag set (`tags: {}`), so the source's title, comment and the location or
+  device tags phone footage often carries are not copied. Checked end to end for title and
+  comment; other tag kinds rely on the muxer writing only what it is given.
+- **Output is bounded** by the server's upload limit (or the 1 GiB protocol ceiling while that is
+  unread): `CappedBytes` refuses to grow past it and the export stops. Assembling the final Blob
+  briefly holds about twice the output.
+- **Parsing surface.** Decoding uses the WebView's own decoders, as previewing does. Mediabunny's
+  JavaScript demuxer is new parsing surface on top of that; its worst case is a hung or crashed
+  page, not code execution outside the WebView. The editor opens the sender's own pick, but that
+  can be a video previously downloaded from a peer, so peer-authored bytes can reach it. Inbound
+  inline media and the native-decode rule for images are not changed by this path.
+- **Video with transparency is refused** before editing: Mediabunny would need blob-URL workers
+  for it, which the CSP blocks. The test is whether the first packet carries alpha data, not the
+  container's alpha flag (Chrome's recorder sets that on opaque canvas captures too). A file whose
+  alpha only starts later fails at export, closed, with the generic message.
+
+File drops (2026-10-19, follow-up): the main window now sets `dragDropEnabled: false`, so files
+dropped from the OS reach the page's drop zones as HTML5 drops (with Tauri's default, wry handled
+drops natively and switched external drops off for the whole webview). Three browser defaults come
+with that, and `drop-guard.ts` closes each for drags that start outside the page:
+
+- a file dropped outside every zone would navigate the webview to it; a link dropped anywhere
+  that is not a text field would be followed (there is no back button in this window). An
+  unaccepted `dragover` gets the drop effect `none` and the `drop` has its default prevented.
+  Only enabled, writable text-entry fields keep their native text drop, and visible
+  `<input type=file>` controls their native file drop; every other control (a checkbox, a slider,
+  a read-only field) is guarded like the page, since the engine's fallback there is to navigate;
+- a file released over an embedded third-party player (the `frame-src` sites) would be delivered
+  to that site's page. While files are dragged over the window (from outside or from within the
+  page) every iframe has `pointer-events: none`, so the drop lands on this page beneath it: in the
+  chat that is the chat's own drop zone, which attaches it there; elsewhere it is refused. The
+  rule is in `drag-drop.css`, a stylesheet loaded from the app's origin, because the shipped CSP
+  carries a Tauri nonce in `style-src` that makes the browser ignore `'unsafe-inline'`: a
+  `<style>` made at runtime or a `style=""` attribute would be refused in production while
+  working in development and every test. The shield lifts on drop or dragend, on the first pointer
+  event after the drag (none fire during one), or after 3 s with no drag event; it does not lift
+  on a short silence, since `dragover` may come only every ~550 ms or only on movement.
+  **Not covered**: a drag that enters the window directly over an iframe without crossing this
+  page first is seen only by that frame;
+- the drop zones accept file drags only, with the effect pinned to `copy`, and their drop handlers
+  ignore anything that is not files, so text dropped on a composer or the wiki editor is the
+  field's own native drop, and the source app never sees a "move".
+
+The page receives only a dropped file's name and contents, never its path (Tauri's handler used to
+deliver full paths, though nothing listened). Nothing native listened for Tauri's drag-drop events.
+Whether a real OS drag reaches the zones, and whether `shiftKey` is set on such a drop, has not been
+exercised by any automated check; unit tests pin the configuration, the guard, the shield and that
+no production module builds a runtime `<style>`.
+
+What it does not claim:
+
+- An **unedited** upload sends the original bytes, metadata included, exactly as before this
+  feature existed. That covers the editor's one action on an untouched clip, the original-file
+  button when the editor cannot open a file or an export failed, and anything added with Shift.
+- "Post now" sends the composer only if it still holds what it held when the editor answered
+  (text and reply target; for an edited clip that is after the export, while the modal blocked
+  typing); otherwise the video is attached and nothing is sent. It is the composer's own send, with
+  its own guards, not a separate path.
+- Nothing here is enforced against a modified client or verifiable by recipients: they receive a
+  normal video and cannot tell whether, or how, it was edited. The original stays on the sender's
+  disk; the editor never touches it.
+- Re-encoding is lossy and may change codec (QuickTime becomes MP4/H.264; WebM becomes VP9/Opus).
+
+Clip maker (2026-10-20). A clip with anything added (text, stickers, other videos, music, sounds)
+or its own sound changed is drawn and mixed frame by frame by `exportClip` (`clip-export.ts`).
+The properties above carry over, and for the same reasons:
+
+- **Cut-out time is still absent.** Frames are drawn only at kept output times, from each video's
+  kept source times (`layerSchedule`), and sound comes only from kept ranges (`soundPieces`).
+  Checked in headless Edge frame by frame and by frequency, not only in unit tests. The file is
+  written fresh from pixels and samples; no packet, tag or file name of any source reaches it (the
+  output keeps the picked file's stem as its name, as before).
+- **Media is local.** The clip maker reads files the person picks or drops from their own disk,
+  emoji drawn by this window, sounds synthesised here (`clip-sfx.ts`), and Studio songs read from
+  this device's own Studio store. Nothing is fetched and no `catcoms-media:` URL is read; server
+  stickers and shared Files media are deliberately not offered yet. SVG and AVIF are refused as
+  pictures. Every file is size-checked before decoding (`MEDIA_LIMITS`), and because bytes say
+  little about decoded size, each is also bounded by what it decodes to, before decoding: a
+  picture's dimensions are read from its header (`imageSize`; for a GIF, its screen grown to hold
+  every frame, since the browser decodes a frame larger than the screen at the frame's size) and
+  anything over 40 megapixels is refused, then kept at most 2048 px; a sound is decoded only as
+  far as the clip can use (its length plus 30 s) and never past ten and a half minutes of samples
+  at 48 kHz. Sound files are demuxed by Mediabunny (all its containers) and decoded by WebCodecs,
+  the same surface as the video path; a codec WebCodecs lacks (ALAC, ADPCM) is refused, not
+  played some other way. The session holds
+  at most 64 media items and 1 GiB of decoded media. Counts in the document are bounded (24
+  overlays, 32 sounds, 3 videos, 900 keys a path) and composed clips at 10 minutes and 1920 px.
+  Those budgets are asked BEFORE anything large is made: decodes and song renders run one at a
+  time through one queue shared by every editor (`JobQueue`), each admitted against its bin's
+  remaining room before it allocates its output. The bound holds across editors, not only within
+  one: closing an editor does not free what its running job holds, so an offline render (which
+  cannot be interrupted, and holds its whole output until it ends) keeps its turn to the end
+  however its editor went or whatever the person stopped. That rests on an assumption: a render
+  always ends, because the engine's suspend callbacks and drum hashing all complete; a render
+  that never ended would hold up every later heavy job until restart. A job that holds no media
+  yet (waiting on a Studio read, say) is let go of as soon as its editor gives up on it, however
+  many hang. A decode holding its output that stalls (a crafted file) can be let go of too, so it
+  cannot block every later editor, but only one such job at a time; a second waits until the
+  first ends, and since the queue runs in order, two stalled decodes block every later add in
+  every editor (song reads and renders too) until restart. At most two jobs
+  holding media are therefore unsettled at once, each within `MEDIA_LIMITS`. A
+  cancelled editor starts no queued job, and a render, mix or decode cancelled part way never
+  reports success, starts no further allocation, and releases the pictures it held. Posting waits
+  until nothing is still being added, or until the person stops what is still pending. Added
+  videos stay files in the bin (probed, decoded only frame by frame while previewing or
+  exporting); limits on their size and length are a recorded follow-up.
+- **Studio songs are peer-authored content** (the channel's Studio is shared). They go through the
+  same validation and resolution as pressing play in the Studio (`scorePlaybackFromNative`,
+  `planJamArchivalPlayback`, the take limits), and a song that cannot be resolved is refused with
+  the Studio's sentence, never replaced by another version. Expired songs are not offered. A song
+  is checked against the channel's index again when it is loaded and again when the clip is
+  posted (`checkSongsOffered`), so one that expired or was deleted while the editor stayed open is
+  not posted; one that expires while the clip itself is being exported still is. They are rendered by the real
+  `JamEngine` into an `OfflineAudioContext` that is never connected to the speakers; the
+  `runningView` proxy only tells that offline engine its context is running. Putting a song into
+  a clip posted elsewhere on the same server is the person's own act, like quoting a message.
+- **Text effects** are drawn from the app's own stylesheet rules, frozen per frame into SVG
+  `foreignObject` images loaded as `data:` URLs (a `blob:` one would taint the canvas). Layout
+  happens in an off-screen shadow root outside `<body>`, so the chat effect runtime never adopts
+  it and nothing makes sound; the library's previews sit in `.text-fx-key-preview`, the runtime's
+  silent picker-preview class. The page itself styles only through CSSOM and constructed
+  stylesheets, which the shipped CSP allows. Each snapshot carries its own `<style>` element and
+  `style=""` attribute INSIDE the SVG image: an image document is not governed by the page's
+  `style-src`. Checked in Edge under the shipped policy with Tauri's runtime nonce added (the
+  page's own inline style was refused in the same run, while the snapshot's styling applied).
+
+It does not claim that recipients can tell how a clip was made, that emoji and text look the
+same on every machine (they are drawn with the sender's fonts), or that two renders of the same
+music are bit-identical (they differ by float rounding, about -140 dB).
+
+## Volatile Studio edits and orderly lock recovery (2026-10-18)
+
+Working editor projections are unconfirmed local intentions. They never replace authenticated
+native views, causal registers, recovery evidence, group binding or authorization. Delayed first
+delivery checks its original epoch/trust binding again after asynchronous preparation; exact
+retries cannot silently adopt a new epoch or ticket. Only never-submitted entries coalesce.
+Submitted identities and ambiguous outcomes remain immutable until ACK or explicit discard.
+
+The encrypted UI continuity record may contain a bounded owned Studio queue for orderly lock
+recovery: 512 records, 8 MiB of PIX file bytes, 12 MiB serialized Studio data, 16 MiB total envelope and
+the original independent 1 MiB non-Studio allowance. Admission includes UTF-8, outer escaping and
+future request/diagnostic reserve. Disk reads check physical size/regularity and use a bounded
+read before authentication. Restore validates typed requests and original scope/group, holds
+them until an explicit action (Save, retry, discard, or leaving the record's own document, which
+saves it), and never restores a native view as authority. Opening a document never sends its held
+records, and admission re-reads a document it holds no view of before comparing a record's
+authoring binding; an unread or superseded read sends nothing and does not count as an attempt, so
+a later retry is admitted afresh. No plaintext
+browser fallback exists. Lock proceeds immediately even if raster staging/serialization fails;
+the failure is disclosed and previous sealed continuity is preserved. A hard crash between a
+native commit and continuity capture can still lose the latest receipt: this is not a write-ahead
+log or crash-atomic Studio transaction. The existing lock coordinator retains its immutable
+continuity argument until unlock for exact racing-close/retry ownership; clearing the editor is
+not a RAM-zeroization claim. Older clients may reject envelopes over their old cap.
+
+Local media previews validate the complete working composition and actual native group/channel;
+failed/uncertain Save state is checked both before and after asynchronous preparation. An ACK of
+the same pixels/music does not revoke playback; changed effective content, actual overlay binding,
+settlement, membership and lock do. Data-only update notices re-read before semantic comparison.
+
+## Closing retry and receive cardinality correction (2026-10-18)
+
+An accepted Closing retry can bypass global inventory only to authenticate the actual scoped
+intent file, match current local membership/author, typed envelope, basis and retained branch
+evidence, then flush that same file and its parent unchanged. Terminal disposal also checks its
+own historic provenance. No new acceptance, source mutation, ciphertext replacement or partial
+budget is allowed on this path. Failed flushes return no acknowledgement and rotate both intent
+and inventory freshness before I/O. New authoring and commits still require complete inventory.
+
+Preserving a native Save receipt must not restore its older projection over a later Read. Frontend
+actual-read serials fence that display update independently of acknowledgement, and reconciliation
+is awaited before dependent first-frame work. Navigation-only fences are excluded from those
+serials. A pre-Apply epoch refusal is known not written; an earlier ambiguous attempt remains
+uncertain. Shared sound-file reads separately enforce a native 4 KiB cap, sixteen current recipes,
+serial registration-aware cancellation and post-await scope/trust/listing/session checks.
+
+The receive inventory's cumulative record ceiling is now 1,024, matching its existing directory
+ceiling; 64 was incorrectly treated as sufficient for a vault containing several records per
+document and multiple local servers. The 8 MiB authenticated-read and 256 KiB cold-validation
+limits, restart accounting, per-cursor-step bound and detached worker pool remain. Existing
+synchronous complete-scan callers may authenticate more small warm records in one custody visit;
+they have no 250 ms guarantee. Resumable InventoryRuntime visits retain their existing deadline.
+
+## Studio inline media and sync diagnostics (2026-10-18)
+
+The existing Media preference now admits PIXA to its bounded application-owned decoder; filename
+and MIME are screening hints, never proof of content, author or membership. Native authenticated
+manifest caps, 9 MiB input limits and complete PIXA/PIX/take validation precede rendering or synth
+admission. On-demand and author blocks remain effective. One inline manager serializes native
+reads, retains two packages and 128 observed hosts, expands current rasters only and owns one
+repaint timer. Silent visual loops do not resume audio. Sound requires a local gesture through
+the existing StudioAudioSession. Token-owned teardown cannot stop a newer card's audio; failed
+starts do not claim playing state. Late IO/audio results cannot repopulate revoked scopes.
+
+Post to chat preserves draft text and normal durable Send identity. It uses the returned fileshare
+CID, never a Studio blob address, after streamed upload. Navigation including ABA, membership,
+lock, readiness and close intent fence every asynchronous composer mutation. A late upload can
+remain a file without becoming a new unsaved draft after continuity has already been captured.
+
+Sync pause reasons are bounded local diagnostics, cleared on resume and lock, and never authorize
+repair or claim corruption/settlement. Whole explicit access must succeed before resume; old Read
+ACKs cannot clear newer authoritative pauses. Lossless actor sequence/native incarnation order a
+bounded cache of 128 locally selected server observations across navigation. Reset or eviction
+forgets the watermark and requires a fresh successful Index read to reconcile current state;
+the diagnostic UI does not claim replay protection beyond that cache/session boundary.
+
+Owner repair remains an explicit decision between actual receipt candidates in Server settings.
+Normal maintenance and already selected repair work resume automatically; neither the UI nor a
+timer invents a winning receipt. Missing owner tenure history cannot be fixed by elapsed time.
+
+## Gate 7 UI completion candidate boundary (2026-10-17)
+
+Main-window repair commands now expose only the existing actor/store owner decision. The
+renderer echoes two actual candidate receipt hashes and one selection; it cannot supply tenure,
+receipt bytes, sequence or signing authority. The backend rederives the pair under custody and
+requires current verified/durable owner authority. Scheduling is not completed repair. UI reads
+and choices invalidate across source and Index/Registry notifications, including in-flight reads;
+failed discovery never hides the scoped repair controls. Native reply loss after scheduling is
+uncertain, not proof of no write. Restore/Copy remain ordinary content Saves, not fault clearing.
+
+Closing Save is a distinct local draft route with exact basis/branch/nonce/body. The actual signed
+close comes only from the local sealed owner journal and is rechecked against current source and
+Known tenure for new authoring. Lookup failure is carried as data through terminal classification;
+it cannot authorize a new capture and cannot strand an accepted retry. Captured plans retain only
+that verified close and still recheck membership, tenure, source version, basis, target and media
+possession at S3. Missing/legacy/repair-bearing close state refuses fresh work. Ordinary peers
+usually lack that journal; UI availability is not universal. Local draft Save grants no receipt,
+shared publication or new network authority; automatic reviewed handoff remains separate.
+
+PIXA deck/global playback validates complete bounded packages and reuses the archival synth and
+remote provenance. Declared MIME/filename and package labels are decoder hints, never membership
+or author authority. Listing≤9MiB, native requested cap against authenticated plan, encoded and
+decoded caps, complete codec checks, four native cancellation debts, one active/one replacement
+read and at most two encoded packages bound the path. Only the current raster expands. Explicit
+local gestures may resume audio; remote heartbeats cannot. Call/session/lock/membership/Deafen
+and local suppression retire pending reads and playback; returning to a previous value does not
+restore currency. The global viewer cancels on close/navigation and never auto-plays incoming files.
+
+## Gate 7 evidence boundary (2026-10-17)
+
+Gate 6 is owner-accepted and merged at `82631a81`. Gate 7 composes existing enforcement paths;
+it adds no wire/persistence authority. [GATE7-ACCEPTANCE](GATE7-ACCEPTANCE.md) distinguishes
+actor/vault, real TCP, native conversion and mocked frontend coverage. The composed rotation
+test requires actual recovery-before-replacement, retains deleted SFX/export rejection even
+under Copy, and exercises ordinary recipe recovery with exact retries and stale-preview refusal.
+It does not convert backups into PIXA, publication into peer custody, or test engines into
+audible hardware/platform evidence. Current UI obligations are in [GATE7-UI-HANDOFF](GATE7-UI-HANDOFF.md).
+
+## Gate 6 enforcement checkpoint (2026-10-14; candidate at that date)
 
 The candidate connects typed Score and complete Flipnote sound state to the existing causal/P1,
 vault, native and UI paths. Parsing alone still grants no authority: explicit document-family
@@ -510,7 +778,7 @@ table with the commit that closed it.
   Studio accounting traversals spent about 0-8 ms in release profiling, and a real foreign writer
   overtaking a cold shared job leaves enough memo progress for the restarted job to mint on its
   next turn. These are host measurements, not an `INVENTORY_SLICE_MS` guarantee. A remount makes
-  the memo cold: receive/catch-up retain their 1024-entry, 64-record, 8 MiB and 256 KiB-cold
+  the memo cold: receive/catch-up retain their 1024-entry, 1024-record, 8 MiB and 256 KiB-cold
   fail-closed rails, while full-profile H1 and repair commits can still hold one custody visit for
   cold validation. Replay is the only production owner that keeps an inventory cursor across
   visits; a future latency gate must give H1/repair embedded ownership-aware jobs rather than
@@ -1132,7 +1400,7 @@ table with the commit that closed it.
   one paced worker per exact native incarnation avoid per-packet tasks or event-consumer cycles.
   Current channel/mount/member/MLS checks precede disk work. A delayed old-actor update cannot be
   emitted under a replacement numeric server id; the UI/incarnation fence lasts through emission.
-  Automatic inventory uses LOCAL limits of 1024 visited entries, 64 records, 8 MiB aggregate
+  Automatic inventory uses LOCAL limits of 1024 visited entries, 1024 records, 8 MiB aggregate
   authenticated reads and 256 KiB aggregate cold validation bytes, including unrelated saved P1
   sources. Its mount-local LRU stores every family's context-free accounting validation
   (C-3 runtime 15.2, M1). Every hit still authenticates the actual file and binds its scope/filename,
@@ -1159,7 +1427,7 @@ table with the commit that closed it.
   the bound, resident for the mount's life, UI lock included. **The bound is the only
   unconditional limit**, and it holds whatever puts an entry. Pruning keeps it near the vault's
   record count only as often as a covering scan completes, and some do not complete: receive's
-  scan refuses any vault over 64 records. Until one does, entries stay for records deleted since
+  scan refuses any vault over 1024 records. Until one does, entries stay for records deleted since
   the last, including any a peer caused this device to store and then remove.
   New/staged files still count; reference scans cannot skip CID enumeration. Remount clears reuse.
   A large cold record refuses before read; a changed candidate above the cold rail refuses before

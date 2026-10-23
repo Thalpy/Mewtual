@@ -1,5 +1,17 @@
 # Flipnote UI hook guide
 
+**Gate 7 UI completion candidate (2026-10-17).** The current handoff now includes shared-deck
+PIXA/global file viewing, `studio_fault_read/repair`, and `studio_closing_overlay_save_begin/save`.
+See [GATE7-UI-HANDOFF](GATE7-UI-HANDOFF.md) and the current [INTERFACES](INTERFACES.md) section
+for exact scopes, truthful scheduling/local-only outcomes, retries, and signed-close availability.
+Older statements below that those commands are absent describe their dated checkpoints.
+
+**Gate 7 handoff (2026-10-17).** The owner accepted Gate 6 and PR #44 is merged at
+`82631a81`. The dated candidate paragraphs below are historical checkpoints.
+[GATE7-UI-HANDOFF](GATE7-UI-HANDOFF.md) maps the complete current surface to production
+commands/events, limits, retry and recovery behavior; [GATE7-ACCEPTANCE](GATE7-ACCEPTANCE.md)
+records current verification and explicit release evidence boundaries.
+
 Current status (2026-10-14): the owner accepted the Gate 4 and Gate 5 merges. PR #43 merged
 into `Create-suite-2` at `7cbe8cbe131e1be8e672d04341c31a1d2b52a98d`. Gate 6's stacked PR #44/#45
 candidate's verified code checkpoint is `818e711641bc8193af5cde3be8e56d4817c475f9`: Score/Sound/linked Music/PIXA/GIF
@@ -292,10 +304,14 @@ the author and operation id; the UI must not supply a purported sender's signatu
 
 Implemented bodies:
 
-- Index: `put_object` for flipnotes, `set_title`, `set_expiry`, `tombstone_object`.
-- Flipnote: `insert_frame`, `replace_frame`, `remove_frame`, and `set_header` for `title`/`fps`.
-- Audio, linked-score and export bodies in the wider contract are **not yet accepted** by these
-  materializers. Recognized codec fields are not proof of backend support.
+- Index: `put_object` for flipnotes and Scores, `set_title`, `set_expiry`, `tombstone_object`.
+- Flipnote: `insert_frame`, `replace_frame`, `remove_frame`, `set_sfx`, `remove_sfx`,
+  `set_patch`, `remove_patch`, `set_export`, `remove_export`, and `set_header` for
+  `title`/`fps`/`score`. The linked Score must exist in the same group/channel; a local
+  export declaration requires actual held, validated PIXA bytes.
+- Score: `set_patch`, `remove_patch`, `set_cell`, `clear_cell`, and `set_header` for
+  `title`/`bpm`/`bpb`/`steps`. Supply `objectKind:"score"` throughout its native path.
+  The saved typed wrapper, rather than an Index hint or overlapping body grammar, binds the family.
 
 ## Save and retry
 
@@ -380,12 +396,13 @@ bounded fetch ceiling is 9 MiB, not permission to fetch a 9-MiB frame.
 
 | Event | Payload | UI response |
 |---|---|---|
-| `studio-updated` | `{server: number, channel: string, object: string | null}` | Invalidate/re-read the matching Index and affected open object. `null` names the Index. Coalesce refreshes; an event is not a new projection. |
+| `studio-updated` | `{server: number, channel: string, object: string | null, objectKind?: "score"}` | Invalidate/re-read the matching Index and affected open object. `null` names the Index. Coalesce refreshes; an event is not a new projection. |
 | `studio-receive-paused` | `{server: number}` | Show a receive/storage warning without claiming settlement failure or deleting local work. Successful explicit Read/Save resumes the paused receiver; Read alone may not warm unrelated large histories. |
-| `settlement-changed` | `{server: number, docType: 15 | 16, logicalKey: string, channel: string, object: string | null, state: string}` | Invalidate matching recovery/phase observations and re-read `studio_recovery_list`. This is not a receipt or a new projection. |
+| `settlement-changed` | `{server: number, docType: 15 | 16, logicalKey: string, channel: string, object: string | null, objectKind?: "score", state: string}` | Invalidate matching recovery/phase observations and re-read `studio_recovery_list`. This is not a receipt or a new projection. |
 
 Settlement states currently emitted are `open`, `closing`, `settled`, `fault`,
-`recoveryAvailable`, `recoveryEvictionPending`, and `refreshRequired`. Phase and recovery
+`recoveryAvailable`, `recoveryEvictionPending`, `refreshRequired`, `repairing`, and
+`storageRefused`. Phase and recovery
 observations are independent: a recovery notification does not replace the document phase.
 `logicalKey` is 32 lowercase hex characters; `channel` is a decimal u128 string. List/read
 commands do not emit invalidations, so listening and re-reading must not create a refresh loop.
@@ -402,7 +419,7 @@ installation; the UI should not implement a second catch-up scheduler or derive 
 |---|---|
 | Settlement chip / rotation progress | `settlement-changed` invalidates the actual phase/recovery listing. `open` does **not** mean the current edits are receipted. Current responses always say `provisional:true`. Do not synthesize receipt author/time or “settled” from epoch alone. |
 | Current owner has not confirmed history | Native Read/List return the distinct `awaitingTenureReceipt: true` preview documented above. Its base is never ordinary authoring authority. The candidate UI can retain edits in the separately labelled local-only Unconfirmed overlay, with exact retry or explicit re-authoring as the typed result directs. |
-| History fault / repair progress | Actual `phase:"fault"` and `fault` invalidations are available. The detached bounded repair runtime is merged and reviewed at its stated boundary, but it has no native command or `repairing` event. Restore/Copy saves ordinary content in an Open target and cannot clear Fault. Historical Read/Export remain available. |
+| History fault / repair progress | Actual `phase:"fault"`, `fault`, `repairing` and `storageRefused` invalidations are available. The detached bounded repair runtime is merged and reviewed at its stated boundary; explicit native repair commands remain unavailable. Restore/Copy saves ordinary content in an Open target and cannot clear Fault. Historical Read/Export remain available. |
 | Local overlay while rotating | Closing Flow S/handoff remains automatic and Shared Apply still refuses Closing/Fault. The registered lifecycle UI can inspect, export, preserve, copy or explicitly dispose retained work; it does not expose a direct Closing Save command. |
 | Manual lifecycle and preview-local Save | Registered in the accepted Gate 4 baseline. `eligibility`, `manualReason` and `unconfirmedState` drive truthful actions; awaiting-tenure edits use the ticketed Unconfirmed Save pair. `pending`/`busy` retry the same bytes, `paused` requires explicit access before the same request, `newTicket` requires explicit re-authoring, and `none` cannot be retried as success. This does not enable direct Closing Save or transferable Unconfirmed authority. |
 | Recovery rail: Restore / Copy / Export | List/inspect/backup export, per-item Restore/Copy and conservative own-intent replay are connected. Score historical OBJECT replay stays manual; SoundRecord backend recovery is implemented and separately reviewed; final combined verification is pending. Whole-version walks choose one effective value/removal per slot, not all alternatives or branch preservation. Backup export is not PIXA; final Gate 6 evidence is in `GATE6-ACCEPTANCE.md`. |

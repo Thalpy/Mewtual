@@ -29,7 +29,9 @@ impl StudioControlRequest {
             }
             .validate()?;
         }
-        if let StudioControlAction::SaveUnconfirmedOverlay(save) = &self.action {
+        if let StudioControlAction::SaveUnconfirmedOverlay(save)
+        | StudioControlAction::SaveClosingOverlay(save) = &self.action
+        {
             if save.body.len() > catcoms_replication::epoch::MAX_DOMAIN_OP_BYTES {
                 return Err(invalid("draft body exceeds the operation bound"));
             }
@@ -56,13 +58,15 @@ impl std::fmt::Debug for StudioUnconfirmedOverlaySaveRequest {
     }
 }
 
-/// What one custody visit of an Unconfirmed Save concluded.
+/// What one custody visit of a ticketed local draft Save concluded. The original public type name
+/// is retained for compatibility; Closing controls reuse this outcome vocabulary inside their
+/// distinct typed `ClosingOverlaySaved` response, never by relabelling an Unconfirmed acceptance.
 ///
 /// No projection is carried. The draft's content is read through the inspection, which has a
 /// delivery fence; a Save result has none and so carries no document content.
 #[derive(Debug)]
 pub enum StudioUnconfirmedSaveOutcome {
-    /// Durably accepted as local draft data on unconfirmed history, or an exact retry of work
+    /// Durably accepted as local draft data on the response's bound provenance, or an exact retry of work
     /// already accepted. `accepted` is the branch's count after this visit.
     Saved { basis: [u8; 32], accepted: usize },
     /// A retry named an operation of the most recently disposed branch. Nothing was accepted;
@@ -223,6 +227,10 @@ pub enum StudioControlAction {
     /// this actor's current ready preview. Intercepted by the receiver, which holds the preview.
     /// Distinct from any Closing Save, so neither path can be reached with the other's request.
     BeginUnconfirmedOverlaySave,
+    /// Ticket for a locally retained Closing edit, minted from the actual saved signed close.
+    BeginClosingOverlaySave,
+    /// Separate from Unconfirmed: no renderer-supplied close, tenure, source or author.
+    SaveClosingOverlay(Box<StudioUnconfirmedOverlaySaveRequest>),
     /// One custody visit of that Save. The caller repeats the identical request until it is
     /// `Saved`; it stays retryable and byte-stable in between. Intercepted by the receiver, like
     /// the ticket. Local draft data only: never published, never a receipt, never ownership.
@@ -473,6 +481,15 @@ pub enum StudioControlResponse {
         target: StudioTarget,
         outcome: StudioUnconfirmedSaveOutcome,
     },
+    ClosingOverlaySaveTicket {
+        target: StudioTarget,
+        basis: [u8; 32],
+        branch: [u8; 32],
+    },
+    ClosingOverlaySaved {
+        target: StudioTarget,
+        outcome: StudioUnconfirmedSaveOutcome,
+    },
     List(StudioRecoveryListing),
     Version(StudioRecoveryVersion),
     Export {
@@ -517,6 +534,8 @@ impl std::fmt::Debug for StudioControlResponse {
             Self::OverlayCopyRefused { .. } => "OverlayCopyRefused { .. }",
             Self::UnconfirmedOverlaySaveTicket { .. } => "UnconfirmedOverlaySaveTicket { .. }",
             Self::UnconfirmedOverlaySaved { .. } => "UnconfirmedOverlaySaved { .. }",
+            Self::ClosingOverlaySaveTicket { .. } => "ClosingOverlaySaveTicket { .. }",
+            Self::ClosingOverlaySaved { .. } => "ClosingOverlaySaved { .. }",
             Self::List(_) => "List { .. }",
             Self::Version(_) => "Version { .. }",
             Self::Export { .. } => "Export { .. }",
@@ -555,6 +574,8 @@ impl StudioControlResponse {
             // Produced entirely in the custody visit, and carrying no document content.
             | Self::UnconfirmedOverlaySaveTicket { .. }
             | Self::UnconfirmedOverlaySaved { .. }
+            | Self::ClosingOverlaySaveTicket { .. }
+            | Self::ClosingOverlaySaved { .. }
             | Self::List(_)
             | Self::Version(_)
             | Self::Export { .. }
@@ -593,6 +614,8 @@ impl StudioControlResponse {
             | Self::OverlayCopyRefused { .. }
             | Self::UnconfirmedOverlaySaveTicket { .. }
             | Self::UnconfirmedOverlaySaved { .. }
+            | Self::ClosingOverlaySaveTicket { .. }
+            | Self::ClosingOverlaySaved { .. }
             | Self::List(_)
             | Self::Version(_)
             | Self::Export { .. }
@@ -773,7 +796,9 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
             }
             // The receiver intercepts both: only it holds the ready preview each stage mints from.
             StudioControlAction::BeginUnconfirmedOverlaySave
-            | StudioControlAction::SaveUnconfirmedOverlay(_) => {
+            | StudioControlAction::SaveUnconfirmedOverlay(_)
+            | StudioControlAction::BeginClosingOverlaySave
+            | StudioControlAction::SaveClosingOverlay(_) => {
                 return Err(invalid(
                     "an unconfirmed draft Save requires the actor's live preview",
                 ))
@@ -854,7 +879,9 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
                         unreachable!("fault read and repair route before recovery decoding")
                     }
                     StudioControlAction::BeginUnconfirmedOverlaySave
-                    | StudioControlAction::SaveUnconfirmedOverlay(_) => {
+                    | StudioControlAction::SaveUnconfirmedOverlay(_)
+                    | StudioControlAction::BeginClosingOverlaySave
+                    | StudioControlAction::SaveClosingOverlay(_) => {
                         unreachable!(
                             "an unconfirmed draft Save is refused before recovery decoding"
                         )

@@ -10,9 +10,12 @@ use std::sync::Arc;
 mod catchup;
 #[cfg(test)]
 pub(crate) use catchup::PreviewHarness;
+mod closing;
 mod handoff;
 mod inventory;
 mod replay;
+#[cfg(test)]
+mod sync_tests;
 mod unconfirmed;
 use catchup::OverlayCommit;
 pub(crate) use catchup::{HandoffCompletion, StudioBackgroundJob, StudioBackgroundResult};
@@ -24,6 +27,10 @@ pub(crate) struct StudioReceiver {
     watches: VecDeque<(ServerStudioWatch, u128)>,
     paused: bool,
     pause_notice: bool,
+    sync_sequence: u64,
+    sync_notice: Option<StudioSyncObservation>,
+    pause_cause: Option<StudioSyncPauseCause>,
+    pause_detail: Option<String>,
     catchup: catchup::CatchupRuntime,
     gossip_runs: usize,
     settlement: SettlementNotices,
@@ -172,17 +179,9 @@ impl StudioReceiver {
     /// classification terminally, or capture new authoring and detach it. The expensive
     /// reconstruction never runs here; that is the whole point.
     ///
-    /// `close` and `budget` are parameters, exactly as they are on the existing explicit
-    /// `Server::save_studio_closing_overlay`. Acquiring them is the caller's job: the saved close
-    /// comes from the owner journal and the budget from a completed five-family inventory, and
-    /// deciding when to pay for both belongs to the still-unregistered direct Closing Save. This
-    /// helper therefore has no production caller yet. The registered ticketed Unconfirmed Save is
-    /// a separate Flow-S entry point that mints from the live preview on every stage and never
-    /// turns this Closing helper into a renderer command.
-    //
-    // Keep the dead-code marker until direct Closing Save is separately completed and registered;
-    // do not remove it merely because the narrower preview-local route is now available.
-    #[allow(dead_code)]
+    /// Explicit-close test adapter. Production uses the same stages below with the vault-derived
+    /// close lookup carried as a Result until new-authoring admission, preserving terminal retries.
+    #[cfg(test)]
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn save_overlay<T: MeshTransport + 'static, R: CryptoRngCore>(
         &mut self,
@@ -196,12 +195,50 @@ impl StudioReceiver {
         operation: catcoms_replication::DomainOp,
         budget: &mut crate::store::EpochStudioBudget,
     ) -> Result<StudioOverlaySaveVisit, AppError> {
+        self.save_overlay_attempt(
+            server,
+            store,
+            id,
+            target,
+            Ok(close.clone()),
+            basis,
+            branch,
+            operation,
+            Some(budget),
+        )
+    }
+
+    /// The production variant carries a vault-derived close lookup failure through S1 retry
+    /// classification. Only newly captured work needs the close and may retain it for S3.
+    #[allow(clippy::too_many_arguments)]
+    fn save_overlay_attempt<T: MeshTransport + 'static, R: CryptoRngCore>(
+        &mut self,
+        server: &mut Server<T, R>,
+        store: &mut ServerStore,
+        id: u64,
+        target: StudioTarget,
+        close: Result<catcoms_replication::CloseRecord, AppError>,
+        basis: [u8; 32],
+        branch: [u8; 32],
+        operation: catcoms_replication::DomainOp,
+        mut budget: Option<&mut crate::store::EpochStudioBudget>,
+    ) -> Result<StudioOverlaySaveVisit, AppError> {
         let request = overlay_request_fingerprint(0, target, &basis, &branch, &operation)?;
         // A plan this actor already produced is finished first. Its transient hold is the only
         // thing protecting its pixels, and it occupies admission until it is consumed. The slot is
         // actor-global, so drain any target and use the authority retained with that plan rather
         // than this visit's Closing record.
         if self.catchup.has_planned_overlay() {
+            // A failed inventory read leaves the plan and its media protection parked. New
+            // production callers scan here only when a commit actually needs its budget.
+            let mut scanned;
+            let budget = match budget.as_deref_mut() {
+                Some(budget) => budget,
+                None => {
+                    scanned = unconfirmed::save_budget(server, store, id)?;
+                    &mut scanned
+                }
+            };
             let (context, plan, ownership) = self
                 .catchup
                 .take_any_planned_overlay()
@@ -259,19 +296,44 @@ impl StudioReceiver {
                 StudioOverlaySaveVisit::Busy
             });
         };
+        // Exact accepted requests owe an unchanged-file durability barrier, not fresh admission.
+        // In particular, a corrupt auxiliary owner journal must not strand a lost Save receipt.
+        let acknowledged = server.sync.with_registry_context(|group, device, _, _| {
+            store.acknowledge_studio_closing_retry(
+                id, group, target, device, basis, branch, &operation,
+            )
+        });
+        match acknowledged {
+            Ok(Some(saved)) => return Ok(StudioOverlaySaveVisit::Saved(Box::new(saved))),
+            Ok(None) => {}
+            Err(error) => return refused_save_visit(error),
+        }
         // Read only once new work reaches S1b. Terminal retries and kept refusals above must keep
         // working without current observed tenure (V8).
         let tenure = server.observed_owner_tenure();
+        // Fast busy/refusal paths above own no inventory work. A malicious retry cannot force
+        // a five-family vault scan while the shared preparation slot is occupied.
+        let mut scanned;
+        let budget = match budget {
+            Some(budget) => budget,
+            None => {
+                scanned = unconfirmed::save_budget(server, store, id)?;
+                &mut scanned
+            }
+        };
+        let captured_close = close.as_ref().ok().cloned();
         let started = match server
             .sync
             .with_registry_context(|group, device, clock, rng| {
-                store.start_studio_closing_overlay(
+                store.start_studio_overlay(
                     id,
                     group,
                     target,
                     device,
-                    close,
-                    tenure,
+                    crate::store::StudioOverlayMint::ClosingAttempt {
+                        close: close.map(Box::new),
+                        tenure,
+                    },
                     basis,
                     branch,
                     operation,
@@ -304,7 +366,9 @@ impl StudioReceiver {
                     *capture,
                     ownership,
                     target,
-                    OverlayCommit::Closing(Box::new(close.clone())),
+                    OverlayCommit::Closing(Box::new(
+                        captured_close.expect("a Closing capture requires a successful close mint"),
+                    )),
                 ) {
                     return Ok(StudioOverlaySaveVisit::Paused);
                 }
@@ -458,6 +522,13 @@ impl StudioReceiver {
                     already_saved,
                 }),
             ))
+        } else if matches!(
+            request.action,
+            StudioControlAction::BeginClosingOverlaySave
+                | StudioControlAction::SaveClosingOverlay(_)
+        ) {
+            let response = self.closing_save_control(server, store, id, request)?;
+            Ok((StudioSavedTransaction::empty(), None, Some(response)))
         } else if matches!(
             request.action,
             StudioControlAction::BeginUnconfirmedOverlaySave
@@ -954,8 +1025,12 @@ impl StudioReceiver {
     /// happened to open a Studio document successfully. `release_if_stalled` at the top of `run`
     /// is a backstop for a pause that arrived some other way, not the primary path.
     fn pause<T: MeshTransport, R: CryptoRngCore>(&mut self, server: &Server<T, R>) {
+        if !self.paused {
+            self.sync_sequence = self.sync_sequence.saturating_add(1);
+        }
         self.paused = true;
         self.pause_notice = true;
+        self.sync_notice = Some(self.sync_observation());
         self.handoff
             .release_if_stalled(server.runtime_clock().monotonic_ms());
         // The same reason for a repair job that is not detached: it holds a pool slot.
@@ -974,6 +1049,40 @@ impl StudioReceiver {
     }
     pub(crate) fn take_pause_notice(&mut self) -> bool {
         std::mem::take(&mut self.pause_notice)
+    }
+    fn sync_observation(&self) -> StudioSyncObservation {
+        StudioSyncObservation {
+            sequence: self.sync_sequence,
+            paused: self.paused,
+            cause: self.pause_cause,
+            detail: self.pause_detail.clone(),
+        }
+    }
+    pub(crate) fn take_sync_notice(&mut self) -> Option<StudioSyncObservation> {
+        self.sync_notice.take()
+    }
+    fn pause_because<T: MeshTransport, R: CryptoRngCore>(
+        &mut self,
+        server: &Server<T, R>,
+        cause: StudioSyncPauseCause,
+        error: &AppError,
+    ) {
+        self.pause_cause = Some(cause);
+        self.pause_detail = Some(error.to_string().chars().take(512).collect());
+        tracing::warn!(?cause, detail = ?self.pause_detail, "Studio sync paused");
+        self.pause(server);
+    }
+    fn resume_after_access(&mut self) {
+        if self.paused {
+            self.sync_sequence = self.sync_sequence.saturating_add(1);
+        }
+        self.paused = false;
+        self.pause_notice = false;
+        self.pause_cause = None;
+        self.pause_detail = None;
+        // Also publish current state on the first successful access after mounting a UI. The
+        // actor may have paused before that window/session subscribed to its notifications.
+        self.sync_notice = Some(self.sync_observation());
     }
 
     fn observe<T: MeshTransport, R: CryptoRngCore>(
@@ -1101,9 +1210,6 @@ impl StudioReceiver {
             let mut saved = result?;
             // Only explicit successful access retries a failed/over-budget background pass.
             // More inbound traffic cannot repeatedly restart expensive failed disk work.
-            self.paused = false;
-            self.catchup
-                .explicit_retry(server.runtime_clock().monotonic_ms());
             for &(target, epoch) in &saved.observed {
                 // A trusted cooperative caller can occupy the sync watch rail separately. A
                 // watch refusal must not misreport an already-durable Save as failed.
@@ -1130,6 +1236,9 @@ impl StudioReceiver {
                     }
                 }
             }
+            self.resume_after_access();
+            self.catchup
+                .explicit_retry(server.runtime_clock().monotonic_ms());
             return Ok((saved, updated));
         }
         let empty = || StudioSavedTransaction {
@@ -1176,7 +1285,7 @@ impl StudioReceiver {
             return match self.background_step(server, store, id) {
                 Ok(saved) => Ok(saved),
                 Err(error) => {
-                    self.pause(server);
+                    self.pause_because(server, StudioSyncPauseCause::Background, &error);
                     Err(error)
                 }
             };
@@ -1190,7 +1299,7 @@ impl StudioReceiver {
             return match result {
                 Ok(saved) => Ok(saved),
                 Err(error) => {
-                    self.pause(server);
+                    self.pause_because(server, StudioSyncPauseCause::Background, &error);
                     Err(error)
                 }
             };
@@ -1258,7 +1367,7 @@ impl StudioReceiver {
             Err(error) => {
                 // A pre-drain failure retains its packet; an admission failure may consume it.
                 // Neither is delivery. Hold BOTH cases instead of a peer-driven disk retry loop.
-                self.pause(server);
+                self.pause_because(server, StudioSyncPauseCause::Incoming, &error);
                 return Err(error);
             }
         };

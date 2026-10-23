@@ -3,7 +3,7 @@ import test from "node:test";
 import { readFileSync } from "node:fs";
 import ts from "typescript";
 import { PendingSendRetry, type RetryClock } from "./pending-send-retry.ts";
-import { MAX_PENDING_SEND_BYTES, pendingSendRetryBlock, sanitizePendingSends, type PendingSend } from "./pending-sends.ts";
+import { MAX_PENDING_SEND_BYTES, pendingSendRetryBlock, sanitizePendingSends, sendRefusedUnaccepted, type PendingSend } from "./pending-sends.ts";
 import { persistenceWarning } from "./message-send.ts";
 
 class FakeClock implements RetryClock {
@@ -234,6 +234,23 @@ test("temporary structured-send reasons retain automatic retry and unknown persi
     assert.equal(pendingSendRetryBlock(reason), undefined);
   }
   assert.equal(sanitizePendingSends({ [intent.token]: { ...intent, retryBlock: "future-permanent-reason" } })[intent.token].retryBlock, "invalid");
+});
+
+test("which refusals prove a request unaccepted is a separate question from which stop retrying", () => {
+  // Capacity and a channel's outstanding preparation keep retrying (above), yet prove that this
+  // attempt was not accepted: the native side refuses them only for a token it holds no record of.
+  for (const reason of ["CHAT_SEND_CAPACITY: retained retry/publication capacity exhausted",
+    "CHAT_SEND_CAPACITY: signed operation exceeds preparation limit", "CHAT_SEND_DOCUMENT_PENDING: retry the outstanding send for this channel first"]) {
+    assert.equal(pendingSendRetryBlock(reason), undefined, `${reason}: still retried`);
+    assert.equal(sendRefusedUnaccepted(reason), true, `${reason}: but proven unaccepted`);
+  }
+  for (const reason of ["CHAT_SEND_INVALID: length", "CHAT_SEND_TOKEN_CONFLICT: reused token", "CHAT_SEND_CONTEXT_CHANGED: earlier epoch"]) {
+    assert.equal(sendRefusedUnaccepted(reason), true, `${reason}: blocked and unaccepted`);
+  }
+  // Nothing about these says the request did not commit.
+  for (const reason of ["IPC failed", "IPC response lost", "CHAT.SEND.REJECTED: Message storage is busy", "Save the pending message in this vault before retrying it."]) {
+    assert.equal(sendRefusedUnaccepted(reason), false, reason);
+  }
 });
 
 test("pausing a full hydrated payload cannot evict any existing retry identity", () => {

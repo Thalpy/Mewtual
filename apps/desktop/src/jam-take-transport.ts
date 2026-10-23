@@ -1,10 +1,21 @@
 import type { JamTake } from "./jam-contract.ts";
+import type { Pixa } from "./pixa.ts";
 import type { JamArchivalPlayback } from "./jam-engine.ts";
 import { JamLatestTaskQueue } from "./jam-publication.ts";
 import { StudioPlaybackController, type StudioPlaybackEngine, type StudioPlaybackScope } from "./studio-playback.ts";
 
 export interface JamTakeTransportEngine extends StudioPlaybackEngine {
   setArchivalPlaybackLevel(capability: JamArchivalPlayback, level: number): boolean;
+}
+
+/** The DJ's picture and advertised position use its synth clock, holding the press while loading. */
+export function archivalDjPosition(pressedSeconds: number, transport: Pick<JamTakeTransport, "state" | "elapsedMs"> | null): number {
+  return transport?.state === "playing" ? transport.elapsedMs / 1000 : pressedSeconds;
+}
+
+/** Heartbeats update a listener's post-preparation seek; they must not restart its pending work. */
+export function archivalPlaybackNeedsStart(pending: boolean, active: { elapsedMs: number; done: boolean } | null, targetMs: number): boolean {
+  return !pending && (!active || (!active.done && Math.abs(active.elapsedMs - targetMs) > 2000));
 }
 
 /**
@@ -43,11 +54,18 @@ export class JamTakeTransport {
   get state() { return this.controller.state; }
   get completed(): boolean { return this.controller.completed; }
   get elapsedMs(): number { return this.controller.elapsedMs; }
-  async start(take: JamTake, offsetMs: number, scope: StudioPlaybackScope, remote: boolean, isCurrent: () => boolean): Promise<boolean> {
+  async start(take: JamTake, offsetMs: number, scope: StudioPlaybackScope, remote: boolean, isCurrent: () => boolean, offsetAtStart?: () => number): Promise<boolean> {
     this.stop(); this.remote = remote; this.current = isCurrent;
     if (!isCurrent() || (remote && this.engine.context.state !== "running")) return false;
     this.controller.setScope(scope, false);
-    return this.controller.startTake(take, offsetMs);
+    return this.controller.startTake(take, offsetMs, 0, offsetAtStart);
+  }
+  /** PIXA carries authored animation/SFX into the SAME capability, remote gates and seek owner. */
+  async startPixa(pixa: Pixa, offsetMs: number, scope: StudioPlaybackScope, remote: boolean, isCurrent: () => boolean, offsetAtStart?: () => number): Promise<boolean> {
+    this.stop(); this.remote = remote; this.current = isCurrent;
+    if (!isCurrent() || (remote && this.engine.context.state !== "running")) return false;
+    this.controller.setScope(scope, false);
+    return this.controller.startAnimation(pixa.take, { fps: pixa.fps, frameCount: pixa.frames.length, sfx: pixa.sfx }, offsetMs, offsetAtStart);
   }
   setLevel(level: number): boolean {
     if (!Number.isFinite(level) || level < 0 || level > 1) return false;

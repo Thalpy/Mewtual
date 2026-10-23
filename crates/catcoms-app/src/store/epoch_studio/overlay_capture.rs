@@ -33,6 +33,13 @@ pub(crate) enum StudioOverlayMint<'a> {
         close: &'a CloseRecord,
         tenure: StudioOwnerTenure,
     },
+    /// Native Closing Save derives the saved close under custody. A missing/corrupt journal
+    /// must block NEW authoring only, so carry the lookup failure through terminal retry
+    /// classification and open it only at S1b. The renderer never supplies this record.
+    ClosingAttempt {
+        close: Result<Box<CloseRecord>, AppError>,
+        tenure: StudioOwnerTenure,
+    },
     /// The caller's attempt at the live-preview mint (`Server::mint_unconfirmed_overlay_basis`),
     /// made in this same custody visit.
     ///
@@ -775,6 +782,20 @@ impl ServerStore {
         storage: &mut EpochStorageBudget,
     ) -> Result<OwnedOverlayBasis, AppError> {
         match mint {
+            StudioOverlayMint::ClosingAttempt { close, tenure } => {
+                let close = close?;
+                self.mint_studio_overlay_basis(
+                    server,
+                    group,
+                    target,
+                    device,
+                    StudioOverlayMint::Closing {
+                        close: &close,
+                        tenure,
+                    },
+                    storage,
+                )
+            }
             StudioOverlayMint::Closing { close, tenure } => {
                 let tenure = require_save_tenure(tenure)?;
                 let (mut source, observed, _) =
@@ -922,6 +943,7 @@ impl ServerStore {
     ) -> Result<StudioLocalDraft, AppError> {
         match (&mint, plan.state.live_overlay_provenance()) {
             (StudioOverlayMint::Closing { .. }, Some(StudioOverlayProvenance::Closing))
+            | (StudioOverlayMint::ClosingAttempt { .. }, Some(StudioOverlayProvenance::Closing))
             | (
                 StudioOverlayMint::Unconfirmed(_),
                 Some(StudioOverlayProvenance::Unconfirmed { .. }),

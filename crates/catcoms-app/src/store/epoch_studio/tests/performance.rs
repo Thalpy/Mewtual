@@ -342,6 +342,72 @@ pub(crate) fn studio_owner_decision_fixture(
         .unwrap()
 }
 
+/// Genuine Closing source AND its sealed signed-close journal for production control tests.
+/// Keeping this in the store fixture avoids exposing journal-writing authority to app callers.
+pub(crate) fn studio_closing_control_fixture(
+    store: &mut ServerStore,
+    server: u64,
+    group: &ServerGroup,
+    device: &MlsDevice,
+    target: StudioTarget,
+) {
+    fill_studio_epoch_fixture(store, server, group, device, target);
+    let decision = studio_owner_decision_fixture(store, server, group, device, target, None);
+    let inv = inventory(store);
+    let mut budget = store.studio_storage_budget(server, group, &inv).unwrap();
+    store
+        .prepare_studio_owner_decision_with_writer(
+            server,
+            &decision,
+            group,
+            0,
+            &mut ChaCha20Rng::seed_from_u64(929),
+            &mut budget.storage,
+            &mut WriteHooks::None,
+        )
+        .unwrap();
+    store
+        .seal_studio_epoch(
+            server,
+            group,
+            target,
+            device,
+            decision.receipt().clone(),
+            0,
+            &mut ChaCha20Rng::seed_from_u64(930),
+            &mut budget,
+        )
+        .unwrap();
+}
+
+/// Simulate loss of just the local signing journal, leaving accepted draft/intent bytes intact.
+pub(crate) fn corrupt_studio_closing_journal_fixture(
+    store: &ServerStore,
+    server: u64,
+    group: &[u8],
+    target: StudioTarget,
+) {
+    let document = target.document(group).unwrap();
+    let scope = crate::store::epoch_owner::scope_bytes(server, &document).unwrap();
+    let path = store.epoch_owner_path(&scope);
+    let mut bytes = std::fs::read(&path).unwrap();
+    let last = bytes.len() - 1;
+    bytes[last] ^= 1;
+    std::fs::write(path, bytes).unwrap();
+}
+
+/// Simulate loss of just the local signing journal, leaving accepted draft/intent bytes intact.
+pub(crate) fn remove_studio_closing_journal_fixture(
+    store: &ServerStore,
+    server: u64,
+    group: &[u8],
+    target: StudioTarget,
+) {
+    let document = target.document(group).unwrap();
+    let scope = crate::store::epoch_owner::scope_bytes(server, &document).unwrap();
+    std::fs::remove_file(store.epoch_owner_path(&scope)).unwrap();
+}
+
 fn measure(count: usize, clock: &dyn Clock) {
     let f = Fixture::new(true);
     let start = clock.monotonic_ms();

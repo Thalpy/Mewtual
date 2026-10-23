@@ -355,7 +355,9 @@ pub(super) fn response_value(response: Response) -> Result<Value, String> {
         | Response::OverlayCopyApplied { .. }
         | Response::OverlayCopyRefused { .. }
         | Response::UnconfirmedOverlaySaveTicket { .. }
-        | Response::UnconfirmedOverlaySaved { .. }) => {
+        | Response::UnconfirmedOverlaySaved { .. }
+        | Response::ClosingOverlaySaveTicket { .. }
+        | Response::ClosingOverlaySaved { .. }) => {
             return super::lifecycle::response_value(response)
         }
         // Copy's two-visit preview converts at its own call site, which holds the context needed to

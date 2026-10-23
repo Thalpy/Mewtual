@@ -412,6 +412,46 @@ pub(crate) async fn studio_unconfirmed_overlay_save(
     )
 }
 
+/// Derive a Closing ticket from the actual locally held signed close. Its absence refuses new
+/// authoring; it never grants permission to synthesize a close or treat imported tenure as known.
+#[tauri::command]
+pub(crate) async fn studio_closing_overlay_save_begin(
+    state: State<'_, AppState>,
+    server: u64,
+    channel: String,
+    object: Option<String>,
+    object_kind: Option<String>,
+) -> Result<Value, String> {
+    recovery::invoke_control(
+        &state,
+        server,
+        target_with_kind(&channel, object.as_deref(), object_kind.as_deref())?,
+        Action::BeginClosingOverlaySave,
+    )
+    .await
+}
+
+/// Visit the same byte-stable local Closing edit. This is never an ordinary shared Apply.
+#[tauri::command]
+pub(crate) async fn studio_closing_overlay_save(
+    state: State<'_, AppState>,
+    server: u64,
+    channel: String,
+    object: Option<String>,
+    object_kind: Option<String>,
+    save: UnconfirmedOverlaySaveInput,
+) -> Result<Value, String> {
+    save_classified(
+        recovery::invoke_control(
+            &state,
+            server,
+            target_with_kind(&channel, object.as_deref(), object_kind.as_deref())?,
+            Action::SaveClosingOverlay(Box::new(save.checked()?)),
+        )
+        .await,
+    )
+}
+
 /// Errors that escape before a typed Save response exists still need the write classification.
 /// Once the actor owns the custody lease, an uncertain store result or a dropped reply may follow
 /// a durable commit. Pre-lease validation/capacity errors remain ordinary errors, and an outcome
@@ -826,6 +866,21 @@ pub(super) fn response_value(response: Response) -> Result<Value, String> {
             "basis":hex::encode(basis),"branch":hex::encode(branch),"provenance":"unconfirmed"}),
         Response::UnconfirmedOverlaySaved { target, outcome } => {
             unconfirmed_save_value(target, outcome)?
+        }
+        Response::ClosingOverlaySaveTicket {
+            target,
+            basis,
+            branch,
+        } => {
+            json!({"v":1,"kind":"closingOverlaySaveTicket","channel":channel_of(target),"object":object_of(target),"basis":hex::encode(basis),"branch":hex::encode(branch),"provenance":"closing"})
+        }
+        Response::ClosingOverlaySaved { target, outcome } => {
+            let mut value = unconfirmed_save_value(target, outcome)?;
+            value["kind"] = "closingOverlaySave".into();
+            if value["state"] == "saved" {
+                value["provenance"] = "closing".into();
+            }
+            value
         }
         _ => return Err("mismatched overlay lifecycle response".into()),
     };

@@ -1,5 +1,15 @@
 # Gate 6 acceptance and evidence ledger
 
+## Owner acceptance — 2026-10-17
+
+The owner confirms Gate 6 completed and accepted, with existing residual limitations retained.
+PR #44 is merged into `Create-suite-2` at `82631a81`. Gate 7 starts from that baseline;
+[GATE7-ACCEPTANCE](GATE7-ACCEPTANCE.md) records its new evidence. The dated CI/local records
+below remain historical results for their exact heads; owner acceptance does not relabel a
+previously queued or unexecuted check as a pass. Shared-deck/global PIXA viewing, shared emoji
+catalog/chat clicks, audible hardware and desktop/platform release observations remain explicit
+limitations unless separately implemented or verified.
+
 ## Combined PR #44 candidate — 2026-10-16, post-merge corrections, hosted acceptance pending
 
 PR #45 was normal-merged into PR #44's branch `gate6-sound-export` on 2026-10-16 at

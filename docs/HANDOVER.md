@@ -1,5 +1,1012 @@
 # Mewtual; Handover
 
+## Image viewer: a screen-sized fit copy after a Linux GPU hang (2026-10-20)
+
+A Linux tester's whole laptop froze while they flipped an image in the full-screen viewer between
+"Fit to window" and "Actual size". Mewtual's own log was clean: the backend kept logging normally
+for about a minute and a half, and the file ends in NUL bytes from the forced power-off. Their
+`journalctl -b -1 -k` showed the cause. The Intel GPU's render engine timed out on preemption while
+running work from `eadedCompositor` (WebKit's `ThreadedCompositor`, cut to 15 characters), then
+`SkiaGPUWorker` threads in the same process timed out, then the driver's reset of the whole chip
+timed out and the display never came back. It is a hybrid Intel + NVIDIA laptop; the hang was on
+the Intel chip, which drives the panel. The failed reset is a driver bug, but the job it choked on
+was ours: the viewer showed the full-resolution original in both modes, so every switch to fit
+had the GPU shrink the whole photo again, and actual size drew it with a rounded clip and a 40px
+blurred shadow.
+
+What changed (frontend only; no CSP, protocol or native change):
+
+- `LightboxPicture.svelte` (new) renders the picture; App.svelte keys it on the opening
+  (`{#key lightbox}`) and `openLightbox` now keeps the decoded `<img>` it was opened from.
+- For a large still image (JPEG, PNG or WebP with at least twice the screen's pixels at full
+  scale), the fit view is a canvas copy sized to the screen, resampled once when the viewer opens
+  on a 2D context requested with `willReadFrequently` (a hint for a CPU-backed canvas). Both
+  elements stay mounted and the zoom flag only toggles `hidden`, so switching never resamples
+  again or reloads the original. Planning and painting live in `lightbox-image.ts`.
+- The copy belongs to the opening. An image opened while still loading gets its copy when its
+  `load` event arrives (the component listens; `complete` is not reactive). Once made, the plan is
+  kept, so the file being unlisted and relisted while the viewer is open neither drops the copy
+  nor draws it again; a MIME that is unknown at opening still gets its one chance when the index
+  arrives.
+- Actual size has no rounded corners and no shadow, for every image.
+- Locking the vault now closes the viewer. It previously survived the lock and popped back up
+  after unlock; with the decoded element held, that would also keep its pixels alive behind the
+  lock.
+
+Limits, stated plainly:
+
+- Nothing here has run on WebKitGTK or Linux; there is no Linux machine. Unverified: whether
+  WebKitGTK honours `willReadFrequently`, and what `screen` and `devicePixelRatio` report under
+  fractional scaling (if they overstate, copies stop being made and photos quietly take the old
+  path). Layout and behaviour were checked in headless Edge and in the jsdom component tests.
+- The one resample runs on the main thread and includes a full-size decode of the source. The
+  source is bounded upstream: shared images reach the viewer only through `serve_media`, which
+  decodes them in Rust and serves a PNG the app produced, refusing anything over 25 megapixels or
+  16384 pixels a side (`DecodeBounds::DEFAULT` in `src-tauri/src/media_decode.rs`). The source
+  is therefore always a PNG. Measured in headless Chromium on a fast desktop: 71 to 173 ms at
+  12 MP and 145 to 418 ms at 25 MP, from flat to grainy content; a real photo (the encoder writes
+  about 1.9 bytes a pixel) falls between, so opening a large photo costs roughly 0.1 to 0.4 s once,
+  more on a slower machine. WebKitGTK is unmeasured. Awaiting `img.decode()` first was tried and
+  removed: Chromium's draw decodes again anyway, so it only left the fit view blank and
+  unclickable. `createImageBitmap` with a resize ran synchronously too.
+- Only GIF and animated WebP reach the webview animated (the native path serves them as APNG and
+  flattens PNG input, including APNG, to a still). GIFs never get a copy. An animated WebP with at
+  least twice the screen's pixels shows its first frame in the fit view, and "Actual size" still
+  plays it; at that size the native 24-megapixel animation budget leaves it a handful of frames at
+  most. Eligibility reads the declared MIME from the file index, never the served `Content-Type`,
+  which is always `image/png`.
+- Small images, GIFs and anything that falls back still use the GPU shrink and the fit-view
+  shadow. Inline images in the chat still render the full original scaled down: a possible
+  follow-up.
+- It reduces the work that triggered the hang; it cannot stop a driver from failing to recover.
+  For an affected user, launching with `WEBKIT_SKIA_ENABLE_CPU_RENDERING=1` moves WebKitGTK's
+  painting to the CPU entirely (field-reported, not officially documented). The owner chose not to
+  make that the default.
+- Pre-existing and untouched: `button:hover` outranks `.lightbox-img { background: none }`, so
+  hovering paints the accent colour behind letterboxed or transparent images.
+
+The same log showed a separate defect: the Linux build lets a user join a voice room although
+WebKitGTK exposes no `RTCPeerConnection` (the known limitation under "Found (predates Gate 5)"
+below). The join succeeds, nothing tells the user calls cannot work, and every heartbeat from
+another member throws an unhandled `ReferenceError` from `createPeer`. A capability check before
+joining was offered and has not been built.
+
+Tests: `lightbox-image.test.ts` and `lightbox-picture.test.ts` (with
+`scripts/fixtures/LightboxPictureHarness.svelte`). Mutation checks: unmounting the copy while
+zoomed, remounting the original, dropping `willReadFrequently`, allowing GIF, measuring the
+threshold against the copy, painting asynchronously, dropping the `complete` check, the load
+listener, its removal on close, and the kept plan each fail their named test. Adversarial review,
+two rounds: the threshold (high) and the lock (medium) are fixed; the main-thread decode (medium)
+is the limit above, after the attempted `decode()` fix was shown not to work in Chromium (high in
+the re-review) and removed. An external review of `c3696754` found the two opening-lifetime
+defects (loading images, index churn; both medium, fixed with regressions shown failing first) and
+corrected the size claim: the native 25 MP bound applies. The test harness now binds each prop
+separately, as App does, because replacing one props object on every update hid the first defect.
+
+## Clip maker: text, stickers, music, sounds, three videos, recorded motion (2026-10-20)
+
+The pre-upload video editor grew into a small "cartoon maker" (the user's brief: "think Spider-Man
+cartoon maker"), from a mockup the user approved (canvas `JFAFBfH968afztVV6Uu2YV`). Everything in
+the cut-only editor still works the same way; on top of it:
+
+- **Text** in any of the 47 chat text effects (or plain, in six colours), **stickers** (pictures
+  from disk, emoji), up to **three videos** (the clip plus two picture-in-picture clips, each
+  movable, resizable, mutable, with its own volume and order), **music** (this channel's Studio
+  songs, or sound and `.jamtake` files from disk), **sound effects** (12 built-in cartoon sounds, or
+  files). Each sits on a timeline lane (V1 to V3, T, A) and can be moved or trimmed there.
+- **Recorded motion**: R (or the record tool) plays the clip, and dragging the selected text or
+  sticker records its path; dragging it while paused just moves it at that moment. Paths are
+  simplified (`simplifyPath`, 0.4% of the frame) and capped at 900 keys.
+- **One action, no needless re-render**: untouched posts the original bytes; only cut uses the old
+  cut-only exporter; anything added or any sound changed goes through the new compositor.
+- **Discard** asks first whenever anything was cut, added or changed.
+
+Files (all `apps/desktop/src`): the document `clip-doc.ts`; drawing `clip-render.ts` (the stage
+and the export share `drawClipFrame`, so the stage shows the posted clip); the compositor
+`clip-export.ts`; sound `clip-audio.ts` (mix in 20 s segments, stateless soft clip);
+`jam-offline.ts` (Studio takes rendered by the real `JamEngine` through `OfflineAudioContext`
+suspend/resume); `clip-sfx.ts`; `text-fx-raster.ts` (text effects frozen at time t as SVG
+foreignObject data URLs); `clip-media.ts` (the session's media bin and file limits);
+`clip-timeline.ts`, `clip-stage.ts`, `clip-preview.ts` (pure geometry and preview decisions);
+`clip-music.ts` (the Studio song source App passes in as `music`); UI in `VideoEditor.svelte`,
+`ClipLibrary.svelte`, `ClipInspector.svelte`. Small exports were added to `video-export.ts` and
+`studio-playback.ts`, and `video-edit.ts`'s history became generic.
+
+Verification: unit tests for every module above and the editor (jsdom), including the
+compositor's wiring over a fake media library (what it decodes and draws per frame); headless Edge
+runs of all 47 effects (rendered, animated, never tainting the canvas), the offline music render,
+the sound effects' levels, a composed export checked frame by frame and by frequency (MP4 and
+WebM, cancel, cap), the text snapshot under the shipped CSP with Tauri's nonce, and the full UI
+flow through real mouse input (text, emoji, picture, sound, second video, music file, a paused
+drag, a recorded drag, post).
+
+Adversarial review (no blocker), all fixed with regression tests, each confirmed to fail when
+its fix is removed:
+- **High**: a Studio listing that failed (likely in any channel without a Studio index) asked
+  again forever. It is now asked once and offers "try again", and no index means no songs.
+- **Medium**: volume or mute changes cut a sound to a shorter clip for good, and could leave a
+  negative length. Push-to-talk keys could not be typed into the text field during a call. An
+  undo or edit during a recording left a stale overlay position and trail on the stage (undo is
+  now refused while recording). Decoded sizes were unbounded: pictures are now sized from their
+  header first, sounds decoded only as far as the clip needs, and the bin has a 1 GiB budget. The
+  compositor's wiring had no checked-in test.
+- **Low**: song renders stop when the editor answers; a full bin no longer leaves a song stuck;
+  a release anywhere ends a stage drag; items past the clip's end and muted sounds no longer force
+  a re-render, and muting a soundless clip is off; raw parser text no longer reaches the person;
+  reset keeps ids unique; the text picture cache is pruned; the drawn trail is capped.
+- Design notes left as they are: Files, wiki and announcements list the current chat channel's
+  songs; the preview plays through Deafen like the plain video preview always has; adding
+  anything soft-clips the clip's own peaks above about -2 dBFS. Expired songs are no longer
+  offered.
+
+A second, external adversarial review of the pushed work (`0191581c`) found two highs, five
+mediums and a low. Fixed with regression tests, each confirmed to fail without its fix:
+- **High**: media budgets were asked only after the work: several song rows clicked at once each
+  rendered (and allocated its whole output) in parallel before the bin refused it. Heavy jobs now
+  run one at a time across editors (`JobQueue`), each admitted against the bin first
+  (`MediaBin.room`), and a full bin refuses before anything starts.
+- **Medium**: "post now" inside a multi-file batch could leave the sent text in the next draft.
+  `postFromComposer` now returns `{started, settled}`; the batch waits for the send and stops if
+  the person moves away meanwhile. The "Discard this clip?" question did not hold focus, and Enter
+  on the post button behind it started the export; it now traps Tab, everything behind it is
+  `inert`, and posting is refused while it shows. Song renders, sound decodes and the mix did not
+  stop between steps once cancelled; each now checks before allocating, between loads and before
+  returning. A silent recording with only a sticker needed an audio encoder. A tall timeline
+  (many overlapping bars) pushed the stage and the post button out of the card; it now stops at
+  220 px and scrolls, checked in Edge at 900 x 640 with 24 stacked bars, including an export
+  started while scrolled down.
+- **Low**: a soundless clip could still be muted from the library's layer list, which sent an
+  untouched clip through a re-render.
+- **Design question, done**: a song is checked against the index again when it is loaded and
+  again when the clip is posted, so one that expired while the editor stayed open is not posted.
+- **Re-review of these fixes** (no blocker or high; all fixed with tests, each confirmed to fail
+  without its fix): the expiry check covered only the load, not the post; a job that never
+  settled would have held the shared queue for every later editor (it now lets go when its editor
+  closes); posting while something was still being added dropped it with a false "no more
+  sounds fit" (posting now waits); a file dropped behind the discard question still landed on the
+  clip; a post-now send that started but did not go out still said "sending"; the inspector still
+  offered mute and volume for a soundless second video; a refused emoji leaked its picture. The
+  emoji leak has no test (jsdom has no `OffscreenCanvas`).
+- **Second re-review** (no blocker, high or medium): waiting for pending adds meant one add that
+  never ended disabled posting for good, so the footer now offers "stop adding"; a failed send
+  puts the draft back trimmed, so the "not sent yet" check compares trimmed text; and a cancel
+  while the songs are checked at post now has a test proving no render starts. Its quick check of
+  "stop adding" found one more low, fixed: stopping released the queue during a render (which
+  cannot be interrupted), so a re-add could render beside it; a render now keeps its turn.
+- **Review of `dded8e20`** (two highs, one medium; the frontend ones fixed here with tests, each
+  confirmed to fail without its fix). Our earlier "nothing remains open" was wrong:
+  - **High**: closing an editor released its render's turn while the render still held its
+    output, so editors closed one after another stacked renders with no ceiling. A render now
+    keeps its turn to the end however its editor went; a stalled read or decode is let go of only
+    one at a time (`JobQueue` `holding` and `looseLimit`). A cancelled picture decode no longer
+    starts its resize, and closes what it holds.
+  - **Medium**: "post now" guessed the send's outcome from the composer, so a sent message whose
+    draft was kept (typed in and back out: same words, newer revision) said "press Send", which
+    sent it twice. `send()` and `postStatus()` now return a `SendOutcome` and the toast reports it.
+  - The emoji release now has a test (fake bitmaps; no drawing needed).
+  - A fresh re-review of those fixes (no blocker or high) found the send outcome wrong in one
+    place, fixed: a throw after the identity was sealed said "not sent", though it stays pending
+    and retries by itself, so it is `uncertain`. Also fixed: a not-accepted superseded result is
+    `failed` (it waits for review), a failed announcement says it may have posted, a hung read
+    that holds no media no longer uses up the stalled-job allowance (`JobStage` light, heavy,
+    pinned), and the outcome is reported before a move away ends the batch (but not behind the
+    lock screen). Its 1500-case probes of the queue, with and without the stages, found the order
+    and the bound held; its last check found nothing blocking.
+  - The external re-review of `09661b68` closed the resource high, the type/Backspace medium and
+    the image and emoji items, and found one more medium, fixed: the outcome read the pending
+    entry back after a failure, so recovering or stopping it in Pending messages while the
+    request was still out turned a possibly accepted message into "not sent". `send()` now keeps
+    its own evidence that the identity may have been dispatched.
+  - The external review of `fd788d80` closed that medium and its own `test:flows` run passed 9/9
+    (isolated Linux checkout). One P3, fixed: the "proven unaccepted" test reused the retry-block
+    classifier, so capacity and document-pending refusals (which keep retrying while the entry
+    exists, but prove non-acceptance) still said "don't send it again" once the entry was
+    resolved. `sendRefusedUnaccepted` now answers that question separately.
+- **OPEN, HIGH, handed to the communication session (not fixed on this branch)**: the native
+  upload/lock race. `finish_file_upload` (`src-tauri/src/lib.rs`) reads the unlocked state, then
+  awaits the uploads mutex, removes the reservation on that earlier answer, and awaits
+  publication without the UI-session commit guard; once the reservation is gone, a lock finds
+  nothing to cancel while the publication is still outstanding. Acceptance criteria given to
+  that session, to land as its own separately reviewed commit and be integrated into Gate7
+  before this high counts as resolved:
+  - bind the pending upload to the UI-session generation it began in;
+  - order final publication against lock with `require_ui_session_generation`, in the existing
+    lock order;
+  - lock winning before final admission rejects publication and cleans up the sealed chunks;
+  - once publication is admitted, lock must not report completion ahead of it;
+  - a lock and unlock cycle never revives an upload from the earlier generation;
+  - deterministic barrier tests around final admission and actor publication covering both
+    orders and a lock/unlock cycle (the existing test passes a literal `true` to the helper and
+    never exercises the race). That session owns the native tests and gates.
+- Follow-ups: limits on added videos' size and length (a lying sample rate can still make one
+  export sound window about 120 MB), and the edited file name contract. Known residuals: emoji
+  and built-in sounds skip the queue (small, but not admitted ahead); the previous editor's bin
+  is freed on unmount, so two can be alive for a moment; a post-now batch also waits for the
+  send's conversation refresh before the next review.
+
+Not explained: in headless Edge, Chromium dropped pointer capture mid-drag on the stage (a bare
+test element keeps it). The stage now ignores a lost capture while the button is down and ends
+on any release, so it does not matter there; it has not been seen with a real mouse.
+
+Known limits: fonts are the sender's own (recipients get pixels). Offline music is the same
+music on every render but not bit-identical (about -140 dB). Composed clips are capped at 10
+minutes and 1920 px. Server stickers and shared Files media are not offered yet: they are other
+people's bytes and need the native CORS change plus their own review first.
+
+## Readable text on dark accents and member colours (2026-10-19)
+
+User report: a dark custom accent left near-black text on accent buttons (a dark red "EXPORT .WAV").
+`--on-accent` was fixed per preset while the accent can be any hex (personal appearance, a livery's
+`accent` or `--accent` token, the Livery preview), and member colours painted avatar initials,
+instrument pills, piano keys, jam pads and Studio sound-lane pills with hard-coded dark text.
+
+- `apps/desktop/src/accent-ink.ts` picks white when it out-contrasts the near-black ink (WCAG 2;
+  the flip is near luminance 0.19, `#797979` white / `#7a7a7a` dark). Every preset accent,
+  `ACCENT_CHOICES` and `NAME_COLORS` stays dark, so defaults are unchanged.
+- The root theme effect clears and re-derives `--on-accent` from the painted accent; the Livery
+  preview does the same for the draft (and pins Nightshade's ink so it cannot inherit the root's).
+  A livery still cannot set any ink: `--on-accent` is not an allow-listed token.
+- Member-colour boxes use `inkOn(colour)`. Text on the fixed `--ok/--warn/--danger` fills now uses
+  a new constant `--on-signal` (moderation badges, Leave and hang-up buttons), so a dark accent
+  cannot sink them.
+- Pre-existing bugs fixed on the way: reaction chips (`<button>`s on `--panel`) inherited the
+  accent ink, so their count and "+" were invisible in every preset, and hovering repainted them
+  `--accent-hi`; a natural piano key pressed with the mouse lost its held highlight to the ivory
+  hover rule.
+
+Verification: `accent-ink.test.ts` (unit tests, plus App's real theme `$effect` and
+`liveryDraftVars` and Studio's `tintInk` run from production text); each guard was confirmed to
+fail when its fix was removed. Headless-Edge fixture shots with accent `#6b0f0f` (white ink) and
+`#e2a83d` (unchanged). Known limit: accent-coloured TEXT on the dark grounds (links, the rail
+monogram) is still low-contrast under a very dark accent; that is a separate change.
+
+## Video editor everywhere, Shift to skip it, one "post now" action, native file drops (2026-10-19)
+
+Follow-up to the entry below, asked for by the user:
+
+- **Wiki and Files** uploads now send videos through the editor too (`wikiEmbed`, `uploadFile`),
+  bound like `embedMedia` to `videoEditorScope`/`videoScopeEpoch`. The wiki batch is also bound to
+  its page (a late upload is shared under that page but not inserted into another), and a Files
+  batch to the folder it was dropped into (it used to read the current folder per file).
+- **Shift skips the editor**: Shift+drop on any zone, and Shift+click on a 📎/share picker label.
+  `upload-intent.ts` (`ShiftIntent`, `shiftPick` action) explains why each gesture is read where it
+  is; a reading is used once, so a cancelled Shift+pick cannot leak. Paste has no Shift form:
+  Ctrl+Shift+V is "paste as plain text" in the webview and very likely carries no image or file at
+  all, so it was removed rather than advertised. A pasted video skips editing in one click anyway.
+- **One action** (the user found attach / attach as is / post now / don't upload confusing): the
+  footer has a single button, also Ctrl+Enter. In chat and announcements it is "post now", which
+  attaches and then calls the composer's own `send()` / `postStatus()` with all their guards, and
+  not if the person has moved on or the composer changed; in the wiki it is "embed" and in Files
+  "upload". An untouched clip goes up as its original bytes with no re-render. The ×/Esc leaves,
+  asking "Discard this clip?" first when anything was trimmed, removed or cut (an in-card dialog,
+  focus on "keep editing", Esc answers keep editing). Wording comes from `editorWords`.
+- **Keybinds page** gains a "Video editor" section rendered from `VIDEO_EDITOR_SHORTCUTS`; a test
+  fails if the editor handles a key the list does not show.
+- **Native drops**: the main window now sets `"dragDropEnabled": false`. With Tauri's default, on
+  Windows it swallowed every file dropped on the window, so none of the page's drop zones fired in
+  the real app (the earlier Edge check used a synthetic in-page drop and could not see that).
+  `drop-guard.ts` then handles what a browser would otherwise do with outside drops: nothing
+  dropped outside a zone navigates the webview, and while files are dragged over the window no
+  embedded third-party frame can receive them. Every file zone's `dragover` is now
+  `acceptFileDrag` (files only, effect `copy`), so text dragged into a composer is the field's own.
+
+Adversarial review of this round (no blocker): two highs, both fixed. "Post now" sent whatever was
+in the composer when the upload FINISHED, so text typed meanwhile went out with the video; it now
+snapshots the composer (text and reply target) when the editor answers and only sends if that is
+unchanged, else attaches and says it did not send. And Ctrl+Shift+V was removed (see above).
+Mediums fixed: the Files label is not text-selectable (Shift+click there extended a selection
+instead of opening the picker); files dragged over an embed no longer reach the embedded site;
+"post now" reports a send that could not start, and `postStatus()` refuses re-entry and keeps text
+typed meanwhile; the App wiring (Shift on every zone and picker, the guard, the zones) is pinned by
+tests. Lows fixed: a wiki page change during a review is counted; scope-change messages use the
+right word per place; the guard leaves editable fields' text drops and visible file inputs' file
+drops alone, and also stops links dropped from other apps; `context` is required.
+
+A re-review of those fixes found one more high, fixed: the embed shield was a `<style>` built at
+runtime, which the SHIPPED app would refuse. Tauri nonces the inline `<style>` in `index.html` and
+adds the nonce to `style-src`, and with a nonce present the browser ignores `'unsafe-inline'`; dev,
+jsdom and the fixture have no CSP, so nothing showed it. The rule (and the Files label's
+`user-select`) now live in `drag-drop.css`, loaded by `main.ts`, and a test fails on any runtime
+`<style>` in production modules. The same CSP fact means inline `style="..."` ATTRIBUTES are inert in
+production too; `docs/design-livery-customisation-safety.md` assumes otherwise, which is worth a
+look from that workstream. Also fixed from it: drop handlers cancelled text drops into the
+composer and wiki editor (they now ignore non-file drops); the guard treated any `<input>` (a
+checkbox, a read-only field) as a text drop target, letting a dropped link navigate the window;
+the shield lifted after 400 ms of silence, which a still hover can exceed (now: drop, dragend, the
+next pointer event, or a 3 s safety); a drag whose source node was removed could leave the
+in-page flag stuck; in-page file drags were not shielded; Shift on a click inside a label's child.
+
+Verification: unit tests for the intent tracker, the action, the drop guard and the iframe shield
+(`upload-intent.test.ts`, which also pins the window setting); App's real `embedMedia`,
+`wikiEmbed`, `uploadFile`, `videoReviewPlan`, `reviewForUpload`, `composerState`,
+`postFromComposer` and `postStatus` under scripted scope and composer changes, plus source pins for
+the wiring (`video-embed-flow.test.ts`); and the buttons, contexts and the Keybinds list in
+`video-editor.test.ts`. Post-now sending, the composer snapshot, the `postStatus` re-entry guard,
+the Files folder binding, the Keybinds list check, the text-drop exemption and the discard question
+were each confirmed to fail when broken.
+`test:startup` passes with the new window setting. `test:flows` as written could not pass while the
+machine was saturated by other agents' cargo jobs: its 20 s Vite wait expired (Vite's first
+transform of `main.ts` took 14 s). A temporary copy with only the Vite and fixture waits raised
+passed all nine scenarios; the copy was deleted.
+NOT verified: a real OS drag into the running app, or whether `shiftKey` is set on such a drop.
+
+Known limits: "post now" in a multi-file batch sends as soon as that file is attached, so files
+after it go into the next message. A drag that enters the window directly over an embed is not
+shielded. Wiki and Files batches also stop on a plain channel switch (their destination is
+server-wide, but the scope key includes the channel), which is more cautious than it needs to be.
+Now that OS drops reach the page, file-drop code that never ran on Windows is live: non-media files
+dropped on a composer become attachments, and a dropped folder fails as an upload.
+
+## Pre-upload video editor (2026-10-19)
+
+A video dropped, picked or pasted into the chat or status composer now opens a small editor
+before anything uploads: trim handles, a blade (B, or S to split at the playhead), remove or
+restore pieces (Delete), undo/redo, and a preview that skips everything that will not be sent.
+"Upload" on an untouched clip sends the original bytes; on an edit it re-encodes only the kept
+frames and uploads that. "Don't upload" (or Esc, or the close button) skips the file.
+
+- Files: `video-edit.ts` (pure model), `video-export.ts` (Mediabunny pipeline, probe, filmstrip,
+  `CappedBytes`), `video-review.ts` (`VideoReviewQueue`, the host's one-at-a-time review rules),
+  `VideoEditor.svelte` (modal), and in App.svelte `embedMedia`, `reviewVideo`, `videoReviews`,
+  `videoEditorScope`, `videoEditorPassKey`, the mouse back/forward guard in `onMouseNav`, and the
+  keyed `{#each}` mount beside the flipnote viewer.
+- New dependency: `mediabunny` 1.61.3 (MPL-2.0), exact-pinned, loaded by dynamic import.
+  `THIRD-PARTY-NOTICES.txt` is regenerated by the release script; it was not regenerated here.
+- Containers: MP4 and QuickTime export as MP4 (H.264/AAC where the WebView can encode them);
+  WebM exports as WebM (VP9/Opus). Ogg and AVI are not offered the editor and upload as before.
+- Security/privacy properties and non-claims are in THREAT-MODEL.md's "Pre-upload video editing
+  boundary"; the frontend contract is in INTERFACES.md's "Pre-upload video editing".
+
+Adversarial review (no blocker or high) found three mediums, all fixed: a second batch could
+close an open editor (now queued, answers filed by review id); the batch scope was only checked
+after a review, so a move during an upload could attach into the wrong channel (now checked
+before every item, after every review and after every upload); and focus could leave the modal
+by a backdrop press or the thumb buttons, handing app shortcuts back (backdrop press keeps focus,
+outside focus is returned, thumb buttons are ignored while editing). Lows fixed: undo/redo/split
+during a drag corrupted the history (any edit now ends the drag), lost pointer releases, transparent
+video (refused: it needs CSP-blocked workers), raw library errors (replaced by a sentence),
+Lock and push-to-talk swallowed by the modal (passed through), unmount without an answer
+(answers `skip`), cancel-then-upload overlap (upload waits for the cancelled export), and doc
+precision.
+
+A short re-review (again no blocker or high) found the focus fix incomplete: focus dropped to
+`<body>` with only a `focusout` when a focused button was disabled or removed, and the guard stole
+focus from App's selection context menu so Esc closed the editor instead. Fixed with a `focusout`
+recovery and by suppressing context menus over the editor. Its lows were fixed too: dropped
+queued reviews are now counted in the toast; focus hands off cleanly between queued editors (a
+test for that exposed, and now pins, a focus ping-pong between outgoing and incoming editors);
+push-to-talk passthrough ignores modifier combinations; a passed plain key cannot press a focused
+button; the editor sits at z-index 59 so an incoming call stays visible over it; and a scope epoch
+catches an away-and-back round trip during an upload.
+
+Verification: unit tests for the model (`video-edit.test.ts`), the exporter (`video-export.test.ts`,
+including a real library failure wrapped into a sentence), the review queue (`video-review.test.ts`),
+App's real `embedMedia` text under scripted scope changes (`video-embed-flow.test.ts`) and the
+mounted component (`video-editor.test.ts`). The once-only answer, late-export, key-isolation,
+undo-during-drag, focus-return and post-upload scope guards were each confirmed to fail when removed. The real codec
+path was checked once in headless Edge with a scratch script (not in the repo): generated MP4,
+MOV and WebM clips with a frame index drawn into every frame were cut at 0.5 s / 2 s / 3 s, and the
+decoded output held exactly the kept frames in order, no removed frame, matching audio length and
+no copied metadata tags. The size cap and cancel paths rejected cleanly. After the review, the same
+script also passed: rotated (90°) footage, a clip whose first frame is at 1.0 s (the preview
+element and the exporter agree on time), an opaque MediaRecorder WebM with no duration or cues
+(editable, exact range), and a recorder WebM with real alpha (refused up front).
+
+Known limits and follow-ups:
+
+- No automated real-codec test: Node has no WebCodecs, and `test:flows` does not cover video.
+  Porting the scratch check into `flow-check.mjs` would close that.
+- The Files tab and wiki uploads do not open the editor; only the chat and status composers do.
+- Export runs on the WebView's main thread through WebCodecs; long clips take a while. The
+  progress bar and Cancel are there, but there is no background export.
+- Preview playback can show up to one painted frame of removed time before it jumps; the export
+  never contains it.
+- The title bar's Back/Forward and the ticker stay clickable over the editor (they sit above it);
+  using them closes the editor with a toast saying the video was not attached. The call bar and
+  incoming-call prompt sit above it on purpose.
+- A status-composer upload counts as interrupted by a channel switch on the same server, which is
+  more cautious than it needs to be.
+- `uploading` is one boolean shared by every upload path, so two overlapping batches can clear it
+  early. This predates the editor.
+- The probe does not check that the sound can be ENCODED; a WebView without a usable audio encoder
+  fails at export with a clear message and the "upload unedited" way out.
+- `THIRD-PARTY-NOTICES.txt` records Mediabunny's MPL-2.0 text but no source location; MPL asks
+  that recipients be told where the source is (npm / GitHub). Worth adding to `gen-notices.mjs`.
+
+## PR #46 seventh review: removed servers, media capture, lock warning (2026-10-19)
+
+The review of `d2548a37` cleared the previous P3 and found two P2s and a P3 in the cumulative PR.
+
+- **P2, a removed server.** Leaving a server, or that server closing natively, moved off it
+  through switchServer's Save gate after its actor had stopped. With another server available,
+  the Save could not land: the app stayed selected on the removed server and later switches
+  refused. The Studio, now given an empty channel, threw "Save your Studio changes before changing
+  channels."
+  - App's new `serverGone(id, left)` handles both routes. `server-closed` goes through
+    `serverClosed`. During that server's own leave, the event only records itself and the
+    leave's outcome decides: success means a leave; failure after the stop means a closure.
+  - It retires that server's Studio scope without saving (`StudioSession.retireServer`). A closed
+    server's records are kept as a restored draft, the same encoding lock uses.
+  - A left server's records, and any waiting draft for it, are dropped. A toast names the server
+    and says which happened.
+  - It then takes a forced edge to no server and begins a fresh switch to the next one, which now
+    has nothing to save.
+  - `leaveServer` settles first: unsaved Studio work for that server is saved through the gate
+    while the actor can take it. A failed Save refuses the leave, and so does a restored draft
+    still waiting for that server's channel, with a message.
+- **P2, media preparation.** `preparePixa` looked each frame's unsaved pixels up in the live queue
+  across its awaits. An autosave receipt for a later frame, landing during an earlier frame's
+  read, removed the record, so the captured `draft:` placeholder was fetched as a CID ("cid is not
+  64 lowercase hex"). It now captures every frame's unsaved PIX in the same turn as the model,
+  before the first await.
+- **P3, lock warning.** Lock assigned the capture-failure warning, then its own later `error = ""`
+  erased it. The warning is now what that line assigns.
+
+Regressions:
+
+- **Removed server.** The production `leaveServer` and `serverGone` run over the real Studio
+  session, studio-state and exit gate, covering:
+  - a leave with an unsent edit (saved first, nothing sent after the stop);
+  - an edit made while leaving (dropped, with a toast);
+  - a closure (no Save; kept, and reinstalled as held when its channel reopens);
+  - a refused pre-leave Save (no leave);
+  - a waiting restored draft (no leave).
+
+  The test fails with the scope retire removed and with the pre-leave Save removed. A second test
+  covers:
+  - a leave that fails after the stop (kept, not "You left");
+  - an event arriving after the leave's response;
+  - a lock during the native leave (the lock message survives);
+  - a server closing during a window close (no server selected, edit kept);
+  - App's own copy of a restored draft.
+
+  That test fails with the lock guard on the error removed and when serverGone skips window close.
+- **Waiting-draft discard.** The mounted StudioNav shows a waiting draft for another server. Its
+  armed discard frees new edits and leaves nothing for the next lock.
+- **Media.** An autosave lands while the first frame's read is held. The test fails on the old
+  live lookup with the reviewer's exact error.
+- **Lock warning.** The whole production `lockScreen` runs with a failing capture, using an inert
+  `with` scope for its unrelated dependencies. It fails when `error` is cleared at the end.
+
+Contract changes in existing tests:
+
+- The route audit's forced-edge count drops from 9 to 7. Leaving the last server and the native
+  closure (two sites each) are now `serverGone`'s two sites.
+- `leaveServer:switchServer` in the late-fresh-claim list becomes `leaveServer:serverGone`. The
+  audit now treats `serverGone` as a navigation callee, because it starts a fresh switch
+  synchronously.
+- The waiting-draft refusal text now also points at the sidebar's discard.
+
+Adversarial review: no BLOCKER or HIGH. MEDIUM-1 is fixed: the first version told the member a
+closed server "reopens at the next unlock". It does not: a lock keeps the node online, and the
+next unlock lists the server again, still stopped. The wording now says "after Mewtual restarts",
+and the sidebar can discard the waiting draft. The LOWs are fixed too:
+- re-checks after awaits, and no leave error over the lock screen;
+- a failed leave treated as a closure;
+- window close no longer skipped;
+- the draft peek replacing a chunk load;
+- a toast for a superseded leave;
+- the "partial" outcome;
+- the audit callee.
+
+Residuals:
+
+- A closed server's kept draft refuses new Studio edits until its channel is open again, which in
+  practice is after Mewtual restarts, unless the member discards it in the sidebar.
+- A stopped server is listed again after a lock and unlock (native; it predates this PR). Opening
+  its Studio channel installs the kept draft as held records whose Save cannot land. Moving off
+  it then refuses until those are discarded, as for any server whose Saves fail. Taking a stopped
+  actor's server out of `running_servers`, or respawning it, is the native follow-up.
+- Edits drawn during the native leave itself are dropped; the toast says so.
+- A newer action retiring the pre-leave Save cancels the leave; a toast says so.
+- While a server's leave is in flight, its `server-closed` waits for `leave_server` to return. If
+  that stalls after the stop (a held persistence lock), the app stays on the stopped server until
+  it does. Switching away still works unless edits were drawn meanwhile. There is no JS timeout
+  fallback yet.
+- The waiting-draft row names neither the server nor the channel (the sidebar has no server
+  names). It does say when some kept edits may already have landed.
+
+Checks:
+
+- `npm --prefix apps/desktop test`: 1826/1826. This includes a parallel session's uncommitted
+  video-editor tests, which share this checkout.
+- `npm run check`: 0 errors and 0 warnings.
+- `npm run build`: passed.
+- `npm run test:flows`: 9/9 on a private port pair (`FLOW_PORT=5197`).
+  - On the default port it first failed with "visual fixture never became ready". The cause was a
+    cold Vite dependency re-optimisation after that session's new `mediabunny` dependency: the
+    fixture took 68 s against the harness's 90 s, and longer under cargo's load.
+  - Later runs also collided with a leftover dev server.
+  - Against a warmed server the flows all passed.
+- `scripts/check-no-ambient.sh`: passed.
+- `git diff --check`: clean.
+- `cargo test --all --all-features`: 2463 passed, 0 failed. Rust is unchanged.
+- `cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml`: 363 passed, 0 failed.
+
+## PR #46 fifth review: two save workers; follow-ups closed (2026-10-19)
+
+The review of `64fed24b` reproduced one P2, a timing variant of the departure-ordering finding.
+An edit made while a departure waited on an earlier receipt became eligible only in the drain's
+next round, so the one worker went to the queued Index half first and the departure timed out.
+The owner asked for "a handful" of save workers.
+
+The Studio now runs two (`SAVE_WORKERS`), one per lane at a time and in queue order within each
+lane. A document lane and the shared Index lane can therefore both be in flight, which removes
+that P2 and the single-worker limit the previous entry pinned. Three were built first, but
+an adversarial review showed they oversubscribe the bridge's four shared inline slots: saves, blob
+fetches, reads and the native receiver all hold one. That produced "too many inline downloads"
+refusals in ordinary use, and more would make it worse.
+
+- **Renderer scheduling only.** The server actor runs Studio operations one at a time, so an
+  operation slow inside the actor still delays the next one there. The native "latest request"
+  fence is per server and target, and one save per lane means one per target, so concurrent saves
+  never supersede each other.
+- **Pre-execution refusals are not writes.** The bridge's actor-busy, slot-pool-full and
+  storage-busy (`authorize`) refusals are raised before the execution lease is transferred, so
+  the operation never runs. The actor may already have signalled Ready (always so with
+  storage-busy), but it gets no lease. `nativeNoWrite` classifies exactly these as not written.
+  Queued Saves and the plain document and Index reads refused this way are resent automatically:
+  the same request, at 250/500/1000 ms. A visit is uncounted, and exhausted resends settle a Save
+  as not written so a retry is admitted afresh, only when no earlier attempt was uncertain. After
+  an uncertain post-dispatch failure and an exact retry, each visit counts and the record stays
+  uncertain, with its original request and no reauthor. All three texts are pinned to their
+  single sites in the Rust sources.
+- **One worker per record.** A record a worker has taken is marked synchronously (it stays
+  `queued` through its admission read), so no second worker takes it. Removing that guard fails
+  two existing tests.
+- **Recovery rail.** It now labels a not-written recovery apply as not written, not as uncertain
+  and "discarded".
+- **Restored Creates.** A restored, held Create reads "create not saved yet · open to save" in the
+  sidebar.
+
+Follow-ups closed:
+
+- An Index recovery record of one entry now counts for that entry's document (held row, Save,
+  indicators).
+- Restoring a wiki revision names the page it restored and closes only that pane's history.
+
+Regressions:
+
+- Edits made before and while leaving, with the Index receipt pending. Fails with one worker and
+  at `64fed24b`.
+- Lane exclusivity. It passes at `64fed24b` too, where one worker made it trivially true, and it
+  does not reach the `running` guard (that needs an admission read). It fails when the lane-head
+  rule is removed, which is what it pins.
+- The no-write classification and its source pins. They fail with the resends, the read retry or
+  the attempt revert removed.
+- Recovery-record affinity and the restore toast. Both fail at `64fed24b`.
+- Added after the review of `28b6ba28`, which cleared the P2 and raised only a documentation P3:
+  an uncertain post-dispatch failure, an exact retry, then each busy text exhausting its
+  resends. The record stays uncertain, keeps its request and cannot be reauthored. The test fails
+  if a pre-execution refusal clears the earlier uncertainty.
+
+Residuals (LOW, from the re-review; not fixed):
+
+- The overlay, recovery, fault and blob reads are not resent after a pre-dispatch refusal. A
+  refused overlay read shows its ordinary error, and a document with a local draft shows the plain
+  projection, until the next refresh.
+- "Studio actor busy" takes its 5 s rendezvous to arrive, so four refused sends outlast a
+  departure's 10 s timeout, which then reports the Save as still running.
+- Workers are not reserved per lane. Two other lanes (a Create and another document's Save) can
+  hold both, so an Index half, or a third document's Save, waits for one of them.
+- Rarer pre-lease refusals (server changed before commit, request cancelled, lease-send expiry)
+  are still classified uncertain. That is safe but pessimistic.
+- A retried read may run natively after a Save that started later, yet still count as the older
+  read. That Save's acknowledgement can briefly replace a slightly newer view; the next refresh
+  corrects it.
+
+Checks:
+
+- `npm --prefix apps/desktop test`: 1759/1759.
+- `npm run check`: 0 errors, 0 warnings.
+- `npm run build`: passed.
+- `npm run test:flows`: 9/9.
+- `scripts/check-no-ambient.sh`: passed.
+- `cargo test --all --all-features`: 2463 passed, 0 failed (Rust unchanged).
+- `cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml`: 363 passed, 0 failed.
+
+Adversarial review: HIGH-1 (three workers oversubscribed the slots) and HIGH-2 (storage-busy
+missed) are fixed, as are three MEDIUMs. The re-review found no BLOCKER, HIGH or MEDIUM issues.
+
+Tests changed because their contract changed:
+
+- `SAVE-001`, the frame test in `studio-session.test.ts`, the Create-retry test there, and the
+  pending-thumbnail `UI-003` used "busy" texts as examples of uncertain failures. Those texts are
+  now definite no-writes that are resent, so each uses a post-dispatch error to keep its own claim.
+- `SAVE-002` asserted a second lane stays queued "behind the one worker". It now fills both
+  workers and asserts that the cleared scope's worker cannot start the waiting third lane, while a
+  new-scope worker can. It pins that behaviour, not the token mechanism.
+- `UI-003` checks both outcomes. While doing so it exposed that a not-written Create showed
+  "creating…" in the sidebar; that now reads "create not written · retry in the editor".
+- The two departure tests from the previous round that pinned single-worker order and the
+  single-worker limit are replaced by the multi-worker contract above.
+
+## PR #46 fourth review: departure ordering (2026-10-18)
+
+The review of `5bc43d2c` confirmed the rename-context and Index-half fixes, plus 14 extended wiki
+cases and the media separation. It reproduced one new P2: leaving a document released its
+Index-lane records before draining its own lane. The single save worker then took the Index record
+first, so a slow Index receipt held the document's Save and the navigation until the 10 s refusal.
+The departure now drains the document's lane, then releases its Index records without awaiting
+them. The regression keeps the Index receipt pending: navigation completes, the document's Save
+lands first, the Index record stays in flight with its original request, and another document's
+restored work stays held. It fails at `5bc43d2c`.
+
+An adversarial review of the fix found no blocker/high; its medium is that the fix holds only
+while the worker is free. Two changes and a pinned limit follow from it:
+
+- A Save being awaited now goes ahead of other lanes' runnable heads, so an Index record an
+  earlier deadline released can no longer overtake a departure's own record (pinned; it fails
+  without the preference).
+- The post-drain release is skipped across a reset and still happens after a superseded but
+  drained departure, so a drained departure does not split the rename. A refused departure holds
+  its restored Index half for Save/retry (pinned). Overlapping Saves keep a list of active
+  preferences, so one finishing early cannot leave a stale one behind.
+- **Follow-up (pre-existing, pinned as a known limit):** one worker serves every lane, so an Index
+  delivery already running still delays a departure or a Create until it answers or the 10 s
+  refusal. It can come from a deadline, an earlier departure or a sidebar retry. A separate
+  Index-lane worker would remove this; it needs a concurrency design review.
+
+The two disclosed lows (Index recovery record without a held row, the restore toast's page name)
+remain follow-ups.
+
+Checks: frontend 1751/1751, `npm run check` 0 errors, build, 9/9 Edge flows (one earlier run
+failed the debug-console flow on load and passed on rerun), ambient gate, root Rust 2463 passed
+(24 ignored), native 363 passed (both in isolated target directories).
+
+## PR #46 third review: rename context and Index-half Save (2026-10-18)
+
+The review of `22e4ed77` confirmed the previous three fixes and reproduced two new P2s, both fixed:
+
+- **A wiki rename never retargets another server's page.** `commitWikiRename` captures the server
+  and view generation before its awaits. It reloads the page list, reopens and falls back by name
+  only while the pane still shows that server's wiki. A rename on A that lands after a switch to B
+  no longer renames B's open "Shared" pane to "Renamed", so B's Save keeps its target.
+- **A document's Save covers both halves of a rename.** `affectedObject(s)` names the document a
+  record changes, including a Closing/Unconfirmed Index record. That record keeps the Index as its
+  native target and names the entry in its op. Save, the editor's pending indicators and the
+  sidebar's held rows all use it.
+
+Both regressions fail at `22e4ed77`, as does the new sidebar assertion for an Index-only held edit.
+
+An adversarial review of these fixes found no blocker/high and four medium findings, all fixed:
+
+- A Save whose Index half sits behind another document's held, failed or uncertain Index record
+  now refuses at once and names it, instead of timing out after 10 s with "try again".
+- The rename fallback also requires that no page has been opened into the pane since the rename
+  began. A pane serial, `wikiPane()`, captures server, generation, serial and page. A newer open of
+  the old name (which reads the post-rename, empty page) keeps its identity.
+- Leaving a restored document sends both halves of its rename: its Index-lane records are
+  released, not awaited.
+- The older wiki actions use the pane they began on. `saveWikiPage` (which marks clean only the
+  text actually sent), `deleteWikiPage`, `setWikiPageFormat` and `openWikiHistory` now use the
+  captured server and page, and touch the pane only while it is still that pane (history also
+  never behind a lock).
+
+Its lows are fixed too:
+
+- Playback and export decide "draft" from content records only.
+- Held rows take a deleted entry's title from the saved Index, and the sidebar comment is updated.
+- Reauthor of an Index record is gated on the Index's refusal.
+
+One low remains: a restored Index recovery record about one entry still has no held row. `affectedObject` has a direct unit test.
+
+A short re-review found no blocker/high and one new medium, introduced by the save fix: a stash
+restored into the pane survived a Save and could later revert the page. That is fixed (saving the
+pane retires its stash) and pinned. Of its lows, these are also fixed:
+
+- The stuck-behind check reruns on every queue change.
+- The refusal says "Retry or discard" for a failed blocker.
+- Delete clears only the pane it began on.
+
+`restoreWikiRev`'s toast still names the page then on screen (cosmetic).
+
+Checks: frontend 1746/1746, `npm run check` 0 errors, build, 9/9 Edge flows, ambient gate,
+root Rust 2463 passed (24 ignored; isolated target), native 363 passed (isolated target: the
+running desktop app held `src-tauri/target/debug/mewtual-desktop.exe`).
+
+## PR #46 re-review fixes: route ownership, read-error recovery, settings requests (2026-10-18)
+
+The re-review of `13e338eb` confirmed the five original fixes and reproduced three remaining P2s:
+
+- **Stale responses no longer take over the screen.** A navigation action now owns a
+  `StudioRoute` from first step to last (`studioExit.begin()`). It carries the route across
+  every await and asks `route.leave()` again right before changing the view, never with a fresh
+  claim. A wiki response that arrives after the member returned to the Studio is discarded. Work
+  drawn in a Studio that stayed on screen during the read is saved first, or keeps the Studio on
+  refusal. History Back/Forward, ticker, inbox, news, mention, topic/search, call-diagnostics,
+  wiki rename/create and add-channel flows hand one route to `switchServer`/`switchTo`/
+  `switchView`/`openWikiPage`. From the Studio they change the surface before the channel, because
+  a channel moved under a mounted Studio ends every route. The route audit rejects a guard separated from its
+  screen change by an await. It also rejects a route-less navigation call after an await, except
+  four stated forced or background cases and one branch that begins its own action.
+- **Wiki menus act on the page they opened.** `openWikiPage` reports whether it opened a page, so a
+  retired request can no longer arm Delete or Rename on the page still shown.
+- **Read errors no longer hide recovery.** With no model on screen, the editor shows the read
+  error beside the retained requests' exact retry, armed discard and waiting count. Restored
+  queued work has a Save and discard in every editor state, without a refused departure first.
+  Save inside an editor now saves only that document (`saveDocument`), so other documents'
+  restored work stays held. A discard confirmation lapses when its record's state changes.
+- **Settings requests own navigation.** A request for the server already on screen retires an
+  older one still waiting on a Studio Save to switch, so that switch never commits, closes the
+  newer dialog or seeds over its draft.
+
+Each regression fails with its fix removed (wiki second check, current-server claim, surface-first
+order, document-scoped Save, state-keyed arming, route threading) or against `13e338eb`
+(read-error controls). An adversarial review of this round found no blocker/high finding; its three
+medium findings (Back to another channel, wiki menu arming, Save scope) and its low findings are
+fixed. Opening settings for the current server deliberately retires other in-flight navigation
+(newest action wins). A short re-review of those fixes found no blocker/high/medium; its low
+findings are fixed, except that the discard key can match again after an uncertain → retry →
+uncertain cycle (accepted: the same risk as when it was armed).
+
+Checks: frontend 1740/1740, `npm run check` 0 errors, build, 9/9 Edge flows, root Rust 2463
+passed (24 ignored), native 363 passed, ambient gate. Root Rust note: a run in the shared `target/`
+reused a `catcoms-rt` artifact from the `chat-update-implementation` worktree and failed to compile.
+The isolated-target run is the one reported.
+
+## PR #46 review fixes: restored drafts, Studio exits, settings, playback (2026-10-18)
+
+An external review of `149e7321` reported one P1 and four P2 defects, all reproduced and fixed:
+
+- **Restored drafts no longer deadlock.** A document switch saves only the document being left, and
+  nothing when no document is open. The sidebar lists documents holding unsaved edits, each with
+  an open button. Before a first delivery, admission reads a document it holds no view of. It does
+  this while the record is still queued and uncounted, so a lock during the read restores the
+  record as unsent. "Could not read", "still reading", unread-Index and changed-server refusals
+  send nothing and do not count an attempt, so a retry is admitted afresh.
+- **Every App route out of the Studio uses the exit gate** (`studio-exit.ts`), so a drawing the
+  full draft queue refused can no longer be destroyed by Ctrl+F, Ctrl+Shift+F, the inbox, DM home,
+  add-server, vault change, wiki/status links, menus, ticker jumps or Back/Forward. Lock, leaving
+  the last server and a native server close are marked forced edges.
+  `studio-exit-routes.test.ts` audits App.svelte for unguarded route writes.
+- **Composite routes act only on success.** `switchServer`/`switchTo` resolve whether the switch
+  happened. `openServerSettings` opens in the turn the switch to the requested server commits, so
+  it never opens on, or renames, the server being left. A refused Back/Forward step leaves the
+  cursor on the place still on screen.
+- **Playback.** Inline PIXA "Play sound" re-arms the repaint loop. Audition requests carry a
+  generation, so a superseded one cannot clear a newer note's flag or report a failure.
+
+Checks: frontend 1730/1730, `npm run check` 0 errors, build, 9/9 Edge flows, root Rust
+2463 passed (24 ignored), native 363 passed, ambient gate. Every new regression was confirmed to
+fail on the pre-fix code. A read-only adversarial review found one HIGH (lock during the
+admission read), two MEDIUM (add-server/vault-change routes; settings re-seeding after the load)
+and five LOW findings; all are fixed. A re-review found no remaining blocker/high/medium, and its
+one LOW (the unread-Index path, identical at HEAD) is fixed too. Residual: `leaveServer`/`server-closed` with other servers remaining still go
+through a `switchServer` whose Studio Save can refuse. A frame publication not yet applied is
+still classified as possibly committed if a lock lands mid-publish. `jumpToInbox` does not await
+its channel switch. An absent document holding only queued restored edits shows no Save button
+until a Studio exit's global Save refuses it into retry/discard.
+
+## Gate 7 complete; communication programme next (2026-10-18)
+
+Gate 7 implementation and local acceptance are complete. Studio uses immediate working edits,
+explicit Save/close/navigation and changed-only five-second autosave; repeat Play starts at frame
+one, saving unchanged content preserves playback, and navigation retains original raster custody.
+Storage/retry and native read/Save races are corrected, with bounded encrypted orderly-lock
+continuity and explicit restored retry. Production attachments, inline looping, Post to Chat,
+Sound/Music/history and server repair controls are connected.
+
+Final checks passed: root suite 2462 tests (24 existing ignored), native suite 363 tests including
+both six-client scenarios, frontend suite 1705 tests, both formatting and strict lint checks,
+native check/build, ambient/raw-filesystem gates, dependency audit, frontend check/build, nine
+standard Edge flows, all 25 expanded Gate 7 assertions and actual native startup. Final read-only
+reviews have no remaining blocker/high/medium findings. `GATE7-ACCEPTANCE.md` records exact commands,
+logs, test-harness corrections and limitations; local screenshots include the inline chat card.
+The owner defers two desktops. Hardware/platform observations and legacy full-scan latency remain
+unqualified; orderly continuity is not crash-atomic authoring.
+
+The owner requests pushing this Gate7 checkpoint, then a new `chat-update-implementation` branch
+for `communication-recovery/CHAT-FILES-VOICE-PLAN.md`. That programme has separate acceptance,
+starting with bridged-room reproduction and narrow demonstrated fixes. Historical checkpoints
+below do not reinstate the earlier wait-for-UI/app-close blocks or pending final checks.
+
+## Studio local edits and final-check checkpoint (2026-10-18)
+
+The owner has finished the parallel UI edits and closed the desktop. Studio now updates working
+edits immediately, saves on Save/ordinary close/navigation and autosaves five seconds after the
+first change. Later edits do not hitchhike on an already-running Save. Failed requests and owned
+PIX remain retained; rotation cannot silently rebind them. Local playback/export uses complete
+validated working inputs, and saving identical content keeps playback running. Every editor Play
+starts at frame one. Normal navigation waits for all dirty strokes, including strokes made while
+the previous revision was saving. Orderly lock uses bounded encrypted continuity; restoration
+requires explicit Save/retry. See current ARCHITECTURE/INTERFACES/THREAT-MODEL sections for exact
+limits, older-client envelope compatibility and the explicit hard-crash/write-ahead limitation.
+
+Focused checks passed: 15 buffer regressions, two mounted playback/navigation checks,
+48 affected frontend checks, two storage checks and
+one native continuity check. Read-only review corrections are incorporated; full final suites
+and production/browser/startup checks are next. Historical checkpoint notes below remain evidence
+of earlier states, not an outstanding request to close the desktop or wait for the other session.
+
+## Studio functional correction checkpoint (2026-10-18)
+
+The current functional correction series addresses the supplied `b2f26d0b` review and the owner's
+new opening/playback/switching reports. See `GATE7-ACCEPTANCE.md` for exact verification state.
+The receive inventory now permits 1024 cumulative records with unchanged byte/cold rails; legacy
+synchronous complete-scan latency remains unqualified. Closing exact retries authenticate and
+flush accepted intent ciphertext unchanged before global inventory. Native Save delivery no
+longer races background Read delivery. Navigation flushes original raster custody before changing
+the editor, and looped pictures continue through long sound tails. Shared archival playback uses
+the actual DJ clock and seats listener seek after preparation.
+
+Focused verification passed: 92 frontend tests, five backend tests and three native library tests.
+Root Clippy, both formatting checks, ambient/raw-filesystem gates and focused strict TypeScript
+checking passed. Actual read serials preserve newer projections without breaking Create→first-frame;
+shared sound-file reads now enforce native 4 KiB limits, sixteen current entries and continuation
+fences. Final read-only re-reviews report no blocker/high/medium findings in these corrected paths.
+The earlier full root run and a duplicate older run were stopped; neither is a current pass.
+The running desktop prevents the default native test command from replacing its executable, so
+only its focused library tests have run. Final complete suites/browser/static/build checks still
+require stable UI files and closure of the running desktop. No Gate 7 sign-off is claimed here.
+
+## Studio sound/music/history tabs, soundfont popup, chat flipnote card and viewer (2026-10-18)
+
+Built from the owner-approved mockup canvas (Flipnote Sound & Chat). Frontend only; no wire,
+persistence or native command changes. Every Studio write still goes through the existing
+`StudioSession` operations (`setSoundPatch`, `setSfx`, `removeSfx`, `removeSoundPatch`,
+`linkScore`, `createScore`); every sound still plays through the one bounded archival controller.
+
+- **Sound tab** (`StudioSound.svelte`, rewritten): this frame's markers as rows; a rack of recipe
+  tiles in shelves (in this flipnote · presets · my library · from the share · new… · import…);
+  a one-octave piano plus semitone/octave steppers; length tiles plus an exact-seconds field;
+  "hear it"; "add to frame N" / "save changes"; an all-sounds list paged at 24. A library tile is
+  only written to the document (`onpatch`) when a marker is added, never on selection. Readiness
+  problems stay on the row (missing recipe, deleted frame, over cap, another value by X with
+  keep/use). Evidence mode (History) lists recipes with usage, cleanup markers and paged raw
+  records. The emoji `.json` import keeps its pitch-range and fixed-length constraints.
+- **Audition** (`studio-audition.ts`): "hear it" and the popup keyboard build a one-event
+  `jam-take:v1` (validated by `validateJamTake`) and start it through `StudioAudioActions` as a
+  score with `loop: false`, so it inherits the gesture, scope, Deafen and cancellation gates. The
+  Studio raises `auditioning` before the start so a playing audition is not document playback:
+  the rack stays enabled and the timeline does not follow its clock.
+- **Soundfont popup** (`StudioSoundfont.svelte`): the call drawer's patch editor as a modal
+  (start-from shelf, two-octave audition keyboard with home-row keys, osc layers one open at a
+  time, the four stage cards with scopes and knobs, `jam-editor.ts` transitions). Footer: save to
+  my library (the call drawer's 12-entry library, same replace-by-name rule), share to the server
+  (`.jampatch`, same sealed file as the drawer), use in the flipnote (`set_patch`, then kept in
+  the library under its name so the rack can show it; a full library refuses only the keeping
+  half and says so). Every edit mints a new recipe id; nothing is replaced silently.
+- **Rack shelves** (`App.svelte`): presets and the device library as before; "from the share"
+  reads `.jampatch` files of the active server while the Studio surface is open, bounded to 16,
+  only files the share's auto-load trust rule already permits, one read at a time, validated by
+  `parseJamPatchJson`, dropped on server switch.
+- **Music tab** (`StudioMusic.svelte`): soundtrack row from the channel index (title, author,
+  linked / unavailable chip), open / change / unlink, a picker of this channel's scores, "+ new
+  track", timing, recipe budget, export readiness (sounds need attention · two tracks chosen ·
+  linked track not on this device). It reads the Score object's own facts nowhere: linking is
+  native-checked and the track's readiness is seen by opening it.
+- **History tab** (`Studio.svelte`): one story: this flipnote (status line, size bar, frames,
+  expiry) · versions (immutable `.pixa` exports: play / download / share / remove, save a version)
+  · previous edits (the unchanged recovery rail) · evidence · sound (fold) · danger (delete, two
+  clicks). The status line moved into its own snippet so the Score surface renders it too.
+- **Timeline sfx lane**: a pill per frame naming the first marker and note, tinted by author.
+- **Chat card** (`pixa-preview.ts`, `app.css`): pixels at 1.5x with a transport strip over the
+  bottom edge (pause/play, frame counter, progress, elapsed, sound, open) and a mono facts line
+  (name · frames · fps · size · sounds/music · expiry · open). Same manager, same bounds (two
+  live packages, one read, one timer, 128 cards, gesture-only sound). New options `open` (checked
+  against the card's scope) and `expiryText`. Veil states: fetching, manual load, error, too large.
+- **Viewer** (`PixaViewer.svelte`): Studio transport (first/prev/play/next/last, loop, sound),
+  frame counter and time, frame thumbnails (up to 48) with sound pills, facts, download, close.
+  Sound on = the audio session from the held frame; sound off or Deafened = a local visual loop.
+  The acceptance flow now clicks the button whose text is exactly "Play".
+- **Composer chips** (`draft-attachments.ts`): a chip per flipnote embed marker in the draft with
+  a ✕ that edits the draft text; the text stays the single source of truth for the durable send,
+  and a stale chip can never cut other text.
+
+Adversarial review (read-only, against `8afb46e4..HEAD` plus the worktree): no blocker. Fixed
+before handoff, each with a regression that fails without the fix: HIGH, shelf tiles keyed by
+display name collapsed two share recipes whose names collide after the 12-character truncation
+(`libraryKey` = name + canonical recipe; `studio-sound-surface.test.ts`); MEDIUM, document Play
+replacing a sounding audition never observed "stopped" and left `auditioning` raised, so the
+transport kept reading "play" (cleared at both document-play entry points; `studio-surface.test.ts`
+G7-UI audition-then-Play); LOW, the card's `open` now checks generation and membership as well
+as server/channel; LOW, the composer-chip grammar now equals the renderer's `EMBED_RE` (newline
+labels); LOW, a document re-read while `onpatch` is pending no longer drops the marker (only a
+frame change does). Recorded as follow-ups: a trusted peer can fill the 16-slot share shelf with
+invalid `.jampatch` files (reads stay bounded; add a failed-cid skip); a popup "use" that resolves
+after Escape lands silently (idempotent by id; surface a notice); the chip scanner has no
+code-span awareness.
+
+Verification (2026-10-18, this change is frontend only): svelte-check 0 errors / 0 warnings;
+`npm test` 1708 passed, 0 failed, run after the fixes (an earlier run at the same tree reported
+1772 because a since-dropped commit of the parallel session added tests); `npm run build` ok;
+`test:flows` default 9/9 and the Gate 7 scenario pass on a quiet machine (under full cargo load
+the boot-panel stylesheet scenario and the search flow each failed once and passed on re-run;
+back-to-back flow runs can also fail on the harness port, re-run them apart). Root
+`cargo test --all --all-features`: 1922 passed, 1 failed under load
+(`an_inventory_job_keeps_its_profile_across_a_restart`, a file the parallel session changed;
+passes alone in 2 s). Native `cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml`:
+394 passed, 5 failed, all in files the parallel session's `4d321fef` changed
+(`studio::tests::native_studio_running_worker_retains_fences_after_invoke_or_actor_abort`,
+`studio::inspection::tests::…instance_span_both_visits`,
+`studio_exports::tests::studio_gif_stale_session_and_missing_server_never_write_or_reveal`, two
+`six_client_recovery::chat_matrix::*`); nothing in this change touches Rust. Fixture screenshots
+of the Sound/Music/History tabs, the popup, the file-info card and the viewer match the mockup.
+
+## Studio UX corrections — implementation complete, final checks running (2026-10-18)
+
+Concurrent Studio audition/popup/Music edits arrived after the frontend verification checkpoint
+and commit `8afb46e4`. Preserve that work. Current UI verification is pending stable files;
+the last full frontend/static/build passes predate those edits. Rust sources remain unchanged
+and their full verification continues. See the ledger for the browser failures during editing.
+
+The owner's follow-up UI issues are implemented: Post to chat stages a real streamed PIXA
+attachment without replacing draft text; chat/wiki/file details play silent looping previews;
+Art/Sound/Music/History are separate; repair lives in Server settings; new palettes run white
+to black and include fixed purple. Existing encoded palettes/indices and authored sound holds
+are preserved. The canvas fits at the native window size and Studio reserves the member rail
+for drawing. Technical filler and misleading waiting/receipt/download prose were removed.
+
+Receiver diagnostics now use ordered native incarnation/actor sequence observations with the
+actual bounded cause. Healthy solo operation and real corrupt/restore pause/resume are tested.
+Read-only controls cannot resume receiving, stale reads/events cannot replace retained current
+state, and channel/server navigation retains 128 recent local server watermarks. Reset/eviction
+needs fresh Index reconciliation; this is private diagnostic state, not protocol authority.
+
+Focused regressions and the real App headless Edge flow pass, including distinct pixels,
+automatic inline loops, draft-preserving Send, ABA upload rejection and a late upload after
+window-close continuity capture. Read-only reviews found no blocker/high; their medium/low
+fixes have focused coverage. Final Rust suites and builds run sequentially with two build jobs;
+frontend tests run one file at a time. The ledger records their exact results. The previous
+partial root run was stopped for these UI changes and is not a full-suite pass. Two desktops
+remain explicitly deferred; native audible/platform observations are not supplied by fixtures.
+
+## Gate 7 UI completion candidate — verification in progress (2026-10-17)
+
+The current worktree connects PIXA file recognition/picker, shared Jukebox canvas/focus playback
+and an explicit global file viewer to the existing archival JamEngine. It adds main-window
+document/Registry owner repair controls with current candidate-pair checks and uncertain scheduling
+classification, plus a separate ticketed Closing local-draft Save using the actual vault-held signed
+close. Fresh Closing authoring is normally available only on the journal-holding device. Exact
+accepted/terminal retries precede current authority lookup. No wire/persistence format changes.
+
+Focused codec/transport/reader/security/fixture/session and rendered repair/Closing controls pass.
+The root Closing regression saves real detached work and pins accepted retry without a close;
+native Studio checks and browser flows are in progress. Adversarial review fixes include pending
+fault-read invalidation, reachable Index/failed-object repair controls and independent radio groups.
+The browser boot flow caught and corrected invalid optional-parameter emission missed by static
+Svelte checking; final browser evidence is not yet a pass. Full suites remain deferred until the
+implementation and focused verification are coherent, then run sequentially with limited jobs.
+Gate remains OPEN. The owner defers two desktops; no audible hardware evidence is invented.
+The ledger owns current exact checks; the following review-correction checkpoint is historical.
+
+## Gate 7 OPEN: PR #46 review corrections and interrupted verification (2026-10-17)
+
+External review of `5a15ba1e` correctly identifies missing actual composition export, a
+receive-only restart supplied from live memory, agreement-only preservation checks and two
+rejected frontend settlement states. The new worktree corrects these through bounded native/
+Node production-session acceptance, disk-only receive restart, independent live-content
+assertions, and all-nine-state frontend contract coverage. See the current section of
+[GATE7-ACCEPTANCE](GATE7-ACCEPTANCE.md). Earlier focused passes/re-review below predate these
+findings; they establish narrower backend progress and do not close the whole delivery.
+The corrected actor and receive-only TCP regressions pass. New native production-session
+composition export/readback and helper rejection tests, focused frontend events/session/media,
+native media tests, frontend check/build, native check and focused root/native strict Clippy pass.
+The final native module passes 2/2, including valid-input lock refusal; adversarial re-review
+has no remaining findings. The ledger owns exact commands, logs and checkpoint results. No complete suite
+is rerun during these corrections; remaining whole-gate UI/release and verification obligations
+stay open.
+
+The owner accepts Gate 6; PR #44 is merged at `82631a81` on `Create-suite-2`. Gate 7 now
+composes the existing actor/vault lifecycle, real TCP cold joining and media readback, and
+native art/Score/sound/export restart. It injects no acceptance receipt/recovery snapshot;
+only a signed quota workload prepares rotation eligibility. Deleted SFX/export recovery stays
+refused, while recipe Copy uses current fingerprints and ordinary exact-retry Save.
+[GATE7-ACCEPTANCE](GATE7-ACCEPTANCE.md) owns the verification results and remaining evidence;
+[GATE7-UI-HANDOFF](GATE7-UI-HANDOFF.md) is the command/event/limit/recovery surface map.
+The hook guide's stale art-only materializer and seven-state notification claims are corrected.
+No protocol, persistence, registered native command or visual layout contract changes are
+introduced. Current corrections share existing native command bodies via internal helpers and
+accept the two already-emitted settlement states in the frontend parser.
+Focused actor/TCP/native tests and 65 selected frontend tests pass; adversarial re-review is
+clear. The complete frontend suite passes 1563/1563 and dependency audit passes. Concurrent
+full backend verification was interrupted by a machine restart, with one native six-client
+failure already observed. Do not mark the full backend gate passed; finish verification
+sequentially with limited concurrency and investigate that failure. The owner explicitly
+defers the two-desktop observation because two desktops are unavailable.
+Older dated candidate statements below retain their historical scope.
+
 ## Current Gate 6 integration candidate (2026-10-14; local verification passed, CI pending)
 
 Gate 5 is owner-accepted at `7cbe8cbe131e1be8e672d04341c31a1d2b52a98d` (PR #43).

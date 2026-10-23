@@ -14,10 +14,11 @@
 // or 5177, so a dev server you already have running on 5173 is left alone)
 
 import { spawn, spawnSync } from "node:child_process";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import process from "node:process";
+import { gate7FlowExpression } from "./gate7-flow.mjs";
 
 const PORT = Number(process.env.FLOW_PORT ?? 5177);
 const URL_UNDER_TEST = `http://localhost:${PORT}/?fixture=chat`;
@@ -127,6 +128,29 @@ class Cdp {
   }
 
   #onMessage(msg) {
+    if (msg.method === "Runtime.bindingCalled" && msg.params.name === "gate7Capture") {
+      const name = msg.params.payload;
+      // Only known test artifacts can be written through this page-to-runner binding.
+      if (!["file-preview", "art", "sound", "music", "history", "chat"].includes(name)) return;
+      void (async () => {
+        const capture = await this.send("Page.captureScreenshot", { format: "png" });
+        if (capture.result?.data) writeFileSync(new URL(`../../../target/gate7-${name}.png`, import.meta.url), Buffer.from(capture.result.data, "base64"));
+        await this.send("Runtime.evaluate", { expression: "window.__gate7Captured?.()" });
+      })().catch(error => this.consoleErrors.push(String(error)));
+      return;
+    }
+    if (msg.method === "Runtime.bindingCalled" && msg.params.name === "gate7Click") {
+      // Test-only trusted mouse input at the freshly observed button centre. Keep browser audio
+      // activation policy intact: programmatic HTMLElement.click() alone cannot qualify Play.
+      const { x, y } = JSON.parse(msg.params.payload);
+      if (!Number.isFinite(x) || !Number.isFinite(y) || x < 0 || y < 0 || x > 900 || y > 640) return;
+      void (async () => {
+        await this.send("Input.dispatchMouseEvent", { type: "mousePressed", x, y, button: "left", clickCount: 1 });
+        await this.send("Input.dispatchMouseEvent", { type: "mouseReleased", x, y, button: "left", clickCount: 1 });
+        await this.send("Runtime.evaluate", { expression: "window.__gate7Clicked?.()" });
+      })().catch(error => this.consoleErrors.push(String(error)));
+      return;
+    }
     if (msg.id && this.#pending.has(msg.id)) {
       this.#pending.get(msg.id)(msg);
       this.#pending.delete(msg.id);
@@ -628,6 +652,19 @@ try {
   connected = await Cdp.connect(() => browserFailure);
   const cdp = connected;
 
+  if (process.env.FLOW_SCENARIO === "gate7") {
+    await cdp.send("Runtime.addBinding", { name: "gate7Click" });
+    await cdp.send("Runtime.addBinding", { name: "gate7Capture" });
+    await cdp.send("Emulation.setDeviceMetricsOverride", { width: 900, height: 640, deviceScaleFactor: 1, mobile: false });
+    await cdp.navigate(URL_UNDER_TEST + "&studio=1");
+    await cdp.waitReady();
+    const golden = JSON.parse(readFileSync(new URL("../../../crates/catcoms-replication/tests/fixtures/studio-export-v1.json", import.meta.url), "utf8"));
+    const result = await cdp.eval(gate7FlowExpression(golden));
+    failed |= !assertEqual("Gate 7 Studio attachments, inline playback and shared PIXA deck", result, { fileInlinePlays: true, fileInlineLoops: true, viewerFirstFrame: true, viewerHasPixels: true, viewerAdvances: true, viewerRepaints: true, viewerClosed: true, studioTabs: true, studioCanvasFits: true, postPreservesDraft: true, postUploadedPixa: true, postSendsNormally: true, chatInlinePlays: true, chatInlineLoops: true, stalePostRevoked: true, closePostRevoked: true, closeNavigationHeld: true, deckHasCanvas: true, noMediaElementForPixa: true, focusHasCanvas: true, deckAdvances: true, deckRepaints: true, pauseHoldsFrame: true, nativeCaps: true, permitsRetired: true });
+    const capture = await cdp.send("Page.captureScreenshot", { format: "png" });
+    if (capture.result?.data) writeFileSync(new URL("../../../target/gate7-pixa-focus.png", import.meta.url), Buffer.from(capture.result.data, "base64"));
+  } else {
+
   await cdp.waitReady();
   const send = await cdp.eval(SEND_SCENARIO);
   failed |= !assertEqual("send flow", send, {
@@ -760,6 +797,7 @@ try {
 
   await cdp.blockUrls([]);
   cdp.consoleErrors.length = errorsBeforeBootChecks;
+  }
 
   if (cdp.consoleErrors.length) {
     console.error(`FAIL page errors:\n  ${cdp.consoleErrors.join("\n  ")}`);
@@ -767,6 +805,9 @@ try {
   }
 } catch (e) {
   console.error(`FAIL harness: ${e.message}`);
+  if (process.env.FLOW_SCENARIO === "gate7" && connected) {
+    try { const capture = await connected.send("Page.captureScreenshot", { format: "png" }); if (capture.result?.data) writeFileSync(new URL("../../../target/gate7-pixa-failure.png", import.meta.url), Buffer.from(capture.result.data, "base64")); } catch { /* preserve original failure */ }
+  }
   // Whatever the page managed to say before it gave up. This is usually the actual diagnosis: a
   // "never became ready" is nearly always a module that threw or would not parse, and the browser
   // has already reported which line.

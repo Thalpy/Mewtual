@@ -93,14 +93,29 @@ test("only whole-file READERS pull a shared file into the window", () => {
   //     synth is built from them; a patch is capped at JAM_PATCH_FILE_MAX_BYTES (4 KiB) by its
   //     own format, checked against the listed size before the fetch and against the decoded
   //     length after it, so this is the tightest-bounded of the three.
-  // Three, named, and a fourth has to be argued for here rather than slipped past a pattern.
+  //   - the explicit global PIXA viewer: one active/one replacement cancellable read, capped
+  //     natively at the requested 9 MiB and in JS before base64 decode; only one raster expands.
+  //     The existing deck reader now also admits PIXA under the same call/trust/cancellation gates.
+  //   - the Studio rack's "from the share" shelf (drainStudioSharedPatches in App.svelte): the
+  //     same patch bound as the drawer's loader (`mayFetchJamPatch` on the listed size before the
+  //     fetch, the decoder's length check after it, the one patch validator), and tighter on
+  //     admission: only files the share's auto-load trust rule already permits, at most sixteen
+  //     per listing, one read at a time, only while the Studio surface is open, and a read that
+  //     lands for a server no longer active is discarded.
+  // Five, named; new readers require their own boundedness argument and regression tests.
   const sites = invokeSites("download_file");
   const total = sites.reduce((n, [, count]) => n + count, 0);
   assert.equal(
     total,
-    3,
-    `download_file should have exactly three callers (text reader, take deck, patch loader), found: ${JSON.stringify(sites)}`,
+    5,
+    `download_file should have exactly five callers (text reader, archival deck, patch loader, PIXA viewer, Studio share shelf), found: ${JSON.stringify(sites)}`,
   );
+  // The shelf reader's admission guards are what make it the tightest of the five; pin that the
+  // candidate filter still names both the size bound and the share's trust rule.
+  const app = frontendSources().find(([name]) => name === "App.svelte");
+  assert.ok(app, "App.svelte hosts the Studio share shelf");
+  const shelf = /const candidates = files\.filter\(\(f\) => isJamPatchFile\(f\.name, f\.mime\) && mayFetchJamPatch\(f\.size\) && mayAutoLoadSharedFile\(f, server\)\)\.slice\(0, STUDIO_SHARED_PATCH_LIMIT\)/;
+  assert.match(app[1], shelf, "the Studio share shelf admits only patch-sized, auto-load-trusted files, bounded per listing");
 });
 
 test("no shared file is rendered by turning it into a data: URL", () => {
