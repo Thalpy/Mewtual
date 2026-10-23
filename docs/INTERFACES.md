@@ -1,5 +1,17 @@
 # Mewtual; Interfaces & Hooks Schema
 
+## Child Result preparation custody (23 October; inactive adapter)
+
+The original authenticated Incoming and child Work reserve the existing8KiB Data task
+before asynchronous binding/UI preparation. This is capacity ownership, never an engine
+or publication grant. One shared physical/payment allocation survives every worker/output
+refusal too; its actual UI commit is installed while uniquely owned before Body/Actor sharing.
+Historical lookup stays synchronous without Work/task admission. The original output Buffer
+still transfers directly, and no browser/drainage fact is inferred from local task completion.
+The ordered Worker retains Work before publication/Incoming across all cancellation points.
+Measured complete Control remains12,252B/12,288B; Result task5,560B/8,192B. Production dispatch
+and complete native/browser integration remain disabled and unaccepted.
+
 ## Confirmation child Input/result adapters (23 October; inactive draft)
 
 Input tag7 has a430B fixed prefix with child RowId, original action identity, ORIGINAL parent

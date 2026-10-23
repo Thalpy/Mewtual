@@ -208,7 +208,10 @@ struct ResultOwner {
 /// byte owner share this one paid allocation. Worker cancellation cannot let lock or channel
 /// shutdown overtake an already queued publication on an independently running actor.
 pub(super) struct PublicationCustody {
-    _commit: tokio::sync::OwnedMutexGuard<()>,
+    // A detached Result worker must stay paid even when native preparation refuses before
+    // UI admission. Only its unique pre-publication owner may install the actual commit;
+    // clones given to Actor bytes always contain Some and cannot manufacture admission.
+    commit: Option<tokio::sync::OwnedMutexGuard<()>>,
     _physical: super::channel::PhysicalHold,
     // Last: pays the shared allocation and detached operation even after its worker dies.
     _payment: CopyCustody,
@@ -219,11 +222,24 @@ impl PublicationCustody {
         physical: super::channel::PhysicalHold,
         payment: CopyCustody,
     ) -> Self {
+        let mut custody = Self::preparing(physical, payment);
+        custody.admit(commit);
+        custody
+    }
+    /// Lifecycle payment before asynchronous native preparation, not effect authority.
+    /// Keep this SAME allocation in every detached worker/completed refusal too.
+    pub(super) fn preparing(physical: super::channel::PhysicalHold, payment: CopyCustody) -> Self {
         Self {
-            _commit: commit,
+            commit: None,
             _physical: physical,
             _payment: payment,
         }
+    }
+    /// The caller must have unique ownership before lending any clone to Actor/body work.
+    /// Root still checks the original action, call, epoch, token and deadline in its turn.
+    pub(super) fn admit(&mut self, commit: tokio::sync::OwnedMutexGuard<()>) {
+        assert!(self.commit.is_none(), "one original publication admission");
+        self.commit = Some(commit);
     }
 }
 impl AsRef<[u8]> for ResultOwner {

@@ -29,6 +29,7 @@ type Store = Mutex<Option<ServerStore>>;
 
 /// Stored in the original paid IO state, before its infrastructure credit in drop order.
 /// Never clone into an unaccounted task or hold an upgraded context in the process host.
+#[derive(Clone)]
 pub(super) struct Context {
     servers: Weak<Servers>,
     store: Weak<Store>,

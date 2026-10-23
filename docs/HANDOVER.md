@@ -1,5 +1,30 @@
 # Mewtual; Handover
 
+## Result preparation custody and fixed Control fit (23 October; focused checks passed)
+
+The Result draft passes257 focused native handoff tests and all4 blocked-TCP confirmation
+tests (67.28s), including real framed accepted/rejected Root results and dropped outer caller.
+The complete codec peak is12,252B/12,288B. Result's own Control graph is2,637B, including
+the actual1,064B future/output and full1,573B serialization graph. Synchronous historical/
+decoder variants finish in launch before the async wait. The same original8KiB Data task now
+pays asynchronous preparation too; its complete measured worker graph is5,560B, with the
+separate Actor-body/frame graph still within original16KiB. No limit, Box or ordinary credit
+was added to make this fit. The earlier oversized Result runs remain excluded as fit evidence.
+
+One shared original lifecycle owner holds the early PhysicalHold/task payment through every
+worker/completed success and refusal. It installs the actual UI commit while unique, before
+Body/Actor sharing. Weak context is upgraded only for scoped checks; no mounted-store context
+spans the parked UI wait, and original selection/Route checks repeat afterward. Worker remains
+one ordered aggregate across every await/cancellation. Review caught a draft reverse-drop
+ordering defect and missing owner Clone; both are fixed. Regressions park a real early worker,
+leave its refusal uncollected, and block actual Work retirement while cancellation runs on
+another thread. Physical idle/payment cannot precede actual owner collection.
+
+The separate deadline/Tokio correction is not integrated here yet. Complete combined native
+and frontend gates are still required; Begin/browser drafts remain separate. Production V2
+and effect dispatch remain disabled. These native test-provider results do not run browser
+WebCrypto, SDP/ICE/RTC or physical media/network acceptance.
+
 ## Child Input/result continuation (23 October; validation in progress)
 
 New work in `target/communication-confirmation-input-worktree` starts at history integration

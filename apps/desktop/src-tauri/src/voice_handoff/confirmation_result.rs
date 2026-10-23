@@ -4,7 +4,7 @@
 use super::bootstrap::Route;
 use super::channel::{self, BodyKind, CompletedReply, Incoming, Operation};
 use super::context::Context;
-use super::custody::{CopyCustody, PublicationCustody};
+use super::custody::PublicationCustody;
 use super::factory::Refused;
 use super::ledger::{Status, Work};
 use super::requests::{confirmation::Request, Action, Kind};
@@ -66,106 +66,140 @@ impl Response {
 pub(super) async fn commit(
     context: &Context,
     route: &Route,
-    mut incoming: Incoming,
+    incoming: Incoming,
 ) -> Result<Response, Refused> {
-    let prepared = prepare(context, route, &incoming).await;
-    match prepared {
-        Err(error) => Ok(Response {
-            result: Err(error),
-            work: None,
-            payment: None,
-            incoming,
-        }),
-        Ok(Prepared::Historical(status)) => Ok(Response {
-            result: Ok(status),
-            work: None,
-            payment: None,
-            incoming,
-        }),
-        Ok(Prepared::Work(mut admitted)) => {
-            let physical = incoming.hold_position().map_err(|_| Refused::Closed)?;
-            // Already paid by the original 8KiB task contribution. The body and worker
-            // share this SAME allocation; neither can release the ordering guard alone.
-            let publication = Arc::new(PublicationCustody::new(
-                admitted.commit.take().expect("original admitted UI commit"),
-                physical,
-                admitted.payment.take().expect("original task contribution"),
-            ));
-            // Range and actual child/action were checked before this irreversible move.
-            // A local metadata refusal restores the SAME buffer and makes no actor request.
-            let body = match incoming.result_body_with_publication(
-                admitted.work.phase(),
-                admitted.output.clone(),
-                Some(publication.clone()),
-            ) {
-                Ok(body) => body,
-                Err(error) => {
-                    drop(admitted); // all unstarted work/commit before original physical reply
-                    return Ok(Response {
-                        result: Err(Refused::Protocol(match error {
-                            super::channel::Refused::Capacity => VoiceError::Capacity,
-                            _ => VoiceError::Malformed,
-                        })),
-                        work: None,
-                        payment: None,
-                        incoming,
-                    });
-                }
-            };
-            let task = run(Worker {
-                body: Some(body),
-                publication: Some(publication),
-                admitted,
+    // Keep synchronous historical/decoder variants out of the async frame entirely.
+    // Only the actual worker JoinHandle survives this scope; no historical Response is
+    // retained alongside the task/output wait. layout_bytes also counts launch's graph.
+    let task = match launch(context, route, incoming)? {
+        Started::Immediate(response) => return Ok(response),
+        Started::Task(task) => task,
+    };
+    task.await.map_err(|_| Refused::Stopped)
+}
+fn launch(context: &Context, route: &Route, incoming: Incoming) -> Result<Started, Refused> {
+    // Resolve terminal history synchronously. A Status is much larger than the live action
+    // selector; carrying it as prepare's async output embeds that unused branch throughout
+    // every UI/Actor wait. No historical status or borrowing decoder crosses this scope.
+    let target = match identify(context, route, &incoming) {
+        Err(error) => {
+            return Ok(Started::Immediate(Response {
+                result: Err(error),
+                work: None,
+                payment: None,
                 incoming,
-            });
-            #[cfg(test)]
-            eprintln!(
-                "confirmation result peak {}; future {}; response {}; admitted {}; command {}",
-                worker_layout(&task),
-                std::mem::size_of_val(&task),
-                std::mem::size_of::<Response>(),
-                std::mem::size_of::<Admitted>(),
-                std::mem::size_of::<catcoms_app::AppCommand>()
-            );
-            if worker_layout(&task) > TASK_BYTES {
-                // Proven local refusal: future was never polled and no actor request exists.
-                // Dropping it releases original work/payment/request, never refunds a Root
-                // publication or reports that an already admitted browser engine drained.
-                return Err(Refused::Protocol(VoiceError::Capacity));
-            }
-            tokio::spawn(task).await.map_err(|_| Refused::Stopped)
+            }))
         }
+        Ok(Initial::Historical(status)) => {
+            return Ok(Started::Immediate(Response {
+                result: Ok(status),
+                work: None,
+                payment: None,
+                incoming,
+            }))
+        }
+        Ok(Initial::Work(target)) => target,
+    };
+    start(context, route, target, incoming)
+}
+
+// Construct the whole asynchronous preparation/publication worker only AFTER borrowing its
+// original8KiB Data contribution. In particular, its UI/Actor waits and completed refusals
+// must not occupy an additional uncharged Control future. No actor effect is admitted here.
+enum Started {
+    Immediate(Response),
+    Task(tokio::task::JoinHandle<Response>),
+}
+fn start(
+    context: &Context,
+    route: &Route,
+    target: Target,
+    incoming: Incoming,
+) -> Result<Started, Refused> {
+    let work = match target.original.work() {
+        Ok(work) => work,
+        Err(error) => {
+            return Ok(Started::Immediate(Response {
+                result: Err(error.into()),
+                work: None,
+                payment: None,
+                incoming,
+            }))
+        }
+    };
+    let payment = match work.phase().copy(TASK_BYTES) {
+        Ok(payment) => payment,
+        Err(error) => {
+            return Ok(Started::Immediate(Response {
+                result: Err(error.into()),
+                work: Some(work),
+                payment: None,
+                incoming,
+            }))
+        }
+    };
+    let physical = incoming.hold_position().map_err(|_| Refused::Closed)?;
+    let publication = Arc::new(PublicationCustody::preparing(physical, payment));
+    let Target {
+        original,
+        tag,
+        output_range,
+    } = target;
+    drop(original); // the SAME Work now owns its actual indexed row; no extra resolver needed
+    let task = run(Worker {
+        context: Some(context.clone()),
+        route: Some(route.clone()),
+        work,
+        tag,
+        output: output_range,
+        publication: Some(publication),
+        incoming,
+    });
+    #[cfg(test)]
+    eprintln!(
+        "confirmation result peak {}; future {}; response {}; admitted {}; command {}",
+        worker_layout(&task),
+        std::mem::size_of_val(&task),
+        std::mem::size_of::<Response>(),
+        std::mem::size_of::<Admitted>(),
+        std::mem::size_of::<catcoms_app::AppCommand>()
+    );
+    if worker_layout(&task) > TASK_BYTES {
+        // Proven local refusal: future was never polled and no actor request exists.
+        // Dropping it releases original work/payment/request, never refunds a Root
+        // publication or reports that an already admitted browser engine drained.
+        return Err(Refused::Protocol(VoiceError::Capacity));
     }
+    Ok(Started::Task(tokio::spawn(task)))
 }
-enum Prepared {
+enum Initial {
     Historical(Status),
-    Work(Admitted),
+    Work(Target),
 }
-// This value stays inline in the paid physical operation until its original task contribution
-// is reserved. No ordinary-pool allocation is required to publish an already admitted result.
+struct Target {
+    original: super::ledger::ResolvedRow,
+    tag: [u8; 32],
+    output_range: Range<usize>,
+}
+// This value stays inline in the already-paid task. No ordinary-pool allocation is needed
+// to prepare or publish an original admitted result; its commit joins the same custody.
 struct Admitted {
-    work: Work,
     actor: ServerActor,
     grant: Arc<CallGrant>,
-    tag: [u8; 32],
-    output: Range<usize>,
-    commit: Option<tokio::sync::OwnedMutexGuard<()>>,
-    payment: Option<CopyCustody>,
+    commit: tokio::sync::OwnedMutexGuard<()>,
 }
 /// Declaration order applies even on unwind/runtime teardown: the actual work, grant/commit
 /// and paid task contribution drop BEFORE Incoming's Header can clear its physical position.
 struct Worker {
-    // Drop actual transferred bytes before the worker payment and physical header.
-    body: Option<VoiceConfirmationBody>,
-    admitted: Admitted,
+    context: Option<Context>,
+    route: Option<Route>,
+    work: Work,
+    tag: [u8; 32],
+    output: Range<usize>,
     publication: Option<Arc<PublicationCustody>>,
     incoming: Incoming,
 }
-async fn prepare(
-    context: &Context,
-    route: &Route,
-    incoming: &Incoming,
-) -> Result<Prepared, Refused> {
+fn identify(context: &Context, route: &Route, incoming: &Incoming) -> Result<Initial, Refused> {
     let context = context.upgrade().ok_or(Refused::Closed)?;
     let (original, identity, tag, output_range) = decode_result(&context, route, incoming)?;
     {
@@ -180,22 +214,41 @@ async fn prepare(
                 return Err(Refused::Protocol(VoiceError::RetryMismatch));
             }
             // History is past metadata, with no current grant/keys/RTC authority.
-            return Ok(Prepared::Historical(status));
+            return Ok(Initial::Historical(status));
         }
     }
+    Ok(Initial::Work(Target {
+        original,
+        tag,
+        output_range,
+    }))
+}
+async fn prepare(
+    context: &Context,
+    route: &Route,
+    incoming: &Incoming,
+    work: &Work,
+    tag: [u8; 32],
+    output_range: Range<usize>,
+) -> Result<Admitted, Refused> {
     let selected = route.selected();
-    {
-        let authority = context
-            .authority
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
-        super::factory::require_current_selection(context.gate(), &authority, selected)?;
-        route.require_open().map_err(|_| Refused::Closed)?;
-    }
-    check_voice_binding_in(&context.servers, selected.binding())
-        .await
-        .map_err(|_| Refused::Closed)?;
-    let commit = context.commit.clone().lock_owned().await;
+    let commit = {
+        let live = context.upgrade().ok_or(Refused::Closed)?;
+        {
+            let authority = live
+                .authority
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            super::factory::require_current_selection(live.gate(), &authority, selected)?;
+            route.require_open().map_err(|_| Refused::Closed)?;
+        }
+        check_voice_binding_in(&live.servers, selected.binding())
+            .await
+            .map_err(|_| Refused::Closed)?;
+        live.commit.clone()
+    }; // no upgraded mounted store/Coordinator/registry survives a parked UI commit wait
+    let commit = commit.lock_owned().await;
+    let context = context.upgrade().ok_or(Refused::Closed)?;
     context
         .gate()
         .require_unlocked()
@@ -219,7 +272,6 @@ async fn prepare(
         route.require_open().map_err(|_| Refused::Closed)?;
     }
     let grant = selected.grant()?;
-    let work = original.work()?;
     let output = &incoming.plain().map_err(|_| VoiceError::Malformed)?[output_range.clone()];
     if !matches!(
         work.action().operation(),
@@ -228,19 +280,14 @@ async fn prepare(
     {
         return Err(VoiceError::RetryMismatch.into());
     }
-    let payment = work.phase().copy(TASK_BYTES)?;
     // Never detach the broad mounted-store/Coordinator/native context. The original actor,
     // affine grant, commit and paid work are sufficient; Root rechecks authority in its turn.
     drop(context);
-    Ok(Prepared::Work(Admitted {
-        work,
+    Ok(Admitted {
         actor,
         grant,
-        tag,
-        output: output_range,
-        commit: Some(commit),
-        payment: Some(payment),
-    }))
+        commit,
+    })
 }
 
 /// The full borrowing decoder and transient parent handle end BEFORE the first suspension.
@@ -293,6 +340,13 @@ fn worker_layout_bytes(future: usize) -> usize {
         + std::mem::size_of::<catcoms_app::AppCommand>()
         + std::mem::size_of::<PublicationCustody>()
         + 2 * std::mem::size_of::<usize>()
+        // Preparation/hash/refresh now execute INSIDE this paid worker. Count their
+        // synchronous borrowed context/digest/status/argument graph too, not just the
+        // compiler's async frame or previously Control-paid decode/serialization.
+        + std::mem::size_of::<super::context::LiveContext>()
+        + std::mem::size_of::<sha2::Sha256>()
+        + std::mem::size_of::<Status>()
+        + 32 + 128
         + TASK_AND_REPLY_BYTES
 }
 
@@ -314,18 +368,27 @@ pub(super) fn layout_bytes() -> usize {
         + std::mem::size_of::<Action>()
         + std::mem::size_of::<Range<usize>>()
         + 128;
-    let validate = std::mem::size_of::<super::context::LiveContext>()
-        + std::mem::size_of::<Status>()
-        + std::mem::size_of::<Admitted>()
-        + std::mem::size_of::<sha2::Sha256>()
-        + 32
+    let start = std::mem::size_of::<Target>()
+        + std::mem::size_of::<Work>()
+        + std::mem::size_of::<super::custody::CopyCustody>()
+        + std::mem::size_of::<super::channel::PhysicalHold>()
         + 128;
-    // The borrowing decoder returns before any await; validation finishes before the worker
-    // is spawned, and Response::seal runs only after actual task/output collection. Include
+    // launch's historical/started alternatives are scoped before the first await. Include
+    // BOTH its whole output and Initial history/target while constructing that output.
+    let launch = std::mem::size_of::<Initial>() + std::mem::size_of::<Started>() + start;
+    // The borrowing decoder returns before any await; asynchronous validation belongs to
+    // the separately paid worker. Response::seal runs after task/output collection. Include
     // the complete synchronous reply graph explicitly, even without a worker payment.
+    eprintln!(
+        "result Control future/output {}; decode {}; launch {}; serialize {}",
+        future(commit),
+        decode,
+        launch,
+        super::history::serialization_layout_bytes()
+    );
     future(commit)
         + decode
-            .max(validate)
+            .max(launch)
             .max(super::history::serialization_layout_bytes())
 }
 
@@ -347,6 +410,130 @@ mod tests {
             total <= 16 * 1024,
             "result worker/body/frame requires {total}"
         );
+    }
+
+    /// Exercises this actual paid worker, not the child decoder: the native Derive fixture
+    /// deliberately cannot publish a confirmation result. Lock must refuse before that
+    /// operation check, while the uncollected failure still pays its real task/physical lane.
+    #[tokio::test]
+    async fn pre_admission_refusal_keeps_actual_task_payment_and_position_until_collection() {
+        use super::super::derivation_result::tests::Case;
+        use std::future::{poll_fn, Future};
+        use std::task::Poll;
+        let case = Case::new().await;
+        let phase = case.row().work().unwrap().phase().clone();
+        let incoming = case.frame(1, &case.bytes());
+        let work = case.row().work().unwrap();
+        let payment = work.phase().copy(TASK_BYTES).unwrap();
+        let physical = incoming.hold_position().unwrap();
+        let publication = Arc::new(PublicationCustody::preparing(physical, payment));
+        let boundary = case.native.state.ui_session_commit.lock().await;
+        let mut worker = Box::pin(run(Worker {
+            context: Some(case.context.clone()),
+            route: Some(case.route.clone()),
+            work,
+            tag: case.action.output_tag(&[]).unwrap(),
+            output: 187..187,
+            publication: Some(publication),
+            incoming,
+        }));
+        assert!(poll_fn(|cx| Poll::Ready(worker.as_mut().poll(cx).is_pending())).await);
+        case.native.actor.member_count().await; // actual earlier binding query has completed
+        assert!(poll_fn(|cx| Poll::Ready(worker.as_mut().poll(cx).is_pending())).await);
+        // Waiting owns only the original commit handle, not a strong mounted-store context.
+        assert_eq!(Arc::strong_count(&case.native.state.store), 1);
+        crate::register_ui_lock_request(&case.native.state);
+        drop(boundary);
+        let task = tokio::spawn(worker); // the actual task is independent of a socket waiter
+        tokio::time::timeout(std::time::Duration::from_secs(15), async {
+            while !task.is_finished() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(phase.copy(TASK_BYTES).err(), Some(VoiceError::Capacity));
+        assert!(case.route.session().fixture_counts().0);
+        assert!(case.action.terminal_status().receipt.is_none());
+        let response = task.await.unwrap();
+        assert!(matches!(response.result, Err(Refused::Closed)));
+        assert!(response.work.is_some() && response.payment.is_some());
+        assert_eq!(phase.copy(TASK_BYTES).err(), Some(VoiceError::Capacity));
+        assert!(case.route.session().fixture_counts().0);
+        drop(response);
+        assert!(!case.route.session().fixture_counts().0);
+        drop(phase.copy(16 * 1024).unwrap());
+        crate::lock_session_inner(&case.native.state, None)
+            .await
+            .unwrap();
+        case.retire();
+        case.native.close().await;
+    }
+
+    #[tokio::test]
+    async fn cancelling_early_worker_cannot_clear_physical_position_before_actual_work_retires() {
+        use super::super::derivation_result::tests::Case;
+        use std::future::{poll_fn, Future};
+        use std::sync::{
+            atomic::{AtomicBool, Ordering},
+            mpsc,
+        };
+        use std::task::Poll;
+        let case = Case::new().await;
+        let incoming = case.frame(1, &case.bytes());
+        let row = case.row();
+        let work = row.work().unwrap();
+        let payment = work.phase().copy(TASK_BYTES).unwrap();
+        let physical = incoming.hold_position().unwrap();
+        let boundary = case.native.state.ui_session_commit.lock().await;
+        let mut worker = Box::pin(run(Worker {
+            context: Some(case.context.clone()),
+            route: Some(case.route.clone()),
+            work,
+            tag: case.action.output_tag(&[]).unwrap(),
+            output: 187..187,
+            publication: Some(Arc::new(PublicationCustody::preparing(physical, payment))),
+            incoming,
+        }));
+        assert!(poll_fn(|cx| Poll::Ready(worker.as_mut().poll(cx).is_pending())).await);
+        case.native.actor.member_count().await;
+        assert!(poll_fn(|cx| Poll::Ready(worker.as_mut().poll(cx).is_pending())).await);
+        let guard = row.fixture_hold_work_retirement();
+        let before = Arc::strong_count(&case.action);
+        let cancel = AtomicBool::new(false);
+        // Work::drop first releases its actual Action Arc, THEN takes this held Row State.
+        // Observe that real destructor progress, rather than a sleep or a fabricated flag.
+        let (observed, busy) = std::thread::scope(|scope| {
+            let action = &case.action;
+            let cancelled = &cancel;
+            let (sent, received) = mpsc::channel();
+            let observer = scope.spawn(move || {
+                while Arc::strong_count(action) >= before && !cancelled.load(Ordering::Acquire) {
+                    std::thread::yield_now();
+                }
+                if !cancelled.load(Ordering::Acquire) {
+                    let _ = sent.send(());
+                }
+            });
+            let dropped = scope.spawn(move || drop(worker)); // actual future cancellation
+            let observed = received.recv_timeout(std::time::Duration::from_secs(5));
+            let busy = case.route.session().fixture_counts().0;
+            cancel.store(true, Ordering::Release);
+            drop(guard); // release BEFORE joins/assertions, including a failing regression
+            dropped.join().unwrap();
+            observer.join().unwrap();
+            (observed, busy)
+        });
+        observed.unwrap();
+        assert!(
+            busy,
+            "physical idle preceded actual blocked Work retirement"
+        );
+        assert!(!case.route.session().fixture_counts().0);
+        assert!(case.action.terminal_status().receipt.is_none());
+        drop(boundary);
+        case.retire();
+        case.native.close().await;
     }
 
     #[tokio::test]
@@ -425,62 +612,89 @@ mod tests {
     }
 }
 async fn run(mut worker: Worker) -> Response {
-    // This independently spawned task survives loss of the socket/invoke waiter. Its exact
-    // original UI commit remains owned until the actor publication AND body/reply collection.
-    // No engine/replay allowance is refunded on an ambiguous handoff or stopped actor.
-    let result = {
-        let body = worker.body.as_ref().expect("actual transferred body");
-        let submitted = match worker.admitted.work.action().operation() {
-            CryptoOperation::EncryptConfirmation => {
-                worker
-                    .admitted
-                    .actor
-                    .submit_voice_confirmation_result(
-                        worker.admitted.grant.clone(),
-                        worker.admitted.work.action().clone(),
-                        body,
-                        worker.admitted.tag,
+    // Preparation is part of this ALREADY paid detached task. Failure before UI admission
+    // still retains its original payment/physical hold through actual output collection.
+    let prepared = prepare(
+        worker.context.as_ref().expect("original weak context"),
+        worker.route.as_ref().expect("original route"),
+        &worker.incoming,
+        &worker.work,
+        worker.tag,
+        worker.output.clone(),
+    )
+    .await;
+    // Keep lifecycle owners in their ORDERED aggregate across every suspension/unwind.
+    // Destructuring into locals here would drop Incoming before Work on cancellation.
+    // Only optional resolution context/Route may leave early, before the Actor wait.
+    drop(worker.context.take());
+    drop(worker.route.take());
+    let result = match prepared {
+        Err(error) => Err(error),
+        Ok(admitted) => {
+            Arc::get_mut(worker.publication.as_mut().expect("original task custody"))
+                .expect("no body/publication clone before native admission")
+                .admit(admitted.commit);
+            // The same actual body allocation is restored on local metadata refusal.
+            // Only successful transfer lends a custody clone to independently queued work.
+            match worker.incoming.result_body_with_publication(
+                worker.work.phase(),
+                worker.output.clone(),
+                worker.publication.clone(),
+            ) {
+                Err(error) => Err(Refused::Protocol(match error {
+                    super::channel::Refused::Capacity => VoiceError::Capacity,
+                    _ => VoiceError::Malformed,
+                })),
+                Ok(body) => {
+                    publish(
+                        &worker.work,
+                        admitted.actor,
+                        admitted.grant,
+                        &body,
+                        worker.tag,
                     )
                     .await
-            }
-            CryptoOperation::DecryptConfirmation => {
-                worker
-                    .admitted
-                    .actor
-                    .commit_voice_confirmation_result(
-                        worker.admitted.grant.clone(),
-                        worker.admitted.work.action().clone(),
-                        body,
-                        worker.admitted.tag,
-                    )
-                    .await
-            }
-            CryptoOperation::Derive => {
-                unreachable!("child operation checked before ownership transfer")
-            }
-        };
-        match submitted {
-            Ok(completed) => match completed.result() {
-                Ok(_) => worker.admitted.work.refresh().map_err(Refused::from),
-                Err(error) => Err(error.into()),
-            },
-            Err(error) => Err(error.into()),
+                }
+            } // body drops before the completed output can become the last payment owner
         }
-    }; // the ACTUAL completed actor reply is collected before releasing the commit
-       // Original body/copy owners first, never a drainage inference.
-    drop(worker.body.take());
-    // Keep the actual shared payment/hold through completed worker-output collection too.
-    // A queued actor body independently retains it if THIS task is cancelled before now.
-    let payment = worker.publication.take();
-    let Worker {
-        admitted: Admitted { work, .. },
-        incoming,
-        ..
-    } = worker;
+    };
     Response {
         result,
-        work: Some(work),
-        payment,
-        incoming,
+        work: Some(worker.work),
+        payment: worker.publication,
+        incoming: worker.incoming,
     }
+}
+
+/// Only actual admitted UI commit custody can reach this Actor call. Caller/task loss cannot
+/// release that commit ahead of queued bytes, and Root repeats its own effect authorization.
+async fn publish(
+    work: &Work,
+    actor: ServerActor,
+    grant: Arc<CallGrant>,
+    body: &VoiceConfirmationBody,
+    tag: [u8; 32],
+) -> Result<Status, Refused> {
+    let submitted = match work.action().operation() {
+        CryptoOperation::EncryptConfirmation => {
+            actor
+                .submit_voice_confirmation_result(grant, work.action().clone(), body, tag)
+                .await
+        }
+        CryptoOperation::DecryptConfirmation => {
+            actor
+                .commit_voice_confirmation_result(grant, work.action().clone(), body, tag)
+                .await
+        }
+        CryptoOperation::Derive => {
+            unreachable!("child operation checked before ownership transfer")
+        }
+    };
+    match submitted {
+        Ok(completed) => match completed.result() {
+            Ok(_) => work.refresh().map_err(Refused::from),
+            Err(error) => Err(error.into()),
+        },
+        Err(error) => Err(error.into()),
+    } // the actual completed Actor reply is collected before body/publication collection
 }
