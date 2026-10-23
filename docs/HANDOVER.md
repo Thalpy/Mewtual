@@ -2,6 +2,15 @@
 
 ## Native terminal-delivery candidate (23 October)
 
+Final destructor tracing found and corrected a fixed-token accounting edge: CollectedChannel
+now declares identity before its paid Row, so the independent token drops before Row credit.
+There is no existing deterministic observer for the inter-field credit-return instant. The
+correction is established by Rust field/destructor tracing and read-only review; actual GC
+integration covers complete ownership/foreign-session/late-handle behavior, not that tiny
+interval. No timing race, source-shape test or layout-changing test hook was added. The full
+native run already compiled from10f55861 retains that provenance; fresh final-source gates
+are required for this correction, and the serial queue will stop before the next gate.
+
 Work continues in target/communication-final-proof-worktree from published346062af. Production
 V2 signalling/call lifecycle and external download resume are assigned to other agents and
 untouched here. The native/browser handoff remains incomplete; this is its next bounded slice.

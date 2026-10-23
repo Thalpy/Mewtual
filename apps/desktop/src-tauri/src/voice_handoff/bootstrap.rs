@@ -58,8 +58,11 @@ struct Retirement {
 /// Retain the paid Row until the ledger has observed its original provenance; drop it only
 /// outside both registries' guards. This proves channel collection, not action/SDK drainage.
 pub(super) struct CollectedChannel {
-    row: Arc<Row>,
+    // Declaration order is custody: this independent token must drop BEFORE the paid Row.
+    // Otherwise its last allocation can outlive bootstrap's metadata credit when no action
+    // Phase or Session remains. The Row's own retirement token is paid until _credit drops.
     identity: Option<Arc<SessionIdentity>>,
+    row: Arc<Row>,
 }
 impl CollectedChannel {
     pub(super) fn identity(&self) -> Option<&Arc<SessionIdentity>> {
