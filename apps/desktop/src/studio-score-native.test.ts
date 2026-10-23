@@ -68,6 +68,27 @@ test("score parser refuses malformed addresses/cells/patches and contradictory e
   assert.throws(() => parseScoreView(ordinaryView(badPatch)), /patch/);
 });
 
+// Re-review of e7250d48, LOW-2: the composer refuses to move or rewrite a layered slot whose
+// `conflict` flag says it holds several different values, so the flag must match the slot's own
+// evidence; an under-reported flag would let a grid edit drop versions nobody saw.
+test("a layered slot's conflict flag must agree with the different values it holds", () => {
+  const id = id64(99), key = `4:2/${id}`;
+  const layered = (values: unknown[], conflict: boolean | null) => {
+    const raw: Record<string, unknown> = content();
+    raw.patches = { [id]: { removed: false, register: reg(legacyJamPatch("sine"), isource(9)) } };
+    raw.layers = { [key]: { cleared: false, register: reg(values[0], isource(1), values.slice(1).map((value, i) => ({ value, source: isource(i + 2) }))) } };
+    raw.readiness = { cells: {}, patches: {}, headerConflicts: false, layers: conflict === null ? {} : { [key]: { ...cellIssues, overlap: conflict, conflict } } };
+    return ordinaryView(raw);
+  };
+  const a = { k: "n", p: id }, b = { k: "n", p: id, len: 3 };
+  assert.equal(scoreModel(parseScoreView(layered([a, b], true)).content).readiness.layers?.[key]?.conflict, true, "two versions, flagged");
+  assert.doesNotThrow(() => parseScoreView(layered([a, a], null)), "the same note twice is one value");
+  assert.doesNotThrow(() => parseScoreView(layered([a, null], null)), "a value and a clear is one live value");
+  assert.throws(() => parseScoreView(layered([a, b], false)), /conflict disagrees/, "an under-reported conflict");
+  assert.throws(() => parseScoreView(layered([a, b], null)), /conflict disagrees/, "a missing flag");
+  assert.throws(() => parseScoreView(layered([a, a], true)), /conflict disagrees/, "an over-reported conflict");
+});
+
 test("score register duplicate provenance and excessive evidence are rejected", () => {
   const raw = content(); raw.cells["0:0"] = { removed: false, register: reg({ k: "d", pad: 0 }, isource(1), [{ value: { k: "d", pad: 1 }, source: isource(1) }]) };
   assert.throws(() => parseScoreView(ordinaryView(raw)), /repeats a source/);

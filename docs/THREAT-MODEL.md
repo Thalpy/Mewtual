@@ -13,7 +13,11 @@ recovery: 512 records, 8 MiB of PIX file bytes, 12 MiB serialized Studio data, 1
 the original independent 1 MiB non-Studio allowance. Admission includes UTF-8, outer escaping and
 future request/diagnostic reserve. Disk reads check physical size/regularity and use a bounded
 read before authentication. Restore validates typed requests and original scope/group, holds
-them until an explicit action, and never restores a native view as authority. No plaintext
+them until an explicit action (Save, retry, discard, or leaving the record's own document, which
+saves it), and never restores a native view as authority. Opening a document never sends its held
+records, and admission re-reads a document it holds no view of before comparing a record's
+authoring binding; an unread or superseded read sends nothing and does not count as an attempt, so
+a later retry is admitted afresh. No plaintext
 browser fallback exists. Lock proceeds immediately even if raster staging/serialization fails;
 the failure is disclosed and previous sealed continuity is preserved. A hard crash between a
 native commit and continuity capture can still lose the latest receipt: this is not a write-ahead
@@ -113,6 +117,105 @@ test requires actual recovery-before-replacement, retains deleted SFX/export rej
 under Copy, and exercises ordinary recipe recovery with exact retries and stale-preview refusal.
 It does not convert backups into PIXA, publication into peer custody, or test engines into
 audible hardware/platform evidence. Current UI obligations are in [GATE7-UI-HANDOFF](GATE7-UI-HANDOFF.md).
+
+## Score layers: add wins and nothing blocks playback (2026-10-20)
+
+Owner decisions (docs/design-score-layers.md). No new authority: `set_note`/`clear_note` are
+admitted through the same membership, epoch, gate, causal-predecessor and one-entry-key checks as
+`set_cell`, and an older build refuses them fail-closed.
+
+- **Add wins.** A clear removes only the values its author saw. A malicious member can keep a note
+  alive by re-adding it with stale predecessors, where under removal wins they could force a
+  delete. Either way a member can already write any note; this changes which concurrent intent
+  survives, not who may write. Legacy cells and sounds keep removal wins.
+- **Nothing refuses a score.** Conflicts, overlaps, a sound that is gone, notes past the end and
+  notes over the cap no longer block Play, download, share or post. What cannot play is skipped
+  and counted in the composer's export list (the voices `score-voices.ts` skips);
+  `ScorePlayback.skipped` also counts holds the exporter had no lane for, but nothing shows that
+  number yet. The composer still lists every flag to review. A Flipnote's own frames and sound
+  keep their refusals; its linked Score is resolved the same additive way, so a linked score with
+  skipped notes now exports what plays instead of refusing the PIXA (a declared change).
+- **Amplification.** One member can stack many concurrent values on one key (empty predecessors at a
+  stale frontier, bounded by the per-device and per-epoch op budgets). Voice and overlap work is
+  O(n log n) on both sides (an O(n) sweep after the sort; the old pairwise walk was quadratic, 24 s
+  for 20,480 voices) and the exporter caps lanes at `TAKE_MAX_LANES`. Layer values are outside the
+  shared conflict budget, so that budget cannot be spent to strip other members' notes.
+- **The voice cap is shared, and one key can fill it.** The 4096 cap counts voices in canonical
+  order. A modified client can write 4096 distinct values into ONE early slot (say `n/0:0/<sound>`,
+  varying `len`/`vol`) from a stale frontier; every later voice then sorts past the cap, is skipped
+  as `count`, and is dropped from the next checkpoint (recovery still holds it). Before layers this
+  took 4096 distinct addresses. Local admission caps only the attacker's own honest client. This is
+  an accepted residual risk of additive merging: a member can already clear or overwrite any note.
+  A possible later mitigation is to count only the first few distinct values of one slot toward
+  the cap.
+- **Playback voices.** Studio playback of a document may hold 48 notes (`JAM_DOCUMENT_HELD_MAX`).
+  It applies only to the local Studio owner of an archival playback; jukebox decks and received
+  takes keep 16 per performer. Under the 64-voice ceiling, 48 leaves 16 held voices for all live
+  performers together while a document plays locally, not 16 each. A recipient may hear fewer
+  simultaneous holds than the author heard; the take is unchanged. Holds playback refuses for want
+  of a voice are counted per pass and shown while the score plays ("N not played"); a held voice
+  is still never stolen, so a room full of live performers' holds can silence a document's notes,
+  and that is now visible rather than silent.
+- **The composer does not overwrite versions the member has not seen.** A layered slot with several
+  different live values shows one; a write or clear of its key replaces every value the member saw.
+  The composer refuses any gesture that would do that (a move, resize, rewrite, and an undo or redo,
+  whose clears would remove versions added since), unless it is the member's own erase on the grid
+  or the review list acting on that one key. A member who stacks many values on a key can so make
+  that note editable only through the review list or an erase. "Several values" is read from
+  readiness, which counts a queued choice as the only value. The guard is in this composer only: a
+  modified client, or native admission, accepts such a write as an ordinary edit of the key, as it
+  always did.
+- **Mixed versions.** The first layered note pauses Studio sync for every older-build member of the
+  server, and an older-build tenure owner cannot close the epoch. Accepted; release notes say so.
+
+## Score additions re-authored without a click (2026-10-20)
+
+This is a new behaviour, not just a resend. After an epoch move the renderer authors a fresh Score
+addition (new nonce, current epoch) for an edit the member made, without a click. That was the
+owner's choice for collaborative scores.
+
+- It grants no new authority. Native runs the full membership, epoch, gate and causal checks on the
+  new edit.
+- It is limited to additions (`set_cell`, `set_note`, `set_patch`) that are proven not written and
+  on the ordinary route. It is bounded to three per edit and never crosses a reset or lock.
+- It extends the design question in the next section. The re-authored addition is causally newer
+  than whatever a collaborator wrote meanwhile at the same cell, so it can override that value. The
+  member's working view showed their value throughout. Clears and header changes are not
+  re-authored, so nothing a collaborator added is removed unseen.
+
+## Studio save resend and the batch grant (2026-10-19, `[desync fixes]`)
+
+- **ACL (SEC-IPC-001).** `studio_apply_batch` was registered but ungranted, so the app manifest
+  denied it everywhere; that was the safe direction, but it broke every burst of Score edits. It is
+  now granted to `main` only (account-write). It carries no authority a sequence of `studio_apply`
+  calls lacks: each item is the same signed member operation under the same custody fence and 64 KiB
+  cap, natively bounded to 64 items and 256 KiB, Score-only, and not atomic.
+- **Automatic resend is replay of the member's own request, not new authority.** The renderer
+  resends a failed Save byte-identically (nonce, epoch, body) after a bounded backoff (seven
+  resends, about two minutes in all), and only for routes whose exact retry native recognises from
+  the retained signed envelope (Create, Apply, Index Apply, ordinary frames). Native still runs the
+  full membership, epoch and gate checks on every visit, so a resend cannot outlive a revoked member
+  or a closed epoch. Resends never cross a reset, lock or scope change. Restored work is never
+  resent before something the member did sends it (an explicit Save or retry, leaving its document
+  or the Studio, a channel change, or a post to chat). A refusal no resend can change (changed
+  history, retired epoch, a server or membership that is gone, an id that already exists) is never
+  resent, and the member's own Retry refuses it too. The amplification bound per failed record is
+  seven resends. Each resend can itself be repeated by the two busy layers beneath it (at most 4 x 6
+  calls) plus an admission read. At most one save is in flight per lane, and two in all.
+- **Design question, not resolved here:** an automatic resend can arrive up to about two minutes
+  after the edit, with no fresh admission check (an exact retry skips it by design). In a
+  multi-member document it can then overwrite a peer's newer value in the same epoch without the
+  member choosing to. A manual retry has always been able to do the same; the resend makes it
+  happen without a click. The member's working view showed their value throughout.
+- **One more "not written" classification.** "Not written" is what permits "Save as a new edit",
+  which mints a fresh nonce, so a wrong classification could apply an edit twice. Only native's
+  retired-epoch refusal is added, matched exactly, alone or as a batch's first item. Native raises
+  it before the intent barrier, and batch items are applied in order. A test pins the text, its
+  single producer, the ordering and the batch wrapper to the Rust sources. Anything else, including
+  a later batch item or a record whose earlier attempt was uncertain, stays uncertain.
+- **Leaving no longer waits for receipts.** Edits keep their full request on the queue (and in the
+  lock snapshot) until they land or the member discards them; the Studio does not change channel
+  while its queue holds work. Window close still waits for every receipt.
 
 ## Gate 6 enforcement checkpoint (2026-10-14; candidate at that date)
 
@@ -217,7 +320,8 @@ table with the commit that closed it.
   duplicate JSON and invalid UTF-8 and returns owned encoded frames, including for Buffer,
   typed-array subclass or shared-memory callers.
   Authored score holds and SFX durations are bounded and preserved, not derived from animation
-  FPS. Overlapping same-row score holds refuse export. The connected candidate displays retained
+  FPS. Overlapping score holds play on separate lanes (since 2026-10-20; see "Score layers" above).
+  The connected candidate displays retained
   conflicts/readiness and uses opaque archival capabilities for authored holds beyond 30 seconds;
   raw live-call note admission retains its original watchdog.
   Export inputs are snapshotted before asynchronous hashing. Exporter/group labels do not prove

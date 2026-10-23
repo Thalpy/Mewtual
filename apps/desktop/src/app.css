@@ -7777,6 +7777,37 @@ button.you-panel:hover {
   color: var(--text);
 }
 
+/* A toast that follows background work, such as the Studio's saves after leaving it: a thin bar
+   along the bottom edge fills from left to right as the work completes. */
+.toast.has-progress {
+  position: relative;
+  overflow: hidden;
+}
+
+.toast-bar {
+  position: absolute;
+  left: 0;
+  bottom: 0;
+  height: 2px;
+  width: calc(var(--p, 0) * 100%);
+  background: var(--accent);
+  transition: width 0.2s ease-out;
+}
+
+.toast.ok .toast-bar {
+  background: var(--ok);
+}
+
+.toast.warn .toast-bar {
+  background: var(--warn);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .toast-bar {
+    transition: none;
+  }
+}
+
 @keyframes toast-in {
   from {
     opacity: 0;
@@ -18290,3 +18321,14 @@ button.id-pick .avatar { width: 28px; height: 28px; flex: none; }
 .composer-attach button:hover {
   color: var(--danger);
 }
+
+/* The studio placeholder while its lazy chunk loads: an indeterminate bar (a module import has
+   no progress to report) plus a seconds readout once it has taken long enough to wonder. */
+.studio-loading { display: flex; flex-direction: column; gap: 8px; max-width: 220px; padding: 6px 0; }
+.studio-loading.wide { max-width: 360px; }
+.studio-loading .micro { font-family: var(--mono); font-size: 0.62rem; letter-spacing: 0.1em; text-transform: uppercase; color: var(--muted); }
+.studio-loading-bar { position: relative; height: 4px; border-radius: 2px; background: var(--bg-elev); border: 1px solid var(--border-soft); overflow: hidden; }
+.studio-loading-bar i { position: absolute; top: 0; bottom: 0; width: 35%; border-radius: 2px; background: var(--accent); animation: studio-loading-slide 1.1s ease-in-out infinite; }
+@keyframes studio-loading-slide { from { left: -35%; } to { left: 100%; } }
+html[data-motion="off"] .studio-loading-bar i { animation: none; left: 0; width: 100%; opacity: 0.5; }
+@media (prefers-reduced-motion: reduce) { .studio-loading-bar i { animation: none; left: 0; width: 100%; opacity: 0.5; } }

@@ -31,6 +31,13 @@ admission reserves frozen-request/diagnostic overhead and counts UTF-8 plus oute
 The sealed envelope is capped at 16 MiB with the existing independent 1 MiB allowance for all
 non-Studio continuity. Physical reads are bounded before decryption. This is orderly lock/close
 recovery, not a write-ahead log or a claim of receipt recovery after a hard process/OS crash.
+Unlock restores that queue with no document open. Opening a document is never conditional on its
+held work saving first (a document switch saves only the document left), and the sidebar shows a
+row with an open button for documents holding unsaved edits (up to eight, then a count; an Index
+edit about one entry counts for that document, on every route; pending Creates keep their own
+rows), so their Save, Retry and discard controls stay
+reachable even for a document the Index does not list. Once open, those controls render whatever
+the document read did: a failing read shows its error beside them, never instead of them.
 
 ## Studio Save, navigation and playback corrections (2026-10-18)
 
@@ -41,7 +48,10 @@ fence an ACK's projection: an overlapping later read preserves its newer state, 
 finishes before dependent queued work runs. Navigation without a read never suppresses Create's
 initial projection. Editor selection flushes the original
 object/frame's dirty raster before replacing the document; a synchronous enqueue refusal vetoes
-the switch. Pending exact Saves retain their pixels and identity offscreen. Protocol Open phase
+the switch. Pending exact Saves retain their pixels and identity offscreen. A slow or failed Save
+never holds navigation: leaving hands it to the background queue, which resends a failed exact
+request on its own for about two minutes (bounded backoff) before leaving it to the member, and the
+Studio waits to change channel until its queue has drained. Protocol Open phase
 and bounded maintenance watches are independent of the one currently open editor.
 
 Looping pictures wrap through long authored sound/release tails without shortening sound. Shared

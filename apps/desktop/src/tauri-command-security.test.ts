@@ -268,8 +268,13 @@ function invokedCommands(source: string): string[] {
  * so the guarantee this file exists for is unchanged, and the check below still sees those
  * literals. Widening this list is a security decision: an indirect invoke is a command name that
  * cannot be audited by reading the frontend.
+ *
+ * `studio-busy.ts` is the Studio session's storage-busy repeat (`busyRetrying`). It wraps a whole
+ * `StudioIpc` and forwards each call's own command and arguments unchanged, a bounded number of
+ * times. It never picks a command itself. Every Studio call site still names its command as a
+ * literal in `studio-native.ts` (`ipc.invoke("studio_apply", …)`), which this scan still reads.
  */
-const INVOKE_WRAPPERS = ["diagnostics.ts"];
+const INVOKE_WRAPPERS = ["diagnostics.ts", "studio-busy.ts"];
 
 test("native command extraction handles stacked attributes and intervening Rust trivia", () => {
   const source = String.raw`

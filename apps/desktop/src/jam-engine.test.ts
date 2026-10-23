@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { JAM_DRUM_DIGESTS_GLOBAL, JAM_DRUM_DIGESTS_PER_LANE, JAM_DRUM_PENDING_GLOBAL, JAM_DRUM_PENDING_PER_SOURCE, JAM_HELD_PER_PEER, JAM_LEGACY_SESSION_NONCE, JAM_REMOTE_HOLD_MAX_MS, JAM_SESSION_NONCE_HEX_CHARS, JAM_VOICE_DECLICK_SECONDS, type JamPatch, type JamTake } from "./jam-contract.ts";
+import { JAM_DOCUMENT_HELD_MAX, JAM_DRUM_DIGESTS_GLOBAL, JAM_DRUM_DIGESTS_PER_LANE, JAM_DRUM_PENDING_GLOBAL, JAM_DRUM_PENDING_PER_SOURCE, JAM_HELD_PER_PEER, JAM_LEGACY_SESSION_NONCE, JAM_REMOTE_HOLD_MAX_MS, JAM_SESSION_NONCE_HEX_CHARS, JAM_VOICE_DECLICK_SECONDS, JAM_VOICES_GLOBAL, type JamPatch, type JamTake } from "./jam-contract.ts";
 import { drumSeed, JamEngine, type JamDrumSeedInput, type JamPlaybackPatchSet } from "./jam-engine.ts";
+import { StudioAudioSession } from "./studio-audio.ts";
 import { jamPatchId } from "./jam-patch.ts";
 import { JamLatestTaskQueue } from "./jam-publication.ts";
 import { JamPeerBudget } from "./jam-budget.ts";
@@ -293,6 +294,52 @@ test("SFX shares the score performer's held-note allowance rather than adding an
   assert.equal(plan.events[16].kind, "on");
   assert.equal((await engine.playArchivalEvent(capability, 16)).reason, "source-held");
   assert.equal(engine.snapshot().voices.length, 16);
+});
+
+// Review of e7250d48, LOW 1: an attack beyond the voice cap was skipped and never counted, though
+// the contract says such notes are counted, not hidden. Real engine and allocator, both owners.
+test("notes beyond the playback voice cap are counted once per pass, for the document and a shared take", async () => {
+  for (const [document, cap] of [[true, JAM_DOCUMENT_HELD_MAX], [false, JAM_HELD_PER_PEER]] as const) {
+    const { engine, now } = contextAndEngine();
+    const audio = new StudioAudioSession(engine, () => now.value);
+    audio.setScope({ generation: 1, server: 0, channel: "channel", membership: 1 }, false);
+    const input = archiveTake(), notes = cap + 1;
+    input.events = [
+      ...Array.from({ length: notes }, (_, q) => ({ ms: 0, lane: 0, n: 30 + q, on: 1 as const, w: "sine" as const, p: 0, q })),
+      ...Array.from({ length: notes }, (_, q) => ({ ms: 1_000, lane: 0, n: 30 + q, on: 0 as const, q: notes + q })),
+    ];
+    assert.equal(await audio.start("score", async () => ({ take: input, gridMs: 2_000 }), true, 0, document), true);
+    await audio.tick();
+    assert.equal(engine.snapshot().voices.filter((voice) => voice.phase === "held").length, cap, `document=${document}`);
+    assert.equal(audio.state.state, "playing", `document=${document}: a refused note does not stop playback`);
+    assert.equal(audio.state.refused, 1, `document=${document}: the one note without a voice is counted`);
+    now.value = 1_000; await audio.tick();
+    assert.equal(audio.state.refused, 1, `document=${document}: its release is not a second refusal`);
+    now.value = 60_000; await audio.tick();
+    assert.equal(audio.state.state, "playing", `document=${document}: the loop restarted`);
+    assert.equal(audio.state.refused, 1, `document=${document}: the pass that ended is carried across the restart`);
+    await audio.tick();
+    assert.equal(audio.state.refused, 1, `document=${document}: a loop counts per pass, it does not add passes up`);
+    audio.stop();
+    assert.equal(audio.state.refused, 0, `document=${document}`);
+  }
+});
+
+test("a document note refused because the room's voices are all held is counted too", async () => {
+  const { engine, now } = contextAndEngine();
+  for (let peer = 0; peer < JAM_VOICES_GLOBAL / JAM_HELD_PER_PEER; peer++) {
+    const live = engine.openSource(`live-${peer}`); engine.beginSourceSession(live, sn);
+    for (let note = 0; note < JAM_HELD_PER_PEER; note++) assert.equal(engine.noteOn({ channel: live, sequence: note, note: 40 + note, wave: "sine", remote: true }).ok, true);
+  }
+  const audio = new StudioAudioSession(engine, () => now.value);
+  audio.setScope({ generation: 1, server: 0, channel: "channel", membership: 1 }, false);
+  const input = archiveTake();
+  input.events = [{ ms: 0, lane: 0, n: 60, on: 1, w: "sine", p: 0, q: 0 }, { ms: 0, lane: 0, n: 62, on: 1, w: "sine", p: 0, q: 1 },
+    { ms: 1_000, lane: 0, n: 60, on: 0, q: 2 }, { ms: 1_000, lane: 0, n: 62, on: 0, q: 3 }];
+  assert.equal(await audio.start("score", async () => ({ take: input, gridMs: 2_000 }), false, 0, true), true);
+  await audio.tick();
+  assert.equal(engine.snapshot().voices.length, JAM_VOICES_GLOBAL, "held voices are never stolen");
+  assert.equal(audio.state.refused, 2);
 });
 
 test("Legacy Sounds Only keeps a zero-release SFX's fallback tail past the old thirteen-ms cleanup", async () => {

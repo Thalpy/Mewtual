@@ -1,5 +1,798 @@
 # Mewtual; Handover
 
+## Collaborative Score editing, stages 2 to 4: layers, additive merge, show/ghost/hide (2026-10-20, branch `score-composer-2`)
+
+Contract: `docs/design-score-layers.md` (design-reviewed; findings H1 to H4 and M1 to M5 are folded
+in and marked there). Interface summary: INTERFACES.md top section. Threat notes: THREAT-MODEL.md
+"Score layers".
+
+Renderer (apps/desktop/src):
+- `score-voices.ts` (new) is the one definition of what plays: candidates, clipping (`len` only
+  above 1), collapse, canonical order, skips, sparse flags, an O(n) overlap sweep. The shared
+  fixture `crates/catcoms-replication/tests/fixtures/studio-score-readiness-v1.json` pins it
+  against Rust readiness.
+- `studio-contract.ts`: `set_note`/`clear_note`, `ScoreLayer`, `layerOf`, `noteKey`, `parseNoteKey`.
+- `studio-native.ts`: optional `layers`/`readiness.layers` parse; `ScoreModel.notes`,
+  `layerSlots`, `voices`; `scoreVoiceSlots`, `layerShownValue`/`layerShownAlternative`;
+  `RecoveryChoice` `scoreNote`.
+- `studio-working.ts`: pending `set_note`/`clear_note`, readiness from `score-voices.ts`, split by
+  collection and kept sparse (the media key serialises it).
+- `studio-export.ts`: `notes` input, lanes for overlapping holds, `skipped`.
+  `studio-resolved-export.ts`: `scoreExportInput` never refuses; `withVoiceSkips`.
+- `studio-session.ts`: media key includes `voices.play`; `scoreNote` recovery choices;
+  `AUTO_REAUTHOR_OPS` has `set_note`. `studio-draft.ts` accepts the new ops and choice.
+- Playback: `JAM_DOCUMENT_HELD_MAX` (48), `heldCap` on the allocator, `document` flag from
+  `Studio.svelte` through `App.svelte`, `studio-audio.ts` and `studio-playback.ts`.
+- Composer: `score-editor.ts` gains the layer surface (`scoreSurface`, `scoreGhostCells`,
+  `scoreSurfaceOps`, `scoreNoteCheck`, `scoreIssuesAt`, visibility helpers) and `note`
+  diagnostics; `scoreDiagnosticOperation` returns a list. `ScoreEditor.svelte` reads the document as
+  `docModel` and edits `model`, the surface; every write leaves through `sendAll`, which
+  translates surface gestures and records document ops for undo. New hooks:
+  `data-score-visibility` (per sound and `d`), `data-doc-kit`; ghost cells carry
+  `ghost`/`gon`/`gend`/`gpad`. Ready gating of play, post, download and share is gone.
+- Visual fixture: "Recovery sketch" holds a concurrent pair in one layer and a hit a clear lost to.
+
+Rust (crates/catcoms-replication, crates/catcoms-app, src-tauri):
+- `score.rs`: `ScoreOp::SetNote`/`ClearNote`, `ScoreLayer` (`key`/`parse`, one spelling),
+  `ScoreCell::layer`. `references.rs` knows both names.
+- `score/state.rs`: `ScoreProjection.layers`, the `ScoreLayerSlot` newtype (no `value()`/
+  `removed()`; `live`, `cleared`, `shown`, `shown_alternative`), `n/` keys, `MAX_KEY_BYTES` 73,
+  readiness from `score/voices.rs` (the Rust half of `score-voices.ts`), distinct-value header and
+  patch conflicts.
+- `score/snapshot.rs`: the optional layer trailer (tag `0x01`, absent without layers, golden
+  vector), voice-order compaction outside the conflict budget, layer op ids in `source_ids`.
+- `admission.rs`: legacy cells and live layer slots share the 4096 cap; `change.rs`: `SetNote`
+  faces `SetCell`'s checks, `ClearNote` always admissible.
+- `catcoms-app` `restore/score.rs`: `StudioRecoveryItem::ScoreNote`; restore authors the shown
+  value into an empty slot only, Copy can clear; the combined cap.
+- src-tauri: the `layers` DTO (byte-identity pinned for layer-free scores) and the `scoreNote`
+  `ChoiceInput`.
+- Tests: `score/voices/tests.rs` runs the shared fixture, a pairwise overlap oracle and a timing
+  test; `score/change/tests/layers.rs` covers both Automerge orders of add vs clear, the 73/74-byte
+  key, the trailer, compaction, the budget exemption, the voice-order cap and the combined cap.
+  `studio-score-ops-v1.json` gained five layered vectors (23 cases).
+
+Gotchas:
+- The composer's surface is derived from the `model` prop. A test that changes the score under a
+  mounted composer must hand over a new model (Harness `update`); the in-place `apply` harness works
+  because `sendAll` bumps `sent`, which re-derives the surface.
+- Test `ScoreModel`s must carry `notes` (the fixtures alias it to `cells`) and `voices`.
+- A gesture's ops are writes before clears; refusal tests now refuse the clear.
+
+Adversarial review (2026-10-20): no blocker or high; a re-review of the first M1/M2 fixes found
+one high and two mediums in them, fixed as below. Fixed:
+- M1 (with re-review H1 and M2): discarding a refused write released its gesture's clear,
+  deleting the note. `onop` carries `scoreGestureId()`; `applyScoreOp(object, op, gesture)` keeps
+  a session-private link; `discard` of a linked Score write removes every LATER record of its
+  gesture in the lane (writes and clears, not in flight) in one pass, then pumps once (pumping per
+  record started the next clear). Links are not in the lock snapshot: after a restore, discarding
+  a Score write marks the restored note edits after it in its lane `blocked` ("An earlier edit was
+  discarded..."), so a bulk Save never runs them and each is the member's to retry or discard.
+- M2 (with re-review M1): a slide could overwrite a note before writing its value elsewhere.
+  `scoreMoveSelection` emits sets against the direction of travel, and `orderWrites` makes a write
+  wait for the write carrying the value it replaces (identity ignores `len: 1` vs absent and
+  `vol: 100` vs absent). An exhaustive test checks every prefix of every move of small patterns of
+  repeated values, in time and pitch.
+- M3 (doc): one slot can fill the 4096 voice cap and push others' notes out; recorded in
+  THREAT-MODEL as an accepted residual risk.
+- L2, L8: overclaiming or stale wording in INTERFACES, THREAT-MODEL, GATE6-ACTIVATION-DESIGN,
+  design-creative-suite, GATE7-UI-HANDOFF, Studio's history line, recovery labels (now name the
+  layer).
+- L3: the grid shows a layered copy before a stale legacy copy of the same sound; editing,
+  moving or clearing the shown note takes the stale copy with it.
+- L4: ghosting or hiding a sound drops a selection or picks on it; reviewing a legacy item
+  (removed ones too) shows its sound; "Sound of this note" lists shown sounds only.
+- L5: the full-score message now fits moves too.
+- L6: identical concurrent values carry no conflict mark, for notes and headers, and are not
+  listed for attention (`scoreHeaderOthers`, distinct values in `scoreAttention`).
+- L7: while a set of a header is queued, the working projection gives that header one value, so
+  readiness, chips and the attention list agree with the readback.
+- L9: usage, trim and the overview count every voice (`docModel.voices.all`, exact for queued
+  edits); the grid's extent also reads the raw shown notes so tails past the end stay visible.
+
+Third review pass (no blocker or high). Fixed:
+- M-A: a phrase move could replace a note of the moving sound stacked behind another sound in the
+  destination cell, never picked. `scoreSurfaceOps` refuses a set onto an existing document key
+  that is not the cell's shown note and was not vacated earlier in the gesture ("Another note of
+  that sound is in the way there."); this also covers changing a note's sound onto a stacked one
+  (L3). A randomized two-sound property test checks no move changes an unpicked note.
+- M-B: re-authoring a restored write dropped its restored mark; `reauthor` now carries it.
+- L1: the restored hold also covers failed restored records: it cancels their automatic resend
+  and re-save jobs and sets the hold message.
+- L2: "fit to last note" reads the raw shown notes too, so it can cover a hold crossing the end.
+- L4: a cell's "another value by" marks drop while an edit of that note is queued.
+- L5: Discard's confirmation says how many edits go (`discardCount`).
+
+Owner's review of `e7250d48` (no blocker; two high, four medium, one low). Fixed, each with a
+regression that fails when its fix is reverted:
+- H1: `staleCopy` cleared any legacy cell of the shown note's sound, so moving a layered note
+  deleted a distinct legacy note behind it. It needed the same note identity, but that identity
+  equated `vol: 100` with no `vol`, which playback hears as two voices: only partly fixed, see the
+  re-review of `73b68ada` below (it now uses `copyIdentity`). A distinct legacy note stays where it
+  is and the same-sound overlap guard (`scoreNoteCheck`) refuses an edit that would overlap it.
+  The random property now mixes legacy and layered keys, drums and distinct companions.
+- H2: a rollback after a host refusal ran every inverse, so after one inverse was refused an older
+  one could clear the last copy of a note. `sendAll` stops the rollback at its first refusal and
+  keeps the prefix (which keeps every note) as the undoable gesture.
+- M1: a phrase drag captured its keys at pointer-down and could move a collaborator's replacement
+  note. The drag binds each carried cell's document key and bytes (`bound`, `boundStill`) and
+  moves nothing if any changed; a multi-key drag moves exactly its captured keys.
+- M2: undo, redo and the review list's actions skipped the surface and wrote into ghosted or
+  hidden sounds. `sendAll` refuses any gesture whose ops reach a sound that is not shown
+  (`scoreOpLayers`); the history entry stays. Only partly fixed: a legacy `set_cell` replacing
+  another sound was missed (re-review of `73b68ada`, MEDIUM 1, below).
+- M3: an old batch's reconciliation read could outlive a lock and restore and clear the restored
+  records' eligibility. `finish` acts only on a record still in the queue, and the batch path
+  checks the session generation after `landed`.
+- M4: a recovery apply is eligible at once, so an admission refusal (Index unread, server group
+  changed) settled it inside `enqueue`, before the walk had installed its callback; the walk stayed
+  "applying". `enqueue(rec, settle)` installs the callback before the record can be pumped
+  (`studio-auto-retry.test.ts`, both refusals).
+- L1: attacks the voice allocator refused (`source-held`, `room-held`) were not counted.
+  `StudioPlaybackController.refused` counts them once each for the current start (releases,
+  `duplicate` and `sequence` are not counted; a stale playback's late result never counts);
+  `StudioAudioState.refused` reports the pass under way or the one before it, whichever is larger,
+  so a loop neither sums passes nor drops to 0 at each restart. The composer shows "N not played"
+  while the score plays (`data-score-refused`). Real-engine tests: 49 document notes give 48 held
+  and 1 counted, 17 shared ones 16 and 1, and a room full of held live voices counts both notes.
+- Design question 1 (several live values): the grid shows one value of a slot that holds several
+  different ones, so moving, resizing or rewriting it would drop the others unseen. `sendAll`
+  refuses such a gesture (`scoreOpSeveralValues`) and points to the review list, where choosing a
+  version rewrites the slot to it; the member's own erase on the grid (a surface gesture of clears
+  alone) removes every version. Identical values are one value and edit normally. Legacy cells are
+  unchanged (removal wins).
+- Design question 2 (hold past the end): the contract said an edit clips the length, the editor
+  refused. Kept the refusal (the authored length survives a score shortened and grown back) and
+  made it practical: Shorten brings a hold that runs past the end to the end in one press (one
+  step at a time was refused until the last). The design doc now says so.
+
+Re-review of those fixes (no blocker or high). Fixed, each verified by breaking it:
+- M-A: an undo or redo of clears alone took the erase exemption and removed a version a
+  collaborator added since. The exemption is now for surface gestures only (`erase`).
+- M-B: `resolving` exempted every key of the gesture, so choosing a removed legacy cell's value
+  overwrote a layered slot with two versions. `resolving` is now the reviewed key and only that
+  key is exempt; the review list's "clear" passes its key too.
+- L-A: the guard read the raw `layerSlots`, which keep both values until readback, so a queued
+  choice left the note uneditable while the review list showed nothing. It reads readiness
+  `conflict`, which the working projection recomputes.
+- L-B: undoing a one-press Shorten (or an erase) of a hold past the end was refused, which also
+  blocked every older undo. WITHDRAWN: the `pastEnd` exception added here queued writes that
+  native refuses (`change.rs` requires `step + len <= effective_steps`), so it was removed in the
+  re-review of `73b68ada` (MEDIUM 2, below). Kept from it: a length the end forced is not
+  remembered as `hold`.
+- L-D: THREAT-MODEL's wording, this entry's guard name, and `noteIdentity`'s place above
+  `orderWrites`'s comment.
+
+A second short re-review confirmed those (no blocker, high or medium) and found two lows, fixed:
+- LOW-1: the past-the-end mark was one per gesture and survived a partial rollback. Moot: the
+  mark itself was removed with L-B's exception (re-review of `73b68ada`, MEDIUM 2).
+- LOW-2: the guard trusted native readiness with no evidence check. `parseScoreContent` now
+  refuses a score whose `readiness.layers[key].conflict` disagrees with the distinct live values
+  of that slot (as it already did for `headerConflicts`), so a disagreeing native build fails
+  closed instead of letting a grid edit drop versions.
+- L-C (not changed): the chip keeps the previous pass's count for one pass after an overload is
+  fixed, by design, so it does not flicker to 0 at each restart; and the composer reads the one
+  app-wide audio session, so an inline chat PIXA playing meanwhile would show its own refusals (as
+  `playing` and `positionMs` already did).
+- Test gap: a maximal layered export (4096 notes as 64 sounds stacked on each of the 64 latest
+  cells, so 64 lanes, `v` on every attack, 64 maximal recipes, a 256-byte group) was 510,915 bytes
+  against the 524,288 cap. Strengthened below.
+- Correction: `test:startup` does not run in CI (the earlier review request said it did). It has
+  not been run on this branch; nothing here touches `setup` or process spawning.
+
+Owner's re-review of `73b68ada` (no blocker; one high, two medium, one design question). Fixed:
+- HIGH 1: the stale-copy test equated `vol: 100` with no `vol`, so moving or erasing a layered note
+  deleted a legacy note spelled the other way, which playback (`score-voices.ts`, Rust
+  `voices.rs`) hears as a second voice. It now uses `copyIdentity`: playback's spelling (absent
+  `len` is 1, `vol` exactly as authored) on the raw length, so a clipped longer note is not a copy
+  either. `noteIdentity` stays for `orderWrites` only. The regression checks both orientations with
+  the real `scoreVoices`; the random property now generates explicit `vol: 100` and companions
+  that differ only in that spelling, and its oracle uses playback's rule (it had copied the bug).
+- MEDIUM 1: `scoreOpLayers` took a legacy `set_cell` to reach only the sound it writes, so an undo
+  putting sound A back over a collaborator's B wrote into B while B was ghosted or hidden. It now
+  also counts the sound the cell holds now (mounted test: two sound orders and a drum, ghost and
+  hide, then shown: undo runs and redo puts B back).
+- MEDIUM 2: L-B's `pastEnd` exception is gone. `scoreReplay(model, ops, history)` refuses an undo
+  or redo whose hold would run past the current end ("Lengthen the score, then undo again")
+  before anything is queued; the entry stays and works once the score is long enough. Shorten
+  says so when it trims. The replaced test had pinned the invalid op (declared in the test).
+- Design question (undo after replacing several versions): an erase or a review-list choice of a
+  slot with several versions replaces them all, and its undo can only write the shown value back;
+  the composer now says so when it happens.
+- Test gap: the maximal export now uses explicit `vol: 100` (`v: 100`) and a group of 256 control
+  characters (six-byte JSON escapes), the reviewer's 516,557-byte case, pinned above 514,000.
+- Not covered by a test: native admission itself (no shared frontend/native case drives a Save of
+  the refused undo); the frontend test asserts no emitted set ever exceeds the score's length.
+- Verification: at the owner's instruction this round ran no local tests or checks at all; CI on
+  the pushed head is the evidence.
+
+Follow-ups (not done):
+- The review's remaining test gaps: the Rust maximal combined seed (L10 below), the overlay-route
+  discard cascade (below), and a randomized Rust/TypeScript parity run plus an old/new binary
+  interoperability session, neither of which exists.
+- L1: the exporter's lane skips (`ScorePlayback.skipped` beyond voice skips) are not shown
+  anywhere; the composer's export list shows voice skips only.
+- L5: at the 4096 cap a move or a legacy edit is refused, since it needs a free place between its
+  write and its clear.
+- L10: no Rust test pins the maximal combined seed (4096 voices backed twice, a full legacy
+  conflict budget, maximal titles) under 2 MiB; the reviewer estimates about 1.74 MB.
+- M3 mitigation: count only the first few distinct values of one slot toward the voice cap.
+- L4 remainder: the selection is kept by cell, so making a sound shown or choosing another sound
+  can re-bind it to that sound's note in the same cell (visible in the panel, not silent).
+- Residual: after discarding a refused move write, a later gesture that writes the same sound into
+  the vacated cell overwrites the note's only copy (no worse than before the fix).
+- Overlay-route (closing/unconfirmed) coverage of the discard cascade is by construction only
+  (the same `laneOf`/`isScoreWrite` path); no test drives that route.
+
+Contract changes in existing tests (all declared in the tests): placements author `set_note`;
+legacy edits are `set_note` then `clear_cell`; moves write before they clear, phrase moves write
+against the direction of travel (score-gestures and score-editor tests); flags never disable
+post/play/export ("to review", not "to fix"); the resolved-export refusal test now plays what it can.
+
+## Collaborative Score editing, stage 1: additions re-saved after an epoch move (2026-10-20, branch `score-composer-2`)
+
+The owner's decisions are recorded in INTERFACES.md (top section):
+
+- one note per sound per cell, as a format change;
+- additive merging: adds win and nothing blocks playback;
+- automatic re-save on an epoch move;
+- show/ghost/hide layers.
+
+The work is staged as follows:
+
+- S0: baselines, and the PIXA `v` gap.
+- S1: re-save. This entry.
+- S2: additive merge on today's format.
+- S3: per-sound note format, readers.
+- S4: authoring and the layer UI.
+
+Defaults taken for the plan's detail questions, any of which the owner may overturn:
+- legacy `c/` cells and sounds keep removal-wins;
+- a note running past the end is clipped;
+- drums are one layer;
+- re-save covers additions only;
+- hide does not mute, and visibility is per viewer;
+- a click acts on the selected sound;
+- readers and authoring ship in one build.
+
+**S1** is `scheduleAutoReauthor` in `studio-session.ts`, with its contract in INTERFACES.md. It
+also changed:
+- `reauthor(id, {pump})`;
+- `resaving(id)`;
+- the tally, `needsDecision`, `stuckBehind` and the banner, which treat a pending re-save as moving.
+
+Tests in `studio-auto-retry.test.ts`:
+- admission and native refusals;
+- the bound;
+- lane order across queued members;
+- a refused batch re-saved after one read, leaving as one batch again;
+- a later batch item, a clear and a closing history left with the member;
+- a reset during the read;
+- flipnote edits left manual.
+
+In `studio-score-batch.test.ts`, the member behind a retried record is now re-saved; that is the
+contract change.
+
+## `[desync fixes]`: Studio saves resolve on their own, leaving never waits (2026-10-19, branch `score-composer-2`)
+
+**What the owner saw**, editing a Score alone: "studio_apply_batch not allowed. Command not found ·
+attempt 1 · your work is kept · 4 later saves wait behind it". "Retry same request" failed again,
+and placing notes quickly locked the Studio with "Could not confirm the save. Your edits are still
+here; retry before leaving."
+
+**Root cause: there was no desync.** `studio_apply_batch` was registered but ungranted (see the
+merge entry below), so Tauri refused every batch before it ran. A lone edit travels as
+`studio_apply` and saved. Several edits queued together travel as one batch, and each was then
+settled uncertain. Retrying one card cleared that card; the next showed the same error, which read
+as "retry fails again". Leaving waited for every card, so one uncertain card kept the member in the
+Studio. `fea4342e` grants the command.
+
+**So that the next failure of any kind does not block anyone** (the contract changes are in
+INTERFACES.md, top section):
+
+- Failed exact saves are resent on their own, about two minutes of bounded backoff, then they are
+  the member's. A retried record never rides a batch.
+- A document navigation, leaving the Studio, and posting to chat hand edits to the background Save
+  and go. App shows a progress toast that ends "Studio edits saved", or a warning that stays. The
+  Index half of a rename follows once the document half lands. Window close still waits.
+- The Studio waits to change channel while its queue holds the last channel's work, with a panel
+  in both surfaces, and switches by itself.
+- Play never asks about save status. Exports still do.
+- New `studio-save-words.ts` holds every word a person reads about a save. The native text moved to
+  the tooltip. New strings use no "·" (standing owner rule: no "·" or em dashes in UI text; the
+  existing ones are not purged yet).
+
+**Contract changes in tests** (each rewritten, none loosened): in `studio-buffer.test.ts`, the two
+navigation-ownership tests (no waiting window now exists to be superseded in), the departure
+Index-half ordering, "never waits on an Index delivery" (the "while leaving" variant had no window
+left) and the refused-departure test (now three endings: retried, slow receipt, discarded). One test
+in `studio-native-no-write.test.ts` stops its clock before the first automatic resend and asserts it.
+Copy assertions changed in `studio-surface.test.ts` and `studio-navigation-surface.test.ts`.
+
+**New tests:** `studio-auto-retry.test.ts` (the field report with the exact ACL text; exact resend
+timing; backoff and stop; lane order; Retry now replacing the due resend; reset cancelling;
+restored and immediate-seam exclusions; no batch around a possibly delivered edit; hand-off; Play
+vs take export; linked-score playback), `studio-save-words.test.ts` (including pinning the
+withheld-Save text to `studio.rs`), `studio-save-toast.test.ts` (App's tracker from its production
+text), and the scope wait at the end of `studio-navigation-surface.test.ts`. The key guards were
+checked by breaking them: the resend, the batch rule, playback, linked-score playback and the scope
+deferral each fail their tests when disabled.
+
+**Adversarial review.** No blocker or high finding. It verified that an exact resend cannot apply
+an edit twice for every covered kind, and that the ACL grant is narrow. Fixed from its findings:
+
+- A retry of a changed-history refusal used to skip admission, send the stale request and lose
+  "Save as a new edit". `retry` now refuses `NEEDS_DECISION` refusals, and `canRetry`/`needsDecision`
+  drive the buttons.
+- A deferred channel switch used to retire App routes begun while it waited. There is now a separate
+  `leaseGeneration`.
+- The wait panel now says "need you" when nothing is moving and lists the stuck edits.
+- The toast used to say "saved" after a discard. It now uses the `discarded` count.
+- A restored snapshot for an unreachable channel used to block Studio editing for good. There is now
+  a discard card.
+- A scope switch during a window close used to throw inside effects.
+- Stuck and uncertain wording claimed failure. Hotkeys acted on the hidden document. Deterministic
+  refusals (retired epoch, gone member, existing id, unknown channel) were resent for two minutes.
+- Doc overclaims about rename splitting and the amplification bound are corrected.
+
+The short re-review found no blocker or high finding, and confirmed those fixes. It raised two
+more mediums, both now fixed:
+
+- A first delivery refused in a retired epoch settled uncertain, so Discard was the only way out.
+  It is refused ahead of native's intent barrier, so it now settles not written (see THREAT-MODEL).
+- The wait panel's bulk "Save as new edits" re-saved changed-history edits unseen. It is removed;
+  such edits are reviewed in their own channel.
+
+Its lows are fixed too: the real native texts for a removed member and a deleted channel, "need
+you" whenever nothing will resend, and a hint on held cards.
+
+**Follow-ups:**
+- The wait panel cannot name the old channel.
+- Flipnote Play can refuse "the displayed source changed" while a linked Score's queued edit lands;
+  press Play again.
+- An in-flight save has no client-side timeout.
+- Retained local-draft Copy requests are not counted in `retainsWork`, so a deferred switch clears
+  them (pre-existing).
+- The review's design question, an automatic resend overwriting a peer's newer value without a
+  click, is recorded in THREAT-MODEL.md.
+
+**Limitations.** Window close refuses at the first failure even while a resend is due; close again
+a moment later. Local-draft (Unconfirmed/Closing) and recovery saves keep manual retry. After the
+backoff, a refusal that keeps coming back is shown, not hidden.
+
+## Merge of Gate7 `d2548a37` into `score-composer-2` (2026-10-19)
+
+Both lines had fixed native "busy" refusals independently, so the merge composes them rather
+than picking one. Decisions a reader of either branch alone would not expect:
+
+- **Two retry layers, one classifier.** The branch's `busyRetrying` (`studio-busy.ts`) still wraps
+  every native call of the Studio session and repeats a storage-busy refusal five times over
+  1.24 s. Gate7's session-level resend (`resendLater`, `unlessBusy`: the Save worker and the
+  document/Index reads, three resends over 1.75 s) sits on top and covers all three no-write texts.
+  `nativeNoWrite` is the only "nothing was written" classifier. The branch's `isPreExecutionRefusal`
+  is removed: it knew two of the three texts and missed the full inline-slot refusal. A Save that
+  stays storage-busy therefore makes 4 × 6 calls of its request over about 6.7 s before it settles
+  not written. The overlay, recovery, fault and blob reads get the wrapper's repeats but no session
+  resend.
+- **Batched Score saves ride the resend.** Before this, a batch refused before dispatch settled
+  every member as not written while Gate7's outer catch quietly resent only the head, which
+  stranded the members as failed cards behind it. While the head has resends left, the members
+  now go back to queued behind it, uncounted, and travel with its resend. Once the resends are used
+  up, every member settles not written, as before. This supersedes "a refused batch settles every
+  member alike" in the busy-spam entry below, for refusals made before dispatch.
+- **`switchTo` answers with its route.** The branch's `return studioRequest === studioNavigation`
+  referenced a variable Gate7 had removed. Git merged it without a conflict, which would have broken
+  the build. It is now `return route.current()`. That checks the same counter and is stricter: it
+  also checks the lock, the reload generation and the Studio session's navigation lease. That is
+  safe for every caller that uses the result: each one that starts in the Studio moves the surface
+  before the channel, and a search hit is only reachable from chat.
+  `saveStudioForNavigation` is gone (Gate7 removed its callers). `noteStudioNavigation` stays: both
+  Studio surfaces still announce document navigations through `onnavigate`.
+- **Score surface.** Gate7's `heldQueuedCard` renders beside `pendingSaves`. The tabs, loop and
+  download controls Gate7 still showed there live in `ScoreEditor.svelte` on this branch.
+
+Test contracts changed by the composition: in `studio-native-no-write.test.ts`, the storage-busy
+cases of the two exhaustion tests now expect the wrapper's repeats inside every send.
+`studio-session.test.ts`'s "outlasts every pause" test now expects 24 calls. `studio-score-batch.test.ts`
+now checks that members ride the resend, that a lock snapshot taken while the head cools restores
+every edit as unsent, and that a resend failing after dispatch leaves every member uncertain with a
+counted attempt. `studio-busy.test.ts` checks that the wrapper's texts are on `NATIVE_NO_WRITE`, and
+`studio-navigation-token.test.ts` pins `return route.current();`.
+
+**Open on this branch from before the merge; fixed by `[desync fixes]` (2026-10-19).** These
+failed identically at `9f519570` and passed at the Gate7 tip:
+
+- `studio_apply_batch` was registered in `apps/desktop/src-tauri/src/lib.rs` but missing from
+  `security/command-policy.json`, `capabilities/main.json` and the reviewed ledger
+  (`tauri-command-security.ts`). This was confirmed in the native app: Tauri refused every batch
+  with "studio_apply_batch not allowed. Command not found", before the command ran. Several Score
+  edits queued together therefore never saved, and each member settled uncertain. This was the
+  whole "desync" a person saw editing alone. All three now name it, and `tests/command_acl.rs`
+  resolves it for `main` through the real `RuntimeAuthority`.
+- `busyRetrying` forwards the command name its caller passed. `studio-busy.ts` is now a
+  sanctioned wrapper beside `diagnostics.ts` in `tauri-command-security.test.ts`. Its callers in
+  `studio-native.ts` still pass literals, and the scan still reads them.
+- FETCH-002 (`studio-session-review.test.ts`) expected one blob request per explicit retry. It now
+  lets the wrapper's repeats run out and pins the exact bounded count (one request plus
+  `STUDIO_BUSY_RETRY_MS.length` repeats).
+
+Verification of the resolution:
+
+- `cargo test --all --all-features`: 2468 passed, 0 failed. No Rust differs from `9f519570`.
+- `npm test`: 1850 of 1854 passed. The 4 failures are exactly the ones listed above.
+- `npm run check`: 0 errors. `npm run build`: passed.
+- The `src-tauri` suite and `test:flows` were not run, because drive M: ran out of space mid-build.
+- An adversarial review found no blocker. It flagged the follow-ups above, plus two design
+  questions. A lock during the wrapper's pauses restores batch members as uncertain. A superseded
+  read keeps repeating beneath `unlessBusy`.
+
+## Score composer: phrases, preview lengths, zoom (2026-10-19, branch `score-composer-2`)
+
+The three items the previous entry deferred from the owner's UX assessment. Frontend only.
+
+**Phrases.** Several onsets can be handled as one: Shift+click adds a note to the phrase or takes
+it out (the first pick joins the selected note), a Shift+drag marquee picks every onset inside its
+rectangle, Ctrl+A picks every note, a plain click or Escape returns to one note. A phrase moves
+as one gesture: drag any of its notes (the whole phrase previews at its destination, red if any
+member is blocked), Alt+arrows or the pinned panel's move buttons nudge it, Ctrl+D or the panel's
+"duplicate" copies it to start where it ends (the score grows first if it must, taken cells are
+skipped and counted), Delete or the panel clears it. The helpers in `score-editor.ts`
+(`scoreOnsetsIn`, `scoreMoveSelection`, `scoreDuplicateSelection`, `scoreClearSelection`) build
+the operations: a move is every source cleared then every note set, validated with the phrase
+lifted out (it may slide over its own cells) and against the other members; one blocked member
+refuses the whole move, nothing partial. A single selected note also duplicates (right after
+itself). The phrase is composer view state: it is dropped with the component, and it dissolves
+when its notes are no longer in the document.
+
+**Preview lengths in the sound designer.** The audition keyboard held every key for 400 ms, and
+the envelope graph drew an illustrative shelf, so a slow attack was released before it had
+developed while the picture suggested the full curve. `StudioSoundfont.svelte` now has four
+preview lengths beside the register stepper (short 0.4 s, one beat, one bar of four beats, long
+2 s; beat and bar follow the open score's tempo through a new `bpm` prop, 120 otherwise) and
+passes the chosen hold to `onaudition` as a third argument, which the Studio hands to the same
+audition path. The envelope scope is now drawn on the preview's real time axis: attack, decay,
+the shelf until the key-up (a dashed rule at the chosen length), then the release; a key let go
+during the attack or decay releases from the level it had reached, which is what the engine does.
+The other scopes stay proportional, as before.
+
+**Zoom.** The grid's steps per page can be chosen: 8, 16, 32 or 64, from the footer's zoom
+buttons or the `-` / `=` keys, keeping the first visible step in view; with no choice the page
+follows the card's width as before. The row-height toggle stays.
+
+**Tests.** `score-gestures.test.ts` (marquee, phrase move and its refusals, duplicate with
+growth and skips, clear); `score-editor.test.ts` (Shift+click and marquee, phrase nudge, carried
+drag with a blocked member, Delete, Ctrl+A, Ctrl+D for a phrase and a single note, Escape, zoom
+from the footer and keys); `studio-soundfont.test.ts` (preview lengths, tempo-following beat and
+bar, the key-up marker moving with the hold).
+
+**Review.** This round's read-only adversarial review found no blocker. Its high finding is
+fixed: a phrase gesture longer than the session's draft queue (Ctrl+A on a large score, then a
+nudge) could half-apply and flood notices; the session now exposes `draftRoom()` and the composer
+(`onroom`) refuses a gesture it cannot queue whole before sending anything. Its mediums are fixed:
+the drag preview now asks the same helper the release will, so a phrase that overlaps itself or
+lost a sound shows red instead of being refused on release; taking a note out of a two-note phrase
+leaves one ordinary selection rather than an invisible pick; a press outside the phrase ends it
+like a click does; and clearing a phrase whose notes could not be re-authored as they were (an
+overlap, a note past the end, a sound that is gone) says so at once instead of at the undo. Lows:
+a duplicate that places nothing says so and sends nothing; stale picks no longer ring empty cells;
+a phrase that shrank under a drag moves what is left; the marquee works in every tool; the
+designer's chips are labelled "length"; a non-finite tempo falls back to 120.
+
+**Verification.** svelte-check, the production build and the focused frontend files
+(`score-gestures`, `score-editor`, `studio-soundfont`, `studio-surface`); the complete suites,
+`test:startup` and `test:flows` were not run (user instruction); no Rust changed.
+
+**Still open from the assessment.** The listen-adjust loop (editing during playback, a steady loop
+period, changes on the next pass) is the engine stream. Transposing a phrase by an interval other
+than one pitch at a time, and a selection that survives switching documents, are not built.
+
+## Score composer: moves, undo, pinned selection, listening feedback (2026-10-19, branch `score-composer-2`)
+
+The owner's UX assessment of `eb411f1` ranked the composer's gaps for a "short pieces, good
+manipulation" toy: moving a note meant recreating it, nothing could be undone, the selected note's
+controls scrolled away under the sound library, sounds and drums gave no feedback when chosen, and
+the screen was small and faint. This round takes the immediate stream of that assessment; it is
+frontend only (no native or wire change).
+
+**Moves.** `ScoreEditor.svelte` gained a third drag kind: pressing a note's body (any cell of it
+but the handle at its end) or a drum hit and carrying it previews the landing on any step or
+pitch, red where another note is in the way, and writes on release. Alt+arrows and the selected
+panel's move buttons nudge the selected onset one step or one pitch. A move is
+`scoreMoveOperations` in `score-editor.ts`: a clear of the source and a set of the same cell
+(sound, length, level) at the destination, validated against the projection without the source,
+sent as two ordinary operations that the session batches into one native transaction once the
+autosave releases them. It is not an atomic wire operation. Native admission refuses a Score
+`set_cell` only at the 4096-cell cap, so the real way the pair can split is the session's own
+limits: a full draft queue (512 records) refusing the set, or the pair straddling a 64-item batch
+boundary with a lock or refusal between the halves. The composer answers the first by rolling the
+accepted clear back (`sendAll` sends the inverses of what was accepted, newest first, and says
+"nothing was changed"; if even that is refused it records what remains so it can be undone); the
+second leaves the cleared value reachable from the attention list's "use this". The atomic
+`move_cell` the earlier entry promised
+was examined and deferred: a score change folds one record under one `c/<step>:<row>` key and the
+change validator requires exactly one entry key per change (`change.rs`, `change.len() > 7`), so
+a two-cell record needs the fold, the validator, the primitive bound and the snapshot's per-slot
+reconstruction changed together; that is a replication-crate design round of its own.
+
+**Undo and redo.** Every gesture the composer sends (placing, erasing, resizing, moving, a sound
+or volume change, a header change, a retained-value choice, a repeated bar; not adding a sound
+from the library, which is the host's own asynchronous save) is recorded with its inverse
+(`scoreInverse`, computed against a rolling local projection, `scoreApplyLocal`, because the model
+prop only updates on the host's next flush), 64 deep per mounted document; Ctrl+Z / Ctrl+Shift+Z
+(or Ctrl+Y) and two tool-rail buttons replay them. A replay passes the same guards a hand edit
+gets (`scoreReplay`: inside the length, with its sound, no overlap), checked against the document
+as it is now, so an undo after a collaborator's edit is refused with a notice rather than writing
+an overlap; a replay that passes overwrites that collaborator's value exactly as a hand edit would.
+What was actually sent, with inverses computed at that moment, is what the opposite stack receives,
+so a value someone wrote between an undo and its redo is restored by the next undo rather than
+cleared. The stack is dropped when the document is left (the component is keyed by object).
+Alt+arrows are taken on the window's capture phase and stopped there, because the app binds
+Alt+Left/Right to its history; while a grid cell is focused those keys nudge, elsewhere they
+navigate as before. A moved drum keeps its pad whatever row it lands on; the drum lane rows are a
+placement aid, not a constraint on moves.
+
+**Selection first.** The selected note's controls (sound, length, move, volume, clear, listen,
+overlapping notes, author, retained values) are a snippet pinned above the inspector's tabs, so
+selecting anything answers at once whatever tab is open; the sounds tab's own block is labelled
+"new notes" so the two are never confused.
+
+**Listening.** Sounds in the score and library tiles have a listen button (one beat at C5, no
+document change); choosing a drum and placing a hit play it through a new `auditionPadPlayback`
+(one-hit take, the kit's own tail as its end) over the same audition path; the listen tool hears
+drums too.
+
+**Wording and legibility.** patches → sounds, hold → note length, audition → listen, keys/pads →
+notes/drums, "+ new…" → "sound designer…", "no recipe" → "no sound". Rows are 22 px (a compact
+toggle keeps 16), labels people read use `--muted` (about 5:1 on the panel) instead of `--faint`,
+the row and ruler labels are larger, the resize handle is drawn on the selected or hovered note's
+last cell (the right part of that cell resizes; the rest of a note moves), and the grid keeps one
+tabbable cell (the selection, else the page's first) so Tab enters it once and arrows move inside.
+"repeat bar" on the score tab copies the current bar one bar later, growing the score first and
+skipping taken cells.
+
+**Tests.** `score-gestures.test.ts` (local projection, inverses, moves, repeats, replay guards);
+`score-editor.test.ts` (body drag with preview and refusal, the handle/body split with a measured
+cell, Alt+arrow and panel nudges, the capture-phase stop against an app-level Alt+arrow listener,
+undo/redo through keys and buttons, a refused undo, fresh inverses across a redo, a midway refusal
+rolled back, listen buttons, drum audition, pinned panel across tabs, roving tab stop that never
+replaces a selection, repeat bar and its undo); `studio-score-batch.test.ts` (a clear and a set in
+one batch, a clear never collapsed); `studio-audition.test.ts` (pad take). Renamed labels updated
+in the existing tests.
+
+**Review.** This round's read-only adversarial review found no blocker. Its high finding (the
+Alt+arrow collision with the app's history keys) and its mediums (replays bypassing the hand-edit
+guards; a move's clear left behind at the queue limit) are fixed above; its lows are fixed where
+they were defects (redo kept a stale inverse, a half-undo was lost, focus replaced the selection,
+a continuation cell read as empty, a nudge onto a folded row failed silently, a bar with a
+sound-less note could not be repeated, the past-the-end refusal was misworded, leftover "recipe"
+wording, instructional copy in the panel) and noted as design questions otherwise (a moved drum
+keeps its pad).
+
+**Verification.** svelte-check, the production build and the focused frontend files
+(`score-gestures`, `score-editor`, `studio-surface`, `studio-audition`); the complete suites,
+`test:startup` and `test:flows` were not run (user instruction); no Rust changed.
+
+**Deferred, in the assessment's order.** The listen-adjust loop (editing during playback and a
+steady loop period with changes applied on the next pass) is the engine stream and still needs the
+cyclic playback owner; playback still locks editing. Phrase selection (select several notes,
+transpose, duplicate a selection) and the sound designer's preview-length choices with a release
+marker on the envelope graph are next. Zoom is only the density toggle.
+
+## Score composer: busy spam, batched saves, note volume, post to chat (2026-10-19, branch `score-composer-2`)
+
+**Storage-busy spam.** With one person editing, the composer kept raising "Studio storage busy;
+retry the same request" save cards and the "Index draft status could not be read" banner. The
+refusal is native `authorize()` (`apps/desktop/src-tauri/src/studio.rs`) losing a `try_lock` once
+the actor has advertised Ready; the holder, when nobody else is online, is the app's own
+bookkeeping: the full server snapshot native seals after every studio save (`persist_server`),
+the UI-continuity write, a chat read. Each holds a guard for tens to hundreds of milliseconds and
+the renderer's follow-up reads and the next autosave land inside that window. The fix is a session
+seam, `apps/desktop/src/studio-busy.ts`: every native call of the Studio session repeats a
+storage-busy refusal with the byte-identical request after pauses of 40, 80, 160, 320 and 640 ms
+(the session's own timer seam, so tests drive it), and stops when the session generation moves.
+Because both native pre-execution refusals ("Studio storage busy; retry the same request",
+"Studio actor busy; retry") are raised before the request reaches the vault, a Save that still ends
+on one is now shown as known not written (re-authorable, discardable) instead of uncertain; every
+other native error keeps its uncertain classification. Two surface tests that used those texts as
+their "uncertain" vehicle now use a withheld-result text; that is the only test contract changed.
+
+**One transaction per autosave.** A score was saved one native transaction per placed note, and
+each transaction is a full server snapshot seal, a storage scan, a publication window and an
+update event. New `StudioRequest::ApplyBatch` (`crates/catcoms-app/src/studio.rs`) applies 1..64
+Score operations (256 KiB of bodies in all, distinct nonces, Score targets only) in one
+transaction through the same `apply` closure; every item is its own signed operation, so an exact
+retry of the whole batch reseals accepted items. It is not atomic: an item refused after earlier
+items were written leaves those durable, and the error names "item k of n". The Tauri command is
+`studio_apply_batch`; the session's `batchable()` gathers the queued, released, same-lane,
+same-epoch, same-binding Score edits behind the running one and sends them together (a lone edit
+still goes as `studio_apply`, which keeps every single-edit expectation). A refused batch settles
+every member alike; each card's retry resends its own item exactly. Tests:
+`crates/catcoms-app/src/studio/tests/batch.rs`, `studio-score-batch.test.ts`.
+
+**Editing while a save is read back.** `ScoreEditor.svelte` no longer treats a re-read of a score
+already on screen as read-only; only a first read with nothing to show blocks input. The working
+projection keeps the queued edits and the next readback corrects anything the author got ahead of.
+
+**Per-note volume.** `jam-score:v1` note cells gained an optional `vol` (1..100, percent of the
+recipe's level; absent means full level and is never rewritten to 100, like an absent `len`).
+Rust: `ScoreCell::Note { volume }` in `catcoms-replication/src/studio/score.rs` with encode-side
+range checks, the snapshot's presence byte (bit 0 `len`, bit 1 `vol`; old 0/1 bytes read
+unchanged), the bridge's cell JSON, two new shared vectors (18 in all). Frontend: the contract,
+native parser, draft validator, `scoreCellOperation` (writes `vol` only when it is not 100),
+export (`vol` rides the take note-on as `v`), take validator (closed key sets), archival plan
+(`level` 0..1), engine (`JamNoteInput.level`, multiplied into the recipe's oscillator mix, never
+the envelope), audition, and the composer (a placing-section level remembered for new notes, and
+quieter/louder steppers plus a number field in the selected panel; resize and reassign carry the
+level). **Compatibility floor:** a build before this one rejects a body or checkpoint carrying
+`vol` as malformed, and under the existing fail-closed admission rule that rejection pauses the old
+build's Studio sync for the whole server (the "sync paused" banner, reasserted by every further
+`vol` operation and by a checkpoint seed with the new presence bit) until an explicit Studio
+access; to its user it looks like corruption. A group editing volumes must therefore run this build
+or newer before anyone authors one; a score without volumes is byte-identical to before. Older take
+players likewise reject a note-on with `v`. Whether to ship the volume controls one release after
+the decoders (the codec and snapshot side is independent of the UI) is a product call left open.
+
+**Post to chat.** The composer offers "post to chat" (`data-score-post`) when the host can attach:
+`Studio.svelte` gained `onpostScore` and `downloadMedia("download" | "share" | "post")`;
+`App.svelte` `postStudioScore` mirrors `postStudioPixa` (upload to the member's embed folder,
+refresh, save the Studio, append the file marker to the draft; every await re-checks channel,
+server, view and the navigation claim).
+
+**Review findings (eb411f1).** P2: a Studio document navigation now announces itself through a
+new `onnavigate` prop (StudioNav `open`/`newFlipnote`/`newScore`, the Music tab's open/create) the
+moment it is decided, before its departure Save can wait; App's `noteStudioNavigation` bumps the
+`studioNavigation` counter, so an App route already waiting on its own Save finds itself
+superseded. `studio-navigation-token.test.ts` pins the wiring statically (it caught the sidebar's
+"new score" path). P3: a cancelled press is forgotten only when its own pointer presses again, so
+a second finger's tap cannot revive it (test added).
+
+**Verification.** `cargo check -p catcoms-app`; `cargo check` of the `src-tauri` workspace;
+`cargo test -p catcoms-replication score`; `cargo test -p catcoms-app --lib studio::tests::batch`
+(3/3); `cargo fmt --all`; `cargo clippy -p catcoms-app -p catcoms-replication --all-targets
+--all-features -- -D warnings`; `scripts/check-no-ambient.sh`; focused frontend files
+(`studio-busy`, `studio-score-batch`, `studio-navigation-token`, `studio-score`,
+`studio-score-session`, `studio-buffer`, `studio-session`, `score-editor`, `studio-surface`,
+`jam-recorder`, `jam-archival-plan`); `npm run check`; `npm run build`. The complete backend and
+frontend suites, `test:startup` and `test:flows` were not run this round (user instruction);
+`cargo deny check` was not run (no dependency change).
+
+**Review.** This round's read-only adversarial review found no blocker. Its high finding is
+fixed: a drag-resize rewrote the cell without its level, silently resetting a quieter note to full
+volume (now carried, pinned in the drag-resize test). Its medium is fixed: batch members only ride
+with a first delivery, because an exact retry skips admission on purpose and a member riding with
+it would have lost its "history changed" refusal (pinned in `studio-score-batch.test.ts`). The
+compatibility consequence above and the `studio_apply_batch` row in `docs/INTERFACES.md` are its
+other two findings. Recorded follow-ups: a refused batch settles every member uncertain although
+native applies in order and stops, so a structured refusal carrying the item index would let the
+items after it stay known-not-written; a 64-item batch materialises the projection and scans the
+log per item under one actor custody, so measure before keeping 64 as the default (16 would still
+remove most of the per-save cost) and note that packets past the two-second publication window
+rely on catch-up; items saved before a refused one are durable but unpublished until retried.
+Test gaps it lists: a lock snapshot during an in-flight batch, a binding or byte-bound split, a
+discard refused for an inflight member, a nonce reused across a single Apply and a batch item.
+
+**Residual.** The busy refusal still surfaces once the bounded repeats are spent (a wedged vault
+is reported, not hidden). A refused batch is retried one card at a time. Flipnote and Index edits
+do not batch (their admission inspects each body). The loop-at-bar/engine milestone and note
+move/undo are unchanged from the entry below.
+
+## Score composer: third review, green CI, studio loading (2026-10-18, PR #49)
+
+The third external review (PR #49 head `8568250e`) reported six findings; all are fixed here:
+
+- **An own Save no longer stops playback.** `workingScore` produced a readiness entry for every
+  cell and recipe, all flags false, while native readiness omits clean slots; the editor's media
+  fingerprint serialises readiness, so the readback of an identical score looked like a source
+  change and stopped audio started from the working projection. The working projection is now
+  sparse like native (`studio-working.ts`), pinned in `studio-buffer.test.ts`.
+- **Jitter is a click.** A place gesture records the pressed cell and the previewed end; movement
+  inside the pressed cell is ignored, the gesture never writes shorter than the preview, and only
+  entering another cell counts as a drag that may change the remembered hold.
+- **A cancelled press is over.** Escape, pointercancel and blur remember the press; its release
+  and completion click are swallowed, and the next press works normally.
+- **A superseded channel switch no longer acts.** `switchTo` returns false after its awaited read
+  unless it is still the newest route and its channel is still on screen; Search-in-channel and
+  Edit-topic then do nothing instead of forcing the pane or opening against another channel.
+- **Every held document is reachable.** The sidebar pages held documents eight at a time with
+  prev/next instead of counting the rest.
+- **Keyboard focus survives folded and past-the-end destinations.** Cells are disabled only when
+  the editor is read-only; cells that cannot take a note are marked `off`/`aria-disabled`, stay
+  focusable, and refuse placement in the click handler.
+
+CI: the 24 score-component failures were the test file's DOM globals (the runtime's event
+delegation needs `HTMLMediaElement`); the audition failure was the own-Save stop above; the
+pads-lane fold assertion now uses a row outside both the scale and the lane. The three focused
+files (`score-editor`, `studio-surface`, `studio-buffer`) pass 89/89; svelte-check and the
+production build pass. The full suites were not run this round (user instruction).
+
+Loading: both "Loading the studio…" placeholders are now an indeterminate bar with a seconds
+readout, and the three studio modules are warmed six seconds after unlock so the first visit does
+not pay the cold import under the click (in development that import is Vite's first transform of
+the editor graph, tens of seconds; in the packaged app it is a local chunk). Nothing but the
+modules is fetched by the warm-up.
+
+This round's own read-only review found no blocker or high. Its mediums are fixed: a superseded
+`switchTo` still refreshes the on-screen channel's topic and delivery ticks and refuses only the
+caller's follow-up action; drift inside a preview that a neighbour forced short no longer rewrites
+the remembered hold (only lengthening beyond the preview does); and a read-only turn mid-press
+now cancels through the same path as Escape, so its completion click is swallowed even after the
+block lifts. Its lows are fixed too: no audition on a folded empty cell, returning to the pressed
+cell returns to the preview even past skipped cells, a secondary-button press does not forget a
+cancelled primary press, the loading seconds are hidden from live announcement, the held-document
+pager resets when its page count changes, and the focus test covers a past-the-end destination.
+Residual, noted by the review: a second pointer's tap during a drag is an ordinary click; a drag
+lengthened across a neighbour ends in the overlap refusal rather than a clamp; working readiness
+does not model the 64-recipe admission cap.
+
+Not changed, by decision: the loop period still grows with the last note's release tail (the
+controller completes at `max(grid, lastRelease)` and the session restarts after that), which the
+review identifies as the likely cause of long sounds feeling out of time. The fix it proposes, a
+cyclic playback owner in the engine that repeats on the authored bar while earlier voices finish
+under the existing budgets, is the next milestone together with note moves and undo under a
+bounded native gesture operation. Gaps: the `switchTo` refusal and the held-document pager have
+no automated regression yet (the route reproduction needs extracted App functions; the pager
+needs nine restored held documents).
+
+## Score composer: review fixes and direct manipulation (2026-10-18, branch `score-composer-2`)
+
+The second review of the composer (PR #47, head `87ab2d89`) reported five P2 and one P3 defects,
+all reproduced from its descriptions and fixed on a worktree branched from that head with the
+`Gate7` review-fix commit merged in:
+
+- **Placing a note no longer cancels its own audition.** Studio records which object and editor
+  media generation each playback was started against (`claimAudio`) and stops audio only when the
+  source on screen is a different one; a note's own edit bumps the generation and then auditions,
+  and that audition survives. A remote invalidation, a navigation or a lock still stops playback.
+- **One owner per overlapped coordinate.** `scoreHolds`, `scoreOnsetAt` and the new `scoreNotesAt`
+  agree: the earliest onset owns a covered continuation cell, so colour, label, selection,
+  audition and erase name the same note there; a later note's own onset cell still shows that
+  note and lists the earlier one. Overlapped cells are striped, the tooltip names the other notes,
+  and the selected panel offers them to select or clear.
+- **A cancelled drag writes nothing.** A drag belongs to the pointer that began it; pointercancel,
+  Escape, a window blur and a read-only turn drop it without an operation or an audition, and a
+  foreign pointer's release is ignored by it.
+- **A drag revalidates its start on release.** The start cell must still be free and the recipe
+  still the chosen one; otherwise nothing is written and a notice says another edit landed first.
+- **Keyboard navigation keeps focus.** Arrow moves focus the selected cell after it renders, so
+  crossing a page boundary no longer parks focus on the body.
+- **Paging keeps an absolute first step.** The view coordinate is the first visible step; the
+  page index is derived from it and the current width, so widening the card keeps the same bars.
+
+Manipulation, the first milestone the review recommended, with the user's answers (short pieces;
+manipulation first, timing second): placement snaps to a chosen unit (eighth by default; the
+snap only moves the start, and only when every cell between the snapped start and the click is
+free), a hover preview shows exactly the cells a click writes (the remembered hold fitted to the
+free run before the next note and to the authored end), the hold is remembered only when the
+author chose it (a drag, a resize or the stepper, never a forced fit), a note's last cell drags to
+resize, the selected panel changes a note's recipe or length (lengthen is unavailable at the end),
+playback can start from the selected step, the pad lane (rows C4..A4 in pads mode) places its
+row's pad and never folds under the scale view, and the scale view (toggle in the header or `s`,
+kind and root in the placing section) folds rows outside the scale to slivers without hiding or
+disabling the notes there. The score tab gained the mockup's tempo (big readout, ±1/±5, tap that
+writes once the tapping settles, half/double), meter (segmented 1..8), length (steps, beats, bars,
+time; "+ bar", "− bar", "fit to last note", which may extend the score to notes past the end,
+"fit to bars") and export (checklist and actions) sections; the transport's "trim" still only
+shortens. Regression tests cover each finding and each gesture, including a real pointer click
+(pointerdown, pointerup, click) that must write the previewed hold; the "model changed under a
+drag" case mounts the composer through `scripts/fixtures/ScoreEditorHarness.svelte`. The round's
+own read-only review found no blocker; its two highs were defects in these unexecuted tests
+(fixed: the widened `ScoreHold` shape, and a fake backend that forgot the applied cell and so read
+as a source change), its medium was the pointer click writing `max(hold, snap)` (fixed as above),
+and its lows are fixed except two design notes: a later note's own onset cell shows that note
+(documented above), and tap tempo uses ambient time in the component (the pure helper is tested).
+
+Timing, deliberately not changed in this round: the engine already schedules each note's release
+on the audio clock when the note is created, so only attacks ride the 16 ms tick. A fix needs
+attack lookahead inside `jam-engine.ts` (allow a negative age in `playArchivalEvent` and
+`noteOnWithHold`, start the source at `now + lead`, hold the gain at zero until then, and give
+`noteOff` a scheduled release so two same-pitch notes inside the lookahead window are not seen as
+a duplicate), plus a controller tick that dispatches events up to the lookahead early. The other
+half of "longer envelopes feel off" is the loop: `StudioAudioSession` restarts only after the last
+release tail, and restarting on the bar instead needs the engine to keep a draining archival
+capability alive beside the new one. Both are engine changes and were not made without running
+the engine's suites. Per the user's instruction the unit suites were NOT run for this round; the
+tests above are written but unexecuted, and svelte-check passed.
+
 ## Score composer surface (2026-10-18)
 
 The Studio's score composer now matches the designed surface instead of the table-based
@@ -43,6 +836,261 @@ change: svelte-check, the focused `score-editor` and `studio-surface` files, the
 unit suite, the root and native Cargo suites, the production frontend build, and fixture
 screenshots at 1280×800 and 900×640; the startup and flow gates were not run because the change
 touches neither `setup`, process spawning nor the chat/friend-request flows.
+
+## PR #46 fifth review: two save workers; follow-ups closed (2026-10-19)
+
+The review of `64fed24b` reproduced one P2, a timing variant of the departure-ordering finding.
+An edit made while a departure waited on an earlier receipt became eligible only in the drain's
+next round, so the one worker went to the queued Index half first and the departure timed out.
+The owner asked for "a handful" of save workers.
+
+The Studio now runs two (`SAVE_WORKERS`), one per lane at a time and in queue order within each
+lane. A document lane and the shared Index lane can therefore both be in flight, which removes
+that P2 and the single-worker limit the previous entry pinned. Three were built first, but
+an adversarial review showed they oversubscribe the bridge's four shared inline slots: saves, blob
+fetches, reads and the native receiver all hold one. That produced "too many inline downloads"
+refusals in ordinary use, and more would make it worse.
+
+- **Renderer scheduling only.** The server actor runs Studio operations one at a time, so an
+  operation slow inside the actor still delays the next one there. The native "latest request"
+  fence is per server and target, and one save per lane means one per target, so concurrent saves
+  never supersede each other.
+- **Pre-execution refusals are not writes.** The bridge's actor-busy, slot-pool-full and
+  storage-busy (`authorize`) refusals are raised before the execution lease is transferred, so
+  the operation never runs. The actor may already have signalled Ready (always so with
+  storage-busy), but it gets no lease. `nativeNoWrite` classifies exactly these as not written.
+  Queued Saves and the plain document and Index reads refused this way are resent automatically:
+  the same request, at 250/500/1000 ms. A visit is uncounted, and exhausted resends settle a Save
+  as not written so a retry is admitted afresh, only when no earlier attempt was uncertain. After
+  an uncertain post-dispatch failure and an exact retry, each visit counts and the record stays
+  uncertain, with its original request and no reauthor. All three texts are pinned to their
+  single sites in the Rust sources.
+- **One worker per record.** A record a worker has taken is marked synchronously (it stays
+  `queued` through its admission read), so no second worker takes it. Removing that guard fails
+  two existing tests.
+- **Recovery rail.** It now labels a not-written recovery apply as not written, not as uncertain
+  and "discarded".
+- **Restored Creates.** A restored, held Create reads "create not saved yet · open to save" in the
+  sidebar.
+
+Follow-ups closed:
+
+- An Index recovery record of one entry now counts for that entry's document (held row, Save,
+  indicators).
+- Restoring a wiki revision names the page it restored and closes only that pane's history.
+
+Regressions:
+
+- Edits made before and while leaving, with the Index receipt pending. Fails with one worker and
+  at `64fed24b`.
+- Lane exclusivity. It passes at `64fed24b` too, where one worker made it trivially true, and it
+  does not reach the `running` guard (that needs an admission read). It fails when the lane-head
+  rule is removed, which is what it pins.
+- The no-write classification and its source pins. They fail with the resends, the read retry or
+  the attempt revert removed.
+- Recovery-record affinity and the restore toast. Both fail at `64fed24b`.
+- Added after the review of `28b6ba28`, which cleared the P2 and raised only a documentation P3:
+  an uncertain post-dispatch failure, an exact retry, then each busy text exhausting its
+  resends. The record stays uncertain, keeps its request and cannot be reauthored. The test fails
+  if a pre-execution refusal clears the earlier uncertainty.
+
+Residuals (LOW, from the re-review; not fixed):
+
+- The overlay, recovery, fault and blob reads are not resent after a pre-dispatch refusal. A
+  refused overlay read shows its ordinary error, and a document with a local draft shows the plain
+  projection, until the next refresh.
+- "Studio actor busy" takes its 5 s rendezvous to arrive, so four refused sends outlast a
+  departure's 10 s timeout, which then reports the Save as still running.
+- Workers are not reserved per lane. Two other lanes (a Create and another document's Save) can
+  hold both, so an Index half, or a third document's Save, waits for one of them.
+- Rarer pre-lease refusals (server changed before commit, request cancelled, lease-send expiry)
+  are still classified uncertain. That is safe but pessimistic.
+- A retried read may run natively after a Save that started later, yet still count as the older
+  read. That Save's acknowledgement can briefly replace a slightly newer view; the next refresh
+  corrects it.
+
+Checks:
+
+- `npm --prefix apps/desktop test`: 1759/1759.
+- `npm run check`: 0 errors, 0 warnings.
+- `npm run build`: passed.
+- `npm run test:flows`: 9/9.
+- `scripts/check-no-ambient.sh`: passed.
+- `cargo test --all --all-features`: 2463 passed, 0 failed (Rust unchanged).
+- `cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml`: 363 passed, 0 failed.
+
+Adversarial review: HIGH-1 (three workers oversubscribed the slots) and HIGH-2 (storage-busy
+missed) are fixed, as are three MEDIUMs. The re-review found no BLOCKER, HIGH or MEDIUM issues.
+
+Tests changed because their contract changed:
+
+- `SAVE-001`, the frame test in `studio-session.test.ts`, the Create-retry test there, and the
+  pending-thumbnail `UI-003` used "busy" texts as examples of uncertain failures. Those texts are
+  now definite no-writes that are resent, so each uses a post-dispatch error to keep its own claim.
+- `SAVE-002` asserted a second lane stays queued "behind the one worker". It now fills both
+  workers and asserts that the cleared scope's worker cannot start the waiting third lane, while a
+  new-scope worker can. It pins that behaviour, not the token mechanism.
+- `UI-003` checks both outcomes. While doing so it exposed that a not-written Create showed
+  "creating…" in the sidebar; that now reads "create not written · retry in the editor".
+- The two departure tests from the previous round that pinned single-worker order and the
+  single-worker limit are replaced by the multi-worker contract above.
+
+## PR #46 fourth review: departure ordering (2026-10-18)
+
+The review of `5bc43d2c` confirmed the rename-context and Index-half fixes, plus 14 extended wiki
+cases and the media separation. It reproduced one new P2: leaving a document released its
+Index-lane records before draining its own lane. The single save worker then took the Index record
+first, so a slow Index receipt held the document's Save and the navigation until the 10 s refusal.
+The departure now drains the document's lane, then releases its Index records without awaiting
+them. The regression keeps the Index receipt pending: navigation completes, the document's Save
+lands first, the Index record stays in flight with its original request, and another document's
+restored work stays held. It fails at `5bc43d2c`.
+
+An adversarial review of the fix found no blocker/high; its medium is that the fix holds only
+while the worker is free. Two changes and a pinned limit follow from it:
+
+- A Save being awaited now goes ahead of other lanes' runnable heads, so an Index record an
+  earlier deadline released can no longer overtake a departure's own record (pinned; it fails
+  without the preference).
+- The post-drain release is skipped across a reset and still happens after a superseded but
+  drained departure, so a drained departure does not split the rename. A refused departure holds
+  its restored Index half for Save/retry (pinned). Overlapping Saves keep a list of active
+  preferences, so one finishing early cannot leave a stale one behind.
+- **Follow-up (pre-existing, pinned as a known limit):** one worker serves every lane, so an Index
+  delivery already running still delays a departure or a Create until it answers or the 10 s
+  refusal. It can come from a deadline, an earlier departure or a sidebar retry. A separate
+  Index-lane worker would remove this; it needs a concurrency design review.
+
+The two disclosed lows (Index recovery record without a held row, the restore toast's page name)
+remain follow-ups.
+
+Checks: frontend 1751/1751, `npm run check` 0 errors, build, 9/9 Edge flows (one earlier run
+failed the debug-console flow on load and passed on rerun), ambient gate, root Rust 2463 passed
+(24 ignored), native 363 passed (both in isolated target directories).
+
+## PR #46 third review: rename context and Index-half Save (2026-10-18)
+
+The review of `22e4ed77` confirmed the previous three fixes and reproduced two new P2s, both fixed:
+
+- **A wiki rename never retargets another server's page.** `commitWikiRename` captures the server
+  and view generation before its awaits. It reloads the page list, reopens and falls back by name
+  only while the pane still shows that server's wiki. A rename on A that lands after a switch to B
+  no longer renames B's open "Shared" pane to "Renamed", so B's Save keeps its target.
+- **A document's Save covers both halves of a rename.** `affectedObject(s)` names the document a
+  record changes, including a Closing/Unconfirmed Index record. That record keeps the Index as its
+  native target and names the entry in its op. Save, the editor's pending indicators and the
+  sidebar's held rows all use it.
+
+Both regressions fail at `22e4ed77`, as does the new sidebar assertion for an Index-only held edit.
+
+An adversarial review of these fixes found no blocker/high and four medium findings, all fixed:
+
+- A Save whose Index half sits behind another document's held, failed or uncertain Index record
+  now refuses at once and names it, instead of timing out after 10 s with "try again".
+- The rename fallback also requires that no page has been opened into the pane since the rename
+  began. A pane serial, `wikiPane()`, captures server, generation, serial and page. A newer open of
+  the old name (which reads the post-rename, empty page) keeps its identity.
+- Leaving a restored document sends both halves of its rename: its Index-lane records are
+  released, not awaited.
+- The older wiki actions use the pane they began on. `saveWikiPage` (which marks clean only the
+  text actually sent), `deleteWikiPage`, `setWikiPageFormat` and `openWikiHistory` now use the
+  captured server and page, and touch the pane only while it is still that pane (history also
+  never behind a lock).
+
+Its lows are fixed too:
+
+- Playback and export decide "draft" from content records only.
+- Held rows take a deleted entry's title from the saved Index, and the sidebar comment is updated.
+- Reauthor of an Index record is gated on the Index's refusal.
+
+One low remains: a restored Index recovery record about one entry still has no held row. `affectedObject` has a direct unit test.
+
+A short re-review found no blocker/high and one new medium, introduced by the save fix: a stash
+restored into the pane survived a Save and could later revert the page. That is fixed (saving the
+pane retires its stash) and pinned. Of its lows, these are also fixed:
+
+- The stuck-behind check reruns on every queue change.
+- The refusal says "Retry or discard" for a failed blocker.
+- Delete clears only the pane it began on.
+
+`restoreWikiRev`'s toast still names the page then on screen (cosmetic).
+
+Checks: frontend 1746/1746, `npm run check` 0 errors, build, 9/9 Edge flows, ambient gate,
+root Rust 2463 passed (24 ignored; isolated target), native 363 passed (isolated target: the
+running desktop app held `src-tauri/target/debug/mewtual-desktop.exe`).
+
+## PR #46 re-review fixes: route ownership, read-error recovery, settings requests (2026-10-18)
+
+The re-review of `13e338eb` confirmed the five original fixes and reproduced three remaining P2s:
+
+- **Stale responses no longer take over the screen.** A navigation action now owns a
+  `StudioRoute` from first step to last (`studioExit.begin()`). It carries the route across
+  every await and asks `route.leave()` again right before changing the view, never with a fresh
+  claim. A wiki response that arrives after the member returned to the Studio is discarded. Work
+  drawn in a Studio that stayed on screen during the read is saved first, or keeps the Studio on
+  refusal. History Back/Forward, ticker, inbox, news, mention, topic/search, call-diagnostics,
+  wiki rename/create and add-channel flows hand one route to `switchServer`/`switchTo`/
+  `switchView`/`openWikiPage`. From the Studio they change the surface before the channel, because
+  a channel moved under a mounted Studio ends every route. The route audit rejects a guard separated from its
+  screen change by an await. It also rejects a route-less navigation call after an await, except
+  four stated forced or background cases and one branch that begins its own action.
+- **Wiki menus act on the page they opened.** `openWikiPage` reports whether it opened a page, so a
+  retired request can no longer arm Delete or Rename on the page still shown.
+- **Read errors no longer hide recovery.** With no model on screen, the editor shows the read
+  error beside the retained requests' exact retry, armed discard and waiting count. Restored
+  queued work has a Save and discard in every editor state, without a refused departure first.
+  Save inside an editor now saves only that document (`saveDocument`), so other documents'
+  restored work stays held. A discard confirmation lapses when its record's state changes.
+- **Settings requests own navigation.** A request for the server already on screen retires an
+  older one still waiting on a Studio Save to switch, so that switch never commits, closes the
+  newer dialog or seeds over its draft.
+
+Each regression fails with its fix removed (wiki second check, current-server claim, surface-first
+order, document-scoped Save, state-keyed arming, route threading) or against `13e338eb`
+(read-error controls). An adversarial review of this round found no blocker/high finding; its three
+medium findings (Back to another channel, wiki menu arming, Save scope) and its low findings are
+fixed. Opening settings for the current server deliberately retires other in-flight navigation
+(newest action wins). A short re-review of those fixes found no blocker/high/medium; its low
+findings are fixed, except that the discard key can match again after an uncertain → retry →
+uncertain cycle (accepted: the same risk as when it was armed).
+
+Checks: frontend 1740/1740, `npm run check` 0 errors, build, 9/9 Edge flows, root Rust 2463
+passed (24 ignored), native 363 passed, ambient gate. Root Rust note: a run in the shared `target/`
+reused a `catcoms-rt` artifact from the `chat-update-implementation` worktree and failed to compile.
+The isolated-target run is the one reported.
+
+## PR #46 review fixes: restored drafts, Studio exits, settings, playback (2026-10-18)
+
+An external review of `149e7321` reported one P1 and four P2 defects, all reproduced and fixed:
+
+- **Restored drafts no longer deadlock.** A document switch saves only the document being left, and
+  nothing when no document is open. The sidebar lists documents holding unsaved edits, each with
+  an open button. Before a first delivery, admission reads a document it holds no view of. It does
+  this while the record is still queued and uncounted, so a lock during the read restores the
+  record as unsent. "Could not read", "still reading", unread-Index and changed-server refusals
+  send nothing and do not count an attempt, so a retry is admitted afresh.
+- **Every App route out of the Studio uses the exit gate** (`studio-exit.ts`), so a drawing the
+  full draft queue refused can no longer be destroyed by Ctrl+F, Ctrl+Shift+F, the inbox, DM home,
+  add-server, vault change, wiki/status links, menus, ticker jumps or Back/Forward. Lock, leaving
+  the last server and a native server close are marked forced edges.
+  `studio-exit-routes.test.ts` audits App.svelte for unguarded route writes.
+- **Composite routes act only on success.** `switchServer`/`switchTo` resolve whether the switch
+  happened. `openServerSettings` opens in the turn the switch to the requested server commits, so
+  it never opens on, or renames, the server being left. A refused Back/Forward step leaves the
+  cursor on the place still on screen.
+- **Playback.** Inline PIXA "Play sound" re-arms the repaint loop. Audition requests carry a
+  generation, so a superseded one cannot clear a newer note's flag or report a failure.
+
+Checks: frontend 1730/1730, `npm run check` 0 errors, build, 9/9 Edge flows, root Rust
+2463 passed (24 ignored), native 363 passed, ambient gate. Every new regression was confirmed to
+fail on the pre-fix code. A read-only adversarial review found one HIGH (lock during the
+admission read), two MEDIUM (add-server/vault-change routes; settings re-seeding after the load)
+and five LOW findings; all are fixed. A re-review found no remaining blocker/high/medium, and its
+one LOW (the unread-Index path, identical at HEAD) is fixed too. Residual: `leaveServer`/`server-closed` with other servers remaining still go
+through a `switchServer` whose Studio Save can refuse. A frame publication not yet applied is
+still classified as possibly committed if a lock lands mid-publish. `jumpToInbox` does not await
+its channel switch. An absent document holding only queued restored edits shows no Save button
+until a Studio exit's global Save refuses it into retry/discard.
 
 ## Gate 7 complete; communication programme next (2026-10-18)
 

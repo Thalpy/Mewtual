@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
-import { StudioAudioSession } from "./studio-audio.ts";
+import { STUDIO_REFRESH_RETRIES, StudioAudioSession } from "./studio-audio.ts";
 import { archivalReleaseTailMs, planJamArchivalPlayback } from "./jam-archival-plan.ts";
 import type { JamTake } from "./jam-contract.ts";
 import type { JamArchivalPlayback } from "./jam-engine.ts";
@@ -24,16 +24,25 @@ function releaseEnd(value: ScorePlayback): number {
 }
 function harness() {
   let now = 0, prepared = 0, resumes = 0, revoked = 0, fail = false;
-  const plans = new Map<JamArchivalPlayback, ReturnType<typeof planJamArchivalPlayback>>();
+  const plans = new Map<JamArchivalPlayback, ReturnType<typeof planJamArchivalPlayback>>(), documents: boolean[] = [];
   const context = { state: "running" as AudioContextState, resume: async () => { resumes++; context.state = "running"; } };
   const audio = new StudioAudioSession({ context,
-    prepareArchivalPlayback: async (value, animation) => { const cap = {} as JamArchivalPlayback; plans.set(cap, planJamArchivalPlayback(value, animation)); prepared++; return cap; },
+    prepareArchivalPlayback: async (value, animation, _current, opts) => { const cap = {} as JamArchivalPlayback; plans.set(cap, planJamArchivalPlayback(value, animation)); prepared++; documents.push(opts?.document === true); return cap; },
     archivalPlaybackPlan: (cap) => plans.get(cap) ?? null, playArchivalEvent: () => fail ? Promise.reject(new Error("renderer failed")) : { ok: true },
     revokeArchivalPlayback: (cap) => { revoked++; return plans.delete(cap); },
   }, () => now);
   audio.setScope({ generation: 1, server: 1, channel: "channel", membership: 1 }, false);
-  return { audio, context, now: (ms: number) => { now = ms; }, prepared: () => prepared, resumes: () => resumes, revoked: () => revoked, fail: () => { fail = true; } };
+  return { audio, context, documents, now: (ms: number) => { now = ms; }, prepared: () => prepared, resumes: () => resumes, revoked: () => revoked, fail: () => { fail = true; } };
 }
+
+test("the editor's own Play, and every loop restart of it, asks for the document voice cap; other playback never does", async () => {
+  const value = await score(16, { "0:0": { k: "n", p: vector.patchId } });
+  const h = harness();
+  assert.equal(await h.audio.start("score", async () => value, true, 0, true), true);
+  h.now(16 * 125); await h.audio.tick(); // the loop restarts at the grid end
+  assert.equal(await h.audio.start("score", async () => value, false), true); // a viewer's playback
+  assert.deepEqual(h.documents, [true, true, false]);
+});
 
 test("looping pictures keep moving through long SFX without restarting or shortening that sound", async () => {
   const p = decodePixa(Buffer.from(vector.pixaHex, "hex"));
@@ -106,4 +115,78 @@ test("a Score whose final release outlasts its grid loops after that release, no
   }
   h.now(end); await h.audio.tick();
   assert.equal(h.prepared(), 2);
+});
+
+/** A looping Score whose source changes between passes; records the take each engine package was prepared from. */
+function loopHarness() {
+  let now = 0, calls = 0, fail = false, gate: ReturnType<typeof deferred<void>> | null = null;
+  let source: ScorePlayback = playback(take);
+  const prepared: JamTake[] = [];
+  const plans = new Map<JamArchivalPlayback, ReturnType<typeof planJamArchivalPlayback>>();
+  const audio = new StudioAudioSession({ context: { state: "running", resume: async () => {} },
+    prepareArchivalPlayback: async (value, animation) => { const cap = {} as JamArchivalPlayback; plans.set(cap, planJamArchivalPlayback(value, animation)); prepared.push(value as JamTake); return cap; },
+    archivalPlaybackPlan: (cap) => plans.get(cap) ?? null, playArchivalEvent: () => ({ ok: true }), revokeArchivalPlayback: (cap) => plans.delete(cap),
+  }, () => now);
+  audio.setScope({ generation: 1, server: 1, channel: "channel", membership: 1 }, false);
+  const prepare = async () => { calls++; if (gate) await gate.promise; if (fail) throw new Error("the displayed source changed; start playback/export again"); return source; };
+  const settle = async () => { for (let i = 0; i < 4; i++) await new Promise(resolve => setImmediate(resolve)); };
+  return { audio, prepare, prepared, settle, calls: () => calls, now: (ms: number) => { now = ms; }, fail: (on: boolean) => { fail = on; },
+    edit: (note: number) => { source = playback({ ...take, events: [{ ...take.events[0], n: note }, take.events[1]] }); },
+    hold: () => { gate = deferred<void>(); }, release: () => { gate?.resolve(); gate = null; } };
+}
+const noteOf = (value: JamTake) => value.events[0].n;
+
+test("a looping Score takes its edits into the next pass: the current pass is never cut, the restart plays the refreshed source", async () => {
+  const h = loopHarness(); assert.equal(await h.audio.start("score", h.prepare, true), true);
+  await h.audio.tick(); assert.equal(h.audio.state.nextPass, false);
+  h.edit(62); h.audio.refresh();
+  assert.equal(h.audio.state.nextPass, true, "edits are waiting from the moment they are asked for");
+  await h.settle();
+  assert.equal(h.calls(), 2, "the next pass is prepared at once, not at the boundary");
+  h.now(45_000); await h.audio.tick();
+  assert.equal(h.audio.state.state, "playing"); assert.equal(h.prepared.length, 1, "the pass under way keeps playing what it began with");
+  assert.equal(h.audio.state.nextPass, true);
+  h.now(90_125); await h.audio.tick();
+  assert.equal(h.prepared.length, 2); assert.equal(noteOf(h.prepared[1]), 62, "the restart is the edited score");
+  assert.equal(h.audio.state.nextPass, false, "nothing is waiting once it has played");
+  h.now(180_250); await h.audio.tick();
+  assert.equal(h.prepared.length, 3); assert.equal(noteOf(h.prepared[2]), 62, "a pass without edits repeats the refreshed source, not the original");
+  assert.equal(h.calls(), 2, "no preparation without a change");
+});
+
+test("refreshes coalesce: a change during a preparation runs one more afterwards; a stop discards a preparation in flight", async () => {
+  const h = loopHarness(); assert.equal(await h.audio.start("score", h.prepare, true), true);
+  h.hold();
+  h.edit(62); h.audio.refresh(); h.edit(64); h.audio.refresh(); h.audio.refresh();
+  await h.settle(); assert.equal(h.calls(), 2, "one preparation at a time");
+  h.release(); await h.settle();
+  assert.equal(h.calls(), 3, "the change that landed during it asks for one more, once");
+  h.now(90_125); await h.audio.tick();
+  assert.equal(noteOf(h.prepared[1]), 64, "the newest source plays");
+  h.hold(); h.edit(65); h.audio.refresh(); await h.settle(); assert.equal(h.calls(), 4);
+  h.audio.stop(); h.release(); await h.settle();
+  assert.equal(h.audio.state.state, "stopped"); assert.equal(h.audio.state.nextPass, false, "a stopped session holds no next pass");
+  assert.equal(h.prepared.length, 2, "the late result starts nothing");
+});
+
+test("a preparation that fails is retried on later ticks a few times, then the loop keeps its pass until the source changes again", async () => {
+  const h = loopHarness(); assert.equal(await h.audio.start("score", h.prepare, true), true);
+  h.fail(true); h.edit(62); h.audio.refresh(); await h.settle();
+  assert.equal(h.calls(), 2); assert.equal(h.audio.state.nextPass, true, "a retry is pending");
+  for (let attempt = 3; attempt <= STUDIO_REFRESH_RETRIES + 1; attempt++) { h.now(1_000 * attempt); await h.audio.tick(); await h.settle(); assert.equal(h.calls(), attempt); }
+  h.now(10_000); await h.audio.tick(); await h.settle();
+  assert.equal(h.calls(), STUDIO_REFRESH_RETRIES + 1, "after the last retry no tick tries again");
+  assert.equal(h.audio.state.nextPass, false, "nothing is waiting: the loop keeps its pass");
+  h.now(90_125); await h.audio.tick();
+  assert.equal(h.prepared.length, 2); assert.equal(noteOf(h.prepared[1]), 60, "the pass that could not be refreshed repeats");
+  h.fail(false); h.audio.refresh(); await h.settle();
+  assert.equal(h.calls(), STUDIO_REFRESH_RETRIES + 2, "a new change asks afresh"); assert.equal(h.audio.state.nextPass, true);
+});
+
+test("a one-shot play and a stopped session have no next pass to refresh", async () => {
+  const h = loopHarness(); assert.equal(await h.audio.start("score", h.prepare, false), true);
+  h.edit(62); h.audio.refresh(); await h.settle();
+  assert.equal(h.calls(), 1); assert.equal(h.audio.state.nextPass, false);
+  h.now(90_125); await h.audio.tick(); assert.equal(h.audio.state.state, "stopped"); assert.equal(h.prepared.length, 1);
+  h.audio.refresh(); await h.settle(); assert.equal(h.calls(), 1);
 });

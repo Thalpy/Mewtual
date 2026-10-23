@@ -11,18 +11,55 @@ use catcoms_app::studio::{
 #[derive(serde::Deserialize)]
 #[serde(tag = "kind", rename_all = "camelCase", deny_unknown_fields)]
 pub(crate) enum ChoiceInput {
-    Frame { id: String, value: String },
-    FrameDeletion { id: String },
-    Title { value: String },
-    Fps { value: String },
-    SoundRecord { value: String },
-    Object { id: String },
-    ObjectTitle { id: String, value: String },
-    ObjectExpiry { id: String, value: String },
-    ObjectDeletion { id: String },
-    ScoreCell { step: u16, row: u8, value: String },
-    ScorePatch { patch: String, value: String },
-    ScoreHeader { field: String, value: String },
+    Frame {
+        id: String,
+        value: String,
+    },
+    FrameDeletion {
+        id: String,
+    },
+    Title {
+        value: String,
+    },
+    Fps {
+        value: String,
+    },
+    SoundRecord {
+        value: String,
+    },
+    Object {
+        id: String,
+    },
+    ObjectTitle {
+        id: String,
+        value: String,
+    },
+    ObjectExpiry {
+        id: String,
+        value: String,
+    },
+    ObjectDeletion {
+        id: String,
+    },
+    ScoreCell {
+        step: u16,
+        row: u8,
+        value: String,
+    },
+    ScoreNote {
+        step: u16,
+        row: u8,
+        layer: String,
+        value: String,
+    },
+    ScorePatch {
+        patch: String,
+        value: String,
+    },
+    ScoreHeader {
+        field: String,
+        value: String,
+    },
 }
 impl ChoiceInput {
     pub(super) fn checked(self) -> Result<StudioRecoveryItem, String> {
@@ -59,6 +96,27 @@ impl ChoiceInput {
                 I::ScoreCell {
                     step,
                     row,
+                    value: hash(&value)?,
+                }
+            }
+            Self::ScoreNote {
+                step,
+                row,
+                layer,
+                value,
+            } => {
+                if step >= SCORE_MAX_STEPS || row >= SCORE_ROWS {
+                    return Err("score coordinate out of range".into());
+                }
+                // A layered note slot (docs/design-score-layers.md section 6). Canonical layer
+                // spelling only (`d` or 64 lowercase hex), the same parser the note key and
+                // `clear_note` use, so a choice can never name a layer no slot could hold.
+                let layer =
+                    ScoreLayer::parse(&layer).map_err(|_| "unknown score layer".to_string())?;
+                I::ScoreNote {
+                    step,
+                    row,
+                    layer,
                     value: hash(&value)?,
                 }
             }

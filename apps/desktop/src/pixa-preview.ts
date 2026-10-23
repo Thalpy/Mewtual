@@ -214,6 +214,11 @@ export class PixaPreviewManager {
         if (generation !== card.generation || audioGeneration !== card.audioGeneration || !this.valid(card)) return;
         if (!started) status.textContent = "Sound unavailable. Check Deafen and try again.";
       }, () => { if (generation === card.generation && audioGeneration === card.audioGeneration && this.valid(card)) status.textContent = "Couldn’t play sound. Try again."; });
+      // The card is running again, so it needs the repaint loop. After the last running card was
+      // paused the timer stopped re-arming itself; without this a sole paused card would sound
+      // while its canvas, counter and progress stayed frozen. Armed after startAudio so nothing
+      // comes between the gesture and the audio start; arm() itself only schedules a timer.
+      this.arm();
     };
     stage.append(canvas, status, load, strip); host.append(stage, caption);
     this.register(card, explicit);

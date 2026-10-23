@@ -12,7 +12,7 @@
 // synchronous and free of the export context's hashing. `group` and `exporter` still come from
 // the real document view, because the validator demands them and a future reviewer should not
 // find a take whose provenance fields are invented.
-import { PATCH_OSC_WAVES, type JamPatch, type JamTake } from "./jam-contract.ts";
+import { JAM_KIT, JAM_NOTE_VOLUME_MAX, JAM_NOTE_VOLUME_MIN, PATCH_OSC_WAVES, type JamPatch, type JamTake } from "./jam-contract.ts";
 import { validateJamPatch } from "./jam-patch.ts";
 import { validateJamTake } from "./jam-recorder.ts";
 import type { ScorePlayback, StudioExportContext } from "./studio-export.ts";
@@ -32,9 +32,11 @@ export const AUDITION_MAX_MS = 600_000;
  * MIDI note, a hold outside 1..600000 ms, a recipe the validator rejects, or a context without
  * the group/exporter the take validator requires. The caller shows the message as a notice.
  */
-export function auditionPlayback(ctx: StudioExportContext, patch: JamPatch, note: number, durationMs: number): ScorePlayback {
+export function auditionPlayback(ctx: StudioExportContext, patch: JamPatch, note: number, durationMs: number, volume?: number): ScorePlayback {
   if (!Number.isInteger(note) || note < 0 || note > 127) throw new Error("the audition note is outside MIDI 0..127");
   if (!Number.isInteger(durationMs) || durationMs < AUDITION_MIN_MS || durationMs > AUDITION_MAX_MS) throw new Error("the audition hold is outside 1 ms..600 s");
+  // The same authored level a score note carries, so a placed note sounds as it will play.
+  if (volume !== undefined && (!Number.isInteger(volume) || volume < JAM_NOTE_VOLUME_MIN || volume > JAM_NOTE_VOLUME_MAX)) throw new Error("the audition volume is outside 1..100");
   if (typeof ctx.group !== "string" || !ctx.group) throw new Error("the document has no group yet; reopen it before auditioning");
   if (typeof ctx.exporter !== "string" || !ctx.exporter) throw new Error("no device identity for the audition take");
   const checked = validateJamPatch(patch);
@@ -51,7 +53,7 @@ export function auditionPlayback(ctx: StudioExportContext, patch: JamPatch, note
     lanes: [{ src: 0, sn: AUDITION_LANE_NONCE }],
     patches: [checked.patch],
     events: [
-      { ms: 0, lane: 0, n: note, on: 1, w, p: 0, q: 0 },
+      { ms: 0, lane: 0, n: note, on: 1, w, p: 0, q: 0, ...(volume === undefined ? {} : { v: volume }) },
       { ms: durationMs, lane: 0, n: note, on: 0, q: 1 },
     ],
   };
@@ -59,4 +61,24 @@ export function auditionPlayback(ctx: StudioExportContext, patch: JamPatch, note
   if (!valid.ok) throw new Error(valid.error);
   // The grid end is the authored hold: the controller adds the recipe's release tail itself.
   return { take: valid.take, gridMs: durationMs };
+}
+
+/**
+ * One pad hit through the same path, so a placed drum is heard like a placed note. A hit is a
+ * one-shot with the kit's own tail: the take carries no recipe, and the grid end is that tail so
+ * the controller lets the sound finish before it reports completion.
+ */
+export function auditionPadPlayback(ctx: StudioExportContext, pad: number): ScorePlayback {
+  const kit = Number.isInteger(pad) ? JAM_KIT[pad] : undefined;
+  if (!kit) throw new Error("the audition pad is outside the kit");
+  if (typeof ctx.group !== "string" || !ctx.group) throw new Error("the document has no group yet; reopen it before auditioning");
+  if (typeof ctx.exporter !== "string" || !ctx.exporter) throw new Error("no device identity for the audition take");
+  const take: JamTake = {
+    v: 1, group: ctx.group, call: AUDITION_CALL, met: { bpm: 120, bpb: 4 }, parts: [ctx.exporter],
+    lanes: [{ src: 0, sn: AUDITION_LANE_NONCE }], patches: [],
+    events: [{ ms: 0, lane: 0, n: pad, d: 1, q: 0 }],
+  };
+  const valid = validateJamTake(take);
+  if (!valid.ok) throw new Error(valid.error);
+  return { take: valid.take, gridMs: Math.max(AUDITION_MIN_MS, kit.tailMs) };
 }
