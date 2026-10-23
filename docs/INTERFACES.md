@@ -1,5 +1,20 @@
 # Mewtual; Interfaces & Hooks Schema
 
+## Private native-origin Derive (23 October; draft)
+
+`factory::native::produce_derivation(Context, Route, PairSelector)` is a private Rust entry,
+not a Tauri command. It returns an opaque non-Clone future yielding native completion and
+bounded RowId metadata. It exposes no Tokio abort handle, key/Input/result bytes, action
+grant or browser drainage flag. Dropping the observer detaches the actual paid task.
+
+The actual Route must be indexed by this Context's canonical channel registry. A live
+Route from another registry is refused even with the same selected owner allocation.
+Fresh native selection/generation/server/grant/live-Route checks still precede Pending
+and Actor work. One native position per original Session has an8KiB ordinary payment
+covering complete preparation/task/output before its first await. The physical4KiB task
+and shared pool limits are unchanged. Native payment and canonical routing persist through
+actual output collection; shutdown cannot infer native idle from physical idle alone.
+
 ## Child admission uses the original final fence (23 October; combined draft)
 
 Parent and child engine adapters share UI-commit -> try-Coordinator -> try-Route -> try-Engine

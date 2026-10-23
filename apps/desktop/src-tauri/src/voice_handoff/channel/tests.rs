@@ -2,6 +2,82 @@ use super::*;
 use rand_chacha::ChaCha20Rng;
 use rand_core::SeedableRng;
 
+#[tokio::test]
+async fn native_and_physical_owners_both_delay_shutdown_in_either_drop_order() {
+    use std::future::{poll_fn, Future};
+    use std::task::Poll;
+    for native_first in [false, true] {
+        let (session, _) = session(Arc::new(Resources::default()), [3; 32]);
+        let native = session.native_hold().unwrap();
+        assert!(matches!(session.native_hold(), Err(Refused::Capacity)));
+        let physical = session.header().unwrap(); // native work cannot borrow this envelope
+        session.close_admission();
+        assert!(matches!(session.native_hold(), Err(Refused::Binding)));
+        assert!(matches!(session.header(), Err(Refused::Binding)));
+        let mut idle = Box::pin(session.wait_idle());
+        assert!(poll_fn(|cx| Poll::Ready(idle.as_mut().poll(cx).is_pending())).await);
+        if native_first {
+            drop(native);
+            assert!(poll_fn(|cx| Poll::Ready(idle.as_mut().poll(cx).is_pending())).await);
+            drop(physical);
+        } else {
+            drop(physical);
+            assert!(poll_fn(|cx| Poll::Ready(idle.as_mut().poll(cx).is_pending())).await);
+            drop(native);
+        }
+        assert!(poll_fn(|cx| Poll::Ready(idle.as_mut().poll(cx).is_ready())).await);
+        assert_eq!(session.fixture_counts(), (false, 0, 0));
+    }
+    // Closing admission first cannot be repaired by a fresh native guard on this Session.
+    let (closed, _) = session(Arc::new(Resources::default()), [3; 32]);
+    closed.close_admission();
+    assert!(matches!(closed.native_hold(), Err(Refused::Binding)));
+    closed.wait_idle().await;
+}
+
+#[tokio::test]
+async fn a_foreign_native_guard_cannot_drain_the_original_session() {
+    use std::future::{poll_fn, Future};
+    use std::task::Poll;
+    let (original, _) = session(Arc::new(Resources::default()), [3; 32]);
+    let (foreign, _) = session(Arc::new(Resources::default()), [3; 32]);
+    let hold = original.native_hold().unwrap();
+    let other = foreign.native_hold().unwrap();
+    original.close_admission();
+    let mut idle = Box::pin(original.wait_idle());
+    assert!(poll_fn(|cx| Poll::Ready(idle.as_mut().poll(cx).is_pending())).await);
+    drop(other);
+    assert!(poll_fn(|cx| Poll::Ready(idle.as_mut().poll(cx).is_pending())).await);
+    drop(hold);
+    assert!(poll_fn(|cx| Poll::Ready(idle.as_mut().poll(cx).is_ready())).await);
+}
+
+#[test]
+fn concurrent_native_acquisition_has_one_actual_owner_without_spending_a_nonce() {
+    let (session, _) = session(Arc::new(Resources::default()), [3; 32]);
+    let ready = std::sync::Barrier::new(9);
+    let held = std::sync::Barrier::new(9);
+    let winners = std::sync::atomic::AtomicUsize::new(0);
+    std::thread::scope(|scope| {
+        for _ in 0..8 {
+            scope.spawn(|| {
+                ready.wait();
+                let owner = session.native_hold();
+                if owner.is_ok() {
+                    winners.fetch_add(1, Ordering::SeqCst);
+                }
+                held.wait();
+                drop(owner);
+            });
+        }
+        ready.wait();
+        held.wait();
+    });
+    assert_eq!(winners.load(Ordering::SeqCst), 1);
+    assert_eq!(session.fixture_counts(), (false, 0, 0));
+    assert!(session.native_hold().is_ok());
+}
+
 fn session(resources: Arc<Resources>, group: [u8; 32]) -> (Arc<Session>, Keys) {
     use catcoms_rt::RngCore;
     let mut rng = ChaCha20Rng::from_seed([37; 32]);

@@ -28,6 +28,7 @@ const TASK_AND_REPLY_BYTES: usize = 1024;
 // group/process limit is introduced; framed input/result copies still debit this exact Phase.
 const DERIVATION_HANDOFF_BYTES: usize = 16 * 1024;
 mod confirmation;
+pub(super) mod native;
 // The inactive authenticated Begin adapter and integration fixtures call these factories.
 // The production listener still rejects effect admission before child dispatch.
 pub(super) use confirmation::{
@@ -237,10 +238,10 @@ pub(super) fn require_current_selection(
     Ok(())
 }
 
-fn worker_layout<F>(future: &F) -> usize {
+fn worker_layout<F: std::future::Future>(future: &F) -> usize {
     std::mem::size_of_val(future)
-        + std::mem::size_of::<Completion>()
-        + std::mem::size_of::<tokio::task::JoinHandle<Completion>>()
+        + std::mem::size_of::<F::Output>()
+        + std::mem::size_of::<tokio::task::JoinHandle<F::Output>>()
         + 2 * std::mem::size_of::<usize>()
         + std::mem::size_of::<catcoms_app::AppCommand>()
         + TASK_AND_REPLY_BYTES
@@ -258,29 +259,38 @@ async fn run(
     _commit: tokio::sync::OwnedMutexGuard<()>,
     custody: FactoryCustody,
 ) -> Completion {
-    let result = async {
-        if registration.has_publication()? {
-            // An earlier actual Root reply already reached this counted Pending. A busy
-            // previous handoff loan is a LOCAL attachment refusal, never permission to
-            // repeat the Actor factory after that reply, a lost caller or later expiry.
-            return registration
-                .attach_published(DERIVATION_HANDOFF_BYTES)
-                .map_err(Refused::from);
-        }
-        registration.mark_handoff()?;
-        let pair = actor.prepare_voice_pair(grant.clone(), selector).await?;
-        let action = actor
-            .prepare_voice_derivation(grant, pair.handshake)
-            .await?;
-        registration
-            .attach(action, pair, DERIVATION_HANDOFF_BYTES)
-            .map_err(Refused::from)
-    }
-    .await;
+    let result = publish_derivation(registration, actor, grant, selector).await;
     Completion {
         result,
         _custody: custody,
     }
+}
+
+/// Shared actual Actor publication for browser-origin and private native-origin factories.
+/// Each caller retains its OWN original commit/selection/payment/drain custody throughout
+/// this turn. This function does not admit work or accept renderer-provided authority.
+async fn publish_derivation(
+    registration: Registration,
+    actor: ServerActor,
+    grant: Arc<CallGrant>,
+    selector: PairSelector,
+) -> Result<RowId, Refused> {
+    if registration.has_publication()? {
+        // An earlier actual Root reply already reached this counted Pending. A busy
+        // previous handoff loan is a LOCAL attachment refusal, never permission to
+        // repeat the Actor factory after that reply, a lost caller or later expiry.
+        return registration
+            .attach_published(DERIVATION_HANDOFF_BYTES)
+            .map_err(Refused::from);
+    }
+    registration.mark_handoff()?;
+    let pair = actor.prepare_voice_pair(grant.clone(), selector).await?;
+    let action = actor
+        .prepare_voice_derivation(grant, pair.handshake)
+        .await?;
+    registration
+        .attach(action, pair, DERIVATION_HANDOFF_BYTES)
+        .map_err(Refused::from)
 }
 
 #[cfg(test)]

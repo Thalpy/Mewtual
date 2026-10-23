@@ -147,6 +147,9 @@ impl Registry {
     /// call lease while its authenticated Control session still has final delivery work.
     /// Do not reuse first-effect require_open here, and do not weaken it for factories.
     /// Release both registry guards before touching Ledger or retiring any Root owner.
+    /// Native producer preflight also uses this pure provenance check before creating its
+    /// task. That use grants no effect authority: final live-Route/selection/UI/grant checks
+    /// remain mandatory after its asynchronous preparation.
     pub(super) fn require_cleanup_route(&self, route: &Route) -> Result<(), Refused> {
         let held = self.index.lock().unwrap_or_else(|error| error.into_inner());
         if self.stopping.load(Ordering::Acquire)
@@ -502,7 +505,7 @@ impl Registry {
     }
 
     /// Process shutdown only: close every existing first-effect fence before collecting any
-    /// physical position. No channel may be created after this Index-ordered transition.
+    /// physical/native position. No channel may be created after this Index-ordered transition.
     /// The service is the sole caller/collector, after its connection future has dropped.
     ///
     /// Unlike ordinary channel collection, this deliberately terminates Control routing:
@@ -522,7 +525,9 @@ impl Registry {
             }
         }
         // One paid Session/waiter at a time; no heap registry, detached waiter or 64-owner
-        // snapshot. Retired Sessions can have no Row references while a reply/worker still
+        // snapshot. Native producer tasks retain the canonical Route as well as their
+        // independently paid native Session hold; wait_idle collects both ownership kinds.
+        // Retired Sessions can have no Row references while a reply/worker still
         // owns them, so consult the original weak witness as well as live State.session.
         for slot in 0..ROWS {
             let session = {

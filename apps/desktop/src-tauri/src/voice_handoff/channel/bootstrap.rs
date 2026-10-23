@@ -129,6 +129,7 @@ impl Prepared {
             counters: Mutex::new(Counters {
                 closed: false,
                 busy: false,
+                native_busy: false,
                 request_floor: 0,
                 response_sequence: 0,
             }),

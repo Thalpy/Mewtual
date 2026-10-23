@@ -1,5 +1,22 @@
 # Mewtual; Architecture
 
+## Private native-origin work producer (23 October; draft)
+
+Native Derive production has a separate origin from browser-authenticated requests. It
+retains the canonical channel Route and one affine native Session position, paying8KiB
+for its complete preparation/task/output before any asynchronous work. The existing
+physical factory retains its4KiB publication payment and separately funded preparation.
+Shared process/group/work/row limits remain unchanged; native production reserves more
+ordinary capacity than that physical task alone.
+
+Shutdown fences and waits for both independently funded native and physical positions.
+The native task keeps current selection, grant and original UI commit through Actor
+publication; its completed output retains payment/Route/drain custody until collected.
+Its opaque observer supports await/detach, with no abort capability. Exact retries recover
+the original ledger purpose/publication. This private producer is not production work
+delivery, authenticated HTTP effect dispatch, a native/WebCrypto cycle or live RTC.
+HANDOVER records the draft's validation and remaining integration work.
+
 ## Separate Plan-final continuation (23 October; validated inactive integration)
 
 After an ordinary action Return the parent retains its original Root plan, independently of

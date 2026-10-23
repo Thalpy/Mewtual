@@ -44,6 +44,9 @@ struct Counters {
     // Process shutdown closes admission permanently. An old Route cannot reopen this Session.
     closed: bool,
     busy: bool,
+    // One independently funded native producer may coexist with the browser position.
+    // This is drain custody only, never a browser Header or action/engine permission.
+    native_busy: bool,
     request_floor: u64,
     response_sequence: u64,
 }
@@ -127,6 +130,7 @@ impl Session {
             counters: Mutex::new(Counters {
                 closed: false,
                 busy: false,
+                native_busy: false,
                 request_floor: 0,
                 response_sequence: 0,
             }),
@@ -161,9 +165,27 @@ impl Session {
         })
     }
 
+    /// Own one native producer position on this actual Session. The caller must pay its
+    /// complete native task/preparation/output BEFORE constructing or awaiting that work;
+    /// the browser's Control envelope may already be occupied. This private affine guard
+    /// neither authenticates a frame nor creates a physical request/response nonce.
+    pub(super) fn native_hold(self: &Arc<Self>) -> Result<NativeHold, Refused> {
+        let mut counters = self.counters.lock().unwrap_or_else(|e| e.into_inner());
+        if counters.closed {
+            return Err(Refused::Binding);
+        }
+        if counters.native_busy {
+            return Err(Refused::Capacity);
+        }
+        counters.native_busy = true;
+        Ok(NativeHold {
+            session: self.clone(),
+        })
+    }
+
     /// Irreversible process-shutdown fence, independent of call lease revocation. Hold the
-    /// counter mutex so an old Route's header either acquired the original position before
-    /// this fence (and must be collected), or is refused without debiting a sequence.
+    /// counter mutex so an old Route's physical/native acquisition either precedes this
+    /// fence (and must be collected), or refuses without debiting a sequence.
     pub(super) fn close_admission(&self) {
         self.counters
             .lock()
@@ -172,8 +194,8 @@ impl Session {
     }
 
     /// The service has ONE shutdown collector. Register its wake before inspecting busy,
-    /// avoiding a lost last-drop notification. This waits for actual header/reply AND detached
-    /// worker/completion ownership; timeout, socket loss and lease End are never substitutes.
+    /// avoiding a lost last-drop notification. This waits for actual header/reply AND native
+    /// producer/worker/completion ownership; timeout, socket loss and End are not substitutes.
     /// The original control payment includes this Notify and its one in-place waiter.
     pub(super) async fn wait_idle(&self) {
         loop {
@@ -186,7 +208,7 @@ impl Session {
                     .lock()
                     .unwrap_or_else(|error| error.into_inner());
                 debug_assert!(counters.closed);
-                if !counters.busy {
+                if !counters.busy && !counters.native_busy {
                     return;
                 }
             }
@@ -207,6 +229,26 @@ impl Session {
             }
             notified.await;
         }
+    }
+}
+
+/// Private non-Clone native drain position. Retain the canonical Route separately too:
+/// its actual Row must remain discoverable by shutdown/GC while this guard owns its Session.
+/// Payment, work, grants and commit must drop BEFORE this last field publishes native idle.
+pub(super) struct NativeHold {
+    session: Arc<Session>,
+}
+impl Drop for NativeHold {
+    fn drop(&mut self) {
+        let mut counters = self
+            .session
+            .counters
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        debug_assert!(counters.native_busy);
+        counters.native_busy = false;
+        drop(counters);
+        self.session.idle.notify_waiters();
     }
 }
 impl Drop for Session {

@@ -1,5 +1,32 @@
 # Threat model; client integrity & enforcement boundaries
 
+## Native-origin task custody (23 October; inactive integration)
+
+Private native Derive production pays its complete preparation/task/output before any await;
+it cannot borrow an occupied browser Control envelope or fabricate Header authentication.
+The actual Route must belong to this Context's canonical registry, not merely share selected
+owner metadata or even the same selected allocation. Final generation, server, selection,
+grant and live Route checks still precede Pending/Actor admission.
+
+This standalone path reserves8KiB once, including preparation. The physical factory keeps
+its existing4KiB publication-only payment and separately funded browser preparation. The
+provisional native4KiB inventory refused at4,456B; it is not fit evidence. The distinct8KiB
+guard and ordinary admission retain the same512KiB group/2MiB process caps and work/row
+limits. Additional native payment reduces available ordinary capacity, and does not claim
+supported multi-peer composition. The focused run passes 282 tests; the complete measured
+graph is 4,456B within the distinct 8KiB payment. Five actual blocked-TCP confirmation
+scenarios also pass. These do not establish browser interoperability or live RTC.
+
+One affine native-busy position shares the original Session admission/shutdown mutex. Closing
+admission fences both native and physical acquisition; shutdown waits for both owners. Their
+credits remain independent. The native task/output retains the canonical Route for registry
+discovery and last-owner GC. Its payment and work retire before native idle is signalled.
+The opaque observer permits await or drop-to-detach, never ordinary caller-triggered task
+abort after an Actor command has been queued. This is normal lifecycle ordering, not a claim
+of crash durability or recovery after arbitrary runtime teardown. Strict native Clippy and
+checking pass; full native tests/build/startup remain pending. No production effect
+dispatcher is enabled by this change.
+
 ## Child Control construction and collection (23 October; inactive adapter)
 
 Begin's separately paid8KiB worker is constructed in synchronous launch only after its

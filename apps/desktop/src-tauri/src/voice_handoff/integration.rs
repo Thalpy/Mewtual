@@ -67,14 +67,44 @@ async fn derivation_cycle(
     purpose.extend_from_slice(&selector.join);
     purpose.extend_from_slice(&selector.key_ref);
     purpose.extend_from_slice(&selector.epoch.to_be_bytes());
-    let mut begin = purpose.clone();
-    begin.push(1);
-    let incoming = opened_frame(&public, &route, (2, 8, 0, [0; 16]), &begin, None);
-    let physical = incoming.hold_position().unwrap();
-    let id = factory::ensure_derivation_row(&context, &route, selector, physical)
-        .await
-        .unwrap();
-    drop(incoming);
+    let id = if return_for_confirmation {
+        // Native-origin work has no browser request to borrow. Exercise its OWN paid
+        // producer/Session drain position on these genuine blocked-TCP pairs. The child
+        // provider below is still a test provider, not browser P256/HKDF acceptance.
+        let output = factory::native::produce_derivation(&context, &route, selector)
+            .unwrap()
+            .await
+            .unwrap();
+        let id = output.result().unwrap();
+        drop(output);
+        let row = state
+            .voice_handoff
+            .resolve(selected, ledger::Purpose::Derive(selector), id)
+            .unwrap();
+        let original = row.status().unwrap();
+        assert!(original.action.is_some() && original.engine.receipt.is_none());
+        let retry = factory::native::produce_derivation(&context, &route, selector)
+            .unwrap()
+            .await
+            .unwrap();
+        assert_eq!(retry.result().unwrap(), id);
+        assert!(
+            row.status().unwrap() == original,
+            "native producer retry preserves the same uncommitted action"
+        );
+        drop(retry);
+        id
+    } else {
+        let mut begin = purpose.clone();
+        begin.push(1);
+        let incoming = opened_frame(&public, &route, (2, 8, 0, [0; 16]), &begin, None);
+        let physical = incoming.hold_position().unwrap();
+        let id = factory::ensure_derivation_row(&context, &route, selector, physical)
+            .await
+            .unwrap();
+        drop(incoming);
+        id
+    };
     let row = state
         .voice_handoff
         .resolve(selected, ledger::Purpose::Derive(selector), id)

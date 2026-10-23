@@ -1,5 +1,43 @@
 # Mewtual; Handover
 
+## Native-origin producer (23 October; full native validation pending)
+
+The isolated native producer draft builds on published3d5b688b. Its private
+`produce_derivation` entry reserves its task payment before constructing asynchronous
+preflight/UI work. Its distinct8KiB payment covers preparation as well as publication;
+the physical factory's4KiB payment remains unchanged. It checks the actual Route against the Context's canonical channel
+registry, repeats current selection/grant/server/Route checks at final admission, reserves
+Pending before Actor work and shares the existing exact-publication recovery path.
+
+An affine native Session position is distinct from an authenticated browser Header. One
+native producer and one separately funded browser physical position may coexist. Shutdown
+waits for both, and uncollected native output retains its payment, canonical Route and native
+position. Drop releases work/commit and payment before publishing native idle. The returned
+observer exposes await/detach, with no Tokio abort handle. Two medium review findings on
+canonical routing and abortable handles were corrected before compilation.
+
+New regressions cover shutdown/drop order, same-selected foreign registries, pressure before
+preflight, lock/unlock, caller loss and completed-output collection. Real blocked-TCP
+confirmation parents now use this producer and require an unchanged uncommitted action on
+retry. The first compile found a test-helper visibility error; the next ran out of native
+archive disk space. Task-only archives/caches were removed after compilers stopped, and
+focused checks now use --lib with process-only CARGO_INCREMENTAL=0. The provisional4KiB
+native contract failed its actual layout guard:4,488B in v3, then4,456B after removing an
+intermediate admission-result graph (280 passed/2 failed in each run). These are excluded
+as fit evidence. Design review accepts the distinct8KiB envelope, charged once before any
+preparation, with the actual runtime/layout assertion retained. Shared group512KiB/process
+2MiB, row/work limits and one native producer per Session remain unchanged. More ordinary
+capacity is reserved by this native operation; positive composition still needs validation.
+The corrected focused run passes all 282 handoff tests (21.78s), including all nine new
+regressions. The complete measured graph is 4,456B (future 2,512B, output 152B), within the
+distinct 8KiB payment. All five real blocked-TCP confirmation scenarios pass (40.40s), using
+the actual native producer for their original uncommitted parent and exact retry. Strict
+native Clippy (1m18s) and checking (54.15s) pass. Read-only adversarial re-review reports no
+remaining blocker, high or medium finding. Full native tests, build and startup are pending;
+the published checkpoint's passes below do not cover this runtime. Root and browser inputs
+remain byte-identical to their recorded complete successful runs. Production work pull,
+actual HTTP effect delivery, native/WebCrypto interoperability and live V2 remain incomplete.
+
 ## Current continuation checkpoint (23 October; validated runtime 9109f20d)
 
 The combined continuation at9109f20d supports first/lost child Begin through the same
