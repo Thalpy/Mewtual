@@ -13,12 +13,39 @@ enum Encoded {
     History([u8; super::replies::STATUS_BYTES]),
 }
 
-pub(super) async fn admit(
-    context: &Context,
-    route: &Route,
+#[allow(clippy::large_enum_variant)]
+enum Initial {
+    Historical([u8; super::replies::STATUS_BYTES]),
+    Work(super::ledger::ResolvedRow, u32),
+}
+
+/// Resolve read-only history at construction, before the pending async frame exists. This
+/// does not enqueue an Actor query, reserve Work or admit an engine until the returned
+/// future is actually polled. The authenticated Incoming already owns its spent nonce.
+pub(super) fn admit<'a>(
+    context: &'a Context,
+    route: &'a Route,
     incoming: Incoming,
+) -> impl std::future::Future<Output = Result<CompletedReply, channel::Refused>> + 'a {
+    // All decoder/reconciliation/Status owners end BEFORE construction of the returned
+    // frame. Its captured Initial owns just serialized history or the same actual row.
+    let initial = identify(context, route, &incoming);
+    async move {
+        let result = match initial {
+            Ok(Initial::Historical(bytes)) => Ok(Encoded::History(bytes)),
+            Ok(Initial::Work(row, engine_bytes)) => {
+                prepare(context, route, row, engine_bytes).await
+            }
+            Err(error) => Err(error),
+        };
+        seal(incoming, result)
+    }
+}
+
+fn seal(
+    incoming: Incoming,
+    result: Result<Encoded, Refused>,
 ) -> Result<CompletedReply, channel::Refused> {
-    let result = prepare(context, route, &incoming).await;
     let refusal = result
         .as_ref()
         .err()
@@ -36,30 +63,9 @@ pub(super) async fn admit(
 async fn prepare(
     context: &Context,
     route: &Route,
-    incoming: &Incoming,
+    row: super::ledger::ResolvedRow,
+    engine_bytes: u32,
 ) -> Result<Encoded, Refused> {
-    if !incoming.belongs_to(route.session())
-        || incoming.operation() != Operation::Admit
-        || incoming.kind() != BodyKind::Control
-    {
-        return Err(VoiceError::Unauthorized.into());
-    }
-    let (row, identity, engine_bytes) = {
-        let live = context.upgrade().ok_or(Refused::Closed)?;
-        let (row, identity, engine_bytes) = decode_admission(&live, route, incoming)?;
-        {
-            let status = row.reconcile()?;
-            if status.action != Some((identity.serial, identity.version, identity.input_tag)) {
-                return Err(VoiceError::Unauthorized.into());
-            }
-            if status.engine.receipt.is_some() || status.engine.settled || status.drained {
-                return super::replies::status(row.id(), &status)
-                    .map(Encoded::History)
-                    .map_err(Into::into);
-            }
-        }
-        (row, identity, engine_bytes)
-    };
     super::factory::preflight_binding(context, route).await?;
     let context = context.upgrade().ok_or(Refused::Closed)?;
     super::factory::require_unlocked_now(&context, route.selected())?;
@@ -88,8 +94,34 @@ async fn prepare(
     .map_err(Into::into)
 }
 
+fn identify(context: &Context, route: &Route, incoming: &Incoming) -> Result<Initial, Refused> {
+    if !incoming.belongs_to(route.session())
+        || incoming.operation() != Operation::Admit
+        || incoming.kind() != BodyKind::Control
+    {
+        return Err(VoiceError::Unauthorized.into());
+    }
+    let (row, engine_bytes) = {
+        let live = context.upgrade().ok_or(Refused::Closed)?;
+        let (row, identity, engine_bytes) = decode_admission(&live, route, incoming)?;
+        {
+            let status = row.reconcile()?;
+            if status.action != Some((identity.serial, identity.version, identity.input_tag)) {
+                return Err(VoiceError::Unauthorized.into());
+            }
+            if status.engine.receipt.is_some() || status.engine.settled || status.drained {
+                return super::replies::status(row.id(), &status)
+                    .map(Initial::Historical)
+                    .map_err(Into::into);
+            }
+        }
+        (row, engine_bytes)
+    };
+    Ok(Initial::Work(row, engine_bytes))
+}
+
 /// The full borrowing child decoder and transient parent resolver finish before any async
-/// binding/UI wait. Only the actual resolved child and fixed action identity cross that
+/// binding/UI wait. Only the actual resolved child and engine byte count cross that
 /// boundary; parent/request metadata cannot become retained native/engine authority.
 fn decode_admission(
     context: &super::context::LiveContext,
@@ -123,11 +155,23 @@ pub(super) fn layout_bytes() -> usize {
     ) -> usize {
         std::mem::size_of::<F>() + std::mem::size_of::<F::Output>()
     }
-    future(admit)
-        + std::mem::size_of::<super::context::LiveContext>()
+    // identify finishes before even CONSTRUCTING the returned async frame, not merely
+    // before its first suspension. Its original Incoming and whole output remain counted.
+    // This is an application-owner inventory, not a claim about uninitialized stack/RSS.
+    let identify = std::mem::size_of::<super::context::LiveContext>()
         + 2 * std::mem::size_of::<super::ledger::ResolvedRow>()
         + std::mem::size_of::<Request<'static>>()
         + std::mem::size_of::<super::ledger::Status>()
+        + std::mem::size_of::<Initial>()
+        + std::mem::size_of::<Action>()
+        + super::ledger::reconciliation_layout_bytes()
+        + super::replies::STATUS_BYTES
+        + std::mem::size_of::<sha2::Sha256>()
+        + std::mem::size_of::<Incoming>()
+        + 128;
+    let final_admission = std::mem::size_of::<super::context::LiveContext>()
+        + std::mem::size_of::<super::ledger::ResolvedRow>()
+        + std::mem::size_of::<super::ledger::Work>()
         + std::mem::size_of::<Encoded>()
         + std::mem::size_of::<catcoms_sync::voice_v2::crypto_actions::CryptoEngineAdmission<'static>>(
         )
@@ -135,5 +179,15 @@ pub(super) fn layout_bytes() -> usize {
         // real owners too, even though the scoped final ticket only borrows the candidate.
         + std::mem::size_of::<catcoms_sync::voice_v2::resources::ByteBudget>()
         + std::mem::size_of::<Option<catcoms_sync::voice_v2::resources::Credit>>()
-        + 128 // nested synchronous final fences/argument wrappers
+        + 128; // nested synchronous final fences/argument wrappers
+    let serialization = std::mem::size_of::<Encoded>()
+        + std::mem::size_of::<super::channel::PreparedReply>()
+        + 3
+        + 2 * std::mem::size_of::<usize>()
+        + 128;
+    // The whole measured returned future/output coexists with its final admission or
+    // seal call frame. Do not max away that live outer storage during serialization.
+    let bytes = identify.max(future(admit) + final_admission.max(serialization));
+    eprintln!("child admission Control future/output {}; identify {identify}; final {final_admission}; serialize {serialization}; total {bytes}", future(admit));
+    bytes
 }

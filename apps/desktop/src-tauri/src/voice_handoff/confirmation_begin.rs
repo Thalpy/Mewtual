@@ -55,11 +55,43 @@ pub(super) async fn begin(
     route: &Route,
     incoming: Incoming,
 ) -> Result<CompletedReply, channel::Refused> {
+    // Construct the separately paid worker in a synchronous frame. Keeping its unpolled
+    // future here would embed that entire future in the fixed Control handler as well as
+    // in its paid Tokio task. Only the actual JoinHandle crosses this await.
+    let task = match launch(context, route, incoming)? {
+        Started::Immediate(response) => return response.seal(),
+        Started::Task(task) => task,
+    };
+    task.await.map_err(|_| channel::Refused::Binding)?.seal()
+}
+
+#[allow(clippy::large_enum_variant)]
+enum Started {
+    Immediate(super::history::Response),
+    Task(tokio::task::JoinHandle<Response>),
+}
+
+/// Pure history/refusal finishes before task admission. The original8KiB payment exists
+/// before constructing the async worker; the worker/output owns it through collection.
+fn launch(
+    context: &Context,
+    route: &Route,
+    incoming: Incoming,
+) -> Result<Started, channel::Refused> {
     let prepared = prepare(context, route, &incoming);
     let target = match prepared {
-        Ok(None) => return super::confirmation_history::recover(context, route, incoming).seal(),
+        Ok(None) => {
+            return Ok(Started::Immediate(super::confirmation_history::recover(
+                context, route, incoming,
+            )))
+        }
         Ok(Some(target)) => target,
-        Err(error) => return super::history::Response::new(incoming, Err(error)).seal(),
+        Err(error) => {
+            return Ok(Started::Immediate(super::history::Response::new(
+                incoming,
+                Err(error),
+            )))
+        }
     };
     let physical = incoming.hold_position()?;
     let payment = match route.selected().resources().charge(
@@ -68,7 +100,12 @@ pub(super) async fn begin(
         ResourceKind::Retained,
     ) {
         Ok(payment) => payment,
-        Err(error) => return super::history::Response::new(incoming, Err(error.into())).seal(),
+        Err(error) => {
+            return Ok(Started::Immediate(super::history::Response::new(
+                incoming,
+                Err(error.into()),
+            )))
+        }
     };
     let task = run(Worker {
         context: context.clone(),
@@ -83,10 +120,7 @@ pub(super) async fn begin(
         // No task has been polled and no snapshot/Actor effect exists on local refusal.
         return Err(channel::Refused::Capacity);
     }
-    tokio::spawn(task)
-        .await
-        .map_err(|_| channel::Refused::Binding)?
-        .seal()
+    Ok(Started::Task(tokio::spawn(task)))
 }
 
 fn prepare(
@@ -226,7 +260,12 @@ async fn observe_incoming(
         route.require_open().map_err(|_| Refused::Closed)?;
     }
     let actor = {
-        let servers = context.servers.lock().await;
+        // This is still a read-only, unadmitted observation. Refuse local contention
+        // rather than suspending with a strong mounted-store/registry context.
+        let servers = context
+            .servers
+            .try_lock()
+            .map_err(|_| VoiceError::Capacity)?;
         let b = route.selected().binding();
         servers
             .get(&b.server)
@@ -282,13 +321,21 @@ pub(super) fn layout_bytes() -> usize {
         + 128;
     let serialization =
         std::mem::size_of::<Response>() + super::history::serialization_layout_bytes();
+    let launch = std::mem::size_of::<Result<Option<(ResolvedRow, ConfirmationPurpose)>, Refused>>()
+        + std::mem::size_of::<Started>()
+        + std::mem::size_of::<PhysicalHold>()
+        + std::mem::size_of::<Credit>()
+        + 128;
     // prepare's borrowing decoder has returned before a worker can be spawned. The worker
     // and its actual output are collected before serialization drops its separate payment;
     // count the whole synchronous serialization graph under Control at that later boundary.
-    size(begin)
+    let bytes = size(begin)
         + decode
             .max(serialization)
-            .max(super::confirmation_history::layout_bytes())
+            .max(super::confirmation_history::layout_bytes() + std::mem::size_of::<Started>())
+            .max(launch);
+    eprintln!("Begin Control future/output {}; decode {decode}; launch {launch}; serialization {serialization}; total {bytes}", size(begin));
+    bytes
 }
 
 #[cfg(test)]
@@ -413,7 +460,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn lost_begin_waiter_keeps_actual_snapshot_and_physical_custody_until_collection() {
+    async fn lost_begin_waiter_keeps_actual_snapshot_and_completed_output_paid() {
         use super::super::derivation_result::tests::Case;
         use super::super::factory::tests::park;
         use super::super::service::tests::opened_frame;
@@ -435,9 +482,15 @@ mod tests {
                 case.native.actor.shutdown().await;
             }
             let incoming = opened_frame(&case.public, &case.route, (1, 8, 0, [0; 16]), &body, None);
-            let mut pending = Box::pin(begin(&case.context, &case.route, incoming));
+            let Started::Task(mut task) = launch(&case.context, &case.route, incoming).unwrap()
+            else {
+                panic!("actual paid Begin worker")
+            };
+            // Lose the outer waiter while keeping the actual task/output available for
+            // explicit collection. The separate socket-loss regression below drops both.
+            let mut pending = Box::pin(async { (&mut task).await });
             assert!(poll_fn(|cx| Poll::Ready(pending.as_mut().poll(cx).is_pending())).await);
-            drop(pending); // actual outer handler loss; original worker remains detached
+            drop(pending);
             tokio::time::timeout(std::time::Duration::from_secs(15), async {
                 while case.selected.resources().counts().0
                     < before.0 + TASK_BYTES + CryptoActionSnapshotPermit::MEMORY_BYTES
@@ -460,13 +513,38 @@ mod tests {
             let mut idle = Box::pin(case.route.session().fixture_wait_physical_idle());
             assert!(poll_fn(|cx| Poll::Ready(idle.as_mut().poll(cx).is_pending())).await);
             drop(parked);
+            let response = tokio::time::timeout(std::time::Duration::from_secs(15), task)
+                .await
+                .unwrap()
+                .unwrap();
+            if stop_first {
+                case.native.actor.stop_and_wait().await.unwrap();
+            }
+            let completed = case.selected.resources().counts();
+            if !stop_first {
+                assert_eq!(completed, (before.0 + TASK_BYTES, before.1));
+            }
+            // Shutdown also retires the Actor's independently paid room directory. Do
+            // not mistake that unrelated refund for an abandoned Begin allocation: pin
+            // the exact task payment at actual output collection under BOTH orderings.
+            assert!(poll_fn(|cx| Poll::Ready(idle.as_mut().poll(cx).is_pending())).await);
+            assert!(case.route.session().header().is_err());
+            let reply = response.seal().unwrap();
+            assert_eq!(
+                case.selected.resources().counts(),
+                (completed.0 - TASK_BYTES, completed.1),
+                "sealing collects actual task output, while Control still owns the reply"
+            );
+            assert!(poll_fn(|cx| Poll::Ready(idle.as_mut().poll(cx).is_pending())).await);
+            assert!(case.route.session().header().is_err());
+            drop(reply);
             tokio::time::timeout(std::time::Duration::from_secs(15), idle)
                 .await
                 .unwrap();
             assert_eq!(
                 case.selected.resources().counts(),
-                before,
-                "actual snapshot/worker/output were collected, not merely abandoned by caller"
+                (completed.0 - TASK_BYTES, completed.1),
+                "only actual completed-output collection releases its original task payment"
             );
             assert!(case
                 .native
@@ -482,5 +560,98 @@ mod tests {
             case.retire();
             case.native.close().await;
         }
+    }
+
+    #[tokio::test]
+    async fn socket_caller_loss_collects_the_actual_detached_begin_snapshot_and_output() {
+        use super::super::derivation_result::tests::Case;
+        use super::super::factory::tests::park;
+        use super::super::service::tests::opened_frame;
+        use std::future::{poll_fn, Future};
+        use std::task::Poll;
+        let case = Case::unadmitted().await;
+        let mut body = vec![2];
+        body.extend_from_slice(case.selector.peer.as_bytes());
+        body.extend_from_slice(&case.selector.join);
+        body.extend_from_slice(&case.selector.key_ref);
+        body.extend_from_slice(&case.selector.epoch.to_be_bytes());
+        body.extend_from_slice(&case.id.logical());
+        body.extend_from_slice(&[3, 1, 1]);
+        let before = case.selected.resources().counts();
+        let parked = park(&case.native.actor).await;
+        let incoming = opened_frame(&case.public, &case.route, (1, 8, 0, [0; 16]), &body, None);
+        let mut pending = Box::pin(begin(&case.context, &case.route, incoming));
+        assert!(poll_fn(|cx| Poll::Ready(pending.as_mut().poll(cx).is_pending())).await);
+        drop(pending); // drops the real JoinHandle too; actual worker remains detached
+        tokio::time::timeout(std::time::Duration::from_secs(15), async {
+            while case.selected.resources().counts().0
+                != before.0 + TASK_BYTES + CryptoActionSnapshotPermit::MEMORY_BYTES
+            {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        assert!(case.route.session().header().is_err());
+        drop(parked);
+        tokio::time::timeout(
+            std::time::Duration::from_secs(15),
+            case.route.session().fixture_wait_physical_idle(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(case.selected.resources().counts(), before);
+        case.retire();
+        case.native.close().await;
+    }
+
+    #[tokio::test]
+    async fn incoming_observation_refuses_busy_registry_without_pinning_mounted_context() {
+        use super::super::derivation_result::tests::Case;
+        use super::super::service::tests::{opened_frame, opened_reply};
+        let case = Case::unadmitted().await;
+        let mut body = vec![2];
+        body.extend_from_slice(case.selector.peer.as_bytes());
+        body.extend_from_slice(&case.selector.join);
+        body.extend_from_slice(&case.selector.key_ref);
+        body.extend_from_slice(&case.selector.epoch.to_be_bytes());
+        body.extend_from_slice(&case.id.logical());
+        body.extend_from_slice(&[3, 1, 1]);
+        let before = case.selected.resources().counts();
+        let store_owners = Arc::strong_count(&case.native.state.store);
+        let registry = case.native.state.servers.lock().await;
+        let header = (1, 8, 0, [0; 16]);
+        let reply = tokio::time::timeout(
+            std::time::Duration::from_secs(15),
+            begin(
+                &case.context,
+                &case.route,
+                opened_frame(&case.public, &case.route, header, &body, None),
+            ),
+        )
+        .await
+        .expect("busy map must refuse rather than wait with mounted context")
+        .unwrap();
+        assert_eq!(
+            opened_reply(&case.public, header, &body, &reply),
+            super::super::replies::refused(Refused::Protocol(VoiceError::Capacity))
+        );
+        assert_eq!(case.selected.resources().counts(), before);
+        assert_eq!(Arc::strong_count(&case.native.state.store), store_owners);
+        assert!(case
+            .native
+            .state
+            .voice_handoff
+            .lookup_child(
+                &case.selected,
+                &case.row(),
+                ConfirmationPurpose::Incoming(1),
+                None,
+            )
+            .is_err());
+        drop(reply);
+        drop(registry);
+        case.retire();
+        case.native.close().await;
     }
 }

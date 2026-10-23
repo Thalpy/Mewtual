@@ -827,6 +827,28 @@ async fn project_and_admit(
     admission.extend_from_slice(&work.action().input_tag());
     admission.extend_from_slice(&(engine_bytes as u32).to_be_bytes());
     drop((input, work, data));
+    // Exercise the actual new synchronous admission constructor with a genuine live
+    // child. Read-only identification may run, but dropping its UNPOLLED future must
+    // release the original physical request and leave the exact child state untouched.
+    // Use row-local evidence: unrelated TCP discovery/Source owners can change global
+    // process byte counts while this real-transport scenario runs.
+    let status_before = row.reconcile().unwrap();
+    let header = (
+        route.session().fixture_counts().1 + 1,
+        2,
+        0,
+        row.id().logical(),
+    );
+    let unpolled = confirmation_admission::admit(
+        &context,
+        &route,
+        opened_frame(&public, &route, header, &admission, None),
+    );
+    assert!(route.session().fixture_counts().0);
+    assert!(row.reconcile().unwrap() == status_before);
+    drop(unpolled);
+    assert!(!route.session().fixture_counts().0);
+    assert!(row.reconcile().unwrap() == status_before);
     let header = (
         route.session().fixture_counts().1 + 1,
         2,
