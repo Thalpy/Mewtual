@@ -426,6 +426,10 @@ pub enum ChoiceRefusal {
     /// The name leaves no room for the partial and numbering suffixes within the filesystem's
     /// name limit. A chosen name is never shortened silently.
     NameTooLong,
+    /// Second review R2-M3: the folder is on a filesystem that cannot make the publication link
+    /// (FAT, vfat, exFAT). Known without creating anything on Unix only; Windows learns it from
+    /// the link probe at creation.
+    NoLinks,
 }
 impl std::fmt::Display for ChoiceRefusal {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -446,6 +450,9 @@ impl std::fmt::Display for ChoiceRefusal {
             Self::FolderChanged => "The chosen folder changed before saving started. Choose it again.",
             Self::NotWritable => "Mewtual cannot write to that folder. Choose another folder.",
             Self::NameTooLong => "That file name is too long. Choose a shorter name.",
+            Self::NoLinks => {
+                "That drive cannot finish a save safely (for example a FAT or exFAT drive). Choose a folder on another drive."
+            }
         })
     }
 }
@@ -521,6 +528,15 @@ impl ChosenDestination {
             }
             Err(_) => return Err(ChoiceRefusal::FolderUnavailable),
         };
+        // Second review R2-M3: on Unix the filesystem type is known without creating anything,
+        // so a drive that cannot make the publication link is refused here, before Save new copy
+        // abandons an old partial for a save that could never finish. Windows has no vetted
+        // crate that reads the filesystem name; there the link probe at creation refuses it, and
+        // the old-partial notice still reaches the user with that error.
+        #[cfg(unix)]
+        if matches!(external::fs_class(&folder), Ok(external::FsClass::NoLinks)) {
+            return Err(ChoiceRefusal::NoLinks);
+        }
         match external::occupied(&folder.join(&name)) {
             Ok(false) => {}
             Ok(true) => return Err(ChoiceRefusal::Exists),

@@ -796,8 +796,14 @@ pub(super) fn fs_class(folder: &Path) -> io::Result<FsClass> {
 /// resolving its path again.
 #[cfg(unix)]
 fn fs_class_of_dir(dir: &File) -> io::Result<FsClass> {
-    if inject(Effect::FsClass).is_err() {
-        return Ok(FsClass::Unknown);
+    // Test seam: an injected `Unsupported` models FAT/exFAT, any other kind a network or FUSE
+    // mount.
+    if let Err(error) = inject(Effect::FsClass) {
+        return Ok(if error.kind() == io::ErrorKind::Unsupported {
+            FsClass::NoLinks
+        } else {
+            FsClass::Unknown
+        });
     }
     {
         let stat = rustix::fs::fstatfs(dir).map_err(io::Error::from)?;

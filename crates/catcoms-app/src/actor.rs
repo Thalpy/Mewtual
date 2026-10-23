@@ -209,6 +209,13 @@ impl DownloadReady {
         self.export_custody = Some(custody);
         self
     }
+    /// The custody attached by [`Self::with_export_custody`], for native work that must keep the
+    /// export capacity occupied until it really ends (second review R2-L1: an export session's
+    /// handle closed on the blocking pool after the invocation already returned). Ownership only;
+    /// it grants nothing.
+    pub fn export_custody(&self) -> Option<catcoms_rt::SharedRequestKeepalive> {
+        self.export_custody.clone()
+    }
     pub fn id(&self) -> catcoms_storage::kept::DownloadId {
         self.lease.id()
     }

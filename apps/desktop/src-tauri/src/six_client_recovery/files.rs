@@ -258,6 +258,9 @@ impl SaveSource for PrivateExportSource<'_> {
         let (origin, ready) = (self.origin.clone(), self.ready.clone());
         Arc::new(move || !origin.is_cancelled() && ready.is_current())
     }
+    fn custody(&self) -> Option<catcoms_rt::SharedRequestKeepalive> {
+        self.ready.export_custody()
+    }
     fn progress(&self, _: usize, _: u64, _: u64, _: Option<String>) {}
 }
 

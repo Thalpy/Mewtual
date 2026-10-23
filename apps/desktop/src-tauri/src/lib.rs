@@ -14787,6 +14787,11 @@ trait SaveSource {
     /// does nothing; a started step completes.
     fn liveness(&self) -> private_downloads::Liveness;
 
+    /// The export capacity this save holds. The staging handle, if it ends up closed on the
+    /// blocking pool after the invocation returned, keeps it occupied until that close finishes
+    /// (second review R2-L1).
+    fn custody(&self) -> Option<catcoms_rt::SharedRequestKeepalive>;
+
     /// Report progress. Purely informational; a dropped update never changes the outcome.
     fn progress(
         &self,
@@ -14895,8 +14900,9 @@ async fn stream_download_staged(
     })
     .await??;
     // Re-review 2 LOW 7: the open handle lives in `OnPool`, so whichever await returns early, it
-    // is closed on the blocking pool and never on a runtime worker.
-    let mut file = private_downloads::OnPool::new(file);
+    // is closed on the blocking pool and never on a runtime worker, holding the export capacity
+    // until it is closed (R2-L1).
+    let mut file = private_downloads::OnPool::with_custody(file, source.custody());
     match fill_staged_download(&mut file, &staging, &path, total, size, target, source).await {
         Ok(()) => {
             // Published (the commit guard is already released): flush the folder and settle our
@@ -15103,6 +15109,10 @@ impl SaveSource for ActorSaveSource<'_> {
         Arc::new(move || !origin.is_cancelled() && ready.is_current())
     }
 
+    fn custody(&self) -> Option<catcoms_rt::SharedRequestKeepalive> {
+        self.ready.export_custody()
+    }
+
     fn progress(
         &self,
         done: usize,
@@ -15261,133 +15271,139 @@ async fn save_group_file(
     } else if expected_intent.is_some() || fresh_copy.is_some() {
         return Err("Download ID is required.".into());
     }
-    if origin.is_cancelled() {
-        return Err("The download is no longer active.".into());
-    }
-    // No external .part exists during acquisition. Only encrypted, owner-scoped chunks survive
-    // interruption/restart; resuming always captures this fresh invocation. A new "Save as"
-    // choice is remembered in the sealed record before any network work (picker review H2).
-    let ready = actor
-        .acquire_download_to(raw, resume, chosen.clone(), origin.clone())
-        .await?
-        .with_export_custody(export_slot);
-    if origin.is_cancelled() || !ready.is_current() {
-        return Err("The download is no longer active.".into());
-    }
-    let total = ready.chunks();
-    let size = ready.total_size();
-    let declared_mime = ready.mime().to_owned();
-    if size > MAX_FILE_BYTES as u64 {
-        return Err(format!(
-            "file is larger than the {MAX_FILE_BYTES}-byte limit"
-        ));
-    }
-    // The record, not this invocation, names where a fresh save goes (see select_destination).
-    let destination =
-        private_downloads::select_destination(ready.planned(), chosen.is_some(), || {
-            app.path().download_dir().map_err(|e| e.to_string())
-        })?;
-    // Journaled, resumable export first; the non-resumable writer only when this destination
-    // cannot carry a journal for a fresh save (no stable identity, links unsupported).
-    let context = private_downloads::ExportContext {
-        state: &state,
-        app: &app,
-        actor: &actor,
-        server,
-        instance,
-        generation,
-        origin: &origin,
-        cid: &cid,
-        operation: operation.as_deref(),
-    };
-    let journaled =
-        private_downloads::export_journaled(&context, &ready, &destination, &name).await?;
-    let resumable = journaled.is_some();
-    // Review L3: when the staging name could not be settled, the Published record stays so the
-    // leftover second plaintext name remains visible in Transfers until Clear removes it.
-    let keep_record = journaled
-        .as_ref()
-        .is_some_and(|exported| !exported.staging_cleared);
-    // Review M-5: a temporary name that had to stay is reported with the saved result.
-    let mut staging_note: Option<String> = None;
-    let path = match journaled {
-        Some(exported) => {
-            staging_note = exported.staging_note.map(str::to_owned);
-            exported.path
-        }
-        None => {
-            let mut source = ActorSaveSource {
-                actor: actor.clone(),
-                state: &state,
-                app: &app,
-                server,
-                cid: cid.clone(),
-                ready: ready.clone(),
-                total,
-                size,
-                generation,
-                origin: origin.clone(),
-                operation: operation.clone(),
-            };
-            let written = match &destination {
-                private_downloads::Destination::Downloads(folder) => {
-                    stream_download_to_disk(folder, &name, total, size, &target, &mut source).await
-                }
-                private_downloads::Destination::Chosen(choice) => {
-                    stream_download_to_chosen(choice, total, size, &target, &mut source).await
-                }
-            };
-            let (path, note) = written
-                .map_err(|error| format!("{error} {}", private_downloads::NOT_RESUMABLE_NOTE))?;
-            if !note.is_empty() {
-                staging_note = Some(note.trim_start().to_owned());
-            }
-            path
-        }
-    };
-    let mut saved = finish_saved_read_if(
-        &state,
-        generation,
-        &origin,
-        &path,
-        &declared_mime,
-        inspect_published,
-        reveal_path,
-        || ready.is_current(),
-    )
-    .await?;
-    // Native, not the renderer's possibly stale list, says whether this is in Downloads.
-    saved.in_downloads =
-        private_downloads::saved_in_downloads(app.path().download_dir().ok().as_deref(), &path);
-    if !resumable {
-        // Say honestly that this location could not have resumed an interrupted save.
-        private_downloads::append_warning(&mut saved, private_downloads::NOT_RESUMABLE_NOTE);
-    }
-    if let Some(note) = left_behind {
-        private_downloads::append_warning(&mut saved, note);
-    }
-    if let Some(note) = staging_note {
-        private_downloads::append_warning(&mut saved, &note);
-    }
-    if keep_record {
-        private_downloads::append_warning(&mut saved, private_downloads::STAGING_LEFT);
-        let _commit = keep_session::read_commit(&state, generation, &origin).await?;
-        if !ready.invocation_current() {
+    // Second review R2-M3: Save new copy may already have abandoned the old journal, and the
+    // notice about a file it left on disk exists only in `left_behind`. Everything from here on
+    // runs in one block whose result, success or failure, carries that notice.
+    let result: Result<SavedFileResult, String> = async {
+        if origin.is_cancelled() {
             return Err("The download is no longer active.".into());
         }
-        return Ok(saved);
+        // No external .part exists during acquisition. Only encrypted, owner-scoped chunks survive
+        // interruption/restart; resuming always captures this fresh invocation. A new "Save as"
+        // choice is remembered in the sealed record before any network work (picker review H2).
+        let ready = actor
+            .acquire_download_to(raw, resume, chosen.clone(), origin.clone())
+            .await?
+            .with_export_custody(export_slot);
+        if origin.is_cancelled() || !ready.is_current() {
+            return Err("The download is no longer active.".into());
+        }
+        let total = ready.chunks();
+        let size = ready.total_size();
+        let declared_mime = ready.mime().to_owned();
+        if size > MAX_FILE_BYTES as u64 {
+            return Err(format!(
+                "file is larger than the {MAX_FILE_BYTES}-byte limit"
+            ));
+        }
+        // The record, not this invocation, names where a fresh save goes (see select_destination).
+        let destination =
+            private_downloads::select_destination(ready.planned(), chosen.is_some(), || {
+                app.path().download_dir().map_err(|e| e.to_string())
+            })?;
+        // Journaled, resumable export first; the non-resumable writer only when this destination
+        // cannot carry a journal for a fresh save (no stable identity, links unsupported).
+        let context = private_downloads::ExportContext {
+            state: &state,
+            app: &app,
+            actor: &actor,
+            server,
+            instance,
+            generation,
+            origin: &origin,
+            cid: &cid,
+            operation: operation.as_deref(),
+        };
+        let journaled =
+            private_downloads::export_journaled(&context, &ready, &destination, &name).await?;
+        let resumable = journaled.is_some();
+        // Review L3: when the staging name could not be settled, the Published record stays so the
+        // leftover second plaintext name remains visible in Transfers until Clear removes it.
+        let keep_record = journaled
+            .as_ref()
+            .is_some_and(|exported| !exported.staging_cleared);
+        // Review M-5: a temporary name that had to stay is reported with the saved result.
+        let mut staging_note: Option<String> = None;
+        let path = match journaled {
+            Some(exported) => {
+                staging_note = exported.staging_note.map(str::to_owned);
+                exported.path
+            }
+            None => {
+                let mut source = ActorSaveSource {
+                    actor: actor.clone(),
+                    state: &state,
+                    app: &app,
+                    server,
+                    cid: cid.clone(),
+                    ready: ready.clone(),
+                    total,
+                    size,
+                    generation,
+                    origin: origin.clone(),
+                    operation: operation.clone(),
+                };
+                let written = match &destination {
+                    private_downloads::Destination::Downloads(folder) => {
+                        stream_download_to_disk(folder, &name, total, size, &target, &mut source)
+                            .await
+                    }
+                    private_downloads::Destination::Chosen(choice) => {
+                        stream_download_to_chosen(choice, total, size, &target, &mut source).await
+                    }
+                };
+                let (path, note) = written.map_err(|error| {
+                    format!("{error} {}", private_downloads::NOT_RESUMABLE_NOTE)
+                })?;
+                if !note.is_empty() {
+                    staging_note = Some(note.trim_start().to_owned());
+                }
+                path
+            }
+        };
+        let mut saved = finish_saved_read_if(
+            &state,
+            generation,
+            &origin,
+            &path,
+            &declared_mime,
+            inspect_published,
+            reveal_path,
+            || ready.is_current(),
+        )
+        .await?;
+        // Native, not the renderer's possibly stale list, says whether this is in Downloads.
+        saved.in_downloads =
+            private_downloads::saved_in_downloads(app.path().download_dir().ok().as_deref(), &path);
+        if !resumable {
+            // Say honestly that this location could not have resumed an interrupted save.
+            private_downloads::append_warning(&mut saved, private_downloads::NOT_RESUMABLE_NOTE);
+        }
+        if let Some(note) = staging_note {
+            private_downloads::append_warning(&mut saved, &note);
+        }
+        if keep_record {
+            private_downloads::append_warning(&mut saved, private_downloads::STAGING_LEFT);
+            let _commit = keep_session::read_commit(&state, generation, &origin).await?;
+            if !ready.invocation_current() {
+                return Err("The download is no longer active.".into());
+            }
+            return Ok(saved);
+        }
+        // Publication is already committed. Cleanup failure must never turn that success into a
+        // retryable save error or remove the external file; retained ciphertext remains charged.
+        finish_download_response(
+            &state,
+            generation,
+            &origin,
+            saved,
+            || ready.invocation_current(),
+            actor.finish_download_export(ready.clone()),
+        )
+        .await
     }
-    // Publication is already committed. Cleanup failure must never turn that success into a
-    // retryable save error or remove the external file; retained ciphertext remains charged.
-    finish_download_response(
-        &state,
-        generation,
-        &origin,
-        saved,
-        || ready.invocation_current(),
-        actor.finish_download_export(ready.clone()),
-    )
-    .await
+    .await;
+    private_downloads::report_left_behind(result, left_behind)
 }
 
 /// Cleanup can wait behind actor work AFTER external publication. Its completion is not a new
@@ -20218,6 +20234,10 @@ mod tests {
         fn liveness(&self) -> private_downloads::Liveness {
             let retired = self.retired_before_worker.clone();
             Arc::new(move || !retired.load(std::sync::atomic::Ordering::SeqCst))
+        }
+
+        fn custody(&self) -> Option<catcoms_rt::SharedRequestKeepalive> {
+            None
         }
 
         fn progress(&self, done: usize, bytes_done: u64, _network: u64, _provider: Option<String>) {

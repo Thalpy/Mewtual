@@ -676,39 +676,94 @@ pub(super) const DIALOG_ABANDONED: &str = "The download is no longer active.";
 /// directory whose identity is captured, and no existing file or partial at that name (an
 /// existing file is refused and left untouched even if the dialog already asked to replace it).
 ///
-/// The one-dialog turn is an RAII guard held by this future: it is released when the dialog
-/// answers, when the chooser fails, and when the awaiting invocation is dropped. A dialog whose
-/// answer never comes (for example a GTK dialog future that never completes) would otherwise hold
-/// the turn for the life of the process, because Tauri does not drop a running command. So the
-/// wait also ends when `cancelled` resolves (production: the invocation's origin, cancelled by
+/// The one-dialog turn is an RAII guard held only while the chooser runs: it is released when the
+/// dialog answers, when the chooser fails, and when the awaiting invocation is dropped. A dialog
+/// whose answer never comes (for example a GTK dialog future that never completes) would otherwise
+/// hold the turn for the life of the process, because Tauri does not drop a running command. So
+/// the wait also ends when `cancelled` resolves (production: the invocation's origin, cancelled by
 /// Lock, unlock or a server replacement), which releases the turn; a still-open OS window is then
 /// orphaned and its answer discarded (re-review 2 residual).
+///
+/// Second review R2-M2: validation reads the chosen folder (its identity and the names in it) and
+/// can stall on a dead share. It used to run while the turn was still held and without watching
+/// `cancelled`, so one stalled check refused every later Save as until the filesystem answered.
+/// Now the turn ends with the dialog, validation runs on the blocking pool while `cancelled` is
+/// still observed, and a cancelled invocation stops waiting at once; its late result goes nowhere.
+/// The worker keeps one slot of a small process-wide pool until the filesystem answers, so stalled
+/// checks stay bounded; with every slot held, a new Save as is refused before any dialog opens.
 pub(super) async fn choose_destination(
     chooser: &dyn DestinationChooser,
     downloads: Option<PathBuf>,
     name: &str,
     cancelled: impl Future<Output = ()>,
 ) -> Result<Option<ChosenDestination>, String> {
-    let _turn = DialogTurn::take().ok_or(DIALOG_BUSY)?;
-    // The suggestion is a peer-chosen name. The Windows file dialog expands `%VAR%` in its name
-    // box when the user presses Save, so "%APPDATA%_x" would turn into a path elsewhere that the
-    // user never saw or typed. A suggestion never carries `%` (picker review residual).
-    let suggested = safe_download_name(name).replace('%', "_");
-    // Cancellation is polled first (re-review 3 LOW 3): `NativeChooser` schedules the OS dialog on
-    // its first poll, so an invocation already cancelled must never reach it, or it would open an
-    // orphan window.
-    let answer = tokio::select! {
+    choose_destination_with(
+        validation_slots(),
+        chooser,
+        downloads,
+        name,
+        cancelled,
+        |picked| ChosenDestination::validate(&picked),
+    )
+    .await
+}
+
+/// Bound on Save as validation workers that may still be waiting on a stalled folder after their
+/// invocation stopped waiting for them (R2-M2).
+fn validation_slots() -> Arc<tokio::sync::Semaphore> {
+    static SLOTS: std::sync::OnceLock<Arc<tokio::sync::Semaphore>> = std::sync::OnceLock::new();
+    SLOTS
+        .get_or_init(|| Arc::new(tokio::sync::Semaphore::new(4)))
+        .clone()
+}
+pub(super) const VALIDATION_BUSY: &str =
+    "Earlier Save as choices are still being checked. Try again shortly.";
+
+/// [`choose_destination`] with the validation pool and the validation itself as seams, so a test
+/// can hold a check behind a barrier and own its pool.
+pub(super) async fn choose_destination_with(
+    slots: Arc<tokio::sync::Semaphore>,
+    chooser: &dyn DestinationChooser,
+    downloads: Option<PathBuf>,
+    name: &str,
+    cancelled: impl Future<Output = ()>,
+    validate: impl FnOnce(PathBuf) -> Result<ChosenDestination, ChoiceRefusal> + Send + 'static,
+) -> Result<Option<ChosenDestination>, String> {
+    // Taken before the dialog, so the user is never asked for a place that cannot be checked.
+    let slot = slots
+        .try_acquire_owned()
+        .map_err(|_| VALIDATION_BUSY.to_string())?;
+    tokio::pin!(cancelled);
+    let picked = {
+        let _turn = DialogTurn::take().ok_or(DIALOG_BUSY)?;
+        // The suggestion is a peer-chosen name. The Windows file dialog expands `%VAR%` in its
+        // name box when the user presses Save, so "%APPDATA%_x" would turn into a path elsewhere
+        // that the user never saw or typed. A suggestion never carries `%` (picker review
+        // residual).
+        let suggested = safe_download_name(name).replace('%', "_");
+        // Cancellation is polled first (re-review 3 LOW 3): `NativeChooser` schedules the OS
+        // dialog on its first poll, so an invocation already cancelled must never reach it, or it
+        // would open an orphan window.
+        let answer = tokio::select! {
+            biased;
+            () = &mut cancelled => return Err(DIALOG_ABANDONED.into()),
+            answer = chooser.choose(downloads, suggested) => answer?,
+        };
+        match answer {
+            Some(picked) => picked,
+            None => return Ok(None),
+        }
+        // The turn ends here, with the dialog (R2-M2).
+    };
+    let validation = blocking(move || {
+        let _slot = slot;
+        validate(picked)
+    });
+    tokio::select! {
         biased;
-        () = cancelled => return Err(DIALOG_ABANDONED.into()),
-        answer = chooser.choose(downloads, suggested) => answer?,
-    };
-    let Some(picked) = answer else {
-        return Ok(None);
-    };
-    blocking(move || ChosenDestination::validate(&picked))
-        .await?
-        .map(Some)
-        .map_err(|refusal| refusal.to_string())
+        () = &mut cancelled => Err(DIALOG_ABANDONED.into()),
+        validated = validation => validated?.map(Some).map_err(|refusal| refusal.to_string()),
+    }
 }
 
 /// One chunk through `step` with the bounded local retry policy. `live` (original invocation and
@@ -970,6 +1025,34 @@ pub(super) fn append_warning(saved: &mut SavedFileResult, note: &str) {
     });
 }
 
+/// Second review R2-M3: once Save new copy has abandoned the old journal, the notice about a file
+/// that save left on disk (for example an old partial on an unplugged drive) exists nowhere else.
+/// So every result of the replacement carries it: a warning on success, and an extra sentence on
+/// every failure after the abandon, so a replacement that then fails (a FAT drive refused at the
+/// link probe, Lock, a lost member) never hides it. The result has already passed (or failed) its
+/// own session fences; this adds text only.
+pub(super) fn report_left_behind(
+    result: Result<SavedFileResult, String>,
+    left_behind: Option<&'static str>,
+) -> Result<SavedFileResult, String> {
+    match (result, left_behind) {
+        (Ok(mut saved), Some(note)) => {
+            append_warning(&mut saved, note);
+            Ok(saved)
+        }
+        (Ok(saved), None) => Ok(saved),
+        (Err(error), left_behind) => Err(with_left_behind(error, left_behind)),
+    }
+}
+
+/// The error text of [`report_left_behind`].
+fn with_left_behind(error: String, left_behind: Option<&'static str>) -> String {
+    match left_behind {
+        Some(note) => format!("{error} {note}"),
+        None => error,
+    }
+}
+
 /// What an explicit Resume settled before acquisition.
 pub(super) struct Prepared {
     /// The preflight found the file already saved (crash after the link): the save is finished.
@@ -1056,8 +1139,11 @@ pub(super) async fn prepare_resume(
         actor.set_download_paused(id, intent, false),
     );
     if fresh_copy {
-        // Save new copy already held the claim through its own retire and delete.
-        resume.await?;
+        // Save new copy already held the claim through its own retire and delete. The old
+        // journal is already abandoned here, so a failure still reports what it left (R2-M3).
+        resume
+            .await
+            .map_err(|error| with_left_behind(error, notice))?;
     } else {
         plain_resume_commit(server, id, resume).await?;
     }
@@ -1189,6 +1275,9 @@ pub(super) trait ExportPorts: Send + Sync {
     /// Best-effort flush of the destination folder after the link and before Published (PR51
     /// M2). Production runs it on the blocking pool; a refusal does not fail the save.
     async fn flush(&self, journal: ExportJournal);
+    /// The export capacity this save holds, kept alive by a session closed on the blocking pool
+    /// until that close finishes (R2-L1). Production: the `DownloadReady`'s custody.
+    fn custody(&self) -> Option<catcoms_rt::SharedRequestKeepalive>;
 }
 
 /// An owned liveness check for blocking workers (see [`ExportPorts::liveness`]).
@@ -1268,6 +1357,9 @@ impl ExportPorts for ActorExport<'_> {
     async fn flush(&self, journal: ExportJournal) {
         let _ = blocking(move || flush_destination(&journal)).await;
     }
+    fn custody(&self) -> Option<catcoms_rt::SharedRequestKeepalive> {
+        self.ready.export_custody()
+    }
 }
 
 /// Owns a value whose drop does destination I/O (an [`ExportFile`] closes its OS handle and
@@ -1276,44 +1368,73 @@ impl ExportPorts for ActorExport<'_> {
 /// instead of a runtime worker (re-review 2 LOW 7). A value moved into a blocking step leaves
 /// with [`OnPool::take`] and comes back with [`OnPool::put`]; while it is inside that step the
 /// step owns it, so a dropped invocation also lets it close on the pool.
-pub(super) struct OnPool<T: Send + 'static>(Option<T>);
+///
+/// Second review R2-L1: a deferred close can outlive the invocation (an early error returns and
+/// drops the `DownloadReady` that holds the export permit while the close still waits on the
+/// destination). The export custody given to [`OnPool::with_custody`] therefore moves into the
+/// deferred disposal and is released only when the close has really finished, so no more than the
+/// export capacity of closes can pile up on a stalled destination.
+pub(super) struct OnPool<T: Send + 'static> {
+    value: Option<T>,
+    custody: Option<catcoms_rt::SharedRequestKeepalive>,
+}
 impl<T: Send + 'static> OnPool<T> {
+    /// Test-only: an `OnPool` with no export custody. Every production session carries the
+    /// custody of its save (R2-L1), so production code uses [`OnPool::with_custody`].
+    #[cfg(test)]
     pub(super) fn new(value: T) -> Self {
-        Self(Some(value))
+        Self::with_custody(value, None)
+    }
+    /// Like [`OnPool::new`], keeping `custody` (the export permit) alive until the value is
+    /// closed, wherever that happens.
+    pub(super) fn with_custody(
+        value: T,
+        custody: Option<catcoms_rt::SharedRequestKeepalive>,
+    ) -> Self {
+        Self {
+            value: Some(value),
+            custody,
+        }
     }
     /// Move the value out for one blocking step. Only called between steps, when it is present.
     pub(super) fn take(&mut self) -> T {
-        self.0
+        self.value
             .take()
             .expect("the session value is present between steps")
     }
     pub(super) fn put(&mut self, value: T) {
-        self.0 = Some(value);
+        self.value = Some(value);
     }
     /// Hand the value (if a step has not consumed it) to a caller that closes it on the pool
-    /// itself, for example together with removing the file it names.
+    /// itself, for example together with removing the file it names. That caller awaits the
+    /// close while the invocation (and its custody) is still alive.
     pub(super) fn release(&mut self) -> Option<T> {
-        self.0.take()
+        self.value.take()
     }
     fn get(&self) -> &T {
-        self.0
+        self.value
             .as_ref()
             .expect("the session value is present between steps")
     }
     fn get_mut(&mut self) -> &mut T {
-        self.0
+        self.value
             .as_mut()
             .expect("the session value is present between steps")
     }
 }
 impl<T: Send + 'static> Drop for OnPool<T> {
     fn drop(&mut self) {
-        if let Some(value) = self.0.take() {
+        let custody = self.custody.take();
+        if let Some(value) = self.value.take() {
             match tokio::runtime::Handle::try_current() {
                 Ok(runtime) => {
                     // Fire and forget: closing needs no answer. If the runtime is shutting down
-                    // the closure (and the value) is dropped where it stands.
-                    drop(runtime.spawn_blocking(move || drop(value)));
+                    // the closure (and the value) is dropped where it stands. The custody is
+                    // released only after the close (R2-L1).
+                    drop(runtime.spawn_blocking(move || {
+                        drop(value);
+                        drop(custody);
+                    }));
                 }
                 Err(_) => drop(value),
             }
@@ -1458,7 +1579,7 @@ pub(super) async fn export_sequence(
                 let _ = blocking(move || file.discard(&mut OsCryptoRng)).await;
                 return Err(user_message(error));
             }
-            OnPool::new(file)
+            OnPool::with_custody(file, ports.custody())
         }
         Some(ExportState::Writing(_)) if matches!(destination, Destination::Chosen(_)) => {
             // A chosen destination is only ever a new file; it never redirects an existing
@@ -1472,7 +1593,7 @@ pub(super) async fn export_sequence(
                 .map_err(|error| error.to_string())?
             {
                 ExportReopen::Ready(file) => {
-                    let file = OnPool::new(*file);
+                    let file = OnPool::with_custody(*file, ports.custody());
                     ports
                         .transition(DownloadExportTransition::Resume {
                             journal,

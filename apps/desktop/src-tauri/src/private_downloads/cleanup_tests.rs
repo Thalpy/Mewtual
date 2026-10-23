@@ -335,6 +335,55 @@ async fn a_stale_save_new_copy_deletes_nothing() {
     assert_eq!(fake.deletes.load(std::sync::atomic::Ordering::SeqCst), 0);
 }
 
+/// Second review R2-M3: Save new copy goes ahead although the old partial's folder is unreachable
+/// (an unplugged drive), abandons the old journal and keeps only a notice. When the replacement
+/// then fails (here the chosen place is refused; in the review, a FAT drive refused at the link
+/// probe), the user-visible error must still say the old file was left in place: after the
+/// abandon, nothing else remembers it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_failed_new_copy_still_reports_the_old_partial_it_left_behind() {
+    let (root, staging, journal) = partial();
+    // The drive holding the old partial is gone.
+    let unplugged = root.path().join("Unplugged");
+    std::fs::rename(staging.parent().unwrap(), &unplugged).unwrap();
+    let (fake, release, _inside) = Fake::new(&journal);
+    drop(release);
+    let claim = CleanupClaim::acquire(7, id(0xA6)).unwrap();
+    let (_intent, left_behind) = abandon_sequence(&fake, claim, 3).await.unwrap();
+    assert_eq!(left_behind, Some(OLD_PARTIAL_UNREACHABLE));
+    assert!(
+        fake.record.lock().unwrap().export.is_none(),
+        "the old journal is abandoned"
+    );
+    assert!(unplugged.join("notes.txt.mewtual-part").exists());
+    // The replacement fails after the abandon: the error the user sees carries the notice.
+    let refused = catcoms_storage::kept::ChoiceRefusal::Exists.to_string();
+    let shown = report_left_behind(Err(refused.clone()), left_behind)
+        .err()
+        .expect("still a failure");
+    assert!(shown.starts_with(&refused), "{shown}");
+    assert!(shown.contains(OLD_PARTIAL_UNREACHABLE), "{shown}");
+    // A replacement that succeeds carries it as a warning, after any warning already there.
+    let saved = SavedFileResult {
+        path: "C:/elsewhere/notes.txt".into(),
+        displayed: true,
+        warning: Some("The GIF was saved, but Downloads could not be opened.".into()),
+        content_validation: None,
+        in_downloads: false,
+    };
+    let warning = report_left_behind(Ok(saved), left_behind)
+        .ok()
+        .and_then(|saved| saved.warning)
+        .unwrap();
+    assert!(warning.ends_with(OLD_PARTIAL_UNREACHABLE), "{warning}");
+    assert!(warning.starts_with("The GIF was saved"), "{warning}");
+    // Nothing left behind: results pass through unchanged.
+    assert_eq!(
+        report_left_behind(Err("plain failure".into()), None).err(),
+        Some("plain failure".to_string())
+    );
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn resume_takes_the_cleanup_claim_only_around_its_intent_change() {
     // Re-review 2 LOW 2, narrowed by re-review 3 MEDIUM (an intentional contract change): while

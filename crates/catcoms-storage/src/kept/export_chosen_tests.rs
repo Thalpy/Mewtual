@@ -793,3 +793,20 @@ fn planned_destination_encoding_and_successor_rules() {
     granted.planned = None;
     assert!(exhausted.validate_successor(&granted).is_err());
 }
+
+#[cfg(unix)]
+#[test]
+fn a_choice_on_a_drive_without_links_is_refused_before_anything_starts() {
+    // Second review R2-M3: Save as on a FAT or exFAT drive is refused at validation (read-only,
+    // nothing created), so Save new copy never abandons an old partial for a save that cannot
+    // finish. The FAT drive is modelled through the filesystem-class seam.
+    let fx = fixture();
+    let folder = chosen_folder(&fx);
+    let refused = injected(Effect::FsClass, io::ErrorKind::Unsupported, || {
+        ChosenDestination::validate(&folder.join("report.bin"))
+    });
+    assert!(matches!(refused, Err(ChoiceRefusal::NoLinks)));
+    assert!(ChoiceRefusal::NoLinks.to_string().contains("FAT"));
+    assert_eq!(fs::read_dir(&folder).unwrap().count(), 0, "nothing created");
+    assert!(ChosenDestination::validate(&folder.join("report.bin")).is_ok());
+}

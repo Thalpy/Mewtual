@@ -199,6 +199,96 @@ async fn save_as_selection_through_the_chooser_seam() {
         late.asked.lock().unwrap().is_empty(),
         "no dialog was opened"
     );
+
+    // Second review R2-M2: the dialog answered, then validation stalls on the chosen folder (a
+    // dead share). Cancelling the invocation ends the wait at once; the one-dialog turn ended with
+    // the dialog, so another Save as opens before the stalled check returns; the stalled worker
+    // holds one slot of a bounded pool until it finishes, and its late result goes nowhere.
+    let slots = Arc::new(tokio::sync::Semaphore::new(1));
+    let (unstall, stalled) = std::sync::mpsc::channel::<()>();
+    let (entered_tx, entered) = std::sync::mpsc::channel::<()>();
+    let checked = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let seen = checked.clone();
+    let picked_place = Scripted::answering(Ok(Some(chosen.join("Stalled.bin"))));
+    let (cancel, cancelled) = tokio::sync::oneshot::channel::<()>();
+    let stalled_choice = choose_destination_with(
+        slots.clone(),
+        &picked_place,
+        None,
+        "stalled.bin",
+        async {
+            let _ = cancelled.await;
+        },
+        move |picked| {
+            let _ = entered_tx.send(());
+            let _ = stalled.recv_timeout(Duration::from_secs(20));
+            seen.store(true, std::sync::atomic::Ordering::SeqCst);
+            ChosenDestination::validate(&picked)
+        },
+    );
+    // While the check is stalled inside its worker (its invocation still live), another Save as
+    // can already open: the turn ended with the first dialog. Then Lock lands.
+    let lock_lands = async {
+        while entered.try_recv().is_err() {
+            tokio::task::yield_now().await;
+        }
+        let meanwhile = Scripted::answering(Ok(None));
+        let opened = choose_now(&meanwhile, None, "meanwhile.bin").await;
+        cancel.send(()).unwrap();
+        (opened, meanwhile)
+    };
+    let (ended, (opened, meanwhile)) = tokio::time::timeout(Duration::from_secs(20), async {
+        tokio::join!(stalled_choice, lock_lands)
+    })
+    .await
+    .expect("cancelling the invocation ends the wait for a stalled check");
+    assert!(
+        opened.unwrap().is_none(),
+        "a second dialog opened meanwhile"
+    );
+    assert_eq!(meanwhile.asked.lock().unwrap().len(), 1);
+    assert_eq!(ended.unwrap_err(), DIALOG_ABANDONED);
+    assert!(
+        !checked.load(std::sync::atomic::Ordering::SeqCst),
+        "the check is still stalled"
+    );
+    let another = Scripted::answering(Ok(None));
+    assert!(
+        choose_now(&another, None, "another.bin")
+            .await
+            .unwrap()
+            .is_none(),
+        "another Save as opens while the old check is still stalled"
+    );
+    assert_eq!(another.asked.lock().unwrap().len(), 1, "its dialog opened");
+    // Bounded: with the pool's only slot held by the stalled check, a Save as through that pool
+    // is refused before any dialog opens.
+    let refused = Scripted::answering(Ok(None));
+    assert_eq!(
+        choose_destination_with(
+            slots.clone(),
+            &refused,
+            None,
+            "x",
+            std::future::pending(),
+            |picked| ChosenDestination::validate(&picked),
+        )
+        .await
+        .unwrap_err(),
+        VALIDATION_BUSY
+    );
+    assert!(refused.asked.lock().unwrap().is_empty());
+    // The check finally returns: its result is discarded, nothing is created, the slot returns.
+    unstall.send(()).unwrap();
+    tokio::time::timeout(Duration::from_secs(20), async {
+        while slots.available_permits() == 0 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("the stalled worker gives its slot back when it finishes");
+    assert!(checked.load(std::sync::atomic::Ordering::SeqCst));
+    assert!(!chosen.join("Stalled.bin").exists(), "nothing was created");
 }
 
 #[test]

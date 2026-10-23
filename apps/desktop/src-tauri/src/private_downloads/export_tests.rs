@@ -221,6 +221,9 @@ impl ExportPorts for Arc<Fake> {
         }
         self.events.lock().unwrap().push(Event::Flush);
     }
+    fn custody(&self) -> Option<catcoms_rt::SharedRequestKeepalive> {
+        None
+    }
 }
 
 fn downloads() -> (tempfile::TempDir, PathBuf) {
@@ -293,6 +296,38 @@ fn a_session_dropped_on_the_async_side_closes_on_the_blocking_pool() {
     let (sender, dropped) = std::sync::mpsc::channel();
     drop(OnPool::new(Probe(sender)));
     assert_eq!(dropped.recv().unwrap(), here);
+
+    // Second review R2-L1: an early export error drops the `DownloadReady` (and its export permit)
+    // while the session's deferred close may still be waiting on the destination. The custody
+    // moves into the deferred close, so the export slot stays occupied until the close finishes.
+    struct Stalled(std::sync::mpsc::Receiver<()>);
+    impl Drop for Stalled {
+        fn drop(&mut self) {
+            let _ = self.0.recv_timeout(Duration::from_secs(20));
+        }
+    }
+    let slots = Arc::new(tokio::sync::Semaphore::new(1));
+    let permit: catcoms_rt::SharedRequestKeepalive =
+        Arc::new(slots.clone().try_acquire_owned().unwrap());
+    let (unstall, stall) = std::sync::mpsc::channel();
+    runtime.block_on(async {
+        drop(OnPool::with_custody(Stalled(stall), Some(permit)));
+    });
+    assert_eq!(
+        slots.available_permits(),
+        0,
+        "the slot stays occupied while the close is stalled"
+    );
+    unstall.send(()).unwrap();
+    runtime.block_on(async {
+        tokio::time::timeout(Duration::from_secs(20), async {
+            while slots.available_permits() == 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the slot is released once the close finishes");
+    });
 }
 
 /// A folder the user picked in Save as, beside (not inside) the Downloads folder.

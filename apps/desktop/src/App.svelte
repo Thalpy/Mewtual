@@ -3822,7 +3822,10 @@
   let hasPeers = $state(false);
   let keptFiles = $state<KeptFiles | null>(null);
   let privateDownloads = $state<PrivateDownload[]>([]);
-  let privateDownloadBusy = $state<symbol | null>(null);
+  // Second review R2-M1: the Pause/Remove/Keep (and pre-acquisition Resume) owner of each row, by
+  // download ID. Native removal can wait indefinitely on an external folder, so one row's pending
+  // mutation must never disable or refuse actions on another row; native also claims per download.
+  let privateDownloadBusy = $state<Record<string, symbol>>({});
   let privateDownloadSaves = $state<Record<string, symbol>>({});
   let privateDownloadError = $state("");
   const fileInventoryGate = fileInventoryRequests();
@@ -7097,7 +7100,7 @@
     keptFiles = null;
     privateDownloads = [];
     privateDownloadError = "";
-    privateDownloadBusy = null;
+    privateDownloadBusy = {};
     privateDownloadSaves = {};
     fileInventoryGate.invalidate();
     cancelKeptTransfer();
@@ -12112,11 +12115,11 @@
   async function resumePrivateDownload(row: PrivateDownload, fresh = false, saveAs = false) {
     const server = activeServerId, gen = viewGeneration;
     const offer = saveAs ? "saveAs" : fresh ? "fresh" : "resume";
-    if (server === null || locked || privateDownloadBusy || privateDownloadSaves[row.id] || saveInProgress(row.cid) || !privateDownloadOffers(row, offer)) return;
+    if (server === null || locked || privateDownloadBusy[row.id] || privateDownloadSaves[row.id] || saveInProgress(row.cid) || !privateDownloadOffers(row, offer)) return;
     const newCopy = fresh || (saveAs && privateDownloadSaveAsIsNewCopy(row));
     const mutation = Symbol("private download");
     error = "";
-    privateDownloadBusy = mutation;
+    privateDownloadBusy[row.id] = mutation;
     privateDownloadSaves[row.id] = mutation;
     fileInventoryGate.invalidate();
     const operation = `save-${crypto.randomUUID()}`;
@@ -12136,7 +12139,7 @@
         networkBytesDone: 0, speed: 0, lastRateAt: started, updatedAt: started, ts: started };
       // Acquisition may wait for a member. Keep Pause/Remove available during that wait;
       // this separate token blocks only a duplicate Save of this same native owner.
-      if (privateDownloadBusy === mutation) privateDownloadBusy = null;
+      if (privateDownloadBusy[row.id] === mutation) delete privateDownloadBusy[row.id];
       const saved = await resumeGroupFile(invoke, server, row.cid, name, row.id, row.intent, operation, newCopy, saveAs);
       if (!unlockedViewCurrent(gen, server)) return;
       if (downloads[key]?.operation === operation) Object.assign(downloads[key], completedDownload(downloads[key], saved, Date.now()));
@@ -12158,16 +12161,18 @@
     } finally {
       if (activeSaves[key] === operation) delete activeSaves[key];
       if (!unlockedViewCurrent(gen, server) && downloads[key]?.operation === operation) delete downloads[key];
-      if (privateDownloadBusy === mutation) privateDownloadBusy = null;
+      if (privateDownloadBusy[row.id] === mutation) delete privateDownloadBusy[row.id];
       if (privateDownloadSaves[row.id] === mutation) delete privateDownloadSaves[row.id];
       if (unlockedViewCurrent(gen, server)) await refreshFiles();
     }
   }
   async function changePrivateDownload(row: PrivateDownload, remove: boolean, keepPartial = false) {
     const server = activeServerId, gen = viewGeneration;
-    if (server === null || locked || privateDownloadBusy) return;
+    // R2-M1: only a second action on this same row is refused while one is pending; a Remove
+    // stalled on an external folder leaves every other row's actions available.
+    if (server === null || locked || privateDownloadBusy[row.id]) return;
     const mutation = Symbol("private download intent");
-    privateDownloadBusy = mutation;
+    privateDownloadBusy[row.id] = mutation;
     fileInventoryGate.invalidate();
     try {
       // Remove deletes encrypted progress and only a partly saved file native proves it created;
@@ -12179,7 +12184,7 @@
       } else await invoke("set_private_download_paused", { server, download: row.id, expectedIntent: row.intent, paused: true });
     } catch (e) { if (unlockedViewCurrent(gen, server)) error = String(e); }
     finally {
-      if (privateDownloadBusy === mutation) privateDownloadBusy = null;
+      if (privateDownloadBusy[row.id] === mutation) delete privateDownloadBusy[row.id];
       if (unlockedViewCurrent(gen, server)) await refreshFiles();
     }
   }
@@ -28242,7 +28247,7 @@
                     <div>
                       {#each privateDownloadActions(saved) as action (action.kind)}
                         <button class={action.ghost ? "ghost" : undefined}
-                          disabled={!!privateDownloadBusy || (action.needsIdle && (!!privateDownloadSaves[saved.id] || saveInProgress(saved.cid)))}
+                          disabled={!!privateDownloadBusy[saved.id] || (action.needsIdle && (!!privateDownloadSaves[saved.id] || saveInProgress(saved.cid)))}
                           onclick={() => runPrivateDownloadAction(saved, action.kind)}>{action.label}</button>
                       {/each}
                     </div>

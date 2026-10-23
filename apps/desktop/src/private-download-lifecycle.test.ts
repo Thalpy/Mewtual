@@ -31,7 +31,7 @@ function deferred() { let resolve!: (value: unknown) => void, reject!: (error: u
 function fixture() {
   return new Function("saveGroupFile", "resumeGroupFile", "completedDownload", "downloadSavedNotice", "acceptSaveProgress",
     "privateDownloadChatSave", "privateDownloadOffers", "isSaveAsCancelled", "privateDownloadSaveAsIsNewCopy", "file", `
-    let activeServerId = 1, viewGeneration = 2, locked = false, error = "", privateDownloadBusy = null;
+    let activeServerId = 1, viewGeneration = 2, locked = false, error = "", privateDownloadBusy = {};
     let privateDownloads = [], privateDownloadSaves = {}, downloads = {}, activeSaves = {}, uuid = 0, refreshes = 0;
     const calls = [], notices = [], views = [], replies = new Map(), filesByCid = new Map([[file.cid, file]]);
     const crypto = { randomUUID: () => "op-" + (++uuid) }, fileInventoryGate = { invalidate() {} };
@@ -175,6 +175,40 @@ test("Remove shows native's notice when a file of the save stays on disk, and no
   const removing = app.act({ ...saved, status: "saved" }, "remove");
   app.lock(); app.unlock(); held.resolve(left); await removing;
   assert.equal(app.notices.length, 1);
+});
+test("a Remove stalled on its folder holds only its own row; every other row keeps its actions", async () => {
+  // Second review R2-M1: native removal can wait indefinitely on external cleanup. The renderer
+  // used to hold one global busy token across that call, so Pause on another row dispatched
+  // nothing. Ownership is now per download ID.
+  const app = fixture(), held = deferred();
+  const a = { ...saved, status: "saved" };
+  const b = { ...saved, id: "e".repeat(64), cid: "f".repeat(64) };
+  app.replies.set("cancel_private_download", held.promise);
+  const removing = app.act(a, "remove");
+  app.replies.set("cancel_private_download", null);
+  await app.act({ ...b, status: "receiving" }, "pause");
+  await app.act({ ...b, status: "destination-changed" }, "remove");
+  await app.act({ ...b, status: "removing" }, "keep");
+  await app.act({ ...b, status: "incomplete" }, "resume");
+  const forB = app.calls.slice(1).map(([name, args]: [string, Record<string, unknown>]) => [name, args.download ?? args.resume]);
+  assert.deepEqual(forB, [
+    ["set_private_download_paused", b.id],
+    ["cancel_private_download", b.id],
+    ["cancel_private_download", b.id],
+    ["save_group_file", b.id],
+  ], "B's Pause, Remove, Keep and Resume all dispatch while A's removal is pending");
+  // A second action on A itself is still refused while its removal is pending.
+  const before = app.calls.length;
+  await app.act({ ...a, status: "receiving" }, "pause");
+  await app.act(a, "remove");
+  await app.act({ ...a, status: "removing" }, "keep");
+  await app.act({ ...a, status: "incomplete" }, "resume");
+  assert.equal(app.calls.length, before, "no duplicate operation on the pending row");
+  assert.ok(app.state().busy[a.id], "A's removal still owns its row");
+  held.resolve(null); await removing;
+  assert.equal(app.state().busy[a.id], undefined, "released when native answers");
+  await app.act(a, "remove");
+  assert.equal(app.calls.length, before + 1, "A is free again");
 });
 test("saving a halted, saved or running file from the list opens Transfers instead of acting", async () => {
   for (const status of ["destination-changed", "destination-unavailable", "saved", "removing", "exhausted", "saving", "receiving"]) {
