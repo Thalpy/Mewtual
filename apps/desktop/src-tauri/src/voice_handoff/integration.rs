@@ -135,30 +135,57 @@ async fn derivation_cycle(
     );
     drop(reply);
     let work = row.work().unwrap();
+    let original_deadline = work.action().protected_binding().unwrap().deadline;
     let phase = work.phase().clone();
     drop(work);
     let mut result = action.clone();
     result.extend_from_slice(&Sha256::digest([]));
     result.extend_from_slice(&0u16.to_be_bytes());
-    let header = (5, 3, 1, id.logical());
-    let response = derivation_result::commit(
-        &context,
-        &route,
-        opened_frame(&public, &route, header, &result, Some(&phase)),
-    )
-    .await
-    .unwrap();
-    let (status, incoming) = response.into_parts();
-    let status = status.expect("actual Actor accepted the original native derivation");
+    let clock = crate::voice_runtime(state).clock();
+    let mut capacity_refusals = 0u32;
+    let status = loop {
+        // Native local contention and Root capacity are retryable on the SAME output,
+        // action/permit and original deadline. A fresh physical nonce is not new work.
+        // Capacity may reflect local registry contention or Root pressure; the refusal
+        // alone does not identify its cause. The old one-shot fixture treated it as
+        // terminal even though the browser preserves this exact request for retry.
+        assert!(
+            clock.monotonic_ms() < original_deadline,
+            "original Derive deadline exhausted after {capacity_refusals} capacity refusals"
+        );
+        let header = (route.session().fixture_counts().1 + 1, 3, 1, id.logical());
+        let response = derivation_result::commit(
+            &context,
+            &route,
+            opened_frame(&public, &route, header, &result, Some(&phase)),
+        )
+        .await
+        .expect("actual original result worker must fit its unchanged payment");
+        let (status, incoming) = response.into_parts();
+        drop(incoming); // collect actual physical owner before an exact new transmission
+        match status {
+            Ok(status) => break status,
+            Err(factory::Refused::Protocol(catcoms_sync::voice_v2::VoiceError::Capacity))
+                if clock.monotonic_ms() < original_deadline =>
+            {
+                capacity_refusals += 1;
+                eprintln!("native Derive exact result retry {capacity_refusals}; row {:?}; action {serial}; remaining original ms {}", id.logical(), original_deadline.saturating_sub(clock.monotonic_ms()));
+                // The same one-second retry cadence as retained browser cleanup. Do not
+                // spin on a busy native fence or grant another action/engine budget.
+                clock.sleep(std::time::Duration::from_secs(1)).await;
+            }
+            Err(error) => panic!("actual original Derive result failed after {capacity_refusals} capacity refusals: {error:?}"),
+        }
+    };
     let receipt = status.engine.receipt.expect("exact native receipt");
     assert!(matches!(
         receipt.outcome,
         catcoms_sync::voice_v2::crypto_actions::CryptoOutcome::Derived
     ));
-    drop(incoming);
     let mut ack = action.clone();
     ack.extend_from_slice(&requests::receipt_digest(&receipt));
-    for (sequence, operation, body) in [(6, 4, ack), (7, 5, action)] {
+    for (operation, body) in [(4, ack), (5, action)] {
+        let sequence = route.session().fixture_counts().1 + 1;
         let header = (sequence, operation, 0, id.logical());
         let reply = settlement::apply(
             &context,
@@ -180,7 +207,7 @@ async fn derivation_cycle(
         drop(late_input);
         let mut returned = purpose;
         returned.push(0);
-        let header = (8, 6, 0, id.logical());
+        let header = (route.session().fixture_counts().1 + 1, 6, 0, id.logical());
         let reply = settlement::apply(
             &context,
             &route,
@@ -202,7 +229,7 @@ async fn derivation_cycle(
     assert!(!selected.lease().is_live());
     let mut retire = purpose.clone();
     retire.push(1); // terminal pilot; never Return then relabel
-    let header = (8, 6, 0, id.logical());
+    let header = (route.session().fixture_counts().1 + 1, 6, 0, id.logical());
     let reply = finalization::respond(
         &context,
         &route,
@@ -219,7 +246,8 @@ async fn derivation_cycle(
     assert!(!state.voice_handoff.channel_may_close(selected));
     drop(late_input);
     let mut proof = None;
-    for sequence in [9, 10] {
+    for _ in 0..2 {
+        let sequence = route.session().fixture_counts().1 + 1;
         let header = (sequence, 6, 0, id.logical());
         let reply = finalization::respond(
             &context,
@@ -242,7 +270,7 @@ async fn derivation_cycle(
     }
     let mut final_ack = purpose;
     final_ack.extend_from_slice(&proof.unwrap());
-    let header = (11, 7, 0, id.logical());
+    let header = (route.session().fixture_counts().1 + 1, 7, 0, id.logical());
     let reply = finalization::respond(
         &context,
         &route,

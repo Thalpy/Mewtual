@@ -370,6 +370,50 @@ async fn admitted_result_uses_only_original_task_capacity_under_full_ordinary_gr
 }
 
 #[tokio::test]
+async fn busy_registry_refuses_before_result_handoff_and_exact_request_survives() {
+    let case = Case::new().await;
+    let bytes = case.bytes();
+    let before = case.selected.resources().counts();
+    let original = case.action.handoff_status();
+    let registry = case.native.state.servers.lock().await;
+    let response = tokio::time::timeout(
+        std::time::Duration::from_secs(15),
+        commit(&case.context, &case.route, case.frame(1, &bytes)),
+    )
+    .await
+    .expect("busy registry refuses without an Actor query or parked mounted context")
+    .unwrap();
+    assert!(matches!(
+        response.result,
+        Err(Refused::Protocol(VoiceError::Capacity))
+    ));
+    assert!(response.work.is_none() && response.payment.is_none());
+    assert!(case.action.handoff_status() == original);
+    assert!(case.row().work().is_ok());
+    assert!(case.route.session().header().is_err());
+    drop(response);
+    assert_eq!(case.selected.resources().counts(), before);
+    assert!(!case.route.session().fixture_counts().0);
+    drop(registry);
+    let response = commit(&case.context, &case.route, case.frame(2, &bytes))
+        .await
+        .unwrap();
+    // Same action/bytes now reach the actual Actor. This synthetic fixture's foreign
+    // grant is intentionally rejected there; Capacity cannot turn into a fake success.
+    assert!(matches!(
+        response.result,
+        Err(Refused::Protocol(VoiceError::Unauthorized))
+    ));
+    assert!(response.work.is_some() && response.payment.is_some());
+    assert!(case.action.handoff_status() == original);
+    drop(response);
+    assert_eq!(case.selected.resources().counts(), before);
+    assert!(!case.route.session().fixture_counts().0);
+    case.retire();
+    case.native.close().await;
+}
+
+#[tokio::test]
 async fn lock_winning_before_final_result_admission_refuses_without_a_worker_or_new_generation_adoption(
 ) {
     let case = Case::new().await;
