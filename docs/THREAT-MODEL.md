@@ -12,8 +12,8 @@ actual Session until fixed Row custody exists; bootstrap/Row collection retains 
 physical identity provenance. A prior foreign witness is cleared when new intent is installed.
 
 The unchanged12KiB Control and2,304B native Row guards now include actual adapter futures,
-Admission, retirement ticket, replies and identity. These new native guards/tests are not yet
-compiled. Mode1 wire vectors remain unchanged; mode2 requires explicit browser expectation and
+Admission, retirement ticket, replies and identity. All241 focused native handoff tests pass, including the new guards; complete native validation
+remains pending. Mode1 wire vectors remain unchanged; mode2 requires explicit browser expectation and
 a separate proof domain. The public listener still rejects effect opcodes before Data admission.
 This draft grants no production V2, browser/RTC, multi-peer or physical acceptance claim.
 

@@ -12,8 +12,8 @@ needed. It remains valid cleanup after End/lock, but cannot install intent after
 Plan final receipts use kind2 in the existing100B layout, with a distinct proof domain. Generic
 FinalAck7 accepts only the stored issuance, original Session and exact proof. Browser decoding
 must explicitly expect `retire-plan`; default Phase decoding still rejects kind2. Shared Rust/TS
-vectors cover Pending/Issued/ACK. Native tests are written but not yet compiled; HANDOVER tracks
-validation. Production loopback admission still permits only Status9/existing-history Begin8(false).
+vectors cover Pending/Issued/ACK. All241 focused native handoff tests pass; HANDOVER tracks complete validation, which is
+still pending. Production loopback admission still permits only Status9/existing-history Begin8(false).
 Child framing/results, browser key/Phase transfer and live RTC integration remain incomplete.
 
 Retained browser broker14 uses separate Plan cleanup only after authenticated Phase-Unauthorized
