@@ -1,5 +1,23 @@
 # Next voice milestone: native result recovery
 
+## Latest checkpoint and next work (23 October)
+
+The integrated confirmation/Plan-final runtime `f1f2e48c` passes native724 and frontend2,538;
+Root3,310 (24 existing ignored) and strict Root Clippy cover identical unchanged Root inputs.
+Current native check/strict Clippy, formatting, ambient gate, Svelte/build and unchanged-dependency
+audit pass. HANDOVER and the acceptance ledger record exact scopes and corrections. Native
+Hello/Proof/Finish traverses the actual A-C-blocked TCP fixture through unjoined B with fixed
+test-provider AES keys. Original-parent Plan-final intent, physical GC, exact final ACK and
+retained browser cleanup after ordinary Return are now implemented as inactive adapters.
+
+Next code is isolated in `target/communication-confirmation-ipc-worktree`: separate child-v2
+request grammar with one direct-written prepaid browser buffer. Its61 focused browser tests
+pass; native tests are written but not yet compiled. It is excluded from this checkpoint.
+Next required implementation remains actual child Input/admission/results, browser key/Phase
+transfer, SDP/ICE/RTC, VoiceV2Native/App composition, supported multi-peer histories and real
+blocked-route negotiation/replacement. Member media relay and physical acceptance remain open;
+only one desktop is available. Production activation and action dispatch remain disabled.
+
 ## Current integration status (23 October)
 
 Published Source/chat runtime `5600fecd`, documented/pushed at `9004cb0a` in draft PR #53, passes

@@ -32,6 +32,60 @@ impl ResolvedRow {
 }
 
 impl Ledger {
+    /// Recover only a descendant of the actual original indexed parent. Public purpose
+    /// fields are lookup hints; equal RowIds in another ledger or a detached parent cannot
+    /// substitute for the strong parent allocation captured before child publication.
+    ///
+    /// This is historical resolution, not admission: no live lease, plan control, State
+    /// guard, Root callback, allocation, or factory is needed. `id=None` recovers a lost
+    /// first reply; later operations must also match their authenticated child header.
+    pub(in crate::voice_handoff) fn lookup_child(
+        self: &Arc<Self>,
+        selected: &SelectedHandoffOwner,
+        parent: &ResolvedRow,
+        request: ConfirmationPurpose,
+        id: Option<RowId>,
+    ) -> Result<ResolvedRow, VoiceError> {
+        if !Arc::ptr_eq(self, &parent.ledger)
+            || parent.row.key.parent.is_some()
+            || !matches!(parent.row.key.purpose, Purpose::Derive(_))
+            || !parent.row.key.matches(selected, parent.row.key.purpose)
+        {
+            return Err(VoiceError::Unauthorized);
+        }
+        let index = self.index.lock().unwrap_or_else(|e| e.into_inner());
+        if !index
+            .rows
+            .get(parent.id().slot)
+            .and_then(Option::as_ref)
+            .is_some_and(|row| row.id == parent.id() && Arc::ptr_eq(row, &parent.row))
+        {
+            return Err(VoiceError::Unauthorized);
+        }
+        let purpose = Purpose::Confirmation {
+            parent: parent.id(),
+            request,
+        };
+        let row = index
+            .rows
+            .iter()
+            .flatten()
+            .find(|row| {
+                id.is_none_or(|id| row.id == id)
+                    && row.key.matches(selected, purpose)
+                    && row
+                        .key
+                        .parent
+                        .as_ref()
+                        .is_some_and(|owner| Arc::ptr_eq(owner, &parent.row))
+            })
+            .ok_or(VoiceError::Unauthorized)?;
+        Ok(ResolvedRow {
+            ledger: self.clone(),
+            row: row.clone(),
+        })
+    }
+
     /// Reserve before Actor work. The returned response trigger is the actual retained
     /// same-parent decrypt, never an action reconstructed from serials or receipt fields.
     /// Caller must already own its physical/factory payment and current UI commit.

@@ -121,6 +121,120 @@ fn parent_retirement_wins_before_child_reservation_without_allocating_a_purpose(
 }
 
 #[test]
+fn child_lookup_requires_actual_indexed_parent_allocation_and_exact_owner_purpose_and_row() {
+    let (coordinator, selected, selector) = selection();
+    let ledger = Arc::new(Ledger::default());
+    let (_join, _action, parent) = returned_parent(&ledger, &coordinator, &selected, selector);
+    let request = ConfirmationPurpose::Start(None);
+    let (Begin::Factory(child), _) = ledger
+        .begin_child(selected.clone(), &parent, request)
+        .unwrap()
+    else {
+        panic!("first child")
+    };
+    let id = child.id();
+    child.mark_handoff().unwrap();
+    drop(child);
+    let before = selected.resources().counts();
+    for child_id in [None, Some(id)] {
+        let found = ledger
+            .lookup_child(&selected, &parent, request, child_id)
+            .unwrap();
+        assert!(found.id() == id);
+    }
+    for wrong_id in [
+        parent.id(),
+        RowId {
+            slot: id.slot,
+            serial: id.serial + 1,
+        },
+    ] {
+        assert!(matches!(
+            ledger.lookup_child(&selected, &parent, request, Some(wrong_id)),
+            Err(VoiceError::Unauthorized)
+        ));
+    }
+    for wrong_request in [
+        ConfirmationPurpose::Incoming(1),
+        ConfirmationPurpose::Start(Some([7; 32])),
+    ] {
+        assert!(matches!(
+            ledger.lookup_child(&selected, &parent, wrong_request, None),
+            Err(VoiceError::Unauthorized)
+        ));
+    }
+    let (other_coordinator, foreign_selected, foreign_selector) = selection();
+    let other = Arc::new(Ledger::default());
+    let (_foreign_join, _foreign_action, foreign) = returned_parent(
+        &other,
+        &other_coordinator,
+        &foreign_selected,
+        foreign_selector,
+    );
+    assert!(parent.id() == foreign.id());
+    assert!(matches!(
+        ledger.lookup_child(&selected, &foreign, request, None),
+        Err(VoiceError::Unauthorized)
+    ));
+    assert!(matches!(
+        ledger.lookup_child(&foreign_selected, &parent, request, None),
+        Err(VoiceError::Unauthorized)
+    ));
+    // A detached foreign row with equal slot/serial cannot bypass either owner or actual
+    // indexed-parent allocation checks by being wrapped in this ledger's resolver handle.
+    let detached = ResolvedRow {
+        ledger: ledger.clone(),
+        row: foreign.row.clone(),
+    };
+    assert!(matches!(
+        ledger.lookup_child(&selected, &detached, request, None),
+        Err(VoiceError::Unauthorized)
+    ));
+    // SAME selected allocation and full public purpose, but another original row. This
+    // passes key.matches and specifically pins the indexed Arc fence (not just labels).
+    let parallel = Arc::new(Ledger::default());
+    let parallel_ticket = ticket(&parallel, selected.clone(), selector);
+    let parallel_parent = parallel
+        .resolve(&selected, Purpose::Derive(selector), parallel_ticket.id())
+        .unwrap();
+    assert!(parallel_parent.id() == parent.id());
+    assert!(matches!(
+        ledger.lookup_child(&selected, &parallel_parent, request, None),
+        Err(VoiceError::Unauthorized)
+    ));
+    let same_ledger_foreign_arc = ResolvedRow {
+        ledger: ledger.clone(),
+        row: parallel_parent.row.clone(),
+    };
+    assert!(same_ledger_foreign_arc
+        .row
+        .key
+        .matches(&selected, parent.row.key.purpose));
+    assert!(matches!(
+        ledger.lookup_child(&selected, &same_ledger_foreign_arc, request, None),
+        Err(VoiceError::Unauthorized)
+    ));
+    drop((
+        parallel_ticket,
+        parallel_parent,
+        same_ledger_foreign_arc,
+        parallel,
+    ));
+    assert_eq!(selected.resources().counts(), before);
+    let found = ledger
+        .lookup_child(&selected, &parent, request, Some(id))
+        .unwrap();
+    found.close_pending().unwrap();
+    parent.retire_plan().unwrap();
+    assert!(
+        ledger
+            .lookup_child(&selected, &parent, request, Some(id))
+            .is_ok(),
+        "history survives original plan retirement without live control"
+    );
+}
+
+#[test]
 fn equal_parent_labels_from_another_ledger_and_unproven_response_triggers_refuse() {
     let (coordinator, selected, selector) = selection();
     let ledger = Arc::new(Ledger::default());

@@ -1,6 +1,21 @@
 # Threat model; client integrity & enforcement boundaries
 
-## Plan-final intent after ordinary Return (23 October; unvalidated draft)
+## Confirmation metadata is not authority (23 October; inactive draft)
+
+The separate child grammar cannot enlarge v1 handler/request state or reinterpret a parent
+request. Closed purpose tags and role1..9 select historical metadata only. Exact original
+Session and full selector first resolve the original Derive parent; one Index guard then
+rechecks its slot/serial/Arc and the child's selected owner, exact purpose and strong parent
+Arc. Equal public labels, foreign ledgers/Sessions and changed header rows do not supply that
+provenance. No State/Index guard survives callback-bearing Root reconciliation. End/lock or
+missing plan control cannot strand read-only history, while unknown history never rearms work.
+The original Incoming retains its physical payment through reply collection; no new ordinary
+capacity or data Phase is required. Child terminal operations cannot close/ACK the whole plan.
+Existing12KiB Control and group/process ceilings remain unchanged; the current measured graph
+fits with36B headroom. Actual child Input/admission/results and complete future/SDK/RTC custody
+remain separate unfinished gates. No new effect opcode or live V2 activation follows.
+
+## Plan-final intent after ordinary Return (23 October; validated inactive adapter)
 
 Separate mode2 intent cannot upgrade immutable Phase Return to Retire. It binds the actual
 original canonical registry/session, selected allocation, full purpose and RowId. Cleanup may
@@ -12,8 +27,7 @@ actual Session until fixed Row custody exists; bootstrap/Row collection retains 
 physical identity provenance. A prior foreign witness is cleared when new intent is installed.
 
 The unchanged12KiB Control and2,304B native Row guards now include actual adapter futures,
-Admission, retirement ticket, replies and identity. All241 focused native handoff tests pass, including the new guards; complete native validation
-remains pending. Mode1 wire vectors remain unchanged; mode2 requires explicit browser expectation and
+Admission, retirement ticket, replies and identity. All241 focused native handoff and724 complete native tests pass, including the new guards. Mode1 wire vectors remain unchanged; mode2 requires explicit browser expectation and
 a separate proof domain. The public listener still rejects effect opcodes before Data admission.
 This draft grants no production V2, browser/RTC, multi-peer or physical acceptance claim.
 
@@ -23,7 +37,7 @@ to replace an intent. All later issuance/ACK decode against the latched mode, re
 keys/counters/parent descriptor. Mode2 refusal cannot bypass native preflight or permit early key
 collection. Broker14 rejects old HMR shape; tests use actual WebCrypto with a framed native mock.
 
-## Native confirmation child draft (23 October; validation incomplete)
+## Native confirmation child checkpoint (23 October; inactive integration)
 
 Child purpose reservation, original-parent retirement and publication/role claims share the
 native Index -> parent -> child ordering. Only child -> original parent strong ownership exists;
@@ -41,7 +55,7 @@ projection's retired bit cannot override Root's actual current-trigger check.
 Native fixed row payment grows from2,048B to2,304B before allocation (at most extra8KiB across32
 rows). This reduces available capacity rather than increasing any attacker budget: group512KiB,
 process2MiB,32 rows, Phase/Root-plan costs and work/rate/attempt limits remain unchanged. The
-enlarged complete wrapper inventory still needs validation. No terminal/uncertain history eviction
+enlarged complete wrapper inventory passes the focused and complete native suites. No terminal/uncertain history eviction
 or advertised16-peer composition follows. Child-only Return cannot mint chain-final proof.
 
 The typed pending-action pull uses the exact current participant and paid Actor member map.

@@ -6,6 +6,7 @@ pub(crate) mod application;
 pub(crate) mod bootstrap;
 mod channel;
 pub(crate) mod commands;
+mod confirmation_history;
 mod context;
 pub(crate) mod custody;
 mod derivation_result;

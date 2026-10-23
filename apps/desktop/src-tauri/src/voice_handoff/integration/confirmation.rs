@@ -260,11 +260,20 @@ async fn crypto_and_return(
     state: &AppState,
     selected: &Arc<SelectedHandoffOwner>,
     row: &ledger::ResolvedRow,
+    parent: &ledger::ResolvedRow,
+    purpose: ledger::ConfirmationPurpose,
 ) -> CryptoOutcome {
     let work = row.work().unwrap();
     let input = work.phase().input(work.action()).unwrap();
     let _adapter = work.phase().copy(4096).unwrap();
     let low = work.action().protected_binding().unwrap().local_is_low;
+    let binding = work.action().protected_binding().unwrap();
+    let selector = PairSelector {
+        peer: binding.peer,
+        join: binding.peer_join,
+        key_ref: binding.peer_key,
+        epoch: binding.epoch,
+    };
     let opening = work.action().operation() == CryptoOperation::DecryptConfirmation;
     let key = if low != opening { [11; 32] } else { [12; 32] };
     let cipher = Aes256Gcm::new_from_slice(&key).unwrap();
@@ -341,6 +350,27 @@ async fn crypto_and_return(
     let receipt = completion.result().unwrap();
     let outcome = receipt.outcome;
     assert!(!matches!(outcome, CryptoOutcome::Rejected(_)));
+    let mut expected = row.status().unwrap();
+    assert!(
+        expected.engine.receipt.is_none(),
+        "native cache has not observed Actor publication"
+    );
+    expected.engine = work.action().terminal_status();
+    assert!(expected
+        .engine
+        .receipt
+        .as_ref()
+        .unwrap()
+        .same_transition(&receipt));
+    recover_child_history(state, selected, parent, purpose, row, selector, &expected).await;
+    assert!(row
+        .status()
+        .unwrap()
+        .engine
+        .receipt
+        .as_ref()
+        .unwrap()
+        .same_transition(&receipt));
     row.acknowledge(&receipt).unwrap();
     row.settle().unwrap();
     drop((work, _adapter));
@@ -359,7 +389,73 @@ async fn crypto_and_return(
     drop((completion, body));
     assert!(row.try_compact().unwrap());
     assert!(row.status().unwrap().drained);
+    recover_child_history(
+        state,
+        selected,
+        parent,
+        purpose,
+        row,
+        selector,
+        &row.status().unwrap(),
+    )
+    .await;
     outcome
+}
+
+/// Recover the actual accepted result before native refresh and again after local
+/// Return/compaction, not a synthetic receipt projection. This read borrows no new Phase.
+async fn recover_child_history(
+    state: &AppState,
+    selected: &Arc<SelectedHandoffOwner>,
+    parent: &ledger::ResolvedRow,
+    purpose: ledger::ConfirmationPurpose,
+    row: &ledger::ResolvedRow,
+    selector: PairSelector,
+    expected: &ledger::Status,
+) {
+    let bootstrap::Status::Ready(public) = bootstrap::ensure(
+        state,
+        selected.id(),
+        selected.executor(),
+        &mut catcoms_rt::OsCryptoRng,
+    )
+    .await
+    .unwrap() else {
+        panic!("original ready channel")
+    };
+    let route = state.voice_channels.route(public.public().slot).unwrap();
+    let mut body = vec![2];
+    body.extend_from_slice(selector.peer.as_bytes());
+    body.extend_from_slice(&selector.join);
+    body.extend_from_slice(&selector.key_ref);
+    body.extend_from_slice(&selector.epoch.to_be_bytes());
+    body.extend_from_slice(&parent.id().logical());
+    match purpose {
+        ledger::ConfirmationPurpose::Start(None) => body.push(0),
+        ledger::ConfirmationPurpose::Start(Some(previous)) => {
+            body.push(1);
+            body.extend_from_slice(&previous);
+        }
+        ledger::ConfirmationPurpose::Respond(trigger) => {
+            body.push(2);
+            body.extend_from_slice(&trigger.logical());
+        }
+        ledger::ConfirmationPurpose::Incoming(role) => body.extend_from_slice(&[3, role]),
+    }
+    body.push(0); // Lookup only. Never reserve/rearm when recovering a lost reply.
+    let expected = replies::status(row.id(), expected).unwrap();
+    // Actual Source/Lower/intake work keeps progressing on other native tasks while this
+    // query runs. Global pool parity is not a valid live-network assertion. The isolated
+    // full-pool history tests pin zero new credit/work; here pin the actual original result.
+    for _ in 0..2 {
+        let sequence = route.session().fixture_counts().1 + 1;
+        let header = (sequence, 8, 0, [0; 16]);
+        let incoming = opened_frame(&public, &route, header, &body, None);
+        let reply = confirmation_history::recover(&context::Context::new(state), &route, incoming)
+            .seal()
+            .unwrap();
+        assert_eq!(opened_reply(&public, header, &body, &reply), expected);
+    }
 }
 
 /// Pin FIRST Respond after actual Opened -> Return -> compaction, for BOTH response roles.
@@ -381,12 +477,26 @@ pub(crate) async fn confirmation_round_trip(
     )
     .await;
     assert!(matches!(
-        crypto_and_return(low_state, low, &hello).await,
+        crypto_and_return(
+            low_state,
+            low,
+            &hello,
+            low_parent,
+            ledger::ConfirmationPurpose::Start(None)
+        )
+        .await,
         CryptoOutcome::Sealed { .. }
     ));
     let opened_hello = incoming(high_state, high, high_parent).await;
     assert_eq!(
-        crypto_and_return(high_state, high, &opened_hello).await,
+        crypto_and_return(
+            high_state,
+            high,
+            &opened_hello,
+            high_parent,
+            ledger::ConfirmationPurpose::Incoming(1)
+        )
+        .await,
         CryptoOutcome::Opened
     );
     assert!(
@@ -407,12 +517,26 @@ pub(crate) async fn confirmation_round_trip(
     )
     .await;
     assert!(matches!(
-        crypto_and_return(high_state, high, &proof).await,
+        crypto_and_return(
+            high_state,
+            high,
+            &proof,
+            high_parent,
+            ledger::ConfirmationPurpose::Respond(opened_hello.id())
+        )
+        .await,
         CryptoOutcome::Sealed { .. }
     ));
     let opened_proof = incoming(low_state, low, low_parent).await;
     assert_eq!(
-        crypto_and_return(low_state, low, &opened_proof).await,
+        crypto_and_return(
+            low_state,
+            low,
+            &opened_proof,
+            low_parent,
+            ledger::ConfirmationPurpose::Incoming(2)
+        )
+        .await,
         CryptoOutcome::Opened
     );
     let finish = outgoing(
@@ -423,12 +547,26 @@ pub(crate) async fn confirmation_round_trip(
     )
     .await;
     assert!(matches!(
-        crypto_and_return(low_state, low, &finish).await,
+        crypto_and_return(
+            low_state,
+            low,
+            &finish,
+            low_parent,
+            ledger::ConfirmationPurpose::Respond(opened_proof.id())
+        )
+        .await,
         CryptoOutcome::Sealed { .. }
     ));
     let opened_finish = incoming(high_state, high, high_parent).await;
     assert_eq!(
-        crypto_and_return(high_state, high, &opened_finish).await,
+        crypto_and_return(
+            high_state,
+            high,
+            &opened_finish,
+            high_parent,
+            ledger::ConfirmationPurpose::Incoming(3)
+        )
+        .await,
         CryptoOutcome::Opened
     );
     let route = route(high_state, high).await;

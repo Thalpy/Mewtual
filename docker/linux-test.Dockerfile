@@ -8,6 +8,7 @@ RUN test -f Cargo.toml \
     && test -f apps/desktop/src/App.svelte \
     && test -f apps/desktop/src-tauri/src/voice_handoff/channel/vectors.json \
     && test -f apps/desktop/src-tauri/src/voice_handoff/requests/vectors.json \
+    && test -f apps/desktop/src-tauri/src/voice_handoff/requests/confirmation/vectors.json \
     && test -f apps/desktop/src-tauri/src/voice_handoff/replies/vectors.json \
     && test -f assets/mewtual-logo.svg \
     && test -f assets/cat/mascot-idle.svg \

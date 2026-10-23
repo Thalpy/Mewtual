@@ -107,9 +107,10 @@ fn paid_fixed_storage_and_original_control_lane_cover_codec_peak() {
         super::super::admission::layout_bytes(),
         super::super::settlement::layout_bytes(),
         super::super::plan_final::layout_bytes(),
+        super::super::confirmation_history::layout_bytes(),
     ];
     eprintln!(
-        "adapter graphs pending/history/final/input/admission/settlement/plan-final: {adapters:?}"
+        "adapter graphs pending/history/final/input/admission/settlement/plan-final/child-history: {adapters:?}"
     );
     let state = std::mem::size_of::<HeaderWorker>()
         .max(std::mem::size_of::<AuthenticatedRequest>())

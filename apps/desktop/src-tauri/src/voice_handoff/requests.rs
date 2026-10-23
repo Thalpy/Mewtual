@@ -71,62 +71,72 @@ impl<'a> Request<'a> {
             key_ref: cursor.take()?,
             epoch: u64::from_be_bytes(cursor.take()?),
         };
-        let kind = match operation {
-            Operation::BeginDerive => Kind::Begin {
-                retry: match cursor.take::<1>()? {
-                    [0] => false,
-                    [1] => true,
-                    _ => return Err(VoiceError::Malformed),
-                },
-            },
-            Operation::Input => Kind::Input,
-            Operation::Admit => Kind::Admit {
-                action: cursor.action()?,
-                engine_bytes: u32::from_be_bytes(cursor.take()?),
-            },
-            Operation::Result => {
-                let action = cursor.action()?;
-                let tag = cursor.take()?;
-                let length = usize::from(u16::from_be_bytes(cursor.take()?));
-                if length > 528 || cursor.0.len() != length {
-                    return Err(VoiceError::Bounds);
-                }
-                let output = cursor.0;
-                cursor.0 = &[];
-                Kind::Result {
-                    action,
-                    tag,
-                    output,
-                }
-            }
-            Operation::ReceiptAck => Kind::ReceiptAck {
-                action: cursor.action()?,
-                digest: cursor.take()?,
-            },
-            Operation::Settle => Kind::Settle {
-                action: cursor.action()?,
-            },
-            Operation::ClosePhase => match cursor.take::<1>()? {
-                [0] => Kind::ClosePhase {
-                    mode: CloseMode::Return,
-                },
-                [1] => Kind::ClosePhase {
-                    mode: CloseMode::Retire,
-                },
-                [2] => Kind::ClosePlan,
-                _ => return Err(VoiceError::Malformed),
-            },
-            Operation::FinalAck => Kind::FinalAck {
-                proof: cursor.take()?,
-            },
-            Operation::Status => return Err(VoiceError::Malformed),
-        };
-        if !cursor.0.is_empty() {
-            return Err(VoiceError::Malformed);
-        }
+        let kind = decode_kind(operation, cursor.0)?;
         Ok(Self { selector, kind })
     }
 }
+/// Shared closed operation suffix. The v2 child grammar owns its separate prefix/type;
+/// reusing this borrowing parser never constructs a v1 body or enlarges v1 Request.
+fn decode_kind(operation: Operation, bytes: &[u8]) -> Result<Kind<'_>, VoiceError> {
+    let mut cursor = Cursor(bytes);
+    let kind = match operation {
+        Operation::BeginDerive => Kind::Begin {
+            retry: match cursor.take::<1>()? {
+                [0] => false,
+                [1] => true,
+                _ => return Err(VoiceError::Malformed),
+            },
+        },
+        Operation::Input => Kind::Input,
+        Operation::Admit => Kind::Admit {
+            action: cursor.action()?,
+            engine_bytes: u32::from_be_bytes(cursor.take()?),
+        },
+        Operation::Result => {
+            let action = cursor.action()?;
+            let tag = cursor.take()?;
+            let length = usize::from(u16::from_be_bytes(cursor.take()?));
+            if length > 528 || cursor.0.len() != length {
+                return Err(VoiceError::Bounds);
+            }
+            let output = cursor.0;
+            cursor.0 = &[];
+            Kind::Result {
+                action,
+                tag,
+                output,
+            }
+        }
+        Operation::ReceiptAck => Kind::ReceiptAck {
+            action: cursor.action()?,
+            digest: cursor.take()?,
+        },
+        Operation::Settle => Kind::Settle {
+            action: cursor.action()?,
+        },
+        Operation::ClosePhase => match cursor.take::<1>()? {
+            [0] => Kind::ClosePhase {
+                mode: CloseMode::Return,
+            },
+            [1] => Kind::ClosePhase {
+                mode: CloseMode::Retire,
+            },
+            [2] => Kind::ClosePlan,
+            _ => return Err(VoiceError::Malformed),
+        },
+        Operation::FinalAck => Kind::FinalAck {
+            proof: cursor.take()?,
+        },
+        Operation::Status => return Err(VoiceError::Malformed),
+    };
+    if !cursor.0.is_empty() {
+        return Err(VoiceError::Malformed);
+    }
+    Ok(kind)
+}
+
+pub(super) mod confirmation;
+
 struct Cursor<'a>(&'a [u8]);
 impl Cursor<'_> {
     fn take<const N: usize>(&mut self) -> Result<[u8; N], VoiceError> {
