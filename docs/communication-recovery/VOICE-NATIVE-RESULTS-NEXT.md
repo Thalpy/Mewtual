@@ -2,12 +2,14 @@
 
 ## Native/Node interoperability continuation (23 October)
 
-The draft on bfe8439e now passes a genuine native/Node single-pair cycle: separate actual
+Runtime afcbee27 on bfe8439e now passes a genuine native/Node single-pair cycle: separate actual
 WebCrypto brokers, non-extractable selected keys, authenticated native HTTP/BYOB, real A-C
 blocked TCP via unjoined B, Derive and all six Hello/Proof/Finish receipts and exact final
 collection. It deliberately forces actual local Input Capacity and requires retry of the
-original intake before native Derived success. Focused native284 and browser141 pass;
-HANDOVER records exact measurements, failure history and pending complete gates.
+original intake before native Derived success. Focused native285, browser141 and all seven
+real TCP scenarios pass. Complete native772 and frontend2,638 pass; Root3,314 (24 existing
+ignored) covers identical unchanged Root inputs. Strict native static/build/startup and browser
+check/build/ten flows pass. HANDOVER records exact scopes, measurements and failure history.
 
 This proves neither independent established-pair authority nor packaged WebView/ACL/CORS,
 production work delivery or RTC. Remaining work below must keep those boundaries explicit;

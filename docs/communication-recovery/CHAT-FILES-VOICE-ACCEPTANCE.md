@@ -1,6 +1,6 @@
 # Chat, files and voice implementation evidence
 
-## Native/Node WebCrypto interoperability (23 October; full gates running)
+## Native/Node WebCrypto interoperability (23 October; runtime afcbee27)
 
 The isolated draft on bfe8439e now passes the actual single-pair TCP scenario with A-C
 forbidden and unjoined B forwarding signed envelopes. Two Node processes import the actual
@@ -32,7 +32,9 @@ sequence marker now observes actual post-preflight progress; UI/Actor admission 
 publication remain separate mandatory proofs. Current focus passes 285 (22.59s), all seven
 TCP cases pass (63.58s), strict native Clippy passes (55.48s), and actual physical Control is
 12,228B/12KiB including the test-only observer. Complete service stays 24,664B/32KiB. Full
-native/check/build/startup remain pending. Read-only re-review reports no remaining blocker/high/medium.
+native passes 772 tests: 767 library (690.24s) plus five command-policy, zero failures/ignored.
+Native check (54.02s), build (2m19s) and actual startup (3.66s) pass. HANDOVER records exact
+logs and unchanged input scopes. Read-only re-review reports no remaining blocker/high/medium.
 The Root inputs remain identical to the completed 3,314-pass run (24 existing ignored).
 Shipping dispatch is still read-only. Independent pair
 readiness, packaged WebView/CSP/ACL, production work delivery, native SDP/ICE/RTC, supported

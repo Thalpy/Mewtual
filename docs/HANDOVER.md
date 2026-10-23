@@ -1,6 +1,6 @@
 # Mewtual; Handover
 
-## Native/Node WebCrypto interoperability (23 October; full native gate pending)
+## Native/Node WebCrypto interoperability (23 October; validated runtime afcbee27)
 
 `target/communication-native-webcrypto-worktree` builds on published `bfe8439e`; its current
 continuation is excluded from that earlier producer's validation below. A private cfg(test)
@@ -87,8 +87,14 @@ medium. Current strict native Clippy passes (55.48s), handoff focus passes all 2
 and all seven real TCP cases pass (63.58s), including the previously failing framing and
 known-incoming scenarios and the actual Node cycle. Physical Control now measures
 12,228B/12KiB including the test-only sequence field; complete service remains 24,664B/32KiB.
-Root/native formatting, ambient and diff checks pass. Complete native/check/build/startup
-remain pending. No shipping effect dispatcher is enabled.
+Root/native formatting, ambient and diff checks pass. Complete native validation passes 772
+tests: 767 library (690.24s), five command-policy, zero failures/ignored. Native check passes
+(54.02s), native build passes (2m19s), and the actual startup gate passes (3.66s), reusing the
+existing dev server on 1420 and closing its own app afterward. Exact current logs in this
+checkout are `target/webcrypto-native-{full-v2,check-final,build-final,startup-final}.log`;
+focused logs are `webcrypto-native-handoff-focus-v8.log` and `webcrypto-native-tcp-focus-v5.log`.
+No shipping effect dispatcher is enabled. Earlier failed runs remain excluded from these
+passing counts; they are preserved above rather than reclassified as success.
 
 An independent established-pair query, production work delivery, full native/WebCrypto
 acceptance, SDP/ICE/RTC, supported group composition, media relay and combined/physical
