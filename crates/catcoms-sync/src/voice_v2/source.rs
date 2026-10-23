@@ -743,6 +743,16 @@ impl SourceLedger {
             SourceOutcome::Pending
         })
     }
+    /// Cheap scheduling hint: whether any packet record is retained at all. It neither prunes
+    /// nor locks per-packet state, so the per-tick scheduler can call it on every actor turn.
+    /// Retained terminal records count until a pruning pass (take_ready/counts) removes them.
+    pub(crate) fn is_empty(&self) -> bool {
+        self.state
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .packets
+            .is_empty()
+    }
     pub fn counts(&self) -> (usize, usize, usize) {
         let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
         self.prune(&mut state);

@@ -438,16 +438,22 @@ async fn voice_transport_busy_ack_verification_returns_exact_affine_completion_f
 
 #[tokio::test]
 async fn voice_transport_detached_helper_requires_exact_endpoint_ack_and_bounds_refused_retries() {
+    // Contract change (voice_schedule review): an unsettled helper edge waits 500 ms before its
+    // next attempt, so each retry below first advances the native clock past that gap.
     let mut f = VoiceForwardFixture::new().await;
     let completed = f.reply(2).await; // A final endpoint cannot turn itself into another helper.
     assert_eq!(f.helper.complete_voice_forward(completed).map_err(|failure| failure.into_error()), Err(VoiceError::Unauthorized));
+    assert!(f.helper.prepare_voice_forwards().unwrap().is_empty(), "the retry gap holds the next attempt");
+    f.clock.advance_ms(500);
     let completed = f.reply(3).await;
     assert_eq!(f.helper.complete_voice_forward(completed).unwrap(), crate::VoiceTransportStatus::Refused);
+    f.clock.advance_ms(500);
     let completed = f.reply(1).await;
     assert_eq!(f.helper.complete_voice_forward(completed).unwrap(), crate::VoiceTransportStatus::EndpointAdmitted);
+    f.clock.advance_ms(500);
     assert!(f.helper.prepare_voice_forwards().unwrap().is_empty());
     let mut f = VoiceForwardFixture::new().await;
-    for _ in 0..3 { let completed = f.reply(3).await; f.helper.complete_voice_forward(completed).unwrap(); }
+    for _ in 0..3 { let completed = f.reply(3).await; f.helper.complete_voice_forward(completed).unwrap(); f.clock.advance_ms(500); }
     assert!(f.helper.prepare_voice_forwards().unwrap().is_empty(), "fourth lower helper submission is forbidden");
 }
 
@@ -1070,4 +1076,344 @@ async fn voice_transport_replaced_watcher_seeds_fresh_challenge_without_adopting
     drop(lower);
     assert_eq!(ledger.counts(), (2, 2, 1));
     drop(fresh);
+}
+
+// ---- Production scheduling (voice_schedule) -------------------------------------------------
+// These drive the NORMAL sync tick (`run_once`) and normal request dispatch; no test code calls a
+// pump, prepares a flight or serves a kind28 request by hand. Each node is polled with
+// now_or_never, exactly as an actor command can cancel a sync poll; flights stay owned on the Root.
+// Mem models connected links: the hop oracle shows V2 used only bound routes, never A-C. It is
+// not physical A-C exclusion, WebView crypto, SDP forwarding or audible media.
+
+async fn tick_nodes(nodes: &mut [&mut VoiceTestNode], rounds: usize) {
+    use futures::FutureExt;
+    for _ in 0..rounds {
+        for node in nodes.iter_mut() {
+            for _ in 0..16 {
+                if node.run_once().now_or_never().is_none() {
+                    break;
+                }
+            }
+        }
+        tokio::task::yield_now().await;
+    }
+}
+fn fresh_issuers(node: &mut VoiceTestNode) -> Vec<(DeviceId, voice_v2::JoinKey)> {
+    let watch = node.voice_runtime.as_ref().unwrap().endpoints.implicit_watch_for_test().unwrap();
+    node.voice_watch_peers(&watch).unwrap().iter().map(|peer| {
+        let voice_v2::Body::Announcement { key, .. } = peer.announcement().body() else { panic!("announcement") };
+        (peer.announcement().issuer(), key.clone())
+    }).collect()
+}
+/// Finalize a proven member connection. The responder may have unrelated events queued first
+/// (it has been ticking), so keep serving until this exact finalization completes.
+async fn bind_nodes(from: &mut VoiceTestNode, to: &mut VoiceTestNode) {
+    use futures::FutureExt;
+    let peer = to.local_peer();
+    let finalize = from.finalize_member_connection(peer);
+    futures::pin_mut!(finalize);
+    for _ in 0..256 {
+        if let Some(result) = finalize.as_mut().now_or_never() {
+            assert!(result.unwrap(), "member finalization succeeds");
+            return;
+        }
+        let _ = to.run_once().now_or_never();
+        tokio::task::yield_now().await;
+    }
+    panic!("member finalization never completed");
+}
+
+/// A-B-C plus a second bridge D that is a member but not yet bound to anyone.
+struct BridgeFixture {
+    _hub: Arc<catcoms_rt::mem::Hub>,
+    a: VoiceTestNode,
+    b: Option<VoiceTestNode>,
+    c: VoiceTestNode,
+    d: VoiceTestNode,
+    clock: Arc<ManualClock>,
+    _runtimes: Vec<Arc<Runtime>>,
+}
+impl BridgeFixture {
+    async fn new() -> Self {
+        let (hub, mut nodes, _) = crate::tests::build_members(4).await;
+        crate::tests::converge_and_publish_test_routes(&mut nodes);
+        nodes[0].initialize_group_policy(GroupMode::PeerToPeer).unwrap();
+        nodes[0].snapshot().unwrap(); nodes[0].publish_group_policy().unwrap();
+        let policy = nodes[0].group_policy.as_ref().unwrap().encode();
+        for node in nodes.iter_mut().skip(1) { node.on_group_policy(&policy); }
+        let mut nodes = nodes.into_iter();
+        let (mut a, mut b, mut c, mut d) = (nodes.next().unwrap(), nodes.next().unwrap(), nodes.next().unwrap(), nodes.next().unwrap());
+        let clock = Arc::new(ManualClock::new(1000));
+        let runtimes: Vec<_> = (0..4).map(|_| Runtime::new(clock.clone())).collect();
+        for (node, runtime) in [&mut a, &mut b, &mut c, &mut d].into_iter().zip(&runtimes) {
+            attach(node, runtime);
+            // Service is off by default; this fixture models an explicit rollout to Forwarding.
+            node.set_voice_routing(VoiceRouting::Forwarding);
+        }
+        bind_nodes(&mut a, &mut b).await;
+        bind_nodes(&mut b, &mut c).await;
+        Self { _hub: hub, a, b: Some(b), c, d, clock, _runtimes: runtimes }
+    }
+    async fn tick(&mut self, rounds: usize) {
+        let mut nodes: Vec<&mut VoiceTestNode> = vec![&mut self.a, &mut self.c, &mut self.d];
+        if let Some(b) = self.b.as_mut() { nodes.push(b); }
+        tick_nodes(&mut nodes, rounds).await;
+    }
+    /// Tick in 250ms voice-clock steps until both endpoints see exactly the other's join.
+    async fn converge(&mut self, steps: usize, expect: &(voice_v2::JoinKey, voice_v2::JoinKey)) -> bool {
+        for _ in 0..steps {
+            self.tick(3).await;
+            let (a, c) = (fresh_issuers(&mut self.a), fresh_issuers(&mut self.c));
+            if a == vec![(self.c.device_id(), expect.1.clone())] && c == vec![(self.a.device_id(), expect.0.clone())] {
+                return true;
+            }
+            self.clock.advance_ms(250);
+        }
+        false
+    }
+}
+
+#[tokio::test]
+async fn voice_schedule_discovers_through_unjoined_bridge_and_recovers_through_replacement_bridge() {
+    let mut f = BridgeFixture::new().await;
+    let a = Arc::new(f.a.voice_call_grant(1).unwrap());
+    let c = Arc::new(f.c.voice_call_grant(1).unwrap());
+    let keys = (public_join_key(101), public_join_key(102));
+    f.a.start_voice_endpoint(a.clone(), keys.0.join, keys.0.public_key).unwrap();
+    f.c.start_voice_endpoint(c.clone(), keys.1.join, keys.1.public_key).unwrap();
+    assert!(f.converge(40, &keys).await, "normal ticks must finish both native challenge/proof flows through B");
+    let (a_peer, b_peer, c_peer, d_peer) = (f.a.local_peer(), f.b.as_ref().unwrap().local_peer(), f.c.local_peer(), f.d.local_peer());
+    assert!(!f.a.voice_schedule.hops.is_empty() && !f.c.voice_schedule.hops.is_empty());
+    assert!(f.a.voice_schedule.hops.iter().all(|hop| *hop == b_peer), "A used only its bound bridge");
+    assert!(f.c.voice_schedule.hops.iter().all(|hop| *hop == b_peer), "C used only its bound bridge");
+    let b = f.b.as_ref().unwrap();
+    assert!(b.voice_schedule.hops.contains(&a_peer) && b.voice_schedule.hops.contains(&c_peer), "B forwarded both ways");
+    assert!(b.voice_runtime.as_ref().unwrap().endpoints.implicit_watch_for_test().is_none(), "forwarding confers no participation");
+    assert!(f.d.voice_schedule.hops.is_empty(), "an unbound member is never used");
+
+    // B disappears (its transport registration and Root drop). D becomes the bound bridge.
+    let (a_mark, c_mark) = (f.a.voice_schedule.hops.len(), f.c.voice_schedule.hops.len());
+    drop(f.b.take());
+    bind_nodes(&mut f.a, &mut f.d).await;
+    bind_nodes(&mut f.d, &mut f.c).await;
+    // Verified liveness lasts at most 15s from challenge creation. Staying fresh well beyond that
+    // proves renewals and new challenges/proofs crossed D, under the ORIGINAL native joins.
+    let mut renewed_through_d = false;
+    for _ in 0..30 {
+        f.clock.advance_ms(1000);
+        f.tick(3).await;
+    }
+    for _ in 0..20 {
+        f.tick(3).await;
+        let (seen_a, seen_c) = (fresh_issuers(&mut f.a), fresh_issuers(&mut f.c));
+        if seen_a == vec![(f.c.device_id(), keys.1.clone())] && seen_c == vec![(f.a.device_id(), keys.0.clone())] {
+            renewed_through_d = true;
+            break;
+        }
+        f.clock.advance_ms(250);
+    }
+    assert!(renewed_through_d, "presence recovered through D after B disappeared, with the original joins");
+    assert!(f.a.voice_schedule.hops[a_mark..].iter().all(|hop| *hop == d_peer), "after B left, A used only D");
+    assert!(f.c.voice_schedule.hops[c_mark..].iter().all(|hop| *hop == d_peer), "after B left, C used only D");
+    assert!(f.d.voice_schedule.hops.contains(&a_peer) && f.d.voice_schedule.hops.contains(&c_peer));
+    assert!(f.d.voice_runtime.as_ref().unwrap().endpoints.implicit_watch_for_test().is_none());
+    // Pairing still derives from the discovered presence on both ends, unchanged by the bridge swap.
+    let epoch = f.a.voice_v2_context(1).unwrap().epoch;
+    let left = f.a.prepare_voice_pair(&a, voice_v2::presence::PairSelector { peer: f.c.device_id(), join: keys.1.join, key_ref: keys.1.key_ref, epoch }).unwrap();
+    let right = f.c.prepare_voice_pair(&c, voice_v2::presence::PairSelector { peer: f.a.device_id(), join: keys.0.join, key_ref: keys.0.key_ref, epoch }).unwrap();
+    assert_eq!(left.handshake, right.handshake);
+}
+
+/// Send one kind28 frame through the recipient's NORMAL dispatch and return the raw reply.
+async fn dispatched(from: &VoiceTestNode, to: &mut VoiceTestNode, frame: &[u8]) -> Bytes {
+    use futures::FutureExt;
+    let request = from.transport.request(to.local_peer(), ProtocolId(RR_PROTOCOL), Bytes::from(frame.to_vec()));
+    futures::pin_mut!(request);
+    for _ in 0..64 {
+        if let Some(reply) = request.as_mut().now_or_never() {
+            return reply.unwrap_or_default();
+        }
+        let _ = to.run_once().now_or_never();
+        tokio::task::yield_now().await;
+    }
+    panic!("normal dispatch never answered");
+}
+fn frame_hash(frame: &[u8]) -> [u8; 32] {
+    let (inner, ..) = decode_authed_request(&frame[1..]).unwrap();
+    voice_v2::Envelope::decode(&inner).unwrap().object().hash()
+}
+
+#[tokio::test]
+async fn voice_schedule_is_off_by_default_and_an_attached_actor_answers_kind28_as_before() {
+    let mut f = VoiceForwardFixture::empty().await;
+    assert_eq!(f.recipient.voice_routing(), VoiceRouting::Disabled, "production default stays off");
+    let watch = f.recipient.start_voice_watch(1, voice_v2::CallLease::default()).unwrap();
+    let object = voice_v2::SignedObject::issue(watch.scope(), &f.helper.device, [160; 32], 1000, 31_000,
+        voice_v2::Body::Announcement { key: public_join_key(160), epoch: f.helper.group.epoch(), renewal: 1 }).unwrap();
+    let frame = voice_frame(&mut f.helper, &voice_v2::Envelope::Direct(object));
+    let reply = dispatched(&f.helper, &mut f.recipient, &frame).await;
+    assert!(reply.is_empty(), "an attached actor with live native state still gets the pre-V2 empty reply");
+    assert_eq!(f.recipient.next_voice_schedule_delay(), None, "and schedules no wake");
+    tick_nodes(&mut [&mut f.recipient], 4).await;
+    assert!(f.recipient.voice_schedule.hops.is_empty(), "and submits no flight");
+}
+
+#[tokio::test]
+async fn voice_schedule_normal_dispatch_serves_kind28_and_disabled_routing_restores_the_old_empty_reply() {
+    let mut f = VoiceForwardFixture::empty().await;
+    f.recipient.set_voice_routing(VoiceRouting::Forwarding);
+    let watch = f.recipient.start_voice_watch(1, voice_v2::CallLease::default()).unwrap();
+    let scope = watch.scope();
+    let announcement = |n: u8, f: &mut VoiceForwardFixture| {
+        let object = voice_v2::SignedObject::issue(scope, &f.helper.device, [n; 32], 1000, 31_000,
+            voice_v2::Body::Announcement { key: public_join_key(n), epoch: f.helper.group.epoch(), renewal: 1 }).unwrap();
+        voice_frame(&mut f.helper, &voice_v2::Envelope::Direct(object))
+    };
+    let frame = announcement(131, &mut f);
+    let reply = dispatched(&f.helper, &mut f.recipient, &frame).await;
+    assert_eq!(f.helper.verify_voice_transport_response(f.recipient.local_peer(), &frame, frame_hash(&frame), &reply).unwrap(),
+        crate::VoiceTransportStatus::EndpointAdmitted, "kind28 reaches native endpoint admission through normal dispatch");
+    assert!(f.recipient.voice_watch_peers(&watch).unwrap().is_empty(), "an announcement alone still proves no presence");
+    f.recipient.set_voice_routing(VoiceRouting::Disabled);
+    let frame = announcement(132, &mut f);
+    let reply = dispatched(&f.helper, &mut f.recipient, &frame).await;
+    assert!(reply.is_empty(), "disabled routing answers exactly as an unknown kind always did");
+    assert!(f.helper.verify_voice_transport_response(f.recipient.local_peer(), &frame, frame_hash(&frame), &reply).is_err(),
+        "an empty reply is unavailable, never an admission or an 'unsupported' claim");
+    assert_eq!(f.recipient.next_voice_schedule_delay(), None, "disabled routing schedules nothing");
+}
+
+#[tokio::test]
+async fn voice_schedule_direct_routing_refuses_the_helper_role_and_narrows_every_context() {
+    let mut f = VoiceForwardFixture::empty().await;
+    f.helper.set_voice_routing(VoiceRouting::Forwarding);
+    assert!(f.helper.voice_v2_context(1).unwrap().indirect);
+    let frame = incoming_helper_frame(&mut f, 141);
+    let reply = dispatched(&f._source, &mut f.helper, &frame).await;
+    assert_eq!(f._source.verify_voice_transport_response(f.helper.local_peer(), &frame, frame_hash(&frame), &reply).unwrap(),
+        crate::VoiceTransportStatus::HelperQueued, "Forwarding retains a permitted helper packet");
+    f.helper.set_voice_routing(VoiceRouting::Direct);
+    assert!(!f.helper.voice_v2_context(1).unwrap().indirect, "the switch narrows every V2 context");
+    let frame = incoming_helper_frame(&mut f, 142);
+    let reply = dispatched(&f._source, &mut f.helper, &frame).await;
+    assert_eq!(f._source.verify_voice_transport_response(f.helper.local_peer(), &frame, frame_hash(&frame), &reply).unwrap(),
+        crate::VoiceTransportStatus::Refused, "Direct refuses helper custody instead of queueing work it will not forward");
+    assert_eq!(f.helper.voice_routing(), VoiceRouting::Direct);
+}
+
+#[tokio::test]
+async fn voice_schedule_routing_flips_end_live_joins_only_when_policy_narrows() {
+    let mut f = VoiceForwardFixture::empty().await;
+    let start = |f: &mut VoiceForwardFixture, n: u8| {
+        let grant = Arc::new(f.recipient.voice_call_grant(1).unwrap());
+        let key = public_join_key(n);
+        f.recipient.start_voice_endpoint(grant.clone(), key.join, key.public_key).unwrap();
+        grant
+    };
+    let live = |f: &mut VoiceForwardFixture| {
+        f.recipient.voice_runtime.as_mut().unwrap().endpoints.prune();
+        f.recipient.voice_runtime.as_ref().unwrap().endpoints.implicit_watch_for_test().is_some_and(|watch| watch.is_live())
+    };
+    // Pausing and resuming service leaves native state alone.
+    let grant = start(&mut f, 171);
+    f.recipient.set_voice_routing(VoiceRouting::Forwarding);
+    assert!(live(&mut f), "Disabled -> Forwarding keeps the join");
+    f.recipient.set_voice_routing(VoiceRouting::Disabled);
+    assert!(live(&mut f), "Forwarding -> Disabled pauses without ending");
+    assert_eq!(f.recipient.next_voice_schedule_delay(), None, "a paused join schedules nothing");
+    // Any change involving Direct narrows or widens policy and ends every live join and watcher.
+    f.recipient.set_voice_routing(VoiceRouting::Direct);
+    assert!(!live(&mut f), "-> Direct ends the live join; it is never converted");
+    assert!(!grant.lease().is_live());
+    let grant = start(&mut f, 172);
+    assert!(live(&mut f), "a fresh join starts under Direct");
+    f.recipient.set_voice_routing(VoiceRouting::Forwarding);
+    assert!(!live(&mut f), "Direct -> Forwarding also ends it: the old transcript bound no helpers");
+    assert!(!grant.lease().is_live());
+}
+
+#[tokio::test]
+async fn voice_schedule_helper_edges_wait_their_retry_gap_after_a_refusal() {
+    // The seeded helper packet targets C's join, which C does not hold, so every delivery is an
+    // authenticated refusal. Pumping after each completion must not resend at once.
+    let mut f = VoiceForwardFixture::new().await;
+    f.helper.set_voice_routing(VoiceRouting::Forwarding);
+    f.recipient.set_voice_routing(VoiceRouting::Forwarding);
+    let c_peer = f.recipient.local_peer();
+    let attempts = |f: &VoiceForwardFixture| f.helper.voice_schedule.hops.iter().filter(|hop| **hop == c_peer).count();
+    tick_nodes(&mut [&mut f.helper, &mut f.recipient], 8).await;
+    assert_eq!(attempts(&f), 1, "one lower attempt inside the gap, despite completion pumps");
+    f.clock.advance_ms(499);
+    tick_nodes(&mut [&mut f.helper, &mut f.recipient], 8).await;
+    assert_eq!(attempts(&f), 1);
+    f.clock.advance_ms(1);
+    tick_nodes(&mut [&mut f.helper, &mut f.recipient], 8).await;
+    assert_eq!(attempts(&f), 2);
+    for _ in 0..4 {
+        f.clock.advance_ms(500);
+        tick_nodes(&mut [&mut f.helper, &mut f.recipient], 8).await;
+    }
+    assert_eq!(attempts(&f), 3, "never more than the three edge attempts");
+}
+
+#[tokio::test]
+async fn voice_schedule_accepted_helper_work_gets_a_bounded_turn_against_the_bridges_own_sources() {
+    // PR50 review regression: source flights and helper forwards share four per-group Forward
+    // slots, and preparing sources first let a bridge's own observation traffic take every freed
+    // slot until an accepted helper packet expired.
+    use voice_v2::resources::ResourceKind;
+    let mut f = VoiceForwardFixture::new().await; // B already holds an accepted packet for C
+    f.helper.set_voice_routing(VoiceRouting::Forwarding);
+    // B is also a participant, so it originates its own room traffic that stays eligible
+    // (overlapping 500 ms hedges) for as long as its flights are unanswered.
+    let grant = Arc::new(f.helper.voice_call_grant(1).unwrap());
+    let key = public_join_key(181);
+    f.helper.start_voice_endpoint(grant.clone(), key.join, key.public_key).unwrap();
+    let group = f.helper.voice_v2_context(1).unwrap().scope.group;
+    let pool = f.helper_runtime.resources();
+    let mut held: Vec<_> = (0..4).map(|_| pool.charge(group, 1, ResourceKind::Forward).unwrap()).collect();
+    assert!(pool.charge(group, 1, ResourceKind::Forward).is_err(), "four shared slots per group");
+    let source = f.helper.voice_transport_actor().unwrap().source().unwrap();
+    let helper = f.helper.voice_transport_actor().unwrap().helper().unwrap();
+    let in_flight = || (source.counts().2, helper.counts().2);
+    // A and C are never ticked, so admitted flights keep their slots: real lower custody.
+    tick_nodes(&mut [&mut f.helper], 2).await;
+    assert_eq!(in_flight(), (0, 0), "no capacity: no flight and no spent attempt");
+    assert!(source.counts().0 > 0, "the bridge's own announcement is queued");
+    drop(held.pop());
+    tick_nodes(&mut [&mut f.helper], 2).await;
+    assert_eq!(in_flight(), (1, 0), "the first freed slot goes to the class owed it (sources)");
+    f.clock.advance_ms(600); // B's own source hedge is eligible again: real contention
+    drop(held.pop());
+    tick_nodes(&mut [&mut f.helper], 2).await;
+    assert_eq!(in_flight(), (1, 1), "the next freed slot is the helper's turn, not another source hedge");
+    f.clock.advance_ms(600);
+    drop(held.pop());
+    tick_nodes(&mut [&mut f.helper], 2).await;
+    assert_eq!(in_flight(), (2, 1), "then sources again: alternation, never more than the freed slots");
+    assert!(pool.charge(group, 1, ResourceKind::Forward).is_err(), "the four-slot ceiling still holds");
+    drop(grant);
+}
+
+#[tokio::test]
+async fn voice_schedule_quiet_wake_exists_only_while_v2_state_is_live() {
+    let mut f = VoiceForwardFixture::empty().await;
+    f.recipient.set_voice_routing(VoiceRouting::Forwarding);
+    assert_eq!(f.recipient.next_voice_schedule_delay(), None, "an idle attached actor needs no wake");
+    let grant = Arc::new(f.recipient.voice_call_grant(1).unwrap());
+    let key = public_join_key(151);
+    f.recipient.start_voice_endpoint(grant.clone(), key.join, key.public_key).unwrap();
+    assert_eq!(f.recipient.next_voice_schedule_delay(), Some(250), "a live join needs renewal wakes");
+    // The announcement's flight goes to the bound helper. The helper must actually consume that
+    // lower request: until a real lower owner retires, the source packet stays retained and so
+    // does the wake (the conservative custody rule), whatever the clock says.
+    tick_nodes(&mut [&mut f.recipient, &mut f.helper], 4).await;
+    assert!(!f.recipient.voice_transport_actor().unwrap().source().unwrap().is_empty());
+    drop(grant);
+    f.recipient.voice_runtime.as_mut().unwrap().endpoints.prune();
+    assert_eq!(f.recipient.next_voice_schedule_delay(), Some(250), "a retained packet keeps a bounded wake");
+    // Past the announcement's signed lifetime plus skew, a pass prunes it and the wake stops.
+    f.clock.advance_ms(40_000);
+    tick_nodes(&mut [&mut f.recipient, &mut f.helper], 4).await;
+    assert_eq!(f.recipient.next_voice_schedule_delay(), None, "an ended join with nothing retained needs none");
 }

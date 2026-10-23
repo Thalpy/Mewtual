@@ -1166,7 +1166,8 @@ struct UnverifiedEncrypted {
 }
 
 /// Snapshot only for synchronous validation. Deferred effects must acquire fresh native/actor
-/// authority at commit. `indirect` comes from policy_allows_member_mesh(), never a UI mode.
+/// authority at commit. `indirect` comes from policy_allows_member_mesh(), never a UI mode; the
+/// local VoiceRouting rollout switch may only narrow it (`voice_indirect_allowed`).
 pub struct Context {
     pub scope: Scope,
     pub local: DeviceId,
@@ -1202,7 +1203,7 @@ impl<T: catcoms_rt::MeshTransport, R: catcoms_rt::CryptoRngCore> crate::ChannelS
             local: self.device.device_id(),
             now: self.voice_v2_clock().now_ms(),
             epoch: self.group.epoch(),
-            indirect: self.policy_allows_member_mesh(),
+            indirect: self.voice_indirect_allowed(),
         })
     }
 }

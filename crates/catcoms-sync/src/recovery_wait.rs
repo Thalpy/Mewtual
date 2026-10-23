@@ -221,10 +221,13 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             Response(Result<Bytes, SyncError>),
             Submission(super::recovery_submission::Completion),
             FileSource(super::file_service::service::Completion),
+            // Boxed: an affine flight completion is far larger than the other variants.
+            Voice(Box<super::voice_schedule::VoiceFlight>),
             Event(Option<TransportEvent>),
             Retry,
             Capacity,
             Reconciliation,
+            VoiceWake,
         }
         if self.bound_source_reconciliation_owed {
             // Authentication can complete after the connection edge that declined recovery.
@@ -246,9 +249,23 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             .flatten()
             .min();
         let reconciliation_delay = self.next_reconciliation_delay();
+        // Quiet V2 renewals/hedges/retries sleep on the voice clock itself: a trusted integration
+        // may give the process voice runtime a different monotonic origin from this server clock.
+        let voice_delay = self.next_voice_schedule_delay();
+        let voice_clock = self.voice_v2_clock();
         let transport = Arc::clone(&self.transport);
         let clock = Arc::clone(&self.clock);
         let event = transport.next_event();
+        let voice_wake = async {
+            match voice_delay {
+                Some(ms) => {
+                    voice_clock
+                        .sleep(std::time::Duration::from_millis(ms))
+                        .await
+                }
+                None => std::future::pending().await,
+            }
+        };
         let retry = async {
             match retry_delay {
                 Some(ms) => clock.sleep(std::time::Duration::from_millis(ms)).await,
@@ -271,7 +288,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
                 std::future::pending::<()>().await;
             }
         };
-        futures::pin_mut!(event, retry, capacity, reconciliation);
+        futures::pin_mut!(event, retry, capacity, reconciliation, voice_wake);
         let ready = poll_fn(|cx| {
             // One bounded local turn per interval precedes ready I/O, so sustained incoming
             // traffic cannot starve quiet anti-entropy. Advance the shared deadline before
@@ -280,10 +297,10 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
                 self.schedule_reconciliation();
                 return Poll::Ready(Ready::Reconciliation);
             }
-            // Rotate catch-up, inbound events, detached submissions and file completions. This poll
-            // may be cancelled by an actor command; the jobs/permits remain on the group owner.
-            for offset in 0..4 {
-                let source = (self.recovery_turn + offset) % 4;
+            // Rotate catch-up, inbound events, detached submissions, file and V2 voice completions.
+            // This poll may be cancelled by an actor command; jobs/permits stay on the owner.
+            for offset in 0..5 {
+                let source = (self.recovery_turn + offset) % 5;
                 if source == 0 {
                     if let Some(pending) = self.pending_catchup.as_mut() {
                         if let Poll::Ready(result) = pending.response.as_mut().poll(cx) {
@@ -309,13 +326,24 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
                     if let Poll::Ready(Some(completed)) =
                         Pin::new(&mut self.file_service.jobs).poll_next(cx)
                     {
-                        self.recovery_turn = 0;
+                        self.recovery_turn = 4;
                         return Poll::Ready(Ready::FileSource(completed));
+                    }
+                } else if source == 4 && !self.voice_schedule.jobs.is_empty() {
+                    use futures::Stream;
+                    if let Poll::Ready(Some(completed)) =
+                        Pin::new(&mut self.voice_schedule.jobs).poll_next(cx)
+                    {
+                        self.recovery_turn = 0;
+                        return Poll::Ready(Ready::Voice(Box::new(completed)));
                     }
                 }
             }
             if capacity.as_mut().poll(cx).is_ready() {
                 return Poll::Ready(Ready::Capacity);
+            }
+            if voice_wake.as_mut().poll(cx).is_ready() {
+                return Poll::Ready(Ready::VoiceWake);
             }
             retry.as_mut().poll(cx).map(|()| Ready::Retry)
         })
@@ -332,6 +360,16 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             }
             Ready::FileSource(completed) => {
                 self.complete_file_service(completed);
+                None
+            }
+            Ready::Voice(completed) => {
+                // Settle on this Root, then let any newly eligible hedge/retry/forward start.
+                self.complete_voice_flight(*completed);
+                self.pump_voice_schedule();
+                None
+            }
+            Ready::VoiceWake => {
+                self.pump_voice_schedule();
                 None
             }
             Ready::Capacity => {

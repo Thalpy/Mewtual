@@ -16,6 +16,10 @@ pub(crate) use receipt::HelperReceipt;
 
 const FANOUT: usize = 4;
 const ATTEMPTS: u8 = 3;
+/// Minimum monotonic gap between attempts on one final edge, matching the source hedge. A
+/// production scheduler pumps right after each completion; without this gap a recipient that
+/// refused would receive all three attempts back to back.
+const RETRY_GAP_MS: u64 = 500;
 const BATCH: usize = 4;
 const CURSORS: usize = 64;
 type PacketKey = (DeviceId, MessageId);
@@ -56,6 +60,8 @@ pub struct Admission {
 struct EdgeState {
     attempts: u8,
     stage: Stage,
+    /// Earliest monotonic time of the next attempt (0 = immediately eligible).
+    next: u64,
 }
 struct Edge {
     target: DeviceId,
@@ -303,6 +309,7 @@ impl HelperLedger {
                     state: Mutex::new(EdgeState {
                         attempts: 0,
                         stage: Stage::Pending,
+                        next: 0,
                     }),
                     in_flight: AtomicBool::new(false),
                     _credit: edge_credit,
@@ -436,6 +443,10 @@ impl HelperLedger {
                 status.stage = Stage::Exhausted;
                 continue;
             }
+            // Backoff spends nothing: the edge simply waits for a later pass.
+            if self.clock.monotonic_ms() < status.next {
+                continue;
+            }
             let Some(peer) = routes.get(&edge.target).copied() else {
                 continue;
             };
@@ -502,9 +513,21 @@ impl HelperLedger {
         } else if status.attempts >= ATTEMPTS {
             Stage::Exhausted
         } else {
+            status.next = self.clock.monotonic_ms().saturating_add(RETRY_GAP_MS);
             Stage::Pending
         };
         Ok(())
+    }
+
+    /// Cheap scheduling hint: whether any packet record is retained at all. It neither prunes
+    /// nor panics on a poisoned per-edge lock, so the per-tick scheduler can call it freely.
+    /// Retained terminal records count until a pruning pass (take_ready/counts) removes them.
+    pub(crate) fn is_empty(&self) -> bool {
+        self.state
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .packets
+            .is_empty()
     }
 
     /// Redacted bounded aggregate diagnostics, not a room roster or delivery claim.

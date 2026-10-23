@@ -420,8 +420,8 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             voice.routes.active.retain(|gate| gate.strong_count() > 0);
         }
     }
-    /// Prepare at most four current helper edges. This is still an inert integration seam:
-    /// production actor scheduling/request dispatch remains disabled until endpoint ownership.
+    /// Prepare at most four current helper edges. `voice_schedule` calls this only while the
+    /// local switch is `Forwarding`; it executes and settles each edge on this same Root.
     pub fn prepare_voice_forwards(&mut self) -> Result<Vec<PendingVoiceForward<T>>, VoiceError> {
         self.reconcile_voice_actor();
         let free_routes = self.available_voice_routes()?;
@@ -461,7 +461,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             room,
         )
     }
-    /// Still inert until endpoint admission and actor fairness are integrated. Reserve each
+    /// Driven by `voice_schedule` within the sync tick's fair rotation. Reserve each
     /// immutable source attempt before framing, and sign a permit only for its selected helper.
     pub fn prepare_voice_sources(&mut self) -> Result<Vec<PendingVoiceSource<T>>, VoiceError> {
         self.reconcile_voice_actor();
