@@ -36,7 +36,14 @@ impl Case {
         Self::with_engine(false).await
     }
     async fn with_engine(admit: bool) -> Self {
-        let native = Fixture::new().await;
+        Self::from_native(Fixture::new().await, admit).await
+    }
+    pub(in crate::voice_handoff) async fn unadmitted_with_clock(
+        clock: Arc<dyn catcoms_rt::Clock>,
+    ) -> Self {
+        Self::from_native(Fixture::with_voice_clock(clock).await, false).await
+    }
+    async fn from_native(native: Fixture, admit: bool) -> Self {
         let owner = native.candidate().await;
         let runtime = crate::voice_runtime(&native.state);
         let now = runtime.clock().monotonic_ms();

@@ -101,6 +101,21 @@ The Root also excludes legacy call ingress/egress for a server with a live V2 pa
 even during routing pause, and clears prequeued legacy writers at publication. The accepted
 contract documents this coarse server scope and the separate App generation fence.
 
+## Native engine admission under contention (23 October)
+
+`CryptoAction::with_engine_admission` prepares a candidate Crypto credit from its original
+lender before sampling the original Clock. Resource/Workflow/reservation waits occur before
+that sample. The scoped final opportunity uses only nonblocking UI commit, Coordinator, Route
+and Engine acquisitions, in that order. Contention refuses with retryable Capacity and an exact
+retry samples time again. Current generation/selection, original leases, deadline, bytes and
+settlement/terminal checks remain mandatory. An existing permit returns its original serial;
+a local capacity refusal reconciles a permit concurrently installed after preflight.
+
+The same prepared credit moves into Engine exactly once. An unused candidate remains outside
+the native callback, so its potentially blocking destructor runs after all final guards drop.
+This is retirement of provably unstarted local preparation, not a refund of an admitted engine
+or transport attempt. No wire/persistence format, deadline, work limit or production switch changes.
+
 ## Integrated V2 routing and call contract (23 October)
 
 VoiceRouting is an explicitly local Root control with Disabled as its default. Opt-in normal

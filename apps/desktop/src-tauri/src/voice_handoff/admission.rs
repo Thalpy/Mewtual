@@ -90,17 +90,7 @@ async fn prepare(
     let permit = work
         .action()
         .with_engine_admission(engine_bytes as usize, |step| {
-            let _commit = context
-                .commit
-                .clone()
-                .try_lock_owned()
-                .map_err(|_| VoiceError::Capacity)?;
-            let authority = context.authority.lock().unwrap_or_else(|e| e.into_inner());
-            super::factory::require_current_selection(context.gate(), &authority, route.selected())
-                .map_err(|_| VoiceError::Unauthorized)?;
-            route
-                .with_open(|| step.commit())
-                .map_err(|_| VoiceError::Unauthorized)?
+            final_engine_admission(&context, route, step)
         })?;
     // Return ONLY the actual commit result. A successful observation/callback is no permit.
     super::replies::admitted(
@@ -115,6 +105,29 @@ async fn prepare(
     )
     .map(Encoded::Permit)
     .map_err(Into::into)
+}
+
+/// Clock/capacity preparation precedes this entire sequence. Keep every final acquisition
+/// nonblocking, in existing UI -> Coordinator -> Row -> Engine order. A retryable refusal
+/// releases no admitted engine and never renews the original deadline or action identity.
+pub(super) fn final_engine_admission(
+    context: &super::context::LiveContext,
+    route: &Route,
+    step: catcoms_sync::voice_v2::crypto_actions::CryptoEngineAdmission<'_>,
+) -> Result<u64, VoiceError> {
+    let _commit = context
+        .commit
+        .clone()
+        .try_lock_owned()
+        .map_err(|_| VoiceError::Capacity)?;
+    let authority = match context.authority.try_lock() {
+        Ok(authority) => authority,
+        Err(std::sync::TryLockError::Poisoned(error)) => error.into_inner(),
+        Err(std::sync::TryLockError::WouldBlock) => return Err(VoiceError::Capacity),
+    };
+    super::factory::require_current_selection(context.gate(), &authority, route.selected())
+        .map_err(|_| VoiceError::Unauthorized)?;
+    route.try_with_open(|| step.commit())
 }
 
 #[cfg(test)]
@@ -132,6 +145,11 @@ pub(super) fn layout_bytes() -> usize {
         + std::mem::size_of::<Encoded>()
         + std::mem::size_of::<catcoms_sync::voice_v2::crypto_actions::CryptoEngineAdmission<'static>>(
         )
+        // Original candidate owner and preflight lender exist outside the scoped callback.
+        // The ticket borrows that owner; neither the credit nor a capacity-lock wait is
+        // hidden behind its reference. Moving the same Credit is not a second allocation.
+        + std::mem::size_of::<catcoms_sync::voice_v2::resources::ByteBudget>()
+        + std::mem::size_of::<Option<catcoms_sync::voice_v2::resources::Credit>>()
         + 128 // nested synchronous final fences/argument wrappers
 }
 

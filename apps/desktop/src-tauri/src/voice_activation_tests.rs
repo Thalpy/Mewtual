@@ -16,7 +16,20 @@ pub(crate) struct Fixture {
 }
 impl Fixture {
     pub(crate) async fn new() -> Self {
-        let state = AppState::default();
+        Self::from_state(AppState::default()).await
+    }
+    /// Native admission regressions control the SAME clock used by the selected owner
+    /// and its actual Root action, without replacing a runtime after publication.
+    pub(crate) async fn with_voice_clock(clock: Arc<dyn catcoms_rt::Clock>) -> Self {
+        Self::from_state(AppState {
+            voice_authority: Arc::new(StdMutex::new(voice_authority::Coordinator::with_runtime(
+                catcoms_sync::voice_v2::runtime::Runtime::new(clock),
+            ))),
+            ..AppState::default()
+        })
+        .await
+    }
+    async fn from_state(state: AppState) -> Self {
         let root = tempfile::tempdir().unwrap();
         *state.store.lock().await =
             Some(ServerStore::open(root.path(), b"test", &mut OsCryptoRng).unwrap());
