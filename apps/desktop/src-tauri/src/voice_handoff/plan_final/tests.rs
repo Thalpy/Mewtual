@@ -233,9 +233,17 @@ async fn cancelling_encrypted_intent_while_waiting_for_actual_commit_installs_no
     case.returned();
     let context = Context::new(&case.state);
     let boundary = case.state.ui_session_commit.clone().lock_owned().await;
+    let store_owners = Arc::strong_count(&case.state.store);
+    let charged = case.selected.resources().counts().0;
     let incoming = case.frame(1, 6, case.row.id().logical(), &case.body(2));
     let mut future = Box::pin(apply(&context, &case.route, incoming));
     assert!(once(future.as_mut()).await.is_pending());
+    assert_eq!(
+        Arc::strong_count(&case.state.store),
+        store_owners,
+        "parked Plan-final retains only its original commit handle, not mounted context"
+    );
+    assert_eq!(case.selected.resources().counts().0, charged);
     assert!(case.route.session().header().is_err());
     assert!(case
         .row
@@ -243,6 +251,7 @@ async fn cancelling_encrypted_intent_while_waiting_for_actual_commit_installs_no
         .is_err());
     drop(future);
     assert!(case.route.session().header().is_ok());
+    assert_eq!(case.selected.resources().counts().0, charged);
     drop(boundary);
     assert!(case
         .row
@@ -266,6 +275,46 @@ async fn cancelling_encrypted_intent_while_waiting_for_actual_commit_installs_no
             .issue_final(case.route.session().identity())
             .is_err());
     }
+}
+
+#[tokio::test]
+async fn parked_plan_final_does_not_keep_app_state_alive_or_admit_after_teardown() {
+    let case = Case::new();
+    case.returned();
+    let context = Context::new(&case.state);
+    let route = case.route.clone();
+    let store = Arc::downgrade(&case.state.store);
+    let resources = case.selected.resources();
+    let boundary = case.state.ui_session_commit.clone().lock_owned().await;
+    let incoming = case.frame(1, 6, case.row.id().logical(), &case.body(2));
+    let mut future = Box::pin(apply(&context, &route, incoming));
+    assert!(once(future.as_mut()).await.is_pending());
+    let charged = resources.counts().0;
+    assert!(
+        route.session().header().is_err(),
+        "actual original request remains busy during wait"
+    );
+    drop(case);
+    assert!(
+        store.upgrade().is_none(),
+        "a parked cleanup must not outlive the app by retaining its store"
+    );
+    drop(boundary);
+    let reply = future.await.unwrap(); // fresh weak-context refusal, still framed by original Session
+    assert!(context.upgrade().is_none());
+    assert!(
+        route.session().fixture_counts().0,
+        "actual output owns the same physical position"
+    );
+    assert!(
+        resources.counts().0 <= charged,
+        "teardown/refusal adds no fresh payment"
+    );
+    drop(reply);
+    assert!(
+        !route.session().fixture_counts().0,
+        "only actual output collection releases the original position"
+    );
 }
 
 #[tokio::test]

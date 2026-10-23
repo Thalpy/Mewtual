@@ -37,8 +37,15 @@ impl Admission {
 }
 
 pub(super) async fn admit(context: &Context, route: &Route) -> Result<Admission, Refused> {
+    // Only this original UI fence may survive a parked wait. Holding LiveContext here
+    // would pin the mounted store/registries through lock or application teardown even
+    // though no final intent has been admitted. Cleanup is deliberately grant-independent.
+    let commit = {
+        let live = context.upgrade().ok_or(Refused::Closed)?;
+        live.commit.clone()
+    };
+    let commit = commit.lock_owned().await;
     let context = context.upgrade().ok_or(Refused::Closed)?;
-    let commit = context.commit.clone().lock_owned().await;
     // Cleanup must remain available after End/lock. The exact original canonical registry
     // allocation/session must still be established and unclosed; no grant is upgraded.
     context
