@@ -536,10 +536,12 @@ and only a fully verified file ever gets the real name. On most local drives an 
 
 Where it works:
 
-- **Resumable:** NTFS on Windows (ReFS also works but is not verified); ext4, xfs, btrfs and tmpfs
-  on Linux; local APFS or HFS+ drives on macOS (not verified yet).
+- **Resumable:** NTFS on Windows (ReFS also works but is not verified); ext4, xfs, btrfs, f2fs and
+  tmpfs on Linux when they record file creation times; local APFS or HFS+ drives on macOS (not
+  verified yet).
 - **Saved, but not resumable:** network folders (SMB shares, mapped drives, NFS) and other
-  filesystems Mewtual cannot identify. An interrupted save there starts again.
+  filesystems Mewtual cannot identify. An interrupted save there starts again. On Linux and macOS
+  a network or FUSE folder that cannot make hard links fails only at the end of the save.
 - **Refused before anything is written:** FAT and exFAT drives (many USB sticks and SD cards),
   because they cannot make the link Mewtual publishes a finished file with. On Linux, saving also
   needs `/proc`, which every normal desktop has.
@@ -547,8 +549,10 @@ Where it works:
   saved file as it is written.
 
 Mewtual only ever deletes a partly saved file it can prove is its own. On Linux and macOS it
-deletes nothing automatically in a folder that other accounts on the computer can change; it says
-so, and you can delete the leftover `.mewtual-part` or `.part` file yourself.
+deletes nothing automatically in a folder that other accounts on the computer can change, nor on a
+network or FUSE drive; it says so, and you can delete the leftover `.mewtual-part` or `.part` file
+yourself. If your system gives your own folders group write access (a umask of 002, common for
+per-user groups), Mewtual treats them the same way.
 
 ### What loads by itself, and how big it may be
 

@@ -495,15 +495,21 @@ writer keeps those properties.
   Unix has no delete-by-inode, so the guarantee is narrower: **automatic deletion is guaranteed
   only against processes running as other accounts.** In a folder other accounts can modify (owner
   neither us nor root, or group- or other-writable without the sticky bit; a user-private group
-  folder at 0775 counts as shared) nothing is deleted automatically and the user is told to delete
-  the partly saved file. Elsewhere the name is renamed, relative to a pinned folder descriptor, to
-  an unguessable random name, verified there, and unlinked only if it is ours (else renamed back);
-  a process running as the same account could swap that random name in the instant before the
-  unlink, but such a process can already delete the file itself. A crash in between leaves our
-  file at a `mewtual-removing-` name, found later by identity, never by name. Writers without a
-  journal verify against the in-session number of the handle they still hold. Identity is still the
-  only proof: a real identity collision (possible in principle on ReFS, whose 64-bit index is not
-  guaranteed unique) could let Remove delete a foreign file.
+  folder at 0775 counts as shared) and on any network, FUSE or unrecognized filesystem (whose
+  permissions this kernel does not decide; ACLs are not read), nothing is deleted automatically and
+  the user is told to delete the leftover, but only after a read-only check that it still holds
+  Mewtual's own file. Elsewhere the name is verified where it is (a foreign object is never moved),
+  renamed relative to a pinned folder descriptor to an unguessable random name, verified again
+  there, and unlinked only if it is still ours; otherwise it is put back without replacing
+  anything, and a put-back that fails is an error that keeps the save tracked. A process running as
+  the same account could swap that random name in the instant before the unlink, but such a process
+  can already delete the file itself. A crash in between leaves our file at a `mewtual-removing-`
+  name: a journaled save finds it later by identity, never by name; a writer without a journal has
+  no record of it. Writers without a journal verify against the in-session number of the handle
+  they still hold (without the handle only after a worker panic). A saved row whose final name is
+  not proven ours deletes nothing on Clear. Identity is still the only proof: a real identity
+  collision (possible in principle on ReFS, whose 64-bit index is not guaranteed unique) could let
+  Remove delete a foreign file.
 - **Publication (PR51 M1).** Both writers give the final name to exactly the object behind the
   handle they verified. Linux and Android link that handle's descriptor through `/proc/self/fd`
   into the pinned folder (no `/proc`: no journal, and the fallback writer refuses before writing).
@@ -517,9 +523,10 @@ writer keeps those properties.
   because the link probe that follows requires the probe name to be our own handle's object, even
   if a file was planted at our name.
 - **Filesystem support (PR51 M3, fail closed).** Unix journals only on filesystems `fstatfs`
-  identifies as local with stable identities (ext4, xfs, btrfs, tmpfs; APFS and HFS+ that are
-  `MNT_LOCAL`); FAT, vfat and exFAT are refused before writing; network, FUSE, overlay and
-  unrecognized filesystems get the non-resumable writer. Windows has no vetted crate that reports
+  identifies as local with stable identities (ext2/3/4, xfs, btrfs, f2fs, tmpfs, each only when it
+  reports birth times; APFS and HFS+ that are `MNT_LOCAL`); FAT, vfat and exFAT are refused before
+  writing; network, FUSE, overlay and unrecognized filesystems get the non-resumable writer (which
+  on a mount without hard links fails at publication and leaves the partial for the user). Windows has no vetted crate that reports
   the filesystem name, so FAT and exFAT are refused by the link probe, network folders (a
   `\\?\UNC\` canonical path, mapped drives included) get the non-resumable writer, and every other
   local volume is journaled on the 64-bit file index plus birth time: verified on NTFS only, ReFS

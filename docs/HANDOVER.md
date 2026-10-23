@@ -830,9 +830,14 @@ only against other accounts); both writers publish exactly the object behind the
 (Linux via `/proc/self/fd`, Windows under a pin, macOS path link plus post-check only); the folder
 is flushed after the link and before Published; filesystem support fails closed (matrix in the
 design document). No `unsafe` was added. Native's fallback writer, GIF export and `write_download`
-use the new `session_id`/`remove_if_session`/`publish_unjournaled`. Open: Unix behaviour runs only
-in Linux CI, macOS is not built in CI, ReFS is unverified, and a Published row whose final name
-was lost still reads "Saved" until cleared.
+use the new `session_id`/`remove_if_session`/`publish_unjournaled`. An adversarial review of those
+changes found no blocker or high; its six mediums (published-row removal, Unix rename-before-verify,
+network/FUSE mode bits, untruthful "delete it yourself", silent leftovers after a successful save,
+user-private groups) are fixed or settled in the design document. Open: Unix behaviour runs only in
+Linux CI, macOS is not built in CI, ReFS is unverified, a Published row whose final name was lost
+still reads "Saved" until cleared, on default user-private-group systems every save leaves a
+temporary copy for the user to delete, and no test pins a Remove landing between the flush and
+Published.
 
 ## Chat history adversarial checkpoint (2026-10-20)
 
