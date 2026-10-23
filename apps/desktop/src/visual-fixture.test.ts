@@ -104,6 +104,7 @@ test("file fixture saves to Downloads, treats Save as as a closed dialog and ref
 
 test("file fixture separates cached bytes from explicitly kept copies", () => {
   assert.deepEqual(visualFixtureResponse("get_private_downloads"), []);
+  assert.equal(visualFixtureResponse("check_saved_download", { server: 1, download: "ab".repeat(32), expectedIntent: "1" }), "present");
   const health = visualFixtureResponse("get_storage_health") as { referenced_chunks: number; verified_chunks: number; categories: unknown[] };
   assert.equal(health.verified_chunks, health.referenced_chunks);
   assert.deepEqual(health.categories, []);

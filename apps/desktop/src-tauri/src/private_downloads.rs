@@ -11,10 +11,11 @@
 use super::*;
 use catcoms_app::{DownloadExportEdge, DownloadExportTransition, DownloadPreflight, DownloadReady};
 use catcoms_storage::kept::{
-    flush_destination, partial_presence, remove_partial, ChoiceRefusal, ChosenDestination,
-    DownloadId, DownloadStatus, ExportError, ExportFile, ExportHalt, ExportJournal, ExportPlan,
-    ExportProbe, ExportProgress, ExportReopen, ExportState, ExportView, KeepPhase, PartialPresence,
-    PartialRemoval, Publication, EXPORT_CHECKPOINT_CHUNKS,
+    flush_destination, partial_presence, remove_partial, saved_presence, ChoiceRefusal,
+    ChosenDestination, DownloadId, DownloadStatus, ExportError, ExportFile, ExportHalt,
+    ExportJournal, ExportPlan, ExportProbe, ExportProgress, ExportReopen, ExportState, ExportView,
+    KeepPhase, PartialPresence, PartialRemoval, Publication, SavedPresence,
+    EXPORT_CHECKPOINT_CHUNKS,
 };
 
 #[derive(Serialize)]
@@ -429,6 +430,177 @@ pub(super) async fn presence_in(
         partial_presence(&journal)
     })
     .await
+}
+
+/// What Transfers shows for a Saved row after checking its file (user decision, 23 October: a
+/// saved file that disappeared or was replaced is said so instead of reading "Saved" until the
+/// row is cleared). Serialized as `present`, `missing`, `replaced` or `unknown`; never a path.
+#[derive(Serialize, Debug, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub(super) enum SavedCheck {
+    /// The saved name still holds our file: "Saved", unchanged.
+    Present,
+    /// Nothing is at the saved name: the row offers Save again.
+    Missing,
+    /// Another file is at the saved name: never claimed as ours; the row offers Save again.
+    Replaced,
+    /// Not checked (timeout, folder unreachable, busy): the row keeps "Saved" without claiming a
+    /// fresh check.
+    Unknown,
+}
+
+/// How long the check waits for its read-only worker before answering `Unknown` (Keep's bound).
+pub(super) const SAVED_CHECK_WAIT: Duration = KEEP_PRESENCE_WAIT;
+
+/// The effects of one saved-file check, behind a seam so the real sequence runs in tests.
+#[async_trait::async_trait]
+pub(super) trait SavedCheckPorts: Send + Sync {
+    /// The record's revision and its saved journal now, `Some` only while it is a Saved
+    /// (Published) record.
+    async fn saved(&self) -> Result<Option<(u64, ExportJournal)>, String>;
+    /// Read-only check of the saved name. Production answers `Unknown` at once without a free
+    /// check slot.
+    async fn presence(&self, journal: ExportJournal) -> Result<SavedPresence, String>;
+    /// Sanctioned-clock wait bounding how long the check waits for [`SavedCheckPorts::presence`].
+    async fn wait(&self, delay: Duration);
+    /// The invocation's UI session and server entry are still the ones that asked.
+    async fn current(&self) -> bool;
+}
+
+/// One saved-file check. Read-only throughout: no journal transition, no file effect, and no
+/// session commit guard held while the filesystem is consulted (the bounded worker keeps running
+/// read-only if the wait ends first). Fenced on both sides: the record must be the same Saved
+/// record (revision and journal) before and after, and the UI session must still be the one that
+/// asked, so a stale answer can never relabel a newer row; the renderer fences on the revision too.
+pub(super) async fn saved_check_sequence(
+    ports: &impl SavedCheckPorts,
+    expected_intent: u64,
+) -> Result<SavedCheck, String> {
+    let Some((intent, journal)) = ports.saved().await? else {
+        return Err(STALE_DOWNLOAD.into());
+    };
+    if intent != expected_intent {
+        return Err(STALE_DOWNLOAD.into());
+    }
+    let checked = tokio::select! {
+        biased;
+        presence = ports.presence(journal.clone()) => presence.ok(),
+        () = ports.wait(SAVED_CHECK_WAIT) => None,
+    };
+    let check = match checked {
+        Some(SavedPresence::Ours) => SavedCheck::Present,
+        Some(SavedPresence::Missing) => SavedCheck::Missing,
+        Some(SavedPresence::Replaced) => SavedCheck::Replaced,
+        Some(SavedPresence::Unknown) | None => SavedCheck::Unknown,
+    };
+    match ports.saved().await? {
+        Some((now, again)) if now == intent && again == journal => {}
+        _ => return Err(STALE_DOWNLOAD.into()),
+    }
+    if !ports.current().await {
+        return Err("The download is no longer active.".into());
+    }
+    Ok(check)
+}
+
+/// Small dedicated bound on saved-file check workers, separate from cleanup and export slots, so
+/// a renderer cannot pin more blocking threads on a stalled share by asking repeatedly.
+fn check_slots() -> Arc<tokio::sync::Semaphore> {
+    static SLOTS: std::sync::OnceLock<Arc<tokio::sync::Semaphore>> = std::sync::OnceLock::new();
+    SLOTS
+        .get_or_init(|| Arc::new(tokio::sync::Semaphore::new(2)))
+        .clone()
+}
+
+/// [`saved_presence`] on the blocking pool with a slot of `pool`, or `Unknown` at once when none is
+/// free (Keep's pattern).
+pub(super) async fn saved_presence_in(
+    pool: Arc<tokio::sync::Semaphore>,
+    journal: ExportJournal,
+) -> Result<SavedPresence, String> {
+    let Ok(slot) = pool.try_acquire_owned() else {
+        return Ok(SavedPresence::Unknown);
+    };
+    blocking(move || {
+        let _held = slot;
+        saved_presence(&journal)
+    })
+    .await
+}
+
+/// Production saved-file check effects for one Download of one server instance and UI generation.
+pub(super) struct ActorSavedCheck<'a> {
+    pub(super) state: &'a AppState,
+    pub(super) server: u64,
+    pub(super) instance: u64,
+    pub(super) generation: u64,
+    pub(super) actor: &'a ServerActor,
+    pub(super) id: DownloadId,
+}
+#[async_trait::async_trait]
+impl SavedCheckPorts for ActorSavedCheck<'_> {
+    async fn saved(&self) -> Result<Option<(u64, ExportJournal)>, String> {
+        let rows = commit_kept_command(
+            self.state,
+            self.server,
+            self.instance,
+            self.generation,
+            self.actor.downloads(),
+        )
+        .await?;
+        let Some(intent) = rows
+            .iter()
+            .find(|row| row.id == self.id)
+            .map(|row| row.state.intent)
+        else {
+            return Ok(None);
+        };
+        Ok(match self.actor.download_export_state(self.id).await? {
+            Some(ExportState::Published(journal)) => Some((intent, journal)),
+            _ => None,
+        })
+    }
+    async fn presence(&self, journal: ExportJournal) -> Result<SavedPresence, String> {
+        saved_presence_in(check_slots(), journal).await
+    }
+    async fn wait(&self, delay: Duration) {
+        SystemClock.sleep(delay).await;
+    }
+    async fn current(&self) -> bool {
+        let session = keep_session::invocation_generation(self.state)
+            .await
+            .is_ok_and(|now| now == self.generation);
+        let entry = actor_instance_of(self.state, self.server)
+            .await
+            .is_ok_and(|(_, now)| now == self.instance);
+        session && entry
+    }
+}
+
+/// Check whether a Saved row's file is still at its saved name (user decision, 23 October). The
+/// renderer asks when Transfers is shown and after acting on a Saved row; the answer is one of
+/// four words and never carries a path. `expected_intent` is the row's revision: a row that
+/// changed meanwhile gets the stale-download error instead of an answer.
+#[tauri::command]
+pub(super) async fn check_saved_download(
+    state: State<'_, AppState>,
+    server: u64,
+    download: String,
+    expected_intent: String,
+) -> Result<SavedCheck, String> {
+    let generation = keep_session::invocation_generation(&state).await?;
+    let id = id(&download)?;
+    let expected = intent(&expected_intent)?;
+    let (actor, instance) = actor_instance_of(&state, server).await?;
+    let ports = ActorSavedCheck {
+        state: &state,
+        server,
+        instance,
+        generation,
+        actor: &actor,
+        id,
+    };
+    saved_check_sequence(&ports, expected).await
 }
 
 /// Blocking delete work for one proven partial; see [`CleanupPorts::remover`].
@@ -2097,3 +2269,7 @@ mod export_tests;
 #[cfg(test)]
 #[path = "private_downloads/chooser_tests.rs"]
 mod chooser_tests;
+
+#[cfg(test)]
+#[path = "private_downloads/saved_check_tests.rs"]
+mod saved_check_tests;

@@ -1574,6 +1574,41 @@ pub fn remove_partial(
     }
 }
 
+/// What a Saved row's final name holds now (user decision, 23 October: Transfers checks a saved
+/// file instead of reading "Saved" until it is cleared).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SavedPresence {
+    /// The saved name still holds our file (by persisted identity).
+    Ours,
+    /// The folder is reachable and still the saved one, and nothing is at the saved name.
+    Missing,
+    /// Something else is at the saved name (an edited or replaced file, a link, a folder): never
+    /// claimed as ours.
+    Replaced,
+    /// It could not be checked: the folder is unreachable or no longer the saved one, or the name
+    /// could not be opened right now.
+    Unknown,
+}
+
+/// Read-only check of a Saved row's final name. Nothing is opened for writing, created, renamed
+/// or deleted; the folder must still be the identified one, or the answer is `Unknown`.
+pub fn saved_presence(journal: &ExportJournal) -> SavedPresence {
+    let Some(folder) = journal.folder_path() else {
+        return SavedPresence::Unknown;
+    };
+    match external::folder_identity(&folder) {
+        Ok(id) if id == journal.folder_id => {}
+        // Moved, swapped or unreachable: where the saved file went cannot be told from here.
+        _ => return SavedPresence::Unknown,
+    }
+    match name_state(&folder.join(&journal.final_leaf), journal.file_id) {
+        NameState::Ours => SavedPresence::Ours,
+        NameState::Absent => SavedPresence::Missing,
+        NameState::Other => SavedPresence::Replaced,
+        NameState::Unknown => SavedPresence::Unknown,
+    }
+}
+
 /// Read-only answer to "is the partly saved file still there?", for "Keep partly saved file".
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PartialPresence {

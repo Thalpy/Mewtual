@@ -1,9 +1,9 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import {
-  acceptSaveProgress, checkedPrivateDownloads, privateDownloadActions, privateDownloadChatSave,
+  acceptSaveProgress, checkedPrivateDownloads, checkedSavedCheck, privateDownloadActions, privateDownloadChatSave,
   privateDownloadDetail, privateDownloadLabel, privateDownloadOffers, privateDownloadSaveAsIsNewCopy,
-  type PrivateDownload,
+  type PrivateDownload, type SavedCheck,
 } from "./private-downloads.ts";
 const row = { id: "ab".repeat(32), cid: "cd".repeat(32), intent: "18446744073709551615", grant: "2",
   status: "incomplete", verifiedChunks: 1, savedChunks: 0, totalChunks: 2, chosenPlace: false };
@@ -90,4 +90,39 @@ test("detail lines count the right progress and use no separators or dashes", ()
   assert.equal(privateDownloadDetail(as("destination-changed")), "Partly saved file changed, 0 of 2 chunks saved");
   assert.equal(privateDownloadDetail(as("saved")), "Saved");
   for (const status of statuses) assert.doesNotMatch(privateDownloadDetail(as(status)), /[·—–]/);
+});
+test("a saved file check says what it found, offers Save again only when the file is gone or changed", () => {
+  // User decision, 23 October: a Saved row reports a missing or replaced file instead of reading
+  // "Saved" until cleared; an unchecked or uncheckable file keeps "Saved" without claiming a check.
+  const saved = as("saved");
+  const detail = (check: SavedCheck | null) => privateDownloadDetail(saved, check);
+  assert.equal(detail(null), "Saved");
+  assert.equal(detail("present"), "Saved");
+  assert.equal(detail("missing"), "The saved file is no longer there");
+  assert.equal(detail("replaced"), "The saved file was changed or replaced");
+  assert.equal(detail("unknown"), "Saved, could not check the file");
+  const fresh = (check: SavedCheck | null) => privateDownloadActions(saved, check).find((a) => a.kind === "fresh");
+  for (const check of ["missing", "replaced"] as const) {
+    assert.equal(fresh(check)?.label, "Save again", check);
+    assert.equal(fresh(check)?.needsIdle, true, "an explicit save that waits for any save of the file");
+    assert.deepEqual(privateDownloadActions(saved, check).map((a) => a.kind), ["fresh", "saveAs", "remove"]);
+    assert.equal(privateDownloadActions(saved, check).find((a) => a.kind === "remove")?.label, "Clear", "Clear is unchanged");
+  }
+  for (const check of [null, "present", "unknown"] as const) assert.equal(fresh(check)?.label, "Save another copy");
+  // A check never changes any other row's line or actions.
+  for (const status of statuses.filter((s) => s !== "saved")) {
+    for (const check of ["missing", "replaced", "unknown"] as const) {
+      assert.equal(privateDownloadDetail(as(status), check), privateDownloadDetail(as(status)), status);
+      assert.deepEqual(privateDownloadActions(as(status), check), privateDownloadActions(as(status)), status);
+    }
+  }
+  for (const check of ["present", "missing", "replaced", "unknown"] as const) {
+    assert.doesNotMatch(detail(check), /[·—–]/);
+  }
+});
+test("a saved file check answer is a closed word, never a path or a status", () => {
+  for (const word of ["present", "missing", "replaced", "unknown"]) assert.equal(checkedSavedCheck(word), word);
+  for (const value of ["saved", "C:\\Users\\me\\cat.bin", "", null, 1, { result: "present" }, "__proto__"]) {
+    assert.throws(() => checkedSavedCheck(value), /check could not be read/);
+  }
 });

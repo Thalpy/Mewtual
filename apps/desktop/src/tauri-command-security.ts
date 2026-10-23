@@ -97,7 +97,10 @@ export const TAURI_COMMAND_GROUPS = {
       // Exact actor's authenticated mode; fenced against lock and replacement, no authority write.
       "group_communication_mode",
       "get_files", "get_storage_health", "get_online_members", "get_delivery", "dm_stats",
-      "get_dm_requests", "file_available", "get_kept_files", "get_private_downloads", "get_file_usage", "get_wiki_pinned_cids", "get_statuses",
+      "get_dm_requests", "file_available", "get_kept_files", "get_private_downloads",
+      // Read-only check of a Saved row's file: one of four words, never a path; bounded natively.
+      "check_saved_download",
+      "get_file_usage", "get_wiki_pinned_cids", "get_statuses",
       "get_events", "get_wiki_pages", "get_wiki_map", "get_wiki_page", "get_wiki_meta",
       "get_wiki_history", "get_wiki_pending", "get_wiki_review_days", "get_roles", "get_moderation",
       // The server's upload cap, off the file index document every member already reads. The

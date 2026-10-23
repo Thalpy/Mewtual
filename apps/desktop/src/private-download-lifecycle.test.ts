@@ -3,14 +3,15 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import ts from "typescript";
 import { saveGroupFile, resumeGroupFile, completedDownload, downloadSavedNotice, isSaveAsCancelled } from "./native-download.ts";
-import { acceptSaveProgress, privateDownloadChatSave, privateDownloadOffers, privateDownloadSaveAsIsNewCopy } from "./private-downloads.ts";
+import { acceptSaveProgress, checkedSavedCheck, privateDownloadChatSave, privateDownloadOffers, privateDownloadSaveAsIsNewCopy } from "./private-downloads.ts";
 
 // Execute the real App handlers and real progress listener across held native replies. This
 // catches races that pure status-label tests cannot see without compiling another fake app.
 const source = readFileSync(new URL("./App.svelte", import.meta.url), "utf8");
 const script = source.slice(source.indexOf(">", source.indexOf("<script")) + 1, source.indexOf("</script>"));
 const tree = ts.createSourceFile("App.ts", script, ts.ScriptTarget.ES2022, true, ts.ScriptKind.TS);
-const names = new Set(["downloadFile", "resumePrivateDownload", "changePrivateDownload", "runPrivateDownloadAction", "saveInProgress"]);
+const names = new Set(["downloadFile", "resumePrivateDownload", "changePrivateDownload", "runPrivateDownloadAction", "saveInProgress",
+  "checkSavedRows", "savedCheckFor"]);
 const handlers = tree.statements.filter(n => ts.isFunctionDeclaration(n) && n.name && names.has(n.name.text));
 assert.equal(handlers.length, names.size);
 let progress: ts.ArrowFunction | undefined;
@@ -30,9 +31,10 @@ const result = { path: "/Downloads/cat.bin", displayed: true };
 function deferred() { let resolve!: (value: unknown) => void, reject!: (error: unknown) => void; const promise = new Promise((yes,no) => { resolve = yes; reject = no; }); return { promise, resolve, reject }; }
 function fixture() {
   return new Function("saveGroupFile", "resumeGroupFile", "completedDownload", "downloadSavedNotice", "acceptSaveProgress",
-    "privateDownloadChatSave", "privateDownloadOffers", "isSaveAsCancelled", "privateDownloadSaveAsIsNewCopy", "file", `
+    "privateDownloadChatSave", "privateDownloadOffers", "isSaveAsCancelled", "privateDownloadSaveAsIsNewCopy", "checkedSavedCheck", "file", `
     let activeServerId = 1, viewGeneration = 2, locked = false, error = "", privateDownloadBusy = {};
     let privateDownloads = [], privateDownloadSaves = {}, downloads = {}, activeSaves = {}, uuid = 0, refreshes = 0;
+    let savedChecks = {}, savedChecking = {}, savedCheckVisit = 1;
     const calls = [], notices = [], views = [], replies = new Map(), filesByCid = new Map([[file.cid, file]]);
     const crypto = { randomUUID: () => "op-" + (++uuid) }, fileInventoryGate = { invalidate() {} };
     const dlKey = (server,cid) => server + ":" + cid;
@@ -45,6 +47,8 @@ function fixture() {
     ${production}
     return { calls, replies, notices, views, start: downloadFile, resume: resumePrivateDownload, pause: row => changePrivateDownload(row,false),
       act: runPrivateDownloadAction,
+      checkSaved: checkSavedRows, savedFor: savedCheckFor,
+      visit() { savedCheckVisit++; },
       rows(value) { privateDownloads = value; },
       lock() { locked = true; viewGeneration++; },
       unlock() { locked = false; viewGeneration++; },
@@ -53,7 +57,7 @@ function fixture() {
         bytes_done: 100, bytes_total: 100, network_bytes_done: 0, provider: null } }); },
       state: () => ({ error, refreshes, downloads, activeSaves, busy: privateDownloadBusy, saves: privateDownloadSaves }) };
   `)(saveGroupFile, resumeGroupFile, completedDownload, downloadSavedNotice, acceptSaveProgress,
-    privateDownloadChatSave, privateDownloadOffers, isSaveAsCancelled, privateDownloadSaveAsIsNewCopy, file);
+    privateDownloadChatSave, privateDownloadOffers, isSaveAsCancelled, privateDownloadSaveAsIsNewCopy, checkedSavedCheck, file);
 }
 test("resumed save settles its exact row and late/preview progress cannot revive it", async () => {
   const app = fixture(), held = deferred(); app.replies.set("save_group_file", held.promise);
@@ -209,6 +213,66 @@ test("a Remove stalled on its folder holds only its own row; every other row kee
   assert.equal(app.state().busy[a.id], undefined, "released when native answers");
   await app.act(a, "remove");
   assert.equal(app.calls.length, before + 1, "A is free again");
+});
+test("Transfers checks each Saved row's file once per visit and keeps only a current answer", async () => {
+  // User decision, 23 October: a Saved row's file is checked (natively, bounded, read-only) when
+  // Transfers is shown. Only an answer for the exact view and row revision is kept.
+  const app = fixture();
+  const a = { ...saved, status: "saved" };
+  const b = { ...saved, id: "e".repeat(64), cid: "f".repeat(64), status: "incomplete" };
+  app.rows([a, b]);
+  app.replies.set("check_saved_download", "missing");
+  await app.checkSaved();
+  assert.deepEqual(app.calls, [["check_saved_download", { server: 1, download: a.id, expectedIntent: "3" }]],
+    "only the Saved row, with its exact revision, never a path");
+  assert.equal(app.savedFor(a), "missing");
+  assert.equal(app.savedFor(b), null);
+  await app.checkSaved();
+  assert.equal(app.calls.length, 1, "once per visit");
+  app.visit(); app.replies.set("check_saved_download", "present");
+  await app.checkSaved();
+  assert.equal(app.calls.length, 2, "each visit checks again");
+  assert.equal(app.savedFor(a), "present");
+  // Acting on the Saved row drops its answer, so the refresh after the action checks again.
+  await app.act(a, "remove");
+  assert.equal(app.savedFor(a), null);
+  // A failed or unreadable answer claims nothing new: "unknown" for that same revision.
+  for (const reply of [Promise.reject("This download changed. Open Transfers and try again."), "C:\\Users\\me\\cat.bin"]) {
+    const app = fixture(); app.rows([a]);
+    app.replies.set("check_saved_download", reply);
+    await app.checkSaved();
+    assert.equal(app.savedFor(a), "unknown");
+  }
+});
+test("a saved file check answered after the row or view changed never relabels anything", async () => {
+  // The row's revision changes (Save another copy) while its check is in flight.
+  {
+    const app = fixture(), held = deferred(), a = { ...saved, status: "saved" };
+    app.rows([a]); app.replies.set("check_saved_download", held.promise);
+    const checking = app.checkSaved();
+    app.rows([{ ...a, intent: "4" }]);
+    held.resolve("replaced"); await checking;
+    assert.equal(app.savedFor({ ...a, intent: "4" }), null, "the older revision's answer never labels the newer row");
+    assert.equal(app.savedFor(a), null);
+  }
+  // Lock (or a server switch) lands while it is in flight.
+  for (const change of ["lock", "server"] as const) {
+    const app = fixture(), held = deferred(), a = { ...saved, status: "saved" };
+    app.rows([a]); app.replies.set("check_saved_download", held.promise);
+    const checking = app.checkSaved();
+    if (change === "lock") { app.lock(); app.unlock(); } else { app.server(2); app.server(1); }
+    held.resolve("missing"); await checking;
+    assert.equal(app.savedFor(a), null, change);
+  }
+  // A row that is no longer Saved shows no check, even with a matching revision.
+  const app = fixture(), a = { ...saved, status: "saved" };
+  app.rows([a]); app.replies.set("check_saved_download", "missing");
+  await app.checkSaved();
+  assert.equal(app.savedFor({ ...a, status: "removing" }), null);
+  // Locked: nothing is asked at all.
+  const locked = fixture(); locked.rows([a]); locked.lock();
+  await locked.checkSaved();
+  assert.equal(locked.calls.length, 0);
 });
 test("saving a halted, saved or running file from the list opens Transfers instead of acting", async () => {
   for (const status of ["destination-changed", "destination-unavailable", "saved", "removing", "exhausted", "saving", "receiving"]) {

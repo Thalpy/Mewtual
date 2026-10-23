@@ -323,6 +323,9 @@ export function visualFixtureResponse(command: string, payload: InvokeArgs = {},
         ],
       });
     case "get_private_downloads": return [];
+    // A Saved row's read-only file check: one of four words, never a path. The fixture lists no
+    // saved rows, so this answers "present" if a captured state ever asks.
+    case "check_saved_download": return "present";
     case "save_group_file": {
       // Mirrors the native contract: the renderer sends a name and an optional `saveAs` flag,
       // never a path or folder. A fixture "Save as" behaves as if the user closed the dialog, so

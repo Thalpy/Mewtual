@@ -25,14 +25,37 @@ const labels: Record<PrivateDownloadStatus, string> = {
 };
 export function privateDownloadLabel(download: PrivateDownload): string { return labels[download.status]; }
 
+/** What native's read-only check found at a Saved row's file (user decision, 23 October).
+ * `present`: still our file. `missing`: nothing at the saved name. `replaced`: another file is
+ * there (never claimed as ours). `unknown`: it could not be checked, so nothing is claimed. */
+export type SavedCheck = "present" | "missing" | "replaced" | "unknown";
+const savedChecks = new Set<string>(["present", "missing", "replaced", "unknown"]);
+/** Closed validation of native's answer: anything else is an error, never a status. */
+export function checkedSavedCheck(value: unknown): SavedCheck {
+  if (typeof value !== "string" || !savedChecks.has(value)) throw new Error("The saved file check could not be read.");
+  return value as SavedCheck;
+}
+/** The saved-row line for a check result. `null` (not checked yet) and `present` both read
+ * "Saved"; `unknown` keeps "Saved" with a quiet hint and never claims a fresh check. */
+function savedDetail(check: SavedCheck | null): string {
+  switch (check) {
+    case "missing": return "The saved file is no longer there";
+    case "replaced": return "The saved file was changed or replaced";
+    case "unknown": return "Saved, could not check the file";
+    default: return labels.saved;
+  }
+}
+
 /** Statuses whose detail line counts the partly saved file instead of encrypted progress. */
 const exporting = new Set<PrivateDownloadStatus>([
   "saving", "save-interrupted", "save-paused", "destination-unavailable", "destination-changed",
 ]);
-/** One short status line. Plain words and commas: no "·" separators or dashes in app text. */
-export function privateDownloadDetail(download: PrivateDownload): string {
+/** One short status line. Plain words and commas: no "·" separators or dashes in app text.
+ * `check` is the latest saved-file check for this exact row revision, or `null`. */
+export function privateDownloadDetail(download: PrivateDownload, check: SavedCheck | null = null): string {
   const label = privateDownloadLabel(download);
-  if (download.status === "saved" || download.status === "removing") return label;
+  if (download.status === "saved") return savedDetail(check);
+  if (download.status === "removing") return label;
   const line = exporting.has(download.status)
     ? `${label}, ${download.savedChunks} of ${download.totalChunks} chunks saved`
     : `${label}, ${download.verifiedChunks} of ${download.totalChunks} chunks received`;
@@ -59,8 +82,10 @@ const saveAs: PrivateDownloadAction = { kind: "saveAs", label: "Save as", ghost:
 /** The actions each typed state offers, in display order. Resume never appears for a changed
  * destination (it cannot succeed there) and nothing re-saves an already saved file implicitly.
  * "Save as" is offered where a new file would be started; running, removing, exhausted and
- * partly saved rows (continue or remove those first) do not offer it. */
-export function privateDownloadActions(download: PrivateDownload): PrivateDownloadAction[] {
+ * partly saved rows (continue or remove those first) do not offer it. A Saved row whose file was
+ * found missing or replaced (`check`) offers "Save again": the same explicit fresh save from the
+ * private encrypted copy, with a fresh or numbered name; it never runs by itself. */
+export function privateDownloadActions(download: PrivateDownload, check: SavedCheck | null = null): PrivateDownloadAction[] {
   switch (download.status) {
     case "receiving": case "saving": return [pause, remove("Remove")];
     case "ready":
@@ -71,7 +96,8 @@ export function privateDownloadActions(download: PrivateDownload): PrivateDownlo
     case "save-interrupted": case "save-paused": return [resume("Resume saving"), remove("Remove")];
     case "destination-unavailable": return [resume("Try again"), fresh("Save new copy"), saveAs, remove("Remove")];
     case "destination-changed": return [fresh("Save new copy"), saveAs, remove("Remove")];
-    case "saved": return [fresh("Save another copy"), saveAs, remove("Clear")];
+    case "saved":
+      return [fresh(check === "missing" || check === "replaced" ? "Save again" : "Save another copy"), saveAs, remove("Clear")];
     case "removing": return [remove("Remove"), keep];
   }
 }

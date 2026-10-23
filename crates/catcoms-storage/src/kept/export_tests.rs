@@ -1381,6 +1381,38 @@ fn saved_row_without_finish(fx: &Fixture) -> (PathBuf, ExportJournal) {
 }
 
 #[test]
+fn a_saved_file_check_says_what_is_at_the_saved_name_without_changing_anything() {
+    // User decision, 23 October: Transfers checks a Saved row's file. Read-only: present and ours,
+    // missing, replaced by another file, or unknown when the folder cannot be checked.
+    let fx = fixture();
+    let (path, saved) = saved_row_without_finish(&fx);
+    let listing = || {
+        let mut names: Vec<_> = fs::read_dir(&fx.downloads)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect();
+        names.sort();
+        names
+    };
+    let before = listing();
+    assert_eq!(saved_presence(&saved), SavedPresence::Ours);
+    assert_eq!(listing(), before, "nothing changed");
+    // Replaced by an editor's atomic save (a new file at the saved name).
+    let original = fx.downloads.join("original copy");
+    fs::rename(&path, &original).unwrap();
+    fs::write(&path, b"edited by the user").unwrap();
+    assert_eq!(saved_presence(&saved), SavedPresence::Replaced);
+    assert_eq!(fs::read(&path).unwrap(), b"edited by the user");
+    // Missing.
+    fs::remove_file(&path).unwrap();
+    assert_eq!(saved_presence(&saved), SavedPresence::Missing);
+    assert!(!path.exists(), "nothing was created");
+    // The folder moved away: where the file went cannot be told, so it is not called missing.
+    fs::rename(&fx.downloads, fx.downloads.with_file_name("Moved")).unwrap();
+    assert_eq!(saved_presence(&saved), SavedPresence::Unknown);
+}
+
+#[test]
 fn clearing_a_saved_row_whose_final_name_is_gone_keeps_the_only_copy() {
     // PR51 M2: power loss on a filesystem that ignored the folder flush (or the user moving the
     // file) can leave a Published record whose final name is gone while the staging name still

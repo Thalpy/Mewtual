@@ -96,7 +96,7 @@
   import {
     completedDownload, downloadSavedNotice, guideSavedNotice, isSaveAsCancelled, saveGroupFile, resumeGroupFile, saveSpaceGuide,
   } from "./native-download";
-  import { acceptSaveProgress, checkedPrivateDownloads, privateDownloadActions, privateDownloadChatSave, privateDownloadDetail, privateDownloadOffers, privateDownloadSaveAsIsNewCopy, type PrivateDownload, type PrivateDownloadActionKind } from "./private-downloads";
+  import { acceptSaveProgress, checkedPrivateDownloads, checkedSavedCheck, privateDownloadActions, privateDownloadChatSave, privateDownloadDetail, privateDownloadOffers, privateDownloadSaveAsIsNewCopy, type PrivateDownload, type PrivateDownloadActionKind, type SavedCheck } from "./private-downloads";
   import {
     newVaultSecretError, vaultSecretChangeNotice, type VaultSecretChangeResult,
   } from "./vault-secret-change";
@@ -3829,6 +3829,13 @@
   // mutation must never disable or refuse actions on another row; native also claims per download.
   let privateDownloadBusy = $state<Record<string, symbol>>({});
   let privateDownloadSaves = $state<Record<string, symbol>>({});
+  // User decision, 23 October: what native's read-only check found at each Saved row's file, for
+  // the exact row revision it checked and the Transfers visit it ran in. A row only shows a result
+  // whose revision matches its own. `savedChecking` is the in-flight owner per row (not rendered);
+  // `savedCheckVisit` counts Transfers visits, so each visit checks every Saved row once again.
+  let savedChecks = $state<Record<string, { intent: string; result: SavedCheck; visit: number }>>({});
+  let savedChecking: Record<string, symbol> = {};
+  let savedCheckVisit = 0;
   let privateDownloadError = $state("");
   const fileInventoryGate = fileInventoryRequests();
   let keptTransfer = $state<{ server: number; cid: string; cancellation: string } | null>(null);
@@ -7104,6 +7111,8 @@
     privateDownloadError = "";
     privateDownloadBusy = {};
     privateDownloadSaves = {};
+    savedChecks = {};
+    savedChecking = {};
     fileInventoryGate.invalidate();
     cancelKeptTransfer();
     wikiPinned = new Set();
@@ -7981,6 +7990,8 @@
       keptFiles = kept.status === "fulfilled" ? kept.value : null;
       privateDownloads = savedDownloads.status === "fulfilled" ? savedDownloads.value : [];
       privateDownloadError = savedDownloads.status === "fulfilled" ? "" : "Download progress could not be read. Open Transfers again to retry.";
+      // Saved rows are checked only while Transfers is shown, once per visit and revision.
+      if (view === "downloads") void checkSavedRows();
     } catch (e) {
       if (fileInventoryGate.current(request, unlockedViewCurrent(gen, server))) error = String(e);
     }
@@ -8781,6 +8792,7 @@
     }
     view = v;
     if (v === "wiki") refreshWiki();
+    if (v === "downloads") savedCheckVisit++; // each visit checks every Saved row's file again
     if (v === "files" || v === "downloads") refreshFiles(); // includes saved private progress after restart
     // The policy is read with the surface rather than with the server, because it is only ever
     // needed by the surface and a server switch already carries enough round-trips.
@@ -12190,7 +12202,42 @@
       if (unlockedViewCurrent(gen, server)) await refreshFiles();
     }
   }
+  // User decision, 23 October: check each Saved row's file once per Transfers visit and row
+  // revision, off the async runtime natively (bounded, read-only). An answer is kept only while
+  // the view and the row are still the ones it was asked for, so a stale answer never relabels a
+  // newer row; a failed or stale check claims nothing.
+  async function checkSavedRows() {
+    const server = activeServerId, gen = viewGeneration, visit = savedCheckVisit;
+    if (server === null || locked) return;
+    const due = privateDownloads.filter((row) => row.status === "saved" && !savedChecking[row.id] &&
+      !(savedChecks[row.id]?.intent === row.intent && savedChecks[row.id]?.visit === visit));
+    await Promise.all(due.map(async (row) => {
+      const token = Symbol("saved check");
+      savedChecking[row.id] = token;
+      let result: SavedCheck = "unknown";
+      try {
+        result = checkedSavedCheck(await invoke<unknown>("check_saved_download",
+          { server, download: row.id, expectedIntent: row.intent }));
+      } catch {
+        // Native refused (a changed row, Lock) or the answer was unreadable: claim nothing new.
+        result = "unknown";
+      } finally {
+        if (savedChecking[row.id] === token) delete savedChecking[row.id];
+      }
+      if (!unlockedViewCurrent(gen, server)) return;
+      const now = privateDownloads.find((other) => other.id === row.id);
+      if (!now || now.status !== "saved" || now.intent !== row.intent) return;
+      savedChecks[row.id] = { intent: row.intent, result, visit };
+    }));
+  }
+  /** The latest check of `row`'s file for this exact revision, or `null`. */
+  function savedCheckFor(row: PrivateDownload): SavedCheck | null {
+    const checked = savedChecks[row.id];
+    return checked && checked.intent === row.intent && row.status === "saved" ? checked.result : null;
+  }
   function runPrivateDownloadAction(row: PrivateDownload, kind: PrivateDownloadActionKind) {
+    // Acting on a Saved row checks its file again when the list refreshes afterwards.
+    if (row.status === "saved") delete savedChecks[row.id];
     if (kind === "resume") return resumePrivateDownload(row);
     if (kind === "fresh") return resumePrivateDownload(row, true);
     if (kind === "saveAs") return resumePrivateDownload(row, false, true);
@@ -28288,9 +28335,9 @@
                 {#each privateDownloads as saved (saved.id)}
                   <li class="dl-item">
                     <b>{filesByCid.get(saved.cid)?.name ?? `File ${saved.cid.slice(0, 12)}`}</b>
-                    <span>{privateDownloadDetail(saved)}</span>
+                    <span>{privateDownloadDetail(saved, savedCheckFor(saved))}</span>
                     <div>
-                      {#each privateDownloadActions(saved) as action (action.kind)}
+                      {#each privateDownloadActions(saved, savedCheckFor(saved)) as action (action.kind)}
                         <button class={action.ghost ? "ghost" : undefined}
                           disabled={!!privateDownloadBusy[saved.id] || (action.needsIdle && (!!privateDownloadSaves[saved.id] || saveInProgress(saved.cid)))}
                           onclick={() => runPrivateDownloadAction(saved, action.kind)}>{action.label}</button>
