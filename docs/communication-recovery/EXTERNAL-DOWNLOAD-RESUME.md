@@ -1130,7 +1130,7 @@ index is not presented as universally unique.
 | SMB, mapped drives (Windows) | No | Yes, if the server gives file numbers; otherwise refused before writing | Yes, by verified handle | Recognized by the `\\?\UNC\` canonical path. |
 | FAT, exFAT (Windows) | No | No (refused before writing) | n/a | No hard links, so publication is impossible. |
 | OneDrive and other cloud folders (Windows) | Yes, on NTFS | Yes | Yes | The provider uploads partial plaintext as it is written. Placeholders are the same file. |
-| ext2/3/4, xfs, btrfs, f2fs, tmpfs (Linux) | Yes, when the filesystem reports birth times (tmpfs on older kernels and ext4 with 128-byte inodes may not; the save then falls back) | Yes | Yes, except in folders other accounts can modify (mode bits; ACLs are not read; a group-writable folder of a user-private group proven from `/etc/passwd`, `/etc/group` and `nsswitch.conf` counts as private) | Needs `/proc/self/fd`. |
+| ext2/3/4, xfs, btrfs, f2fs, tmpfs (Linux) | Yes, when the filesystem reports birth times (tmpfs on older kernels and ext4 with 128-byte inodes may not; the save then falls back) | Yes | Yes, except in folders other accounts can modify (mode bits; a group-writable folder without an extended ACL, of a user-private group proven from the local account files outside any container, counts as private) | Needs `/proc/self/fd`. |
 | overlayfs, FUSE, NFS, SMB/CIFS, 9p (Linux) | No | Yes if the mount supports hard links; otherwise the save fails at publication after writing, and the partial is left for the user | No (counted as shared, review M-3) | Container `/tmp` on overlayfs gets no journal. Unix does not probe links here: the probe name could not be removed. |
 | vfat, exFAT (Linux) | No | No (refused before writing) | n/a | |
 | APFS, HFS+ (macOS, local) | Yes, unverified | Yes | As on Linux | Not built in CI; publication guarantee (a) only. |
@@ -1211,16 +1211,28 @@ Implemented:
 - **Group-writable folders: trust a proven user-private group.** A group-writable folder without
   the sticky bit counts as private (so Remove and the writers' cleanup may delete there) only when
   all of these hold: it is owned by our effective uid; its group is our effective primary gid;
-  and that group provably has no other member. The proof (`group_is_private`) comes only from the
-  local files, read bounded with std (1 MiB each): `nsswitch.conf` lists only `files`, `compat` or
-  `systemd` for `passwd` and `group` (or is absent); `passwd` and `group` have no NIS `+`/`-` or
-  malformed lines and list our own account; no other uid has that group as its primary group;
-  exactly one `group` entry has that gid, and its supplementary members name nobody but us. A
-  group name equal to the user name is not required (only a supporting signal; the membership is
-  the proof). Anything unprovable stays shared (directory services such as `sss`, `ldap`, `nis`;
-  unreadable files; a group that resolves only through NSS). macOS keeps its account databases in
-  Directory Services, so membership is never provable there and `staff` (gid 20) stays shared;
-  Android has no `/etc/passwd`, so it fails closed too. World-writable stays shared unless sticky.
+  it carries no extended POSIX ACL (with one, the group bits are the ACL mask and may be another
+  account's write access; `system.posix_acl_access` read through `rustix`, an error other than
+  "no such attribute" or "no ACL support" counts as an ACL); and that group provably has no other
+  member. The proof (`group_is_private`) comes only from the local system, read bounded with std
+  (1 MiB per file, userdb directories only up to their first entry): this process is in the
+  initial user namespace (`/proc/self/uid_map` and `gid_map` are the identity map) and not in a
+  container (`/run/.containerenv`, `/.dockerenv`); `nsswitch.conf` lists only `files`, `compat` or
+  `systemd` for `passwd` and `group`, and for `initgroups` when present, with `[...]` action groups
+  removed character by character as glibc does (or there is no `nsswitch.conf`); when `systemd`
+  is listed, no systemd userdb record directory has an entry and systemd-homed is not running;
+  `passwd` and `group` have no NIS `+`/`-` or malformed lines and list our own account; no other
+  uid has that group as its primary group; exactly one `group` entry has that gid, and its
+  supplementary members name nobody but us. A group name equal to the user name is not required
+  (only a supporting signal; the membership is the proof). Anything unprovable stays shared
+  (directory services such as `sss`, `ldap`, `nis`; unreadable files; a group that resolves only
+  through NSS; containers and user namespaces). macOS keeps its account databases in Directory
+  Services, so membership is never provable there and `staff` (gid 20) stays shared; Android has
+  no `/etc/passwd`, so it fails closed too. World-writable stays shared unless sticky. Not readable
+  (residual): `gshadow` members and group passwords, group credentials granted by privileged
+  launchers (systemd `SupplementaryGroups=`, set-group-id programs), and sessions that kept a
+  group after an account left it. Classification (and its reads) happens only where deletion is
+  decided, never under the session commit guard of the publication link.
   Tests inject the account files (`ACCOUNT_FILES` in tests; production reads the real files):
   `a_group_writable_folder_is_private_only_for_a_proven_user_private_group`,
   `a_user_private_group_is_proven_only_from_the_local_files`, `unprovable_membership_fails_closed`,
@@ -1234,8 +1246,9 @@ Implemented:
   Published journal), runs `saved_presence` (read-only: the folder must still be the identified one,
   then the final name is opened without following links and compared by identity) on the blocking
   pool with one of two check slots, and waits at most `SAVED_CHECK_WAIT` (3 s, Keep's bound) on
-  the sanctioned clock, holding no session commit guard while it waits; without a free slot it
-  answers `unknown` at once. The answer is returned only while the record is the same Saved record
+  the sanctioned clock for a free slot and the check together, holding no session commit guard
+  while it waits (the renderer asks for one row at a time). The answer is returned only while the
+  record is the same Saved record
   (revision and journal) before and after and the UI session and server entry are unchanged; the
   renderer keeps it only for the same view and row revision. Outcomes: `present` keeps "Saved";
   `missing` shows "The saved file is no longer there"; `replaced` shows "The saved file was changed
@@ -1252,7 +1265,25 @@ Implemented:
   `a saved file check answer is a closed word...`, and the production-text App.svelte tests
   `Transfers checks each Saved row's file once per visit...` and `a saved file check answered after
   the row or view changed never relabels anything` (both renderer fences and the native
-  after-check fence break-checked).
+  after-check fence break-checked). Residual: an edit made in place keeps the file's identity and
+  reads "present"; a file renamed within its folder reads "missing"; on Windows the check opens the
+  saved file with read access, which antivirus or another program's share mode can delay (the
+  bounded wait then answers "unknown").
+
+Adversarial review of these two changes (`516ab8d0..d291cb88`) and dispositions:
+
+| Finding | Disposition |
+| --- | --- |
+| HIGH: an extended POSIX ACL can give another account write access while the mode shows only group write, so the new rule would call such a folder private | Fixed: the group proof requires the absence of `system.posix_acl_access` (read through `rustix::fs::fgetxattr`, size only); any read error other than `ENODATA`/`EOPNOTSUPP` counts as an ACL. Tests: `an_extended_acl_is_never_ruled_out_without_proof` (Linux/Android), and on Linux CI an ACL case in `unix_removes_in_a_group_writable_folder_only_for_a_user_private_group` (a named user with write, set with `fsetxattr`, gives `SharedFolder`). Both run only on Linux; compiled and Clippy-checked for Android here. |
+| M1: all Saved rows were checked at once while native ran two workers and answered "unknown" for the rest | Fixed: native waits for a slot within its 3 s bound (no thread held while waiting); the renderer asks one row at a time and claims its batch up front. Tests: the production check test (a held slot, then a real answer), `Saved rows are checked one at a time...` (break-checked). |
+| M2: `nsswitch.conf` parsing dropped services glued to `[...]` and ignored `initgroups` | Fixed: action groups removed character by character (unbalanced brackets fail closed); `initgroups`, when present, must use the same sources. Test: `directory_services_cannot_hide_behind_nsswitch_syntax` (initgroups break-checked). |
+| M3: the `systemd` source also serves userdb records and systemd-homed | Fixed: with `systemd` listed, the userdb record directories must be empty or absent and the homed socket absent, else (or if unreadable) shared. Test: `systemd_accounts_and_containers_fail_closed` (break-checked). |
+| M4: containers and user namespaces see an `/etc` that does not describe the host | Fixed: the identity uid/gid maps and no container marker are required. Tests: the same, plus `the_account_files_are_read_bounded_from_the_root` (Linux CI; break-checked on the pure rule). |
+| L1: unused items on macOS | Gated to Linux/Android or allowed elsewhere. |
+| L2: the publication link classified the folder under the commit guard | Fixed: `pin_folder(.., classify: false)` for the link reads no account files or ACLs. |
+| L3: acting on a Saved row briefly showed plain "Saved" | Fixed: the last answer stays until the re-check replaces it. |
+| L4: INTERFACES error wording | Fixed. |
+| L5: test gaps | Added the call-site test, the bounded loader test on a prepared root, and the set-group-id case now changes the folder's group instead of skipping. `ActorSavedCheck` itself (actor-backed) stays untested; its fences are covered through the sequence. |
 
 Recorded, no change:
 

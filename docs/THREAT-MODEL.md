@@ -624,9 +624,12 @@ writer keeps those properties.
   Unix has no delete-by-inode, so the guarantee is narrower: **automatic deletion is guaranteed
   only against processes running as other accounts.** In a folder other accounts can modify (owner
   neither us nor root, or group- or other-writable without the sticky bit; a group-writable folder
-  counts as private only when it is ours, its group is our primary group, and the local account
-  files prove that group has no other member, user decision of 23 October; membership that cannot
-  be proven, as with directory services or on macOS, stays shared) and on any network, FUSE or
+  counts as private only when it is ours, its group is our primary group, it has no extended POSIX
+  ACL (whose mask the group bits would then be), and the local account files prove that group has
+  no other member, user decision of 23 October; membership that cannot be proven, as with
+  directory services, systemd userdb or homed records, containers, user namespaces or on macOS,
+  stays shared; `gshadow` members and group credentials granted by privileged launchers or kept by
+  existing sessions are not visible and remain a residual) and on any network, FUSE or
   unrecognized filesystem (whose
   permissions this kernel does not decide; ACLs are not read), nothing is deleted automatically and
   the user is told to delete the leftover, but only after a read-only check that it still holds
