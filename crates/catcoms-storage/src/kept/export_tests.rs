@@ -897,7 +897,12 @@ fn unix_a_shared_folder_tells_the_user_to_delete_only_its_own_file() {
     // leftover only when the name still holds Mewtual's own file. A name the user already deleted,
     // or one now holding someone else's file, never produces "Delete it yourself".
     use std::os::unix::fs::PermissionsExt;
-    for case in ["missing", "foreign", "saved-missing"] {
+    // Root reads a mode-0 file anyway, so the unreadable case means nothing there.
+    let root = rustix::process::geteuid().is_root();
+    for case in ["missing", "foreign", "foreign-unreadable", "saved-missing"] {
+        if root && case == "foreign-unreadable" {
+            continue;
+        }
         let fx = fixture();
         let mut store = open(&fx.vault);
         let (id, lease) = completed(&mut store);
@@ -916,28 +921,32 @@ fn unix_a_shared_folder_tells_the_user_to_delete_only_its_own_file() {
             .unwrap()
             .journal()
             .clone();
-        match case {
-            "foreign" => {
-                fs::remove_file(staging(&fx.downloads)).unwrap();
-                fs::write(staging(&fx.downloads), b"someone else's file").unwrap();
-            }
-            _ => fs::remove_file(staging(&fx.downloads)).unwrap(),
+        fs::remove_file(staging(&fx.downloads)).unwrap();
+        if case.starts_with("foreign") {
+            fs::write(staging(&fx.downloads), b"someone else's file").unwrap();
+        }
+        if case == "foreign-unreadable" {
+            // Re-review LOW 1: a file we may not even open was put there by another account.
+            fs::set_permissions(staging(&fx.downloads), fs::Permissions::from_mode(0o000)).unwrap();
         }
         fs::set_permissions(&fx.downloads, fs::Permissions::from_mode(0o777)).unwrap();
         let outcome = remove_partial(&journal, published, &mut rng()).unwrap();
         let expected = match case {
             "missing" => PartialRemoval::Removed,
-            "foreign" => PartialRemoval::LeftInPlace,
+            "foreign" | "foreign-unreadable" => PartialRemoval::LeftInPlace,
             _ => PartialRemoval::KeptSaved,
         };
         assert_eq!(outcome, expected, "{case}");
+        // Neither the unpublished ("Delete it yourself") nor the saved ("Delete that copy
+        // yourself") shared-folder instruction appears.
         assert!(
             !outcome
                 .notice(published)
-                .is_some_and(|notice| notice.contains("Delete it yourself")),
+                .is_some_and(|notice| notice.contains("yourself")),
             "{case}"
         );
-        if case == "foreign" {
+        if case.starts_with("foreign") {
+            fs::set_permissions(staging(&fx.downloads), fs::Permissions::from_mode(0o644)).unwrap();
             assert_eq!(
                 fs::read(staging(&fx.downloads)).unwrap(),
                 b"someone else's file"
@@ -1291,6 +1300,17 @@ fn a_native_staging_name_in_a_folder_others_can_modify_is_left_in_place() {
         SessionRemoval::SharedFolder
     );
     assert!(staging.exists(), "left for the user to delete");
+    // Combined review M-A: a missing or foreign name there is never reported as shared (which
+    // would tell the user to delete it).
+    assert_eq!(
+        remove_if_session(dir.path(), "absent.part", id, &mut rng()).unwrap(),
+        SessionRemoval::Missing
+    );
+    fs::write(dir.path().join("theirs.part"), b"someone else's file").unwrap();
+    assert_eq!(
+        remove_if_session(dir.path(), "theirs.part", id, &mut rng()).unwrap(),
+        SessionRemoval::NotOurs
+    );
     fs::set_permissions(dir.path(), fs::Permissions::from_mode(0o755)).unwrap();
     assert_eq!(
         remove_if_session(dir.path(), "notes.txt.part", id, &mut rng()).unwrap(),

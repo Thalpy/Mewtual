@@ -347,6 +347,22 @@ async fn a_stale_save_new_copy_deletes_nothing() {
     assert_eq!(fake.deletes.load(std::sync::atomic::Ordering::SeqCst), 0);
 }
 
+/// Combined review LOW 1: Save another copy of a saved row whose folder is unreachable names the
+/// earlier save's files, never "the old partly saved file".
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn save_another_copy_of_an_unreachable_saved_row_says_what_was_left() {
+    let (root, staging, journal) = partial();
+    std::fs::rename(staging.parent().unwrap(), root.path().join("Unplugged")).unwrap();
+    let (fake, release, _inside) = Fake::new(&journal);
+    drop(release);
+    fake.record.lock().unwrap().export = Some(ExportState::Published(journal.clone()));
+    let claim = CleanupClaim::acquire(7, id(0xA8)).unwrap();
+    let (_intent, notice) = abandon_sequence(&fake, claim, 3).await.unwrap();
+    assert_eq!(notice, Some(OLD_SAVED_UNREACHABLE));
+    assert!(!OLD_SAVED_UNREACHABLE.contains("partly saved"));
+    assert!(fake.record.lock().unwrap().export.is_none());
+}
+
 /// Combined review LOW 2: Save new copy decides whether the old save was already Published from
 /// the read made after its retire, so a live writer that records Published in between cannot make
 /// it delete a staging name whose final name was never proven ours (here none exists, so the

@@ -1302,8 +1302,10 @@ pub enum PartialRemoval {
     /// The folder is ours but the partial could not be opened to prove ownership (for example
     /// another program holds it without sharing). It may be ours, so it is not forgotten.
     Unchecked,
-    /// PR51 H1 (Unix): the folder can be modified by other accounts, so nothing is deleted
-    /// automatically there. The partly saved file was left in place for the user to delete.
+    /// PR51 H1 (Unix): the folder can (or, on network and FUSE filesystems, may) be modified by
+    /// other accounts, so nothing is deleted automatically there. Reported only for a name
+    /// verified to hold our file (combined review M-A), which was left in place for the user to
+    /// delete: the partly saved file, or a saved row's temporary copy (see `notice`).
     SharedFolder,
     /// PR51 M2: the save was Published but its final name is gone (for example lost by a power
     /// failure on a filesystem that ignored the folder flush) while our staging name still holds

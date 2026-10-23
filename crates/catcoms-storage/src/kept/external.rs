@@ -967,7 +967,8 @@ pub(super) enum Verified {
     Missing,
     /// Something else is at the name; it was left exactly where it was.
     NotOurs,
-    /// Unix: the folder can be modified by other accounts, so nothing is deleted automatically.
+    /// Unix: the name holds our object (verified), but the folder can (or may) be modified by
+    /// other accounts, so nothing is deleted automatically.
     #[cfg_attr(not(unix), allow(dead_code))]
     Shared,
     /// Unix: the folder opened at this path is no longer the expected one.
@@ -986,11 +987,13 @@ pub(super) enum Verified {
 ///   the name the handle was opened through goes, so a second name (a published final name) stays.
 ///   Long-lived handles elsewhere keep std's default share mode, which allows this open.
 /// - Unix (no delete-by-inode exists): the folder is pinned by a descriptor (following a configured
-///   folder link, then checked against `folder_id` when known). If other accounts can modify it
+///   folder link, then checked against `folder_id` when known), and the name is verified where it
+///   is, read-only (an object that is not ours is never renamed; review M-2): missing is
+///   `Missing`, anything else not ours is `NotOurs`. Then, if other accounts can modify the folder
 ///   (owner neither us nor root, or group- or other-writable without the sticky bit) or may (a
 ///   network, FUSE or unrecognized filesystem, whose permissions this kernel does not decide;
-///   review M-3), nothing is deleted (`Shared`). Otherwise the name is verified where it is (an
-///   object that is not ours is never renamed; review M-2), renamed relative to that descriptor to
+///   review M-3), nothing is deleted (`Shared`, only ever for a name verified ours; combined review
+///   M-A). Otherwise the name is renamed relative to that descriptor to
 ///   a random unguessable name (no-replace where the platform has it), verified again there, and
 ///   unlinked only if it is still ours; otherwise it is put back without replacing anything and
 ///   reported `NotOurs`, or, if it cannot be put back, the call fails (the caller keeps tracking
@@ -1041,6 +1044,12 @@ pub(super) fn remove_verified(
             }
             Ok(None) => return Ok(Verified::NotOurs),
             Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Verified::Missing),
+            // Re-review LOW 1: in a shared folder, a name we may not even read was put there by
+            // another account (Mewtual creates its files readable by itself). Nothing is deleted
+            // there anyway, so settle it as not ours instead of an endless "retry".
+            Err(error) if error.kind() == io::ErrorKind::PermissionDenied && pinned.shared => {
+                return Ok(Verified::NotOurs)
+            }
             Err(error) => return Err(error),
         }
         if pinned.shared {
