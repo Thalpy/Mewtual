@@ -323,48 +323,46 @@ async fn confirmation_over_blocked_tcp(framed: bool, reject: bool, known_incomin
             )
             .await;
         }
+    } else if known_incoming {
+        crate::voice_handoff::integration::confirmation_known_incoming_retry(
+            &scenario.online(2).state,
+            &c,
+            &cp,
+            &scenario.online(1).state,
+            &a,
+            &ap,
+        )
+        .await;
+    } else if reject {
+        crate::voice_handoff::integration::confirmation_rejected_result(
+            &scenario.online(2).state,
+            &c,
+            &cp,
+            &scenario.online(1).state,
+            &a,
+            &ap,
+        )
+        .await;
+    } else if framed {
+        crate::voice_handoff::integration::confirmation_framed_round_trip(
+            &scenario.online(2).state,
+            &c,
+            &cp,
+            &scenario.online(1).state,
+            &a,
+            &ap,
+        )
+        .await;
     } else {
-        if known_incoming {
-            crate::voice_handoff::integration::confirmation_known_incoming_retry(
-                &scenario.online(2).state,
-                &c,
-                &cp,
-                &scenario.online(1).state,
-                &a,
-                &ap,
-            )
-            .await;
-        } else if reject {
-            crate::voice_handoff::integration::confirmation_rejected_result(
-                &scenario.online(2).state,
-                &c,
-                &cp,
-                &scenario.online(1).state,
-                &a,
-                &ap,
-            )
-            .await;
-        } else if framed {
-            crate::voice_handoff::integration::confirmation_framed_round_trip(
-                &scenario.online(2).state,
-                &c,
-                &cp,
-                &scenario.online(1).state,
-                &a,
-                &ap,
-            )
-            .await;
-        } else {
-            crate::voice_handoff::integration::confirmation_round_trip(
-                &scenario.online(2).state,
-                &c,
-                &cp,
-                &scenario.online(1).state,
-                &a,
-                &ap,
-            )
-            .await;
-        }
+        crate::voice_handoff::integration::confirmation_round_trip(
+            &scenario.online(2).state,
+            &c,
+            &cp,
+            &scenario.online(1).state,
+            &a,
+            &ap,
+        )
+        .await;
     }
     crate::end_voice_owner_inner(&scenario.online(1).state, a.id()).await;
     crate::end_voice_owner_inner(&scenario.online(2).state, c.id()).await;
