@@ -1,6 +1,22 @@
 # Threat model; client integrity & enforcement boundaries
 
-## Binding preflight lifetime (23 October; native draft, validation pending)
+## Child Control construction and collection (23 October; inactive adapter)
+
+Begin's separately paid8KiB worker is constructed in synchronous launch only after its
+original payment; the fixed Control await retains just its actual JoinHandle. Child engine
+admission finishes pure identity/history/reconciliation before constructing its pending
+future. The full returned future/output remains additive with final admission and sealing;
+the earlier synchronous graph includes its original Incoming, actual snapshots and output.
+Current whole Control measures12,220B within unchanged12,288B; no Box, added cap or omitted
+live owner supplies this fit. These are application-owner bounds, not stack/allocator/SDK RSS.
+
+The lookup constructor grants no Work/Actor/engine effect. Actual first admission still uses
+fresh original time and nonblocking UI/Coordinator/Route/Engine fences. Actual Begin task
+payment lasts through output collection/sealing, and physical custody through CompletedReply
+collection. Actor shutdown may independently release room-directory payments; regressions
+pin exact task release separately and preserve fully dropped-handler/snapshot coverage.
+
+## Binding preflight lifetime (23 October; inactive native adapter)
 
 Native factories, Input, engine admission and Result resolve their original Actor in a scoped
 context, then await its binding query with that Actor alone. Store and registry ownership do
@@ -12,7 +28,7 @@ after blocking preparation and before the unchanged nonblocking final engine fen
 Server-map contention and pre-engine resumable/store contention return retryable Capacity
 before effects or engine charge. They preserve original authority/deadlines and never refund an
 ambiguous network attempt. Parked-query/caller-loss, Input UI-wait and actual contention/retry
-regressions are written; native compilation is pending. After publication admission the actual
+regressions pass in the272-case focused native run. After publication admission the actual
 commit/paid work still orders lock against that work until it drains.
 
 An abandoned read-only binding query can remain in the Actor's separate64-entry metadata
@@ -48,8 +64,9 @@ commit wait. Initial binding observation ends first, leaving only the original c
 selected/parent identity and already-paid physical/task custody. After acquisition, it upgrades
 the original weak context and repeats native generation/selection/server/Route/grant checks
 before reserving a child or reaching Actor publication. Lock can win without a late adoption.
-The new framed caller-loss test observes that actual commit wait and baseline store ownership;
-combined compilation/runtime proof is pending. No production effect opcode is enabled.
+The framed caller-loss test observes that actual commit wait and baseline store ownership;
+it passes on the combined source, including the759-test complete native gate at9109f20d.
+Native/WebCrypto integration remains separate acceptance work. No production effect opcode is enabled.
 
 ## Result preparation cancellation (23 October; inactive adapter)
 

@@ -80,7 +80,9 @@ End between children must not depend on a successor loan. Trusted whole-plan cle
 new adoption, closes the exact original control outside native locks and stores its actual
 retirement witness. A missing control does not prove drainage. Late input/lower owners still
 delay the original publisher, and ordinary Phase Return never becomes terminal Phase Retire.
-This capability is implemented; child factories and browser key/phase transfer remain open.
+This capability and the inactive child factories/adapters are implemented. Production work
+delivery and the complete native/browser WebCrypto key/phase transfer still need integration;
+framed mocks and a fixed-key native provider do not establish that combined path.
 
 ## Group-call integration gates
 

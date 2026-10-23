@@ -5,9 +5,13 @@
 Parent and child engine adapters share UI-commit -> try-Coordinator -> try-Route -> try-Engine
 after the original Clock sample. Actual original-lender capacity preparation precedes that
 sample. Contention refuses with Capacity and retries resample without deadline renewal.
-The child borrowing decoder/original parent resolver ends before async native waits; only
-the resolved actual child and fixed identity survive. Candidate/lender metadata remains
-explicitly included in the unchanged Control inventory; combined measurements are pending.
+The child borrowing decoder/original parent resolver validates the exact action and finishes
+before constructing the pending async frame; only the resolved child/byte count or serialized
+history survives. Construction performs no Actor query/Work/engine admission. Whole returned
+future/output remains additive with its later final-admission or sealing call frame; the
+earlier synchronous graph includes actual reconciliation snapshots. Candidate/lender metadata
+remains explicit. Combined focused measurement is12,220B/12,288B Control, child admission3,446B;
+the complete native gate passes759 tests at9109f20d. This does not activate production dispatch.
 
 ## Child Result preparation custody (23 October; inactive adapter)
 
@@ -18,14 +22,15 @@ refusal too; its actual UI commit is installed while uniquely owned before Body/
 Historical lookup stays synchronous without Work/task admission. The original output Buffer
 still transfers directly, and no browser/drainage fact is inferred from local task completion.
 The ordered Worker retains Work before publication/Incoming across all cancellation points.
-Measured complete Control remains12,252B/12,288B; Result task5,560B/8,192B. Production dispatch
+Current complete Control measures12,220B/12,288B; the Result task retains its8,192B guard. Production dispatch
 and complete native/browser integration remain disabled and unaccepted.
-## Retained known-child browser continuation (23 October; inactive draft)
+## Retained child browser continuation (23 October; inactive draft)
 
-`nativeConfirmationFromChannel(owner, channel, plan, purpose, row, identity)` requires the
-original selected broker/channel and an already authenticated native child row/action.
-The closed Start/Respond/Incoming purpose is a lookup hint, not native authority. It starts
-no Begin factory and cannot recover an unknown row after a lost Begin reply. At most nine
+`nativeConfirmationFromChannel(owner, channel, plan, purpose, row?, identity?)` requires the
+original selected broker/channel. Supply both authenticated child hints to continue a known
+row/action, or omit both to recover first/lost Begin on the same prepaid descriptor. Unknown,
+Pending(row) and attached(row, action) remain distinct; Pending grants no action authority.
+The closed Start/Respond/Incoming purpose is a lookup hint, not native authority. At most nine
 child descriptors use one shared original parent selector, pair and immutable request deadline.
 Native result metadata cannot establish remote confirmation or RTC readiness.
 
@@ -34,7 +39,11 @@ phase to a child. The original action/input binding, native permit and exact out
 uncertain RPCs. Child ACK/settlement/Return precede parent Plan-final cleanup and key collection.
 Every descriptor retains its global fixed row position, including when no ActionRecord exists;
 transfer to an ActionRecord consumes that exact claim, never a second allocation or early refund.
-Broker15 refuses earlier retained HMR shapes. The structural buffer/row inventories are declared
+End drains actual local SDK/read/cancel work before handing unresolved history to the original
+channel driver. Begin(false) and exact child Return precede parent Plan-final; refusal alone
+does not prove absence. Fixed history and row claims survive until actual channel unlink and
+owner retirement, in either order. Broker17 refuses earlier retained HMR shapes.
+The structural buffer/row inventories are declared
 application custody, not a bound on JavaScript/WebCrypto implementation heap or allocator slack.
 
 ## Child Begin adoption (23 October; inactive draft)

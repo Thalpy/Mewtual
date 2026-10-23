@@ -1,5 +1,45 @@
 # Next voice milestone: native result recovery
 
+## Current implementation boundary (23 October; combined continuation)
+
+The child-v2 grammar and Begin/Input/admission/result/ACK/settlement/Return adapters now
+exist on the combined continuation, as does the browser continuation on the original
+Derive chain. The native owner accepts the `VoiceV2Native` interface. Earlier statements
+below that these pieces are absent describe their named historical checkpoints.
+
+HANDOVER and CHAT-FILES-VOICE-ACCEPTANCE record the current source and validation. The
+deadline-admission correction and Tokio patch are published; runtime9109f20d passes complete
+native759, Root3,314 (24 existing ignored) and frontend2,638 on the documented exact input
+scopes, plus static/build/startup and ten browser flows. The separate browser and native
+tests do not yet establish an actual native-to-WebCrypto confirmation cycle. The native
+TCP provider uses fixed test AES keys, while browser tests use framed endpoint mocks.
+
+The next implementation must cross that boundary explicitly:
+
+1. Deliver a genuine uncommitted native Derive through a bounded native-owned work
+   producer. A native producer must own its own admitted custody; it must not fabricate
+   an authenticated browser Header/Incoming merely to call a physical-request factory.
+2. Use the broker's actual non-extractable selected P256 key and original channel for
+   P256/HKDF, then all six Hello/Proof/Finish seal/open operations. Byte-bearing Input,
+   results and future SDP must use the prepaid authenticated encrypted channel. Ordinary
+   command IPC may carry only its bounded public selection and work metadata.
+3. Expose the authenticated child row needed by a Respond purpose as bounded original
+   metadata, without making renderer hints into action, role or parent authority. Keep
+   Unknown, Pending and attached states separate across reply loss and End.
+4. Require real native receipts before proceeding, preserve accepted and rejected results,
+   exact ACK/settlement/Return, and the original Plan-final proof/ACK after actual browser
+   and native owners drain. A complete single-pair interop test must block A-C, route via
+   unjoined B, and preserve original authority across bridge replacement.
+5. Complete production work/event delivery, native SDP/ICE factories and RTC integration,
+   protocol isolation, Finish-to-SDP causal transfer, and supported multi-peer history/
+   resource composition before enabling V2. A successful single-pair Node interop test
+   would not prove packaged WebView/ACL/CORS/RTC behavior or physical audio/network results.
+
+Member media relay and combined acceptance remain separate unfinished work. One physical
+desktop is available. Production effect dispatch remains disabled.
+
+## Historical checkpoints
+
 ## Latest checkpoint and next work (23 October)
 
 The integrated confirmation/Plan-final runtime `f1f2e48c` passes native724 and frontend2,538;

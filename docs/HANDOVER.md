@@ -1,8 +1,8 @@
 # Mewtual; Handover
 
-## First/lost child Begin draft (23 October; native gates pending)
+## Current continuation checkpoint (23 October; validated runtime 9109f20d)
 
-The current isolated continuation now supports first/lost child Begin through the same
+The combined continuation at9109f20d supports first/lost child Begin through the same
 browser descriptor, purpose, prepaid slot, keys and deadline. It distinguishes Unknown,
 Pending(row) and attached(row, action). After End, actual SDK/read/cancel drainage unblocks
 the original channel driver; history-only lookup and exact child Return precede parent
@@ -10,16 +10,63 @@ Plan-final. Refusal does not prove absence. Fixed history/row payment survives u
 channel unlink and owner retirement in either order. Broker17 refuses older retained shapes.
 
 All223 focused browser cases and the complete2,638-test frontend suite pass. Current Svelte
-reports zero errors/warnings and the production build passes (38.53s). Mocks exercise actual WebCrypto/framing but do not establish
-native replay-floor/factory ordering or a complete native/browser cycle. Two new native
-regressions use actual Header admission to target delayed lower-sequence Begin versus higher
-history/Plan-final, and an already-admitted detached Begin retaining the physical position.
-Those tests are written but uncompiled. Review also found Plan-final retaining LiveContext at
-its UI wait; that wait now retains only the original commit Arc and freshly rechecks context
-and canonical cleanup routing afterward, with cancellation and teardown regressions pending.
+reports zero errors/warnings and the production build passes (38.53s). Mocks exercise actual
+WebCrypto/framing; they do not establish a complete native/browser cycle. Native regressions
+use actual Header admission to target delayed lower-sequence Begin versus higher history/
+Plan-final and an already-admitted detached Begin retaining the physical position.
 
-The single Root full suite is still running in frozen deadline/Tokio5388993f; combined Root
-inputs remain identical. The combined native Begin/Result/Tokio checkout has not compiled.
+The complete Root suite passed in frozen deadline/Tokio5388993f:3,314 passed, zero failed,
+24 existing ignored, including all four new engine-admission regressions. Strict Root Clippy
+and the patched-lock cargo-deny check also pass. Combined Root inputs remain identical.
+The first combined native Begin/Result/Tokio compile succeeded on43227218:267 focused tests
+passed and2 failed. Begin's actual Control graph exceeded its unchanged12KiB payment; the
+worker is now constructed in synchronous launch after its original8KiB payment, leaving only
+the actual JoinHandle across the Control await. The other failure compared global resources
+across Actor shutdown, which independently releases its room directory. Tests now pin exact
+task release at actual Response sealing, retain physical custody through CompletedReply
+collection, and separately preserve fully dropped-handler/snapshot refund coverage. The
+corrected native focus passes all272 cases (22.00s). Whole Control is12,220B/12,288B;
+Begin is3,450B and child admission3,446B. The first three oversized layout runs are excluded
+as fit evidence. No test/cap was weakened. All5 blocked-TCP confirmation scenarios pass
+(55.47s). Complete native passes758 tests (753 library in738.10s plus5 ACL), zero failures
+or ignored tests, including onward channel discovery and adversarial chat-bubble recovery.
+That full pass covers2b33f1ec before subsequent lint-only cleanup. Strict native Clippy then
+identified the intentionally inline Started enum, inline test-module placement and a nested
+fixture branch. da6c5368 records the allocation rationale, extracts the same five tests and
+flattens that branch without changing behavior; read-only review verified the extracted text
+and all branch arguments/priority. Current strict Clippy passes (66s) and native check passes
+(5.07s). The final da6c5368 full run failed:752 passed/1 failed (734.52s). The framed
+confirmation fixture unwrapped a missing receipt before classifying the authenticated reply;
+the underlying refusal was not recorded, so its cause remains unconfirmed. Build did not run.
+The correction first authenticates/classifies the reply, retries only exact Capacity within
+the original action deadline, and injects a real held-registry refusal followed by mandatory
+genuine Root success. The independent lost-caller publication proof remains unchanged.
+The correction is committed separately as9109f20d. Its oracle allows only the canonical
+receipt's observational retired bit to advance; every other byte stays exact. A mutation
+unit covers accepted/rejected receipts, backwards/invalid values and every other byte.
+This is an oracle test, not an actual Clock-expiry integration test. The unit and all5 TCP
+confirmation cases pass (43.03s), as do strict native Clippy (15.93s) and check (0.88s).
+The corrected full native run passes759 tests:754 library (706.19s) plus5 ACL, zero failed
+or ignored. Native build passes (4m29s); actual application startup and all10 Edge flows
+pass. Root/native formatting, ambient gate and diff checks pass. Root and frontend inputs
+remain byte-identical to their complete successful runs above. No production switch changed.
+
+The first TCP focus passed4 and failed1 on a Derive-result Capacity refusal. Its exact cause
+was not established. A held-registry regression now proves local Capacity precedes Work/Actor
+handoff, then the same request progresses after release (the synthetic Actor correctly rejects
+its foreign grant). The TCP driver retains the same result/action/permit/Phase and original
+action deadline/Runtime Clock across Capacity replies, collecting each physical response before
+a one-second retry; every other error still fails. Subsequent ACK/cleanup uses the actual
+Session floor. Genuine Derived success remains mandatory. The successful rerun logged no retry,
+so it does not establish the first refusal's cause. Commits9e511694 and2b33f1ec are separate.
+
+Child admission also completes pure identification/history before constructing its pending
+async frame; only original row/byte count or serialized history enters that frame. Its whole
+future/output remains additive with final admission and sealing. The synchronous lookup graph
+includes actual native/Root reconciliation snapshots, original Incoming and full output.
+A genuine-child TCP regression targets unpolled physical cleanup/history stability; that
+projected history does not independently expose the engine permit. No Actor/engine effect
+occurs in the constructor; all first-effect checks remain in the subsequently polled path.
 Do not publish this as completed live V2, native/browser acceptance or RTC. Production effect
 dispatch, complete WebCrypto/native confirmation, SDP/ICE/RTC, live/group adapter, media relay
 and combined/physical acceptance remain unfinished. Only one desktop is available.
@@ -29,9 +76,25 @@ in both factories, Input, admission and Result. One shared preflight now resolve
 Actor without retaining Store/registries while awaiting that query, obtains the original
 commit handle afterward, and leaves all final authority checks in place after fresh upgrade.
 Unadmitted server-map/resumable/store contention returns Capacity without an engine charge.
-New actual parked-query/caller-loss, Input UI-wait and contention/exact-retry regressions are
-written and awaiting native compilation. Root's1,249 App unit tests have passed; the remaining
-Root crates/integration tests are still running. None of this enables production V2 effects.
+Plan-final similarly retains only its original commit Arc at the UI wait and freshly checks
+weak context and canonical cleanup routing afterward. New parked-query/caller-loss, Input
+UI-wait, teardown and contention/exact-retry regressions passed in that first focused run.
+Incoming Begin now also refuses a busy server map without awaiting it with mounted context.
+Read-only adversarial re-review found no remaining confirmed blocker/high/medium. Corrected
+native layout, complete suites and static/build/startup checks pass on the named scopes.
+The Root result above covers identical Root
+inputs, not these separate native-workspace edits. None of this enables production V2 effects.
+
+The next native-owned producer draft is isolated in
+`target/communication-native-producer-worktree`. It is excluded from the9109f20d validation
+and publication until its own tests and review pass. Production work delivery and actual
+native/browser interoperability remain open; a private draft is not completion evidence.
+
+## Earlier source checkpoints
+
+The dated entries below preserve evidence from their named source checkpoints. Later fixes
+and current validation above supersede their pending items, broker versions and measurements;
+an older pass is not evidence for a later changed native/browser combination.
 
 ## Browser fixed-history cleanup correction (23 October; combined gates pending)
 

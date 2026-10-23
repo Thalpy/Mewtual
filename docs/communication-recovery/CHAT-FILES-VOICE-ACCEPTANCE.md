@@ -1,5 +1,61 @@
 # Chat, files and voice implementation evidence
 
+## Current combined continuation (23 October; validated runtime 9109f20d)
+
+The PR53 deadline correction7b9af8d5 and Tokio1.53.3 lock-only patch5388993f are published.
+The combined child Begin/Input/admission/result and browser continuation is validated at
+9109f20d. Root inputs are identical to5388993f: the
+complete Root suite passed3,314 tests, zero failed,24 existing ignored, including all four
+new actual engine-admission regressions. Strict Root Clippy and patched cargo-deny pass.
+The current full frontend passes2,638 tests, Svelte zero errors/warnings and production build.
+
+The first combined native compile passed267 focused tests and failed2. Begin's actual Control
+graph exceeded12KiB; synchronous launch now constructs the worker only after its original8KiB
+payment, keeping that worker out of the Control async frame. A cancellation test also counted
+Actor shutdown's independent room-directory refund as a Begin discrepancy. Exact task/output
+and physical-reply collection now have separate assertions and fully dropped-caller coverage.
+The corrected focused run passes272 tests (22.00s), including complete Control12,220B/12,288B.
+The first three oversized layout runs are excluded as fit evidence. Child admission completes
+pure lookup/reconciliation before constructing its pending async frame; its measured whole
+future/output remains additive with final preparation/sealing. No cap, authorization check
+or production switch changed. All5 blocked-TCP confirmation scenarios pass (55.47s).
+Complete native passes758 tests (753 library in738.10s plus5 ACL), zero failures/ignored,
+including onward directory discovery and adversarial chat-bubble recovery, on2b33f1ec.
+Subsequent lint-only da6c5368 keeps the measured enum inline with a rationale, extracts the
+same five tests and flattens an equivalent test branch. Read-only review verified unchanged
+test text/branch semantics. Current strict native Clippy (66s) and native check (5.07s) pass;
+the final da6c5368 full native run failed752/1 (734.52s), before build. The confirmation
+fixture assumed a receipt before inspecting its authenticated reply. Its underlying refusal
+was not recorded and is not diagnosed. A correction now classifies replies first, retries only
+exact Capacity on the original immutable action/deadline, and forces a held-registry refusal
+before mandatory genuine native success. Independent detached-publication proof is retained.
+The correction9109f20d passes its mutation unit and all5 TCP confirmation cases (43.03s),
+strict native Clippy (15.93s), native check (0.88s), and full native759:754 library (706.19s)
+plus5 ACL, zero failures/ignored. Native build (4m29s), actual startup and all10 Edge flows
+pass. The receipt comparison allows only canonical retired0→1; its mutation unit checks
+every other byte and rejected receipts too, not actual Clock-expiry integration.
+
+The first TCP run passed4/failed1 on Derive-result Capacity, with cause unconfirmed. A new
+held-registry regression pins local refusal before Work/Actor, then exact-request progress
+to the synthetic Actor's expected Unauthorized. The TCP driver retries only collected Capacity
+on the same original output/action/permit/Phase/deadline/Clock; success still requires genuine
+Derived. It never retries structural layout failure or grants a new action/attempt budget.
+The successful rerun had no retry, and therefore does not diagnose the first failure.
+
+First/lost child Begin keeps one original descriptor, purpose, prepaid row, keys and deadline;
+Unknown, Pending(row) and attached(row, action) remain distinct. Exact history/Return and native
+parent Plan-final precede collection. Broker17 keeps fixed history/row claims through actual
+channel unlink and owner retirement. Shared native preflight retains only the actual Actor
+across its query and original commit handle across UI waiting, then repeats final checks.
+Read-only adversarial re-review has no remaining confirmed blocker/high/medium; it does not
+replace actual native/WebCrypto interoperability acceptance. The new native-owned producer
+draft in its separate worktree is excluded from this validated source.
+
+Production effect dispatch, the live adapter, complete browser/native confirmation, SDP/ICE/
+RTC, supported multi-peer composition, member media relay and combined/physical acceptance
+remain open. Only one desktop is available. The earlier source-specific entries below retain
+their historical evidence scope; they are not passes for this later combined candidate.
+
 ## Native confirmation and original Plan-final checkpoint (23 October)
 
 Combined runtime `f1f2e48c`, with documentation-only publication afterward, passes complete
