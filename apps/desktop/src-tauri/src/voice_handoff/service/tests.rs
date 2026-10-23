@@ -82,6 +82,291 @@ struct Client {
     hash: [u8; 32],
 }
 
+/// A signed old request can be delayed BEFORE physical admission. Keep fixture-owned wire
+/// separate from Incoming: constructing two live Incoming values would bypass the exact
+/// single-position boundary these ordering regressions are intended to exercise.
+#[tokio::test]
+async fn higher_child_history_and_plan_final_fence_a_delayed_unadmitted_begin() {
+    use super::super::custody::CloseMode;
+    use super::super::derivation_result::tests::Case;
+    use super::super::ledger::ConfirmationPurpose;
+    use super::super::{confirmation_begin, confirmation_history, plan_final};
+    let case = Case::unadmitted().await;
+    case.action.settle_engine();
+    let parent = case.row();
+    parent
+        .close_phase(case.route.session().identity(), CloseMode::Return)
+        .unwrap();
+    assert!(parent.try_compact().unwrap());
+    let mut selector = vec![1];
+    selector.extend_from_slice(case.selector.peer.as_bytes());
+    selector.extend_from_slice(&case.selector.join);
+    selector.extend_from_slice(&case.selector.key_ref);
+    selector.extend_from_slice(&case.selector.epoch.to_be_bytes());
+    let mut begin = selector.clone();
+    begin[0] = 2;
+    begin.extend_from_slice(&case.id.logical());
+    begin.extend_from_slice(&[0, 1]);
+    let client = Client::new(case.public.public());
+    let (_, admission, cipher) = client.packet(1, 8, 0, [0; 16], &begin);
+    let delayed = wire(41891, &admission, &cipher); // NOT admitted; no physical/native work exists
+    let mut lookup = begin.clone();
+    *lookup.last_mut().unwrap() = 0;
+    let incoming = opened_frame(&case.public, &case.route, (2, 8, 0, [0; 16]), &lookup, None);
+    let reply = confirmation_history::recover(&case.context, &case.route, incoming)
+        .seal()
+        .unwrap();
+    assert_eq!(
+        opened_reply(&case.public, (2, 8, 0, [0; 16]), &lookup, &reply),
+        [1, 3, 5]
+    );
+    drop(reply);
+    let mut final_body = selector;
+    final_body.push(2);
+    let boundary = case
+        .native
+        .state
+        .ui_session_commit
+        .clone()
+        .lock_owned()
+        .await;
+    let incoming = opened_frame(
+        &case.public,
+        &case.route,
+        (3, 6, 0, case.id.logical()),
+        &final_body,
+        None,
+    );
+    let mut finalizing = Box::pin(plan_final::apply(&case.context, &case.route, incoming));
+    assert!(
+        std::future::poll_fn(|cx| Poll::Ready(finalizing.as_mut().poll(cx).is_pending())).await
+    );
+    drop(boundary);
+    let reply = bounded(finalizing).await.unwrap();
+    let issued = opened_reply(
+        &case.public,
+        (3, 6, 0, case.id.logical()),
+        &final_body,
+        &reply,
+    );
+    assert_eq!(&issued[..2], &[1, 4]);
+    assert_eq!(&issued[66..68], &[2, 1]);
+    drop(reply);
+    let mut acknowledgement = final_body[..105].to_vec();
+    acknowledgement.extend_from_slice(&issued[68..100]);
+    let incoming = opened_frame(
+        &case.public,
+        &case.route,
+        (4, 7, 0, case.id.logical()),
+        &acknowledgement,
+        None,
+    );
+    let reply = super::super::finalization::respond(&case.context, &case.route, incoming)
+        .seal()
+        .unwrap();
+    let acknowledged = opened_reply(
+        &case.public,
+        (4, 7, 0, case.id.logical()),
+        &acknowledgement,
+        &reply,
+    );
+    assert_eq!(&acknowledged[66..68], &[2, 2]);
+    drop(reply);
+    let counters = case.route.session().fixture_counts();
+    let charged = case.selected.resources().counts();
+    let mut worker = case.route.session().header().unwrap();
+    worker.scratch_mut()[..delayed.len()].copy_from_slice(&delayed);
+    worker.set_filled(delayed.len()).unwrap();
+    assert!(matches!(
+        worker
+            .authenticate(41891, Origin::PackagedHttp.value())
+            .unwrap()
+            .admit(None),
+        Err(super::super::channel::Refused::Replay)
+    ));
+    assert_eq!(
+        case.route.session().fixture_counts(),
+        counters,
+        "rejected old wire spends no new counter"
+    );
+    assert_eq!(case.selected.resources().counts(), charged);
+    assert!(case
+        .native
+        .state
+        .voice_handoff
+        .lookup_child(
+            &case.selected,
+            &parent,
+            ConfirmationPurpose::Start(None),
+            None
+        )
+        .is_err());
+    // A new, correctly sequenced request passes the replay floor but cannot adopt a child
+    // into the atomically frozen original plan. Keep the selected lease live throughout.
+    assert!(case.selected.lease().is_live());
+    let incoming = opened_frame(&case.public, &case.route, (5, 8, 0, [0; 16]), &begin, None);
+    let reply = bounded(confirmation_begin::begin(
+        &case.context,
+        &case.route,
+        incoming,
+    ))
+    .await
+    .unwrap();
+    let refused = opened_reply(&case.public, (5, 8, 0, [0; 16]), &begin, &reply);
+    assert_eq!(
+        refused,
+        [1, 3, 7],
+        "the actual parent freeze refuses capacity, without revoking the live join"
+    );
+    drop(reply);
+    case.native.close().await;
+}
+
+#[tokio::test]
+async fn admitted_begin_worker_keeps_physical_ownership_ahead_of_newer_history() {
+    use super::super::custody::CloseMode;
+    use super::super::derivation_result::tests::Case;
+    use super::super::ledger::ConfirmationPurpose;
+    use super::super::{confirmation_begin, confirmation_history, plan_final};
+    let case = Case::unadmitted().await;
+    case.action.settle_engine();
+    let parent = case.row();
+    parent
+        .close_phase(case.route.session().identity(), CloseMode::Return)
+        .unwrap();
+    assert!(parent.try_compact().unwrap());
+    let mut selector = vec![1];
+    selector.extend_from_slice(case.selector.peer.as_bytes());
+    selector.extend_from_slice(&case.selector.join);
+    selector.extend_from_slice(&case.selector.key_ref);
+    selector.extend_from_slice(&case.selector.epoch.to_be_bytes());
+    let mut begin = selector.clone();
+    begin[0] = 2;
+    begin.extend_from_slice(&case.id.logical());
+    begin.extend_from_slice(&[0, 1]);
+    let boundary = case
+        .native
+        .state
+        .ui_session_commit
+        .clone()
+        .lock_owned()
+        .await;
+    let commit_owners = Arc::strong_count(&case.native.state.ui_session_commit);
+    let store_owners = Arc::strong_count(&case.native.state.store);
+    let incoming = opened_frame(&case.public, &case.route, (1, 8, 0, [0; 16]), &begin, None);
+    let mut creating = Box::pin(confirmation_begin::begin(
+        &case.context,
+        &case.route,
+        incoming,
+    ));
+    assert!(std::future::poll_fn(|cx| Poll::Ready(creating.as_mut().poll(cx).is_pending())).await);
+    drop(creating); // actual socket caller loss; the admitted worker still owns its request
+    until(|| {
+        Arc::strong_count(&case.native.state.ui_session_commit) > commit_owners
+            && Arc::strong_count(&case.native.state.store) == store_owners
+    })
+    .await;
+    let counters = case.route.session().fixture_counts();
+    assert!(matches!(
+        case.route.session().header(),
+        Err(super::super::channel::Refused::Capacity)
+    ));
+    assert_eq!(
+        case.route.session().fixture_counts(),
+        counters,
+        "newer work cannot pass an admitted old physical owner"
+    );
+    drop(boundary);
+    bounded(case.route.session().fixture_wait_physical_idle()).await;
+    let mut lookup = begin.clone();
+    *lookup.last_mut().unwrap() = 0;
+    let incoming = opened_frame(&case.public, &case.route, (2, 8, 0, [0; 16]), &lookup, None);
+    let reply = confirmation_history::recover(&case.context, &case.route, incoming)
+        .seal()
+        .unwrap();
+    let observed = opened_reply(&case.public, (2, 8, 0, [0; 16]), &lookup, &reply);
+    // The synthetic fixture is not the Actor's authenticated MLS pair. Its real rejection
+    // leaves an actual OPEN handed-off Pending record, never a fabricated successful action.
+    assert_eq!(&observed[..2], &[1, 0]);
+    assert_eq!(observed[18], 1);
+    assert_eq!(observed[19], 0);
+    let child = case
+        .native
+        .state
+        .voice_handoff
+        .lookup_child(
+            &case.selected,
+            &parent,
+            ConfirmationPurpose::Start(None),
+            None,
+        )
+        .unwrap();
+    assert_eq!(&observed[2..18], &child.id().logical());
+    drop(reply);
+    let mut returning = begin;
+    *returning.last_mut().unwrap() = 0;
+    let incoming = opened_frame(
+        &case.public,
+        &case.route,
+        (3, 6, 0, child.id().logical()),
+        &returning,
+        None,
+    );
+    let reply = super::super::confirmation_settlement::apply(&case.context, &case.route, incoming)
+        .seal()
+        .unwrap();
+    let closed = opened_reply(
+        &case.public,
+        (3, 6, 0, child.id().logical()),
+        &returning,
+        &reply,
+    );
+    assert_eq!(closed[18], 4);
+    drop(reply);
+    let mut final_body = selector;
+    final_body.push(2);
+    let incoming = opened_frame(
+        &case.public,
+        &case.route,
+        (4, 6, 0, case.id.logical()),
+        &final_body,
+        None,
+    );
+    let reply = bounded(plan_final::apply(&case.context, &case.route, incoming))
+        .await
+        .unwrap();
+    let issued = opened_reply(
+        &case.public,
+        (4, 6, 0, case.id.logical()),
+        &final_body,
+        &reply,
+    );
+    assert_eq!(&issued[..2], &[1, 4]);
+    assert_eq!(&issued[66..68], &[2, 1]);
+    drop(reply);
+    let mut acknowledgement = final_body[..105].to_vec();
+    acknowledgement.extend_from_slice(&issued[68..100]);
+    let incoming = opened_frame(
+        &case.public,
+        &case.route,
+        (5, 7, 0, case.id.logical()),
+        &acknowledgement,
+        None,
+    );
+    let reply = super::super::finalization::respond(&case.context, &case.route, incoming)
+        .seal()
+        .unwrap();
+    let acknowledged = opened_reply(
+        &case.public,
+        (5, 7, 0, case.id.logical()),
+        &acknowledgement,
+        &reply,
+    );
+    assert_eq!(&acknowledged[66..68], &[2, 2]);
+    drop(reply);
+    case.native.close().await;
+}
+
 /// Actual native bootstrap + independent client MAC/AEAD for sibling executor regressions.
 /// Fixture allocations are not application custody evidence; returned Incoming is the real
 /// original Session owner and has already passed header authentication and body opening.
