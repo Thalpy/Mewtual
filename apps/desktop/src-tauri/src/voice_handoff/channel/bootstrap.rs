@@ -2,7 +2,8 @@
 //! A registry must retain its Pending ticket before construction, then atomically install the
 //! result under the original selected-owner/generation fence. These keys grant no Root effect.
 use super::{
-    Counters, Keys, Refused, Session, BOOTSTRAP_BYTES, BROWSER_CONTROL_BYTES, CONTROL_BYTES,
+    Counters, Keys, Refused, Session, SessionIdentity, BOOTSTRAP_BYTES, BROWSER_CONTROL_BYTES,
+    CONTROL_BYTES,
 };
 use crate::voice_authority::{Binding, SelectedHandoffOwner};
 use catcoms_rt::rng::RngError;
@@ -120,6 +121,7 @@ impl Prepared {
         // claim about arithmetic temporaries, provider heaps or later join-key compromise.
         drop(ephemeral);
         let session = Arc::new(Session {
+            identity: Arc::new(SessionIdentity(public.hash)),
             resources: self.selected.resources(),
             group: self.selected.binding().scope.group,
             slot: self.slot,

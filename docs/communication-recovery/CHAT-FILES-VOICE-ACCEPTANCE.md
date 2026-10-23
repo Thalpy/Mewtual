@@ -1,5 +1,13 @@
 # Chat, files and voice implementation evidence
 
+## Terminal-delivery candidate (23 October)
+
+Original-row final intent, separate bounded receipt/ACK, immutable closure mode and exact
+physical-identity collection are implemented but remain inactive at production ingress. Native
+focused208 and browser codec65 pass; static Svelte check reports zero errors/warnings, and
+adversarial re-review is clear. Complete current-source gates are pending. HANDOVER records
+source and failed iteration logs. This is neither action delivery nor live V2/RTC acceptance.
+
 ## Validated proof retention and automatic cleanup retry (22 October)
 
 Frozen runtime `edf923c107f3d11bf635a3e58a04e0b673edd7c1` passed the current native/frontend/static/build gates.

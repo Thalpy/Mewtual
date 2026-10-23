@@ -1,5 +1,30 @@
 # Mewtual; Interfaces & Hooks Schema
 
+## Inactive terminal closure and final receipt (23 October)
+
+ClosePhase6 requires version1, complete104B purpose and one mode byte:0 returns the original
+action phase;1 retires the original whole confirmation plan. Plaintext is106B. The105B mode-less
+shape was never enabled in production and now refuses. First choice is immutable while copies
+remain. Pending supports only ordinary local closure, never whole-Workflow retirement.
+
+The inactive finalization adapter authenticates original Session/Control, complete purpose and
+exact header RowId before terminal Close6 or FinalAck7. Phase admission requires actual native
+engine settlement and any actual terminal receipt ACK. It takes no Work/Input. One gated
+non-waiting compaction visit shares the sole visitor with wait_compacted; delayed copies/Root
+owners yield Pending/refusal rather than parking a listener on a non-notifying Root snapshot.
+
+Separate final replies are100B: version1/tag4, RowId16, action serial8/version8/inputTag32,
+mode1 (terminal=1), disposition1 (0Pending/1Issued/2Acknowledged), proof32. Pending padding is
+zero. Noncanonical fields and contradictory ACK-without-proof refuse in release. Browser
+decoding requires expected row/action; an expected proof additionally requires Acknowledged
+with that proof. The242B history schema remains unchanged and grants no engine admission.
+
+Native intent retains the SAME independent SessionIdentity allocation. Stored issuance names
+original transcript/full purpose/RowId/action/mode. ACK compares that exact stored proof and
+allocation after End/lock or lost replies; normal channel closure requires final ACK. GC still
+requires original physical identity, dead lease, original Root readiness and sole indexed
+ownership; it need not invent ACK to discard unreachable history. No new opcode is enabled.
+
 ## Native final snapshot and browser cleanup retry (22 October)
 
 `ResolvedRow::confirmation_status() -> Result<ConfirmationStatus, VoiceError>` reads the

@@ -33,6 +33,61 @@ const NAMES: [&str; 12] = [
 fn vectors() -> Value {
     serde_json::from_str(include_str!("vectors.json")).unwrap()
 }
+
+#[test]
+fn separate_final_vectors_bind_exact_action_mode_and_closed_delivery_disposition() {
+    for case in vectors()["finalCases"].as_array().unwrap() {
+        let value = &case["expected"];
+        let identity = &value["identity"];
+        let receipt = FinalReceipt {
+            row: RowId::from_logical(
+                hex::decode(value["row"].as_str().unwrap())
+                    .unwrap()
+                    .try_into()
+                    .unwrap(),
+            )
+            .unwrap(),
+            action: super::super::requests::Action {
+                serial: number(&identity["action"]),
+                version: number(&identity["version"]),
+                input_tag: hash(&identity["inputTag"]),
+            },
+            proof: (!value["proof"].is_null()).then(|| hash(&value["proof"])),
+            acknowledged: value["stage"] == "acknowledged",
+        };
+        let encoded = final_receipt(receipt).unwrap();
+        assert_eq!(
+            encoded.as_slice(),
+            hex::decode(case["plaintext"].as_str().unwrap()).unwrap()
+        );
+        assert!(encoded.len() <= 256);
+    }
+}
+
+#[test]
+fn final_encoder_rejects_noncanonical_identity_and_ack_without_issuance_in_release() {
+    let mut logical = [0; 16];
+    logical[15] = 1;
+    let original = FinalReceipt {
+        row: RowId::from_logical(logical).unwrap(),
+        action: super::super::requests::Action {
+            serial: 1,
+            version: 1,
+            input_tag: [0; 32],
+        },
+        proof: None,
+        acknowledged: false,
+    };
+    for index in 0..3 {
+        let mut bad = original;
+        match index {
+            0 => bad.action.serial = 0,
+            1 => bad.action.version = 0,
+            _ => bad.acknowledged = true,
+        }
+        assert!(final_receipt(bad).is_err());
+    }
+}
 fn hash(value: &Value) -> [u8; 32] {
     hex::decode(value.as_str().unwrap())
         .unwrap()

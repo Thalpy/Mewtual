@@ -2,12 +2,38 @@
 //! listener operation. Authenticate the original Session and resolve the complete native
 //! purpose BEFORE encoding; the original prepaid Control owner must cover this stack/output.
 use super::factory::Refused;
-use super::ledger::{PendingStatus, RowId, Status};
+use super::ledger::{FinalReceipt, PendingStatus, RowId, Status};
 use super::requests::{error_code, receipt_digest};
 use catcoms_sync::voice_v2::crypto_actions::CryptoOutcome;
 use catcoms_sync::voice_v2::VoiceError;
 
 pub(super) const STATUS_BYTES: usize = 242;
+pub(super) const FINAL_BYTES: usize = 100;
+
+/// Separate bounded Control metadata: exact Row/action, terminal mode, and Pending/Issued/
+/// Acknowledged. A zero-padded Pending is never retirement evidence. History's 242 bytes
+/// cannot accommodate a final proof in its unchanged 256-byte plaintext envelope.
+pub(super) fn final_receipt(receipt: FinalReceipt) -> Result<[u8; FINAL_BYTES], VoiceError> {
+    RowId::from_logical(receipt.row.logical())?;
+    if receipt.action.serial == 0
+        || receipt.action.version == 0
+        || (receipt.acknowledged && receipt.proof.is_none())
+    {
+        return Err(VoiceError::Malformed);
+    }
+    let mut bytes = [0; FINAL_BYTES];
+    bytes[..2].copy_from_slice(&[1, 4]);
+    bytes[2..18].copy_from_slice(&receipt.row.logical());
+    bytes[18..26].copy_from_slice(&receipt.action.serial.to_be_bytes());
+    bytes[26..34].copy_from_slice(&receipt.action.version.to_be_bytes());
+    bytes[34..66].copy_from_slice(&receipt.action.input_tag);
+    bytes[66] = 1; // only terminal retirement can have this reply
+    if let Some(proof) = receipt.proof {
+        bytes[67] = if receipt.acknowledged { 2 } else { 1 };
+        bytes[68..100].copy_from_slice(&proof);
+    }
+    Ok(bytes)
+}
 
 /// One canonical fixed historical observation, never a fresh factory/input/engine permit.
 /// The digest names the ACTUAL native receipt and excludes observational `retired`, exactly

@@ -1,5 +1,18 @@
 # Next voice milestone: native result recovery
 
+## Terminal-delivery work (23 October, validation in progress)
+
+The final-proof checkout adds original-row terminal intent, separate100B final replies,
+deterministic stored issuance/exact ACK, immutable Return/Retire mode and physical-identity GC.
+Production final/action dispatch stays disabled. Focused validation and actual-diff re-review
+are in progress; previous complete gates do not validate this source. HANDOVER records evidence.
+
+Remaining: canonical Input/admitted-permit replies; prepaid browser Input intake; native
+data/result/receipt/settlement adapters; authenticated original-Session browser cleanup after
+End, retaining keys through final exchange; and an actual Actor/WebView action cycle. Action
+settlement must remain independent of whole-chain/final drainage. Production V2 signalling/
+call lifecycle and external download resume belong to other agents and are outside this work.
+
 ## Current proof retention and cleanup retry candidate (22 October)
 
 The isolated final-proof checkout follows `e560d319`. Compacted final-intent history retains

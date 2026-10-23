@@ -5,6 +5,7 @@
 use super::bootstrap::Route;
 use super::channel::{Incoming, Operation};
 use super::context::Context;
+use super::custody::CloseMode;
 use super::factory::Refused;
 use super::ledger::{Purpose, RowId, Status};
 use super::requests::{Kind, Request};
@@ -41,8 +42,15 @@ fn close_original(
         incoming.operation(),
         incoming.plain().map_err(|_| VoiceError::Malformed)?,
     )?;
-    if !matches!(request.kind, Kind::ClosePhase) {
-        return Err(VoiceError::Malformed.into());
+    if !matches!(
+        request.kind,
+        Kind::ClosePhase {
+            mode: CloseMode::Return
+        }
+    ) {
+        // A possibly published Pair does not give this local Pending a capability to close
+        // Root's Workflow. In particular it must never issue a whole-plan final proof.
+        return Err(VoiceError::Unauthorized.into());
     }
     let context = context.upgrade().ok_or(Refused::Closed)?;
     let row = context.ledger.resolve(

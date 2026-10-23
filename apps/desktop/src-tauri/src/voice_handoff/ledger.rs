@@ -5,8 +5,8 @@
 //! This is deliberately a finite pilot: pending, live and drained rows share 32 positions. A
 //! live owner cannot evict old uncertain history to make space. Physical reply/control-flight
 //! prepayment, authenticated browser drainage and live dispatch are separate integration gates.
-use super::channel::{AuthenticatedRequest, BodyKind, Operation};
-use super::custody::{ConfirmationStatus, CopyCustody, Phase, PreparedPhase};
+use super::channel::{AuthenticatedRequest, BodyKind, Operation, SessionIdentity};
+use super::custody::{CloseMode, ConfirmationStatus, CopyCustody, Phase, PreparedPhase};
 use crate::voice_authority::SelectedHandoffOwner;
 use catcoms_sync::voice_v2::crypto_actions::{
     CryptoAction, CryptoOperation, CryptoResultReceipt, CryptoResultStatus,
@@ -21,7 +21,7 @@ use tokio::sync::Notify;
 const ROWS: usize = 32;
 const ROW_BYTES: usize = 2048;
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct RowId {
     slot: usize,
     serial: u64,
@@ -123,6 +123,10 @@ enum ClosePending {
     Retire(PendingRetirement),
 }
 struct Live {
+    // The existing paid Phase's fixed graph covers the independent identity allocation.
+    // Drop delivery BEFORE phase on every abandonment/unwind, including whole-ledger Drop.
+    // Compaction transfers this SAME delivery into Body::Drained before dropping Live.
+    final_delivery: Option<FinalDelivery>,
     selected: Arc<SelectedHandoffOwner>,
     action: Arc<CryptoAction>,
     phase: Arc<Phase>,
@@ -134,7 +138,7 @@ enum Body {
     ClosingPending,
     ClosedPending,
     Live(Live),
-    Drained,
+    Drained(Option<FinalDelivery>),
 }
 struct State {
     body: Body,
@@ -147,6 +151,39 @@ struct State {
     // Monotonic native-only proof. It is independent of action/Phase drainage and cannot be
     // inferred from a browser FinalACK, timeout, lease revocation or copied selected fields.
     session_collected: bool,
+}
+// Original-Session intent precedes local/Root close. The token retains NO Session or key.
+// Live/Drained reuse enum storage occupied by the larger Pending preparation. The SAME
+// original Phase payment covers its independent token allocation through delivery Drop.
+struct FinalDelivery {
+    session: Arc<SessionIdentity>,
+    issued: Option<[u8; 32]>,
+    acknowledged: bool,
+}
+/// Fixed original-row final delivery metadata, separate from the 242-byte history schema.
+/// It proves neither channel collection nor SDK erasure. Only native issuance can create it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct FinalReceipt {
+    pub row: RowId,
+    pub action: super::requests::Action,
+    pub proof: Option<[u8; 32]>,
+    pub acknowledged: bool,
+}
+impl State {
+    fn final_delivery(&self) -> Option<&FinalDelivery> {
+        match &self.body {
+            Body::Live(live) => live.final_delivery.as_ref(),
+            Body::Drained(delivery) => delivery.as_ref(),
+            _ => None,
+        }
+    }
+    fn final_delivery_mut(&mut self) -> Option<&mut FinalDelivery> {
+        match &mut self.body {
+            Body::Live(live) => live.final_delivery.as_mut(),
+            Body::Drained(delivery) => delivery.as_mut(),
+            _ => None,
+        }
+    }
 }
 struct Row {
     id: RowId,
@@ -202,6 +239,191 @@ pub(crate) struct ResolvedRow {
     row: Arc<Row>,
 }
 impl ResolvedRow {
+    /// Hold original indexed ownership through a metadata mutation. Slot+serial alone is
+    /// insufficient for a retained orphan; native allocation equality is checked as well.
+    fn indexed(&self) -> Result<std::sync::MutexGuard<'_, Index>, VoiceError> {
+        let index = self.ledger.index.lock().unwrap_or_else(|e| e.into_inner());
+        if !index
+            .rows
+            .get(self.row.id.slot)
+            .and_then(Option::as_ref)
+            .is_some_and(|row| row.id == self.row.id && Arc::ptr_eq(row, &self.row))
+        {
+            return Err(VoiceError::Unauthorized);
+        }
+        Ok(index)
+    }
+    /// Authenticated adapter only, after exact browser action SDK/result settlement. Admit
+    /// local closure without taking Work/copies which would wait on their own destruction.
+    /// Root retirement and original loan destruction happen only after Row guard release.
+    pub(super) fn close_phase(
+        &self,
+        session: &Arc<SessionIdentity>,
+        mode: CloseMode,
+    ) -> Result<(), VoiceError> {
+        self.reconcile()?;
+        let closing = {
+            let _index = self.indexed()?;
+            let row = &self.row;
+            let mut state = row.state.lock().unwrap_or_else(|e| e.into_inner());
+            let phase = match &state.body {
+                Body::Live(live) if !live.worker && !live.observer => live.phase.clone(),
+                Body::Live(_) => return Err(VoiceError::Capacity),
+                Body::Drained(_) if mode == CloseMode::Retire => {
+                    state.final_phase.clone().ok_or(VoiceError::Unauthorized)?
+                }
+                Body::Drained(_)
+                    if state.final_phase.is_none() && state.final_delivery().is_none() =>
+                {
+                    return Ok(())
+                }
+                // Ordinary compaction already returned its only capability. A terminal
+                // request can never relabel it, nor can ClosedPending close Root's plan.
+                _ => return Err(VoiceError::Unauthorized),
+            };
+            if !state.status.engine.settled
+                || (state.status.engine.receipt.is_some() && !state.status.acknowledged)
+            {
+                return Err(VoiceError::Capacity);
+            }
+            if let Some(delivery) = state.final_delivery() {
+                if mode != CloseMode::Retire || !Arc::ptr_eq(&delivery.session, session) {
+                    return Err(VoiceError::Unauthorized);
+                }
+            } else if matches!(state.body, Body::Drained(_)) {
+                return Err(VoiceError::Unauthorized);
+            }
+            let closing = phase.begin_close(mode)?;
+            if mode == CloseMode::Retire && state.final_delivery().is_none() {
+                // The authenticated original Session is physically alive now. A witness
+                // for an equal-selected foreign Session received before this intent cannot
+                // prove that this one was collected. Future evidence must match this token.
+                state.session_collected = false;
+                let Body::Live(live) = &mut state.body else {
+                    unreachable!("new intent on original Live only")
+                };
+                live.final_delivery = Some(FinalDelivery {
+                    session: session.clone(),
+                    issued: None,
+                    acknowledged: false,
+                });
+            }
+            closing
+        };
+        // Dropping this actual original ticket may retire Root. Never do so under State.
+        drop(closing);
+        Ok(())
+    }
+
+    /// Issue once only AFTER actual local compaction and original variable Workflow
+    /// retirement. Repeated requests recover the same stored proof; there is no Clock,
+    /// factory, grant upgrade, variable owner or new allocation even under full pressure.
+    pub(super) fn issue_final(
+        &self,
+        session: &Arc<SessionIdentity>,
+    ) -> Result<FinalReceipt, VoiceError> {
+        use sha2::{Digest, Sha256};
+        let _index = self.indexed()?;
+        let row = &self.row;
+        let mut state = row.state.lock().unwrap_or_else(|e| e.into_inner());
+        let delivery = state.final_delivery().ok_or(VoiceError::Unauthorized)?;
+        if !Arc::ptr_eq(&delivery.session, session) {
+            return Err(VoiceError::Unauthorized);
+        }
+        let (serial, version, input) = state.status.action.ok_or(VoiceError::Unauthorized)?;
+        let action = super::requests::Action {
+            serial,
+            version,
+            input_tag: input,
+        };
+        if !matches!(state.body, Body::Drained(_))
+            || state.final_phase.is_none()
+            || !Ledger::final_retirement_ready(&state)
+        {
+            return Ok(FinalReceipt {
+                row: row.id,
+                action,
+                proof: None,
+                acknowledged: false,
+            });
+        }
+        let proof = if let Some(proof) = delivery.issued {
+            proof
+        } else {
+            let Purpose::Derive(selector) = row.key.purpose;
+            let mut hash = Sha256::new();
+            hash.update(b"Mewtual native voice final retirement v1\0");
+            hash.update(session.0);
+            hash.update(row.id.logical());
+            hash.update([0]); // closed Purpose::Derive tag
+            hash.update(selector.peer.as_bytes());
+            hash.update(selector.join);
+            hash.update(selector.key_ref);
+            hash.update(selector.epoch.to_be_bytes());
+            hash.update(serial.to_be_bytes());
+            hash.update(version.to_be_bytes());
+            hash.update(input);
+            hash.update([1]); // terminal retirement, never ordinary return
+            hash.finalize().into()
+        };
+        let delivery = state.final_delivery_mut().expect("checked original intent");
+        delivery.issued = Some(proof);
+        Ok(FinalReceipt {
+            row: row.id,
+            action,
+            proof: Some(proof),
+            acknowledged: delivery.acknowledged,
+        })
+    }
+
+    /// ACK is observation only, usable after End/lock and an ACK reply loss. Even a guessed
+    /// correct digest refuses before native issuance. It never manufactures Root retirement
+    /// or actual physical channel collection, and never removes the original purpose fence.
+    pub(super) fn acknowledge_final(
+        &self,
+        session: &Arc<SessionIdentity>,
+        proof: [u8; 32],
+    ) -> Result<FinalReceipt, VoiceError> {
+        let _index = self.indexed()?;
+        let row = &self.row;
+        let mut state = row.state.lock().unwrap_or_else(|e| e.into_inner());
+        let (serial, version, input_tag) = state.status.action.ok_or(VoiceError::Unauthorized)?;
+        let delivery = state.final_delivery_mut().ok_or(VoiceError::Unauthorized)?;
+        if !Arc::ptr_eq(&delivery.session, session) || delivery.issued != Some(proof) {
+            return Err(VoiceError::Unauthorized);
+        }
+        delivery.acknowledged = true;
+        Ok(FinalReceipt {
+            row: row.id,
+            action: super::requests::Action {
+                serial,
+                version,
+                input_tag,
+            },
+            proof: Some(proof),
+            acknowledged: true,
+        })
+    }
+
+    /// One bounded non-waiting compaction visit for the serial authenticated cleanup driver.
+    /// Share the SAME sole-waiter gate as wait_compacted; do not admit a quiet observer in
+    /// parallel or park a physical request waiting for the Root's non-notifying snapshot.
+    pub(super) fn try_compact(&self) -> Result<bool, VoiceError> {
+        let _index = self.indexed()?;
+        if self
+            .row
+            .cleanup_waiter
+            .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+            .is_err()
+        {
+            return Err(VoiceError::Capacity);
+        }
+        let waiter = CleanupWaiter(self.row.clone());
+        drop(_index);
+        let result = self.ledger.compact(self.row.id);
+        drop(waiter);
+        result
+    }
     /// Fixed metadata for an authenticated reply after a lost factory response. The ID is
     /// never authority: later operations must still resolve this same native provenance.
     pub(crate) fn id(&self) -> RowId {
@@ -221,7 +443,7 @@ impl ResolvedRow {
         let state = row.state.lock().unwrap_or_else(|error| error.into_inner());
         Ok(match &state.body {
             Body::Live(live) => live.phase.confirmation_status(),
-            Body::Drained => state
+            Body::Drained(_) => state
                 .final_phase
                 .as_ref()
                 .map_or(ConfirmationStatus::NotRequested, |phase| {
@@ -269,8 +491,12 @@ impl Ledger {
                 return true;
             }
             let state = row.state.lock().unwrap_or_else(|error| error.into_inner());
-            matches!(state.body, Body::Drained | Body::ClosedPending)
+            matches!(state.body, Body::Drained(_) | Body::ClosedPending)
                 && Self::final_retirement_ready(&state)
+                && ((state.final_phase.is_none() && state.final_delivery().is_none())
+                    || state
+                        .final_delivery()
+                        .is_some_and(|delivery| delivery.issued.is_some() && delivery.acknowledged))
         })
     }
 
@@ -295,10 +521,14 @@ impl Ledger {
             let index = self.index.lock().unwrap_or_else(|error| error.into_inner());
             for row in index.rows.iter().flatten() {
                 if row.key.matches(collected.selected(), row.key.purpose) {
-                    row.state
-                        .lock()
-                        .unwrap_or_else(|error| error.into_inner())
-                        .session_collected = true;
+                    let mut state = row.state.lock().unwrap_or_else(|error| error.into_inner());
+                    if state.final_delivery().is_none_or(|delivery| {
+                        collected
+                            .identity()
+                            .is_some_and(|identity| Arc::ptr_eq(identity, &delivery.session))
+                    }) {
+                        state.session_collected = true;
+                    }
                 }
             }
         }
@@ -324,7 +554,7 @@ impl Ledger {
                     }
                     let state = row.state.lock().unwrap_or_else(|error| error.into_inner());
                     state.session_collected
-                        && matches!(state.body, Body::Drained | Body::ClosedPending)
+                        && matches!(state.body, Body::Drained(_) | Body::ClosedPending)
                         && Self::final_retirement_ready(&state)
                 });
                 if reclaim {
@@ -364,7 +594,7 @@ impl Ledger {
         let state = row.state.lock().unwrap_or_else(|error| error.into_inner());
         match &state.body {
             Body::Live(live) => Ok(live.phase.clone()),
-            Body::Pending(_) | Body::ClosingPending | Body::ClosedPending | Body::Drained => {
+            Body::Pending(_) | Body::ClosingPending | Body::ClosedPending | Body::Drained(_) => {
                 Err(VoiceError::Capacity)
             }
         }
@@ -558,7 +788,7 @@ impl Ledger {
                 Body::ClosingPending => return Err(VoiceError::Capacity),
                 Body::Pending(pending) if !pending.worker && state.status.action.is_none() => {}
                 Body::Pending(_) => return Err(VoiceError::Capacity),
-                Body::Live(_) | Body::Drained => return Err(VoiceError::Unauthorized),
+                Body::Live(_) | Body::Drained(_) => return Err(VoiceError::Unauthorized),
             }
             state.status.pending = PendingStatus::Closing;
             let Body::Pending(pending) = std::mem::replace(&mut state.body, Body::ClosingPending)
@@ -706,7 +936,7 @@ impl Ledger {
     /// compaction does NOT wait for full Root retirement: it preserves the original final
     /// Phase proof instead. Channel closure and history GC check that separate snapshot.
     fn compact(&self, id: RowId) -> Result<bool, VoiceError> {
-        // Only wait_compacted's gated sole waiter may call this quiet path in production.
+        // Only wait_compacted/try_compact's gated sole visitor may use this quiet path.
         // Another native caller could otherwise overlap an unnotified quiet observation.
         // The sole cleanup waiter must not wake itself merely by observing unchanged history.
         // External observation retirement still notifies readiness after releasing its fence.
@@ -714,7 +944,7 @@ impl Ledger {
         let row = self.row(id)?;
         let retired = {
             let mut state = row.state.lock().unwrap_or_else(|error| error.into_inner());
-            if matches!(state.body, Body::Drained) {
+            if matches!(state.body, Body::Drained(_)) {
                 return Ok(true);
             }
             let Body::Live(live) = &state.body else {
@@ -741,7 +971,12 @@ impl Ledger {
             if let Some(receipt) = &mut state.status.engine.receipt {
                 receipt.retired = true; // this closed phase can never admit another first effect
             }
-            std::mem::replace(&mut state.body, Body::Drained)
+            let mut retired = std::mem::replace(&mut state.body, Body::Drained(None));
+            let Body::Live(live) = &mut retired else {
+                unreachable!("checked original Live")
+            };
+            state.body = Body::Drained(live.final_delivery.take());
+            retired
         };
         // Native input/action/Workflow owners and affine worker grants must never destruct
         // beneath State/Index. Compacted history retains only fixed evidence/provenance and,
@@ -770,7 +1005,7 @@ impl Ledger {
             let state = row.state.lock().unwrap_or_else(|error| error.into_inner());
             match &state.body {
                 Body::Live(live) => Some(live.phase.clone()),
-                Body::Drained => None,
+                Body::Drained(_) => None,
                 Body::Pending(_) | Body::ClosingPending => return Err(VoiceError::Capacity),
                 Body::ClosedPending => return Ok(state.status.clone()),
             }
@@ -885,6 +1120,7 @@ impl Registration {
                     phase,
                     worker: false,
                     observer: false,
+                    final_delivery: None,
                 }),
             )
         };

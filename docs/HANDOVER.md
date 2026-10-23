@@ -1,5 +1,34 @@
 # Mewtual; Handover
 
+## Native terminal-delivery candidate (23 October)
+
+Work continues in target/communication-final-proof-worktree from published346062af. Production
+V2 signalling/call lifecycle and external download resume are assigned to other agents and
+untouched here. The native/browser handoff remains incomplete; this is its next bounded slice.
+
+Implemented: explicit immutable ordinary Return versus terminal Retire; actual original-loan
+ticket destruction outside native guards; original-Session terminal intent; separate100B
+Pending/Issued/Acknowledged replies; stable stored issuance and exact ACK; normal channel-close
+preflight requires final ACK. Independent actual physical collection/Root readiness/dead lease/
+last metadata-owner GC can discard unreachable unACKed history without inventing ACK.
+An equal-hash foreign Session, including collection before terminal intent, cannot supply proof.
+Production still exposes Status/read-only history only. No browser final/action driver is enabled.
+
+Focused native208/208 passes in4.75s (102.16s compile/gate). Browser codec65/65 passes; Svelte
+has zero errors/warnings, native formatting passes. Read-only actual-diff review/re-review has
+no remaining actionable blocker/high/medium. Full validation is pending on this candidate;
+older source-specific complete results below do not establish these new runtime changes.
+Failed compile/layout/fixture runs remain in target/voice-final-proof-native-focus-3..5.log.
+The initial Row graph exceeded2KiB. Final state reuses Live/Drained enum space; SAME original
+Phase2KiB payment covers the independent48B token allocation, with verified field-drop order.
+Session12KiB, bootstrap8KiB and Control12KiB guards cover their separate actual lifetimes.
+No capacity limit is raised. Current focused guard and runtime tests all pass.
+
+Next: canonical Input/admitted-permit replies and prepaid browser Input intake; native action
+adapters; authenticated original-Session browser cleanup after End retaining keys through final
+issuance/ACK; actual Actor/MLS/WebView action acceptance. Action settlement cannot wait on
+whole-chain/final drainage. Those remain this agent's work. Do not claim live V2 or media readiness.
+
 ## Validated proof retention and automatic cleanup retry (22 October)
 
 Frozen runtime `edf923c107f3d11bf635a3e58a04e0b673edd7c1` passed the current native/frontend/static/build gates.

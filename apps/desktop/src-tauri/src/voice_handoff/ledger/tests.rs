@@ -7,6 +7,7 @@ use catcoms_crypto::DeviceKeypair;
 use catcoms_sync::voice_v2::runtime::Runtime;
 use catcoms_sync::voice_v2::{key_reference, Scope};
 
+mod finalization;
 mod pending;
 mod retirement;
 

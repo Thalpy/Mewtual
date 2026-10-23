@@ -1,5 +1,29 @@
 # Threat model; client integrity & enforcement boundaries
 
+## Terminal delivery and physical collection (23 October)
+
+First ordinary/terminal closure mode is immutable before delayed copies drain. Terminal intent
+latches the original private SessionIdentity before Root closes. Hash equality, renderer IDs,
+dead lease and actor_handoff Pending metadata cannot replace that allocation or mint a Root
+retirement capability. Its separate fixed token retains no Session, framing key or Workflow.
+
+A final proof is a deterministic name, not secret authority. Even an exact predicted proof
+refuses ACK until native stores issuance after real compaction and Root retirement. Lost
+issuance/ACK replies recover the same state. Normal setup/channel closure cannot overtake ACK.
+ACK means receipt of issued proof, not that the browser read the ACK response or erased memory.
+
+Forced shutdown may make ACK unreachable. Independent GC requires original dead lease, SAME
+physical identity, Root readiness and last metadata-owner collection, without setting ACK.
+A foreign equal-selected Session cannot supply this proof, including before intent was latched.
+Every mutator checks indexed slot/serial/native Row allocation. Original retirement tickets
+and displaced owners drop outside native guards. Existing enum space and caps pay the state.
+
+The separate100B canonical Control grammar binds expected row/action/mode; Pending never means
+retirement. The inactive adapter retains physical Incoming through response collection and
+creates no data owner while waiting for its own drainage. Production rejects these opcodes.
+Browser post-End key retention, Input/engine delivery, normal Actor/MLS/WebView action success,
+live V2/RTC and physical media acceptance remain outside this increment.
+
 ## Preserving original retirement proof and bounded cleanup progress (22 October)
 
 Local 16 KiB return cannot become whole 96 KiB retirement by dropping Phase. Final-intent

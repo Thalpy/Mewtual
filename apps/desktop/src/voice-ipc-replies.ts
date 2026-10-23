@@ -16,7 +16,50 @@ export type VoiceIpcReceipt = Readonly<{
 export type VoiceIpcActionReply = Readonly<{ kind: "refused"; code: "closed" | "stopped" | VoiceIpcProtocolError }> |
   Readonly<{ kind: "status"; row: string; pending: VoiceIpcPending; identity: VoiceIpcActionIdentity | null;
     settled: boolean; receipt: VoiceIpcReceipt | null; acknowledged: boolean; localDrained: boolean }>;
+export type VoiceIpcFinalReply = Extract<VoiceIpcActionReply, { kind: "refused" }> |
+  Readonly<{ kind: "final"; row: string; identity: VoiceIpcActionIdentity; mode: "retire";
+    stage: "pending"; proof: null }> |
+  Readonly<{ kind: "final"; row: string; identity: VoiceIpcActionIdentity; mode: "retire";
+    stage: "issued" | "acknowledged"; proof: string }>;
 const fail = (): never => { throw new Error("invalid voice action reply"); };
+
+/** Only an authenticated original-channel reply may reach this decoder. The exact expected
+ * row AND action are mandatory; history/final metadata cannot create engine or RTC authority.
+ * The original paid Control driver covers these bounded objects/strings. This pure codec
+ * performs no fetch, setup, provider action, ACK, retry, or cleanup on the caller's behalf. */
+export function decodeVoiceIpcFinalReply(bytes: Uint8Array, expectedRow: string,
+  expectedIdentity: VoiceIpcActionIdentity, expectedProof: string | null = null): VoiceIpcFinalReply {
+  if (!isVoiceIpcActionRow(expectedRow)) return fail();
+  // Validate expected metadata even for a refusal; do not accept lossy/aliased identities.
+  const exactU64 = (text: unknown): text is string => typeof text === "string" &&
+    /^[1-9][0-9]{0,19}$/.test(text) && BigInt(text) <= ((1n << 64n) - 1n);
+  if (!expectedIdentity || !exactU64(expectedIdentity.action) || !exactU64(expectedIdentity.version) ||
+    typeof expectedIdentity.inputTag !== "string" || !/^[0-9a-f]{64}$/.test(expectedIdentity.inputTag) ||
+    (expectedProof !== null && (typeof expectedProof !== "string" || !/^[0-9a-f]{64}$/.test(expectedProof)))) return fail();
+  if (!(bytes instanceof Uint8Array)) return fail();
+  if (bytes.byteLength === 3) {
+    const refused = decodeVoiceIpcActionReply(bytes, expectedRow);
+    if (refused.kind !== "refused") return fail();
+    return refused;
+  }
+  if (bytes.byteLength !== 100 || bytes[0] !== 1 || bytes[1] !== 4 || bytes[66] !== 1 || bytes[67] > 2) return fail();
+  const hex = (start: number, end: number) => {
+    let result = "";
+    for (let i = start; i < end; i++) result += bytes[i].toString(16).padStart(2, "0");
+    return result;
+  };
+  const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  const row = hex(2, 18);
+  const identity = Object.freeze({ action: view.getBigUint64(18).toString(), version: view.getBigUint64(26).toString(), inputTag: hex(34, 66) });
+  if (row !== expectedRow || identity.action !== expectedIdentity.action || identity.version !== expectedIdentity.version || identity.inputTag !== expectedIdentity.inputTag) return fail();
+  const proof = hex(68, 100);
+  if (bytes[67] === 0) {
+    if (proof !== "0".repeat(64) || expectedProof !== null) return fail();
+    return Object.freeze({ kind: "final", row, identity, mode: "retire", stage: "pending", proof: null });
+  }
+  if (expectedProof !== null && (bytes[67] !== 2 || proof !== expectedProof)) return fail();
+  return Object.freeze({ kind: "final", row, identity, mode: "retire", stage: bytes[67] === 2 ? "acknowledged" : "issued", proof });
+}
 
 export function isVoiceIpcActionRow(row: unknown): row is string {
   return typeof row === "string" && /^[0-9a-f]{32}$/.test(row) &&

@@ -108,6 +108,7 @@ fn paid_fixed_storage_and_original_control_lane_cover_codec_peak() {
     // known live codec temporaries, canonical encoding and a reserved 1 KiB for the future IO
     // wrapper. That wrapper still requires its own actual layout/copy/collection proof.
     let peak = std::mem::size_of::<Session>()
+        + std::mem::size_of::<SessionIdentity>() + 2 * std::mem::size_of::<usize>()
         + std::mem::size_of::<PhysicalPosition>()
         + 2 * std::mem::size_of::<usize>()
         + std::mem::size_of::<PhysicalHold>()
@@ -118,7 +119,7 @@ fn paid_fixed_storage_and_original_control_lane_cover_codec_peak() {
         + http::HEADER_BYTES // FULL fixed Box allocation, not merely its inline pointer
         // Only one synchronous Control opcode owns this original physical position. Count
         // its largest complete handler graph, not a sum of mutually exclusive dispatch arms.
-        + super::super::pending_close::layout_bytes().max(super::super::history::layout_bytes())
+        + super::super::pending_close::layout_bytes().max(super::super::history::layout_bytes()).max(super::super::finalization::layout_bytes())
         + std::mem::size_of::<Aes256Gcm>()
         + 2 * std::mem::size_of::<Hmac<Sha256>>()
         + crypto::HEADER * 4

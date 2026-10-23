@@ -9,6 +9,99 @@ use catcoms_sync::voice_v2::presence::PairSelector;
 use catcoms_sync::voice_v2::VoiceError;
 
 #[tokio::test]
+async fn unacknowledged_final_gc_requires_matching_physical_identity_and_late_metadata_drainage() {
+    use crate::voice_handoff::custody::CloseMode;
+    for foreign_before_intent in [false, true] {
+        let (mut coordinator, selected, selector) = selection();
+        let ledger = Arc::new(Ledger::default());
+        let original_registry = Registry::default();
+        let foreign_registry = Registry::default();
+        let (output, route) = installed(&original_registry, selected.clone());
+        let (foreign_output, foreign_route) = installed(&foreign_registry, selected.clone());
+        // The test has completed both channel constructors before requesting the protected
+        // action. Release their original setup-work credits; retain both Control lanes.
+        route.acknowledge_setup().unwrap();
+        foreign_route.acknowledge_setup().unwrap();
+        assert_eq!(
+            route.hash(),
+            foreign_route.hash(),
+            "equal transcript metadata fixture"
+        );
+        let identity = route.session().identity().clone();
+        assert!(!Arc::ptr_eq(&identity, foreign_route.session().identity()));
+        let ActionBegin::Factory(registration) = ledger
+            .begin(selected.clone(), Purpose::Derive(selector))
+            .unwrap()
+        else {
+            panic!("new original")
+        };
+        let (join, action, pair) = actual_action(&coordinator, &selected);
+        let input = action.input().unwrap();
+        let id = registration
+            .attach(action.clone(), pair, 16 * 1024)
+            .unwrap();
+        let row = ledger
+            .resolve(&selected, Purpose::Derive(selector), id)
+            .unwrap();
+        action.settle_engine();
+        if !foreign_before_intent {
+            row.close_phase(&identity, CloseMode::Retire).unwrap();
+            assert!(row.try_compact().unwrap());
+        }
+        coordinator.end(selected.id());
+        // Forced shutdown/physical collection is independent of normal ACK-gated close.
+        // Collect an actually different Session with identical public labels and hash.
+        retire(&foreign_registry, &selected);
+        drop((foreign_output, foreign_route));
+        foreign_registry.collect_retired(&ledger);
+        if foreign_before_intent {
+            row.close_phase(&identity, CloseMode::Retire).unwrap();
+            assert!(row.try_compact().unwrap());
+        }
+        assert!(
+            row.issue_final(&identity).unwrap().proof.is_none(),
+            "real late Root input remains"
+        );
+        drop((input, action, join));
+        let issued = row.issue_final(&identity).unwrap();
+        assert!(issued.proof.is_some() && !issued.acknowledged);
+        drop(row);
+        foreign_registry.collect_retired(&ledger);
+        assert!(
+            ledger
+                .lookup_original(&selected, Purpose::Derive(selector))
+                .is_some(),
+            "foreign physical token cannot collect this row"
+        );
+        let late = ledger
+            .resolve(&selected, Purpose::Derive(selector), id)
+            .unwrap();
+        retire(&original_registry, &selected);
+        drop((output, route));
+        original_registry.collect_retired(&ledger);
+        assert_eq!(
+            late.issue_final(&identity).unwrap(),
+            issued,
+            "physical collection must not invent final ACK"
+        );
+        assert!(
+            ledger
+                .lookup_original(&selected, Purpose::Derive(selector))
+                .is_some(),
+            "late metadata still owns original payment"
+        );
+        drop(late);
+        Registry::default().collect_retired(&ledger);
+        assert!(
+            ledger
+                .lookup_original(&selected, Purpose::Derive(selector))
+                .is_none(),
+            "empty sweep collects with actual original proof, without ACK"
+        );
+    }
+}
+
+#[tokio::test]
 async fn actual_channel_collection_keeps_final_proof_until_late_root_input_retires() {
     use crate::voice_handoff::custody::ConfirmationStatus;
     let (mut coordinator, selected, selector) = selection();
@@ -68,7 +161,7 @@ async fn actual_channel_collection_keeps_final_proof_until_late_root_input_retir
     assert!(original_phase.upgrade().is_none());
 }
 
-fn installed(
+pub(in crate::voice_handoff) fn installed(
     registry: &Registry,
     selected: Arc<SelectedHandoffOwner>,
 ) -> (Arc<SetupOutput>, Route) {
@@ -421,8 +514,12 @@ async fn both_explicit_close_variants_keep_control_until_compacted_final_root_pr
         let work = row.work().unwrap();
         let phase = work.phase().clone();
         action.settle_engine();
-        phase.close_confirmation().unwrap();
         drop(work);
+        row.close_phase(
+            route.session().identity(),
+            super::super::super::custody::CloseMode::Retire,
+        )
+        .unwrap();
         assert!(row.wait_compacted().await.unwrap().drained);
         assert_eq!(
             row.confirmation_status().unwrap(),
@@ -455,6 +552,23 @@ async fn both_explicit_close_variants_keep_control_until_compacted_final_root_pr
             row.confirmation_status().unwrap(),
             ConfirmationStatus::Drained
         );
+        for stage in 0..2 {
+            let result = if channel {
+                collect_channel(&f.state, selected.id(), selected.executor()).await
+            } else {
+                settle_setup(&f.state, selected.id(), selected.executor()).await
+            };
+            assert!(
+                matches!(result, Err(Refused::Capacity)),
+                "unACKed final stage {stage}"
+            );
+            assert!(route.require_open().is_ok());
+            let issued = row.issue_final(route.session().identity()).unwrap();
+            assert!(issued.proof.is_some() && !issued.acknowledged);
+        }
+        let issued = row.issue_final(route.session().identity()).unwrap();
+        row.acknowledge_final(route.session().identity(), issued.proof.unwrap())
+            .unwrap();
         let result = if channel {
             collect_channel(&f.state, selected.id(), selected.executor()).await
         } else {

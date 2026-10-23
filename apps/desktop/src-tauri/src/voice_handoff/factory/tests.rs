@@ -553,6 +553,7 @@ async fn registration_completed_uncollected_error_keeps_factory_payment_until_co
     bytes.extend_from_slice(&selector.join);
     bytes.extend_from_slice(&selector.key_ref);
     bytes.extend_from_slice(&selector.epoch.to_be_bytes());
+    bytes.push(0); // exact ordinary ClosePhase mode
     let incoming = crate::voice_handoff::service::tests::opened_frame(
         &public,
         &route,

@@ -9,6 +9,7 @@ mod context;
 pub(crate) mod custody;
 mod derivation_result;
 pub(crate) mod factory;
+mod finalization;
 mod history;
 mod http;
 pub(crate) mod ledger;

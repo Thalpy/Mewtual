@@ -3,6 +3,7 @@
 //! original Session, then resolve the SAME header RowId, actual selection and full purpose.
 //! This module allocates no body/descriptor and cannot run a factory or borrow an engine.
 use super::channel::Operation;
+use super::custody::CloseMode;
 use catcoms_app::DeviceId;
 use catcoms_sync::voice_v2::crypto_actions::{CryptoOutcome, CryptoResultReceipt};
 use catcoms_sync::voice_v2::presence::PairSelector;
@@ -40,7 +41,9 @@ pub(super) enum Kind<'a> {
     Settle {
         action: Action,
     },
-    ClosePhase,
+    ClosePhase {
+        mode: CloseMode,
+    },
     FinalAck {
         proof: [u8; 32],
     },
@@ -100,7 +103,13 @@ impl<'a> Request<'a> {
             Operation::Settle => Kind::Settle {
                 action: cursor.action()?,
             },
-            Operation::ClosePhase => Kind::ClosePhase,
+            Operation::ClosePhase => Kind::ClosePhase {
+                mode: match cursor.take::<1>()? {
+                    [0] => CloseMode::Return,
+                    [1] => CloseMode::Retire,
+                    _ => return Err(VoiceError::Malformed),
+                },
+            },
             Operation::FinalAck => Kind::FinalAck {
                 proof: cursor.take()?,
             },
