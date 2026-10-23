@@ -1,5 +1,8 @@
 //! Coordinator fixtures use synthetic grants; actual actor barriers live in the native tests.
 use super::*;
+// Pressure must track the actual native policy, including future reviewed policy revisions.
+// A historical256KiB filler no longer exercises capacity refusal at the current512KiB limit.
+use catcoms_sync::voice_v2::resources::GROUP_BYTES;
 
 fn point() -> [u8; 65] {
     let mut point = [1; 65];
@@ -30,7 +33,7 @@ fn native_handoff_selection_requires_actual_published_generation_and_reuses_its_
     let group = selected.binding().scope.group;
     let pressure = c
         .resources
-        .charge(group, 256 * 1024 - before.0, ResourceKind::Retained)
+        .charge(group, GROUP_BYTES - before.0, ResourceKind::Retained)
         .unwrap();
     assert!(Arc::ptr_eq(
         &selected,
@@ -82,7 +85,7 @@ fn native_handoff_selection_capacity_refusal_does_not_consume_its_published_gene
         .resources
         .charge(
             c.owner(&owner).unwrap().binding.scope.group,
-            256 * 1024 - before.0,
+            GROUP_BYTES - before.0,
             ResourceKind::Retained,
         )
         .unwrap();
@@ -102,7 +105,7 @@ fn selected_join_key_lost_admission_recovers_one_paid_operation_under_pressure()
     let group = c.owner(&owner).unwrap().binding.scope.group;
     let pressure = c
         .resources
-        .charge(group, 256 * 1024 - baseline.1 .0, ResourceKind::Retained)
+        .charge(group, GROUP_BYTES - baseline.1 .0, ResourceKind::Retained)
         .unwrap();
     for _ in 0..4 {
         let retry = c.admit_join_key(&owner, [9; 32]).unwrap();
@@ -215,7 +218,11 @@ fn selected_join_key_preparation_capacity_does_not_burn_generation_or_serial() {
     let group = c.owner(&owner).unwrap().binding.scope.group;
     let pressure = c
         .resources
-        .charge(group, 256 * 1024 - 64, ResourceKind::Retained)
+        .charge(
+            group,
+            GROUP_BYTES - c.resources.counts().0,
+            ResourceKind::Retained,
+        )
         .unwrap();
     let serial = c.serial;
     assert!(c.admit_join_key(&owner, [9; 32]).is_err());
@@ -258,7 +265,7 @@ fn supplied_selection_check_never_materializes_a_local_cache_for_foreign_equal_l
     let group = local.owner(&local_id).unwrap().binding.scope.group;
     let pressure = local
         .resources
-        .charge(group, 256 * 1024 - before.0, ResourceKind::Retained)
+        .charge(group, GROUP_BYTES - before.0, ResourceKind::Retained)
         .unwrap();
     let full = local.resources.counts();
     assert!(!local.is_current_handoff_owner(&other));
