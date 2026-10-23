@@ -1,5 +1,16 @@
 # Threat model; client integrity & enforcement boundaries
 
+## Detached Begin waiting for UI admission (23 October; combined native draft)
+
+Start/Respond/Incoming Begin may outlive its socket caller. Its common confirmation factory
+must not retain upgraded store/server/Coordinator/registry references during a parked UI
+commit wait. Initial binding observation ends first, leaving only the original commit handle,
+selected/parent identity and already-paid physical/task custody. After acquisition, it upgrades
+the original weak context and repeats native generation/selection/server/Route/grant checks
+before reserving a child or reaching Actor publication. Lock can win without a late adoption.
+The new framed caller-loss test observes that actual commit wait and baseline store ownership;
+combined compilation/runtime proof is pending. No production effect opcode is enabled.
+
 ## Result preparation cancellation (23 October; inactive adapter)
 
 Early Work/task ownership cannot authorize an Actor effect. After scoped binding observation,

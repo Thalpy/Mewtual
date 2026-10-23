@@ -260,6 +260,13 @@ fn worker_layout(future: usize) -> usize {
         + std::mem::size_of::<Response>()
         + std::mem::size_of::<tokio::task::JoinHandle<Response>>()
         + 2 * std::mem::size_of::<usize>()
+        // create/known-child selection performs synchronous native/Root reconciliation
+        // between awaits. These locals are not necessarily stored in the compiler future.
+        + std::mem::size_of::<super::context::LiveContext>()
+        + 2 * std::mem::size_of::<ResolvedRow>()
+        + std::mem::size_of::<RowId>()
+        + super::ledger::reconciliation_layout_bytes()
+        + 128
         + TASK_AND_REPLY_BYTES
 }
 #[cfg(test)]
@@ -278,7 +285,10 @@ pub(super) fn layout_bytes() -> usize {
     // prepare's borrowing decoder has returned before a worker can be spawned. The worker
     // and its actual output are collected before serialization drops its separate payment;
     // count the whole synchronous serialization graph under Control at that later boundary.
-    size(begin) + decode.max(serialization)
+    size(begin)
+        + decode
+            .max(serialization)
+            .max(super::confirmation_history::layout_bytes())
 }
 
 #[cfg(test)]
@@ -291,6 +301,70 @@ mod tests {
         }
         let bytes = size(run);
         assert!(bytes <= TASK_BYTES, "Begin worker requires {bytes}");
+    }
+
+    #[tokio::test]
+    async fn lost_start_begin_waiter_does_not_pin_mounted_context_at_factory_ui_wait() {
+        use super::super::derivation_result::tests::Case;
+        use super::super::service::tests::opened_frame;
+        use std::future::{poll_fn, Future};
+        use std::task::Poll;
+        let case = Case::new().await;
+        let before = case.selected.resources().counts();
+        let boundary = case.native.state.ui_session_commit.lock().await;
+        let commit_owners = Arc::strong_count(&case.native.state.ui_session_commit);
+        let store_owners = Arc::strong_count(&case.native.state.store);
+        let mut body = vec![2];
+        body.extend_from_slice(case.selector.peer.as_bytes());
+        body.extend_from_slice(&case.selector.join);
+        body.extend_from_slice(&case.selector.key_ref);
+        body.extend_from_slice(&case.selector.epoch.to_be_bytes());
+        body.extend_from_slice(&case.id.logical());
+        body.extend_from_slice(&[0, 1]); // actual Start(None), Begin(true)
+        let incoming = opened_frame(&case.public, &case.route, (1, 8, 0, [0; 16]), &body, None);
+        let mut pending = Box::pin(begin(&case.context, &case.route, incoming));
+        assert!(poll_fn(|cx| Poll::Ready(pending.as_mut().poll(cx).is_pending())).await);
+        drop(pending); // actual framed caller loss, not cancellation of its paid worker
+        tokio::time::timeout(std::time::Duration::from_secs(15), async {
+            // Observe the real original commit handle after factory binding completes and
+            // LiveContext drops. The old implementation pins store while this mutex waits.
+            while Arc::strong_count(&case.native.state.ui_session_commit) <= commit_owners
+                || Arc::strong_count(&case.native.state.store) != store_owners
+            {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        assert!(case.route.session().fixture_counts().0);
+        assert_eq!(case.selected.resources().counts().0, before.0 + TASK_BYTES);
+        crate::register_ui_lock_request(&case.native.state);
+        drop(boundary);
+        tokio::time::timeout(
+            std::time::Duration::from_secs(15),
+            case.route.session().fixture_wait_physical_idle(),
+        )
+        .await
+        .unwrap();
+        assert!(case.native.state.ui_session_commit.try_lock().is_ok());
+        assert!(case
+            .native
+            .state
+            .voice_handoff
+            .lookup_child(
+                &case.selected,
+                &case.row(),
+                ConfirmationPurpose::Start(None),
+                None
+            )
+            .is_err());
+        assert!(case.action.terminal_status().receipt.is_none());
+        assert!(case.selected.resources().counts().0 <= before.0);
+        crate::lock_session_inner(&case.native.state, None)
+            .await
+            .unwrap();
+        case.retire();
+        case.native.close().await;
     }
 
     #[tokio::test]

@@ -1439,6 +1439,17 @@ struct Observation {
     action: Option<Arc<CryptoAction>>,
     notify: bool,
 }
+/// Fixed synchronous reconciliation graph, independently of an async worker's inline
+/// frame. Native Row/Root records already pay their persistent cached state; callers must
+/// also pay this actual observer, Root snapshot and transient merge/returned status copies.
+/// No variable input/provider buffer or callback can be hidden behind this fixed inventory.
+pub(super) fn reconciliation_layout_bytes() -> usize {
+    std::mem::size_of::<Observation>()
+        + std::mem::size_of::<CryptoHandoffStatus>()
+        + 2 * std::mem::size_of::<Status>()
+        + std::mem::size_of::<CryptoResultReceipt>()
+        + 128 // nested guards/scalar/borrowed arguments; no SDK or variable allocation
+}
 impl Drop for Observation {
     fn drop(&mut self) {
         drop(self.action.take());

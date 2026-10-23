@@ -45,26 +45,7 @@ async fn prepare(
         return Err(VoiceError::Unauthorized.into());
     }
     let context = context.upgrade().ok_or(Refused::Closed)?;
-    let (row, identity, engine_bytes) = {
-        let request = Request::decode(
-            incoming.operation(),
-            incoming.kind(),
-            incoming.logical(),
-            incoming.plain().map_err(|_| VoiceError::Malformed)?,
-        )?;
-        let Kind::Admit {
-            action,
-            engine_bytes,
-        } = request.kind
-        else {
-            return Err(VoiceError::Malformed.into());
-        };
-        (
-            super::confirmation_input::resolve(&context, route, &request)?,
-            action,
-            engine_bytes,
-        )
-    };
+    let (row, identity, engine_bytes) = decode_admission(&context, route, incoming)?;
     {
         let status = row.reconcile()?;
         if status.action != Some((identity.serial, identity.version, identity.input_tag)) {
@@ -90,17 +71,9 @@ async fn prepare(
     let permit = work
         .action()
         .with_engine_admission(engine_bytes as usize, |step| {
-            let _commit = context
-                .commit
-                .clone()
-                .try_lock_owned()
-                .map_err(|_| VoiceError::Capacity)?;
-            let authority = context.authority.lock().unwrap_or_else(|e| e.into_inner());
-            super::factory::require_current_selection(context.gate(), &authority, route.selected())
-                .map_err(|_| VoiceError::Unauthorized)?;
-            route
-                .with_open(|| step.commit())
-                .map_err(|_| VoiceError::Unauthorized)?
+            // Parent and child use the SAME nonblocking original-clock final fences.
+            // A busy Coordinator/Route cannot carry a pre-wait observation across expiry.
+            super::admission::final_engine_admission(&context, route, step)
         })?;
     // Return ONLY the actual commit result. A successful observation/callback is no permit.
     super::replies::admitted(
@@ -115,6 +88,34 @@ async fn prepare(
     )
     .map(Encoded::Permit)
     .map_err(Into::into)
+}
+
+/// The full borrowing child decoder and transient parent resolver finish before any async
+/// binding/UI wait. Only the actual resolved child and fixed action identity cross that
+/// boundary; parent/request metadata cannot become retained native/engine authority.
+fn decode_admission(
+    context: &super::context::LiveContext,
+    route: &Route,
+    incoming: &Incoming,
+) -> Result<(super::ledger::ResolvedRow, Action, u32), Refused> {
+    let request = Request::decode(
+        incoming.operation(),
+        incoming.kind(),
+        incoming.logical(),
+        incoming.plain().map_err(|_| VoiceError::Malformed)?,
+    )?;
+    let Kind::Admit {
+        action,
+        engine_bytes,
+    } = request.kind
+    else {
+        return Err(VoiceError::Malformed.into());
+    };
+    Ok((
+        super::confirmation_input::resolve(context, route, &request)?,
+        action,
+        engine_bytes,
+    ))
 }
 
 #[cfg(test)]
@@ -132,5 +133,9 @@ pub(super) fn layout_bytes() -> usize {
         + std::mem::size_of::<Encoded>()
         + std::mem::size_of::<catcoms_sync::voice_v2::crypto_actions::CryptoEngineAdmission<'static>>(
         )
+        // Root prepares the original candidate/lender before the final Clock; count their
+        // real owners too, even though the scoped final ticket only borrows the candidate.
+        + std::mem::size_of::<catcoms_sync::voice_v2::resources::ByteBudget>()
+        + std::mem::size_of::<Option<catcoms_sync::voice_v2::resources::Credit>>()
         + 128 // nested synchronous final fences/argument wrappers
 }

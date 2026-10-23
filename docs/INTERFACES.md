@@ -1,5 +1,14 @@
 # Mewtual; Interfaces & Hooks Schema
 
+## Child admission uses the original final fence (23 October; combined draft)
+
+Parent and child engine adapters share UI-commit -> try-Coordinator -> try-Route -> try-Engine
+after the original Clock sample. Actual original-lender capacity preparation precedes that
+sample. Contention refuses with Capacity and retries resample without deadline renewal.
+The child borrowing decoder/original parent resolver ends before async native waits; only
+the resolved actual child and fixed identity survive. Candidate/lender metadata remains
+explicitly included in the unchanged Control inventory; combined measurements are pending.
+
 ## Child Result preparation custody (23 October; inactive adapter)
 
 The original authenticated Incoming and child Work reserve the existing8KiB Data task

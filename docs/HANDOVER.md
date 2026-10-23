@@ -1,5 +1,30 @@
 # Mewtual; Handover
 
+## Combined continuation integration (23 October; native validation pending)
+
+`communication-confirmation-begin` now merges reviewed Result92c7df7c, known-child browser
+250ee6f7 and published deadline/Tokio5388993f. Root crates/bins/manifests/lock/scripts are
+byte-identical to the frozen5388993f checkout running strict Clippy (passed) and full Root
+validation. No second heavy Cargo suite is started. Complete combined frontend2,619 passes
+(98.70s), Svelte reports zero errors/warnings and the production build passes (86s). Root/native
+formatting and the ambient gate pass. The native Begin+Result+patched-dependency combination
+has NOT yet compiled.
+
+Child engine admission now calls the same nonblocking final helper as parent admission.
+Its full borrowing decoder/transient parent resolver ends before async binding/UI waits;
+the fixed Control inventory includes actual original candidate/lender metadata. All existing
+12KiB/8KiB/16KiB guards must still pass on this combined source. Lower source-specific test
+records below are historical checkpoints, not claims of a combined native pass. Unknown-Begin
+browser recovery, complete native/WebCrypto cycle, SDP/ICE/RTC, live/group adapter, media relay
+and combined/physical acceptance remain unfinished. Production V2/effect dispatch is disabled.
+
+The merged-path review found a detached Begin common-factory wait pinning LiveContext.
+It now retains only the original commit handle during that wait, re-upgrading/rechecking
+afterward. A framed Start Begin/caller-loss/lock regression targets this exact boundary.
+Begin's task inventory explicitly includes synchronous native/Root reconciliation, and its
+Control inventory explicitly includes nested read-only history. Static re-review has no
+remaining confirmed blocker/high/medium; these latest native changes await compilation.
+
 ## Tokio advisory follow-up (23 October; full validation running)
 
 After the separate deadline correction7b9af8d5 was pushed, local/CI cargo-deny exposed
