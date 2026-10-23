@@ -735,6 +735,104 @@ test("V2 activation can only become available together with App driver wiring", 
   else assert.doesNotMatch(app, /new VoiceV2Call\(/, "no half-wired driver exists while unavailable");
 });
 
+async function establishedWithHigh(h: ReturnType<typeof harness>, lease: string) {
+  h.native.push(lease, { kind: "peer", identity: HIGH, join: join(1) });
+  h.native.push(lease, { kind: "paired", identity: HIGH, join: join(1) });
+  await settle();
+  const ours = { issuer: SELF, message: join(0x81) };
+  h.native.push(lease, { kind: "answer", identity: HIGH, join: join(1), offer: ours, sdp: "answer" });
+  await settle();
+  return ours;
+}
+
+test("presence expiry during a temporary RTC disconnection keeps the established call recoverable", async () => {
+  // Review regression: "disconnected" reads as connecting, and expiry used to destroy the pair;
+  // same-join renewal then created a waiting record that native never re-confirms.
+  const h = harness();
+  const lease = await joined(h);
+  const ours = await establishedWithHigh(h, lease);
+  const pc = h.pcs[0];
+  pc.state("connected");
+  pc.state("disconnected");
+  assert.equal(h.peer(HIGH)?.media, "connecting");
+  h.native.push(lease, { kind: "peer-gone", identity: HIGH, join: join(1), reason: "expired" });
+  await settle();
+  assert.equal(pc.closed, false, "observation expiry is not pair retirement");
+  assert.equal(h.peer(HIGH)?.presence, "stale");
+  assert.equal(describeVoiceV2Peer(h.peer(HIGH)!), "Presence not renewed, keeping the call open");
+  h.native.push(lease, { kind: "peer", identity: HIGH, join: join(1) }); // same join renews
+  await settle();
+  assert.equal(h.peer(HIGH)?.presence, "fresh");
+  assert.equal(h.peer(HIGH)?.signalling, "negotiated", "no new waiting-pair record");
+  assert.equal(h.pcs.length, 1, "the original connection survives");
+  h.native.push(lease, { kind: "ice", identity: HIGH, join: join(1), offer: ours, candidate: { candidate: "after reconnect" } });
+  await settle();
+  assert.equal((pc.ice.at(-1) as any).candidate, "after reconnect", "the original OfferId still applies");
+  pc.state("connected");
+  assert.equal(h.peer(HIGH)?.media, "connected");
+  // Removal still tears it down.
+  h.native.push(lease, { kind: "peer-gone", identity: HIGH, join: join(1), reason: "removed" });
+  await settle();
+  assert.ok(pc.closed);
+});
+
+test("presence expiry while the first RTC connection is still progressing keeps the pair", async () => {
+  const h = harness();
+  const lease = await joined(h);
+  h.native.push(lease, { kind: "peer", identity: HIGH, join: join(1) });
+  h.native.push(lease, { kind: "paired", identity: HIGH, join: join(1) });
+  await settle();
+  h.native.push(lease, { kind: "peer-gone", identity: HIGH, join: join(1), reason: "expired" });
+  await settle();
+  assert.equal(h.pcs[0].closed, false);
+  h.native.push(lease, { kind: "answer", identity: HIGH, join: join(1), offer: { issuer: SELF, message: join(0x81) }, sdp: "late answer" });
+  await settle();
+  assert.equal(h.peer(HIGH)?.signalling, "negotiated", "the negotiation completes on the kept pair");
+  // An unpaired candidate, by contrast, simply expires.
+  h.native.push(lease, { kind: "peer", identity: LOW, join: join(2) });
+  h.native.push(lease, { kind: "peer-gone", identity: LOW, join: join(2), reason: "expired" });
+  await settle();
+  assert.equal(h.peer(LOW), undefined);
+});
+
+test("lost offer replies are recovered by exact retry inside the receipt window, and a waiting answer applies", async () => {
+  // Review regression: four lost replies used to strand the offer while saying "still trying".
+  const h = harness();
+  const lease = await joined(h);
+  h.native.loseSubmit = 4; // native commits the offer; the first reply and three retries are lost
+  h.native.push(lease, { kind: "peer", identity: HIGH, join: join(1) });
+  h.native.push(lease, { kind: "paired", identity: HIGH, join: join(1) });
+  await settle();
+  // The peer already answered our committed offer while our IPC was failing.
+  h.native.push(lease, { kind: "answer", identity: HIGH, join: join(1), offer: { issuer: SELF, message: join(0x81) }, sdp: "early answer" });
+  for (let i = 0; i < 3; i++) { await settle(); h.advance(4_000); h.wake(); }
+  await settle();
+  assert.equal(h.peer(HIGH)?.signalling, "uncertain", "uncertain while recovery work is scheduled");
+  h.advance(4_000); h.wake(); await settle(); // fifth attempt, ~16 s in: IPC is back
+  assert.deepEqual(h.pcs[0].remotes, [{ type: "answer", sdp: "early answer" }]);
+  assert.equal(h.peer(HIGH)?.signalling, "negotiated");
+  const offers = h.native.offers();
+  assert.equal(offers.length, 5);
+  assert.equal(new Set(offers.map((s) => JSON.stringify(s.action))).size, 1, "every retry is the exact original action");
+});
+
+test("an offer whose replies stay lost past the receipt window fails explicitly and stops retrying", async () => {
+  const h = harness();
+  const lease = await joined(h);
+  h.native.loseSubmit = 99;
+  h.native.push(lease, { kind: "peer", identity: HIGH, join: join(1) });
+  h.native.push(lease, { kind: "paired", identity: HIGH, join: join(1) });
+  await settle();
+  for (let i = 0; i < 8; i++) { h.advance(4_000); h.wake(); await settle(); }
+  assert.equal(h.peer(HIGH)?.signalling, "failed");
+  assert.equal(describeVoiceV2Peer(h.peer(HIGH)!), "Signalling failed, leave and rejoin to retry");
+  assert.ok(h.diags.includes("VOICE.V2.SUBMIT_FAILED"));
+  const attempts = h.native.offers().length;
+  for (let i = 0; i < 4; i++) { h.advance(4_000); h.wake(); await settle(); }
+  assert.equal(h.native.offers().length, attempts, "no hidden retries once failed");
+  assert.equal(h.call.snapshot().mode, "v2", "still no legacy fallback");
+});
+
 test("a peer that never completes key confirmation is reported, still without fallback", async () => {
   const h = harness();
   const lease = await joined(h);

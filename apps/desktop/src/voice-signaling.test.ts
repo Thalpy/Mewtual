@@ -27,10 +27,12 @@ test("a V2 call excludes every legacy signal for its own room before any handler
   assert.equal(legacyCallSignalAdmission(room("v2", 7, "general")), "exclude");
   assert.equal(legacyCallSignalAdmission(room("v2", 8, "general")), "handle", "other server, other room");
   assert.equal(legacyCallSignalAdmission(room("v2", 7, "random")), "handle", "other room keeps presence-only legacy meaning");
-  // A malformed or missing channel never matches the protected room, and is then handled by the
-  // legacy path's own parse/room checks, which already ignore it.
-  assert.equal(legacyCallSignalAdmission(room("v2", 7, 7)), "handle");
-  assert.equal(legacyCallSignalAdmission(room("v2", 7, undefined)), "handle");
+  // A malformed room is excluded during a V2 call (review fix): `${server}:${channel}` presence
+  // keys coerce 7 or ["7"] into "7", so letting it through would reach the protected room.
+  for (const channel of [7, ["general"], undefined, null, { toString: () => "general" }]) {
+    assert.equal(legacyCallSignalAdmission(room("v2", 7, channel)), "exclude");
+    assert.equal(legacyCallSignalAdmission(room("legacy", 7, channel)), "handle", "legacy calls unchanged");
+  }
   // A stale mode after leaving cannot exclude anything: no call, nothing protected.
   assert.equal(legacyCallSignalAdmission(room("v2", 7, "general", false)), "handle");
 });

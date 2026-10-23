@@ -13464,7 +13464,12 @@
   function broadcast(msg: Record<string, unknown>) {
     const server = callServer;
     const selfId = callSelfId;
-    if (server !== null && selfId) void broadcastOn(server, selfId, msg);
+    if (server === null || !selfId) return;
+    // Decide legacy egress now, for the join that created this message. broadcastOn awaits the
+    // roster first; by then teardown (or the next call) may have reset the global mode, and the
+    // final check in sendSignal would judge this old V2-room message by the new state.
+    if (legacyCallSignalEgress({ mode: callSignalMode, inCall, callServer, callChannel, server, channel: msg.callId }) === "suppress") return;
+    void broadcastOn(server, selfId, msg);
   }
   /**
    * Say goodbye, on every route at once, before the room is torn down.
@@ -13487,6 +13492,11 @@
    */
   function announceHangup(server: number, selfId: string, channel: string) {
     const farewell = { callId: channel, type: "bye" };
+    // Bind the legacy decision to the join being left, before the roster await below: leaveVoice
+    // resets callSignalMode synchronously after this returns, so a check at send time would let a
+    // V2 join's farewell out as a legacy bye. A V2 join leaves through its native end instead.
+    const legacyFarewell =
+      legacyCallSignalEgress({ mode: callSignalMode, inCall, callServer, callChannel, server, channel }) === "send";
     const edges: string[] = [];
     for (const [id, peer] of Object.entries(callPeers)) {
       edges.push(id);
@@ -13494,6 +13504,7 @@
         try { peer.dc.send(JSON.stringify({ t: "bye" })); } catch { /* edge already gone */ }
       }
     }
+    if (!legacyFarewell) return;
     void (async () => {
       // Peers with an edge are told whatever the roster read does, including nothing at all: an
       // established edge is better evidence that someone is in this room than the online list is.
@@ -19623,9 +19634,13 @@
     } catch {
       return;
     }
-    const cid = msg.callId as string | undefined;
-    const type = msg.type as string | undefined;
-    if (!cid || !type) return;
+    // Validate the parsed shape before any gate or state. Room and type must be non-empty strings:
+    // presence keys are built with `${server}:${channel}`, which coerced other values into a real
+    // room (an array ["7"] or the number 7 became "7") after they had slipped past the V2 fence.
+    if (!msg || typeof msg !== "object" || Array.isArray(msg)) return;
+    const cid = msg.callId;
+    const type = msg.type;
+    if (typeof cid !== "string" || !cid || typeof type !== "string" || !type) return;
     // A V2 join's room has no legacy writer: no legacy presence, peer, SDP, ICE or bye may touch it,
     // whatever capability fields are missing or whichever helper relayed it (VOICE-SIGNALLING-V2.md).
     // This runs before the presence writes below. Other rooms keep their legacy presence meaning.

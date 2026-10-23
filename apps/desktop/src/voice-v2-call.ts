@@ -46,8 +46,14 @@ export const VOICE_V2_RECEIPTS = 512;
 export const VOICE_V2_BATCH = 64;
 /** Backoff after an uncertain native reply (a rejected promise). The last delay then repeats. */
 export const VOICE_V2_RETRY_MS: readonly number[] = [250, 1000, 4000];
-/** Exact-retry attempts for one start/submit/end before reporting uncertainty. */
+/** Exact-retry attempts for one start/end, or one ICE submit, before giving up as uncertain. */
 export const VOICE_V2_RETRIES = VOICE_V2_RETRY_MS.length;
+/**
+ * How long an offer/answer submit keeps retrying its exact action after lost replies: native
+ * retains an exact completed result through the packet's 15 s signed expiry plus 5 s skew, so a
+ * retry inside this window recovers the original OfferId instead of stranding the negotiation.
+ */
+export const VOICE_V2_RECEIPT_MS = 20_000;
 /** Minimum pause after an empty pull, so a native adapter that answers at once cannot spin us. */
 export const VOICE_V2_IDLE_MS = 250;
 /** Consecutive uncertain pulls before the call reports "events-uncertain" (it keeps polling). */
@@ -168,7 +174,7 @@ export type VoiceV2Diagnostic = Readonly<{ code: string; fields?: Readonly<Recor
 export type VoiceV2Phase = "starting" | "joined" | "rejoining" | "uncertain" | "ended" | "unavailable";
 export type VoiceV2Signalling =
   | "waiting-pair" | "pair-unavailable" | "paired" | "offering" | "answering"
-  | "offer-submitted" | "answer-submitted" | "negotiated" | "refused" | "uncertain";
+  | "offer-submitted" | "answer-submitted" | "negotiated" | "refused" | "uncertain" | "failed";
 export type VoiceV2Media = "none" | "connecting" | "connected" | "failed";
 
 export type VoiceV2PeerSnapshot = Readonly<{
@@ -633,8 +639,12 @@ export class VoiceV2Call {
       this.#diag("VOICE.V2.STALE_JOIN", { kind: reason });
       return;
     }
-    if (!tearDown && record.media === "connected") {
-      // Presence lapsed but media still flows: report it honestly instead of cutting live audio.
+    if (!tearDown && record.pc !== null) {
+      // Observation expiry is not pair retirement. An established pair may be mid-reconnect
+      // (RTC "disconnected" reads as connecting), and native keeps the pair across discovery
+      // expiry without a new confirmation, so a destroyed record could never be re-paired for this
+      // join. Keep the connection and its OfferId, report stale presence, and let renewal of the
+      // same join restore it. Only bye, removal, retirement or a confirmed replacement end it.
       record.presence = "stale";
       this.#changed();
       return;
@@ -854,6 +864,7 @@ export class VoiceV2Call {
   async #submit(generation: number, record: PeerRecord, action: VoiceV2Action): Promise<VoiceV2SubmitResult | null> {
     const lease = this.#lease;
     if (!lease) return null;
+    const started = this.#deps.clock.now();
     for (let tries = 0; ; tries++) {
       if (!this.#live(generation, record)) return null;
       try {
@@ -873,12 +884,27 @@ export class VoiceV2Call {
         }
         return Object.freeze({ status: "submitted", action: action.action, offer });
       } catch {
-        if (tries >= VOICE_V2_RETRIES) {
-          if (this.#live(generation, record) && action.kind !== "ice") {
+        if (action.kind === "ice") {
+          // A lost candidate is cheap to lose and the negotiation does not wait on it.
+          if (tries >= VOICE_V2_RETRIES) return null;
+        } else {
+          // Offer/answer: the native side may have committed it (and the peer may already have
+          // answered), so keep retrying the EXACT action while native can still return its cached
+          // result. "uncertain" therefore always means scheduled recovery work exists.
+          if (tries + 1 === VOICE_V2_RETRIES && this.#live(generation, record)) {
             record.signalling = "uncertain";
             this.#changed();
           }
-          return null;
+          if (this.#deps.clock.now() - started >= VOICE_V2_RECEIPT_MS) {
+            // The cached result may be gone: further retries could neither recover the original
+            // OfferId nor be distinguished from a new action. Stop and say so, actionably.
+            if (this.#live(generation, record)) {
+              record.signalling = "failed";
+              this.#diag("VOICE.V2.SUBMIT_FAILED", { kind: action.kind });
+              this.#changed();
+            }
+            return null;
+          }
         }
         await this.#deps.clock.sleep(VOICE_V2_RETRY_MS[Math.min(tries, VOICE_V2_RETRY_MS.length - 1)]);
       }
@@ -927,7 +953,9 @@ export class VoiceV2Call {
  */
 export function describeVoiceV2Peer(peer: VoiceV2PeerSnapshot): string {
   if (peer.media === "connected") return peer.presence === "stale" ? "Connected, presence not renewed" : "Connected";
+  if (peer.signalling === "failed") return "Signalling failed, leave and rejoin to retry";
   if (peer.media === "failed") return "Signalling done, no media route";
+  if (peer.presence === "stale") return "Presence not renewed, keeping the call open";
   switch (peer.signalling) {
     case "waiting-pair": return "In the room, confirming keys";
     case "pair-unavailable": return "In the room, key confirmation not reached";

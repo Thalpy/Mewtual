@@ -32,14 +32,15 @@ type CallRoomAddress = Readonly<{
   channel: unknown;
 }>;
 
-/** True when a legacy signal names the room a V2 join currently protects. */
+/**
+ * True when a legacy signal names the room a V2 join currently protects. During a V2 call a
+ * non-string room is treated as protected too: it is never a legitimate legacy signal, and string
+ * interpolation downstream (presence keys) can coerce it into the protected room's key.
+ */
 function addressesProtectedRoom(input: CallRoomAddress): boolean {
-  return (
-    input.mode === "v2" &&
-    input.inCall &&
-    typeof input.channel === "string" &&
-    isCurrentVoiceRoom(input.callServer, input.callChannel, input.server, input.channel)
-  );
+  if (input.mode !== "v2" || !input.inCall) return false;
+  if (typeof input.channel !== "string") return true;
+  return isCurrentVoiceRoom(input.callServer, input.callChannel, input.server, input.channel);
 }
 
 /**
