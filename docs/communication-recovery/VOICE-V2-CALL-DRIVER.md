@@ -171,9 +171,12 @@ Driver rules:
   connected media. It marks presence stale and keeps the connection and OfferId, because native
   keeps the pair across discovery expiry and would never re-confirm it; renewal of the same join
   restores fresh presence. An `unresolved` submit is never evidence of death. A stale pair is
-  retired as soon as its RTC reaches `failed`: a peer that truly vanished stops answering ICE
-  consent checks (RFC 7675), so a connected or checking path fails on its own. Unpaired candidates
-  simply expire.
+  retired as soon as its RTC reaches `failed`. A peer that truly vanished stops answering ICE
+  consent checks (RFC 7675), which usually drives the path to `failed`, but that is not
+  guaranteed: WebRTC reaches `failed` only after the remote end-of-candidates indication, so a
+  transport still awaiting remote candidates can stay `disconnected` or `checking`, and RFC 7675
+  leaves the application's reaction to consent loss open. Such stale pairs are the open design
+  decision under "Remaining limitations". Unpaired candidates simply expire.
 - ICE for a retired or foreign OfferId is refused, never reassigned. Early ICE waits for its
   remote description: at most 8 candidates / 16 KiB per pair, refused rather than evicting.
 - Every RTC continuation and callback is fenced by call generation, exact peer record and OfferId.
@@ -252,7 +255,13 @@ The branch was refreshed onto the moved shared head; both doc conflicts were dat
 The reviewer also reported a pre-existing hosted failure in
 `six_client_native_reversed_reopen_gossip_loss_and_command_load` (594 passed, 1 failed, same
 assertion on the base commit). It predates this change and is tracked separately; it is not
-established as harmless.
+established as harmless. The later base `346062af` passed its main CI with that test passing
+(native 671 passed, 0 failed). That updates the evidence without explaining the earlier failure.
+
+The final external re-review of `4f3a0de3` closed the P2, the P3 and the withdrawn retirement
+rule, with no remaining blocking code finding. Its one LOW corrected this document: consent loss
+does not guarantee a `failed` callback when the remote end-of-candidates indication was lost, so
+the stale-pair design decision covers every pair that never fails definitively.
 
 ## Activation (explicitly incomplete)
 
@@ -265,7 +274,9 @@ Before `voiceV2Activation()` may report available:
 3. App wiring for V2 peers (tracks, data channels, `ontrack` fenced by the driver's `isCurrent`),
    plus the visual fixture commands;
 4. an agreed default for `VoiceRouting` and a desktop path to change it;
-5. real TCP A-B-C with A-C forbidden, then native WebView and physical audio acceptance;
+5. real TCP A-B-C with A-C forbidden, then native WebView and physical audio acceptance,
+   including in the target WebViews the sequence "media connects, the remote end-of-candidates
+   indication is lost, the peer vanishes and consent is lost" with the observed RTC states;
 6. adapter acceptance for buffered early ICE expiring by its original signed expiry, and for
    bounded ownership/accounting of RTC work queued after the event cursor has advanced (the
    driver bounds counts and bytes but cannot itself see native expiry or engine custody).
@@ -280,11 +291,15 @@ Before `voiceV2Activation()` may report available:
 - Presence expiry marks an established pair stale rather than tearing it down; only definitive
   evidence (RTC `failed`, or an authoritative refusal without connected media) tears it down at
   expiry, or later once a stale pair's RTC fails. Bye, removal and retirement always tear down.
-- **Design decision required before activation:** a pair that lost presence before negotiation
-  completed, and whose RTC therefore never starts connectivity checks, never reaches `failed` on
-  its own. It stays listed as stale (within the 16-peer ceiling) until bye, removal, retirement or
-  leave. Retiring it after a grace period would be a call-lifetime policy, deliberately not chosen
-  here; whatever is chosen must keep a healthy media path independent of signalling renewal.
+- **Design decision required before activation:** stale pairs that never produce a definitive
+  failure stay listed (within the 16-peer ceiling) until bye, removal, retirement or leave. This
+  covers a pair that lost presence before negotiation completed, so its RTC never starts
+  connectivity checks. It also covers a previously connected pair whose remote end-of-candidates
+  indication was lost: ICE submits are bounded and "submitted" is native admission, not delivery.
+  After the peer vanishes and consent is lost, such a transport can remain `disconnected` (read as
+  connecting) instead of reaching `failed`. Any cleanup, such as a grace period, is a call-lifetime
+  policy deliberately not chosen here. Whatever is chosen must still keep a healthy media path
+  independent of signalling renewal.
 - The 250 ms quiet wake costs a timer per group while V2 state is live.
 - A start whose every reply was lost leaves native to collect the unadopted owner.
 - This branch adds a dated THREAT-MODEL section and an acceptance-ledger entry. ARCHITECTURE,
@@ -330,4 +345,4 @@ that refinement, both now fixed:
 It also flagged that my earlier mandatory "retire every lapsed join" native contract contradicted
 the decision's established-pair rule and would cut healthy media during a signalling partition.
 That requirement is withdrawn (see the contract above); vanished-peer cleanup relies on definitive
-RTC failure, and the pre-negotiation case is recorded as a design decision.
+RTC failure, and stale pairs that never fail definitively are recorded as a design decision.
