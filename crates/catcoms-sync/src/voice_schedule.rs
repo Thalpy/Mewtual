@@ -9,8 +9,10 @@
 //! - each sync tick, after a served kind-28 request and after each flight completion, the sole
 //!   Root runs one bounded pass, but only while V2 state is live (a native join or watcher, or a
 //!   retained source/helper packet): the native endpoint pump (renewed announcements, watcher
-//!   challenges, join proofs: at most four public responses), then at most four source flights,
-//!   then at most four helper forwards. An idle attached actor pays two cheap emptiness checks;
+//!   challenges, join proofs: at most four public responses), then source flights and helper
+//!   forwards (at most four each). Both classes share four per-group forwarding slots, so they
+//!   take turns: the class owed the next opportunity prepares first and keeps that claim until it
+//!   actually gets a flight. An idle attached actor pays two cheap emptiness checks;
 //! - every prepared flight runs detached and connected-only, owned on `self` like the other
 //!   recovery jobs, so a cancelled actor poll never drops a lower request or its credit;
 //! - each completion is settled by the same Root that prepared it, which re-verifies the signed
@@ -68,8 +70,24 @@ pub(super) enum VoiceFlight {
     Forward(CompletedVoiceForward),
 }
 
+/// The class owed the next opportunity at the shared per-group forwarding slots. Source flights
+/// and helper forwards both charge `ResourceKind::Forward` (four per group), so whichever class
+/// prepares first takes every freed slot. Preparing source work first unconditionally let a
+/// helper's own observation traffic starve an accepted helper packet until it expired.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+enum FlightClass {
+    #[default]
+    Source,
+    Helper,
+}
+
 pub(super) struct VoiceSchedule {
     routing: VoiceRouting,
+    /// Persistent across passes and capacity refusals: the owed class keeps priority until it
+    /// actually receives a flight, then the other class is owed. Under contention the two classes
+    /// therefore alternate per freed slot; when one class has no eligible work the other still
+    /// uses every slot (work-conserving), and the idle class keeps its claim.
+    owed: FlightClass,
     pub(super) jobs: FuturesUnordered<BoxFuture<'static, VoiceFlight>>,
     retries: VecDeque<VoiceFlight>,
     /// Upper cancellation for every flight. Dropping it (with this owner) cancels too; lower
@@ -84,6 +102,7 @@ impl Default for VoiceSchedule {
     fn default() -> Self {
         Self {
             routing: VoiceRouting::default(),
+            owed: FlightClass::default(),
             jobs: FuturesUnordered::new(),
             retries: VecDeque::new(),
             cancel: tokio::sync::watch::channel(false).0,
@@ -188,35 +207,65 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         if let Err(error) = self.pump_voice_endpoint() {
             tracing::trace!(%error, "voice endpoint pump refused");
         }
-        match self.prepare_voice_sources() {
-            Ok(pending) => {
-                for flight in pending {
-                    #[cfg(test)]
-                    self.voice_schedule.hops.push(flight.peer());
-                    let signal = self.voice_schedule.cancel.subscribe();
-                    self.voice_schedule.jobs.push(
-                        async move { VoiceFlight::Source(flight.execute(signal).await) }.boxed(),
-                    );
-                }
-            }
-            Err(error) => tracing::trace!(%error, "voice source preparation refused"),
-        }
         if self.voice_schedule.routing != VoiceRouting::Forwarding {
+            // Direct service has no helper class competing for the shared slots.
+            self.start_voice_flights(FlightClass::Source);
             return;
         }
-        match self.prepare_voice_forwards() {
-            Ok(pending) => {
-                for flight in pending {
-                    #[cfg(test)]
-                    self.voice_schedule.hops.push(flight.peer());
-                    let signal = self.voice_schedule.cancel.subscribe();
-                    self.voice_schedule.jobs.push(
-                        async move { VoiceFlight::Forward(flight.execute(signal).await) }.boxed(),
-                    );
-                }
-            }
-            Err(error) => tracing::trace!(%error, "voice helper preparation refused"),
+        let owed = self.voice_schedule.owed;
+        let other = match owed {
+            FlightClass::Source => FlightClass::Helper,
+            FlightClass::Helper => FlightClass::Source,
+        };
+        // The owed class prepares first, so it gets the first freed slot. The other class may
+        // still use any slots left in this same pass. The debt moves only once the owed class
+        // actually received a flight; a capacity refusal or an idle owed class keeps it owed.
+        if self.start_voice_flights(owed) > 0 {
+            self.voice_schedule.owed = other;
         }
+        self.start_voice_flights(other);
+    }
+
+    /// Prepare and start one class's flights (each preparation is bounded to four). Returns how
+    /// many were started. Preparation reserves attempts and shared capacity synchronously.
+    fn start_voice_flights(&mut self, class: FlightClass) -> usize
+    where
+        T: 'static,
+    {
+        let mut started = 0;
+        match class {
+            FlightClass::Source => match self.prepare_voice_sources() {
+                Ok(pending) => {
+                    for flight in pending {
+                        #[cfg(test)]
+                        self.voice_schedule.hops.push(flight.peer());
+                        let signal = self.voice_schedule.cancel.subscribe();
+                        self.voice_schedule.jobs.push(
+                            async move { VoiceFlight::Source(flight.execute(signal).await) }
+                                .boxed(),
+                        );
+                        started += 1;
+                    }
+                }
+                Err(error) => tracing::trace!(%error, "voice source preparation refused"),
+            },
+            FlightClass::Helper => match self.prepare_voice_forwards() {
+                Ok(pending) => {
+                    for flight in pending {
+                        #[cfg(test)]
+                        self.voice_schedule.hops.push(flight.peer());
+                        let signal = self.voice_schedule.cancel.subscribe();
+                        self.voice_schedule.jobs.push(
+                            async move { VoiceFlight::Forward(flight.execute(signal).await) }
+                                .boxed(),
+                        );
+                        started += 1;
+                    }
+                }
+                Err(error) => tracing::trace!(%error, "voice helper preparation refused"),
+            },
+        }
+        started
     }
 
     /// Settle one completed flight on this Root. Only temporary verification capacity keeps the

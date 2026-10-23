@@ -1357,6 +1357,45 @@ async fn voice_schedule_helper_edges_wait_their_retry_gap_after_a_refusal() {
 }
 
 #[tokio::test]
+async fn voice_schedule_accepted_helper_work_gets_a_bounded_turn_against_the_bridges_own_sources() {
+    // PR50 review regression: source flights and helper forwards share four per-group Forward
+    // slots, and preparing sources first let a bridge's own observation traffic take every freed
+    // slot until an accepted helper packet expired.
+    use voice_v2::resources::ResourceKind;
+    let mut f = VoiceForwardFixture::new().await; // B already holds an accepted packet for C
+    f.helper.set_voice_routing(VoiceRouting::Forwarding);
+    // B is also a participant, so it originates its own room traffic that stays eligible
+    // (overlapping 500 ms hedges) for as long as its flights are unanswered.
+    let grant = Arc::new(f.helper.voice_call_grant(1).unwrap());
+    let key = public_join_key(181);
+    f.helper.start_voice_endpoint(grant.clone(), key.join, key.public_key).unwrap();
+    let group = f.helper.voice_v2_context(1).unwrap().scope.group;
+    let pool = f.helper_runtime.resources();
+    let mut held: Vec<_> = (0..4).map(|_| pool.charge(group, 1, ResourceKind::Forward).unwrap()).collect();
+    assert!(pool.charge(group, 1, ResourceKind::Forward).is_err(), "four shared slots per group");
+    let source = f.helper.voice_transport_actor().unwrap().source().unwrap();
+    let helper = f.helper.voice_transport_actor().unwrap().helper().unwrap();
+    let in_flight = || (source.counts().2, helper.counts().2);
+    // A and C are never ticked, so admitted flights keep their slots: real lower custody.
+    tick_nodes(&mut [&mut f.helper], 2).await;
+    assert_eq!(in_flight(), (0, 0), "no capacity: no flight and no spent attempt");
+    assert!(source.counts().0 > 0, "the bridge's own announcement is queued");
+    drop(held.pop());
+    tick_nodes(&mut [&mut f.helper], 2).await;
+    assert_eq!(in_flight(), (1, 0), "the first freed slot goes to the class owed it (sources)");
+    f.clock.advance_ms(600); // B's own source hedge is eligible again: real contention
+    drop(held.pop());
+    tick_nodes(&mut [&mut f.helper], 2).await;
+    assert_eq!(in_flight(), (1, 1), "the next freed slot is the helper's turn, not another source hedge");
+    f.clock.advance_ms(600);
+    drop(held.pop());
+    tick_nodes(&mut [&mut f.helper], 2).await;
+    assert_eq!(in_flight(), (2, 1), "then sources again: alternation, never more than the freed slots");
+    assert!(pool.charge(group, 1, ResourceKind::Forward).is_err(), "the four-slot ceiling still holds");
+    drop(grant);
+}
+
+#[tokio::test]
 async fn voice_schedule_quiet_wake_exists_only_while_v2_state_is_live() {
     let mut f = VoiceForwardFixture::empty().await;
     f.recipient.set_voice_routing(VoiceRouting::Forwarding);
