@@ -795,6 +795,55 @@ test("presence expiry while the first RTC connection is still progressing keeps 
   assert.equal(h.peer(LOW), undefined);
 });
 
+test("a vanished peer cannot linger: dead pairs are torn down on expiry, on later failure or on retirement", async () => {
+  // Re-review regression: keeping every established pair on expiry let crashed peers stay for the
+  // whole call (open RTC objects, phantom tiles) and fill the per-call peer ceiling.
+  const h = harness();
+  const lease = await joined(h);
+  await establishedWithHigh(h, lease);
+  const pc = h.pcs[0];
+  pc.state("failed"); // permanent: V2 has no renegotiation or ICE restart
+  h.native.push(lease, { kind: "peer-gone", identity: HIGH, join: join(1), reason: "expired" });
+  await settle();
+  assert.equal(h.peer(HIGH), undefined, "expiry of an already dead pair tears it down");
+  assert.ok(pc.closed);
+  // A stale pair whose media later fails is retired too.
+  h.native.push(lease, { kind: "peer", identity: LOW, join: join(2) });
+  h.native.push(lease, { kind: "paired", identity: LOW, join: join(2) });
+  h.native.push(lease, { kind: "peer-gone", identity: LOW, join: join(2), reason: "expired" });
+  await settle();
+  assert.equal(h.peer(LOW)?.presence, "stale");
+  h.pcs[1].state("failed");
+  assert.equal(h.peer(LOW), undefined, "stale and failed: nothing can revive it");
+  // Native retirement of a lapsed join (contract: once its delegation expires) also tears down.
+  h.native.push(lease, { kind: "peer", identity: LOW, join: join(3) });
+  h.native.push(lease, { kind: "paired", identity: LOW, join: join(3) });
+  h.native.push(lease, { kind: "peer-gone", identity: LOW, join: join(3), reason: "expired" });
+  h.native.push(lease, { kind: "peer-gone", identity: LOW, join: join(3), reason: "retired" });
+  await settle();
+  assert.equal(h.peer(LOW), undefined);
+});
+
+test("sixteen vanished peers do not block a newcomer once their pairs are dead", async () => {
+  const h = harness();
+  const lease = await joined(h);
+  const identities = Array.from({ length: VOICE_V2_MAX_PEERS }, (_, n) => (0xa0 + n).toString(16).repeat(32));
+  for (const [n, identity] of identities.entries()) {
+    h.native.push(lease, { kind: "peer", identity, join: join(n + 1) });
+    h.native.push(lease, { kind: "paired", identity, join: join(n + 1) });
+  }
+  await settle();
+  for (const pc of h.pcs) pc.state("failed");
+  for (const [n, identity] of identities.entries()) h.native.push(lease, { kind: "peer-gone", identity, join: join(n + 1), reason: "expired" });
+  await settle();
+  assert.equal(h.call.snapshot().peers.length, 0);
+  assert.ok(h.pcs.every((pc) => pc.closed));
+  h.native.push(lease, { kind: "peer", identity: "f0".repeat(32), join: join(0x30) });
+  await settle();
+  assert.equal(h.call.snapshot().peers.length, 1, "the newcomer is admitted");
+  assert.ok(!h.diags.includes("VOICE.V2.PEER_CAPACITY"));
+});
+
 test("lost offer replies are recovered by exact retry inside the receipt window, and a waiting answer applies", async () => {
   // Review regression: four lost replies used to strand the offer while saying "still trying".
   const h = harness();
@@ -823,8 +872,14 @@ test("an offer whose replies stay lost past the receipt window fails explicitly 
   h.native.push(lease, { kind: "peer", identity: HIGH, join: join(1) });
   h.native.push(lease, { kind: "paired", identity: HIGH, join: join(1) });
   await settle();
-  for (let i = 0; i < 8; i++) { h.advance(4_000); h.wake(); await settle(); }
+  const firstAt = 1_000; // the harness clock when the offer was first submitted
+  const sentAt: number[] = [];
+  const original = h.native.submit.bind(h.native);
+  let clockNow = firstAt;
+  h.native.submit = (leaseId, action) => { sentAt.push(clockNow); return original(leaseId, action); };
+  for (let i = 0; i < 8; i++) { h.advance(4_000); clockNow += 4_000; h.wake(); await settle(); }
   assert.equal(h.peer(HIGH)?.signalling, "failed");
+  assert.ok(sentAt.every((at) => at - firstAt < 20_000), "no retry is sent after the receipt window");
   assert.equal(describeVoiceV2Peer(h.peer(HIGH)!), "Signalling failed, leave and rejoin to retry");
   assert.ok(h.diags.includes("VOICE.V2.SUBMIT_FAILED"));
   const attempts = h.native.offers().length;

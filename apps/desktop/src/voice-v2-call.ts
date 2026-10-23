@@ -639,12 +639,15 @@ export class VoiceV2Call {
       this.#diag("VOICE.V2.STALE_JOIN", { kind: reason });
       return;
     }
-    if (!tearDown && record.pc !== null) {
+    const dead = record.media === "failed" || record.signalling === "failed" || record.signalling === "refused";
+    if (!tearDown && record.pc !== null && !dead) {
       // Observation expiry is not pair retirement. An established pair may be mid-reconnect
       // (RTC "disconnected" reads as connecting), and native keeps the pair across discovery
       // expiry without a new confirmation, so a destroyed record could never be re-paired for this
       // join. Keep the connection and its OfferId, report stale presence, and let renewal of the
-      // same join restore it. Only bye, removal, retirement or a confirmed replacement end it.
+      // same join restore it. Only bye, removal, retirement or a confirmed replacement end it, or
+      // the pair turning out dead (failed media or negotiation, here or later in #wire): V2 has
+      // no renegotiation, so a stale dead pair would otherwise linger as a phantom participant.
       record.presence = "stale";
       this.#changed();
       return;
@@ -796,6 +799,14 @@ export class VoiceV2Call {
       if (state === "connected") record.media = "connected";
       else if (state === "failed") record.media = "failed";
       else if (state === "connecting" || state === "disconnected") record.media = "connecting";
+      if (record.media === "failed" && record.presence === "stale") {
+        // Presence already lapsed and the media path is now permanently gone (no V2 ICE restart):
+        // nothing can revive this pair, so it must not stay on as a phantom participant. A newer
+        // native-fresh join of the same identity, if one was waiting, becomes the candidate.
+        const pending = record.pendingJoin;
+        this.#retire(record);
+        if (pending && this.#lease) this.#peers.set(record.identity, this.#record(record.identity, pending, this.#lease.self));
+      }
       this.#changed();
     };
   }
@@ -895,7 +906,10 @@ export class VoiceV2Call {
             record.signalling = "uncertain";
             this.#changed();
           }
-          if (this.#deps.clock.now() - started >= VOICE_V2_RECEIPT_MS) {
+          // Stop before a retry would land outside the window, not after it: a reply to an attempt
+          // sent once the cached result may be gone could not be told apart from a fresh action.
+          const delay = VOICE_V2_RETRY_MS[Math.min(tries, VOICE_V2_RETRY_MS.length - 1)];
+          if (this.#deps.clock.now() - started + delay >= VOICE_V2_RECEIPT_MS) {
             // The cached result may be gone: further retries could neither recover the original
             // OfferId nor be distinguished from a new action. Stop and say so, actionably.
             if (this.#live(generation, record)) {
