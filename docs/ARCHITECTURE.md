@@ -1,6 +1,6 @@
 # Mewtual; Architecture
 
-## Original-channel terminal delivery (23 October, validation in progress)
+## Original-channel terminal delivery (23 October)
 
 The inactive adapter distinguishes returning an action's16KiB loan from retiring its whole
 original confirmation plan. First close mode is immutable, even while copies remain.

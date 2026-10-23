@@ -1,12 +1,55 @@
 # Chat, files and voice implementation evidence
 
-## Terminal-delivery candidate (23 October)
+## Validated native terminal delivery (23 October)
 
-Original-row final intent, separate bounded receipt/ACK, immutable closure mode and exact
-physical-identity collection are implemented but remain inactive at production ingress. Native
-focused208 and browser codec65 pass; static Svelte check reports zero errors/warnings, and
-adversarial re-review is clear. Complete current-source gates are pending. HANDOVER records
-source and failed iteration logs. This is neither action delivery nor live V2/RTC acceptance.
+Frozen runtime `193f220f4761844946740ee7b7d32f870b50722f` passed the complete local suites. This checkpoint implements native
+terminal-delivery state and strict browser decoding. The native/browser action handoff remains
+incomplete, and production final/action dispatch remains disabled. Production V2 signalling/call
+lifecycle and external download resume belong to other agents and were not changed here.
+
+The first close mode is immutable: ordinary Return cannot become whole-plan Retire while copies
+drain. Terminal intent retains the original Session's private identity without retaining keys.
+After actual local/Root owners drain, native records one stable issuance and accepts its exact
+ACK. Normal channel closure waits for ACK. Lost replies recover the same stored state; a correct
+but unissued proof, another row or an equal-hash foreign Session cannot substitute for it.
+Independent physical collection may reclaim unreachable unACKed history without inventing ACK.
+The separate 100-byte Pending/Issued/Acknowledged grammar leaves historical replies read-only.
+Production still serves only Status9 and existing-history Begin8(false).
+
+Validation, zero failures:
+
+- Root: **3,254 passed**, 24 existing ignored, in 2155.38s. The suite ran from
+  the frozen checkout using cached artifacts with Root inputs byte-identical to `e560d319`.
+  The source-scanning construction test was then rebuilt against this checkout and passed
+  (19.44s build; 1.76s tests), so its embedded manifest path checks the changed native source.
+- Native: **680 library plus five ACL tests passed** (824.58s gate), including **208 focused
+  handoff tests** (5.61s tests; 85.28s gate). Separate check (6.59s), formatting (8.97s) and strict
+  all-target/all-feature Clippy (23.64s) pass. No memory, copy or resource cap was increased.
+- Frontend: **2,464 passed** (70.06s); focused codec tests **65/65** and Svelte check with zero
+  errors/warnings pass. Production build (41.05s) and all ten rendered Edge flows (53.66s) passed
+  on `10f55861`; their frontend/build inputs are unchanged by the later native-only correction.
+- Native development build (174.73s) and actual application startup (8.83s) pass on the corrected
+  runtime. No new packaged-WebView action, media or physical-network acceptance is claimed.
+
+Read-only actual-diff design/review/re-review has no remaining actionable blocker/high/medium.
+Destructor tracing corrected CollectedChannel's field order in `193f220f`: its independent
+identity token now drops before the paid Row. No existing deterministic observer sees the tiny
+inter-field credit-return interval; this property is established by Rust destructor tracing
+and review. Actual collector tests cover foreign sessions, late handles and complete GC.
+The initial layout/compile/fixture failures remain in the focused iteration logs. Final state
+fits the existing Row/Phase/Session/bootstrap/Control payments; no limits were loosened.
+
+Evidence: `target/voice-terminal-validation-summary.json`, `voice-terminal-gates.jsonl`,
+`voice-terminal-current-construction.json`, `voice-terminal-review.json` and referenced logs in
+the final-proof checkout. Heavy Cargo jobs ran serially. Older sections retain their own source
+scope; their passed counts are not additional tests of this runtime. Hosted-head CI is unverified.
+
+Still required here: canonical Input/admitted-permit replies, browser intake paid before Input
+fetch, native action adapters, authenticated original-Session browser cleanup after End retaining
+keys through final ACK, and actual Actor/MLS/WebView action acceptance. Engine admission also
+needs a synchronous native/Root commit boundary with Clock callbacks outside locks; it must not
+authorize work using a stale UI/route check. Exact action settlement cannot wait for whole-chain
+retirement. Live V2/RTC, relay, combined rollout and independent physical acceptance remain open.
 
 ## Validated proof retention and automatic cleanup retry (22 October)
 
