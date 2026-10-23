@@ -7,6 +7,11 @@ terminal-delivery state and strict browser decoding. The native/browser action h
 incomplete, and production final/action dispatch remains disabled. Production V2 signalling/call
 lifecycle and external download resume belong to other agents and were not changed here.
 
+Publication scope: this checkpoint stays on `communication-native-handoff`, based on
+`346062af`. PR #50 advanced the shared communication branch to `2f08bde0` while validation
+ran. That V2 merge is absent from this frozen source. Its code is preserved independently;
+integration and combined validation remain required. The counts below do not validate that merge.
+
 The first close mode is immutable: ordinary Return cannot become whole-plan Retire while copies
 drain. Terminal intent retains the original Session's private identity without retaining keys.
 After actual local/Root owners drain, native records one stable issuance and accepts its exact
