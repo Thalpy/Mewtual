@@ -302,9 +302,10 @@ Before `voiceV2Activation()` may report available:
   independent of signalling renewal.
 - The 250 ms quiet wake costs a timer per group while V2 state is live.
 - A start whose every reply was lost leaves native to collect the unadopted owner.
-- This branch adds a dated THREAT-MODEL section and an acceptance-ledger entry. ARCHITECTURE,
-  INTERFACES and HANDOVER still say kind 28 is undispatched, which remains true by default; the
-  switch and scheduler should be recorded there at integration by the primary owner.
+- At the isolated branch checkpoint, the switch was recorded only in THREAT-MODEL and the
+  acceptance ledger. PR #52 integration subsequently records the switch/scheduler and their
+  disabled production gates in ARCHITECTURE, INTERFACES and HANDOVER. Earlier undispatched
+  descriptions apply to the default; combined evidence keeps its own source scope.
 - No physical forbidden-edge TCP topology, flood test through real dispatch or mixed-version
   fixture exists yet; those are prerequisites for enabling service by default.
 

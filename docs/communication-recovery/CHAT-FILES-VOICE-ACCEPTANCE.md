@@ -1,18 +1,58 @@
 # Chat, files and voice implementation evidence
 
-## Native handoff and V2 target integration (23 October, validation pending)
+## Validated native handoff and V2 target integration (23 October)
 
-This tree integrates native terminal-delivery checkpoint `05dcc2c2` with target `2f08bde0`
-(PR #50). Both implementations are preserved: runtime paths changed on only one side, and
-only the dated THREAT-MODEL and acceptance sections conflicted. Both sections are retained.
-The complete combined suites and actual-diff review are pending; earlier counts below apply
-only to their named sources. In particular, `193f220f` predates the target V2 merge.
+Frozen combined runtime `3f584d6049ef139492f8fa4146b5181bdc080575` integrates native checkpoint `05dcc2c2`
+with target `2f08bde0` (PR #50). The runtime changes were disjoint and remain byte-identical
+to their respective reviewed parents. Both conflicting dated documentation sections are
+retained. The historical isolated results below keep their original source scope; these new
+results validate the combined tree rather than assuming the earlier checkpoints compose.
 
-Production gates are unchanged. VoiceRouting defaults to Disabled; the desktop activation
-factory is unavailable. Native loopback admission remains Status9/existing-history Begin8(false)
-only. The new finalization adapter and action dispatch remain disabled. This integration adds
-no SDP/ICE delivery, post-End browser cleanup, media relay or physical acceptance.
-External download resume is outside this change. Its separate worktree was not modified.
+Production gates are unchanged: VoiceRouting defaults to Disabled, desktop V2 activation is
+unavailable, and native loopback admission remains Status9/existing-history Begin8(false).
+Action/final dispatch stays disabled. Input/permit delivery, atomic native/Root admission,
+action adapters, authenticated browser cleanup after End with keys retained through final ACK,
+and actual Actor/MLS/WebView action acceptance remain unfinished. No SDP/ICE, member-media relay
+or physical audio/network acceptance is established by these local integration checks.
+The external-download worktree and unrelated Main UI changes were not modified.
+
+Complete combined validation, zero failures:
+
+- Root: **3,262 passed**, 24 existing ignored (2442.64s). All eight incoming
+  voice_schedule regressions and both original Root retirement witnesses appear in the actual
+  full log. The actual source-scanner and sync test fingerprints point at this checkout.
+- Native: **685 passed** (680 library plus five ACL; 637.02s), including all
+  **208 focused handoff tests** (194.30s gate). Separate check
+  (44.67s), formatting (5.11s) and strict all-target/
+  all-feature Clippy (65.80s) pass.
+- Frontend: **2,515 passed** (83.83s); Svelte has zero errors/warnings
+  (56.70s), production build (42.39s) and all ten
+  rendered Edge flows (55.77s) pass on the combined source.
+- Focused Root voice: **458 passed** (100.14s gate), including all eight
+  incoming scheduling tests. Root formatting (4.16s), strict Clippy
+  (62.49s), ambient-dependency gate (1.02s) and
+  cargo-deny (11.97s) pass.
+- Native development build (158.72s) and actual application
+  startup (5.34s) pass. These checks exercise startup; action delivery and media remain untested.
+
+The first Root-focused command reported 450 but reused an older absolute-path cache artifact
+which omitted all eight incoming scheduler tests. That run is explicitly EXCLUDED. Thirty
+stale catcoms-sync dependency metadata files (72,704 bytes) were preserved under checked paths,
+not deleted, to force the affected crate to rebuild. The corrected 458 focus and complete Root
+run both require the eight new test names. No suite, test or resource limit was loosened and
+no cache was cleaned. Heavy Cargo commands ran serially.
+
+Read-only integration review independently verified both parent runtime sets and found no
+blocker/high/medium. Its stale central-documentation note is now marked historical. A LOW
+wording follow-up remains in voice-v2-call.ts:18: 'status-only' omits read-only history; the
+actual native whitelist and current canonical docs are correct. Enabled-path policy revocation,
+real dispatch/topology and actual native/WebView actions remain activation prerequisites.
+
+Evidence in the final-proof checkout: target/voice-integration-validation-summary.json,
+voice-integration-gates.jsonl, voice-integration-invalid-evidence.json,
+voice-integration-fingerprint-preservation.json, voice-integration-review.json and referenced
+logs. Validated runtime `3f584d60` is frozen; subsequent evidence changes are documentation only. Hosted
+checks for the final published head must be read separately; no hosted pass is implied here.
 
 ## Validated native terminal delivery (23 October)
 

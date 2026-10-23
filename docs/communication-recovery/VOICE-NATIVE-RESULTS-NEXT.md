@@ -1,12 +1,19 @@
 # Next voice milestone: native result recovery
 
-## Integration status (23 October, validation pending)
+## Validated target integration (23 October)
 
-PR #52 now includes target `2f08bde0` and its off-by-default V2 scheduler/call-driver contract.
-Both documentation histories are preserved. Combined validation and review are pending;
-`193f220f` results below describe only the prior isolated native checkpoint. Input/permit,
-atomic admission, action adapters, post-End browser cleanup and actual Actor/WebView acceptance
-remain outstanding. No production gate is enabled by the merge.
+Combined runtime `3f584d6049ef139492f8fa4146b5181bdc080575` includes target `2f08bde0` and passed complete
+Root 3,262, native 685 (including five ACL) and frontend 2,515 tests, with zero failures.
+Focused Root 458/native 208, static checks, production frontend build, all ten Edge flows,
+native development build and actual startup pass. HANDOVER records exact commands, durations,
+current-source fingerprints and the excluded stale 450-test run. Both reviewed runtime source
+sets and both documentation histories are preserved. A read-only integration review found no
+blocker/high/medium. The stale driver integration note is now historical; its status-only
+source comment remains a recorded LOW wording follow-up in the V2 owner's area.
+
+Production activation and action/final dispatch remain disabled. The seven remaining native/
+browser implementation steps below are unchanged. Do not interpret combined local suites as
+an actual Actor/MLS/WebView action cycle, live SDP/ICE, member relay or physical acceptance.
 
 ## Validated terminal delivery; remaining handoff work (23 October)
 
