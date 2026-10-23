@@ -19,7 +19,12 @@ local SDK/I/O, and transfers unresolved cleanup to the original channel driver. 
 plus exact Return handles existing children; refusal alone never proves absence. Exact native
 parent Plan-final issuance/ACK must cover any still-unknown child before channel collection.
 Fixed history/row custody lasts through actual unlink and owner retirement in either order.
-These draft adapters do not activate production dispatch or implement `VoiceV2Native`/RTC.
+The private native `factory::native::produce_derivation` now supplies the original
+uncommitted Derive without a fabricated browser request. Its canonical Route and separately
+paid native position survive actual Actor publication and output collection; shutdown waits
+for both native and browser physical owners. The opaque observer supports await/detach,
+without exposing task cancellation. This is not yet connected to production work delivery.
+These adapters do not activate production dispatch or implement `VoiceV2Native`/RTC.
 
 - `start(server, room, attempt)` selects one current native join. A lost reply repeats the
   same attempt and returns its original result. Server incarnation, UI-session generation,

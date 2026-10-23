@@ -14,11 +14,20 @@ scopes, plus static/build/startup and ten browser flows. The separate browser an
 tests do not yet establish an actual native-to-WebCrypto confirmation cycle. The native
 TCP provider uses fixed test AES keys, while browser tests use framed endpoint mocks.
 
-The next implementation must cross that boundary explicitly:
+Native producer 7edf9192 adds the private paid origin needed by that integration. It checks
+the canonical Route, owns a separate native Session position and reserves 8KiB before
+preflight. The physical factory keeps its existing 4KiB task payment. Focused handoff tests
+pass 282 cases and five real blocked-TCP confirmation scenarios pass using the actual
+uncommitted native parent. The complete measured graph is 4,456B; strict native Clippy and
+checking pass. Full native validation passes 768 tests (763 library plus five command-policy),
+and native build and actual startup pass. A separate native/Node HTTP interoperability draft
+is uncommitted and excluded from these passes; its native and combined layout checks are pending.
 
-1. Deliver a genuine uncommitted native Derive through a bounded native-owned work
-   producer. A native producer must own its own admitted custody; it must not fabricate
-   an authenticated browser Header/Incoming merely to call a physical-request factory.
+The next implementation must cross the browser boundary explicitly:
+
+1. Connect the existing private native producer to bounded native-owned work delivery.
+   Preserve its original payment, native position and publication history through output
+   collection. Do not fabricate an authenticated browser Header/Incoming to start it.
 2. Use the broker's actual non-extractable selected P256 key and original channel for
    P256/HKDF, then all six Hello/Proof/Finish seal/open operations. Byte-bearing Input,
    results and future SDP must use the prepaid authenticated encrypted channel. Ordinary

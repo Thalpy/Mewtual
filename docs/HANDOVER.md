@@ -1,6 +1,6 @@
 # Mewtual; Handover
 
-## Native-origin producer (23 October; full native validation pending)
+## Native-origin producer (23 October; validated runtime 7edf9192)
 
 The isolated native producer draft builds on published3d5b688b. Its private
 `produce_derivation` entry reserves its task payment before constructing asynchronous
@@ -33,10 +33,17 @@ regressions. The complete measured graph is 4,456B (future 2,512B, output 152B),
 distinct 8KiB payment. All five real blocked-TCP confirmation scenarios pass (40.40s), using
 the actual native producer for their original uncommitted parent and exact retry. Strict
 native Clippy (1m18s) and checking (54.15s) pass. Read-only adversarial re-review reports no
-remaining blocker, high or medium finding. Full native tests, build and startup are pending;
-the published checkpoint's passes below do not cover this runtime. Root and browser inputs
-remain byte-identical to their recorded complete successful runs. Production work pull,
+remaining blocker, high or medium finding. Full native validation passes 768 tests: 763
+library (708.17s) plus five command-policy tests, zero failures or ignored tests. Native build
+passes (2m39s) and the actual application startup check passes (2.93s). These logs are
+`target/native-producer-{full,build,startup}.log` in the producer checkout. Root and browser
+inputs remain byte-identical to their recorded complete successful runs below. Production work pull,
 actual HTTP effect delivery, native/WebCrypto interoperability and live V2 remain incomplete.
+
+Further interoperability code is isolated, uncommitted and unvalidated in
+`target/communication-native-webcrypto-worktree`; it is excluded from this checkpoint. Its
+browser row-observation change passes all 141 channel tests. The native/Node HTTP fixture,
+combined service layout and complete suites have not yet run. No production mode is enabled.
 
 ## Current continuation checkpoint (23 October; validated runtime 9109f20d)
 

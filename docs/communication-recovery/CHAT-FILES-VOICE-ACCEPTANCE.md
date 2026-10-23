@@ -1,5 +1,30 @@
 # Chat, files and voice implementation evidence
 
+## Native-origin producer (23 October; runtime 7edf9192)
+
+The private paid native producer passes 282 focused handoff tests (21.78s), including nine
+new lifecycle/ownership regressions, and all five real blocked-TCP confirmation scenarios
+(40.40s). Those scenarios now start their original uncommitted Derive through the actual
+native producer and verify that an exact producer retry preserves its action and history.
+The full native task graph measures 4,456B within its distinct 8KiB ordinary payment. The
+physical factory retains its 4KiB payment; group/process/work/row limits are unchanged.
+
+The provisional 4KiB native envelope correctly failed its layout guard: 280 passed/2 failed
+at 4,488B, then the same result at 4,456B after reducing the retained graph. Those runs are
+not fit evidence. The new 8KiB contract reserves preparation and publication together before
+any await; it does not borrow the independently funded browser Control position. Read-only
+adversarial review corrected canonical-registry and abortable-waiter findings; re-review has
+no remaining blocker/high/medium. Strict native Clippy (1m18s), checking (54.15s), formatting,
+ambient-dependency and diff checks pass. Complete native validation passes 768 tests: 763
+library (708.17s) plus five command-policy tests, zero failures/ignored. Native build passes
+(2m39s) and the actual startup gate passes (2.93s). Exact logs in the producer checkout are
+`target/native-producer-{full,build,startup}.log`. The separate uncommitted native/Node HTTP
+draft is excluded; it still needs native, complete layout and combined validation.
+
+Root and browser inputs are byte-identical to the complete passing runs recorded below.
+This does not establish native/WebCrypto interoperability, production work/HTTP effect
+delivery, SDP/ICE/RTC, member media relay or combined/physical acceptance.
+
 ## Current combined continuation (23 October; validated runtime 9109f20d)
 
 The PR53 deadline correction7b9af8d5 and Tokio1.53.3 lock-only patch5388993f are published.

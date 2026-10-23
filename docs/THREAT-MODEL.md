@@ -24,8 +24,8 @@ discovery and last-owner GC. Its payment and work retire before native idle is s
 The opaque observer permits await or drop-to-detach, never ordinary caller-triggered task
 abort after an Actor command has been queued. This is normal lifecycle ordering, not a claim
 of crash durability or recovery after arbitrary runtime teardown. Strict native Clippy and
-checking pass; full native tests/build/startup remain pending. No production effect
-dispatcher is enabled by this change.
+checking pass. Complete native validation passes 768 tests, and native build and actual
+application startup pass on runtime 7edf9192. No production effect dispatcher is enabled.
 
 ## Child Control construction and collection (23 October; inactive adapter)
 
