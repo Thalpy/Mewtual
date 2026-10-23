@@ -55,7 +55,7 @@ pub(super) fn final_receipt(receipt: FinalReceipt) -> Result<[u8; FINAL_BYTES], 
     bytes[18..26].copy_from_slice(&receipt.action.serial.to_be_bytes());
     bytes[26..34].copy_from_slice(&receipt.action.version.to_be_bytes());
     bytes[34..66].copy_from_slice(&receipt.action.input_tag);
-    bytes[66] = 1; // only terminal retirement can have this reply
+    bytes[66] = receipt.kind as u8; // exact Phase/Plan meaning; ordinary Return has neither
     if let Some(proof) = receipt.proof {
         bytes[67] = if receipt.acknowledged { 2 } else { 1 };
         bytes[68..100].copy_from_slice(&proof);

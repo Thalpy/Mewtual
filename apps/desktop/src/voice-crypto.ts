@@ -388,7 +388,7 @@ function context(label: string, transcript: Uint8Array): Uint8Array<ArrayBuffer>
  * unsettled work. Revoking an owner never frees a running promise; only its real settlement does.
  * A derive pipeline uses one permit for sequential import/ECDH/HKDF work, never parallel calls. */
 export class VoiceCryptoBroker {
-  readonly version = 13;
+  readonly version = 14;
   readonly subtle: SubtleCrypto;
   private readonly native: VoiceCryptoAdmission;
   private active = 0;
@@ -1463,10 +1463,14 @@ class RetainedIpcChannel {
   private readonly execution: SharedIpcExecution;
   private linked: BrowserChain | null = null;
   private intake: ChainIntake | null = null;
-  // Original terminal Derive pilot only. Continuation must define its SAME plan witness
-  // before replacing this descriptor with sibling confirmation rows. No renderer status or
-  // localDrained flag can manufacture a final proof or authorize closing the native channel.
+  // Original Derive parent only. This descriptor is never replaced by a sibling; native's
+  // separate Plan-final intent still names that same parent after ordinary Return. Child
+  // key/phase transfer remains separate. Neither a renderer flag nor localDrained can
+  // manufacture final proof or authorize closing the native channel.
   private terminalAction: Readonly<Pick<ChainIntake, "purpose" | "row" | "identity">> | null = null;
+  // Immutable after the one definite Phase-refusal transition. Unknown replies never
+  // select a different intent, and an issued proof can only be ACKed in its original mode.
+  private finalMode: "retire" | "retire-plan" = "retire";
   private finalProof: string | null = null;
   private finalAcknowledged = false;
   private actionBusy = false;
@@ -1622,7 +1626,7 @@ class RetainedIpcChannel {
     response: "input" | "permit" | "status", afterEnd: boolean,
     decode: (opened: Uint8Array<ArrayBuffer>, kind: VoiceIpcHeader["kind"]) => T): Promise<T> {
     if (this.actionBusy || this.request || this.historyRequest || !isVoiceIpcActionRow(row) ||
-        (afterEnd && action.kind !== "ack" && action.kind !== "settle" && action.kind !== "close" && action.kind !== "final")) throw new Error("voice channel busy");
+        (afterEnd && action.kind !== "ack" && action.kind !== "settle" && action.kind !== "close" && action.kind !== "close-plan" && action.kind !== "final")) throw new Error("voice channel busy");
     this.actionBusy = true;
     let encoded: ReturnType<typeof encodeVoiceIpcAction> | null = null;
     try {
@@ -1976,14 +1980,18 @@ class RetainedIpcChannel {
       ordinaryDrained = settled.localDrained;
     }
     if (this.finalProof === null) {
-      const reply = await exchange({ kind: "close", mode: "retire" }, 100,
-        opened => decodeVoiceIpcFinalReply(opened, original.row, original.identity));
+      let reply = await exchange(this.finalMode === "retire" ? { kind: "close", mode: "retire" } : { kind: "close-plan" }, 100,
+        opened => decodeVoiceIpcFinalReply(opened, original.row, original.identity, null, this.finalMode));
+      if (reply.kind === "refused" && reply.code === "unauthorized" && ordinaryDrained && this.finalMode === "retire") {
+        // Only an authenticated definite refusal permits this separate intent. A lost or
+        // Pending Phase reply may already own mode1 and MUST retry it. Native mode2 checks
+        // the actual returned original parent and retires its SAME plan; it cannot relabel
+        // Return or turn this observation into drainage. Latch before the first mode2 send.
+        this.finalMode = "retire-plan";
+        reply = await exchange({ kind: "close-plan" }, 100,
+          opened => decodeVoiceIpcFinalReply(opened, original.row, original.identity, null, this.finalMode));
+      }
       if (reply.kind === "refused") {
-        // A historical ordinary Return irreversibly gave back its capability. Do not relabel
-        // it as terminal retirement. Native settleSetup's independent preflight MUST decide
-        // whether this channel can close. If it refuses, keep keys and retry the original
-        // cleanup loop; neither this history observation nor a refusal is final proof.
-        if (reply.code === "unauthorized" && ordinaryDrained) return;
         throw new Error("native terminal cleanup unresolved");
       }
       if (reply.stage === "pending") throw new Error("native terminal cleanup pending");
@@ -1993,7 +2001,7 @@ class RetainedIpcChannel {
     if (!this.finalAcknowledged) {
       const proof = this.finalProof!;
       const reply = await exchange({ kind: "final", proof }, 100,
-        opened => decodeVoiceIpcFinalReply(opened, original.row, original.identity, proof));
+        opened => decodeVoiceIpcFinalReply(opened, original.row, original.identity, proof, this.finalMode));
       if (reply.kind !== "final" || reply.stage !== "acknowledged") throw new Error("native final acknowledgement unresolved");
       this.finalAcknowledged = true;
     }
@@ -2012,7 +2020,7 @@ export function windowVoiceCryptoBroker(
   const host = window as Record<symbol, unknown>;
   const previous = host[BROKER] as VoiceCryptoBroker | undefined;
   if (previous) {
-    if (previous.version !== 13 || typeof previous.nativeDerivationFromChannel !== "function" || typeof previous.recoverChannelHistory !== "function" || typeof previous.prepareChainFromChannel !== "function" || typeof previous.nativeChannel !== "function" || typeof previous.run !== "function" || typeof previous.selectJoinKey !== "function" || typeof previous.retrySelectedJoinKeys !== "function" ||
+    if (previous.version !== 14 || typeof previous.nativeDerivationFromChannel !== "function" || typeof previous.recoverChannelHistory !== "function" || typeof previous.prepareChainFromChannel !== "function" || typeof previous.nativeChannel !== "function" || typeof previous.run !== "function" || typeof previous.selectJoinKey !== "function" || typeof previous.retrySelectedJoinKeys !== "function" ||
         typeof previous.registerProtectedConfirmation !== "function" ||
         typeof previous.registerProtectedDerivation !== "function" || typeof previous.registerConfirmation !== "function" || typeof previous.createPair !== "function") {
       throw new Error("voice crypto broker version changed; reload required");

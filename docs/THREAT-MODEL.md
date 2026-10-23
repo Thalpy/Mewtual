@@ -1,5 +1,28 @@
 # Threat model; client integrity & enforcement boundaries
 
+## Plan-final intent after ordinary Return (23 October; unvalidated draft)
+
+Separate mode2 intent cannot upgrade immutable Phase Return to Retire. It binds the actual
+original canonical registry/session, selected allocation, full purpose and RowId. Cleanup may
+outlive the current call grant, but cannot create a factory, admit an engine or revive a join.
+Both normal closures use the same original UI commit: intent winning blocks close until exact
+final ACK, while close winning rejects new intent. Forced shutdown remains independent and
+does not invent ACK or Root readiness. Admission pays its identity lifetime by retaining the
+actual Session until fixed Row custody exists; bootstrap/Row collection retains its original
+physical identity provenance. A prior foreign witness is cleared when new intent is installed.
+
+The unchanged12KiB Control and2,304B native Row guards now include actual adapter futures,
+Admission, retirement ticket, replies and identity. These new native guards/tests are not yet
+compiled. Mode1 wire vectors remain unchanged; mode2 requires explicit browser expectation and
+a separate proof domain. The public listener still rejects effect opcodes before Data admission.
+This draft grants no production V2, browser/RTC, multi-peer or physical acceptance claim.
+
+The retained browser latches separate Plan mode only after authenticated definite mode1 refusal
+and exact settled/localDrained history. It never treats loss, Pending or another error as permission
+to replace an intent. All later issuance/ACK decode against the latched mode, retaining original
+keys/counters/parent descriptor. Mode2 refusal cannot bypass native preflight or permit early key
+collection. Broker14 rejects old HMR shape; tests use actual WebCrypto with a framed native mock.
+
 ## Native confirmation child draft (23 October; validation incomplete)
 
 Child purpose reservation, original-parent retirement and publication/role claims share the

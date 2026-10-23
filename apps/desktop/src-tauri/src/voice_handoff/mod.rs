@@ -18,6 +18,7 @@ mod input;
 pub(crate) mod integration;
 pub(crate) mod ledger;
 mod pending_close;
+mod plan_final;
 mod replies;
 mod requests;
 mod service;

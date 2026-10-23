@@ -28,6 +28,11 @@ mod plan;
 pub(super) use children::ConfirmationPurpose;
 use plan::Plan;
 
+#[cfg(test)]
+pub(super) fn retirement_layout_bytes() -> usize {
+    plan::RETIREMENT_MEMORY_BYTES
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct RowId {
     slot: usize,
@@ -188,11 +193,21 @@ struct State {
 }
 // Original-Session intent precedes local/Root close. The token retains NO Session or key.
 // Live/Drained reuse enum storage occupied by the larger Pending preparation. The SAME
-// original Phase payment covers its independent token allocation through delivery Drop.
+// original Row payment covers the full token allocation through delivery Drop, including
+// Plan-final after ordinary Return when there is no Phase left. Layout guards include it.
 struct FinalDelivery {
     session: Arc<SessionIdentity>,
+    kind: FinalKind,
     issued: Option<[u8; 32]>,
     acknowledged: bool,
+}
+/// Immutable terminal meaning. An ordinary Phase Return is never upgraded to Retire;
+/// Plan retirement instead closes its separately retained original control capability.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u8)]
+pub(super) enum FinalKind {
+    Phase = 1,
+    Plan = 2,
 }
 /// Fixed original-row final delivery metadata, separate from the 242-byte history schema.
 /// It proves neither channel collection nor SDK erasure. Only native issuance can create it.
@@ -200,6 +215,7 @@ struct FinalDelivery {
 pub(super) struct FinalReceipt {
     pub row: RowId,
     pub action: super::requests::Action,
+    pub kind: FinalKind,
     pub proof: Option<[u8; 32]>,
     pub acknowledged: bool,
 }
@@ -342,7 +358,10 @@ impl ResolvedRow {
                 return Err(VoiceError::Capacity);
             }
             if let Some(delivery) = state.final_delivery() {
-                if mode != CloseMode::Retire || !Arc::ptr_eq(&delivery.session, session) {
+                if mode != CloseMode::Retire
+                    || delivery.kind != FinalKind::Phase
+                    || !Arc::ptr_eq(&delivery.session, session)
+                {
                     return Err(VoiceError::Unauthorized);
                 }
             } else if matches!(state.body, Body::Drained(..)) {
@@ -359,6 +378,7 @@ impl ResolvedRow {
                 };
                 live.final_delivery = Some(FinalDelivery {
                     session: session.clone(),
+                    kind: FinalKind::Phase,
                     issued: None,
                     acknowledged: false,
                 });
@@ -392,12 +412,16 @@ impl ResolvedRow {
             input_tag: input,
         };
         if !matches!(state.body, Body::Drained(..))
-            || state.final_phase.is_none()
+            || match delivery.kind {
+                FinalKind::Phase => state.final_phase.is_none(),
+                FinalKind::Plan => !state.plan().is_some_and(Plan::is_drained),
+            }
             || !Ledger::final_retirement_ready(&state)
         {
             return Ok(FinalReceipt {
                 row: row.id,
                 action,
+                kind: delivery.kind,
                 proof: None,
                 acknowledged: false,
             });
@@ -420,7 +444,7 @@ impl ResolvedRow {
             hash.update(serial.to_be_bytes());
             hash.update(version.to_be_bytes());
             hash.update(input);
-            hash.update([1]); // terminal retirement, never ordinary return
+            hash.update([delivery.kind as u8]); // distinct immutable terminal meaning
             hash.finalize().into()
         };
         let delivery = state.final_delivery_mut().expect("checked original intent");
@@ -428,6 +452,7 @@ impl ResolvedRow {
         Ok(FinalReceipt {
             row: row.id,
             action,
+            kind: delivery.kind,
             proof: Some(proof),
             acknowledged: delivery.acknowledged,
         })
@@ -457,6 +482,7 @@ impl ResolvedRow {
                 version,
                 input_tag,
             },
+            kind: delivery.kind,
             proof: Some(proof),
             acknowledged: true,
         })

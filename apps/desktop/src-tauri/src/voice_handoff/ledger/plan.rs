@@ -61,6 +61,81 @@ impl Drop for Retirement {
 }
 
 impl ResolvedRow {
+    /// Latch a DISTINCT original-Session Plan intent after action Returns. The opaque
+    /// admission retains the SAME UI commit used by normal bootstrap closure, preventing
+    /// preflight-then-close from overtaking newly required final delivery. No grant upgrade,
+    /// Phase relabelling, reconstructed capability, allocation or detached work is involved.
+    pub(in crate::voice_handoff) fn request_plan_final(
+        &self,
+        admission: &super::super::plan_final::Admission,
+    ) -> Result<(), VoiceError> {
+        if !Arc::ptr_eq(&self.ledger, admission.ledger()) {
+            return Err(VoiceError::Unauthorized);
+        }
+        let ticket = {
+            let index = self.indexed()?;
+            let mut state = self
+                .row
+                .state
+                .lock()
+                .unwrap_or_else(|error| error.into_inner());
+            if self.row.key.parent.is_some()
+                || !matches!(self.row.key.purpose, Purpose::Derive(_))
+                || !self
+                    .row
+                    .key
+                    .matches(admission.selected(), self.row.key.purpose)
+                || !matches!(state.body, Body::Drained(..))
+                || state.final_phase.is_some()
+            {
+                return Err(VoiceError::Unauthorized);
+            }
+            if !state.status.drained
+                || !state.status.engine.settled
+                || (state.status.engine.receipt.is_some() && !state.status.acknowledged)
+                || !Ledger::children_locally_closed(&index, &self.row)
+            {
+                return Err(VoiceError::Capacity);
+            }
+            if let Some(delivery) = state.final_delivery() {
+                return if delivery.kind == FinalKind::Plan
+                    && Arc::ptr_eq(&delivery.session, admission.session())
+                {
+                    Ok(())
+                } else {
+                    Err(VoiceError::Unauthorized)
+                };
+            }
+            let plan = state.plan().ok_or(VoiceError::Unauthorized)?;
+            if plan.control.is_none() && plan.retirement.is_none() {
+                // The existing Retirement ticket is between native publication and Root
+                // witness installation. Its missing control is not retirement evidence.
+                return Err(VoiceError::Capacity);
+            }
+            state.session_collected = false; // prior physical proof cannot cover new intent
+            let Body::Drained(delivery, ..) = &mut state.body else {
+                unreachable!("validated original history")
+            };
+            *delivery = Some(FinalDelivery {
+                session: admission.session().clone(),
+                kind: FinalKind::Plan,
+                issued: None,
+                acknowledged: false,
+            });
+            state
+                .plan_mut()
+                .expect("same original retained plan")
+                .control
+                .take()
+                .map(|control| Retirement {
+                    row: self.row.clone(),
+                    control: Some(control),
+                })
+        };
+        drop(ticket); // Root retirement and affine destruction outside every native guard
+        Ok(())
+    }
+
     /// Capacity provenance for a trusted child factory, never an admission or effect grant.
     /// Frozen retirement excludes NEW child adoption even if its public metadata matches.
     pub(crate) fn contains_plan_action(&self, action: &CryptoAction) -> Result<bool, VoiceError> {
@@ -80,32 +155,7 @@ impl ResolvedRow {
     /// Derive Return cannot be upgraded, but it must not strand cleanup if End happens before
     /// any successor exists. Caller must resolve the original authenticated native owner.
     pub(crate) fn retire_plan(&self) -> Result<bool, VoiceError> {
-        let ticket = {
-            let index = self.indexed()?;
-            let mut state = self
-                .row
-                .state
-                .lock()
-                .unwrap_or_else(|error| error.into_inner());
-            if !state.status.drained
-                || !state.status.engine.settled
-                || (state.status.engine.receipt.is_some() && !state.status.acknowledged)
-            {
-                return Err(VoiceError::Capacity);
-            }
-            if !Ledger::children_locally_closed(&index, &self.row) {
-                return Err(VoiceError::Capacity);
-            }
-            let plan = state.plan_mut().ok_or(VoiceError::Unauthorized)?;
-            if plan.retirement.is_some() {
-                return Ok(plan.is_drained());
-            }
-            let control = plan.control.take().ok_or(VoiceError::Capacity)?;
-            Retirement {
-                row: self.row.clone(),
-                control: Some(control),
-            }
-        };
+        let ticket = self.prepare_retirement()?;
         drop(ticket); // Root may enter Engine and release credits; native guards are gone.
         let state = self
             .row
@@ -113,5 +163,40 @@ impl ResolvedRow {
             .lock()
             .unwrap_or_else(|error| error.into_inner());
         Ok(state.plan().is_some_and(Plan::is_drained))
+    }
+
+    /// Take the actual original control under the native gate, before its destructor can
+    /// enter Root. Keeping this transition separate permits deterministic cancellation/race
+    /// tests to park the SAME production ticket rather than inventing a missing-control flag.
+    fn prepare_retirement(&self) -> Result<Option<Retirement>, VoiceError> {
+        let index = self.indexed()?;
+        let mut state = self
+            .row
+            .state
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if !state.status.drained
+            || !state.status.engine.settled
+            || (state.status.engine.receipt.is_some() && !state.status.acknowledged)
+            || !Ledger::children_locally_closed(&index, &self.row)
+        {
+            return Err(VoiceError::Capacity);
+        }
+        let plan = state.plan_mut().ok_or(VoiceError::Unauthorized)?;
+        if plan.retirement.is_some() {
+            return Ok(None);
+        }
+        let control = plan.control.take().ok_or(VoiceError::Capacity)?;
+        Ok(Some(Retirement {
+            row: self.row.clone(),
+            control: Some(control),
+        }))
+    }
+
+    #[cfg(test)]
+    pub(in crate::voice_handoff) fn park_retirement_for_test(
+        &self,
+    ) -> Result<impl Send, VoiceError> {
+        self.prepare_retirement()
     }
 }

@@ -286,10 +286,12 @@ async function framedDerivation(f: Awaited<ReturnType<typeof fixture>>) {
   let derived = false, acknowledged = false, settled = false, historical = false, lostResult = false;
   let retireCalls = 0, finalCalls = 0, finalAcknowledged = false, finalPending = false;
   let loseIssuance = false, loseFinalAck = false, ordinaryReturned = false;
+  let planCalls = 0, finalMode: 1 | 2 = 1, replyMode: 1 | 2 | null = null;
   let alter: ((data: Uint8Array) => Uint8Array) | null = null;
   const emptyTag = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
   const receipt = hash(77);
   const proof = hash(78);
+  const planProof = hash(79);
   const status = () => {
     const bytes = Buffer.alloc(242); bytes[0] = 1; Buffer.from(row, "hex").copy(bytes, 2); bytes[19] = 1;
     integer(BigInt(identity.action), 8).copy(bytes, 20); integer(1n, 8).copy(bytes, 28); Buffer.from(identity.inputTag, "hex").copy(bytes, 36);
@@ -301,7 +303,7 @@ async function framedDerivation(f: Awaited<ReturnType<typeof fixture>>) {
   };
   const nativeSettle = f.native.settleSetup;
   f.native.settleSetup = async (...args) => {
-    assert.ok(finalAcknowledged || ordinaryReturned, "native setup cannot close ahead of final ACK or its original ordinary closure");
+    assert.ok(finalAcknowledged, "native setup cannot close ahead of the separate original final ACK");
     await nativeSettle(...args);
   };
   f.cleanup(() => { finalPending = false; loseIssuance = false; loseFinalAck = false; f.native.settleSetup = nativeSettle; });
@@ -335,17 +337,24 @@ async function framedDerivation(f: Awaited<ReturnType<typeof fixture>>) {
     if (header.operation === 6 || header.operation === 7) {
       assert.ok(settled && (!derived || acknowledged), "native terminal close follows exact action settlement/receipt ACK");
       if (header.operation === 6) {
-        retireCalls++; assert.deepEqual(opened, encodeVoiceIpcAction(historyPurpose, { kind: "close", mode: "retire" }).body);
-        if (ordinaryReturned) return { kind: 0, body: new Uint8Array([1, 3, 5]) };
+        if (opened[105] === 1) {
+          retireCalls++; assert.deepEqual(opened, encodeVoiceIpcAction(historyPurpose, { kind: "close", mode: "retire" }).body);
+          assert.equal(planCalls, 0, "Plan retries cannot revert to Phase mode after uncertain intent");
+          if (ordinaryReturned) return { kind: 0, body: new Uint8Array([1, 3, 5]) };
+        } else {
+          planCalls++; assert.deepEqual(opened, encodeVoiceIpcAction(historyPurpose, { kind: "close-plan" }).body);
+          assert.ok(ordinaryReturned, "Plan final is a distinct original-parent intent after Return");
+          finalMode = 2;
+        }
         if (loseIssuance) { loseIssuance = false; throw new Error("actual native final issuance reply lost"); }
       } else {
-        finalCalls++; assert.deepEqual(opened, encodeVoiceIpcAction(historyPurpose, { kind: "final", proof }).body);
+        finalCalls++; assert.deepEqual(opened, encodeVoiceIpcAction(historyPurpose, { kind: "final", proof: finalMode === 2 ? planProof : proof }).body);
         assert.equal(finalPending, false); finalAcknowledged = true;
         if (loseFinalAck) { loseFinalAck = false; throw new Error("actual native final ACK reply lost"); }
       }
       const body = Buffer.concat([Buffer.from([1, 4]), Buffer.from(row, "hex"), integer(BigInt(identity.action), 8), integer(1n, 8),
-        Buffer.from(identity.inputTag, "hex"), Buffer.from([1, finalPending ? 0 : finalAcknowledged ? 2 : 1]),
-        Buffer.from(finalPending ? "0".repeat(64) : proof, "hex")]);
+        Buffer.from(identity.inputTag, "hex"), Buffer.from([replyMode ?? finalMode, finalPending ? 0 : finalAcknowledged ? 2 : 1]),
+        Buffer.from(finalPending ? "0".repeat(64) : finalMode === 2 ? planProof : proof, "hex")]);
       return { kind: 0, body };
     }
     assert.equal(header.operation, 5); settlements++; settled = true; return status();
@@ -354,6 +363,8 @@ async function framedDerivation(f: Awaited<ReturnType<typeof fixture>>) {
     historical() { historical = true; derived = true; settled = true; },
     loseResult() { lostResult = true; }, alter(work: typeof alter) { alter = work; },
     finalCounts: () => ({ retireCalls, finalCalls, finalAcknowledged }),
+    planCalls: () => planCalls,
+    finalReplyMode(value: typeof replyMode) { replyMode = value; },
     pendingFinal(value = true) { finalPending = value; },
     loseFinalReplies() { loseIssuance = true; loseFinalAck = true; },
     returned() { ordinaryReturned = true; historical = true; settled = true; },
@@ -421,6 +432,7 @@ test("post-End final issuance and ACK recover lost replies using original framin
   assert.equal(f.counts().settlements, 0, "native channel stays open after a lost final ACK reply");
   f.advance(1000); await close; await until(() => f.broker.counts().bytes === 0);
   assert.deepEqual(source.finalCounts(), { retireCalls: 2, finalCalls: 2, finalAcknowledged: true });
+  assert.equal(source.planCalls(), 0, "lost Phase replies never select another intent");
   assert.equal(f.counts().steps.filter(step => step === "deriveBits").length, derives);
   assert.equal(f.counts().setups, 1); assert.equal(f.timers().pending, 0);
 });
@@ -440,16 +452,53 @@ test("post-End Pending retains Control and retries on bounded Clock cadence unti
   source.pendingFinal(false); f.advance(1000); await close;
   await until(() => f.broker.counts().bytes === 0);
   assert.equal(source.finalCounts().finalAcknowledged, true); assert.equal(f.timers().pending, 0);
+  assert.equal(source.planCalls(), 0, "Pending Phase intent must remain Phase");
 });
 
-test("a historical ordinary Return cannot be relabelled as terminal proof during channel cleanup", async t => {
+test("ordinary Return retains original Plan mode through lost intent and ACK replies", async t => {
+  const f = await fixture(t), channel = f.channel(); await channel.status();
+  const source = await framedDerivation(f); source.returned();
+  await f.broker.nativeDerivationFromChannel(f.owner, channel, f.key, historyPurpose, source.row, source.identity).attempt();
+  const steps = f.counts().steps.length;
+  source.loseFinalReplies(); f.owner.retire(); const close = channel.close();
+  await until(() => source.planCalls() === 1 && f.timers().delays.includes(1000));
+  assert.equal(source.finalCounts().retireCalls, 1); assert.equal(f.counts().settlements, 0);
+  f.advance(1000);
+  await until(() => source.finalCounts().finalCalls === 1 && f.timers().delays.includes(1000));
+  assert.equal(source.planCalls(), 2); assert.equal(source.finalCounts().retireCalls, 1);
+  assert.equal(f.counts().settlements, 0); assert.ok(f.broker.counts().bytes > 0);
+  f.advance(1000); await close; await until(() => f.broker.counts().bytes === 0);
+  assert.deepEqual(source.finalCounts(), { retireCalls: 1, finalCalls: 2, finalAcknowledged: true });
+  assert.equal(source.planCalls(), 2); assert.equal(f.counts().setups, 1);
+  assert.equal(f.counts().steps.filter(s => s === "deriveBits").length,
+    f.counts().steps.slice(0, steps).filter(s => s === "deriveBits").length, "cleanup never derives replacement keys");
+});
+
+for (const refusal of ["pending", "wrong-kind"] as const) test(`Plan ${refusal} retains keys and retries the same mode before setup closure`, async t => {
+  const f = await fixture(t), channel = f.channel(); await channel.status();
+  const source = await framedDerivation(f); source.returned();
+  await f.broker.nativeDerivationFromChannel(f.owner, channel, f.key, historyPurpose, source.row, source.identity).attempt();
+  if (refusal === "pending") source.pendingFinal(); else source.finalReplyMode(1);
+  f.owner.retire(); let done = false;
+  const close = channel.close().then(() => { done = true; });
+  await until(() => source.planCalls() === 1 && f.timers().delays.includes(1000));
+  assert.equal(done, false); assert.equal(f.counts().settlements, 0); assert.equal(f.counts().collections, 0);
+  assert.equal(source.finalCounts().finalCalls, 0); assert.ok(f.broker.counts().bytes > 0);
+  source.pendingFinal(false); source.finalReplyMode(2); f.advance(1000); await close;
+  await until(() => f.broker.counts().bytes === 0);
+  assert.equal(source.finalCounts().retireCalls, 1); assert.equal(source.planCalls(), 2);
+  assert.equal(source.finalCounts().finalAcknowledged, true); assert.equal(f.counts().setups, 1);
+});
+
+test("historical ordinary Return uses a separate original Plan-final intent and exact ACK", async t => {
   const f = await fixture(t), channel = f.channel(); await channel.status();
   const source = await framedDerivation(f); source.returned();
   const reply = await f.broker.nativeDerivationFromChannel(f.owner, channel, f.key, historyPurpose, source.row, source.identity).attempt();
   assert.equal(reply.kind, "status");
   await channel.close(); await until(() => f.broker.counts().active === 0);
-  assert.deepEqual(source.finalCounts(), { retireCalls: 1, finalCalls: 0, finalAcknowledged: false });
-  assert.equal(f.counts().settlements, 1, "only native preflight can authorize this ordinary channel closure");
+  assert.deepEqual(source.finalCounts(), { retireCalls: 1, finalCalls: 1, finalAcknowledged: true });
+  assert.equal(source.planCalls(), 1);
+  assert.equal(f.counts().settlements, 1, "native final ACK still precedes channel preflight");
 });
 
 test("ordinary history never bypasses native channel preflight or loses keys after its refusal", async t => {
@@ -467,7 +516,8 @@ test("ordinary history never bypasses native channel preflight or loses keys aft
   assert.equal(f.counts().collections, 0); assert.equal(f.counts().settlements, 0);
   assert.ok(f.broker.counts().bytes > 0);
   f.advance(1000); await close; await until(() => f.broker.counts().bytes === 0);
-  assert.deepEqual(source.finalCounts(), { retireCalls: 2, finalCalls: 0, finalAcknowledged: false });
+  assert.deepEqual(source.finalCounts(), { retireCalls: 1, finalCalls: 1, finalAcknowledged: true });
+  assert.equal(source.planCalls(), 1, "lost close reply never repeats acknowledged Plan intent");
   assert.equal(f.counts().setups, 1, "successful retry framing used original keys, never new setup");
   assert.equal(f.counts().collections, 1);
 });
@@ -948,7 +998,7 @@ test("absolute IO deadline aborts stale-port fetch but retains custody until act
   assert.equal((await channel.status()).kind, "ready"); assert.deepEqual(f.counts().tx, [2n]);
 });
 
-for (const version of [7, 8, 9, 10, 11]) test(`HMR refuses v${version} retained pool rather than creating a second channel allocator`, () => {
+for (const version of [7, 8, 9, 10, 11, 12, 13]) test(`HMR refuses v${version} retained pool rather than creating a second channel allocator`, () => {
   const host = { [Symbol.for("mewtual.voice.crypto-broker.v2")]: { version } };
   const native = { async admit() { return ""; }, async settle() {}, async commitInbound() {} };
   assert.throws(() => windowVoiceCryptoBroker(native, host, real), /reload required/);
@@ -1171,7 +1221,7 @@ test("Derive intake and terminal Control payload graphs fit their separate origi
   const controlBuffers = 2 * (185 + 16) + 2 * (242 + 16) + 144 + 288 + 4 * 40 + 2 * 32 + 2 * 12 + 1;
   const descriptor = 2 * (3 * 64 + 20 + 32 + 2 * 20 + 64 + 64);
   const decoded = 2 * 1024; // bounded fixed status/final graph, including exact-u64 strings
-  const wrappers = 3 * 1024;
+  const wrappers = 3 * 1024 + 2 * "retire-plan".length; // retained fixed final-mode discriminator
   const control = controlBuffers + descriptor + decoded + wrappers;
   assert.ok(control <= 8 * 1024, `terminal Control payload/wrapper envelope ${control}/8192`);
 });

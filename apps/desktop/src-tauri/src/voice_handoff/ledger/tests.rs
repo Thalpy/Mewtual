@@ -116,6 +116,9 @@ fn complete_records_index_handles_and_one_worker_fit_existing_fixed_payments() {
     // wrappers, index slot, temporary Status response and Arc allocation counters here.
     let bytes = std::mem::size_of::<Row>()
         + 2 * std::mem::size_of::<usize>()
+        // Plan-final after Return retains identity with NO Phase. Its full original
+        // allocation must remain paid through late Row/history handles and physical GC.
+        + std::mem::size_of::<SessionIdentity>() + 2 * std::mem::size_of::<usize>()
         + std::mem::size_of::<CallGrant>()
         + 2 * std::mem::size_of::<usize>()
         + std::mem::size_of::<Option<Arc<Row>>>()

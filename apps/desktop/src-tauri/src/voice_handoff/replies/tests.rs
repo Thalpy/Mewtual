@@ -36,10 +36,21 @@ fn vectors() -> Value {
 
 #[test]
 fn separate_final_vectors_bind_exact_action_mode_and_closed_delivery_disposition() {
-    for case in vectors()["finalCases"].as_array().unwrap() {
+    let vectors = vectors();
+    for case in vectors["finalCases"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .chain(vectors["planFinalCases"].as_array().unwrap())
+    {
         let value = &case["expected"];
         let identity = &value["identity"];
         let receipt = FinalReceipt {
+            kind: match value["mode"].as_str().unwrap() {
+                "retire" => super::super::ledger::FinalKind::Phase,
+                "retire-plan" => super::super::ledger::FinalKind::Plan,
+                _ => panic!("closed native final-kind vector"),
+            },
             row: RowId::from_logical(
                 hex::decode(value["row"].as_str().unwrap())
                     .unwrap()
@@ -69,6 +80,7 @@ fn final_encoder_rejects_noncanonical_identity_and_ack_without_issuance_in_relea
     let mut logical = [0; 16];
     logical[15] = 1;
     let original = FinalReceipt {
+        kind: super::super::ledger::FinalKind::Phase,
         row: RowId::from_logical(logical).unwrap(),
         action: super::super::requests::Action {
             serial: 1,

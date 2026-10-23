@@ -1,5 +1,43 @@
 # Mewtual; Handover
 
+## Plan-final continuation (23 October; focused checks pass, full native pending)
+
+New work is isolated in `target/communication-native-continuation-worktree`, based on the
+frozen confirmation-child checkpoint `534b641e`. Heavy complete validation of that checkpoint
+continues in its own checkout; do not attribute those results to this draft.
+
+The draft adds a separate original-Session Plan-final intent after ordinary action Returns.
+The actual UI commit orders it against both normal channel closures. Cleanup routing accepts
+the exact original canonical registry/session after End, without weakening first-effect checks.
+Admission retains the actual paid Session until the fixed paid Row owns its original identity.
+The same original Root retirement ticket supplies readiness; missing in-flight control is a
+retryable refusal. Final kind2 is distinct from existing Phase kind1 and has separate proof
+domain and explicit browser decoding. The inactive authenticated adapter uses ClosePhase6 mode2,
+with separate `ClosePlan` decoding and rejection by old Phase handlers; generic exact FinalAck7
+is shared. Production dispatch, live driver and activation remain disabled.
+
+Review requested complete Control-future/Admission accounting, forced-shutdown/last-owner
+coverage and shared native/browser Plan vectors. Those checks are now written, retaining the
+12KiB Control and2,304B Row ceilings. The67 focused TypeScript reply/grammar tests and151
+browser cleanup/derivation/final tests pass; the updated full frontend passes2,538 with zero
+Svelte errors/warnings and a successful production build. All241 native handoff tests pass,
+including all11 Plan-final regressions. Actual encrypted-request tests cover cancellation while waiting for the
+original commit, wrong bindings, lost issuance/ACK, End/lock cleanup and old-handler rejection.
+The retained browser now selects separate Plan cleanup only after an authenticated definite
+Phase-Unauthorized response plus exact settled/localDrained history. Lost/Pending Phase replies
+never switch. Plan mode latches before sending and survives lost intent/ACK, Pending and wrong-kind
+responses, preserving the original descriptor, keys and counters. Broker version14 refuses older
+HMR pools. Native Plan-final ACK is required before setup preflight; an ordinary Return is no
+longer a shortcut. These browser tests use real WebCrypto with framed native mocks, not live IPC.
+The complete measured codec graph is12,252B within12,288B Control; the Plan adapter graph is
+3,520B. Keep the actual compiler-future/identity/output inventory current: headroom is small.
+The initial native test build failed only on private fixture references and unpolled-future
+temporary lifetimes; explicit fixture exports and earlier temporary destruction corrected them.
+No failing test was skipped or assertion weakened. Full native and current strict/static checks
+remain pending. Root runtime sources are unchanged from the3,310-test frozen child checkpoint.
+Complete child IPC, actual browser key/phase transfer, SDP/ICE/RTC,
+multi-peer composition, member media relay and physical acceptance remain unfinished.
+
 ## Native confirmation children (23 October; focused validation in progress)
 
 Continue this draft in `target/communication-native-children-worktree`, branch

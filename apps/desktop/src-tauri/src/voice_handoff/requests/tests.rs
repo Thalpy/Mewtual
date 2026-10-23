@@ -41,6 +41,11 @@ fn native_browser_vectors_preserve_complete_purpose_identity_and_borrow_the_exac
                 assert_eq!(bytes.len(), 106);
                 assert_eq!(mode == CloseMode::Retire, source["mode"] == "retire");
             }
+            Kind::ClosePlan => {
+                assert_eq!(bytes.len(), 106);
+                assert_eq!(source["kind"], "close-plan");
+                assert_eq!(bytes[105], 2);
+            }
             Kind::Admit {
                 action,
                 engine_bytes,
@@ -123,7 +128,12 @@ fn flags_zero_identities_and_result_length_are_closed_while_epoch_zero_remains_v
             }
         }
         if matches!(operation, Operation::BeginDerive | Operation::ClosePhase) {
-            for flag in [2, 255] {
+            // Mode2 is a distinct Plan intent only for ClosePhase; Begin remains boolean.
+            for flag in if operation == Operation::BeginDerive {
+                [2, 255]
+            } else {
+                [3, 255]
+            } {
                 bytes[105] = flag;
                 assert!(Request::decode(operation, &bytes).is_err());
             }

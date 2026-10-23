@@ -44,6 +44,9 @@ pub(super) enum Kind<'a> {
     ClosePhase {
         mode: CloseMode,
     },
+    /// Separate whole-plan intent after ordinary action Returns. This cannot relabel an
+    /// earlier Phase closure, and requires the original native UI-commit admission.
+    ClosePlan,
     FinalAck {
         proof: [u8; 32],
     },
@@ -103,12 +106,15 @@ impl<'a> Request<'a> {
             Operation::Settle => Kind::Settle {
                 action: cursor.action()?,
             },
-            Operation::ClosePhase => Kind::ClosePhase {
-                mode: match cursor.take::<1>()? {
-                    [0] => CloseMode::Return,
-                    [1] => CloseMode::Retire,
-                    _ => return Err(VoiceError::Malformed),
+            Operation::ClosePhase => match cursor.take::<1>()? {
+                [0] => Kind::ClosePhase {
+                    mode: CloseMode::Return,
                 },
+                [1] => Kind::ClosePhase {
+                    mode: CloseMode::Retire,
+                },
+                [2] => Kind::ClosePlan,
+                _ => return Err(VoiceError::Malformed),
             },
             Operation::FinalAck => Kind::FinalAck {
                 proof: cursor.take()?,

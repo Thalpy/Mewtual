@@ -10,6 +10,7 @@ export type VoiceIpcActionRequest =
   | Readonly<{ kind: "begin"; retry: boolean }>
   | Readonly<{ kind: "input" }>
   | Readonly<{ kind: "close"; mode: "return" | "retire" }>
+  | Readonly<{ kind: "close-plan" }>
   | Readonly<{ kind: "admit"; identity: VoiceIpcActionIdentity; engineBytes: number }>
   | Readonly<{ kind: "result"; identity: VoiceIpcActionIdentity; tag: string; output: Uint8Array }>
   | Readonly<{ kind: "ack"; identity: VoiceIpcActionIdentity; digest: string }>
@@ -51,6 +52,7 @@ export function encodeVoiceIpcAction(purpose: VoiceIpcPurpose, request: VoiceIpc
     case "close":
       if (request.mode !== "return" && request.mode !== "retire") return fail();
       operation = 6; length = 106; break;
+    case "close-plan": operation = 6; length = 106; break;
     case "final": operation = 7; length = 137; break;
     default: return fail();
   }
@@ -67,6 +69,7 @@ export function encodeVoiceIpcAction(purpose: VoiceIpcPurpose, request: VoiceIpc
     switch (request.kind) {
       case "begin": body[105] = Number(request.retry); break;
       case "close": body[105] = request.mode === "retire" ? 1 : 0; break;
+      case "close-plan": body[105] = 2; break;
       case "admit": view.setUint32(153, request.engineBytes); break;
       case "result":
         hash(body, 153, request.tag); view.setUint16(185, request.output.byteLength);

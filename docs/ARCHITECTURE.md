@@ -1,5 +1,21 @@
 # Mewtual; Architecture
 
+## Separate Plan-final continuation draft (23 October; validation pending)
+
+After an ordinary action Return the parent retains its original Root plan, independently of
+the discarded variable Phase. A new Plan-final intent records the original native Session
+identity in the fixed paid Row and freezes further child adoption. The actual UI commit orders
+this transition against both normal channel closures. Before that Row custody exists, cleanup
+Admission retains the actual paid Session, including across forced process shutdown.
+
+The same affine Root retirement ticket supplies readiness outside native guards. Intent does
+not infer success from a missing control, dead lease, returned loan or renderer flag. Issuance
+and exact ACK remain separate, and forced GC still needs the original physical witness, late
+Root readiness and actual last metadata-owner collection. Existing Phase Return/Retire semantics
+remain unchanged. The new inactive mode2 Control adapter and explicit browser reply decoder are
+not production enablement; native tests are pending. Full child/browser/SDP/ICE/RTC composition
+and media remain open; see HANDOVER for the frozen checkpoint and current draft evidence.
+
 ## Integrated V2 scheduling boundary (23 October)
 
 The target's V2 transport now coexists with native terminal-delivery state. Root routes kind 28

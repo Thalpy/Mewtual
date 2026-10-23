@@ -143,6 +143,43 @@ struct Ticket {
 }
 
 impl Registry {
+    /// Cleanup-only routing under the caller's ORIGINAL UI commit. End/lock may revoke the
+    /// call lease while its authenticated Control session still has final delivery work.
+    /// Do not reuse first-effect require_open here, and do not weaken it for factories.
+    /// Release both registry guards before touching Ledger or retiring any Root owner.
+    pub(super) fn require_cleanup_route(&self, route: &Route) -> Result<(), Refused> {
+        let held = self.index.lock().unwrap_or_else(|error| error.into_inner());
+        if self.stopping.load(Ordering::Acquire)
+            || !held.as_ref().is_some_and(|index| {
+                index
+                    .rows
+                    .iter()
+                    .flatten()
+                    .any(|row| Arc::ptr_eq(row, &route.row))
+            })
+        {
+            return Err(Refused::Binding);
+        }
+        let state = route
+            .row
+            .state
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if state.closed
+            || state.pending
+            || !state
+                .session
+                .as_ref()
+                .is_some_and(|session| Arc::ptr_eq(session, &route.session))
+            || !state
+                .public
+                .as_ref()
+                .is_some_and(|public| Arc::ptr_eq(public, &route.public))
+        {
+            return Err(Refused::Binding);
+        }
+        Ok(())
+    }
     /// Original immutable provenance for cleanup preflight, including after End. This grants
     /// no effect authority and does not reinstall a retired Session. The caller must retain
     /// the SAME UI commit through ledger preflight and final closure so an admitted factory
@@ -879,4 +916,4 @@ fn require_selected(
 #[cfg(test)]
 mod tests;
 #[cfg(test)]
-pub(super) use tests::installed as fixture_installed;
+pub(super) use tests::{installed as fixture_installed, retire as fixture_retire};

@@ -248,7 +248,7 @@ pub(in crate::voice_handoff) fn installed(
     (output, route)
 }
 
-fn retire(registry: &Registry, selected: &SelectedHandoffOwner) {
+pub(in crate::voice_handoff) fn retire(registry: &Registry, selected: &SelectedHandoffOwner) {
     let row = registry
         .close_row(selected.id(), selected.executor(), None)
         .unwrap();

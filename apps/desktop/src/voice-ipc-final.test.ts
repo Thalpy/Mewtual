@@ -6,10 +6,28 @@ import type { VoiceIpcActionIdentity } from "./voice-ipc-actions.ts";
 
 const vectors = JSON.parse(readFileSync(new URL("../src-tauri/src/voice_handoff/replies/vectors.json", import.meta.url), "utf8")) as {
   finalCases: { name: string; expected: Extract<VoiceIpcFinalReply, { kind: "final" }>; plaintext: string }[];
+  planFinalCases: { name: string; expected: Extract<VoiceIpcFinalReply, { kind: "final" }>; plaintext: string }[];
   refusedCases: { expected: VoiceIpcFinalReply; plaintext: string }[];
 };
 const bytes = (text: string) => Uint8Array.from(Buffer.from(text, "hex"));
 const issued = vectors.finalCases[1], acked = vectors.finalCases[2];
+test("Plan final replies require an explicit expected Plan kind and cannot replace Phase replies", () => {
+  for (const [index, item] of vectors.planFinalCases.entries()) {
+    // These fixed bytes are also emitted/checked by the actual native encoder. Keep old
+    // Phase vectors untouched, and reject either kind where the other was requested.
+    const source = bytes(vectors.finalCases[index].plaintext), plan = bytes(item.plaintext);
+    assert.throws(() => decodeVoiceIpcFinalReply(plan, item.expected.row, item.expected.identity));
+    assert.throws(() => decodeVoiceIpcFinalReply(source, item.expected.row, item.expected.identity, null, "retire-plan"));
+    const decoded = decodeVoiceIpcFinalReply(plan, item.expected.row, item.expected.identity, null, "retire-plan");
+    assert.deepEqual(decoded, item.expected);
+    if (item.expected.stage === "acknowledged") {
+      assert.deepEqual(decodeVoiceIpcFinalReply(plan, item.expected.row, item.expected.identity,
+        item.expected.proof, "retire-plan"), decoded);
+      assert.throws(() => decodeVoiceIpcFinalReply(plan, item.expected.row, item.expected.identity,
+        "66".repeat(32), "retire-plan"));
+    }
+  }
+});
 for (const item of vectors.finalCases) test(`native/browser final receipt: ${item.name}`, () => {
   const source = bytes(item.plaintext), before = source.slice();
   const decoded = decodeVoiceIpcFinalReply(source, item.expected.row, item.expected.identity);
