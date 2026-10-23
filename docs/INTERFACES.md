@@ -1,5 +1,22 @@
 # Mewtual; Interfaces & Hooks Schema
 
+## Retained known-child browser continuation (23 October; inactive draft)
+
+`nativeConfirmationFromChannel(owner, channel, plan, purpose, row, identity)` requires the
+original selected broker/channel and an already authenticated native child row/action.
+The closed Start/Respond/Incoming purpose is a lookup hint, not native authority. It starts
+no Begin factory and cannot recover an unknown row after a lost Begin reply. At most nine
+child descriptors use one shared original parent selector, pair and immutable request deadline.
+Native result metadata cannot establish remote confirmation or RTC readiness.
+
+Actual Derive engine/read/result drainage and its ordinary Return precede lending the same
+phase to a child. The original action/input binding, native permit and exact output survive
+uncertain RPCs. Child ACK/settlement/Return precede parent Plan-final cleanup and key collection.
+Every descriptor retains its global fixed row position, including when no ActionRecord exists;
+transfer to an ActionRecord consumes that exact claim, never a second allocation or early refund.
+Broker15 refuses earlier retained HMR shapes. The structural buffer/row inventories are declared
+application custody, not a bound on JavaScript/WebCrypto implementation heap or allocator slack.
+
 ## Child Begin adoption (23 October; inactive draft)
 
 Existing v2 Begin8(true) now has a separate inactive native executor. Start/Respond resolve

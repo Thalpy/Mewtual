@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test, { type TestContext } from "node:test";
-import { webcrypto } from "node:crypto";
+import { webcrypto, createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import {
   VoiceCryptoBroker, createVoiceCryptoOwner, windowVoiceCryptoBroker,
@@ -12,7 +12,7 @@ import {
   voiceIpcNonce, type VoiceIpcHeader,
 } from "./voice-ipc-frame.ts";
 import { windowVoiceIpcNative } from "./voice-ipc-native.ts";
-import { encodeVoiceIpcAction, type VoiceIpcPurpose } from "./voice-ipc-actions.ts";
+import { encodeVoiceIpcAction, encodeVoiceIpcConfirmationAction, type VoiceIpcPurpose, type VoiceIpcConfirmationPurpose } from "./voice-ipc-actions.ts";
 import type { VoiceIpcActionReply } from "./voice-ipc-replies.ts";
 
 const real = webcrypto.subtle as unknown as SubtleCrypto;
@@ -47,9 +47,11 @@ async function fixture(t: TestContext, sharedBroker?: VoiceCryptoBroker, identit
   const bodyReads: number[] = [];
   const operations: number[] = [];
   let historyBody = Buffer.from(historyVector("derived-drained").plaintext, "hex");
-  let actionResponder: ((header: VoiceIpcHeader, opened: Uint8Array) => { kind: 0 | 1; body: Uint8Array }) | null = null;
+  type ActionResponse = { kind: 0 | 1; body: Uint8Array };
+  let actionResponder: ((header: VoiceIpcHeader, opened: Uint8Array) => ActionResponse | Promise<ActionResponse>) | null = null;
   let responseChange: Partial<VoiceIpcHeader> | null = null;
   let holdAt = -1, held: ReturnType<typeof gate> | null = null, engineEnabled = false;
+  let holdWhen: ((name: string, args: unknown[]) => boolean) | null = null;
   let stalled = false, cancelEntered = false, cancelGate: ReturnType<typeof gate> | null = null;
   let observedStep = -1;
   let now = 0, timerSerial = 0, hostileHeaders = false, hangFetch = false, fetchAborted = false, fetchEntered = false;
@@ -63,6 +65,7 @@ async function fixture(t: TestContext, sharedBroker?: VoiceCryptoBroker, identit
       if (engineEnabled) {
         const index = engineSteps.length; engineSteps.push(String(name));
         if (index === holdAt) { observedStep = index; await held!.promise; }
+        if (holdWhen?.(String(name), args)) { holdWhen = null; observedStep = -2; await held!.promise; }
         if (name === "encrypt" && failEncrypt) { failEncrypt = false; throw new Error("local provider failure"); }
       }
       return value.apply(target, args);
@@ -154,7 +157,7 @@ async function fixture(t: TestContext, sharedBroker?: VoiceCryptoBroker, identit
       assert.deepEqual(opened, encodeVoiceIpcAction(historyPurpose, { kind: "begin", retry: false }).body);
     } else {
       assert.ok(actionResponder, "unexpected actual framed action");
-      actionReply = actionResponder(request.header, opened);
+      actionReply = await actionResponder(request.header, opened);
     }
     opened.fill(0);
     const plaintext = actionReply?.body ?? (request.header.operation === 8 ? historyBody : new Uint8Array([1, setupClosed ? 2 : 1, 1]));
@@ -200,12 +203,20 @@ async function fixture(t: TestContext, sharedBroker?: VoiceCryptoBroker, identit
     historyReply(name: string) { historyBody = Buffer.from(historyVector(name).plaintext, "hex"); },
     responseChange(value: Partial<VoiceIpcHeader> | null) { responseChange = value; },
     operations: () => [...operations], bodyReads: () => [...bodyReads],
+    rowBudget() {
+      // Read-only unit observation of actual retained claims. Public counts intentionally
+      // expose no capability/history internals to application callers.
+      const state = broker as unknown as { reservedRows: number; actions: Map<unknown, unknown> };
+      return { reserved: state.reservedRows, actions: state.actions.size };
+    },
     hold(index: number) { holdAt = index; held = gate(); return { release: held.release, entered: () => observedStep === index }; },
+    holdWhen(predicate: NonNullable<typeof holdWhen>) { holdWhen = predicate; held = gate(); return { release: held.release, entered: () => observedStep === -2 }; },
     loseSetup() { loseSetup = true; }, loseSettle() { loseSettle = true; }, tamperSetup() { tamperSetup = true; },
     closeBeforeSetup() { setupClosed = true; },
     loseCollection() { loseCollection = true; },
     failEncrypt() { failEncrypt = true; }, badBody(value = true) { badBody = value; }, forceSequence(value: bigint | null) { forceSequence = value; },
     stallBody() { stalled = true; cancelGate = gate(); return { entered: () => cancelEntered, release: cancelGate.release }; },
+    clearBodyStall() { stalled = false; },
     hostileHeaders() { hostileHeaders = true; },
     hangFetch() { hangFetch = true; fetchCancel = gate(); return { entered: () => fetchEntered, aborted: () => fetchAborted, release() { hangFetch = false; fetchCancel!.release(); } }; },
     timers: () => ({ pending: timers.size, peak: timerPeak, callbacks: [...timers.values()].map(timer => timer.run),
@@ -288,6 +299,9 @@ async function framedDerivation(f: Awaited<ReturnType<typeof fixture>>) {
   let loseIssuance = false, loseFinalAck = false, ordinaryReturned = false;
   let planCalls = 0, finalMode: 1 | 2 = 1, replyMode: 1 | 2 | null = null;
   let alter: ((data: Uint8Array) => Uint8Array) | null = null;
+  let childResponder: Parameters<typeof f.actions>[0] = null;
+  let settleHold: ReturnType<typeof gate> | null = null;
+  let checkFinal: (() => void) | null = null;
   const emptyTag = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
   const receipt = hash(77);
   const proof = hash(78);
@@ -306,8 +320,12 @@ async function framedDerivation(f: Awaited<ReturnType<typeof fixture>>) {
     assert.ok(finalAcknowledged, "native setup cannot close ahead of the separate original final ACK");
     await nativeSettle(...args);
   };
-  f.cleanup(() => { finalPending = false; loseIssuance = false; loseFinalAck = false; f.native.settleSetup = nativeSettle; });
-  f.actions((header, opened) => {
+  f.cleanup(() => { finalPending = false; loseIssuance = false; loseFinalAck = false; settleHold?.release(); f.native.settleSetup = nativeSettle; });
+  f.actions(async (header, opened) => {
+    if (opened[0] === 2) {
+      assert.ok(childResponder, "unexpected child action");
+      return childResponder(header, opened);
+    }
     assert.equal(header.logical, row);
     if (header.operation === 1) {
       inputReads++;
@@ -337,6 +355,11 @@ async function framedDerivation(f: Awaited<ReturnType<typeof fixture>>) {
     if (header.operation === 6 || header.operation === 7) {
       assert.ok(settled && (!derived || acknowledged), "native terminal close follows exact action settlement/receipt ACK");
       if (header.operation === 6) {
+        if (opened[105] === 0) {
+          assert.deepEqual(opened, encodeVoiceIpcAction(historyPurpose, { kind: "close", mode: "return" }).body);
+          ordinaryReturned = true; return status();
+        }
+        checkFinal?.();
         if (opened[105] === 1) {
           retireCalls++; assert.deepEqual(opened, encodeVoiceIpcAction(historyPurpose, { kind: "close", mode: "retire" }).body);
           assert.equal(planCalls, 0, "Plan retries cannot revert to Phase mode after uncertain intent");
@@ -348,6 +371,7 @@ async function framedDerivation(f: Awaited<ReturnType<typeof fixture>>) {
         }
         if (loseIssuance) { loseIssuance = false; throw new Error("actual native final issuance reply lost"); }
       } else {
+        checkFinal?.();
         finalCalls++; assert.deepEqual(opened, encodeVoiceIpcAction(historyPurpose, { kind: "final", proof: finalMode === 2 ? planProof : proof }).body);
         assert.equal(finalPending, false); finalAcknowledged = true;
         if (loseFinalAck) { loseFinalAck = false; throw new Error("actual native final ACK reply lost"); }
@@ -357,7 +381,8 @@ async function framedDerivation(f: Awaited<ReturnType<typeof fixture>>) {
         Buffer.from(finalPending ? "0".repeat(64) : finalMode === 2 ? planProof : proof, "hex")]);
       return { kind: 0, body };
     }
-    assert.equal(header.operation, 5); settlements++; settled = true; return status();
+    assert.equal(header.operation, 5); settlements++; if (settleHold) await settleHold.promise;
+    settled = true; return status();
   });
   return { row, identity, binding, data, engineBytes, counts: () => ({ inputReads, admissions, commits, acknowledgements, settlements }),
     historical() { historical = true; derived = true; settled = true; },
@@ -368,8 +393,271 @@ async function framedDerivation(f: Awaited<ReturnType<typeof fixture>>) {
     pendingFinal(value = true) { finalPending = value; },
     loseFinalReplies() { loseIssuance = true; loseFinalAck = true; },
     returned() { ordinaryReturned = true; historical = true; settled = true; },
+    wasReturned: () => ordinaryReturned,
+    childReplies(responder: typeof childResponder) { childResponder = responder; },
+    holdSettlement() { settleHold = gate(); return settleHold; },
+    beforeFinal(check: () => void) { checkFinal = check; },
   };
 }
+
+/** Mock native signer/Root only; actual original-channel framing, P256/HKDF/AEAD, bounded
+ * stream reads, broker ownership and native-action adapters execute unchanged. */
+async function framedConfirmation(f: Awaited<ReturnType<typeof fixture>>) {
+  const channel = f.channel(); await channel.status();
+  const parent = await framedDerivation(f);
+  const ready = await f.broker.nativeDerivationFromChannel(f.owner, channel, f.key, historyPurpose, parent.row, parent.identity).attempt();
+  assert.equal(ready.kind, "ready"); if (ready.kind !== "ready") throw new Error("original chain required");
+  let row = "00000000000000010000000000000001", identity = { action: "9007199254741027", version: "3", inputTag: hash(91) };
+  let purpose: VoiceIpcConfirmationPurpose = { parent: historyPurpose, parentRow: parent.row, request: { kind: "start", predecessor: null } };
+  const aad = utf8.encode("native signed Hello header"), body = utf8.encode("native closed Hello");
+  const engineBytes = 4 * (aad.length + body.length + 16) + 3 * 512 + 2048;
+  const b = parent.binding;
+  const data = Buffer.concat([Buffer.from([1, 7]), Buffer.from(row, "hex"), integer(BigInt(identity.action), 8), integer(BigInt(identity.version), 8),
+    Buffer.from(identity.inputTag, "hex"), Buffer.from(parent.row, "hex"), Buffer.from(f.owner.group, "hex"), Buffer.from([0]), Buffer.alloc(32), integer(1n, 16), integer(BigInt(b.epoch), 8),
+    ...[b.localDevice, b.localJoin, b.localKey, b.peerDevice, b.peerJoin, b.peerKey, b.handshake].map(s => Buffer.from(s, "hex")),
+    integer(BigInt(b.generation), 8), integer(BigInt(b.nativeDeadline), 8), Buffer.from([1]), integer(BigInt(engineBytes), 4), Buffer.from([1, 1]),
+    integer(1n, 8), integer(BigInt(aad.length), 2), integer(BigInt(body.length), 2), aad, body]);
+  assert.equal(data.length, 430 + aad.length + body.length);
+  let inputs = 0, admissions = 0, results = 0, acknowledgements = 0, settlements = 0, returns = 0;
+  let resultTag: string | null = null, output: Uint8Array | null = null, acknowledged = false, settled = false, returned = false;
+  let lostInput = false, lostResult = false, lostReturn = false, historical = false, rejected = false;
+  let alter: ((data: Uint8Array) => Uint8Array) | null = null, onInput: (() => void) | null = null;
+  let holdSettle: ReturnType<typeof gate> | null = null;
+  const receipt = hash(92);
+  parent.beforeFinal(() => assert.ok(returned, "parent final cannot overtake original child Return"));
+  const status = () => {
+    const bytes = Buffer.alloc(242); bytes[0] = 1; Buffer.from(row, "hex").copy(bytes, 2); bytes[19] = 1;
+    integer(BigInt(identity.action), 8).copy(bytes, 20); integer(BigInt(identity.version), 8).copy(bytes, 28); Buffer.from(identity.inputTag, "hex").copy(bytes, 36);
+    bytes[68] = Number(settled); bytes[69] = Number(resultTag !== null); bytes[208] = Number(acknowledged); bytes[209] = Number(returned);
+    if (resultTag !== null) {
+      integer(BigInt(identity.action), 8).copy(bytes, 70); Buffer.from(identity.inputTag, "hex").copy(bytes, 78); Buffer.from(resultTag, "hex").copy(bytes, 110);
+      bytes[142] = rejected ? 3 : 1;
+      if (rejected) bytes[143] = 1;
+      else { Buffer.from(hash(93), "hex").copy(bytes, 143); Buffer.from(hash(94), "hex").copy(bytes, 175); }
+      bytes[207] = Number(returned); Buffer.from(receipt, "hex").copy(bytes, 210);
+    }
+    return { kind: 0 as const, body: bytes };
+  };
+  f.cleanup(() => { holdSettle?.release(); f.clearBodyStall(); });
+  parent.childReplies(async (header, opened) => {
+    assert.equal(header.logical, row); assert.equal(opened[0], 2);
+    assert.ok(parent.wasReturned(), "native child use follows actual parent Return");
+    const exact = (request: Parameters<typeof encodeVoiceIpcConfirmationAction>[1]) => assert.deepEqual(opened, encodeVoiceIpcConfirmationAction(purpose, request).body);
+    if (header.operation === 1) {
+      inputs++; exact({ kind: "input" }); onInput?.();
+      assert.ok(f.broker.counts().bytes >= 128 * 1024, "same original envelope paid before Data read");
+      if (lostInput) { lostInput = false; throw new Error("native Input reply lost"); }
+      return historical ? status() : { kind: 1, body: alter ? alter(new Uint8Array(data)) : data };
+    }
+    if (header.operation === 2) {
+      admissions++; exact({ kind: "admit", identity, engineBytes });
+      return { kind: 0, body: Buffer.concat([Buffer.from([1, 6]), Buffer.from(row, "hex"), integer(BigInt(identity.action), 8),
+        integer(BigInt(identity.version), 8), Buffer.from(identity.inputTag, "hex"), integer(BigInt(identity.action), 8), integer(BigInt(engineBytes), 4)]) };
+    }
+    if (header.operation === 3) {
+      results++;
+      // Start(None) has the122-byte selector; result suffix is identity48+tag32+len2.
+      const next = opened.slice(204), tag = Buffer.from(opened.subarray(170, 202)).toString("hex");
+      assert.equal(createHash("sha256").update(next).digest("hex"), tag);
+      exact({ kind: "result", identity, tag, output: next });
+      if (output) assert.deepEqual(next, output, "lost replies retry the same provider output");
+      else { output = next; resultTag = tag; }
+      if (lostResult) { lostResult = false; throw new Error("native result committed; reply lost"); }
+      return status();
+    }
+    if (header.operation === 4) { acknowledgements++; exact({ kind: "ack", identity, digest: receipt }); acknowledged = true; return status(); }
+    if (header.operation === 5) {
+      settlements++; exact({ kind: "settle", identity }); if (holdSettle) await holdSettle.promise; settled = true; return status();
+    }
+    assert.equal(header.operation, 6); returns++; exact({ kind: "close", mode: "return" });
+    assert.ok(settled && (resultTag === null || acknowledged)); returned = true;
+    if (lostReturn) { lostReturn = false; throw new Error("native Return completed; reply lost"); }
+    return status();
+  });
+  return { channel, parent, ready, purpose, row, identity,
+    handle: () => f.broker.nativeConfirmationFromChannel(f.owner, channel, ready.chain, purpose, row, identity),
+    derive: () => ready.derivation.attempt(),
+    counts: () => ({ inputs, admissions, results, acknowledgements, settlements, returns }),
+    output: () => output,
+    loseInput() { lostInput = true; }, loseResult() { lostResult = true; }, loseReturn() { lostReturn = true; },
+    reject() { rejected = true; },
+    historical() { historical = true; resultTag = hash(95); },
+    alter(work: typeof alter) { alter = work; }, onInput(work: typeof onInput) { onInput = work; },
+    holdSettlement() { holdSettle = gate(); return holdSettle; },
+    nextHistorical() {
+      assert.ok(returned); const next = BigInt(identity.action) + 1n;
+      row = (BigInt("0x" + row.slice(0, 16)) + 1n).toString(16).padStart(16, "0") + "0000000000000001";
+      identity = { action: next.toString(), version: "3", inputTag: hash(Number(next % 1000n)) };
+      purpose = { ...purpose, request: { kind: "start", predecessor: hash(Number(next % 1000n)) } };
+      returned = false; settled = false; acknowledged = false; historical = true; resultTag = hash(95);
+      return f.broker.nativeConfirmationFromChannel(f.owner, channel, ready.chain, purpose, row, identity);
+    },
+  };
+}
+
+test("known child uses original derived keys through framed Input, permit, result and Return", async t => {
+  const f = await fixture(t), child = await framedConfirmation(f);
+  assert.equal((await child.derive()).kind, "accepted");
+  const handle = child.handle(), baseline = f.broker.counts().bytes, pair = child.ready.derivation.pair();
+  assert.deepEqual(f.rowBudget(), { reserved: 11, actions: 1 });
+  assert.equal(child.handle(), handle);
+  const before = f.counts().steps.length, outcome = await handle.attempt();
+  assert.equal(outcome.kind, "accepted");
+  assert.equal(f.broker.counts().bytes, baseline, "no new96KiB envelope or row reservation");
+  assert.equal(child.ready.derivation.pair(), pair, "ordinary Return preserves the same pair");
+  assert.deepEqual(f.rowBudget(), { reserved: 10, actions: 2 }, "one original descriptor claim transfers into one actual record");
+  assert.ok(child.output());
+  assert.deepEqual(child.counts(), { inputs: 1, admissions: 1, results: 1, acknowledgements: 1, settlements: 2, returns: 1 });
+  assert.equal(f.counts().steps.slice(before).filter(name => name === "deriveBits" || name === "deriveKey").length, 0);
+  const tx = f.counts().tx; assert.ok(tx.every((value, index) => index === 0 || value > tx[index - 1]));
+  assert.throws(() => f.broker.nativeConfirmationFromChannel(f.owner, child.channel, child.ready.chain, child.purpose, child.row,
+    { ...child.identity, version: "4" }), /identity changed/);
+});
+
+test("known child waits for actual derivation settlement before lending its phase", async t => {
+  const f = await fixture(t), child = await framedConfirmation(f), hold = child.parent.holdSettlement();
+  assert.equal((await child.derive()).kind, "accepted");
+  await until(() => child.parent.counts().settlements === 1);
+  const pending = child.handle().attempt();
+  await new Promise<void>(yes => setImmediate(yes));
+  assert.equal(child.parent.wasReturned(), false); assert.equal(child.counts().inputs, 0);
+  hold.release(); assert.equal((await pending).kind, "accepted");
+});
+
+test("known child historical result is observed and returned without AEAD or engine admission", async t => {
+  const f = await fixture(t), child = await framedConfirmation(f); await child.derive();
+  child.historical(); const result = await child.handle().attempt();
+  assert.equal(result.kind, "status"); if (result.kind === "status") assert.equal(result.localDrained, true);
+  assert.equal(child.counts().admissions, 0); assert.equal(child.counts().results, 0);
+});
+
+test("known child lost Input retries the same descriptor and does not reconstruct the pair", async t => {
+  const f = await fixture(t), child = await framedConfirmation(f); await child.derive();
+  child.loseInput(); const handle = child.handle(), pair = child.ready.derivation.pair();
+  assert.equal((await handle.attempt()).kind, "uncertain"); assert.equal(child.counts().admissions, 0);
+  assert.equal((await handle.attempt()).kind, "accepted");
+  assert.equal(child.ready.derivation.pair(), pair); assert.equal(child.counts().inputs, 2);
+});
+
+for (const rejected of [false, true]) test(`known child lost ${rejected ? "rejected" : "accepted"} result/Return preserves original output and retries cleanup`, async t => {
+  const f = await fixture(t), child = await framedConfirmation(f); await child.derive();
+  if (rejected) child.reject(); child.loseResult(); child.loseReturn();
+  const handle = child.handle(); assert.equal((await handle.attempt()).kind, "uncertain");
+  const returning = handle.attempt();
+  await until(() => child.counts().returns === 1); // lost Return remains owned
+  assert.equal((await returning).kind, "uncertain");
+  const final = handle.attempt();
+  f.advance(1000);
+  assert.equal((await final).kind, rejected ? "rejected" : "accepted");
+  assert.equal(child.counts().admissions, 1); assert.equal(child.counts().inputs, 1); assert.equal(child.counts().results, 2);
+});
+
+test("known child End waits for actual Input read cancellation and original child Return", async t => {
+  const f = await fixture(t), child = await framedConfirmation(f); await child.derive();
+  let cancel: ReturnType<typeof f.stallBody> | null = null;
+  child.onInput(() => { cancel = f.stallBody(); });
+  const pending = child.handle().attempt(); await until(() => child.counts().inputs === 1);
+  let closed = false; const closure = child.channel.close().then(() => { closed = true; });
+  await until(() => cancel !== null && cancel.entered());
+  assert.equal(closed, false); assert.ok(f.broker.counts().bytes >= 96 * 1024);
+  assert.equal(child.counts().settlements, 0); assert.equal(child.counts().returns, 0);
+  f.clearBodyStall(); cancel!.release();
+  assert.equal((await pending).kind, "retired"); await closure;
+  assert.equal(child.counts().admissions, 0); assert.equal(child.counts().returns, 1);
+});
+
+test("known child End before its first attempt still returns the original native row", async t => {
+  const f = await fixture(t), child = await framedConfirmation(f); await child.derive();
+  const handle = child.handle(); await child.channel.close();
+  assert.equal((await handle.attempt()).kind, "retired");
+  assert.equal(child.counts().inputs, 0); assert.equal(child.counts().admissions, 0);
+  assert.equal(child.counts().settlements, 1); assert.equal(child.counts().returns, 1);
+});
+
+test("known child does not report completed Return while actual native settlement is blocked", async t => {
+  const f = await fixture(t), child = await framedConfirmation(f); await child.derive();
+  const hold = child.holdSettlement(); let completed = false;
+  const pending = child.handle().attempt().then(outcome => { completed = true; return outcome; });
+  await until(() => child.counts().settlements === 1);
+  assert.equal(child.counts().results, 1); assert.equal(child.counts().acknowledgements, 1);
+  assert.equal(completed, false); assert.equal(child.counts().returns, 0);
+  hold.release(); assert.equal((await pending).kind, "accepted"); assert.equal(child.counts().returns, 1);
+});
+
+test("known child queued history and End release the history gate before framed settlement", async t => {
+  const f = await fixture(t), child = await framedConfirmation(f); await child.derive();
+  const held = f.holdWhen((name, args) => name === "encrypt" && new TextDecoder().decode((args[0] as AesGcmParams).additionalData as ArrayBuffer) === "native signed Hello header");
+  const action = child.handle().attempt(); await until(held.entered);
+  const history = f.broker.recoverChannelHistory(f.owner, child.channel, historyPurpose);
+  let closed = false; const close = child.channel.close().then(() => { closed = true; });
+  assert.equal(closed, false); assert.equal(child.counts().settlements, 0);
+  held.release(); assert.equal((await action).kind, "retired"); await close;
+  assert.equal((await history).kind, "retired"); assert.equal(child.counts().returns, 1);
+});
+
+test("known child in-flight history cancellation and End release the gate before framed Return", async t => {
+  const f = await fixture(t), child = await framedConfirmation(f); await child.derive();
+  await until(() => f.broker.counts().active === 0);
+  child.handle();
+  const cancel = f.stallBody();
+  const history = f.broker.recoverChannelHistory(f.owner, child.channel, historyPurpose);
+  await until(() => f.operations().at(-1) === 8);
+  let closed = false; const close = child.channel.close().then(() => { closed = true; });
+  await until(cancel.entered); assert.equal(closed, false); assert.equal(child.counts().returns, 0);
+  assert.ok(f.broker.counts().bytes >= 96 * 1024);
+  f.clearBodyStall(); cancel.release(); await close;
+  assert.equal((await history).kind, "retired"); assert.equal(child.counts().returns, 1);
+});
+
+test("known child rejects unknown purpose discriminants instead of treating them as incoming", async t => {
+  const f = await fixture(t), child = await framedConfirmation(f); await child.derive();
+  assert.throws(() => f.broker.nativeConfirmationFromChannel(f.owner, child.channel, child.ready.chain,
+    { ...child.purpose, request: { kind: "other", role: 1 } as unknown as VoiceIpcConfirmationPurpose["request"] }, child.row, child.identity), /invalid voice confirmation purpose/);
+  assert.equal(child.counts().inputs, 0);
+  child.handle(); // retain the real known child for End; the rejected hint created none
+});
+
+for (const mode of ["idle", "historical", "failed-input"] as const) test(`known child ${mode} retains its exact fixed row after End without an ActionRecord`, async t => {
+  const f = await fixture(t), child = await framedConfirmation(f); await child.derive();
+  const baseline = f.broker.counts().bytes, handle = child.handle();
+  assert.deepEqual(f.rowBudget(), { reserved: 11, actions: 1 }, "descriptor retains the original global preclaim");
+  if (mode === "historical") { child.historical(); assert.equal((await handle.attempt()).kind, "status"); }
+  if (mode === "failed-input") { child.loseInput(); assert.equal((await handle.attempt()).kind, "uncertain"); }
+  assert.deepEqual(f.rowBudget(), { reserved: 11, actions: 1 });
+  await child.channel.close();
+  assert.equal(f.broker.counts().bytes, baseline - 96 * 1024 - 10 * 2048,
+    "only ten unused rows and the actually drained variable envelope may be refunded");
+  assert.deepEqual(f.rowBudget(), { reserved: 1, actions: 1 }, "known history still occupies its global logical slot");
+});
+
+test("several historical children retain separate fixed claims without manufacturing ActionRecords", async t => {
+  const f = await fixture(t), child = await framedConfirmation(f); await child.derive();
+  const baseline = f.broker.counts().bytes;
+  child.historical(); assert.equal((await child.handle().attempt()).kind, "status");
+  for (let n = 0; n < 2; n++) assert.equal((await child.nextHistorical().attempt()).kind, "status");
+  assert.deepEqual(f.rowBudget(), { reserved: 11, actions: 1 });
+  await child.channel.close();
+  assert.equal(f.broker.counts().bytes, baseline - 96 * 1024 - 8 * 2048);
+  assert.deepEqual(f.rowBudget(), { reserved: 3, actions: 1 });
+});
+
+test("known child completion cannot renew the original browser deadline or encryption allocator", async t => {
+  const f = await fixture(t), child = await framedConfirmation(f); await child.derive();
+  f.advance(10_000); const handle = child.handle(); assert.equal((await handle.attempt()).kind, "accepted");
+  const before = f.counts(); f.advance(5_000); f.broker.collectChains();
+  assert.equal(child.ready.chain.isCurrent(), false); assert.equal(child.ready.derivation.pair(), null);
+  assert.throws(() => f.broker.nativeConfirmationFromChannel(f.owner, child.channel, child.ready.chain,
+    { ...child.purpose, request: { kind: "incoming", role: 2 } }, "00000000000000020000000000000001", { ...child.identity, action: "9007199254741028" }), /derived pair/);
+  assert.deepEqual(f.counts().tx, before.tx); assert.deepEqual(f.counts().steps, before.steps);
+  assert.equal((await handle.attempt()).kind, "accepted", "retained past metadata is not a fresh engine or pair");
+});
+
+for (const offset of [81, 417, 425]) test(`known child bound Input mutation at${offset} cannot reach engine admission`, async t => {
+  const f = await fixture(t), child = await framedConfirmation(f); await child.derive();
+  child.alter(bytes => { bytes[offset] ^= 1; return bytes; });
+  assert.equal((await child.handle().attempt()).kind, "uncertain");
+  assert.equal(child.counts().admissions, 0); assert.equal(child.counts().results, 0);
+});
 
 test("native Input prepays and transfers the same claim, then executes real framed admission/result/ACK/settlement", async t => {
   const f = await fixture(t), channel = f.channel(); await channel.status();
@@ -998,7 +1286,7 @@ test("absolute IO deadline aborts stale-port fetch but retains custody until act
   assert.equal((await channel.status()).kind, "ready"); assert.deepEqual(f.counts().tx, [2n]);
 });
 
-for (const version of [7, 8, 9, 10, 11, 12, 13]) test(`HMR refuses v${version} retained pool rather than creating a second channel allocator`, () => {
+for (const version of [7, 8, 9, 10, 11, 12, 13, 14]) test(`HMR refuses v${version} retained pool rather than creating a second channel allocator`, () => {
   const host = { [Symbol.for("mewtual.voice.crypto-broker.v2")]: { version } };
   const native = { async admit() { return ""; }, async settle() {}, async commitInbound() {} };
   assert.throws(() => windowVoiceCryptoBroker(native, host, real), /reload required/);
@@ -1224,4 +1512,43 @@ test("Derive intake and terminal Control payload graphs fit their separate origi
   const wrappers = 3 * 1024 + 2 * "retire-plan".length; // retained fixed final-mode discriminator
   const control = controlBuffers + descriptor + decoded + wrappers;
   assert.ok(control <= 8 * 1024, `terminal Control payload/wrapper envelope ${control}/8192`);
+});
+
+test("nine child descriptors and serial Data adoption fit unchanged chain envelopes", () => {
+  // Structural application-owned payload/wrapper accounting, not a JS engine/SDK/GC/RSS
+  // bound. The immutable parent selector and chain binding are SHARED across every child.
+  // Each occupied2KiB history row covers its descriptor, cached adapter, ActionRecord,
+  // receipt and one-shot physical-drain Signal. Nine children plus Derive occupy10/12 rows.
+  const childHints = 2 * (32 + 64 + 32 + 20 + 20 + 64);
+  const decodedInputIdentity = 2 * (20 + 20 + 64);
+  const terminalIdentityAndTags = 2 * (20 + 20 + 64 + 64 + 64);
+  const rowWrappers = 768; // bounded adapter/functions, records, Signal and scalar fields
+  const row = childHints + decodedInputIdentity + terminalIdentityAndTags + rowWrappers;
+  assert.ok(row <= 2048, `child row payload/wrapper inventory ${row}/2048`);
+  assert.ok(10 * row <= 24 * 1024, `retained child/Derive history ${10 * row}/24576`);
+  // Historical Input has no ActionRecord, but retains the FULL native Status instead of
+  // the compact accepted CommitReply. Use the shared Sealed vector (largest receipt), with
+  // only row/identity/receipt.action/inputTag shared with the original descriptor as code
+  // explicitly normalizes them. Do not silently substitute the smaller live-result graph.
+  const sealed = historyVector("sealed").expected;
+  assert.ok(sealed.kind === "status" && sealed.receipt?.outcome.kind === "sealed");
+  const stringPayload = (value: unknown): number => typeof value === "string" ? 2 * value.length :
+    value && typeof value === "object" ? Object.values(value).reduce<number>((sum, field) => sum + stringPayload(field), 0) : 0;
+  const historicalPayload = stringPayload({ kind: sealed.kind, pending: sealed.pending,
+    receipt: { outputTag: sealed.receipt.outputTag, digest: sealed.receipt.digest, outcome: sealed.receipt.outcome } });
+  const historicalRow = childHints + historicalPayload + rowWrappers;
+  assert.ok(historicalRow <= 2048, `full historical Sealed row inventory ${historicalRow}/2048`);
+  const parentSelector = 2 * (3 * 64 + 20);
+  const sharedBinding = 2 * (7 * 64 + 4 * 20) + 8;
+  const metadata = parentSelector + sharedBinding + 2 * 128 + 4096 + 2 * 128;
+  assert.ok(metadata <= 8 * 1024, `chain metadata/maps/drainage inventory ${metadata}/8192`);
+
+  // The current child can overlap frame ciphertext/opened body, decoder-owned input and
+  // adopted immutable input. Count all four full-sized buffers even though the decoder
+  // copies only AAD/body and registration zeros its temporary arrays before the engine.
+  const transcript = 1024, retained = 2 * (130 + transcript) + 9 * (2048 - 430);
+  const largestRequest = 154 + 82 + 528;
+  const framing = 2 * (largestRequest + 16) + 4 * 2064 + 144 + 288 + 4 * 40 + 2 * 32 + 2 * 12 + 1;
+  const variable = retained + framing + 16 * 1024 + 16 * 1024;
+  assert.ok(variable <= 96 * 1024, `child Data/engine/retained-input inventory ${variable}/98304`);
 });

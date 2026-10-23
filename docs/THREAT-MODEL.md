@@ -1,5 +1,22 @@
 # Threat model; client integrity & enforcement boundaries
 
+## Known-child continuation ownership (23 October; inactive browser draft)
+
+A renderer child descriptor cannot create a native plan, row or token. The original selected
+channel, parent/purpose/action binding and native Input/engine/result checks remain required.
+Only the same derived pair is retained; retries cannot recreate keys, counters, deadlines or
+budget. Historical receipt recovery starts no crypto work and confers no remote/RTC readiness.
+Actual read/SDK/cancellation drainage, native settlement and ordinary child Return remain
+independent. A history query releases only its shared execution gate before waiting for linked
+child drainage; its actual original driver/copy payment remains until that driver completes.
+
+End refunds only unused fixed positions. An idle, historical or failed-read child descriptor
+keeps its own original row claim even without an ActionRecord. A claim transfers once to the
+same actual record, or releases only when that descriptor's retained history is collected.
+No uncertain descriptor can free a global slot while retaining its application metadata.
+Both deadlock orderings and claim-transfer/no-record cases have framed WebCrypto regressions.
+These mocks do not establish native IPC, SDK allocation bounds, SDP/ICE/RTC or physical acceptance.
+
 ## Incoming Begin ownership (23 October; inactive draft)
 
 A renderer role never creates a token or native action. The Begin worker retains the original

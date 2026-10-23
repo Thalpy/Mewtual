@@ -1,5 +1,30 @@
 # Mewtual; Handover
 
+## Known-child browser continuation (23 October; native integration open)
+
+The separate browser draft now passes179 focused and2,619 full frontend tests (72.04s),
+Svelte with zero errors/warnings and the production build (35.91s). Tests use actual WebCrypto
+and authenticated frame mocks; they do not run the native child Begin/result handlers.
+`nativeConfirmationFromChannel` accepts only an already known native child identity and
+the original parent channel/plan. It retains the same keys, original deadline and allocators,
+waits for actual Derive drainage, and uses framed Input/admission/result/ACK/settlement/Return.
+Uncertain replies keep the original output and cleanup mode; End also cleans an idle known child.
+Historical results grant no new engine or RTC work. Unknown/lost-Begin recovery is not implemented.
+
+Review found and corrected a history/End drainage cycle and a fixed-row accounting gap.
+The history gate now clears after its actual execution/read/cancellation releases the shared
+lane, before waiting for linked child drainage; its original driver/payment still survives.
+Each descriptor keeps its exact global row claim until the same claim transfers into its
+ActionRecord or actual final history collection. Idle, historical and failed-Input descriptors
+cannot refund a live claim at End. Both history/End orderings and exact row ownership have
+regressions. Broker version15 rejects earlier HMR shapes rather than creating a second pool.
+Read-only adversarial review has no remaining confirmed blocker/high/medium in this browser diff.
+
+Native Begin has not yet compiled. The separate Result correction now passes257 native handoff
+and4 blocked-TCP tests, keeping the full codec at12,252B/12,288B; it is not integrated here yet.
+PR53's separate deadline/Tokio corrections are published, with patched full gates running. None of these
+browser results enables production V2, SDP/ICE/RTC, supported group calls or media relay.
+
 ## Authenticated child Begin draft (23 October; native validation pending)
 
 `target/communication-confirmation-begin-worktree` starts at frozen Input/result draft
