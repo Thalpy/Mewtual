@@ -514,9 +514,13 @@ writer keeps those properties.
   handle they verified. Linux and Android link that handle's descriptor through `/proc/self/fd`
   into the pinned folder (no `/proc`: no journal, and the fallback writer refuses before writing).
   Windows holds a delete-denying pin on the staging name, checked to be our object, across the
-  path-based link, which also blocks renaming its folders. macOS has no link by descriptor
-  (narrowed): the link is by path, and the post-link check only guarantees that a foreign object at
-  the final name is never reported as saved; it is then left alone with the staging name.
+  path-based link, which also blocks renaming its folders (but not retargeting a junction among
+  its ancestors, which someone with write access to that junction could do; the save then halts as
+  Changed and is never reported saved). macOS has no link by descriptor (narrowed): the link is by
+  path, and the post-link check only guarantees that a foreign object at the final name is never
+  reported as saved; it is then left alone with the staging name. On Linux a confinement policy
+  (AppArmor, SELinux, snap, seccomp) can deny the descriptor link although `/proc` is present;
+  such a save halts at publication after writing, truthfully.
 - **Creation.** Creating a partial is path-based: every creation with a captured folder identity
   re-reads it afterwards and removes (verified as above) and refuses a partial that landed in a
   swapped folder; a swap and swap-back inside that window leaves at most an empty partial there,
@@ -548,8 +552,8 @@ writer keeps those properties.
   answers cannot block later Save as attempts after Lock or a server replacement. The turn ends
   when the dialog answers; validating the picked place (which reads that folder and can stall on a
   dead share) runs afterwards with cancellation still observed, and a stalled check keeps one of
-  four validation slots until the filesystem answers, after which further Save as attempts are
-  refused until one returns (second review R2-M2). If Save new copy abandons an old partial it
+  four validation slots until the filesystem answers; with all four held, further Save as attempts
+  are refused until one returns (second review R2-M2). If Save new copy abandons an old partial it
   cannot reach, the notice saying so travels with every later result of that save, failures
   included (R2-M3). A cloud-synced or shared chosen folder (for example OneDrive Desktop or Documents)
   uploads the partial plaintext and the probe name as they are written. A chosen folder inside the

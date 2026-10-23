@@ -1027,8 +1027,12 @@ failed. All go through `external::remove_verified`:
   when one exists. If other accounts can modify it (owner neither us nor root, or group- or
   other-writable without the sticky bit), or may (adversarial review M-3: a network, FUSE or
   unrecognized filesystem, where mode bits do not say who can change the folder; ACLs are not
-  read), delete nothing and say so (`SharedFolder`: "Other accounts can change the folder with the
-  partly saved file, so Mewtual left it in place. Delete it yourself if you no longer need it.").
+  read), delete nothing and say so, but only after a read-only check that the name still holds our
+  file (combined review M-A; a missing name is `Missing`, a foreign one `NotOurs`, as elsewhere):
+  `SharedFolder`, "This folder may be changed by other accounts, so Mewtual deletes nothing there
+  automatically and left the partly saved file in place. Delete it yourself if you no longer need
+  it." (for a saved row: "... left the temporary .mewtual-part copy of the saved file in place.
+  Delete that copy yourself if you no longer need it.").
   Otherwise verify the object where it is (review M-2: a foreign object is never renamed), then
   `renameat` the name to `mewtual-removing-<128 random bits>` (no-replace where the platform has
   it; the random name comes from the `catcoms-rt` RNG seam), verify again there, and `unlinkat` it
@@ -1048,16 +1052,15 @@ failed. All go through `external::remove_verified`:
   reports no file number at all is refused before any plaintext is written (the Windows link probe
   and the fallback writer's staging check), because nothing there could ever be proven ours.
 - Messages (review M-4, M-5): native says "delete it yourself" only after a read-only look proves
-  the leftover name still holds Mewtual's own file ("Other accounts can change this folder, so the
-  partly saved file "<name>" was left in place; delete it yourself.", "The partly saved file
-  "<name>" could not be removed; delete it yourself.", and the same for "the temporary copy
+  the leftover name still holds Mewtual's own file ("This folder may be changed by other accounts,
+  so the partly saved file "<name>" was left in place; delete it yourself.", "The partly saved
+  file "<name>" could not be removed; delete it yourself.", and the same for "the temporary copy
   "<name>" of the saved file"); nothing when the name is gone or holds another file; "Mewtual could
   not check "<name>", so it was left in place." when it cannot look. A successful save reports a
   temporary copy that had to stay with its result: the journaled writer keeps the record (and says
   Clear can remove it) only when the name could not be checked or deleted right now; in a shared
-  folder it releases the record and says "Other accounts can change this folder, so the temporary
-  .mewtual-part copy of the saved file was left there. Delete it yourself if you no longer need
-  it."
+  folder it releases the record with the saved-row `SharedFolder` notice above. "May be changed"
+  (combined review LOW 1) covers network and FUSE folders, where Mewtual cannot tell who can.
 - Guarantee wording, changed: "the deleted object is exactly the one verified" holds on Windows
   against every process. On Unix: "Automatic deletion is guaranteed only against processes running
   as other accounts; in folders other accounts can modify, and on network or FUSE filesystems,
@@ -1171,6 +1174,24 @@ and the renderer. Line numbers in the findings are at `86664d94`.
 | R2-M2: `choose_destination` held the process-wide one-dialog turn across validation of the picked path and stopped watching cancellation, so a validation stalled on a dead share refused every later Save as until the filesystem answered | Not affected, except that validation now also reads the filesystem class on Unix (R2-M3), one more call that can stall. | Fixed: the turn is scoped to the chooser and ends when the dialog answers; validation runs on the blocking pool while cancellation is still observed, and a cancelled invocation stops waiting at once (its late result is dropped with the future, so it can never start a save). A validation worker left running holds one of four process-wide validation slots, taken before the dialog opens, until the filesystem answers; with all four held, Save as is refused before any dialog ("Earlier Save as choices are still being checked. Try again shortly."). Test: the R2-M2 part of `save_as_selection_through_the_chooser_seam` (the chooser returns a path, validation waits on a barrier, a second Save as opens while the first is still live, the invocation is cancelled and returns at once, a third Save as through a one-slot pool is refused before any dialog, then the barrier is released, the slot returns and nothing was created). Break-checked (holding the turn across validation turns it red). |
 | R2-M3: when Save new copy could not reach the old folder, the old journal was abandoned and the "left in place" notice lived only in a local variable attached to a successful result; a replacement that then failed (for example a FAT drive refused at the link probe) lost it | More notices can come out of the abandon since PR51 (`SharedFolder`, `SavedNameReplaced`, `KeptOnlyCopy`); all are carried the same way. | Fixed with the minimum option: every result after the abandon passes through `report_left_behind`, a warning on success and an extra sentence on every failure (including the intent commit inside `prepare_resume` right after the abandon). Plus a read-only check before the abandon where possible: on Unix `ChosenDestination::validate` refuses a FAT, vfat or exFAT folder (`ChoiceRefusal::NoLinks`), so Save as there never abandons the old journal; Windows still learns it only at the creation probe (no vetted crate reads the filesystem name; validation creates nothing), and then the error carries the notice. Not chosen: a durable "unresolved old partial" in the sealed record (a second amendment of the unreleased v2 format, with its own UI and Remove path), and deferring the abandon (the record holds one journal, and the new save needs that slot from Begin on). Tests: `a_failed_new_copy_still_reports_the_old_partial_it_left_behind` (the real `abandon_sequence` reports FolderUnreachable and abandons the journal, then the replacement fails; the final error starts with the replacement's error and contains the notice; a success carries it after earlier warnings), `a_choice_on_a_drive_without_links_is_refused_before_anything_starts` (Linux CI). Coverage gap: `save_group_file` itself needs a live `AppHandle`; that every path after the abandon goes through `report_left_behind` is structural (one block) and was checked by reading. |
 | R2-L1: `OnPool::drop` closed the session on the blocking pool without the export permit, so after an early error more than four stalled closes could pile up | PR51 keeps the fallback writer's staging handle open in `OnPool` until it is settled, so more closes take this path. | Fixed: `OnPool::with_custody` moves the save's export custody (`DownloadReady::export_custody`, a new read accessor in `actor.rs`) into the deferred disposal and drops it only after the close; the journaled session (both creation and reopen) and the fallback writer's handle carry it (`ExportPorts::custody`, `SaveSource::custody`). Test: `a_session_dropped_on_the_async_side_closes_on_the_blocking_pool` now holds a close behind a barrier and asserts the export slot stays occupied until the close finishes. Break-checked. |
+
+### Adversarial review of the combined diff (`86664d94..e3db72ea`) and dispositions
+
+No blocker or high.
+
+| Finding | Disposition |
+| --- | --- |
+| M-A: on Unix a journaled removal in a shared folder answered `SharedFolder` ("delete it yourself") before checking the name, so a name the user had already deleted, or another account's file, produced that instruction | Fixed: the read-only check at the original name comes first; `Shared` only for a name verified ours, `Missing`/`NotOurs` otherwise. Test (Linux CI): `unix_a_shared_folder_tells_the_user_to_delete_only_its_own_file` (missing, foreign, saved row with its staging name gone). |
+| LOW 1: saved rows and network/FUSE folders worded as "the partly saved file" and "Other accounts can change" | Fixed: `SharedFolder.notice(saved)` names the temporary copy for a saved row (and `STAGING_SHARED` is gone in favour of it); Save another copy of an unreachable saved row says "The folder of the earlier saved copy is unavailable, so its files there were left in place."; all shared-folder sentences say "This folder may be changed by other accounts". |
+| LOW 2: `abandon_sequence` read `published` before its retire | Fixed: from the read after the retire. Test: `save_new_copy_reads_published_after_its_retire`. |
+| LOW 3: the jam-sheet export cleaned up a failed write under the session commit guard on an async worker | Fixed: `write_download_held` plus `FailedWrite::clean_up`, which the jam-sheet export runs after dropping the guard (the success path keeps the guard across the write and the reveal as before). The write itself still runs on the async worker, as it did before PR51. |
+| LOW 4: panic paths after publication (silent fallback settle; `?` after Published in the export sequence) | Fixed: a hedged sentence for a panicked settle; `after_publication` takes the worker result and keeps the record instead of failing a committed save. Test: `after_publication_keeps_the_record_only_when_clear_can_still_help`. |
+| LOW 5: doc drift (`cleared_staging`, `publish_session` errors, "with all four held") | Fixed in code docs, INTERFACES and THREAT-MODEL. |
+| LOW 6: empty files left on Windows SMB folders without file numbers | The refusal now says "empty temporary files may remain there". No plaintext. |
+| Design: Linux confinement (AppArmor, SELinux, snap, seccomp) can deny `linkat` through `/proc/self/fd` although the read-only availability check passes, and the Flatpak document portal or Android FUSE storage behave alike; such a save writes everything and then halts at publication | Documented residual (the halt is truthful and nothing is reported saved). Follow-up: a real descriptor-link probe at creation, where the probe name could be removed. |
+| Design: on Windows the pin blocks renaming the folder's ancestors but not retargeting an ancestor junction, so guarantee (b) holds only without such a writable junction (the save halts as Changed, never reported saved) | Documented residual (THREAT-MODEL). |
+| Design: four stalled validations or cleanups on a hard NFS mount disable Save as or Remove until they return; R2-M1 lets one window start concurrent Removes, the fifth reports busy | Documented; the messages are truthful and a retry recovers. |
+| Design: Unix writers without a journal: a failed unlink plus a failed put-back leave plaintext at a `mewtual-removing-` name that no record or message mentions | Documented residual (same-account or kernel failure paths only). |
 
 ## Ledger (22 October)
 

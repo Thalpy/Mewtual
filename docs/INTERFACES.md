@@ -518,10 +518,11 @@ Rust interfaces:
   its final name is proven ours; otherwise nothing is deleted and the outcome says what was seen
   (`PartialRemoval::KeptOnlyCopy`, `SavedNameReplaced`, `SavedFileMissing`, `Unchecked` for a
   name that cannot be checked right now). It adds `SharedFolder` (Unix: nothing deleted where
-  other accounts can or may modify the folder, network and FUSE filesystems included);
-  `PartialRemoval::cleared_staging()` tells whether no staging name of ours can remain, and
-  `ExportFile::finish` now returns the `PartialRemoval` so native can word the saved result
-  truthfully. For writers without a journal (native's fallback writer, the GIF export,
+  other accounts can or may modify the folder, network and FUSE filesystems included, and only
+  for a name verified ours); `PartialRemoval::cleared_staging()` describes whether no staging name
+  of ours can remain, and `ExportFile::finish` now returns the `PartialRemoval`; native's
+  `after_publication` keeps the Published record only for `Unchecked`/`FolderUnreachable` (or a
+  failed worker) and otherwise releases it with `notice(true)`. For writers without a journal (native's fallback writer, the GIF export,
   `write_download`): `session_id(&File) -> SessionId` (in-session volume and file index, or device
   and inode; never persisted, Debug redacted), `remove_if_session(folder, leaf, id, rng) ->
   SessionRemoval` (`Removed`, `Missing`, `NotOurs`, `SharedFolder`; an error means it could not
