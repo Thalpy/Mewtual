@@ -1,5 +1,41 @@
 # Chat, files and voice implementation evidence
 
+## Validated native Derive checkpoint (23 October)
+
+Runtime commit `85621697` plus native test correction `9aa5d7bd` passed the complete local
+gates. This is a validated partial integration; production V2 remains disabled. No desktop
+caller enables routing or dispatches the Derive/action/final adapters. The actual
+VoiceV2Native adapter, confirmation continuation, SDP/ICE/RTC, member-media relay and physical
+audio/network acceptance remain unfinished. Only one physical desktop is available.
+
+Validation on these frozen inputs:
+
+- Root `cargo test --all --all-features -j 2`: **3,279 passed**,24 ignored, zero failures.
+- Native `cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml -j 2`: **700 passed**
+  (695 library plus5 ACL), zero failures. This includes actual A-C-blocked TCP discovery through
+  unjoined B, replacement D and native Derive/Input/admission/result/ACK/End/final-proof handling.
+  It does not prove SDP/ICE negotiation or actual browser WebCrypto on that transport.
+- Full frontend: **2,531 passed**. Svelte zero errors/warnings, production build and all ten
+  browser flows pass. Edge required execution outside the sandbox after sandbox GPU startup
+  failed; the harness was unchanged. The existing large-bundle warning remains.
+- Root/native formatting and strict Clippy, native check, ambient-dependency gate via Git Bash,
+  and cargo-deny pass. Cargo-deny retains the existing unmatched-ignore warning.
+- Native development build and actual application startup pass; startup completed in4.92s.
+  Native check took51.72s, strict Clippy56.98s and development build2m27s.
+
+The first native full run was692 pass/3 fail: old256KiB fillers no longer reached the reviewed
+512KiB group limit. `9aa5d7bd` changes all six relevant fixtures to authoritative GROUP_BYTES,
+with no refusal/retry assertion removed. All12 focused join-key tests and the repeated full
+native suite pass. Root/frontend runtime inputs remained unchanged; critical runtime hashes
+were rechecked. Read-only adversarial review found no remaining blocker/high/medium in this
+checkpoint or the fixture correction. No reviewer ran a duplicate suite.
+
+Logs are `target/native-live-{root-full,root-clippy,native-full-rerun,native-check,native-clippy,
+native-build,startup,frontend-full,frontend-check,frontend-build,flows-unsandboxed,deny}.log`.
+The separate `communication-v2-progress` checkout is an unvalidated continuation from this
+runtime; its shared outgoing capacity, Source budget and End cleanup work are not included
+in this sign-off. Do not mix its test results or activation claims with this frozen checkpoint.
+
 ## Validated native handoff and V2 target integration (23 October)
 
 Frozen combined runtime `3f584d6049ef139492f8fa4146b5181bdc080575` integrates native checkpoint `05dcc2c2`

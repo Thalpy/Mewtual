@@ -1,12 +1,47 @@
 # Mewtual; Handover
 
+## Validated native Derive checkpoint (23 October)
+
+Runtime commit `85621697` plus native test correction `9aa5d7bd` passed the complete local
+gates. This is a validated partial integration; production V2 remains disabled. No desktop
+caller enables routing or dispatches the Derive/action/final adapters. The actual
+VoiceV2Native adapter, confirmation continuation, SDP/ICE/RTC, member-media relay and physical
+audio/network acceptance remain unfinished. Only one physical desktop is available.
+
+Validation on these frozen inputs:
+
+- Root `cargo test --all --all-features -j 2`: **3,279 passed**,24 ignored, zero failures.
+- Native `cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml -j 2`: **700 passed**
+  (695 library plus5 ACL), zero failures. This includes actual A-C-blocked TCP discovery through
+  unjoined B, replacement D and native Derive/Input/admission/result/ACK/End/final-proof handling.
+  It does not prove SDP/ICE negotiation or actual browser WebCrypto on that transport.
+- Full frontend: **2,531 passed**. Svelte zero errors/warnings, production build and all ten
+  browser flows pass. Edge required execution outside the sandbox after sandbox GPU startup
+  failed; the harness was unchanged. The existing large-bundle warning remains.
+- Root/native formatting and strict Clippy, native check, ambient-dependency gate via Git Bash,
+  and cargo-deny pass. Cargo-deny retains the existing unmatched-ignore warning.
+- Native development build and actual application startup pass; startup completed in4.92s.
+  Native check took51.72s, strict Clippy56.98s and development build2m27s.
+
+The first native full run was692 pass/3 fail: old256KiB fillers no longer reached the reviewed
+512KiB group limit. `9aa5d7bd` changes all six relevant fixtures to authoritative GROUP_BYTES,
+with no refusal/retry assertion removed. All12 focused join-key tests and the repeated full
+native suite pass. Root/frontend runtime inputs remained unchanged; critical runtime hashes
+were rechecked. Read-only adversarial review found no remaining blocker/high/medium in this
+checkpoint or the fixture correction. No reviewer ran a duplicate suite.
+
+Logs are `target/native-live-{root-full,root-clippy,native-full-rerun,native-check,native-clippy,
+native-build,startup,frontend-full,frontend-check,frontend-build,flows-unsandboxed,deny}.log`.
+The separate `communication-v2-progress` checkout is an unvalidated continuation from this
+runtime; its shared outgoing capacity, Source budget and End cleanup work are not included
+in this sign-off. Do not mix its test results or activation claims with this frozen checkpoint.
+
 ## Native Derive and blocked-TCP continuation (23 October; validation checkpoint)
 
 Continue in `target/communication-final-proof-worktree`, branch `communication-native-live`,
-from accepted integration `18ac9585`. Publication awaits the full validation gates. Do not edit
-Main's unrelated UI changes or the external-download worktree. Full Root validation is running;
-full native validation has not started. The previous complete combined gates below apply only to
-their frozen source. Keep heavy Cargo jobs serial, `-j 2`, using the existing Root/native targets.
+from accepted integration `18ac9585`. The final combined gates are recorded above. Preserve
+Main's unrelated UI changes and the external-download worktree. Earlier combined gates below
+apply only to their own frozen source. Keep heavy Cargo jobs serial, `-j 2`, using the existing Root/native targets.
 
 Implemented in this worktree, with production activation/action dispatch STILL CLOSED:
 
@@ -30,7 +65,7 @@ Implemented in this worktree, with production activation/action dispatch STILL C
   actual last-field publisher, including real late input custody, gates channel closure/GC.
   Native ticket layout remains within2KiB by reusing exclusive lifecycle storage/closure slots.
 
-Focused evidence on the current code (no full-suite sign-off):
+Focused evidence preceding the complete combined gates above:
 
 - Root `cargo test -p catcoms-sync voice --lib -j 2`: **473 pass**, including normal
   dispatch mixed-version ingress/egress, duplicate/equivocation flood, both Clock callback edges,
@@ -41,7 +76,7 @@ Focused evidence on the current code (no full-suite sign-off):
   Earlier codec/native-row layout failures remain in iteration logs; the current graphs pass.
   Actual result worker peak remains4,576B. Root app exact-stop actor regression passed.
 - Native blocked TCP test `native_v2_discovers_blocked_endpoints`: **1 pass**,22.17s before the
-  latest plan-control increment; a fresh full native run remains required. A-C stays
+  latest plan-control increment; the final full native rerun also passed this scenario. A-C stays
   physically forbidden; unjoined B discovers both actual joins; restored D renews newer proof
   ordinals under the SAME joins/keys after B closes. Both sides then run actual native factory,
   Input, admission, Actor result, receipt ACK, settlement and End/final proof ACK. A real retained
@@ -51,7 +86,7 @@ Focused evidence on the current code (no full-suite sign-off):
   **2,531 pass**; Svelte zero errors/warnings; production build and all ten Edge flows pass.
   Sandboxed Edge failed GPU startup; the unchanged harness passed outside that execution sandbox.
 - Root/native formatting, ambient-dependency gate and cargo-deny pass. Root/native strict Clippy,
-  full native suite/check and development build/startup remain pending.
+  full native suite/check and development build/startup passed in the final gates above.
 - Read-only actual-diff adversarial re-review resolved all four cleanup/legacy/flood MEDIUM
   findings; no additional blocker/high/medium in the inspected increment. The SDP composition
   blocker below remains an activation prerequisite. No reviewer ran Cargo or edited files.
@@ -59,7 +94,7 @@ Focused evidence on the current code (no full-suite sign-off):
   ticket accounting was traced through the exclusive Pending versus compacted lifecycle.
 
 Evidence logs are `target/native-live-{root-voice,dispatch,handoff,tcp,ipc}-focus.log` in this
-checkout. These are focused, source-specific results, not hosted CI or a full completion claim.
+checkout. These are source-specific local results, not hosted CI or live V2 completion.
 
 Remaining implementation boundary: the earlier224KiB/256KiB design could not include native
 owners, even before discovery/history. Current source instead retains BOTH Lower lanes while

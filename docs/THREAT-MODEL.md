@@ -1,6 +1,6 @@
 # Threat model; client integrity & enforcement boundaries
 
-## Native signalling capacity policy revision (23 October; validation in progress)
+## Native signalling capacity policy revision (23 October; validated partial checkpoint)
 
 The native group byte ceiling is now512KiB; the aggregate native process pool remains2MiB.
 This pool accounts declared signalling owners, not total application RSS or opaque SDK/OS
