@@ -1,6 +1,23 @@
 # Mewtual; Handover
 
-## Hosted onward-chat failure and correction (23 October; validation in progress)
+## Validated Source and onward-chat checkpoint (23 October)
+
+The combined runtime at `5600fecd` is pushed to `communication-native-live`, draft PR #53.
+Complete local gates on this frozen source pass: Root3,304 (24 existing ignored), native702
+(697 library plus5 ACL), frontend2,531, Svelte zero errors/warnings and production build.
+Root strict all-target/all-feature Clippy, native check and strict all-target Clippy, both
+format checks, ambient-dependency gate and cargo-deny pass. Deny used its normal external
+advisory cache after the sandbox denied its lock; the existing unmatched RUSTSEC-2026-0381
+ignore warning remains. Logs are `target/native-progress-*.log` in the progress checkout.
+No setup/process/frontend runtime changed after the earlier startup/flow checks below; those
+checks were not repeated for this Source/chat increment. This is local evidence, not a claim
+that the new hosted head has completed CI.
+
+The next native confirmation-child draft lives separately in
+`target/communication-native-children-worktree`; none of its changes are covered by these
+results or included in this checkpoint. Production V2 remains disabled.
+
+### Hosted onward-chat failure and correction
 
 The pushed Derive checkpoint `583794de` has a failing Linux native job in PR #53:
 `six_client_native_reversed_reopen_gossip_loss_and_command_load`,694 pass/1 fail. In the90s
@@ -25,16 +42,16 @@ response marker, retaining no payload. That metadata cannot prove signature acce
 knownness or import. Actual-diff re-review found no actionable findings after the MORE/PAGE and
 documentation corrections. The unchanged hostile six-client replay passes in272.83s, including
 the failed hosted phase. This is supporting evidence, not proof of the sole hosted cause.
-All2,531 frontend tests and Svelte checks (zero errors/warnings) also pass. Full Root/native
-combined validation remains pending; keep V2 disabled.
+The complete combined gates above also cover this correction. Keep V2 disabled pending the
+separate integration and acceptance work.
 
-## V2 native Source progress (23 October; full validation in progress)
+## V2 native Source progress (23 October; validated partial integration)
 
 Continue in `target/communication-v2-progress-worktree`, branch `communication-v2-progress`.
 Its runtime starts at `85621697`; `754d055a` carries the same native pressure-test correction
 as published `9aa5d7bd`. The validated Derive checkpoint is published as `583794de` on
-`communication-native-live`, draft PR #53. This newer Source increment has not yet been
-published or fully validated. Preserve Main UI and the external-download worktree.
+`communication-native-live`, draft PR #53. The Source/chat increment is now published at
+`5600fecd` with complete local validation above. Preserve Main UI and the external-download worktree.
 
 Implemented in the continuation:
 
@@ -67,12 +84,12 @@ under full ordinary pressure, actual protected publication/native pump/signed tr
 ACK/End/late-Lower retirement, revised-limit fairness, closed-phase slot release, borrowed cache
 retry, and current50-member Actor-map rejection. The latter checks current membership/owners;
 it does not instrument heap allocation. Native handoff **221 tests pass**, including unchanged
-row/codec layout guards. Full Root/native/frontend and native check remain pending for this increment. The initial
+row/codec layout guards. The complete combined checks are recorded above. The initial
 all-feature run reused a stale test executable and was stopped/excluded. Its affected sync/app/
 replication metadata (318files,493870bytes) was preserved under
 `target/source-pump-metadata-backup`; compiled dependencies/binaries were not cleaned. Fresh strict
-Root Clippy and all-feature no-run rebuild pass from this checkout. The newer chat correction
-above still needs fresh combined gates. Read-only actual-diff review
+Root Clippy and all-feature no-run rebuild pass from this checkout; the subsequent complete
+suites include the current chat correction. Read-only actual-diff review
 resolved the unpaid roster-copy MEDIUM and clarified the32-preparation bound; no blocker/high/
 medium remains in this slice. Logs are `target/native-progress-*.log` in this checkout.
 

@@ -1,6 +1,6 @@
 # Threat model; client integrity & enforcement boundaries
 
-## Shared native progress candidate (23 October; validation incomplete)
+## Shared native progress checkpoint (23 October; partial integration)
 
 The continuation candidate shares two outgoing group positions across confirmation and SDP,
 with an independent1KiB owner payment. Only actual Lower credits retain those positions after
