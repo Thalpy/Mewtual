@@ -1,5 +1,87 @@
 # Mewtual; Handover
 
+## Native Derive and blocked-TCP continuation (23 October; validation checkpoint)
+
+Continue in `target/communication-final-proof-worktree`, branch `communication-native-live`,
+from accepted integration `18ac9585`. Publication awaits the full validation gates. Do not edit
+Main's unrelated UI changes or the external-download worktree. Full Root validation is running;
+full native validation has not started. The previous complete combined gates below apply only to
+their frozen source. Keep heavy Cargo jobs serial, `-j 2`, using the existing Root/native targets.
+
+Implemented in this worktree, with production activation/action dispatch STILL CLOSED:
+
+- Canonical native Derive Input/permit and actual input/work/physical output custody; original
+  native UI/selection/route fences compose with Root's scoped, Clock-free engine commit.
+- One prepaid browser intake, exact framed admission/result/receipt ACK/settlement and post-End
+  final issuance/ACK using retained original keys/counters. Lost replies never repeat derivation.
+  Idle close and real cancellation drain correctly; one immutable pilot descriptor prevents
+  historical Input from losing cleanup to another plan. Ordinary Return stays immutable and
+  bounded native compaction lets its last-copy completion become observable without final proof.
+- Trusted actual-participant observation/stop. Native End captures its exact original grant
+  before revocation; admitted Actor cleanup survives lost replies and cannot remove a replacement.
+- Native legacy ingress/egress exclusion while a V2 participant is live (including routing pause),
+  with prequeued legacy writers discarded at selection. Scope is deliberately the WHOLE server;
+  observers/helpers do not select protocol. App's existing generation fence remains necessary.
+- Agreement of the renderer/native contract is recorded in
+  `communication-recovery/VOICE-V2-NATIVE-HANDOFF-CONTRACT.md`; this does not implement the
+  actual VoiceV2Native adapter, confirmation continuation, SDP/ICE factories or App RTC wiring.
+- The original parent retains fixed plan provenance and a separate exact cleanup capability
+  through ordinary Return/compaction. End between children needs no successor loan; Root's
+  actual last-field publisher, including real late input custody, gates channel closure/GC.
+  Native ticket layout remains within2KiB by reusing exclusive lifecycle storage/closure slots.
+
+Focused evidence on the current code (no full-suite sign-off):
+
+- Root `cargo test -p catcoms-sync voice --lib -j 2`: **473 pass**, including normal
+  dispatch mixed-version ingress/egress, duplicate/equivocation flood, both Clock callback edges,
+  settlement/revocation fences and exact stop with a real late Root input witness.
+- Native `cargo test --locked --manifest-path apps/desktop/src-tauri/Cargo.toml --lib voice_handoff
+  -j 2`: **221 pass**. Expanded codec/future/output inventory is **12,228/12,288B**;
+  Input serialization was split into nonoverlapping Data/Control frames, with no cap increase.
+  Earlier codec/native-row layout failures remain in iteration logs; the current graphs pass.
+  Actual result worker peak remains4,576B. Root app exact-stop actor regression passed.
+- Native blocked TCP test `native_v2_discovers_blocked_endpoints`: **1 pass**,22.17s before the
+  latest plan-control increment; a fresh full native run remains required. A-C stays
+  physically forbidden; unjoined B discovers both actual joins; restored D renews newer proof
+  ordinals under the SAME joins/keys after B closes. Both sides then run actual native factory,
+  Input, admission, Actor result, receipt ACK, settlement and End/final proof ACK. A real retained
+  Root input holds final Pending until it drops; lost issuance recovers the same proof. This is
+  NOT SDP/ICE negotiation, actual WebView WebCrypto, audio, NAT or physical-device acceptance.
+- Browser `voice-ipc-session.test.ts` plus `voice-ipc-input.test.ts`: **98 pass**. Full frontend:
+  **2,531 pass**; Svelte zero errors/warnings; production build and all ten Edge flows pass.
+  Sandboxed Edge failed GPU startup; the unchanged harness passed outside that execution sandbox.
+- Root/native formatting, ambient-dependency gate and cargo-deny pass. Root/native strict Clippy,
+  full native suite/check and development build/startup remain pending.
+- Read-only actual-diff adversarial re-review resolved all four cleanup/legacy/flood MEDIUM
+  findings; no additional blocker/high/medium in the inspected increment. The SDP composition
+  blocker below remains an activation prerequisite. No reviewer ran Cargo or edited files.
+  The later plan-capability/member-view review also found no blocker/high/medium; max closure-
+  ticket accounting was traced through the exclusive Pending versus compacted lifecycle.
+
+Evidence logs are `target/native-live-{root-voice,dispatch,handoff,tcp,ipc}-focus.log` in this
+checkout. These are focused, source-specific results, not hosted CI or a full completion claim.
+
+Remaining implementation boundary: the earlier224KiB/256KiB design could not include native
+owners, even before discovery/history. Current source instead retains BOTH Lower lanes while
+borrowing the original source object, writing exact-capacity canonical parents/final frames and
+using a private same-job cached hash for small ACK verification. Root now declares187,966B
+inside192KiB. Native group policy is explicitly512KiB with the SAME2MiB process pool and all
+work/rate/action limits; the browser ledger stays separately256KiB. Real group-A load/group-B
+progress and true revised-limit pressure pass the focused Root gate. Actual setup-ACKed Derive
+ends at226,752B for the original group (230,848B aggregate); that is not an SDP composition peak.
+Do not infer supported16-peer combinations from these individual maxima or Root-only sums.
+Preserve uncertain history, actual owners and Session counters. Design/measure phase transfer
+before exposing readiness, an SDP nonce, positive incoming SDP admission or desktop activation.
+Confirmation source scheduling/continuation, complete native/browser/RTC handoff and actual
+physically blocked A-B-C negotiation remain required. Media relay and physical acceptance are
+not established here. Only one physical desktop is available.
+
+The accepted handoff contract now records additional multi-peer blockers: one Workflow/Exchange
+per group, one SDP exchange per LocalJoin, lifetime32-action/row histories, and two confirmation
+plus two SDP reserved Forward lanes leaving no discovery/helper slot. Do not retire Finish on
+local sealing, browser ACK/settlement or HelperQueued. Resolve original progress-lane ownership,
+history capacity and causal phase transfer before enabling actual group calls.
+
 ## Validated native handoff and V2 target integration (23 October)
 
 Frozen combined runtime `3f584d6049ef139492f8fa4146b5181bdc080575` integrates native checkpoint `05dcc2c2`

@@ -4,7 +4,7 @@ use super::*;
 
 /// Project original sealed routes and actor liveness without exposing network seeds/addresses.
 /// Each independent probe has its own bound so diagnostics cannot strand a failed fixture.
-async fn bridge_diagnostic(scenario: &Scenario, bridge: usize) -> Vec<String> {
+pub(super) async fn bridge_diagnostic(scenario: &Scenario, bridge: usize) -> Vec<String> {
     async fn observe<F: Future>(future: F) -> Option<F::Output> {
         tokio::select! {
             value = future => Some(value),
@@ -46,7 +46,10 @@ async fn bridge_diagnostic(scenario: &Scenario, bridge: usize) -> Vec<String> {
 
 /// Both exact peer/listener pairs need standing member-mesh consent; one saved direction,
 /// duplicates or an obsolete listener cannot establish this replacement-bridge prerequisite.
-fn has_saved_bridge_endpoints(net: &ServerNet, expected: &[(PeerId, String); 2]) -> bool {
+pub(super) fn has_saved_bridge_endpoints(
+    net: &ServerNet,
+    expected: &[(PeerId, String); 2],
+) -> bool {
     net.reconnect_policy == ReconnectPolicy::MemberMesh
         && expected.iter().all(|(peer, address)| {
             net.reconnect_routes

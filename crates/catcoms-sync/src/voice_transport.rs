@@ -137,7 +137,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         request: &[u8],
         object_hash: [u8; 32],
         response: &[u8],
-        retained: Option<&Envelope>,
+        retained: Option<forwarding::RetainedEnvelope<'_>>,
         progress: Option<&Arc<voice_v2::negotiation::Exchange>>,
     ) -> Result<VoiceTransportStatus, VoiceError> {
         if response.len() > 512 {
@@ -222,27 +222,50 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             return Err(VoiceError::Signature);
         }
         drop(transcript);
-        let decoded;
-        let envelope = if let Some(envelope) = retained {
-            envelope
+        let decoded = if retained.is_none() {
+            Some(Envelope::decode(request.inner)?)
         } else {
-            decoded = Envelope::decode(request.inner)?;
-            &decoded
+            None
         };
-        if envelope.object().hash() != object_hash {
-            return Err(VoiceError::RetryMismatch);
-        }
+        let object = if let Some(envelope) = &retained {
+            // Only the private immutable Work view can provide this cache. A copied hash
+            // from a public response never suppresses canonical hashing/role verification.
+            if envelope.hash() != object_hash {
+                return Err(VoiceError::RetryMismatch);
+            }
+            envelope.object()
+        } else {
+            let decoded = decoded
+                .as_ref()
+                .expect("no retained work requires canonical decode");
+            if decoded.object().hash() != object_hash {
+                return Err(VoiceError::RetryMismatch);
+            }
+            decoded.object()
+        };
         // A helper can attest only to its own custody. Re-run the original request's role
         // checks as the responder, including the exact targeted member and current policy.
         // Otherwise a correctly signed helper ACK could falsely settle final delivery.
+        let native = self.voice_v2_context(object.scope().room)?;
         let context = voice_v2::Context {
             local: responder,
-            ..self.voice_v2_context(envelope.object().scope().room)?
+            ..native
         };
-        let members: HashSet<_> = self.group.member_device_ids().into_iter().collect();
-        let disposition = envelope.authorize(self.device.device_id(), &context, |id| {
-            members.contains(&id)
-        })?;
+        // The actor already owns and pays the exact epoch's membership map. Borrow it for
+        // this pure role check rather than allocating another up-to512-member roster/set
+        // inside the small ACK verification ticket. Public callers still decode/hash above.
+        let disposition =
+            self.voice_transport_actor()?
+                .with_current_members(&native, |members| {
+                    if let Some(envelope) = retained {
+                        envelope.authorize(self.device.device_id(), &context, members)
+                    } else {
+                        decoded
+                            .as_ref()
+                            .expect("canonical decoded request")
+                            .authorize(self.device.device_id(), &context, members)
+                    }
+                })?;
         if !matches!(
             (disposition, status),
             (_, Status::Refused)

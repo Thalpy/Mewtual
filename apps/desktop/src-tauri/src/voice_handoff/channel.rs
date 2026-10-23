@@ -630,6 +630,7 @@ impl Incoming {
         )?;
         Ok(PreparedReply {
             body,
+            input: None,
             request,
             response,
             worker,
@@ -638,11 +639,25 @@ impl Incoming {
 }
 pub(super) struct PreparedReply {
     body: Body,
+    input: Option<ReplyInput>,
     request: Header,
     response: Header,
     worker: HeaderWorker,
 }
 impl PreparedReply {
+    /// Transfer actual native input/row custody, not a descriptor. Keep it through sealing,
+    /// socket writing and completed-output collection; a lost browser reply cannot free it.
+    pub(super) fn retain_input(
+        mut self,
+        input: super::custody::InputCustody,
+        work: super::ledger::Work,
+    ) -> Self {
+        self.input = Some(ReplyInput {
+            _input: input,
+            _work: work,
+        });
+        self
+    }
     pub(super) fn plain_mut(&mut self) -> &mut [u8] {
         let bytes = self.body.cipher_bytes - 16;
         &mut self.body.cipher_mut()[..bytes]
@@ -662,6 +677,7 @@ impl PreparedReply {
             .response_admission(&self.response, &self.request);
         Ok(CompletedReply {
             body: self.body,
+            _input: self.input,
             admission,
             worker: self.worker,
         })
@@ -671,8 +687,14 @@ impl PreparedReply {
 /// readiness or dropping the caller's wait is not collection and cannot free this position.
 pub(super) struct CompletedReply {
     body: Body,
+    // Actual buffers/input/Work drain BEFORE the last physical HeaderWorker clears busy.
+    _input: Option<ReplyInput>,
     admission: [u8; crypto::ADMISSION],
     worker: HeaderWorker,
+}
+struct ReplyInput {
+    _input: super::custody::InputCustody,
+    _work: super::ledger::Work,
 }
 impl CompletedReply {
     pub(super) fn admission(&self) -> &[u8; crypto::ADMISSION] {

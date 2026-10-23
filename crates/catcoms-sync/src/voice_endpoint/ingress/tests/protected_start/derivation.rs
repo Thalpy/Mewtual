@@ -4,6 +4,28 @@ use super::*;
 use voice_v2::crypto_actions::CryptoOutcome;
 
 #[tokio::test]
+async fn exact_endpoint_stop_does_not_retire_a_late_original_input_owner() {
+    let (mut root, _remote, _runtime, _clock, grant, handshake) = low_fixture().await;
+    let action = root.prepare_voice_derivation(&grant, handshake).unwrap();
+    let input = action.input().unwrap();
+    let loan = action.borrow_handoff(16 * 1024).unwrap();
+    let retirement = loan.retire_confirmation_observed();
+    root.stop_voice_endpoint(&grant);
+    action.settle_engine();
+    assert!(!grant.lease().is_live());
+    assert!(
+        !retirement.is_drained(),
+        "Root stop cannot refund an actual late input borrower"
+    );
+    drop(input);
+    assert!(
+        retirement.is_drained(),
+        "actual last borrower publishes the original witness"
+    );
+    root.stop_voice_endpoint(&grant);
+}
+
+#[tokio::test]
 async fn root_handoff_expiry_refuses_new_capacity_but_preserves_the_actual_old_loan() {
     for admitted in [false, true] {
         let (mut root, _remote, runtime, clock, grant, handshake) = low_fixture().await;

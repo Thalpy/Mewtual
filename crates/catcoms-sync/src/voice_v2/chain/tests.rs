@@ -748,7 +748,7 @@ fn failed_preparation_returns_partial_bytes_and_slots_at_each_resource_boundary(
             blockers.push(
                 pool.charge(
                     bound.scope.group,
-                    256 * 1024 - ROWS * ROW_BYTES,
+                    crate::voice_v2::resources::GROUP_BYTES - ROWS * ROW_BYTES,
                     ResourceKind::Retained,
                 )
                 .unwrap(),
@@ -774,7 +774,11 @@ fn failed_preparation_returns_partial_bytes_and_slots_at_each_resource_boundary(
             blockers.push(
                 pool.charge(
                     bound.scope.group,
-                    256 * 1024 - ROWS * ROW_BYTES - VARIABLE_BYTES - METADATA_BYTES + 1,
+                    crate::voice_v2::resources::GROUP_BYTES
+                        - ROWS * ROW_BYTES
+                        - VARIABLE_BYTES
+                        - METADATA_BYTES
+                        + 1,
                     ResourceKind::Retained,
                 )
                 .unwrap(),

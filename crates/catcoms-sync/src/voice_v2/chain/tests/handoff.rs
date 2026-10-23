@@ -2,6 +2,108 @@
 use super::*;
 
 #[test]
+fn original_plan_control_survives_return_and_end_between_children_without_pinning_progress() {
+    let pool = Arc::new(Resources::default());
+    let slots = Arc::new(slots::Slots::default());
+    let bound = binding(8);
+    let call = bound.call.clone();
+    let chain = prepare_chain(pool.clone(), bound, slots.clone()).unwrap();
+    let (queue, action) = publish(&chain, &pool, &slots);
+    let control = action.confirmation_control().unwrap();
+    let loan = action.borrow_handoff(16 * 1024).unwrap();
+    let input = action.input().unwrap();
+    action.admit_engine(action.engine_bytes()).unwrap();
+    action.settle_engine();
+    drop(loan); // ordinary Return; no child/terminal Phase will ever be created
+    assert!(!chain.control.lock().unwrap().closed);
+    call.revoke();
+    chain.close();
+    drop((chain, action, queue, slots));
+    let retirement = control.retire(); // no current call, action, control or new data loan
+    assert!(
+        !retirement.is_drained(),
+        "the actual last input is still retained"
+    );
+    drop(input);
+    assert!(retirement.is_drained());
+    assert_eq!(pool.counts(), (METADATA_BYTES, 0));
+    let replacement =
+        prepare_chain(pool.clone(), binding(9), Arc::new(slots::Slots::default())).unwrap();
+    assert!(!replacement.control.lock().unwrap().closed);
+    assert!(
+        retirement.is_drained(),
+        "observation cannot adopt the replacement"
+    );
+    drop(retirement);
+    replacement.close();
+    drop(replacement);
+    assert_eq!(pool.counts(), (0, 0));
+}
+
+#[test]
+fn plan_control_closes_original_after_return_without_needing_a_successor_or_revocation() {
+    let pool = Arc::new(Resources::default());
+    let slots = Arc::new(slots::Slots::default());
+    let chain = prepare_chain(pool.clone(), binding(8), slots.clone()).unwrap();
+    let (queue, action) = publish(&chain, &pool, &slots);
+    let control = action.confirmation_control().unwrap();
+    let loan = action.borrow_handoff(16 * 1024).unwrap();
+    action.admit_engine(action.engine_bytes()).unwrap();
+    action.settle_engine();
+    drop(loan);
+    assert_eq!(
+        action.confirmation_control().err(),
+        Some(VoiceError::Unauthorized)
+    );
+    let retirement = control.retire();
+    assert!(chain.control.lock().unwrap().closed);
+    assert!(retirement.is_drained());
+    assert_eq!(
+        action.borrow_handoff(1).err(),
+        Some(VoiceError::Unauthorized)
+    );
+    drop((retirement, action, queue, chain, slots));
+    assert_eq!(pool.counts(), (0, 0));
+}
+
+#[test]
+fn retained_plan_control_weak_zero_is_not_the_original_workflow_last_field_publisher() {
+    let pool = Arc::new(Resources::default());
+    let slots = Arc::new(slots::Slots::default());
+    let chain = prepare_chain(pool.clone(), binding(8), slots.clone()).unwrap();
+    let (queue, action) = publish(&chain, &pool, &slots);
+    let control = action.confirmation_control().unwrap();
+    // Park the SAME actual publisher at the original native field-destruction boundary.
+    // No fabricated observer/publisher or skipped Drop stands in for production custody.
+    let held = chain
+        .control
+        .lock()
+        .unwrap()
+        .workflow
+        .as_ref()
+        .unwrap()
+        .clone();
+    chain.close();
+    drop((chain, action, queue, slots));
+    let mut workflow = match Arc::try_unwrap(held) {
+        Ok(workflow) => workflow,
+        Err(_) => panic!("fixed control must not itself own the variable Workflow"),
+    };
+    let publisher = workflow._retirement.take().unwrap();
+    drop(workflow);
+    let retirement = control.retire();
+    assert_eq!(pool.counts(), (METADATA_BYTES, 0));
+    assert!(
+        !retirement.is_drained(),
+        "missing control and returned bytes are not completion"
+    );
+    drop(publisher);
+    assert!(retirement.is_drained());
+    drop(retirement);
+    assert_eq!(pool.counts(), (0, 0));
+}
+
+#[test]
 fn workflow_rejects_foreign_same_group_pool_without_charging_either_pool() {
     let pool = Arc::new(Resources::default());
     let foreign = Arc::new(Resources::default());
@@ -356,7 +458,7 @@ fn handoff_uses_reserved_bytes_without_borrowing_a_second_crypto_lane() {
     let pressure = pool
         .charge(
             bound.scope.group,
-            256 * 1024 - before.0,
+            crate::voice_v2::resources::GROUP_BYTES - before.0,
             ResourceKind::Retained,
         )
         .unwrap();

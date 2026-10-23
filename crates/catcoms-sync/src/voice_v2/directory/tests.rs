@@ -174,13 +174,20 @@ fn failed_room_allocation_revokes_previous_authority_without_refunding_retained_
     let before = runtime.resources().counts().0;
     let fill = runtime
         .resources()
-        .charge([1; 32], 256 * 1024 - before, ResourceKind::Retained)
+        .charge(
+            [1; 32],
+            crate::voice_v2::resources::GROUP_BYTES - before,
+            ResourceKind::Retained,
+        )
         .unwrap();
     let mut doc = AutoCommit::new();
     doc.put(ROOT, "2", true).unwrap();
     assert_eq!(directory.observe(Some(&doc)), Err(VoiceError::Capacity));
     assert!(!retained.lease.is_live());
-    assert_eq!(runtime.resources().counts().0, 256 * 1024);
+    assert_eq!(
+        runtime.resources().counts().0,
+        crate::voice_v2::resources::GROUP_BYTES
+    );
     drop(fill);
     drop(retained);
     assert_eq!(runtime.resources().counts().0, before - 1024);
@@ -252,7 +259,11 @@ fn retained_call_grants_hold_room_and_declared_bytes_until_actual_final_owner_dr
     );
     let held = resources.counts().0;
     let fill = resources
-        .charge([1; 32], 256 * 1024 - held, ResourceKind::Retained)
+        .charge(
+            [1; 32],
+            crate::voice_v2::resources::GROUP_BYTES - held,
+            ResourceKind::Retained,
+        )
         .unwrap();
     assert_eq!(
         directory.call_grant(&replacement, scope(2)).err(),
@@ -261,11 +272,14 @@ fn retained_call_grants_hold_room_and_declared_bytes_until_actual_final_owner_dr
     drop(native);
     assert_eq!(
         resources.counts().0,
-        256 * 1024,
+        crate::voice_v2::resources::GROUP_BYTES,
         "the last real Arc still owns custody"
     );
     drop(actual_last_owner);
-    assert_eq!(resources.counts().0, 256 * 1024 - 1024 - 256);
+    assert_eq!(
+        resources.counts().0,
+        crate::voice_v2::resources::GROUP_BYTES - 1024 - 256
+    );
     let fresh = directory.call_grant(&replacement, scope(2)).unwrap();
     assert!(fresh.lease().is_live());
     assert!(!old.is_live() && !other_lease.is_live());
@@ -292,7 +306,11 @@ fn call_grant_charge_refusal_issues_no_live_actor_or_room_child() {
     directory.observe(None).unwrap();
     let before = resources.counts().0;
     let fill = resources
-        .charge([1; 32], 256 * 1024 - before, ResourceKind::Retained)
+        .charge(
+            [1; 32],
+            crate::voice_v2::resources::GROUP_BYTES - before,
+            ResourceKind::Retained,
+        )
         .unwrap();
     assert_eq!(
         directory.call_grant(&actor, scope(1)).err(),

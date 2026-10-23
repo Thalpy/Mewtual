@@ -378,24 +378,8 @@ impl<S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin> Connection<S> {
             incoming.open().map_err(|_| Refused::Body)?;
             self.reply = Some(match incoming.operation() {
                 Operation::Status => {
-                    let plain = incoming.plain().map_err(|_| Refused::Body)?;
-                    if plain.len() != 49
-                        || plain[0] != 1
-                        || plain[1..17] != route.session_id()
-                        || plain[17..49] != route.hash()
-                    {
-                        return Err(Refused::Body);
-                    }
-                    // ONLY the existing Status9 setup protocol acknowledges constructor/SDK
-                    // drainage. A historical Begin must not invent or advance that evidence.
-                    route.acknowledge_setup().map_err(|_| Refused::Body)?;
-                    let snapshot = route.snapshot();
                     let incoming = self.incoming.take().ok_or(Refused::Body)?;
-                    let mut prepared = incoming
-                        .reply(BodyKind::Control, 3, None)
-                        .map_err(|_| Refused::Body)?;
-                    prepared.plain_mut().copy_from_slice(&snapshot);
-                    prepared.seal().map_err(|_| Refused::Body)?
+                    status(route, incoming)?
                 }
                 Operation::BeginDerive => {
                     let context = context.ok_or(Refused::Binding)?;
@@ -432,6 +416,34 @@ impl<S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin> Connection<S> {
         self.stream.shutdown().await.map_err(|_| Refused::Io)?;
         Ok(())
     }
+}
+
+/// The shipping setup acknowledgement, also exercised by the actual native/TCP fixture.
+/// Only this exact original authenticated Session may acknowledge its setup SDK drainage;
+/// an action/history reply or equal-label foreign Session cannot advance that evidence.
+pub(super) fn status(route: &Route, incoming: Incoming) -> Result<CompletedReply, Refused> {
+    if !incoming.belongs_to(route.session())
+        || incoming.operation() != Operation::Status
+        || incoming.kind() != BodyKind::Control
+        || incoming.logical() != route.session_id()
+    {
+        return Err(Refused::Binding);
+    }
+    let plain = incoming.plain().map_err(|_| Refused::Body)?;
+    if plain.len() != 49
+        || plain[0] != 1
+        || plain[1..17] != route.session_id()
+        || plain[17..49] != route.hash()
+    {
+        return Err(Refused::Body);
+    }
+    route.acknowledge_setup().map_err(|_| Refused::Body)?;
+    let snapshot = route.snapshot();
+    let mut prepared = incoming
+        .reply(BodyKind::Control, 3, None)
+        .map_err(|_| Refused::Body)?;
+    prepared.plain_mut().copy_from_slice(&snapshot);
+    prepared.seal().map_err(|_| Refused::Body)
 }
 
 /// Fixed response headers only; no attacker-controlled String or header map is constructed.

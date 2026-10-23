@@ -635,7 +635,13 @@ impl SourceLedger {
             };
             // Root framing and route authority share this same affine lower credit. Reserving
             // route metadata here avoids a fallible ordinary allocation after attempt debit.
-            let bytes = 4 * packet.bytes + 4096 + ROUTE_METADATA_BYTES;
+            // Original ciphertext remains in Packet's independently paid Source record.
+            // Root borrows that object, and its exact-capacity encoders retain at most two
+            // large buffers (inner+transcript, inner+frame, or Root+driver frame). The private
+            // retained ACK view reuses this SAME packet's cached hash, so its small verifier
+            // cannot hide two additional SDP encodings. Fixed wrapper/permit/route payments
+            // remain unchanged, and the actual driver still retains this whole credit.
+            let bytes = 2 * packet.bytes + 4096 + ROUTE_METADATA_BYTES;
             let budget = if let Some(exchange) = packet.activity.exchange() {
                 exchange.charge(super::negotiation::Stage::Lower, bytes)
             } else {

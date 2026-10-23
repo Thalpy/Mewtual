@@ -925,7 +925,7 @@ fn maximum_offer_cache_and_successful_lower_custody_allow_maximum_answer_verific
             f.source.counts(),
             (1, 1, usize::from(delayed_lower_retirement))
         );
-        assert!(f.runtime.resources().counts().0 <= 256 * 1024);
+        assert!(f.runtime.resources().counts().0 <= crate::voice_v2::resources::GROUP_BYTES);
         // This is the current packet/verification composition, not an SDP engine/result or
         // crossed-Offer progress claim. Those owners must join a prepaid exchange before V2.
         drop((incoming, ticket, actual_verifier, actual_lower));
@@ -997,7 +997,7 @@ fn maximum_sdp_reply_and_declared_engine_result_fit_with_two_lowers_under_unrela
     let ordinary = resources
         .charge(
             group,
-            256 * 1024 - resources.counts().0,
+            crate::voice_v2::resources::GROUP_BYTES - resources.counts().0,
             ResourceKind::Retained,
         )
         .unwrap();
@@ -1065,7 +1065,10 @@ fn maximum_sdp_reply_and_declared_engine_result_fit_with_two_lowers_under_unrela
         .charge(&resources, group, 61_624, ResourceKind::Crypto)
         .unwrap();
     let result = owner.retain_result(&vec![b'a'; MAX_SDP_PLAINTEXT]).unwrap();
-    assert_eq!(resources.counts(), (256 * 1024, 4));
+    assert_eq!(
+        resources.counts(),
+        (crate::voice_v2::resources::GROUP_BYTES, 4)
+    );
     f.clock.advance_ms(HEDGE_MS);
     assert!(f.jobs(&[2, 4]).is_empty());
     assert_eq!(
@@ -1180,7 +1183,7 @@ fn source_max_ice_payload_retained_b_capacity_refusal_does_not_burn_d_attempt() 
         .resources()
         .charge(
             f.context.scope.group,
-            256 * 1024 - current - 10,
+            crate::voice_v2::resources::GROUP_BYTES - current - 10,
             ResourceKind::Retained,
         )
         .unwrap();
@@ -1205,7 +1208,7 @@ fn source_refused_capacity_spends_no_original_quota_and_room_revocation_stops_ac
         .resources()
         .charge(
             f.context.scope.group,
-            256 * 1024 - current - 10,
+            crate::voice_v2::resources::GROUP_BYTES - current - 10,
             ResourceKind::Retained,
         )
         .unwrap();

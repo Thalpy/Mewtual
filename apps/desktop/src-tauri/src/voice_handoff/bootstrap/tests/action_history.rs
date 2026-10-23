@@ -218,6 +218,9 @@ async fn drained(
     phase.close();
     drop(work);
     assert!(row.wait_compacted().await.unwrap().drained);
+    // This helper promises a fully collectable plan. Ordinary Return alone no longer
+    // establishes that: retire the actual original plan through its retained native owner.
+    assert!(row.retire_plan().unwrap());
     (id, phase, join)
 }
 
@@ -375,6 +378,11 @@ async fn witness_before_ack_settlement_and_phase_drain_remains_pending_until_act
     assert!(!row.status().unwrap().drained);
     drop(buffer);
     assert!(row.wait_compacted().await.unwrap().drained);
+    assert!(
+        !ledger.channel_may_close(&selected),
+        "local Return is not the Root last-owner witness"
+    );
+    assert!(row.retire_plan().unwrap());
     registry.collect_retired(&ledger);
     assert!(
         row.reconcile().unwrap().drained,
@@ -606,8 +614,12 @@ async fn action_and_channel_collection_need_no_fresh_capacity_under_full_pool_pr
             break;
         }
         pressure.push(
-            pool.charge([value; 32], left.min(256 * 1024), ResourceKind::Retained)
-                .unwrap(),
+            pool.charge(
+                [value; 32],
+                left.min(catcoms_sync::voice_v2::resources::GROUP_BYTES),
+                ResourceKind::Retained,
+            )
+            .unwrap(),
         );
     }
     assert_eq!(pool.counts().0, 2 * 1024 * 1024);

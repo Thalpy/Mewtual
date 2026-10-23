@@ -528,6 +528,12 @@ impl Route {
     /// otherwise a retained Route could start actor work after trusted channel collection.
     /// Coordinator -> Row is the existing lock order. This grants no Root authorization.
     pub(super) fn require_open(&self) -> Result<(), Refused> {
+        self.with_open(|| ())
+    }
+    /// Keep the original route fence held through a synchronous native first effect. The
+    /// callback must not await, sample Clock, reacquire Coordinator/Row, or destroy owners
+    /// whose Drop can call Root. Existing lock order is UI commit -> Coordinator -> Row.
+    pub(super) fn with_open<T>(&self, commit: impl FnOnce() -> T) -> Result<T, Refused> {
         let state = self
             .row
             .state
@@ -536,7 +542,9 @@ impl Route {
         if state.closed || state.pending || !self.row.selected.lease().is_live() {
             return Err(Refused::Binding);
         }
-        Ok(())
+        let result = commit();
+        drop(state);
+        Ok(result)
     }
     pub(super) fn session(&self) -> &Arc<Session> {
         &self.session

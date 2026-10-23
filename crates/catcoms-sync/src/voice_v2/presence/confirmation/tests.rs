@@ -315,7 +315,7 @@ fn protected_mode_survives_capacity_refusal_and_cannot_fall_back_to_ordinary_han
             .pool
             .charge(
                 f.low.context.scope.group,
-                256 * 1024 - f.pool.counts().0,
+                crate::voice_v2::resources::GROUP_BYTES - f.pool.counts().0,
                 ResourceKind::Retained,
             )
             .unwrap();
@@ -502,7 +502,7 @@ fn prepared_chain_derive_uses_protected_capacity_and_refuses_replacement_or_othe
         .pool
         .charge(
             f.low.context.scope.group,
-            256 * 1024 - f.pool.counts().0,
+            crate::voice_v2::resources::GROUP_BYTES - f.pool.counts().0,
             ResourceKind::Retained,
         )
         .unwrap();
@@ -919,7 +919,7 @@ fn native_action_actual_sign_and_closed_plaintext_use_the_registered_fence() {
 #[test]
 fn native_action_capacity_refusal_does_not_consume_identity_or_engine_eligibility() {
     let mut f = fixture();
-    let bytes = 256 * 1024 - f.pool.counts().0;
+    let bytes = crate::voice_v2::resources::GROUP_BYTES - f.pool.counts().0;
     let pressure = f
         .pool
         .charge(f.low.context.scope.group, bytes, ResourceKind::Retained)
@@ -934,7 +934,7 @@ fn native_action_capacity_refusal_does_not_consume_identity_or_engine_eligibilit
             ByteBudget::Ordinary
         )
         .is_err());
-    assert_eq!(f.pool.counts().0, 256 * 1024);
+    assert_eq!(f.pool.counts().0, crate::voice_v2::resources::GROUP_BYTES);
     drop(pressure);
     let action = f
         .low
@@ -1390,7 +1390,7 @@ fn native_action_reserved_bytes_continue_under_ordinary_pressure_and_close_keeps
         .pool
         .charge(
             f.low.context.scope.group,
-            256 * 1024 - f.pool.counts().0,
+            crate::voice_v2::resources::GROUP_BYTES - f.pool.counts().0,
             ResourceKind::Retained,
         )
         .unwrap();
@@ -1405,10 +1405,13 @@ fn native_action_reserved_bytes_continue_under_ordinary_pressure_and_close_keeps
         )
         .unwrap();
     action.admit_engine(action.engine_bytes()).unwrap();
-    assert_eq!(f.pool.counts(), (256 * 1024, 1));
+    assert_eq!(
+        f.pool.counts(),
+        (crate::voice_v2::resources::GROUP_BYTES, 1)
+    );
     reserve.close();
     let held = f.pool.counts();
-    assert!(held.0 < 256 * 1024 && held.1 == 1);
+    assert!(held.0 < crate::voice_v2::resources::GROUP_BYTES && held.1 == 1);
     assert!(action.is_pending());
     let reader = action.input().unwrap();
     let CryptoInput::Derive(setup) = reader.as_input() else {
@@ -1594,7 +1597,7 @@ fn abandoned_action_and_failed_replacement_reservation_cannot_restore_pending_cr
         .pool
         .charge(
             f.low.context.scope.group,
-            256 * 1024 - f.pool.counts().0,
+            crate::voice_v2::resources::GROUP_BYTES - f.pool.counts().0,
             ResourceKind::Retained,
         )
         .unwrap();
@@ -1673,7 +1676,7 @@ fn sdp_readiness_fits_actual_retained_three_flight_confirmation_without_repeatin
         // prepays the local issuer's normal 2 KiB row before reserving the workflow.
         before.0 + super::super::super::negotiation::EXCHANGE_BYTES + 2048
     );
-    assert!(f.pool.counts().0 <= 256 * 1024);
+    assert!(f.pool.counts().0 <= crate::voice_v2::resources::GROUP_BYTES);
     let retry = f
         .low
         .join
@@ -2333,7 +2336,7 @@ fn valid_progress_survives_response_capacity_without_new_nonce_or_second_decrypt
             .pool
             .charge(
                 receiver.context.scope.group,
-                256 * 1024 - bytes,
+                crate::voice_v2::resources::GROUP_BYTES - bytes,
                 ResourceKind::Retained,
             )
             .unwrap();
@@ -2449,7 +2452,7 @@ fn lost_prepare_reply_recovers_through_exact_input_retry_after_expiry_and_capaci
             .pool
             .charge(
                 receiver.context.scope.group,
-                256 * 1024 - bytes,
+                crate::voice_v2::resources::GROUP_BYTES - bytes,
                 ResourceKind::Retained,
             )
             .unwrap();

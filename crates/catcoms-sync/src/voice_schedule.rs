@@ -96,6 +96,10 @@ pub(super) struct VoiceSchedule {
     /// Test-only observation of every submitted flight's next hop, for forbidden-edge oracles.
     #[cfg(test)]
     pub(super) hops: Vec<PeerId>,
+    /// Passive bounded test oracle: increment ONLY after actual signed helper-completion
+    /// verification succeeds. Preparing/queuing/timing out a job cannot satisfy receipt tests.
+    #[cfg(test)]
+    pub(super) helper_refusals: u64,
 }
 
 impl Default for VoiceSchedule {
@@ -108,6 +112,8 @@ impl Default for VoiceSchedule {
             cancel: tokio::sync::watch::channel(false).0,
             #[cfg(test)]
             hops: Vec::new(),
+            #[cfg(test)]
+            helper_refusals: 0,
         }
     }
 }
@@ -277,7 +283,14 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
                 Err(failure) => Self::retryable(failure).map(VoiceFlight::Source),
             },
             VoiceFlight::Forward(completed) => match self.complete_voice_forward(completed) {
-                Ok(_) => None,
+                Ok(_status) => {
+                    #[cfg(test)]
+                    if _status == VoiceTransportStatus::Refused {
+                        self.voice_schedule.helper_refusals =
+                            self.voice_schedule.helper_refusals.saturating_add(1);
+                    }
+                    None
+                }
                 Err(failure) => Self::retryable(failure).map(VoiceFlight::Forward),
             },
         };

@@ -372,7 +372,7 @@ async fn registration_payment_refusal_before_handoff_calls_no_actor_and_removes_
     let pressure = pool
         .charge(
             selected.binding().scope.group,
-            256 * 1024 - pool.counts().0 + 4096 - 4096 - 1024,
+            catcoms_sync::voice_v2::resources::GROUP_BYTES - pool.counts().0 + 4096 - 4096 - 1024,
             ResourceKind::Retained,
         )
         .unwrap();

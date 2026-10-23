@@ -5,7 +5,7 @@
 use catcoms_app::{VoiceConfirmationBody, VOICE_CONFIRMATION_BODY_METADATA_BYTES};
 use catcoms_sync::voice_v2::crypto_actions::{
     ConfirmationRetirement, CryptoAction, CryptoInput, CryptoInputLease, HandoffLoan,
-    ProtectedCryptoBinding,
+    ProtectedCryptoPlan,
 };
 use catcoms_sync::voice_v2::resources::{Credit, ResourceKind, Resources};
 use catcoms_sync::voice_v2::{CallLease, Scope, VoiceError};
@@ -59,13 +59,13 @@ impl PreparedPhase {
         if !action.belongs_to(self.scope, &self.call) || !action.uses_resources(&self.resources) {
             return Err(VoiceError::Unauthorized);
         }
-        let binding = action.protected_binding()?;
+        let plan = action.protected_plan()?;
         let loan = action.borrow_handoff(bytes)?;
         Ok(Arc::new(Phase {
             resources: self.resources,
             scope: self.scope,
             call: self.call,
-            binding,
+            plan,
             capacity: bytes,
             state: Mutex::new(State {
                 stage: Stage::Open,
@@ -123,7 +123,9 @@ pub(crate) struct Phase {
     resources: Arc<Resources>,
     scope: Scope,
     call: CallLease,
-    binding: ProtectedCryptoBinding,
+    // Root's SAME independently paid fixed identity, never an Action/Workflow/input owner.
+    // It cannot retain a dead Action allocation after that Action's record credit drops.
+    plan: ProtectedCryptoPlan,
     capacity: usize,
     state: Mutex<State>,
     drained: AtomicBool,
@@ -263,15 +265,16 @@ impl Phase {
         self: &Arc<Self>,
         action: &CryptoAction,
     ) -> Result<InputCustody, VoiceError> {
-        if !action.belongs_to(self.scope, &self.call)
+        if !self.plan.contains(action)
+            || !action.belongs_to(self.scope, &self.call)
             || !action.uses_resources(&self.resources)
-            || action.protected_binding()? != self.binding
         {
             return Err(VoiceError::Unauthorized);
         }
-        // Metadata equality is copy-capacity bookkeeping only. The registry independently
-        // resolves the actual Root-produced row before calling this method. Native input
-        // already owns its own paid payload, but still contributes to phase drainage.
+        // The original native row still has to resolve this EXACT child's allocation before
+        // calling; same-plan provenance only permits sharing the original capacity, never an
+        // engine/effect or adoption of an unregistered action. Native input already owns its
+        // own paid payload, but its lease independently contributes to phase drainage.
         let custody = self.copy(0)?;
         let input = action.input()?;
         Ok(InputCustody {
@@ -447,6 +450,35 @@ mod tests {
     }
 
     #[test]
+    fn same_metadata_from_an_independent_actual_plan_cannot_borrow_the_original_phase() {
+        let (coordinator, selected, _selector) = super::super::ledger::tests::selection();
+        let (_join, action, _pair) =
+            super::super::ledger::tests::actual_action(&coordinator, &selected);
+        let phase = PreparedPhase::new(
+            selected.resources(),
+            selected.binding().scope,
+            selected.lease().clone(),
+        )
+        .unwrap()
+        .bind(&action, 16 * 1024)
+        .unwrap();
+        // PacketLedger deliberately forbids constructing a second ledger under one actual
+        // call lease. Use an independent original grant/pool; its deterministic projection
+        // still equals the original, while Root provenance and capacity remain independent.
+        let (foreign_coordinator, foreign_selected, _) = super::super::ledger::tests::selection();
+        let (_foreign_join, foreign, _foreign_pair) =
+            super::super::ledger::tests::actual_action(&foreign_coordinator, &foreign_selected);
+        assert_eq!(action.protected_binding(), foreign.protected_binding());
+        assert!(!foreign.belongs_to(selected.binding().scope, selected.lease()));
+        assert!(!foreign.uses_resources(&selected.resources()));
+        assert!(!foreign.same_protected_plan(&action));
+        let before = selected.resources().counts();
+        assert_eq!(phase.input(&foreign).err(), Some(VoiceError::Unauthorized));
+        assert_eq!(selected.resources().counts(), before);
+        assert!(phase.input(&action).is_ok());
+    }
+
+    #[test]
     fn full_buffer_wrappers_fit_and_return_their_exact_copy_contributions() {
         let (_coordinator, _join, _action, phase) = phase_fixture();
         // Include real Vec headers even for zero-sized buffers: payload capacity alone is
@@ -508,7 +540,7 @@ mod tests {
         let pressure = pool
             .charge(
                 action.protected_binding().unwrap().scope.group,
-                256 * 1024 - pool.counts().0,
+                catcoms_sync::voice_v2::resources::GROUP_BYTES - pool.counts().0,
                 ResourceKind::Retained,
             )
             .unwrap();
@@ -570,7 +602,7 @@ mod tests {
         let pressure = pool
             .charge(
                 action.protected_binding().unwrap().scope.group,
-                256 * 1024 - pool.counts().0,
+                catcoms_sync::voice_v2::resources::GROUP_BYTES - pool.counts().0,
                 ResourceKind::Retained,
             )
             .unwrap();
@@ -738,7 +770,7 @@ mod tests {
         let pressure = pool
             .charge(
                 action.protected_binding().unwrap().scope.group,
-                256 * 1024 - original.0,
+                catcoms_sync::voice_v2::resources::GROUP_BYTES - original.0,
                 ResourceKind::Retained,
             )
             .unwrap();
@@ -824,7 +856,11 @@ mod tests {
         let pool = Arc::new(Resources::default());
         let scope = Scope::for_group(b"native phase metadata", Some([3; 32]), 77);
         let pressure = pool
-            .charge(scope.group, 256 * 1024, ResourceKind::Retained)
+            .charge(
+                scope.group,
+                catcoms_sync::voice_v2::resources::GROUP_BYTES,
+                ResourceKind::Retained,
+            )
             .unwrap();
         let before = pool.counts();
         assert_eq!(

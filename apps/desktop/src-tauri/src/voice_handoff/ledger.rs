@@ -9,7 +9,7 @@ use super::channel::{AuthenticatedRequest, BodyKind, Operation, SessionIdentity}
 use super::custody::{CloseMode, ConfirmationStatus, CopyCustody, Phase, PreparedPhase};
 use crate::voice_authority::SelectedHandoffOwner;
 use catcoms_sync::voice_v2::crypto_actions::{
-    CryptoAction, CryptoOperation, CryptoResultReceipt, CryptoResultStatus,
+    CryptoAction, CryptoHandoffStatus, CryptoOperation, CryptoResultReceipt, CryptoResultStatus,
 };
 use catcoms_sync::voice_v2::presence::{PairReceipt, PairSelector};
 use catcoms_sync::voice_v2::resources::{Credit, ResourceKind};
@@ -20,6 +20,8 @@ use tokio::sync::Notify;
 
 const ROWS: usize = 32;
 const ROW_BYTES: usize = 2048;
+mod plan;
+use plan::Plan;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct RowId {
@@ -130,6 +132,7 @@ struct Live {
     selected: Arc<SelectedHandoffOwner>,
     action: Arc<CryptoAction>,
     phase: Arc<Phase>,
+    plan: Option<Plan>,
     worker: bool,
     observer: bool,
 }
@@ -138,7 +141,7 @@ enum Body {
     ClosingPending,
     ClosedPending,
     Live(Live),
-    Drained(Option<FinalDelivery>),
+    Drained(Option<FinalDelivery>, Plan),
 }
 struct State {
     body: Body,
@@ -170,17 +173,33 @@ pub(super) struct FinalReceipt {
     pub acknowledged: bool,
 }
 impl State {
+    /// Reuse the existing mutually exclusive Pending/Live/Drained storage. These original
+    /// fixed handles survive compaction without enlarging every row's variable owner graph.
+    fn plan(&self) -> Option<&Plan> {
+        match &self.body {
+            Body::Live(live) => live.plan.as_ref(),
+            Body::Drained(_, plan) => Some(plan),
+            _ => None,
+        }
+    }
+    fn plan_mut(&mut self) -> Option<&mut Plan> {
+        match &mut self.body {
+            Body::Live(live) => live.plan.as_mut(),
+            Body::Drained(_, plan) => Some(plan),
+            _ => None,
+        }
+    }
     fn final_delivery(&self) -> Option<&FinalDelivery> {
         match &self.body {
             Body::Live(live) => live.final_delivery.as_ref(),
-            Body::Drained(delivery) => delivery.as_ref(),
+            Body::Drained(delivery, _) => delivery.as_ref(),
             _ => None,
         }
     }
     fn final_delivery_mut(&mut self) -> Option<&mut FinalDelivery> {
         match &mut self.body {
             Body::Live(live) => live.final_delivery.as_mut(),
-            Body::Drained(delivery) => delivery.as_mut(),
+            Body::Drained(delivery, _) => delivery.as_mut(),
             _ => None,
         }
     }
@@ -269,10 +288,10 @@ impl ResolvedRow {
             let phase = match &state.body {
                 Body::Live(live) if !live.worker && !live.observer => live.phase.clone(),
                 Body::Live(_) => return Err(VoiceError::Capacity),
-                Body::Drained(_) if mode == CloseMode::Retire => {
+                Body::Drained(..) if mode == CloseMode::Retire => {
                     state.final_phase.clone().ok_or(VoiceError::Unauthorized)?
                 }
-                Body::Drained(_)
+                Body::Drained(..)
                     if state.final_phase.is_none() && state.final_delivery().is_none() =>
                 {
                     return Ok(())
@@ -290,7 +309,7 @@ impl ResolvedRow {
                 if mode != CloseMode::Retire || !Arc::ptr_eq(&delivery.session, session) {
                     return Err(VoiceError::Unauthorized);
                 }
-            } else if matches!(state.body, Body::Drained(_)) {
+            } else if matches!(state.body, Body::Drained(..)) {
                 return Err(VoiceError::Unauthorized);
             }
             let closing = phase.begin_close(mode)?;
@@ -336,7 +355,7 @@ impl ResolvedRow {
             version,
             input_tag: input,
         };
-        if !matches!(state.body, Body::Drained(_))
+        if !matches!(state.body, Body::Drained(..))
             || state.final_phase.is_none()
             || !Ledger::final_retirement_ready(&state)
         {
@@ -443,7 +462,7 @@ impl ResolvedRow {
         let state = row.state.lock().unwrap_or_else(|error| error.into_inner());
         Ok(match &state.body {
             Body::Live(live) => live.phase.confirmation_status(),
-            Body::Drained(_) => state
+            Body::Drained(..) => state
                 .final_phase
                 .as_ref()
                 .map_or(ConfirmationStatus::NotRequested, |phase| {
@@ -491,7 +510,7 @@ impl Ledger {
                 return true;
             }
             let state = row.state.lock().unwrap_or_else(|error| error.into_inner());
-            matches!(state.body, Body::Drained(_) | Body::ClosedPending)
+            matches!(state.body, Body::Drained(..) | Body::ClosedPending)
                 && Self::final_retirement_ready(&state)
                 && ((state.final_phase.is_none() && state.final_delivery().is_none())
                     || state
@@ -505,10 +524,11 @@ impl Ledger {
     /// Final-phase wire dispatch remains disabled until its retained cleanup driver can
     /// recheck this snapshot: Root has no notification into Row's existing Notify.
     fn final_retirement_ready(state: &State) -> bool {
-        state
-            .final_phase
-            .as_ref()
-            .is_none_or(|phase| phase.confirmation_status() == ConfirmationStatus::Drained)
+        state.plan().is_none_or(Plan::is_drained)
+            && state
+                .final_phase
+                .as_ref()
+                .is_none_or(|phase| phase.confirmation_status() == ConfirmationStatus::Drained)
     }
 
     /// Accept only the actual bootstrap registry's last-owner proof, after all its locks
@@ -554,7 +574,7 @@ impl Ledger {
                     }
                     let state = row.state.lock().unwrap_or_else(|error| error.into_inner());
                     state.session_collected
-                        && matches!(state.body, Body::Drained(_) | Body::ClosedPending)
+                        && matches!(state.body, Body::Drained(..) | Body::ClosedPending)
                         && Self::final_retirement_ready(&state)
                 });
                 if reclaim {
@@ -594,7 +614,7 @@ impl Ledger {
         let state = row.state.lock().unwrap_or_else(|error| error.into_inner());
         match &state.body {
             Body::Live(live) => Ok(live.phase.clone()),
-            Body::Pending(_) | Body::ClosingPending | Body::ClosedPending | Body::Drained(_) => {
+            Body::Pending(_) | Body::ClosingPending | Body::ClosedPending | Body::Drained(..) => {
                 Err(VoiceError::Capacity)
             }
         }
@@ -788,7 +808,7 @@ impl Ledger {
                 Body::ClosingPending => return Err(VoiceError::Capacity),
                 Body::Pending(pending) if !pending.worker && state.status.action.is_none() => {}
                 Body::Pending(_) => return Err(VoiceError::Capacity),
-                Body::Live(_) | Body::Drained(_) => return Err(VoiceError::Unauthorized),
+                Body::Live(_) | Body::Drained(..) => return Err(VoiceError::Unauthorized),
             }
             state.status.pending = PendingStatus::Closing;
             let Body::Pending(pending) = std::mem::replace(&mut state.body, Body::ClosingPending)
@@ -816,7 +836,7 @@ impl Ledger {
             return self.status(id);
         };
         // Original callback-bearing Clock/history observations run outside ALL native gates.
-        let observed = observer.action().terminal_status();
+        let observed = observer.action().handoff_status();
         let status = {
             let mut state = row.state.lock().unwrap_or_else(|error| error.into_inner());
             merge_observed(&mut state.status, observed)?;
@@ -849,7 +869,7 @@ impl Ledger {
         let row = self.row(id)?;
         if let Some(observer) = Self::observe(&row, true)? {
             observer.action().acknowledge_result(receipt)?;
-            let observed = observer.action().terminal_status();
+            let observed = observer.action().handoff_status();
             let mut state = row.state.lock().unwrap_or_else(|error| error.into_inner());
             merge_observed(&mut state.status, observed)?;
             state.status.acknowledged = true;
@@ -879,7 +899,7 @@ impl Ledger {
         let row = self.row(id)?;
         if let Some(observer) = Self::observe(&row, true)? {
             observer.action().settle_engine();
-            let observed = observer.action().terminal_status();
+            let observed = observer.action().handoff_status();
             let mut state = row.state.lock().unwrap_or_else(|error| error.into_inner());
             merge_observed(&mut state.status, observed)?;
             let status = state.status.clone();
@@ -944,7 +964,7 @@ impl Ledger {
         let row = self.row(id)?;
         let retired = {
             let mut state = row.state.lock().unwrap_or_else(|error| error.into_inner());
-            if matches!(state.body, Body::Drained(_)) {
+            if matches!(state.body, Body::Drained(..)) {
                 return Ok(true);
             }
             let Body::Live(live) = &state.body else {
@@ -971,11 +991,14 @@ impl Ledger {
             if let Some(receipt) = &mut state.status.engine.receipt {
                 receipt.retired = true; // this closed phase can never admit another first effect
             }
-            let mut retired = std::mem::replace(&mut state.body, Body::Drained(None));
+            let mut retired = std::mem::replace(&mut state.body, Body::ClosedPending);
             let Body::Live(live) = &mut retired else {
                 unreachable!("checked original Live")
             };
-            state.body = Body::Drained(live.final_delivery.take());
+            state.body = Body::Drained(
+                live.final_delivery.take(),
+                live.plan.take().expect("same original plan"),
+            );
             retired
         };
         // Native input/action/Workflow owners and affine worker grants must never destruct
@@ -1005,7 +1028,7 @@ impl Ledger {
             let state = row.state.lock().unwrap_or_else(|error| error.into_inner());
             match &state.body {
                 Body::Live(live) => Some(live.phase.clone()),
-                Body::Drained(_) => None,
+                Body::Drained(..) => None,
                 Body::Pending(_) | Body::ClosingPending => return Err(VoiceError::Capacity),
                 Body::ClosedPending => return Ok(state.status.clone()),
             }
@@ -1071,6 +1094,9 @@ impl Registration {
             pending.selected.clone()
         };
         let binding = action.protected_binding()?;
+        // Capture from the actual pending Root Action BEFORE its first engine/Return. No
+        // copied parent fields can recreate this provenance or cleanup authority later.
+        let plan = Plan::capture(&action)?;
         let Purpose::Derive(selector) = self.row.key.purpose;
         if !selected.lease().is_live()
             || action.operation() != CryptoOperation::Derive
@@ -1118,6 +1144,7 @@ impl Registration {
                     selected,
                     action,
                     phase,
+                    plan: Some(plan),
                     worker: false,
                     observer: false,
                     final_delivery: None,
@@ -1178,6 +1205,9 @@ pub(crate) struct Work {
     owners: Option<WorkOwners>,
 }
 impl Work {
+    pub(super) fn id(&self) -> RowId {
+        self.row.id
+    }
     pub(crate) fn action(&self) -> &Arc<CryptoAction> {
         &self.owners.as_ref().expect("live work").action
     }
@@ -1190,7 +1220,7 @@ impl Work {
     /// Observe the actual Root action OUTSIDE State/Index; never accept serialized terminal
     /// claims. The single worker prevents stale observations from overwriting newer history.
     pub(crate) fn refresh(&self) -> Result<Status, VoiceError> {
-        let observed = self.action().terminal_status();
+        let observed = self.action().handoff_status();
         let mut state = self
             .row
             .state
@@ -1217,8 +1247,8 @@ impl Work {
 }
 /// Concurrent metadata observations can finish out of order. Preserve immutable terminal
 /// identity and monotonic settlement/retirement; an older empty snapshot cannot erase proof.
-fn merge_observed(status: &mut Status, observed: CryptoResultStatus) -> Result<(), VoiceError> {
-    if let Some(receipt) = observed.receipt {
+fn merge_observed(status: &mut Status, observed: CryptoHandoffStatus) -> Result<(), VoiceError> {
+    if let Some(receipt) = observed.engine.receipt {
         if let Some(old) = &mut status.engine.receipt {
             if !old.same_transition(&receipt) {
                 return Err(VoiceError::RetryMismatch);
@@ -1228,7 +1258,10 @@ fn merge_observed(status: &mut Status, observed: CryptoResultStatus) -> Result<(
             status.engine.receipt = Some(receipt);
         }
     }
-    status.engine.settled |= observed.settled;
+    status.engine.settled |= observed.engine.settled;
+    // Root reports this actual Engine bit under the SAME fence as its terminal identity.
+    // Retired/settled/missing input are never substitutes, and stale snapshots cannot erase it.
+    status.acknowledged |= observed.acknowledged;
     Ok(())
 }
 struct Observation {

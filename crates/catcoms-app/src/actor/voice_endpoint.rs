@@ -48,6 +48,18 @@ impl VoiceEndpointCommand {
 }
 
 enum Command {
+    Stop {
+        grant: Arc<CallGrant>,
+        reply: Reply<()>,
+    },
+    Routing {
+        routing: catcoms_sync::VoiceRouting,
+        reply: Reply<()>,
+    },
+    ParticipantPeers {
+        grant: Arc<CallGrant>,
+        reply: Reply<Vec<FreshPeer>>,
+    },
     Start {
         grant: Arc<CallGrant>,
         join: Nonce,
@@ -110,6 +122,23 @@ impl Command {
         // the actual action; terminal metadata survives for exact result recovery. A lost Watch
         // reply instead drops its affine grant and closes precisely that abandoned observer.
         match self {
+            Self::Stop { grant, reply } => {
+                // An admitted cleanup must run even if its reply is lost. Unlike a factory,
+                // this only retires the SAME original allocation and cannot create authority.
+                server.sync.stop_voice_endpoint(&grant);
+                let _ = reply.send(Ok(()));
+            }
+            Self::Routing { routing, reply } => {
+                if !reply.is_closed() {
+                    server.sync.set_voice_routing(routing);
+                    let _ = reply.send(Ok(()));
+                }
+            }
+            Self::ParticipantPeers { grant, reply } => {
+                if !reply.is_closed() {
+                    let _ = reply.send(server.sync.voice_participant_peers(&grant));
+                }
+            }
             Self::Start {
                 grant,
                 join,
@@ -241,6 +270,36 @@ impl Command {
 }
 
 impl ServerActor {
+    /// Retire only the actual native call allocation. Safe after lease revocation and across
+    /// lost replies; retrying an old stop cannot stop a newer endpoint in the same room.
+    pub async fn stop_voice_endpoint(
+        &self,
+        grant: Arc<CallGrant>,
+    ) -> Result<(), VoiceEndpointError> {
+        self.voice_endpoint_request(|reply| Command::Stop { grant, reply })
+            .await
+    }
+
+    /// Trusted native rollout control only, never renderer data. The Root keeps Disabled as
+    /// its default and the switch can only narrow authenticated group policy. Exact repeats
+    /// are idempotent; a transition involving Direct revokes the old runtime policy lease.
+    pub async fn set_voice_routing(
+        &self,
+        routing: catcoms_sync::VoiceRouting,
+    ) -> Result<(), VoiceEndpointError> {
+        self.voice_endpoint_request(|reply| Command::Routing { routing, reply })
+            .await
+    }
+
+    /// Fresh evidence from the actual participant's implicit watcher, bound to the original
+    /// affine CallGrant allocation. No synthetic watcher or cached PairReceipt is substituted.
+    pub async fn voice_participant_peers(
+        &self,
+        grant: Arc<CallGrant>,
+    ) -> Result<Vec<FreshPeer>, VoiceEndpointError> {
+        self.voice_endpoint_request(|reply| Command::ParticipantPeers { grant, reply })
+            .await
+    }
     /// Select the actual implicit watch's proven peer using immutable remote join/key identity.
     /// Lost replies retry this same selector; a peer rejoin cannot silently change the request.
     pub async fn prepare_voice_pair(

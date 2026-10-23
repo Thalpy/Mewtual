@@ -112,6 +112,15 @@ pub(in crate::voice_handoff) fn opened_reply(
     request_plaintext: &[u8],
     reply: &super::super::channel::CompletedReply,
 ) -> Vec<u8> {
+    opened_reply_kind(public, header, request_plaintext, reply, 0)
+}
+pub(in crate::voice_handoff) fn opened_reply_kind(
+    public: &SetupOutput,
+    header: (u64, u8, u8, [u8; 16]),
+    request_plaintext: &[u8],
+    reply: &super::super::channel::CompletedReply,
+    response_kind: u8,
+) -> Vec<u8> {
     let client = Client::new(public.public());
     let (request, _, _) = client.packet(header.0, header.1, header.2, header.3, request_plaintext);
     let admission = hex::decode(reply.admission()).unwrap();
@@ -123,7 +132,7 @@ pub(in crate::voice_handoff) fn opened_reply(
     );
     assert_ne!(u64::from_be_bytes(response[8..16].try_into().unwrap()), 0);
     assert_eq!(&response[16..32], &header.3);
-    assert_eq!(&response[36..40], &[0; 4]); // Control kind + canonical reserved bytes
+    assert_eq!(&response[36..40], &[response_kind, 0, 0, 0]);
     let mut body = reply.body().to_vec();
     assert_eq!(
         u32::from_be_bytes(response[32..36].try_into().unwrap()) as usize,
@@ -704,7 +713,11 @@ async fn prepaid_status_makes_progress_with_every_crypto_slot_and_process_byte_o
     // then the other bounded test groups, without increasing any configured limit.
     let group_used = resources.counts().0 - 4096 - INFRASTRUCTURE_BYTES;
     let mut pressure = vec![resources
-        .charge(group, 256 * 1024 - group_used, ResourceKind::Retained)
+        .charge(
+            group,
+            catcoms_sync::voice_v2::resources::GROUP_BYTES - group_used,
+            ResourceKind::Retained,
+        )
         .unwrap()];
     for value in 97..=104 {
         let left = 2 * 1024 * 1024 - resources.counts().0;
@@ -713,7 +726,11 @@ async fn prepaid_status_makes_progress_with_every_crypto_slot_and_process_byte_o
         }
         pressure.push(
             resources
-                .charge([value; 32], left.min(256 * 1024), ResourceKind::Retained)
+                .charge(
+                    [value; 32],
+                    left.min(catcoms_sync::voice_v2::resources::GROUP_BYTES),
+                    ResourceKind::Retained,
+                )
                 .unwrap(),
         );
     }

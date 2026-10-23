@@ -1,5 +1,38 @@
 # Mewtual; Interfaces & Hooks Schema
 
+## Native handoff continuation work (23 October)
+
+The native owner has accepted the renderer contract in
+[VOICE-V2-NATIVE-HANDOFF-CONTRACT.md](communication-recovery/VOICE-V2-NATIVE-HANDOFF-CONTRACT.md).
+Its implementation is still incomplete. The current branch adds canonical Derive Input
+(tag5,541B fixed plus transcript), actual admission permits (tag6,78B), original action
+ACK/settlement and browser post-End final exchange. These adapters remain outside production
+dispatch; the current whitelist is still Status9 and existing-history Begin8(false).
+
+Input binds original RowId/action/context/points/engine size, exact u128 room and decimal u64s.
+Root chain generation is distinct from UI generation, and native monotonic deadlines are not
+browser time. Browser v13 prepays one affine128KiB intake before Data read and transfers it
+without renewing its15s deadline. One original terminal plan is pinned per pilot channel.
+End cleanup retains original framing keys/counters through native final issuance and ACK;
+ordinary Return remains immutable and native preflight independently authorizes channel close.
+The original Derive row now retains opaque protected-plan provenance and a separate native-only
+`ConfirmationControl` across ordinary compaction. Returning an action's loan does not close its
+plan. End can occur before any successor exists; channel closure and history collection therefore
+also require the original Workflow's actual retirement publisher. Trusted `retire_plan` consumes
+that original control outside native locks after local drainage, settlement and receipt ACK.
+It never relabels Phase Return, reconstructs authority by ID or treats weak-zero as drainage.
+No renderer opcode exposes this whole-plan cleanup operation yet.
+No complete confirmation continuation, SDP/ICE/RTC or WebView acceptance follows from this.
+
+Trusted Rust actor controls now include routing, original-participant peer observation and
+cleanup-only stop by the actual CallGrant allocation. Native End captures that original grant
+before revocation; a lost admitted stop reply does not suppress cleanup, and an old/foreign
+stop cannot remove a replacement. Stop is not a proof of SDK/input/transport drainage.
+
+The Root also excludes legacy call ingress/egress for a server with a live V2 participant,
+even during routing pause, and clears prequeued legacy writers at publication. The accepted
+contract documents this coarse server scope and the separate App generation fence.
+
 ## Integrated V2 routing and call contract (23 October)
 
 VoiceRouting is an explicitly local Root control with Disabled as its default. Opt-in normal
@@ -812,7 +845,7 @@ every retried completion repeats connection, Root, member, policy and packet aut
 
 `LocalJoin::prepare_sdp_exchange` requires an established native pair, the actor's actual shared
 OriginLimits, and at most two fixed current helper identities. It prepays endpoint/helper records
-without spending or resetting traffic buckets, then reserves 224 KiB, one Crypto lane, two
+without spending or resetting traffic buckets, then reserves192KiB, one Crypto lane, two
 Forward lanes and two slots from the existing combined 32-action queue. Refusal precedes a local
 SDP nonce or incoming positive admission. The exchange permits one local and one remote SDP
 (8 KiB maximum each), one Source record and two actual lower holders. The first admitted Offer
@@ -890,7 +923,7 @@ Controllers also own an irreversible parent lease for explicit observers; replac
 and native coordinator Drop revoke it synchronously. Starting a call preserves the controller.
 Eight prepared candidates expire after 30 monotonic seconds. The process admits eight active-or-
 uncertain crypto operations, four/group, with shared declared-byte limits of 2 MiB/process and
-256 KiB/group. Generate/derive/encrypt/decrypt declarations are bounded respectively to
+512KiB/native group. The independent browser ledger remains256KiB/group. Generate/derive/encrypt/decrypt declarations are bounded respectively to
 128/4352/36864/36880 bytes. These commands grant resources, not packet signatures, forwarding,
 microphone consent or decrypted delivery. A current actor query is only a snapshot; future
 protocol effects must check authority again in their actor turn. No live V2 request kind or

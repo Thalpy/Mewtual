@@ -47,6 +47,7 @@ async function fixture(t: TestContext, sharedBroker?: VoiceCryptoBroker, identit
   const bodyReads: number[] = [];
   const operations: number[] = [];
   let historyBody = Buffer.from(historyVector("derived-drained").plaintext, "hex");
+  let actionResponder: ((header: VoiceIpcHeader, opened: Uint8Array) => { kind: 0 | 1; body: Uint8Array }) | null = null;
   let responseChange: Partial<VoiceIpcHeader> | null = null;
   let holdAt = -1, held: ReturnType<typeof gate> | null = null, engineEnabled = false;
   let stalled = false, cancelEntered = false, cancelGate: ReturnType<typeof gate> | null = null;
@@ -144,16 +145,20 @@ async function fixture(t: TestContext, sharedBroker?: VoiceCryptoBroker, identit
     requestSequences.push(request.header.sequence);
     const opened = new Uint8Array(await real.decrypt({ name: "AES-GCM", iv: voiceIpcNonce(request.header), additionalData: request.bytes }, requestBody, init!.body as Uint8Array<ArrayBuffer>));
     operations.push(request.header.operation);
+    let actionReply: { kind: 0 | 1; body: Uint8Array } | null = null;
     if (request.header.operation === 9) {
       assert.deepEqual(opened, new Uint8Array(Buffer.concat([Buffer.from([1]), session, transcriptHash])));
-    } else {
+    } else if (request.header.operation === 8) {
       assert.equal(request.header.operation, 8); assert.equal(request.header.kind, 0);
       assert.equal(request.header.logical, "0".repeat(32)); assert.equal(request.header.length, 122);
       assert.deepEqual(opened, encodeVoiceIpcAction(historyPurpose, { kind: "begin", retry: false }).body);
+    } else {
+      assert.ok(actionResponder, "unexpected actual framed action");
+      actionReply = actionResponder(request.header, opened);
     }
     opened.fill(0);
-    const plaintext = request.header.operation === 8 ? historyBody : new Uint8Array([1, setupClosed ? 2 : 1, 1]);
-    const response: VoiceIpcHeader = Object.freeze({ ...request.header, direction: 1, length: plaintext.length + 16,
+    const plaintext = actionReply?.body ?? (request.header.operation === 8 ? historyBody : new Uint8Array([1, setupClosed ? 2 : 1, 1]));
+    const response: VoiceIpcHeader = Object.freeze({ ...request.header, direction: 1, kind: actionReply?.kind ?? 0, length: plaintext.length + 16,
       sequence: forceSequence ?? ++nativeSequence, ...responseChange });
     // Deliberately allow a valid native MAC over a wrongly bound response. The actual
     // browser must reject its binding before accepting/reading the body, even with a MAC.
@@ -191,6 +196,7 @@ async function fixture(t: TestContext, sharedBroker?: VoiceCryptoBroker, identit
     channel() { return broker.nativeChannel(owner, selected.key, native, transport); },
     counts: () => ({ ordinary, setups, settlements, collections, steps: [...engineSteps], tx: [...requestSequences], reads: bodyReads.length }),
     historyBytes(value: Uint8Array) { historyBody = Buffer.from(value); },
+    actions(responder: typeof actionResponder) { actionResponder = responder; },
     historyReply(name: string) { historyBody = Buffer.from(historyVector(name).plaintext, "hex"); },
     responseChange(value: Partial<VoiceIpcHeader> | null) { responseChange = value; },
     operations: () => [...operations], bodyReads: () => [...bodyReads],
@@ -202,7 +208,8 @@ async function fixture(t: TestContext, sharedBroker?: VoiceCryptoBroker, identit
     stallBody() { stalled = true; cancelGate = gate(); return { entered: () => cancelEntered, release: cancelGate.release }; },
     hostileHeaders() { hostileHeaders = true; },
     hangFetch() { hangFetch = true; fetchCancel = gate(); return { entered: () => fetchEntered, aborted: () => fetchAborted, release() { hangFetch = false; fetchCancel!.release(); } }; },
-    timers: () => ({ pending: timers.size, peak: timerPeak, callbacks: [...timers.values()].map(timer => timer.run) }),
+    timers: () => ({ pending: timers.size, peak: timerPeak, callbacks: [...timers.values()].map(timer => timer.run),
+      delays: [...timers.values()].map(timer => timer.at - now) }),
     fireTimerEarly() {
       assert.equal(timers.size, 1); const [id, timer] = [...timers][0]; timers.delete(id); timer.run();
     },
@@ -256,6 +263,289 @@ async function linkedDerivation(f: Awaited<ReturnType<typeof fixture>>, channel 
     loseSettle() { loseSettle = true; },
   };
 }
+
+/** Independent fixed native projection for browser transport tests. Unlike native integration
+ * tests this fixture grants no Actor/MLS authority; its fake keyRef belongs to its mock signer. */
+async function framedDerivation(f: Awaited<ReturnType<typeof fixture>>) {
+  const peer = await real.generateKey({ name: "ECDH", namedCurve: "P-256" }, false, ["deriveBits"]);
+  const point = new Uint8Array(await real.exportKey("raw", peer.publicKey));
+  const transcript = utf8.encode("original native framed action");
+  const row = "0".repeat(31) + "1";
+  const identity = Object.freeze({ action: "9007199254741007", version: "1", inputTag: hash(11) });
+  const engineBytes = 3 * transcript.length + 4096 + 256;
+  const binding = { chain: "1", epoch: historyPurpose.epoch, localDevice: "06".repeat(32), localJoin: hash(2), localKey: hash(3),
+    peerDevice: historyPurpose.peer, peerJoin: historyPurpose.join, peerKey: historyPurpose.keyRef, handshake: hash(10),
+    generation: "9007199254741011", nativeDeadline: "500000", localIsLow: true };
+  const data = Buffer.concat([Buffer.from([1, 5]), Buffer.from(row, "hex"), integer(BigInt(identity.action), 8), integer(1n, 8), Buffer.from(identity.inputTag, "hex"),
+    integer(1n, 8), Buffer.from(f.owner.group, "hex"), Buffer.from([0]), Buffer.alloc(32), integer(1n, 16), integer(BigInt(binding.epoch), 8),
+    ...[binding.localDevice, binding.localJoin, binding.localKey, binding.peerDevice, binding.peerJoin, binding.peerKey, binding.handshake].map(s => Buffer.from(s, "hex")),
+    integer(BigInt(binding.generation), 8), integer(BigInt(binding.nativeDeadline), 8), Buffer.from([1]), integer(BigInt(engineBytes), 4), Buffer.from([0]),
+    f.key.publicKey(), point, integer(BigInt(transcript.length), 2), transcript]);
+  assert.equal(data.length, 541 + transcript.length);
+  let inputReads = 0, admissions = 0, commits = 0, acknowledgements = 0, settlements = 0;
+  let derived = false, acknowledged = false, settled = false, historical = false, lostResult = false;
+  let retireCalls = 0, finalCalls = 0, finalAcknowledged = false, finalPending = false;
+  let loseIssuance = false, loseFinalAck = false, ordinaryReturned = false;
+  let alter: ((data: Uint8Array) => Uint8Array) | null = null;
+  const emptyTag = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
+  const receipt = hash(77);
+  const proof = hash(78);
+  const status = () => {
+    const bytes = Buffer.alloc(242); bytes[0] = 1; Buffer.from(row, "hex").copy(bytes, 2); bytes[19] = 1;
+    integer(BigInt(identity.action), 8).copy(bytes, 20); integer(1n, 8).copy(bytes, 28); Buffer.from(identity.inputTag, "hex").copy(bytes, 36);
+    bytes[68] = Number(settled); bytes[69] = Number(derived); bytes[208] = Number(acknowledged);
+    bytes[209] = Number(ordinaryReturned); bytes[207] = Number(ordinaryReturned && derived);
+    if (derived) { integer(BigInt(identity.action), 8).copy(bytes, 70); Buffer.from(identity.inputTag, "hex").copy(bytes, 78);
+      Buffer.from(emptyTag, "hex").copy(bytes, 110); Buffer.from(receipt, "hex").copy(bytes, 210); }
+    return { kind: 0 as const, body: bytes };
+  };
+  const nativeSettle = f.native.settleSetup;
+  f.native.settleSetup = async (...args) => {
+    assert.ok(finalAcknowledged || ordinaryReturned, "native setup cannot close ahead of final ACK or its original ordinary closure");
+    await nativeSettle(...args);
+  };
+  f.cleanup(() => { finalPending = false; loseIssuance = false; loseFinalAck = false; f.native.settleSetup = nativeSettle; });
+  f.actions((header, opened) => {
+    assert.equal(header.logical, row);
+    if (header.operation === 1) {
+      inputReads++;
+      // This callback is reached only after actual request AEAD/fetch. The full claim MUST
+      // already be visible, even though no chain/input has yet been materialized locally.
+      assert.ok(f.broker.counts().bytes >= 128 * 1024);
+      assert.deepEqual(opened, encodeVoiceIpcAction(historyPurpose, { kind: "input" }).body);
+      if (historical) return status();
+      return { kind: 1, body: alter ? alter(new Uint8Array(data)) : data };
+    }
+    if (header.operation === 2) {
+      admissions++; assert.deepEqual(opened, encodeVoiceIpcAction(historyPurpose, { kind: "admit", identity, engineBytes }).body);
+      const permit = Buffer.concat([Buffer.from([1, 6]), Buffer.from(row, "hex"), integer(BigInt(identity.action), 8), integer(1n, 8),
+        Buffer.from(identity.inputTag, "hex"), integer(BigInt(identity.action), 8), integer(BigInt(engineBytes), 4)]);
+      return { kind: 0, body: permit };
+    }
+    if (header.operation === 3) {
+      commits++; assert.deepEqual(opened, encodeVoiceIpcAction(historyPurpose, { kind: "result", identity, tag: emptyTag, output: new Uint8Array() }).body);
+      derived = true;
+      if (lostResult) { lostResult = false; throw new Error("native committed but result reply lost"); }
+      return status();
+    }
+    if (header.operation === 4) {
+      acknowledgements++; assert.deepEqual(opened, encodeVoiceIpcAction(historyPurpose, { kind: "ack", identity, digest: receipt }).body);
+      acknowledged = true; return status();
+    }
+    if (header.operation === 6 || header.operation === 7) {
+      assert.ok(settled && (!derived || acknowledged), "native terminal close follows exact action settlement/receipt ACK");
+      if (header.operation === 6) {
+        retireCalls++; assert.deepEqual(opened, encodeVoiceIpcAction(historyPurpose, { kind: "close", mode: "retire" }).body);
+        if (ordinaryReturned) return { kind: 0, body: new Uint8Array([1, 3, 5]) };
+        if (loseIssuance) { loseIssuance = false; throw new Error("actual native final issuance reply lost"); }
+      } else {
+        finalCalls++; assert.deepEqual(opened, encodeVoiceIpcAction(historyPurpose, { kind: "final", proof }).body);
+        assert.equal(finalPending, false); finalAcknowledged = true;
+        if (loseFinalAck) { loseFinalAck = false; throw new Error("actual native final ACK reply lost"); }
+      }
+      const body = Buffer.concat([Buffer.from([1, 4]), Buffer.from(row, "hex"), integer(BigInt(identity.action), 8), integer(1n, 8),
+        Buffer.from(identity.inputTag, "hex"), Buffer.from([1, finalPending ? 0 : finalAcknowledged ? 2 : 1]),
+        Buffer.from(finalPending ? "0".repeat(64) : proof, "hex")]);
+      return { kind: 0, body };
+    }
+    assert.equal(header.operation, 5); settlements++; settled = true; return status();
+  });
+  return { row, identity, binding, data, engineBytes, counts: () => ({ inputReads, admissions, commits, acknowledgements, settlements }),
+    historical() { historical = true; derived = true; settled = true; },
+    loseResult() { lostResult = true; }, alter(work: typeof alter) { alter = work; },
+    finalCounts: () => ({ retireCalls, finalCalls, finalAcknowledged }),
+    pendingFinal(value = true) { finalPending = value; },
+    loseFinalReplies() { loseIssuance = true; loseFinalAck = true; },
+    returned() { ordinaryReturned = true; historical = true; settled = true; },
+  };
+}
+
+test("native Input prepays and transfers the same claim, then executes real framed admission/result/ACK/settlement", async t => {
+  const f = await fixture(t), channel = f.channel(); await channel.status();
+  const source = await framedDerivation(f);
+  const baseline = f.broker.counts().bytes;
+  const intake = f.broker.nativeDerivationFromChannel(f.owner, channel, f.key, historyPurpose, source.row, source.identity);
+  assert.equal(f.broker.counts().bytes, baseline + 128 * 1024);
+  assert.equal(f.broker.nativeDerivationFromChannel(f.owner, channel, f.key, historyPurpose, source.row, source.identity), intake);
+  const attempt = intake.attempt(); assert.equal(intake.attempt(), attempt);
+  const ready = await attempt; assert.equal(ready.kind, "ready");
+  if (ready.kind !== "ready") throw new Error("actual framed derivation input required");
+  assert.equal(f.broker.counts().bytes, baseline + 128 * 1024, "adoption never refunds/recharges or adds another chain");
+  assert.equal((await ready.derivation.attempt()).kind, "accepted");
+  await until(() => source.counts().settlements === 1 && f.broker.counts().active === 0);
+  assert.ok(ready.derivation.pair());
+  assert.deepEqual(source.counts(), { inputReads: 1, admissions: 1, commits: 1, acknowledgements: 1, settlements: 1 });
+  assert.deepEqual(f.operations(), [9, 1, 2, 3, 4, 5]);
+});
+
+test("historical Input drains prepaid intake without deriving keys or admitting an engine", async t => {
+  const f = await fixture(t), channel = f.channel(); await channel.status();
+  const source = await framedDerivation(f); source.historical();
+  const baseline = f.broker.counts().bytes;
+  const intake = f.broker.nativeDerivationFromChannel(f.owner, channel, f.key, historyPurpose, source.row, source.identity);
+  const answer = await intake.attempt(); assert.equal(answer.kind, "status");
+  assert.equal((await intake.attempt()).kind, "status");
+  assert.equal(f.broker.counts().bytes, baseline + 8 * 1024, "only paid fixed intake history remains");
+  assert.deepEqual(source.counts(), { inputReads: 1, admissions: 0, commits: 0, acknowledgements: 0, settlements: 0 });
+});
+
+test("historical Input cannot lose its original final cleanup descriptor to a second row", async t => {
+  const f = await fixture(t), channel = f.channel(); await channel.status();
+  const source = await framedDerivation(f); source.historical();
+  const original = f.broker.nativeDerivationFromChannel(f.owner, channel, f.key, historyPurpose, source.row, source.identity);
+  assert.equal((await original.attempt()).kind, "status");
+  const paid = f.broker.counts().bytes;
+  assert.throws(() => f.broker.nativeDerivationFromChannel(f.owner, channel, f.key,
+    { ...historyPurpose, peer: hash(19) }, "0".repeat(31) + "2", { ...source.identity, action: "9007199254741008" }), /ready voice channel/);
+  assert.equal(f.broker.counts().bytes, paid, "a different plan refuses before any new charge");
+  assert.equal(f.broker.nativeDerivationFromChannel(f.owner, channel, f.key, historyPurpose, source.row, source.identity), original);
+  f.owner.retire(); await channel.close(); await until(() => f.broker.counts().bytes === 0);
+  assert.deepEqual(source.finalCounts(), { retireCalls: 1, finalCalls: 1, finalAcknowledged: true });
+  assert.equal(source.counts().inputReads, 1);
+});
+
+test("post-End final issuance and ACK recover lost replies using original framing keys without repeating derivation", async t => {
+  const f = await fixture(t), channel = f.channel(); await channel.status();
+  const source = await framedDerivation(f);
+  const ready = await f.broker.nativeDerivationFromChannel(f.owner, channel, f.key, historyPurpose, source.row, source.identity).attempt();
+  if (ready.kind !== "ready") throw new Error("framed native input required");
+  assert.equal((await ready.derivation.attempt()).kind, "accepted");
+  await until(() => source.counts().settlements === 1 && f.broker.counts().active === 0);
+  const derives = f.counts().steps.filter(step => step === "deriveBits").length;
+  source.loseFinalReplies(); f.owner.retire();
+  const close = channel.close();
+  await until(() => source.finalCounts().retireCalls === 1 && f.timers().delays.includes(1000));
+  assert.equal(f.counts().settlements, 0, "native channel stays open after a lost issuance reply");
+  f.advance(1000);
+  await until(() => source.finalCounts().finalCalls === 1 && f.timers().delays.includes(1000));
+  assert.equal(f.counts().settlements, 0, "native channel stays open after a lost final ACK reply");
+  f.advance(1000); await close; await until(() => f.broker.counts().bytes === 0);
+  assert.deepEqual(source.finalCounts(), { retireCalls: 2, finalCalls: 2, finalAcknowledged: true });
+  assert.equal(f.counts().steps.filter(step => step === "deriveBits").length, derives);
+  assert.equal(f.counts().setups, 1); assert.equal(f.timers().pending, 0);
+});
+
+test("post-End Pending retains Control and retries on bounded Clock cadence until actual native retirement", async t => {
+  const f = await fixture(t), channel = f.channel(); await channel.status();
+  const source = await framedDerivation(f); source.pendingFinal();
+  f.broker.nativeDerivationFromChannel(f.owner, channel, f.key, historyPurpose, source.row, source.identity);
+  f.owner.retire(); let done = false;
+  const close = channel.close().then(() => { done = true; });
+  await until(() => source.finalCounts().retireCalls === 1 && f.timers().delays.includes(1000));
+  const held = f.broker.counts().bytes;
+  assert.ok(held > 0); assert.equal(done, false); assert.equal(f.counts().settlements, 0);
+  f.advance(100_000);
+  await until(() => source.finalCounts().retireCalls === 2 && f.timers().delays.includes(1000));
+  assert.equal(f.broker.counts().bytes, held); assert.equal(source.finalCounts().finalCalls, 0);
+  source.pendingFinal(false); f.advance(1000); await close;
+  await until(() => f.broker.counts().bytes === 0);
+  assert.equal(source.finalCounts().finalAcknowledged, true); assert.equal(f.timers().pending, 0);
+});
+
+test("a historical ordinary Return cannot be relabelled as terminal proof during channel cleanup", async t => {
+  const f = await fixture(t), channel = f.channel(); await channel.status();
+  const source = await framedDerivation(f); source.returned();
+  const reply = await f.broker.nativeDerivationFromChannel(f.owner, channel, f.key, historyPurpose, source.row, source.identity).attempt();
+  assert.equal(reply.kind, "status");
+  await channel.close(); await until(() => f.broker.counts().active === 0);
+  assert.deepEqual(source.finalCounts(), { retireCalls: 1, finalCalls: 0, finalAcknowledged: false });
+  assert.equal(f.counts().settlements, 1, "only native preflight can authorize this ordinary channel closure");
+});
+
+test("ordinary history never bypasses native channel preflight or loses keys after its refusal", async t => {
+  const f = await fixture(t), channel = f.channel(); await channel.status();
+  const source = await framedDerivation(f); source.returned();
+  await f.broker.nativeDerivationFromChannel(f.owner, channel, f.key, historyPurpose, source.row, source.identity).attempt();
+  const settle = f.native.settleSetup; let attempts = 0;
+  f.cleanup(() => { f.native.settleSetup = settle; });
+  f.native.settleSetup = async (...args) => {
+    if (++attempts === 1) throw new Error("native preflight still owns a required original channel row");
+    await settle(...args);
+  };
+  f.owner.retire(); const close = channel.close();
+  await until(() => attempts === 1 && f.timers().delays.includes(1000));
+  assert.equal(f.counts().collections, 0); assert.equal(f.counts().settlements, 0);
+  assert.ok(f.broker.counts().bytes > 0);
+  f.advance(1000); await close; await until(() => f.broker.counts().bytes === 0);
+  assert.deepEqual(source.finalCounts(), { retireCalls: 2, finalCalls: 0, finalAcknowledged: false });
+  assert.equal(f.counts().setups, 1, "successful retry framing used original keys, never new setup");
+  assert.equal(f.counts().collections, 1);
+});
+
+test("lost native result replies retry the same action/output automatically without a second derive", async t => {
+  const f = await fixture(t), channel = f.channel(); await channel.status();
+  const source = await framedDerivation(f); source.loseResult();
+  const intake = f.broker.nativeDerivationFromChannel(f.owner, channel, f.key, historyPurpose, source.row, source.identity);
+  const ready = await intake.attempt(); if (ready.kind !== "ready") throw new Error("framed input required");
+  assert.equal((await ready.derivation.attempt()).kind, "uncertain");
+  const derives = f.counts().steps.filter(step => step === "deriveBits").length;
+  f.advance(1000);
+  await until(() => ready.derivation.inspect() === "accepted" && source.counts().settlements === 1 && f.broker.counts().active === 0);
+  assert.equal(f.counts().steps.filter(step => step === "deriveBits").length, derives);
+  assert.deepEqual(source.counts(), { inputReads: 1, admissions: 1, commits: 2, acknowledgements: 1, settlements: 1 });
+});
+
+test("lost Input and malformed bound metadata retain one claim and never renew its original deadline", async t => {
+  const f = await fixture(t), channel = f.channel(); await channel.status();
+  const source = await framedDerivation(f);
+  source.alter(data => { data[162] ^= 1; return data; }); // valid MAC; wrong MLS epoch
+  const intake = f.broker.nativeDerivationFromChannel(f.owner, channel, f.key, historyPurpose, source.row, source.identity);
+  const reserved = f.broker.counts().bytes;
+  assert.equal((await intake.attempt()).kind, "uncertain");
+  assert.equal(f.broker.counts().bytes, reserved);
+  f.advance(14_999); source.alter(null);
+  assert.equal((await intake.attempt()).kind, "ready");
+  f.advance(1);
+  const next = await intake.attempt();
+  if (next.kind === "ready") assert.equal(next.chain.isCurrent(), false, "native deadline500000 does not renew browser deadline15000");
+  assert.equal(source.counts().admissions, 0);
+});
+
+test("End while Input SDK is unresolved retains its intake/payment until actual completion", async t => {
+  const f = await fixture(t), channel = f.channel(); await channel.status();
+  const source = await framedDerivation(f);
+  const held = f.hold(f.counts().steps.length);
+  const intake = f.broker.nativeDerivationFromChannel(f.owner, channel, f.key, historyPurpose, source.row, source.identity);
+  const pending = intake.attempt(); await until(held.entered);
+  const reserved = f.broker.counts().bytes; f.owner.retire();
+  assert.equal(f.broker.counts().bytes, reserved);
+  held.release(); assert.equal((await pending).kind, "retired");
+  await channel.close(); await until(() => f.broker.counts().bytes === 0);
+  assert.equal(source.counts().inputReads, 0);
+});
+
+test("explicit channel close retires an idle Input claim without waiting for its deadline", async t => {
+  const f = await fixture(t), channel = f.channel(); await channel.status();
+  const source = await framedDerivation(f);
+  const intake = f.broker.nativeDerivationFromChannel(f.owner, channel, f.key, historyPurpose, source.row, source.identity);
+  await channel.close(); // no Clock advancement, owner is still current
+  assert.equal(f.owner.isCurrent(), true);
+  assert.equal((await intake.attempt()).kind, "retired");
+  assert.equal(source.counts().inputReads, 0);
+  assert.equal(f.timers().pending, 0);
+  await until(() => f.broker.counts().active === 0);
+  assert.equal(f.broker.counts().active, 0);
+});
+
+test("explicit channel close retains a blocked Input read until actual cancellation drains", async t => {
+  const f = await fixture(t), channel = f.channel(); await channel.status();
+  const source = await framedDerivation(f), blocked = f.hangFetch();
+  const intake = f.broker.nativeDerivationFromChannel(f.owner, channel, f.key, historyPurpose, source.row, source.identity);
+  const attempt = intake.attempt(); await until(blocked.entered);
+  const paid = f.broker.counts().bytes;
+  let closed = false; const close = channel.close().then(() => { closed = true; });
+  await until(blocked.aborted);
+  assert.equal(closed, false);
+  assert.equal(f.broker.counts().bytes, paid, "abort is not actual read drainage");
+  blocked.release();
+  assert.equal((await attempt).kind, "retired");
+  await close; // same Clock instant, no 15-second intake expiry
+  assert.equal(f.owner.isCurrent(), true);
+  assert.equal(f.timers().pending, 0);
+  await until(() => f.broker.counts().active === 0);
+  assert.equal(f.broker.counts().active, 0);
+  assert.equal(source.counts().inputReads, 0);
+});
 
 test("two retained channels lend their existing two positions without a third reservation or nested RPC deadlock", async t => {
   const f = await fixture(t), a = f.channel(); await a.status();
@@ -861,4 +1151,27 @@ test("the bounded history graph fits the original 8KiB Control payment with its 
   assert.match(source, /const IPC_CONTROL_BYTES = 8 \* 1024;/);
   assert.match(source, /private historyRequest: IpcHistoryRequest \| null = null;/);
   assert.equal(request.body.length, 106);
+});
+
+test("Derive intake and terminal Control payload graphs fit their separate original prepayments", () => {
+  // Structural bounds on application-owned buffers/wrappers, not arbitrary SDK/GC heaps.
+  // Fixed chain/row metadata is paid separately. Input/compute are serial on ONE lane;
+  // this sum is deliberately more conservative than their nonoverlapping live payloads.
+  const transcript = 1024 - utf8.encode("mewtual/voice/v2/aes-gcm/high-to-low\0").length;
+  const input = 541 + transcript;
+  const request = 187; // largest Derive request: exact empty result, no extra output copy
+  const framing = 2 * (request + 16) + 2 * (input + 16) + 144 + 288 + 4 * 40 + 2 * 32 + 2 * 12 + 1;
+  const decodedAndAdopted = 3 * (transcript + 2 * 65);
+  const engine = 3 * transcript + 4096 + 256;
+  const variable = framing + decodedAndAdopted + engine + 16 * 1024;
+  assert.ok(variable <= 96 * 1024, `Derive data/engine/wrapper envelope ${variable}/98304`);
+  // Original purpose/row/action strings, one stored final proof, native bootstrap, decoded
+  // fixed status/final metadata and wrappers. No history query is live during terminal
+  // cleanup; the decoded action graph ends before reading the separate final proof.
+  const controlBuffers = 2 * (185 + 16) + 2 * (242 + 16) + 144 + 288 + 4 * 40 + 2 * 32 + 2 * 12 + 1;
+  const descriptor = 2 * (3 * 64 + 20 + 32 + 2 * 20 + 64 + 64);
+  const decoded = 2 * 1024; // bounded fixed status/final graph, including exact-u64 strings
+  const wrappers = 3 * 1024;
+  const control = controlBuffers + descriptor + decoded + wrappers;
+  assert.ok(control <= 8 * 1024, `terminal Control payload/wrapper envelope ${control}/8192`);
 });

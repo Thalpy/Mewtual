@@ -345,7 +345,7 @@ fn protected_confirmation_completes_under_full_ordinary_pool_pressure_at_both_en
     let high_full = high_pool
         .charge(
             p.f.high.context.scope.group,
-            256 * 1024 - high_pool.counts().0,
+            crate::voice_v2::resources::GROUP_BYTES - high_pool.counts().0,
             crate::voice_v2::resources::ResourceKind::Retained,
         )
         .unwrap();
@@ -375,7 +375,7 @@ fn protected_confirmation_completes_under_full_ordinary_pool_pressure_at_both_en
         p.f.pool
             .charge(
                 p.f.low.context.scope.group,
-                256 * 1024 - p.f.pool.counts().0,
+                crate::voice_v2::resources::GROUP_BYTES - p.f.pool.counts().0,
                 crate::voice_v2::resources::ResourceKind::Retained,
             )
             .unwrap();
@@ -398,7 +398,7 @@ fn protected_confirmation_completes_under_full_ordinary_pool_pressure_at_both_en
     let _high_full = high_pool
         .charge(
             p.f.high.context.scope.group,
-            256 * 1024 - high_pool.counts().0,
+            crate::voice_v2::resources::GROUP_BYTES - high_pool.counts().0,
             crate::voice_v2::resources::ResourceKind::Retained,
         )
         .unwrap();

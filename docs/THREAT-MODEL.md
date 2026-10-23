@@ -1,5 +1,74 @@
 # Threat model; client integrity & enforcement boundaries
 
+## Native signalling capacity policy revision (23 October; validation in progress)
+
+The native group byte ceiling is now512KiB; the aggregate native process pool remains2MiB.
+This pool accounts declared signalling owners, not total application RSS or opaque SDK/OS
+allocations. The earlier provisional256KiB policy could not compose the retained native
+channel/bootstrap/history/discovery owners with the supported SDP phase. Refusing healthy
+incoming authentication while old Lower custody survives can exhaust a legitimate Answer's
+immutable attempt budget, so that refusal is not the chosen memory-saving mechanism.
+
+One group may now retain one quarter rather than one eighth of the process pool. Untrusted
+bytes still need current member/peer/scope/epoch authority, cheap requester debits, verified
+origin limits and atomic actual-owner capacity. Crypto4/group8/process, Forward4/group8/process,
+record/action limits, replay protection, nonce counters, protocol isolation and last-owner
+retirement rules are unchanged. A lost waiter or cancellation cannot refund an actual owner.
+Authoritative exported limits now drive pressure tests; filling the former256KiB would no
+longer exercise exhaustion. The two-group normal-dispatch regression checks sustained actual
+source/helper work, authenticated progress for a second group, twelve watcher replacements with
+exact native observer counts, atomic process exhaustion and recovery after actual last-owner release.
+
+Root source framing also removes real copies: it borrows the original immutable packet and
+uses exact-capacity canonical parents/final request frames. A private same-job ACK view
+reuses its original cached hash; public ACK/ingress verification still hashes independently.
+ACK role checks borrow the already-paid exact native Actor membership map under its Group/Policy
+fences. They do not allocate a second roster Vec/HashSet inside the small verification ticket.
+Two actual Lower lanes and full incoming verification remain funded. The Root-only declared
+maximum is187,966B inside192KiB, before native/browser/RTC composition. Neither the policy
+revision nor this arithmetic establishes16 simultaneous fully confirmed peers:32 Root actions,
+protected12-row plans, native histories and the separate256KiB browser ledger still constrain
+admission. Production remains disabled pending complete measured composition and integration.
+
+## Native Derive custody and protocol isolation work (23 October)
+
+The current branch's inactive Input adapter holds its actual CryptoInputLease, Work and
+physical position through completed reply collection. Refusal/cancellation drops payload
+owners before its last physical hold; ordinary-pool pressure cannot substitute a new loan.
+Admission samples the original Clock outside native/Engine gates, then consumes one scoped,
+non-escaping commit while UI/selection/route fences are held. Only its actual commit serial
+becomes a permit. Settlement/revocation cannot reopen an engine or renew the original deadline.
+
+Browser v13 prepays and pins one affine Derive intake before authenticated Data, retaining
+payment until real SDK/read cancellation drains. Historical results cannot reconstruct keys.
+After End, only exact original cleanup may use retained framing keys and monotonic counters;
+final Pending never means retirement. Lost issuance/ACK replies retry the same native proof.
+A prior ordinary Return cannot be upgraded to terminal intent. Bounded compaction can collect
+that original returned phase after delayed copies drain; independent native preflight still
+decides channel closure. A second distinct pilot plan cannot overwrite the first's cleanup.
+
+Ordinary action Return can precede End without any successor action ever existing. The native
+parent row therefore retains its original opaque plan and separate cleanup capability across
+compaction. A weak reference to the exact paid Root control supplies no completion evidence:
+only that plan's actual Workflow retirement publisher allows channel closure/GC. Explicit plan
+retirement freezes later child adoption before closing outside native locks; it waits for actual
+late inputs even after local Phase drainage. This remains a trusted Rust seam, not a new IPC action.
+
+Native End captures the actual original call grant before revocation and stops only that
+participant on its original actor. Old/foreign stops are harmless to a replacement. This is
+logical cleanup, not a refund of real late input/engine/lower owners or a new final witness.
+
+While a live V2 participant exists, Root drops all opaque legacy call signalling for that
+server (including other-room/companion/juke traffic), clears prequeued writers at selection,
+and refuses legacy egress. Routing pause preserves that exclusion. Observers/helpers do not
+select endpoint protocol. App fences still reject already-emitted events and RTC callbacks.
+
+Activation remains unavailable. The native group policy revision above removes the immediate
+arithmetic obstacle; complete native/browser/RTC composition is still unproved. The accepted
+[handoff contract](communication-recovery/VOICE-V2-NATIVE-HANDOFF-CONTRACT.md) records the required
+phase redesign. This work establishes no live SDP/ICE, WebView/RTC, media relay or physical
+audio/network acceptance; earlier dated sections describe their own historical checkpoints.
+
 ## Terminal delivery and physical collection (23 October)
 
 First ordinary/terminal closure mode is immutable before delayed copies drain. Terminal intent
@@ -251,7 +320,7 @@ browser crypto funding, actual physical setup ACK/drainage and legacy isolation 
 The distinct process-retained credit shares the existing2MiB total with all groups. It is
 capacity for trusted fixed native listener/router/task overhead only, with no group, Crypto
 slot, forwarding lane, lending or effect authority. Group-scoped input, crypto and outputs
-must not use it to bypass the256KiB group cap. Retain it until actual infrastructure/output
+must not use it to bypass the512KiB native group cap. Retain it until actual infrastructure/output
 drainage, including after cancellation or group retirement. It does not bound OS socket
 buffers, SDK heaps or allocator metadata outside the adapter's documented measured charge.
 
@@ -899,7 +968,7 @@ This seam has no browser commands or complete continuation/result dispatch integ
 A capacity reserve releases only unused bytes on close, preserving actual loans and
 slots; closing it is not evidence that a workflow or uncertain engine has completed.
 
-The narrow SDP foundation prepays 224 KiB, one Crypto lane, two Forward lanes, two continuation
+The narrow SDP foundation prepays192KiB, one Crypto lane, two Forward lanes, two continuation
 slots and ordinary endpoint/helper origin records before a nonce or positive incoming admission.
 It supports one local and one remote 8 KiB SDP, one Source record and two actual lower holders,
 bound to one native pair/OfferId and fixed initiator/responder role. Crossed Offers refuse before

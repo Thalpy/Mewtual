@@ -201,14 +201,17 @@ async fn root_pair_recovers_original_receipt_under_full_pressure_without_resetti
         .resources()
         .charge(
             grant.scope().group,
-            256 * 1024 - used,
+            crate::voice_v2::resources::GROUP_BYTES - used,
             ResourceKind::Retained,
         )
         .unwrap();
     for _ in 0..12 {
         assert_eq!(root.prepare_voice_pair(&grant, request).unwrap(), first);
         assert_eq!(state(&root), (1, 1, 1));
-        assert_eq!(runtime.resources().counts().0, 256 * 1024);
+        assert_eq!(
+            runtime.resources().counts().0,
+            crate::voice_v2::resources::GROUP_BYTES
+        );
         assert!(
             !changes.has_changed().unwrap(),
             "exact recovery cannot self-wake its driver"
@@ -298,7 +301,7 @@ async fn root_pair_local_capacity_refusal_publishes_neither_table_nor_serial() {
         .resources()
         .charge(
             grant.scope().group,
-            256 * 1024 - used,
+            crate::voice_v2::resources::GROUP_BYTES - used,
             ResourceKind::Retained,
         )
         .unwrap();
@@ -307,7 +310,10 @@ async fn root_pair_local_capacity_refusal_publishes_neither_table_nor_serial() {
         Some(VoiceError::Capacity)
     );
     assert_eq!(state(&root), (0, 0, 0));
-    assert_eq!(runtime.resources().counts().0, 256 * 1024);
+    assert_eq!(
+        runtime.resources().counts().0,
+        crate::voice_v2::resources::GROUP_BYTES
+    );
     drop(held);
     assert!(root.prepare_voice_pair(&grant, request).is_ok());
     assert_eq!(state(&root), (1, 1, 1));
@@ -378,7 +384,7 @@ async fn root_pair_newly_proved_rejoin_cannot_substitute_an_uncertain_original_r
         .resources()
         .charge(
             grant.scope().group,
-            256 * 1024 - used,
+            crate::voice_v2::resources::GROUP_BYTES - used,
             ResourceKind::Retained,
         )
         .unwrap();

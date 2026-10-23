@@ -154,7 +154,7 @@ async fn public_source_capacity_refusal_reuses_exact_native_challenge_without_ne
     let full = pool
         .charge(
             grant.scope.group,
-            256 * 1024 - baseline - 6144 - 512,
+            crate::voice_v2::resources::GROUP_BYTES - baseline - 6144 - 512,
             ResourceKind::Retained,
         )
         .unwrap();

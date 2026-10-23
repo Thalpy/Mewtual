@@ -30,6 +30,12 @@ pub(in crate::voice_handoff) struct Case {
 }
 impl Case {
     pub(in crate::voice_handoff) async fn new() -> Self {
+        Self::with_engine(true).await
+    }
+    pub(in crate::voice_handoff) async fn unadmitted() -> Self {
+        Self::with_engine(false).await
+    }
+    async fn with_engine(admit: bool) -> Self {
         let native = Fixture::new().await;
         let owner = native.candidate().await;
         let runtime = crate::voice_runtime(&native.state);
@@ -121,7 +127,9 @@ impl Case {
         let work = row.work().unwrap();
         let phase = work.phase().clone();
         drop(work);
-        action.admit_engine(action.engine_bytes()).unwrap();
+        if admit {
+            action.admit_engine(action.engine_bytes()).unwrap();
+        }
         let context = Context::new(&native.state);
         Self {
             native,

@@ -745,7 +745,7 @@ idempotent, settlement permanently closes delayed admission, and first signing/c
 effects use that same fence. End closes unstarted actions but leaves actual admitted work charged.
 The combined 32-record queue includes terminal identities; pulls rotate through at most four
 without dequeueing. Prepaid capacity can close unused bytes while retaining actual outstanding
-loan bytes and slots. The narrow SDP foundation now requires a 224 KiB native exchange reserve
+loan bytes and slots. The narrow SDP foundation now requires a 192 KiB native exchange reserve
 before the first local nonce or incoming positive admission. It prepays one Crypto lane, two
 Forward lanes, two action continuation slots and member records for the endpoints and at most
 two fixed helpers. One local and one remote SDP of at most 8 KiB share one OfferId and fixed

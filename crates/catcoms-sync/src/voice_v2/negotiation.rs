@@ -11,7 +11,7 @@ use super::{CallLease, EncryptedKind, Scope, VoiceError, MAX_SDP_PLAINTEXT, ROUT
 use catcoms_crypto::DeviceId;
 use std::sync::{Arc, Mutex};
 
-pub const EXCHANGE_BYTES: usize = 224 * 1024;
+pub const EXCHANGE_BYTES: usize = 192 * 1024;
 const METADATA_BYTES: usize = 4096;
 const STAGES: usize = 8;
 // Maximum policy- and OfferId-bound native encoding sizes. Composition regressions must compare
@@ -19,8 +19,11 @@ const STAGES: usize = 8;
 const CIPHERTEXT: usize = MAX_SDP_PLAINTEXT + 16;
 pub const MAX_AAD: usize = 542;
 const PACKET_BYTES: usize = 2 * CIPHERTEXT + 1340;
-const SOURCE_BYTES: usize = CIPHERTEXT + 2154;
-const LOWER_BYTES: usize = 4 * CIPHERTEXT + 8616 + ROUTE_METADATA_BYTES;
+// Canonical signed object plus Source's existing512-byte wire/identity allowance. Source
+// metadata adds1024; Lower borrows that original object rather than cloning its ciphertext.
+const SOURCE_WIRE_BYTES: usize = CIPHERTEXT + 1130;
+const SOURCE_BYTES: usize = SOURCE_WIRE_BYTES + 1024;
+const LOWER_BYTES: usize = 2 * SOURCE_WIRE_BYTES + 4096 + ROUTE_METADATA_BYTES;
 const ACTION_BYTES: usize = CIPHERTEXT + MAX_AAD + 1536;
 const ENGINE_BYTES: usize = 4 * (CIPHERTEXT + MAX_AAD) + 3 * MAX_SDP_PLAINTEXT + 2048;
 const RESULT_BYTES: usize = MAX_SDP_PLAINTEXT + 1040;
@@ -452,10 +455,23 @@ mod tests {
     use super::*;
     #[test]
     fn declared_maximum_exchange_fits_with_two_actual_lowers_and_retained_action_inputs() {
+        let declared = METADATA_BYTES
+            + 2 * PACKET_BYTES
+            + SOURCE_BYTES
+            + 2 * LOWER_BYTES
+            + 2 * ACTION_BYTES
+            + ENGINE_BYTES
+            + RESULT_BYTES;
+        assert_eq!(declared, 187_966);
+        assert!(declared <= EXCHANGE_BYTES);
         let resources = Arc::new(Resources::default());
         let exchange = Exchange::new(resources.clone(), [1; 32]).unwrap();
         let ordinary = resources
-            .charge([1; 32], 32 * 1024, ResourceKind::Retained)
+            .charge(
+                [1; 32],
+                crate::voice_v2::resources::GROUP_BYTES - EXCHANGE_BYTES,
+                ResourceKind::Retained,
+            )
             .unwrap();
         let outgoing = exchange.charge(Stage::LocalPacket, PACKET_BYTES).unwrap();
         let (encrypt_history, encrypt_input, encrypt_issue) = exchange
@@ -485,7 +501,10 @@ mod tests {
         let engine = Arc::new(exchange.charge(Stage::Crypto, ENGINE_BYTES).unwrap());
         let result = SdpResult::new(&exchange, &vec![b'a'; MAX_SDP_PLAINTEXT]).unwrap();
         assert_eq!(result.bytes().len(), MAX_SDP_PLAINTEXT);
-        assert_eq!(resources.counts(), (256 * 1024, 1));
+        assert_eq!(
+            resources.counts(),
+            (crate::voice_v2::resources::GROUP_BYTES, 1)
+        );
         exchange.close();
         assert!(exchange.charge(Stage::Crypto, 1).is_err());
         assert_eq!(

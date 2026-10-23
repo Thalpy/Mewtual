@@ -6,8 +6,15 @@ use super::VoiceError;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
-const PROCESS_BYTES: usize = 2 * 1024 * 1024;
-const GROUP_BYTES: usize = 256 * 1024;
+/// Aggregate declared native memory across ALL groups and process infrastructure. A local
+/// group policy revision never grants another process pool or increases this hard ceiling.
+pub const PROCESS_BYTES: usize = 2 * 1024 * 1024;
+/// Declared native group capacity. Actual authenticated discovery, retained transport work,
+/// channel/setup custody and the SDP phase must compose; the earlier provisional256KiB
+/// budget could refuse an ordinary two-endpoint call before SDP. One group may now occupy
+/// at most one quarter of the UNCHANGED2MiB process pool. Work/issuer/record/peer ceilings and
+/// actual-last-owner refunds remain separate, unchanged enforcement boundaries.
+pub const GROUP_BYTES: usize = 512 * 1024;
 const GROUP_RECORDS: usize = 1024;
 const SLOT_KINDS: usize = 8;
 
@@ -439,6 +446,17 @@ impl Resources {
         let state = self.state.lock().unwrap_or_else(|error| error.into_inner());
         (state.total.bytes, state.total.slots[0])
     }
+    /// Snapshot for trusted native composition diagnostics: original group's bytes/Crypto
+    /// positions, excluding process-only infrastructure. Missing means no charged group at
+    /// this observation, never a drained action or permission to reserve observed headroom.
+    /// Actual charge/admission must still repeat its atomic checks under this pool's fence.
+    pub fn group_counts(&self, group: [u8; 32]) -> Option<(usize, usize)> {
+        let state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+        state
+            .groups
+            .get(&group)
+            .map(|counts| (counts.bytes, counts.slots[0]))
+    }
 }
 
 impl Reservation {
@@ -625,6 +643,23 @@ impl Drop for Credit {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn group_composition_snapshot_excludes_process_and_other_group_payments() {
+        let pool = Arc::new(Resources::default());
+        let process = pool.charge_process_retained(4096).unwrap();
+        assert_eq!(pool.group_counts([1; 32]), None);
+        let first = pool.charge([1; 32], 2048, ResourceKind::Crypto).unwrap();
+        let other = pool.charge([2; 32], 512, ResourceKind::Retained).unwrap();
+        assert_eq!(pool.group_counts([1; 32]), Some((2048, 1)));
+        assert_eq!(pool.group_counts([2; 32]), Some((512, 0)));
+        assert_eq!(pool.counts(), (6656, 1));
+        drop(first);
+        assert_eq!(pool.group_counts([1; 32]), None);
+        assert_eq!(pool.group_counts([2; 32]), Some((512, 0)));
+        drop((other, process));
+        assert_eq!(pool.counts(), (0, 0));
+    }
 
     #[test]
     fn process_retained_bounds_and_refusal_are_atomic_without_group_or_slot_records() {
@@ -932,14 +967,14 @@ mod tests {
         reserve.close();
         lane.close();
         lane.close();
-        assert_eq!(pool.counts(), (32 * 1024 + 61_624, 4));
+        assert_eq!(pool.counts(), (GROUP_BYTES - 224 * 1024 + 61_624, 4));
         assert!(budget
             .charge(&pool, group, 1, ResourceKind::Crypto)
             .is_err());
         drop((budget, reserve, lane));
         assert_eq!(pool.counts().1, 4, "actual engine keeps its retired lane");
         drop(engine);
-        assert_eq!(pool.counts(), (32 * 1024, 3));
+        assert_eq!(pool.counts(), (GROUP_BYTES - 224 * 1024, 3));
         drop((ordinary_bytes, ordinary_slots));
         assert_eq!(pool.counts(), (0, 0));
     }
@@ -1036,8 +1071,8 @@ mod tests {
     #[test]
     fn close_releases_exact_capacity_at_the_process_limit() {
         let pool = Arc::new(Resources::default());
-        let reserves: Vec<_> = (0..8)
-            .map(|group| pool.reserve([group; 32], GROUP_BYTES).unwrap())
+        let reserves: Vec<_> = (0..PROCESS_BYTES / GROUP_BYTES)
+            .map(|group| pool.reserve([group as u8; 32], GROUP_BYTES).unwrap())
             .collect();
         let held = reserves[0]
             .charge([0; 32], 512, ResourceKind::Crypto)
@@ -1268,9 +1303,9 @@ mod tests {
         let pool = Arc::new(Resources::default());
         let another = pool.clone();
         let mut held = Vec::new();
-        for group in 0..8 {
+        for group in 0..PROCESS_BYTES / GROUP_BYTES {
             held.push(
-                pool.charge([group; 32], GROUP_BYTES, ResourceKind::Retained)
+                pool.charge([group as u8; 32], GROUP_BYTES, ResourceKind::Retained)
                     .unwrap(),
             );
         }

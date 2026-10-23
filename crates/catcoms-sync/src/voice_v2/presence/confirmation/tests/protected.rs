@@ -165,7 +165,7 @@ fn protected_hello_consumer_and_engine_use_reserved_custody_under_full_ordinary_
         .pool
         .charge(
             f.high.context.scope.group,
-            256 * 1024 - before,
+            crate::voice_v2::resources::GROUP_BYTES - before,
             crate::voice_v2::resources::ResourceKind::Retained,
         )
         .unwrap();

@@ -15,6 +15,7 @@ mod runtime;
 mod signed_history;
 mod transport;
 mod voice;
+mod voice_live;
 use runtime::{mount, network, register, Running};
 use transport::{forbidden, NetworkRules, Trace, Transport};
 

@@ -93,6 +93,10 @@ impl EndpointOwners {
         }
     }
     #[cfg(test)]
+    pub(crate) fn observer_count_for_test(&self) -> usize {
+        self.observers.len()
+    }
+    #[cfg(test)]
     pub(crate) fn implicit_watch_for_test(&self) -> Option<Arc<VoiceWatchGrant>> {
         // Inspection only: this returns the already factory-issued implicit watcher. Tests do
         // not fabricate an observer, participant, route proof or native ownership capability.
@@ -157,6 +161,23 @@ impl EndpointOwners {
     }
 }
 impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
+    /// Legacy call signals have no authenticated join incarnation. While this Root owns an
+    /// actual live V2 participant, they cannot be writers into that endpoint, including when
+    /// V2 service is temporarily paused. App also fences its callbacks; rejecting here keeps
+    /// stale/mixed-version traffic out of the native legacy queue before any renderer sees it.
+    /// Presence-only observers and unjoined member helpers do not select an endpoint protocol.
+    pub(crate) fn has_live_v2_participant(&self) -> bool {
+        self.voice_runtime.as_ref().is_some_and(|voice| {
+            voice
+                .endpoints
+                .participant
+                .as_ref()
+                .is_some_and(|participant| {
+                    participant.grant.strong_count() > 0 && participant.lease.is_live()
+                })
+        })
+    }
+
     /// Trusted native factory. Parent is the actual controller for an explicit observer, or the
     /// actual call grant for an implicit call watcher. Caller rechecks native UI binding after
     /// awaits; the affine reply closes on abandonment without relying on another actor command.
@@ -278,8 +299,45 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         });
         voice.endpoints.prune();
         voice.endpoints.changed();
+        // The sole Root publishes protocol selection and discards queued legacy writers in
+        // the SAME turn. A bye received before upgrade must not escape after selection, or
+        // reappear after End. Events already emitted remain fenced by the App generation.
+        self.pending_call_signals.clear();
         Ok(())
     }
+    /// Cleanup of the exact original native participant, including after End, lock or an
+    /// actor/session replacement. Revocation is not an admission prerequisite for cleanup.
+    /// Equal room/lease values cannot select a participant: only its actual grant allocation
+    /// can stop it. A delayed/repeated old stop therefore cannot affect a replacement call.
+    /// This does not assert that outstanding crypto/transport borrowers have drained.
+    pub fn stop_voice_endpoint(&mut self, grant: &Arc<CallGrant>) {
+        let Some(voice) = self.voice_runtime.as_mut() else {
+            return;
+        };
+        let same = voice
+            .endpoints
+            .participant
+            .as_ref()
+            .is_some_and(|participant| {
+                std::sync::Weak::ptr_eq(&participant.grant, &Arc::downgrade(grant))
+            });
+        if !same {
+            return;
+        }
+        let participant = voice
+            .endpoints
+            .participant
+            .take()
+            .expect("matched original participant");
+        participant.lease.revoke();
+        participant.watch.revoke();
+        voice.endpoints.observers.remove(&participant.watch.id);
+        voice.endpoints.changed();
+        // Drop LocalJoin outside native/ledger locks, after detaching it from the sole Root.
+        // Existing input/source/lower owners still own their original credits and witnesses.
+        drop(participant);
+    }
+
     pub fn voice_endpoint_changes(
         &mut self,
     ) -> Result<tokio::sync::watch::Receiver<u64>, VoiceError> {

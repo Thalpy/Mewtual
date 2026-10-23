@@ -1021,7 +1021,7 @@ fn capacity_refusal_during_edge_or_cursor_charging_commits_no_partial_packet_or_
             .resources()
             .charge(
                 scope().group,
-                256 * 1024 - current - persistent_remaining,
+                crate::voice_v2::resources::GROUP_BYTES - current - persistent_remaining,
                 ResourceKind::Retained,
             )
             .unwrap();

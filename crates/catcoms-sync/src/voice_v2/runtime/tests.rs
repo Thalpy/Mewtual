@@ -56,6 +56,87 @@ fn active(runtime: &Arc<Runtime>, epoch: u64) -> ActorOwner {
 }
 
 #[test]
+fn response_member_view_borrows_original_map_and_rejects_stale_scope_epoch_policy_and_session() {
+    let runtime = Runtime::new(Arc::new(ManualClock::new(1000)));
+    let mut actor = active(&runtime, 1);
+    let original = actor
+        .source_context(super::super::Scope {
+            group: [1; 32],
+            policy: Some([7; 32]),
+            room: 9,
+        })
+        .unwrap();
+    let before = runtime.resources().counts();
+    assert_eq!(
+        actor.with_current_members(&original, |member| {
+            assert!(member(device(1)) && member(device(2)) && member(device(3)));
+            assert!(!member(device(4)));
+            // The pure callback borrows the SAME map under its actual native fence.
+            assert!(actor.group.state.try_lock().is_err());
+            Ok(())
+        }),
+        Ok(())
+    );
+    assert_eq!(runtime.resources().counts(), before);
+    for altered in [
+        super::super::Context {
+            epoch: 2,
+            ..original
+        },
+        super::super::Context {
+            local: device(2),
+            ..original
+        },
+        super::super::Context {
+            scope: super::super::Scope {
+                group: [2; 32],
+                ..original.scope
+            },
+            ..original
+        },
+        super::super::Context {
+            scope: super::super::Scope {
+                policy: None,
+                ..original.scope
+            },
+            ..original
+        },
+        super::super::Context {
+            indirect: false,
+            ..original
+        },
+    ] {
+        assert_eq!(
+            actor.with_current_members(&altered, |_| -> Result<(), VoiceError> {
+                panic!("stale native view must refuse before the role callback")
+            }),
+            Err(VoiceError::Unauthorized)
+        );
+    }
+    actor.sync_view(view(2, &[1, 3])).unwrap();
+    assert_eq!(
+        actor.with_current_members(&original, |_| Ok(())),
+        Err(VoiceError::Unauthorized)
+    );
+    let current = super::super::Context {
+        epoch: 2,
+        ..original
+    };
+    assert_eq!(
+        actor.with_current_members(&current, |member| {
+            assert!(!member(device(2)) && member(device(3)));
+            Ok(())
+        }),
+        Ok(())
+    );
+    runtime.revoke_session();
+    assert_eq!(
+        actor.with_current_members(&current, |_| Ok(())),
+        Err(VoiceError::Unauthorized)
+    );
+}
+
+#[test]
 fn collection_releases_cold_locked_group_origins_without_erasing_membership_evidence() {
     let clock = Arc::new(ManualClock::new(1000));
     let runtime = Runtime::new(clock.clone());

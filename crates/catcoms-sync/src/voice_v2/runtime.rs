@@ -661,6 +661,22 @@ impl ActorOwner {
         self.current()?;
         Ok(self.group.source.clone())
     }
+    /// Borrow the already-paid exact native membership map for a small pure role check.
+    /// This avoids a second roster Vec/HashSet on the retained ACK path. The closure MUST
+    /// be bounded and synchronous: no Clock, effect or re-entry into native owners. Any
+    /// canonical hashing scratch must already be prepaid by the public verification ticket;
+    /// the private same-job ACK path needs none. Authenticate signatures/sample time first.
+    pub(crate) fn with_current_members<T>(
+        &self,
+        context: &super::Context,
+        check: impl FnOnce(&dyn Fn(DeviceId) -> bool) -> Result<T, VoiceError>,
+    ) -> Result<T, VoiceError> {
+        self.current()?;
+        let state = self.group.state.lock().unwrap_or_else(|e| e.into_inner());
+        let policy = self.gate.policy.lock().unwrap_or_else(|e| e.into_inner());
+        self.check_route_view(&state, &policy, context.local, context)?;
+        check(&|id| state.members.contains_key(&id))
+    }
     pub(crate) fn source_context(&self, scope: super::Scope) -> Result<super::Context, VoiceError> {
         self.current()?;
         // Directory/grant validation also enters this path. EffectiveClock invokes the original

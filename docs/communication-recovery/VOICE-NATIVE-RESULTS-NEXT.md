@@ -1,5 +1,56 @@
 # Next voice milestone: native result recovery
 
+## Current native Derive continuation (23 October; validation checkpoint)
+
+Branch `communication-native-live` in `target/communication-final-proof-worktree` continues
+from accepted integration `18ac9585`. The implementation now supplies canonical Input and
+actual admitted-permit replies, atomic native/Root admission, original input/physical custody,
+prepaid browser intake, exact result/ACK/settlement and post-End final issuance/ACK with the
+original channel keys retained. These adapters remain **inactive in production**. The seven
+items in the historical sections below describe their earlier checkpoints, not the present
+absence of the newly implemented Derive pieces.
+
+Actual blocked TCP discovery through unjoined B, replacement by restored D under the SAME
+join/key, then native factory/Input/admission/Actor result/ACK/settlement/End/final ACK passes.
+The last focused run took22.17s before the latest plan-control increment; full native validation
+is still required. A retained actual Root input keeps final retirement pending. This
+does not execute browser WebCrypto inside a WebView or exchange SDP/ICE. Separate browser
+tests exercise real WebCrypto against an independent framed endpoint fixture.
+
+Original protected role indexes and plan allocations now survive action compaction. A fixed
+opaque plan identity shares Root's original paid metadata without retaining an Action or
+Workflow. Native reconciliation recovers actual Root ACK even if native's earlier cache/latch
+was lost; receipt presence, settlement and retirement never substitute for ACK.
+
+The original parent now preserves that opaque plan and a separate native-only close capability
+after ordinary Return/compaction. A caller can retire the exact plan even when End happens before
+any successor exists. Root's actual original publisher, including late inputs, gates channel/GC;
+Phase Return remains immutable. The native2KiB guard includes the larger of the mutually exclusive
+Pending-retirement and compacted-plan-retirement tickets, with all other owners still counted.
+Focused Root473/native221 and complete frontend2,531 tests pass; Root full is running, native full
+and Rust static/build/startup checks remain pending. Frontend check/build/ten Edge flows pass.
+
+Remaining work includes shared native confirmation-child custody/factory cancellation,
+confirmation source scheduling, explicit transfer of the established browser keys without
+renewing old tickets, composed SDP/IPC/browser/RTC capacity, actual native SDP/ICE factories
+and ingress, the VoiceV2Native adapter, App RTC wiring and combined acceptance. Production
+activation remains unavailable. External download resume stays in its other agent's area.
+
+Do not shrink the SDP reserve by removing a hedge or refusing large incoming authentication:
+real Mesh lower custody survives the upper3s cancellation until response/failure (up to the
+10s request timeout), and a legitimate Answer could exhaust its original attempts during that
+wait. The current candidate instead removes redundant source ciphertext/framing copies,
+uses exact-capacity canonical parent encoders and a private original-job cached-hash view for
+small ACK verification. The Root candidate now declares187,966B with two actual Lowers inside
+a192KiB reserve; pressured packet/cancellation/canonical-capacity regressions pass. The native
+group ceiling is explicitly revised to512KiB, retaining the2MiB native
+process ceiling, work/rate/record limits and real last-owner accounting. The independent browser
+group ceiling remains256KiB. Revised-bound pressure and two-group authenticated source/helper
+progress/cleanup pass. Complete native composition remains unresolved: actual setup-ACKed Derive
+uses226,752B in its original group, but no maximum-SDP/native/browser/RTC composition is established.
+The accepted handoff contract records reserved-slot overlap and single-peer/history limits that
+still block full group calls. No physical audio/network acceptance is claimed.
+
 ## Validated target integration (23 October)
 
 Combined runtime `3f584d6049ef139492f8fa4146b5181bdc080575` includes target `2f08bde0` and passed complete

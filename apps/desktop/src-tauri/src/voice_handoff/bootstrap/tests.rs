@@ -182,7 +182,7 @@ async fn lost_setup_reply_and_duplicate_ensure_recover_original_session_without_
         .resources()
         .charge(
             group,
-            256 * 1024 - before.0 + INDEX_BYTES,
+            catcoms_sync::voice_v2::resources::GROUP_BYTES - before.0 + INDEX_BYTES,
             ResourceKind::Retained,
         )
         .unwrap();
@@ -462,7 +462,7 @@ async fn full_group_or_crypto_pressure_refuses_before_rng_without_stranding_a_ro
                 resources
                     .charge(
                         group,
-                        256 * 1024 - resources.counts().0,
+                        catcoms_sync::voice_v2::resources::GROUP_BYTES - resources.counts().0,
                         ResourceKind::Retained,
                     )
                     .unwrap(),

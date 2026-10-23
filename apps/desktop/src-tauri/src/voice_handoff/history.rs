@@ -18,6 +18,9 @@ pub(super) struct Response {
     incoming: Incoming,
 }
 impl Response {
+    pub(super) fn new(incoming: Incoming, result: Result<(RowId, Status), Refused>) -> Self {
+        Self { result, incoming }
+    }
     /// Build the one authenticated Control reply on the original already-spent nonce.
     /// No data Phase, new task, grant upgrade or ordinary-pool payment is admitted here.
     pub(super) fn seal(self) -> Result<CompletedReply, channel::Refused> {

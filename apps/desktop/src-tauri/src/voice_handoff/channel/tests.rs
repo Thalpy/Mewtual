@@ -99,6 +99,15 @@ fn paid_fixed_storage_and_original_control_lane_cover_codec_peak() {
     use hkdf::Hkdf;
     use hmac::Hmac;
     use sha2::Sha256;
+    let adapters = [
+        super::super::pending_close::layout_bytes(),
+        super::super::history::layout_bytes(),
+        super::super::finalization::layout_bytes(),
+        super::super::input::layout_bytes(),
+        super::super::admission::layout_bytes(),
+        super::super::settlement::layout_bytes(),
+    ];
+    eprintln!("adapter graphs pending/history/final/input/admission/settlement: {adapters:?}");
     let state = std::mem::size_of::<HeaderWorker>()
         .max(std::mem::size_of::<AuthenticatedRequest>())
         .max(std::mem::size_of::<Incoming>())
@@ -117,9 +126,9 @@ fn paid_fixed_storage_and_original_control_lane_cover_codec_peak() {
         + 2 * std::mem::size_of::<usize>()
         + state
         + http::HEADER_BYTES // FULL fixed Box allocation, not merely its inline pointer
-        // Only one synchronous Control opcode owns this original physical position. Count
+        // Only one adapter owns this original physical position. Count
         // its largest complete handler graph, not a sum of mutually exclusive dispatch arms.
-        + super::super::pending_close::layout_bytes().max(super::super::history::layout_bytes()).max(super::super::finalization::layout_bytes())
+        + adapters.into_iter().max().unwrap()
         + std::mem::size_of::<Aes256Gcm>()
         + 2 * std::mem::size_of::<Hmac<Sha256>>()
         + crypto::HEADER * 4
@@ -587,7 +596,7 @@ fn constructor_second_payment_refusal_restores_credit_and_never_calls_rng() {
     let pressure = pool
         .charge(
             group,
-            256 * 1024 - CONTROL_BYTES - BOOTSTRAP_BYTES / 2,
+            catcoms_sync::voice_v2::resources::GROUP_BYTES - CONTROL_BYTES - BOOTSTRAP_BYTES / 2,
             ResourceKind::Retained,
         )
         .unwrap();

@@ -531,4 +531,31 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             clock.as_ref(),
         )
     }
+
+    /// Observe the participant's ORIGINAL implicit watcher. A separate explicit observer or
+    /// equal-scope grant cannot establish readiness for this participant's protected pairs.
+    /// Returned evidence owns its existing native charge; it grants no engine/RTC authority.
+    pub fn voice_participant_peers(
+        &mut self,
+        grant: &Arc<CallGrant>,
+    ) -> Result<Vec<FreshPeer>, VoiceError> {
+        self.validate_voice_call_grant(grant)?;
+        let endpoints = &mut self
+            .voice_runtime
+            .as_mut()
+            .ok_or(VoiceError::Unauthorized)?
+            .endpoints;
+        endpoints.prune();
+        let participant = endpoints
+            .participant
+            .as_ref()
+            .ok_or(VoiceError::Unauthorized)?;
+        if !std::sync::Weak::ptr_eq(&participant.grant, &Arc::downgrade(grant))
+            || !participant.lease.is_live()
+        {
+            return Err(VoiceError::Unauthorized);
+        }
+        let watch = participant.watch.clone();
+        self.voice_watch_peers(&watch)
+    }
 }

@@ -801,8 +801,11 @@ impl SignedObject {
         }
     }
     pub fn encode(&self) -> Vec<u8> {
-        let mut e = Encoder::new();
-        fixed(&mut e, &self.unsigned());
+        // Finish the child BEFORE allocating its parent. Appending the small signature to
+        // an already full growing Vec otherwise doubles a maximum SDP backing allocation.
+        let unsigned = self.unsigned();
+        let mut e = Encoder::with_capacity(unsigned.len() + 4 + 4 + self.signature.len());
+        fixed(&mut e, &unsigned);
         fixed(&mut e, &self.signature);
         e.finish()
     }
@@ -1061,6 +1064,11 @@ impl RoutePermit {
         Ok(())
     }
     fn matches(&self, object: &SignedObject) -> Result<(), VoiceError> {
+        self.matches_hash(object, object.hash())
+    }
+    /// The caller either computes the hash above or supplies the original immutable job's
+    /// cached hash through the private retained-completion path. Never use a wire claim.
+    fn matches_hash(&self, object: &SignedObject, hash: [u8; 32]) -> Result<(), VoiceError> {
         self.validate()?;
         let expected = object
             .body
@@ -1069,7 +1077,7 @@ impl RoutePermit {
         if self.scope != object.scope
             || self.issuer != object.issuer
             || self.public_key != object.public_key
-            || self.packet != object.hash()
+            || self.packet != hash
             || self.final_scope != expected
             || self.expires > object.expires
             || self.issued < object.issued
@@ -1151,6 +1159,22 @@ pub enum Envelope {
         permit: RoutePermit,
     },
 }
+/// Borrow an already-owned immutable packet instead of cloning its ciphertext merely to
+/// select a transport role. This crate-only view has no independent lifetime or authority;
+/// deferred source work keeps the actual SourceJob/packet and its original payment alive.
+/// Owning and borrowed roles share the SAME canonical encoder and authorization checks.
+#[derive(Clone, Copy)]
+pub(crate) enum EnvelopeRef<'a> {
+    Direct(&'a SignedObject),
+    ToHelper {
+        object: &'a SignedObject,
+        permit: &'a RoutePermit,
+    },
+    HelperDelivery {
+        object: &'a SignedObject,
+        permit: &'a RoutePermit,
+    },
+}
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Disposition {
     Deliver,
@@ -1208,6 +1232,15 @@ impl<T: catcoms_rt::MeshTransport, R: catcoms_rt::CryptoRngCore> crate::ChannelS
     }
 }
 impl Envelope {
+    pub(crate) fn as_ref(&self) -> EnvelopeRef<'_> {
+        match self {
+            Self::Direct(object) => EnvelopeRef::Direct(object),
+            Self::ToHelper { object, permit } => EnvelopeRef::ToHelper { object, permit },
+            Self::HelperDelivery { object, permit } => {
+                EnvelopeRef::HelperDelivery { object, permit }
+            }
+        }
+    }
     fn peek_encrypted(bytes: &[u8]) -> Result<UnverifiedEncrypted, VoiceError> {
         if bytes.len() > MAX_ENVELOPE {
             return Err(VoiceError::Bounds);
@@ -1260,19 +1293,7 @@ impl Envelope {
         }
     }
     pub fn encode(&self) -> Vec<u8> {
-        let mut e = Encoder::new();
-        e.put_u8(VERSION);
-        let (kind, object, permit) = match self {
-            Self::Direct(object) => (1, object, None),
-            Self::ToHelper { object, permit } => (2, object, Some(permit)),
-            Self::HelperDelivery { object, permit } => (3, object, Some(permit)),
-        };
-        e.put_u8(kind);
-        fixed(&mut e, &object.encode());
-        if let Some(permit) = permit {
-            fixed(&mut e, &permit.encode());
-        }
-        e.finish()
+        self.as_ref().encode()
     }
     /// Charge the authenticated immediate requester's cheap work budget BEFORE calling decode.
     /// Decoding verifies original signatures but does not admit replay or authorize delivery.
@@ -1312,6 +1333,69 @@ impl Envelope {
         context: &Context,
         member: impl Fn(DeviceId) -> bool,
     ) -> Result<Disposition, VoiceError> {
+        self.as_ref().authorize(requester, context, member)
+    }
+}
+
+impl EnvelopeRef<'_> {
+    pub(crate) fn object(&self) -> &SignedObject {
+        match self {
+            Self::Direct(object)
+            | Self::ToHelper { object, .. }
+            | Self::HelperDelivery { object, .. } => object,
+        }
+    }
+
+    pub(crate) fn encode(&self) -> Vec<u8> {
+        let (kind, object, permit) = match self {
+            Self::Direct(object) => (1, object, None),
+            Self::ToHelper { object, permit } => (2, object, Some(permit)),
+            Self::HelperDelivery { object, permit } => (3, object, Some(permit)),
+        };
+        // Each child completes before the large parent exists. Exactly reserve the final
+        // frame so appending a small permit cannot double a complete SDP allocation.
+        let object = object.encode();
+        let permit = permit.map(|permit| permit.encode());
+        let bytes = 2 + 4 + object.len() + permit.as_ref().map_or(0, |permit| 4 + permit.len());
+        let mut e = Encoder::with_capacity(bytes);
+        e.put_u8(VERSION);
+        e.put_u8(kind);
+        fixed(&mut e, &object);
+        if let Some(permit) = permit {
+            fixed(&mut e, &permit);
+        }
+        e.finish()
+    }
+
+    pub(crate) fn authorize(
+        &self,
+        requester: DeviceId,
+        context: &Context,
+        member: impl Fn(DeviceId) -> bool,
+    ) -> Result<Disposition, VoiceError> {
+        self.authorize_inner(requester, context, member, None)
+    }
+
+    /// Only native transport's private RetainedEnvelope calls this: it binds BOTH this view
+    /// and the cached hash to the same original immutable SourceJob/ForwardJob allocation.
+    /// Ingress and public ACK verification must use `authorize`, computing their own hash.
+    pub(crate) fn authorize_retained(
+        &self,
+        requester: DeviceId,
+        context: &Context,
+        member: impl Fn(DeviceId) -> bool,
+        hash: [u8; 32],
+    ) -> Result<Disposition, VoiceError> {
+        self.authorize_inner(requester, context, member, Some(hash))
+    }
+
+    fn authorize_inner(
+        &self,
+        requester: DeviceId,
+        context: &Context,
+        member: impl Fn(DeviceId) -> bool,
+        cached_hash: Option<[u8; 32]>,
+    ) -> Result<Disposition, VoiceError> {
         let object = self.object();
         if object.scope != context.scope {
             return Err(VoiceError::Scope);
@@ -1344,7 +1428,11 @@ impl Envelope {
                 if !context.indirect || context.scope.policy.is_none() || !member(permit.helper) {
                     return Err(VoiceError::Unauthorized);
                 }
-                permit.matches(object)?;
+                if let Some(hash) = cached_hash {
+                    permit.matches_hash(object, hash)?;
+                } else {
+                    permit.matches(object)?;
+                }
                 freshness(permit.issued, permit.expires, context.now)?;
                 match self {
                     Self::ToHelper { .. }

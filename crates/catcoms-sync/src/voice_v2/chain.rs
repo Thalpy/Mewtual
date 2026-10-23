@@ -82,7 +82,7 @@ pub(super) struct PlanBinding {
 impl PlanBinding {
     // The original fixed payment already retains this exact pool. Borrow it rather than
     // adding duplicate pool owners to HistoryPlan and Workflow inside the 2KiB allowance.
-    fn resources(&self) -> &Arc<Resources> {
+    pub(super) fn resources(&self) -> &Arc<Resources> {
         self._metadata.resources()
     }
 }
@@ -186,6 +186,43 @@ impl ConfirmationRetirement {
     }
 }
 redacted_debug!(ConfirmationRetirement);
+
+/// Native-only authority to close one ORIGINAL confirmation plan between handoff phases.
+/// Unlike a HandoffLoan this owns no variable capacity, input or engine. In particular, an
+/// ordinary loan Return followed by End must not leave native cleanup dependent on a future
+/// child action being published. Capture this capability before returning the first loan.
+///
+/// The weak control allocation remains covered by the SAME fixed PlanBinding payment, which
+/// outlives it by field order. No handshake lookup, current grant or replacement plan is used.
+pub struct ConfirmationControl {
+    control: Weak<PreparedChain>,
+    binding: Arc<PlanBinding>,
+}
+redacted_debug!(ConfirmationControl);
+impl ConfirmationControl {
+    /// Observe only this plan's actual variable-capacity retirement. This samples no Clock,
+    /// takes no lock and grants no current authority. Weak control loss alone never sets it.
+    pub fn is_drained(&self) -> bool {
+        self.binding.workflow_drained.load(Ordering::Acquire)
+    }
+    /// Permanently close the exact captured plan and retain its original last-field observer.
+    /// Call outside Engine/Group/Policy/native registry locks; closing retires unstarted
+    /// actions. This proves closure only: actual input/lower/SDK owners must still drain.
+    /// Browser keys and RTC readiness are separate and this grants no SDP authority.
+    pub fn retire(self) -> ConfirmationRetirement {
+        let retirement = ConfirmationRetirement {
+            binding: self.binding.clone(),
+        };
+        if let Some(control) = self.control.upgrade() {
+            control.close();
+        }
+        // If the exact control has already reached strong-zero, PreparedChain::Drop closes
+        // it. Do not infer completion from weak-zero: the SAME Workflow publisher below may
+        // still be pending, and the returned observer remains false until it actually runs.
+        drop(self);
+        retirement
+    }
+}
 struct WorkflowState {
     closed: bool,
     // One IPC owner for the entire chain, including distinct rows. A lost renderer reply may
@@ -287,6 +324,12 @@ pub(super) struct RowIssue {
     unpublished: bool,
 }
 impl RowIssue {
+    /// Native publication carries this original role position into the immutable action.
+    /// It is not a renderer-provided slot and remains meaningful after payload compaction.
+    pub(super) fn row_index(&self) -> u8 {
+        u8::try_from(self.row).expect("protected history has twelve fixed rows")
+    }
+
     pub(super) fn validate(
         &self,
         resources: &Arc<Resources>,
@@ -566,6 +609,12 @@ impl Drop for PreparedChain {
     }
 }
 impl Workflow {
+    pub(super) fn confirmation_control(&self) -> ConfirmationControl {
+        ConfirmationControl {
+            control: self.control.clone(),
+            binding: self.binding.clone(),
+        }
+    }
     pub(crate) fn charge(
         self: &Arc<Self>,
         resources: &Arc<Resources>,

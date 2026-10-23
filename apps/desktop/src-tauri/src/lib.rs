@@ -11077,13 +11077,39 @@ async fn activate_voice_owner(
 /// Exact revocation is available during lock/destruction. It never refunds unsettled crypto.
 #[tauri::command]
 async fn end_voice_owner(state: State<'_, AppState>, owner: String) -> Result<(), String> {
-    state
+    end_voice_owner_inner(&state, &owner).await;
+    Ok(())
+}
+
+/// Logical revocation is synchronous; actual Root participant cleanup uses the original
+/// affine grant even after End. Never look up a replacement by room or serialized join id.
+/// This does not settle outstanding SDK/transport owners: authenticated channel cleanup
+/// retains those original payments and waits on its independent retirement witness.
+async fn end_voice_owner_inner(state: &AppState, owner: &str) {
+    let original = state
         .voice_authority
         .lock()
         .unwrap_or_else(|e| e.into_inner())
-        .end(&owner);
+        .end_with_cleanup(owner);
+    if let Some(original) = original {
+        let actor = {
+            let servers = state.servers.lock().await;
+            servers
+                .get(&original.binding.server)
+                .filter(|entry| {
+                    entry.instance == original.binding.instance
+                        && entry.group_id == original.binding.group
+                })
+                .map(|entry| entry.actor.clone())
+        };
+        if let Some(actor) = actor {
+            // Once admitted, the actor applies Stop even if this reply is lost. Cancellation
+            // before mailbox admission is not completion; no code treats it as drainage.
+            // A stopped/removed original actor has no replacement participant to operate on.
+            let _ = actor.stop_voice_endpoint(original.cleanup_grant()).await;
+        }
+    }
     state.voice_channels.collect_retired(&state.voice_handoff);
-    Ok(())
 }
 
 async fn admit_voice_crypto_inner(

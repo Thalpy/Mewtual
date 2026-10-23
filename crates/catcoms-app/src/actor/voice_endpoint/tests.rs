@@ -71,6 +71,17 @@ async fn native_voice_actor_installs_exact_endpoint_and_coalesces_revision_obser
         .start_voice_endpoint(grant.clone(), [81; 32], point())
         .await
         .unwrap();
+    assert!(actor
+        .voice_participant_peers(grant.clone())
+        .await
+        .unwrap()
+        .is_empty());
+    let foreign = Arc::new(CallGrant::from_lease(grant.lease(), grant.scope()));
+    assert_eq!(
+        actor.voice_participant_peers(foreign.clone()).await.err(),
+        Some(VoiceEndpointError::Protocol(VoiceError::Unauthorized)),
+        "equal scope and even the same lease cannot adopt another affine participant grant"
+    );
     assert!(changes.has_changed().unwrap());
     changes.borrow_and_update();
     assert_eq!(
@@ -159,6 +170,78 @@ async fn native_voice_actor_rejects_foreign_and_replaced_call_allocations() {
             .err(),
         Some(VoiceEndpointError::Protocol(VoiceError::Unauthorized))
     );
+    actor.stop_and_wait().await.unwrap();
+    task.await.unwrap();
+    drain.await.unwrap();
+}
+
+#[tokio::test]
+async fn native_voice_actor_stop_survives_revocation_lost_reply_and_replacement() {
+    let (actor, mut events, task, _runtime, grant) = start().await;
+    let drain = tokio::spawn(async move { while events.recv().await.is_some() {} });
+    actor
+        .start_voice_endpoint(grant.clone(), [81; 32], point())
+        .await
+        .unwrap();
+    let foreign = Arc::new(CallGrant::from_lease(grant.lease(), grant.scope()));
+    actor.stop_voice_endpoint(foreign.clone()).await.unwrap();
+    assert!(
+        actor.voice_participant_peers(grant.clone()).await.is_ok(),
+        "equal scope and lease cannot stop the actual affine participant"
+    );
+
+    // End wins before the actor receives cleanup. Lost reply must not suppress the admitted
+    // cleanup command; the real mailbox barrier below observes its ordered completion.
+    grant.lease().revoke();
+    let (reply, lost) = oneshot::channel();
+    drop(lost);
+    actor
+        .cmd_tx
+        .send(AppCommand::VoiceEndpoint(VoiceEndpointCommand(
+            Command::Stop {
+                grant: grant.clone(),
+                reply,
+            },
+        )))
+        .await
+        .unwrap();
+    actor.member_count().await;
+    let replacement = Arc::new(
+        actor
+            .voice_call_grant(crate::channel_id("general"))
+            .await
+            .unwrap(),
+    );
+    actor
+        .start_voice_endpoint(replacement.clone(), [82; 32], point())
+        .await
+        .unwrap();
+    for _ in 0..3 {
+        actor.stop_voice_endpoint(grant.clone()).await.unwrap();
+    }
+    assert!(
+        actor
+            .voice_participant_peers(replacement.clone())
+            .await
+            .is_ok(),
+        "late old cleanup cannot remove the replacement participant"
+    );
+    actor
+        .stop_voice_endpoint(replacement.clone())
+        .await
+        .unwrap();
+    assert!(
+        !replacement.lease().is_live(),
+        "live exact stop revokes before dropping Root ownership"
+    );
+    assert_eq!(
+        actor
+            .voice_participant_peers(replacement.clone())
+            .await
+            .err(),
+        Some(VoiceEndpointError::Protocol(VoiceError::Unauthorized))
+    );
+    actor.stop_voice_endpoint(replacement).await.unwrap();
     actor.stop_and_wait().await.unwrap();
     task.await.unwrap();
     drain.await.unwrap();

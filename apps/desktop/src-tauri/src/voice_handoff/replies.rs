@@ -9,6 +9,34 @@ use catcoms_sync::voice_v2::VoiceError;
 
 pub(super) const STATUS_BYTES: usize = 242;
 pub(super) const FINAL_BYTES: usize = 100;
+pub(super) const PERMIT_BYTES: usize = 78;
+
+/// Admission is reported only from the actual synchronous Root commit. Serial equality
+/// binds its permit to this exact action; history/callback success cannot manufacture it.
+pub(super) fn admitted(
+    id: RowId,
+    action: super::requests::Action,
+    engine_bytes: usize,
+    permit: u64,
+) -> Result<[u8; PERMIT_BYTES], VoiceError> {
+    RowId::from_logical(id.logical())?;
+    if action.serial == 0 || action.version == 0 || permit != action.serial {
+        return Err(VoiceError::Malformed);
+    }
+    let mut bytes = [0; PERMIT_BYTES];
+    bytes[..2].copy_from_slice(&[1, 6]);
+    bytes[2..18].copy_from_slice(&id.logical());
+    bytes[18..26].copy_from_slice(&action.serial.to_be_bytes());
+    bytes[26..34].copy_from_slice(&action.version.to_be_bytes());
+    bytes[34..66].copy_from_slice(&action.input_tag);
+    bytes[66..74].copy_from_slice(&permit.to_be_bytes());
+    bytes[74..78].copy_from_slice(
+        &u32::try_from(engine_bytes)
+            .map_err(|_| VoiceError::Bounds)?
+            .to_be_bytes(),
+    );
+    Ok(bytes)
+}
 
 /// Separate bounded Control metadata: exact Row/action, terminal mode, and Pending/Issued/
 /// Acknowledged. A zero-padded Pending is never retirement evidence. History's 242 bytes

@@ -125,7 +125,7 @@ async fn delayed_root_owner_and_lost_issuance_and_ack_replies_recover_on_origina
     let pressure = pool
         .charge(
             selected.binding().scope.group,
-            256 * 1024 - pool.counts().0,
+            catcoms_sync::voice_v2::resources::GROUP_BYTES - pool.counts().0,
             ResourceKind::Retained,
         )
         .unwrap();

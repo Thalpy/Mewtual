@@ -24,9 +24,9 @@ const RECORD_BYTES: usize = 1024;
 mod handoff;
 mod results;
 pub(crate) mod slots;
-pub use super::chain::{ConfirmationRetirement, HandoffLoan};
-pub use handoff::ProtectedCryptoBinding;
-pub use results::{CryptoOutcome, CryptoResultReceipt, CryptoResultStatus};
+pub use super::chain::{ConfirmationControl, ConfirmationRetirement, HandoffLoan};
+pub use handoff::{ProtectedCryptoBinding, ProtectedCryptoPlan};
+pub use results::{CryptoHandoffStatus, CryptoOutcome, CryptoResultReceipt, CryptoResultStatus};
 pub(super) use results::{ResultBinding, TerminalResult};
 
 /// Closed operation identity; the native factory selects it from actual protocol state.
@@ -49,6 +49,48 @@ pub enum CryptoInput<'a> {
 /// reference, but a serializer/worker still holding this lease retains the original buffers
 /// and their credit. This grants no engine, signing, packet or RTC authority.
 pub struct CryptoInputLease(Arc<ActionPayload>);
+
+/// One synchronous native admission opportunity. The originating action samples its own
+/// Clock before lending this value to a trusted adapter's final UI/selection/route fence.
+/// `commit` samples no Clock and invokes no adapter callback. Its private, scoped lifetime
+/// prevents retaining this opportunity across an await or returning it from the fence.
+/// This is not a renderer permit; the original action remains the engine's identity.
+pub struct CryptoEngineAdmission<'a> {
+    action: &'a CryptoAction,
+    bytes: usize,
+    mono: u64,
+    wall: u64,
+    _scope: &'a mut (),
+}
+impl CryptoEngineAdmission<'_> {
+    /// Consume immediately while the trusted final native fences are still held. Settlement,
+    /// revocation or a consumed pending token wins even if it occurred in a Clock callback.
+    pub fn commit(self) -> Result<u64, VoiceError> {
+        let mut engine = self.action.engine.lock().unwrap_or_else(|e| e.into_inner());
+        if self.bytes != self.action.engine_bytes {
+            return Err(VoiceError::RetryMismatch);
+        }
+        if engine.settled || engine.terminal.is_some() {
+            return Err(VoiceError::Unauthorized);
+        }
+        self.action.check_pending_at(self.mono, self.wall)?;
+        if engine.permit.is_none() {
+            engine.permit = Some(
+                engine
+                    .lender
+                    .as_ref()
+                    .ok_or(VoiceError::Unauthorized)?
+                    .charge(
+                        &self.action.resources,
+                        self.action.scope.group,
+                        self.bytes,
+                        ResourceKind::Crypto,
+                    )?,
+            );
+        }
+        Ok(self.action.serial)
+    }
+}
 impl CryptoInputLease {
     pub fn as_input(&self) -> CryptoInput<'_> {
         match &self.0.input {
@@ -131,6 +173,9 @@ pub struct CryptoAction {
     // Fixed identity shares the existing paid plan object. It must never retain Workflow:
     // terminal action history is independent of variable progress/IPC capacity.
     binding: Option<Arc<super::chain::PlanBinding>>,
+    // Preserve RowIssue's actual native position, not a serial-derived or copied IPC index.
+    // The shared binding/chain allocations below remain the authority for plan membership.
+    protected_row: Option<u8>,
     // Lock order is Engine -> payload. An input lease clones its Arc under this mutex and
     // releases the guard before any engine operation. Actual payload/credit drops occur after
     // releasing BOTH locks, so downstream destructors cannot reenter an action fence.
@@ -145,6 +190,7 @@ pub struct CryptoAction {
 }
 redacted_debug!(
     CryptoAction,
+    CryptoEngineAdmission<'_>,
     CryptoInput<'_>,
     CryptoInputLease,
     CryptoOperation
@@ -239,36 +285,50 @@ impl CryptoAction {
         self.engine.try_lock().is_ok()
     }
     pub fn is_pending(&self) -> bool {
+        let (mono, wall) = self.pending_observation();
         let engine = self.engine.lock().unwrap_or_else(|e| e.into_inner());
-        !engine.settled && engine.terminal.is_none() && self.authority.authorized()
+        !engine.settled && engine.terminal.is_none() && self.check_pending_at(mono, wall).is_ok()
     }
 
     /// The trusted native adapter calls this only for an already registered exact action.
     /// Its immutable serial is the permit identity inside that exact native owner; duplicates
     /// return it without charging again. Capacity is transient and leaves the action eligible.
     pub fn admit_engine(&self, bytes: usize) -> Result<u64, VoiceError> {
-        let mut engine = self.engine.lock().unwrap_or_else(|e| e.into_inner());
+        self.with_engine_admission(bytes, |admission| admission.commit())
+    }
+
+    /// Sample the ORIGINAL Clock outside Engine and all native gates, then lend a single
+    /// non-escaping commit to the adapter. The callback must acquire its final native fences
+    /// and consume the opportunity synchronously, without awaiting or calling external code.
+    /// The higher-ranked lifetime keeps the opportunity out of `T`; dropping it admits nothing.
+    /// In particular, `Ok(T)` returned by the callback is not proof that it called `commit`.
+    /// Native adapters must serialize the exact successful `commit()` result as their permit.
+    /// A refusal before commit preserves eligibility and never refunds an ambiguous engine.
+    ///
+    /// ```compile_fail
+    /// use catcoms_sync::voice_v2::crypto_actions::{CryptoAction, CryptoEngineAdmission};
+    /// use catcoms_sync::voice_v2::VoiceError;
+    /// fn escape(action: &CryptoAction) -> Result<CryptoEngineAdmission<'_>, VoiceError> {
+    ///     action.with_engine_admission(action.engine_bytes(), |step| Ok(step))
+    /// }
+    /// ```
+    pub fn with_engine_admission<T>(
+        &self,
+        bytes: usize,
+        fence: impl for<'commit> FnOnce(CryptoEngineAdmission<'commit>) -> Result<T, VoiceError>,
+    ) -> Result<T, VoiceError> {
         if bytes != self.engine_bytes {
             return Err(VoiceError::RetryMismatch);
         }
-        if engine.settled || engine.terminal.is_some() || !self.authority.authorized() {
-            return Err(VoiceError::Unauthorized);
-        }
-        if engine.permit.is_none() {
-            engine.permit = Some(
-                engine
-                    .lender
-                    .as_ref()
-                    .ok_or(VoiceError::Unauthorized)?
-                    .charge(
-                        &self.resources,
-                        self.scope.group,
-                        bytes,
-                        ResourceKind::Crypto,
-                    )?,
-            );
-        }
-        Ok(self.serial)
+        let (mono, wall) = self.pending_observation();
+        let mut scope = ();
+        fence(CryptoEngineAdmission {
+            action: self,
+            bytes,
+            mono,
+            wall,
+            _scope: &mut scope,
+        })
     }
 
     /// Actual engine and last result-RPC settlement only. An unstarted action can be closed too;
@@ -373,6 +433,7 @@ pub(super) struct PreparedAction {
     chain: Option<CallLease>,
     chain_epoch: Option<u64>,
     binding: Option<Arc<super::chain::PlanBinding>>,
+    protected_row: Option<u8>,
 }
 
 pub(super) struct Allocation {
@@ -493,6 +554,7 @@ impl ActionQueue {
         }
         let serial = self.serial.checked_add(1).ok_or(VoiceError::Capacity)?;
         let binding = history.as_ref().map(|history| history.issue.binding());
+        let protected_row = history.as_ref().map(|history| history.issue.row_index());
         if let Some(history) = &history {
             history
                 .issue
@@ -587,6 +649,7 @@ impl ActionQueue {
             chain,
             chain_epoch,
             binding,
+            protected_row,
         })
     }
 
@@ -624,6 +687,7 @@ impl ActionQueue {
             chain: prepared.chain,
             chain_epoch: prepared.chain_epoch,
             binding: prepared.binding,
+            protected_row: prepared.protected_row,
             input: Mutex::new(Some(Arc::new(ActionPayload {
                 input,
                 _credit: prepared.payload,
@@ -798,6 +862,9 @@ mod tests {
             let call = CallLease::default();
             let mut queue = ActionQueue::default();
             let action = publish(&mut queue, &pool, &call, 1);
+            assert_eq!(action.protected_row(), Err(VoiceError::Unauthorized));
+            assert!(!action.same_protected_plan(&action));
+            assert!(!action.handoff_status().acknowledged);
             let input = action.input().unwrap();
             let payload_bytes = allocation(&pool, &call).payload_bytes;
             action.admit_engine(action.engine_bytes()).unwrap();
@@ -823,13 +890,16 @@ mod tests {
                 action.acknowledge_result(&changed),
                 Err(VoiceError::RetryMismatch)
             );
+            assert!(!action.handoff_status().acknowledged);
             if ack_first {
                 action.acknowledge_result(&receipt).unwrap();
+                assert!(action.handoff_status().acknowledged);
                 assert!(action.input().is_ok());
                 assert_eq!(pool.counts().1, 1);
                 action.settle_engine();
             } else {
                 action.settle_engine();
+                assert!(!action.handoff_status().acknowledged);
                 assert!(
                     action.input().is_ok(),
                     "settlement cannot acknowledge a lost result reply"
@@ -837,6 +907,9 @@ mod tests {
                 action.acknowledge_result(&receipt).unwrap();
             }
             assert!(action.input().is_err());
+            let history = action.handoff_status();
+            assert!(history.acknowledged && history.engine.settled);
+            assert!(receipt.same_transition(history.engine.receipt.as_ref().unwrap()));
             assert!(matches!(input.as_input(), CryptoInput::Derive(_)));
             let held = pool.counts().0;
             drop(input);
@@ -926,6 +999,226 @@ mod tests {
                 })
             })
             .unwrap()
+    }
+
+    /// Injected providers must be free to inspect/revoke the real action and the native
+    /// fence. An Engine-held Clock callback used to deadlock an adapter doing exactly this.
+    #[derive(Debug)]
+    struct AdmissionClock {
+        inner: ManualClock,
+        action: Mutex<Option<std::sync::Weak<CryptoAction>>>,
+        native: Mutex<()>,
+        invalidate: Mutex<Option<(bool, bool, CallLease)>>,
+        armed: std::sync::atomic::AtomicBool,
+        observations: std::sync::atomic::AtomicUsize,
+    }
+    impl AdmissionClock {
+        fn observe(&self, monotonic: bool) {
+            if self.armed.load(std::sync::atomic::Ordering::Acquire) {
+                assert!(
+                    self.native.try_lock().is_ok(),
+                    "Clock ran beneath native fence"
+                );
+                let action = self
+                    .action
+                    .lock()
+                    .unwrap()
+                    .as_ref()
+                    .unwrap()
+                    .upgrade()
+                    .unwrap();
+                assert!(
+                    action.result_fence_available_for_test(),
+                    "Clock ran beneath Engine"
+                );
+                let invalidation = {
+                    let mut pending = self.invalidate.lock().unwrap();
+                    if pending
+                        .as_ref()
+                        .is_some_and(|(edge, _, _)| *edge == monotonic)
+                    {
+                        pending.take()
+                    } else {
+                        None
+                    }
+                };
+                if let Some((_, settle, lease)) = invalidation {
+                    if settle {
+                        action.settle_engine();
+                    } else {
+                        lease.revoke();
+                    }
+                }
+                if !monotonic {
+                    self.observations
+                        .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+                }
+            }
+        }
+    }
+    impl catcoms_rt::Clock for AdmissionClock {
+        fn now_ms(&self) -> u64 {
+            self.observe(false);
+            self.inner.now_ms()
+        }
+        fn monotonic_ms(&self) -> u64 {
+            self.observe(true);
+            self.inner.monotonic_ms()
+        }
+        fn sleep(&self, duration: std::time::Duration) -> futures::future::BoxFuture<'_, ()> {
+            self.inner.sleep(duration)
+        }
+    }
+    fn admission_fixture() -> (
+        Arc<CryptoAction>,
+        Arc<AdmissionClock>,
+        Arc<Resources>,
+        CallLease,
+    ) {
+        let pool = Arc::new(Resources::default());
+        let call = CallLease::default();
+        let clock = Arc::new(AdmissionClock {
+            inner: ManualClock::new(1000),
+            action: Mutex::new(None),
+            native: Mutex::new(()),
+            invalidate: Mutex::new(None),
+            armed: std::sync::atomic::AtomicBool::new(false),
+            observations: std::sync::atomic::AtomicUsize::new(0),
+        });
+        let mut queue = ActionQueue::default();
+        let prepared = queue
+            .prepare(Key::Derive([1; 32]), allocation(&pool, &call))
+            .unwrap();
+        let authority = CryptoAuthority::new(
+            call.clone(),
+            CallLease::default(),
+            clock.clone(),
+            16_000,
+            u64::MAX,
+        )
+        .unwrap();
+        let action = queue.publish_derive(prepared, setup(1), authority);
+        *clock.action.lock().unwrap() = Some(Arc::downgrade(&action));
+        clock
+            .armed
+            .store(true, std::sync::atomic::Ordering::Release);
+        (action, clock, pool, call)
+    }
+
+    #[test]
+    fn native_admission_samples_clock_before_engine_and_final_native_fence() {
+        let (action, clock, pool, _) = admission_fixture();
+        let before = pool.counts();
+        // A native refusal has no first effect and cannot consume the action's eligibility.
+        assert_eq!(
+            action.with_engine_admission(action.engine_bytes(), |_| Err::<u64, _>(
+                VoiceError::Unauthorized
+            )),
+            Err(VoiceError::Unauthorized)
+        );
+        assert_eq!(pool.counts(), before);
+        for _ in 0..2 {
+            let serial = action
+                .with_engine_admission(action.engine_bytes(), |admission| {
+                    let _native = clock.native.lock().unwrap();
+                    admission.commit()
+                })
+                .unwrap();
+            assert_eq!(serial, action.serial());
+            assert_eq!(pool.counts().1, 1, "exact retry shares the original engine");
+        }
+        assert_eq!(
+            clock
+                .observations
+                .load(std::sync::atomic::Ordering::Acquire),
+            3
+        );
+        action.settle_engine();
+        assert_eq!(pool.counts().1, 0);
+        assert!(action.admit_engine(action.engine_bytes()).is_err());
+    }
+
+    #[test]
+    fn handoff_snapshot_samples_clock_outside_engine_and_ack_remains_independent() {
+        let (action, clock, _, call) = admission_fixture();
+        // The fixture Clock asserts Engine and native gates are available on EVERY callback.
+        assert!(!action.handoff_status().acknowledged);
+        action.admit_engine(action.engine_bytes()).unwrap();
+        clock
+            .armed
+            .store(false, std::sync::atomic::Ordering::Release);
+        let receipt = finish(&action, CryptoOutcome::Derived);
+        clock
+            .armed
+            .store(true, std::sync::atomic::Ordering::Release);
+        let status = action.handoff_status();
+        assert!(!status.acknowledged && !status.engine.settled);
+        assert!(receipt.same_transition(status.engine.receipt.as_ref().unwrap()));
+        call.revoke();
+        action.settle_engine();
+        let status = action.handoff_status();
+        assert!(status.engine.settled);
+        assert!(status.engine.receipt.unwrap().retired);
+        assert!(
+            !status.acknowledged,
+            "retirement and settlement are not an ACK"
+        );
+        action.acknowledge_result(&receipt).unwrap();
+        assert!(action.handoff_status().acknowledged);
+        assert!(action.input().is_err());
+        assert!(!action.is_pending());
+    }
+
+    #[test]
+    fn final_clock_revocation_or_settlement_before_commit_cannot_admit() {
+        for monotonic in [false, true] {
+            for settle in [false, true] {
+                let (action, clock, pool, call) = admission_fixture();
+                *clock.invalidate.lock().unwrap() = Some((monotonic, settle, call.clone()));
+                assert_eq!(
+                    action.with_engine_admission(action.engine_bytes(), |step| {
+                        let _native = clock.native.lock().unwrap();
+                        step.commit()
+                    }),
+                    Err(VoiceError::Unauthorized)
+                );
+                assert_eq!(
+                    pool.counts().1,
+                    0,
+                    "neither Clock callback can revive admission"
+                );
+                if settle {
+                    assert!(action.is_settled());
+                } else {
+                    assert!(!call.is_live());
+                }
+            }
+        }
+        for during_clock in [false, true] {
+            let (action, clock, pool, call) = admission_fixture();
+            if during_clock {
+                *clock.invalidate.lock().unwrap() = Some((false, false, call.clone()));
+            }
+            let result = action.with_engine_admission(action.engine_bytes(), |admission| {
+                let _native = clock.native.lock().unwrap();
+                if !during_clock {
+                    call.revoke();
+                }
+                admission.commit()
+            });
+            assert_eq!(result, Err(VoiceError::Unauthorized));
+            assert_eq!(pool.counts().1, 0);
+        }
+        let (action, clock, pool, _) = admission_fixture();
+        assert_eq!(
+            action.with_engine_admission(action.engine_bytes(), |admission| {
+                let _native = clock.native.lock().unwrap();
+                action.settle_engine();
+                admission.commit()
+            }),
+            Err(VoiceError::Unauthorized)
+        );
+        assert_eq!(pool.counts().1, 0);
     }
 
     #[test]
@@ -1332,7 +1625,10 @@ mod tests {
         assert_eq!(pool.counts(), (0, 0));
         queue.serial = 0;
         let pressure = pool
-            .reserve(allocation(&pool, &call).scope.group, 256 * 1024)
+            .reserve(
+                allocation(&pool, &call).scope.group,
+                crate::voice_v2::resources::GROUP_BYTES,
+            )
             .unwrap();
         assert!(queue
             .prepare(Key::Derive([1; 32]), allocation(&pool, &call))

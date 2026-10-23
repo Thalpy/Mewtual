@@ -168,8 +168,16 @@ fn sdp_without_prepaid_readiness_and_crossed_offer_refuse_without_nonce_or_repla
     };
     assert_eq!(reserve(&mut a, &mut rng).err(), Some(VoiceError::Capacity));
     assert_eq!(a.ledger.pairs[&HANDSHAKE].next, 0);
+    // Refuse at the ACTUAL reserve boundary, including after a reviewed copy reduction.
+    // A fixed40KiB pressure ceased to be pressure when SDP moved224→192KiB; the security
+    // contract is still refusal before nonce/replay consumption when prepayment cannot fit.
     let pressure = pool
-        .charge(a.context.scope.group, 40 * 1024, ResourceKind::Retained)
+        .charge(
+            a.context.scope.group,
+            crate::voice_v2::resources::GROUP_BYTES - super::super::negotiation::EXCHANGE_BYTES + 1
+                - pool.counts().0,
+            ResourceKind::Retained,
+        )
         .unwrap();
     assert_eq!(a.prepare_sdp(&clock).err(), Some(VoiceError::Capacity));
     assert!(a.ledger.sdp.is_none());
@@ -1741,7 +1749,11 @@ fn engine_and_packet_cache_share_credits_and_refusal_does_not_allocate_a_nonce()
     let mut f = fixture();
     let full = f
         .resources
-        .charge(f.a.context.scope.group, 256 * 1024, ResourceKind::Retained)
+        .charge(
+            f.a.context.scope.group,
+            crate::voice_v2::resources::GROUP_BYTES,
+            ResourceKind::Retained,
+        )
         .unwrap();
     assert_eq!(
         f.a.reserve(&f.clock, &mut f.rng).err(),
