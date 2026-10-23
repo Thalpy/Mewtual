@@ -1,5 +1,18 @@
 # Mewtual; Handover
 
+## Tokio advisory follow-up (23 October; full validation running)
+
+After the separate deadline correction7b9af8d5 was pushed, local/CI cargo-deny exposed
+RUSTSEC-2026-0386 in existing Tokio1.52.3. Both lockfiles now select patched1.53.3, changing
+only that package's version/checksum. No advisory exception or other package/edge changes.
+Cargo's initial precise update also rerouted existing Windows/socket dependency edges;
+those generated locks are saved under task target but are not the reviewed candidate.
+Complete `cargo metadata --locked --offline` validates the narrower locks in BOTH workspaces,
+and current cargo-deny passes (existing duplicate/advisory-not-detected warnings remain).
+Root strict Clippy/full suite are running on this patched checkpoint. The native733 pass
+below predates this dependency change; patched native tests/check/lint/build/startup remain
+pending. Frontend source/lockfile is unchanged from its2,577-test/check/build-passing run.
+
 ## PR53 deadline review correction (23 October; validation in progress)
 
 `target/communication-admission-deadline-worktree` isolates the review finding against

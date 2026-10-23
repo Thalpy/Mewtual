@@ -14,12 +14,15 @@ use catcoms_sync::voice_v2::{CallGrant, VoiceError};
 use std::sync::Arc;
 
 const FACTORY_BYTES: usize = 4096;
-// Pinned Tokio 1.52.3 task Cell Header/Core/Trailer (64-byte alignment, scheduler, hooks,
+// Pinned Tokio 1.53.3 task Cell Header/Core/Trailer (64-byte alignment, scheduler, hooks,
 // stage discriminator and join waker), one sequential oneshot Inner<Result<Arc<Action>>>
 // or Inner<Result<PairReceipt>>, its Arc counters and an actor-envelope copy. The actual
 // future/output/handle are measured separately below. This allowance does not claim bounds
 // on general allocator bookkeeping, thread stacks or the whole Tokio runtime. Re-audit on a
 // Tokio task/oneshot layout or actor command change; the locked dependency is intentional.
+// Re-audited for 1.53.3: Header's scheduled_at uses the zero-sized schedule-latency mock
+// in our supported feature configuration. Enabling that instrumentation requires a new
+// inventory; the separate measured future/output checks do not account for runtime hooks.
 const TASK_AND_REPLY_BYTES: usize = 1024;
 // Existing protected 96 KiB Workflow supplies this variable loan. No extra engine lane or
 // group/process limit is introduced; framed input/result copies still debit this exact Phase.
