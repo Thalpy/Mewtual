@@ -32,7 +32,16 @@ progressing. It was removed from the live helper; exact original authenticated h
 remain, and isolated full-pool tests still enforce no new credit. Actual child Rejected receipt
 recovery through this new framed handler remains a focused coverage follow-up; Root's rejection
 and generic result-history contracts already have separate tests. This run does not claim it.
-Full current native/static checks remain pending. Child Input, engine/result IPC,
+The complete native run finished725 passed/2 failed in675.93s. Both failures were existing
+active Keep/private-download recovery after B restart, outside this handoff diff. They passed
+an isolated serial rerun2/2 in25.39s; this does not erase the full-run failures or establish their
+cause. File recovery implementation remains the other agent's area. Native sign-off stays open
+pending reconciliation under combined load; no timeout or assertion was relaxed. Native check
+and strict all-target/all-feature Clippy pass. Full frontend2,577, current Svelte0/0 and production
+build pass; both formatting and ambient gates pass. Current Root sources/manifests remain
+unchanged from the previously validated3,310-test checkpoint; a fresh complete Root run remains
+pending. No startup/flow rerun is required for this inactive, non-setup/non-chat increment.
+Child Input, engine/result IPC,
 browser key/Phase transfer, SDP/ICE/RTC, live activation and media remain unfinished. External
 download resume and the other signalling checkout remain untouched.
 
