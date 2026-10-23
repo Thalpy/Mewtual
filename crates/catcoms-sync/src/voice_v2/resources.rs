@@ -17,6 +17,10 @@ pub const PROCESS_BYTES: usize = 2 * 1024 * 1024;
 pub const GROUP_BYTES: usize = 512 * 1024;
 const GROUP_RECORDS: usize = 1024;
 const SLOT_KINDS: usize = 8;
+mod group_lanes;
+pub(crate) use group_lanes::GroupForwardLanes;
+#[cfg(test)]
+pub(super) use group_lanes::GROUP_FORWARD_METADATA_BYTES;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum ResourceKind {
@@ -51,6 +55,7 @@ struct Counts {
     slots: [usize; SLOT_KINDS],
     exchange: std::sync::Weak<super::negotiation::Exchange>,
     workflow: std::sync::Weak<super::chain::Workflow>,
+    outgoing_lanes: std::sync::Weak<GroupForwardLanes>,
 }
 #[derive(Default)]
 struct State {
@@ -126,7 +131,13 @@ struct LaneState {
     busy: bool,
     closed: bool,
 }
-struct LaneBorrow(Arc<WorkLane>);
+struct LaneBorrow {
+    lane: Arc<WorkLane>,
+    // An actual Lower, including ordinary helper/public work borrowing an idle shared
+    // lane, keeps the ORIGINAL group owner/payment alive. Lane ownership alone would let
+    // its weak index expire and a replacement factory reserve another two slots.
+    group: Option<Arc<GroupForwardLanes>>,
+}
 redacted_debug!(WorkLane);
 impl WorkLane {
     /// Retirement releases an idle lane. An actual borrower remains charged until its last
@@ -151,12 +162,15 @@ impl WorkLane {
             return Err(VoiceError::Capacity);
         }
         state.busy = true;
-        Ok(LaneBorrow(self.clone()))
+        Ok(LaneBorrow {
+            lane: self.clone(),
+            group: None,
+        })
     }
 }
 impl Drop for LaneBorrow {
     fn drop(&mut self) {
-        let mut state = self.0.state.lock().unwrap_or_else(|e| e.into_inner());
+        let mut state = self.lane.state.lock().unwrap_or_else(|e| e.into_inner());
         assert!(state.busy, "one actual work lane borrower");
         state.busy = false;
         if state.closed {
@@ -314,6 +328,18 @@ impl Resources {
             workflow.collect_expired(mono);
         }
     }
+    /// Compare a supplied actual packet producer with the current original owner. Upgrade
+    /// under Pool, then return the strong owner outside it; never export an unpaid dead Weak.
+    pub(crate) fn workflow(&self, group: [u8; 32]) -> Option<Arc<super::chain::Workflow>> {
+        let workflow = {
+            let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+            state
+                .groups
+                .get(&group)
+                .and_then(|counts| counts.workflow.upgrade())
+        };
+        workflow
+    }
     pub(crate) fn register_exchange(
         &self,
         group: [u8; 32],
@@ -343,7 +369,17 @@ impl Resources {
         bytes: usize,
         kind: ResourceKind,
     ) -> Result<Credit, VoiceError> {
-        self.charge_inner(group, bytes, kind, false)
+        match self.charge_inner(group, bytes, kind, false) {
+            Err(VoiceError::Capacity) if kind == ResourceKind::Forward && bytes != 0 => {
+                // Public/helper work may borrow this group's idle native outgoing capacity.
+                // This does not mint another slot or relax byte/group/process limits. The
+                // scheduler still decides fair order; real old requests keep their owner.
+                self.existing_group_forward_lanes(group)
+                    .ok_or(VoiceError::Capacity)?
+                    .charge_ordinary(self, group, bytes)
+            }
+            result => result,
+        }
     }
     fn charge_inner(
         self: &Arc<Self>,

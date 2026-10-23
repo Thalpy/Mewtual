@@ -134,8 +134,12 @@ enum Work {
 pub(super) struct RetainedEnvelope<'a> {
     envelope: voice_v2::EnvelopeRef<'a>,
     hash: [u8; 32],
+    progress: voice_v2::source::SourceProgress<'a>,
 }
 impl RetainedEnvelope<'_> {
+    pub(super) fn progress(&self) -> voice_v2::source::SourceProgress<'_> {
+        self.progress
+    }
     pub(super) fn object(&self) -> &voice_v2::SignedObject {
         self.envelope.object()
     }
@@ -157,12 +161,10 @@ impl Work {
         RetainedEnvelope {
             envelope: self.envelope(),
             hash: self.object_hash(),
-        }
-    }
-    fn exchange(&self) -> Option<Arc<voice_v2::negotiation::Exchange>> {
-        match self {
-            Self::Source { job, .. } => job.exchange(),
-            Self::Helper { .. } => None,
+            progress: match self {
+                Self::Source { job, .. } => job.progress(),
+                Self::Helper { .. } => voice_v2::source::SourceProgress::Ordinary,
+            },
         }
     }
     fn peer(&self) -> PeerId {
@@ -303,6 +305,12 @@ impl fmt::Debug for CompletedVoiceSource {
     }
 }
 impl<T: MeshTransport> PendingVoiceSource<T> {
+    #[cfg(test)]
+    pub(crate) fn keepalive_for_test(&self) -> SharedRequestKeepalive {
+        // Observe the SAME actual prepared flight, as a retained transport cancellation or
+        // completed output does. Never fabricate a separate credit or retirement witness.
+        self.0.job.keepalive()
+    }
     pub fn peer(&self) -> PeerId {
         self.0.peer()
     }
@@ -699,7 +707,6 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
                     .map_err(VoiceCompletionFailure::terminal)?,
             )
             .map_err(VoiceCompletionFailure::terminal)?;
-        let progress = completed.job.exchange();
         let status = if let Ok(response) = &completed.response {
             match self.verify_voice_response(
                 completed.job.peer(),
@@ -707,7 +714,6 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
                 completed.job.object_hash(),
                 response,
                 Some(completed.job.retained()),
-                progress.as_ref(),
             ) {
                 Ok(status) => Some(status),
                 Err(error @ (VoiceError::Capacity | VoiceError::RateLimited)) => {

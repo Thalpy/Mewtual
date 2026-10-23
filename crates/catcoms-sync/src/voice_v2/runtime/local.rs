@@ -91,9 +91,10 @@ impl ActorOwner {
             }
         })
     }
-    /// Reserve only the original origin/key binding's existing bounded pin position. Samples
-    /// precede both try-locks, and a refusal spends no requester/setup/room allowance. A second
-    /// final native transaction must still admit the pair; this is protective capacity only.
+    /// Prepay endpoint origin rows and the original key binding's bounded pin position. Samples
+    /// precede both try-locks; refusal spends no requester/setup/room allowance. A later failed
+    /// pin/publication may leave the normal paid60s rows, never refreshed traffic buckets.
+    /// A final native transaction must still admit the pair; this is protective capacity only.
     pub(crate) fn prepare_pair_pin(
         &self,
         binding: &super::super::packets::PairBinding,
@@ -124,6 +125,16 @@ impl ActorOwner {
         {
             return Err(VoiceError::Unauthorized);
         }
+        // A protected pair can publish its first signed confirmation before the local
+        // Announcement has entered Source. Prepay BOTH existing origin/requester records
+        // before accepting that pair, so Source admission and its peer's ACK cannot ask the
+        // ordinary pool for a new row after the confirmation envelope was admitted. This
+        // creates no traffic allowance, resets no bucket and keeps normal60s row retention.
+        state.limits.prepare_exchange_members(
+            &[context.local, binding.peer],
+            &self.resources,
+            mono,
+        )?;
         state
             .limits
             .protect_pair(binding.peer, binding.join, binding.key_ref, pin, mono)?;

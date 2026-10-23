@@ -288,6 +288,10 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
     pub fn pump_voice_endpoint(&mut self) -> Result<(), VoiceError> {
         self.reconcile_voice_actor();
         self.observe_voice_directory();
+        // A published confirmation/SDP/ICE packet must not depend on a caller retaining a
+        // copied payload or explicitly queueing it. Run before public response work, whose
+        // four-item bound may return early. Source rechecks the exact original authority.
+        self.pump_voice_packet_sources()?;
         let clock = self.voice_v2_clock();
         let members: HashSet<_> = self.group.member_device_ids().into_iter().collect();
         let announcement = {

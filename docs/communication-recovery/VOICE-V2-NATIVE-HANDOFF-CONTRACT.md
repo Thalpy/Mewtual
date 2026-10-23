@@ -81,17 +81,43 @@ Closing unused12-row claims does not remove those records. Native32-row and brow
 per-chain fixed-history limits also need a supported multi-peer lifecycle. A one-pair TCP test
 cannot establish the advertised sixteen-peer upper bound.
 
-Do not stack the current reservations and assume that512KiB solves progress: confirmation
-reserves two Forward lanes and SDP reserves another two, exhausting all four group slots.
-Confirmation Source currently borrows ordinary slots, so it cannot retry Finish after that
-overlap. Public discovery and member helper forwards also need a scheduling opportunity.
+The continuation candidate shares two actual outgoing Forward positions per native group
+between confirmation and SDP phases. Their independent1KiB metadata payment is outside both
+phase variable envelopes. Each actual Lower retains the SAME shared owner; closing a phase
+takes only that phase's handle and drops it outside its state fence. Retained closed inputs
+cannot pin idle process positions. Public/helper work can also borrow an idle shared position,
+with its own ordinary byte payment and unchanged authentication, slot and attempt limits.
 
-The next design must share or safely lend original outgoing progress lanes across native
-phases, while leaving authenticated public/helper work able to progress. Every actual Lower
-must retain the original lane-owner/payment through transport retirement; weak-zero, timeout
-and cancellation cannot permit a replacement reservation to escape those counts. Phase close
-must not close capacity that another phase still owns. Preserve the one original Source attempt
-budget and select real capacity before spending an attempt.
+Focused Root voice and native handoff/layout checks pass; full validation of this increment
+is in progress. Protected outgoing packets now
+retain their original typed Workflow; the exact Source activity identity includes its
+allocation. Source scratch, records and Lower preparation borrow that original phase. The
+private retained ACK view binds envelope/hash and borrowed progress together. Actor admission
+compares the supplied owner against the current native index, pool/group and live phase;
+public ingress cannot select a Workflow. Busy original Crypto capacity retains the SAME
+completion for retry after actual SDK settlement, with no replacement budget or Source
+attempt reset. Actual protected publication/native pump/Source/authenticated Refused ACK/End
+integration now passes under full ordinary-pool pressure, including late actual Lower custody.
+It does not prove positive remote decrypt, browser SDK or RTC execution.
+
+A permanently ended actual join/watch now permits early Source map collection once its
+active Flight count reaches zero. A live call's packet/pair/chain retirement does not erase
+attempt history. Map removal is not drainage proof: retained SourceActivity, FlightAuthority
+and actual Lower owners still retain their original payments. Native activation must issue
+fresh serialized join/watch incarnations; equal public metadata cannot authorize adoption.
+The collection and signed Source/ACK/End regressions pass the495-test focused voice gate.
+
+Both endpoint origin/requester rows are prepaid before protected pair admission. Scheduling
+also prepares the selected immediate responder's row before spending a Source attempt; an
+unseen helper's row-pressure refusal preserves the original packet/deadline/attempt budget.
+No traffic bucket is reset. The production endpoint pump now borrows only its32-row native
+Published cache and pays Source's own copy before cloning it. Four NEW insertions are allowed
+per pass; up to32 bounded failed preparations are possible. Cached metadata and stale rows
+cannot starve a later live row. It borrows the paid Actor member map after outer MLS/directory
+observation; no new roster scratch is constructed. Broader process contention, complete native/
+browser composition and multi-peer history/phase transfer remain open. Preserve the one original Source
+attempt budget and select real capacity before spending an attempt; weak-zero, timeout and
+cancellation never refund an outstanding actual Lower.
 
 Successful confirmation-to-SDP transfer must also preserve the final Finish packet. A local
 seal, result ACK/settlement or HelperQueued is not evidence that the peer opened Finish. End

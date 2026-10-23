@@ -567,6 +567,11 @@ impl LocalJoin {
         self.owned(authority)?;
         self.ledger.retire_outgoing(id, authority)
     }
+    /// Inspect only already-published native packets, borrowing bytes from their original
+    /// payment until Source can admit its own paid copy. This iterator grants no authority.
+    pub(crate) fn published_source_packets(&self) -> impl Iterator<Item = &SignedObject> {
+        self.ledger.published_source_packets()
+    }
     /// Only the actual cached outgoing ledger packet gets an encrypted source grant. Its pair
     /// lease closes on timeout/newer-pair promotion even when this local join remains active.
     pub fn source_packet_activity(

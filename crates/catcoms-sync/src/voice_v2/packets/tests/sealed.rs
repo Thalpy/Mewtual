@@ -53,6 +53,7 @@ fn abandoned_signed_preparation_is_not_source_visible_and_exact_retry_never_sign
     assert_eq!(calls.load(Ordering::Acquire), 1);
     assert_eq!(f.resources.counts(), before);
     assert!(f.a.ledger.outgoing[&draft.id].sealed.published().is_none());
+    assert_eq!(f.a.ledger.published_source_packets().count(), 0);
     assert!(f
         .a
         .ledger
@@ -79,6 +80,10 @@ fn abandoned_signed_preparation_is_not_source_visible_and_exact_retry_never_sign
         .unwrap();
     let published = prepared.publish();
     assert_eq!(published, inert);
+    assert_eq!(
+        f.a.ledger.published_source_packets().collect::<Vec<_>>(),
+        vec![&published]
+    );
     assert_eq!(calls.load(Ordering::Acquire), 1);
     assert!(f
         .a

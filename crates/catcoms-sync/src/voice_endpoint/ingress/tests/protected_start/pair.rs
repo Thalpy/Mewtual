@@ -579,7 +579,9 @@ async fn root_pair_final_native_contention_revokes_unpublished_pin_and_preserves
             0,
             "an unpublished refusal leaves no live origin pin"
         );
-        assert_eq!(runtime.resources().counts(), before);
+        // Preparation now prepays the local source row too. A later publication refusal
+        // leaves that normal2KiB/60s row paid, with no traffic debit or live pin leaked.
+        assert_eq!(runtime.resources().counts(), (before.0 + 2048, before.1));
         let first = root.prepare_voice_pair(&grant, request).unwrap();
         assert_eq!(state(&root), (1, 1, 1));
         assert_eq!(pins(), 1);

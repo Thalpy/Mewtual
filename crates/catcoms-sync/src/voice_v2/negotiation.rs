@@ -6,7 +6,9 @@
 //! Offer must be refused before positive admission; this contract does not solve glare. The
 //! phase quotas count retained terminal records and actual lower/engine/result owners too.
 
-use super::resources::{ByteBudget, Credit, Reservation, ResourceKind, Resources, WorkLane};
+use super::resources::{
+    ByteBudget, Credit, GroupForwardLanes, Reservation, ResourceKind, Resources, WorkLane,
+};
 use super::{CallLease, EncryptedKind, Scope, VoiceError, MAX_SDP_PLAINTEXT, ROUTE_METADATA_BYTES};
 use catcoms_crypto::DeviceId;
 use std::sync::{Arc, Mutex};
@@ -60,6 +62,8 @@ impl Stage {
 }
 struct State {
     closed: bool,
+    // Retired outside the phase fence; actual Lower borrowers keep original group custody.
+    lower_lanes: Option<Arc<GroupForwardLanes>>,
     used: [usize; STAGES],
     // Issuance is irreversible at publication. Actual input occupancy can drain without
     // permitting a second seal/open identity to steal the opposite direction's reserved row.
@@ -81,7 +85,6 @@ pub struct Exchange {
     group: [u8; 32],
     reserve: Arc<Reservation>,
     lane: Arc<WorkLane>,
-    lower_lanes: [Arc<WorkLane>; 2],
     state: Mutex<State>,
     binding: Option<Binding>,
     live: CallLease,
@@ -211,10 +214,7 @@ impl Exchange {
     ) -> Result<Arc<Self>, VoiceError> {
         let reserve = resources.reserve(group, EXCHANGE_BYTES)?;
         let lane = resources.reserve_crypto_lane(group)?;
-        let lower_lanes = [
-            resources.reserve_forward_lane(group)?,
-            resources.reserve_forward_lane(group)?,
-        ];
+        let lower_lanes = resources.group_forward_lanes(group)?;
         let metadata = ByteBudget::Reserved(reserve.clone()).charge(
             &resources,
             group,
@@ -226,9 +226,9 @@ impl Exchange {
             group,
             reserve,
             lane,
-            lower_lanes,
             state: Mutex::new(State {
                 closed: false,
+                lower_lanes: Some(lower_lanes),
                 used: [0; STAGES],
                 action_preparing: [false; 2],
                 action_issued: [false; 2],
@@ -318,18 +318,11 @@ impl Exchange {
             return Err(VoiceError::Capacity);
         }
         let credit = if kind == ResourceKind::Forward {
-            let mut found = Err(VoiceError::Capacity);
-            for lane in &self.lower_lanes {
-                found = ByteBudget::ReservedLane {
-                    reservation: self.reserve.clone(),
-                    lane: lane.clone(),
-                }
-                .charge(&self.resources, self.group, bytes, kind);
-                if !matches!(found, Err(VoiceError::Capacity)) {
-                    break;
-                }
-            }
-            found?
+            state
+                .lower_lanes
+                .as_ref()
+                .ok_or(VoiceError::Unauthorized)?
+                .charge(&self.resources, self.group, &self.reserve, bytes)?
         } else {
             ByteBudget::ReservedLane {
                 reservation: self.reserve.clone(),
@@ -407,18 +400,21 @@ impl Exchange {
     /// Retire effects separately through their actual protocol leases. This releases unused
     /// capacity only. Actual stage credits keep both this owner and their retired lane alive.
     pub(crate) fn close(&self) {
-        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
-        if state.closed {
-            return;
-        }
-        state.closed = true;
+        let lower_lanes = {
+            let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+            if state.closed {
+                return;
+            }
+            state.closed = true;
+            state.lower_lanes.take()
+        };
         self.live.revoke();
         self.reserve.close();
         self.action_slots.close();
         self.lane.close();
-        for lane in &self.lower_lanes {
-            lane.close();
-        }
+        // Never close another phase's capacity. Dropping this handle outside State releases
+        // idle slots only when no live phase or actual Lower retains the original owner.
+        drop(lower_lanes);
     }
 }
 impl Drop for Exchange {
@@ -454,6 +450,40 @@ impl SdpResult {
 mod tests {
     use super::*;
     #[test]
+    fn four_closed_exchanges_release_idle_slots_while_the_last_real_lower_stays_charged() {
+        let pool = Arc::new(Resources::default());
+        let phases: Vec<_> = (1..=4)
+            .map(|group| Exchange::new(pool.clone(), [group; 32]).unwrap())
+            .collect();
+        assert_eq!(
+            pool.charge([5; 32], 1, ResourceKind::Forward).err(),
+            Some(VoiceError::Capacity)
+        );
+        let late = Arc::new(phases[0].charge(Stage::Lower, 1).unwrap());
+        for phase in &phases {
+            phase.close();
+        }
+        let mut work: Vec<_> = (0..4)
+            .map(|_| pool.charge([5; 32], 1, ResourceKind::Forward).unwrap())
+            .collect();
+        for _ in 0..2 {
+            work.push(pool.charge([6; 32], 1, ResourceKind::Forward).unwrap());
+        }
+        assert_eq!(
+            pool.charge([6; 32], 1, ResourceKind::Forward).err(),
+            Some(VoiceError::Capacity)
+        );
+        let last = late.clone();
+        drop(late);
+        assert!(pool.charge([6; 32], 1, ResourceKind::Forward).is_err());
+        drop(last);
+        for _ in 0..2 {
+            work.push(pool.charge([6; 32], 1, ResourceKind::Forward).unwrap());
+        }
+        drop((work, phases));
+        assert_eq!(pool.counts(), (0, 0));
+    }
+    #[test]
     fn declared_maximum_exchange_fits_with_two_actual_lowers_and_retained_action_inputs() {
         let declared = METADATA_BYTES
             + 2 * PACKET_BYTES
@@ -469,7 +499,9 @@ mod tests {
         let ordinary = resources
             .charge(
                 [1; 32],
-                crate::voice_v2::resources::GROUP_BYTES - EXCHANGE_BYTES,
+                crate::voice_v2::resources::GROUP_BYTES
+                    - EXCHANGE_BYTES
+                    - super::super::resources::GROUP_FORWARD_METADATA_BYTES,
                 ResourceKind::Retained,
             )
             .unwrap();
@@ -529,7 +561,12 @@ mod tests {
         ));
         let bytes = resources.counts().0;
         drop(held);
-        assert_eq!(resources.counts().0, bytes - LOWER_BYTES);
+        // The last actual Lower also retires the independently funded shared group owner;
+        // closed Exchange handles intentionally retain neither idle slots nor that payment.
+        assert_eq!(
+            resources.counts().0,
+            bytes - LOWER_BYTES - super::super::resources::GROUP_FORWARD_METADATA_BYTES
+        );
         drop((exchange, ordinary));
         assert_eq!(resources.counts(), (0, 0));
     }

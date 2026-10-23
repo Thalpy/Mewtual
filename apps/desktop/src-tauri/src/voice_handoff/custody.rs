@@ -192,6 +192,12 @@ impl Drop for Buffer {
     }
 }
 impl CopyCustody {
+    /// Borrow the SAME paid phase already retained by this actual copy contribution. Native
+    /// Work needs no redundant strong Phase handle; this owner survives until after its
+    /// worker flag is cleared and the last-copy drainage notification can be observed.
+    pub(super) fn phase(&self) -> &Arc<Phase> {
+        &self.phase
+    }
     /// Provider output must have been prepaid before invoking that provider. Reject an
     /// unexpectedly larger backing allocation without ever handing it to another worker.
     pub(crate) fn adopt(self, mut bytes: Vec<u8>) -> Result<Buffer, VoiceError> {

@@ -1175,15 +1175,15 @@ impl ActorOwner {
         requester: DeviceId,
         frame: &[u8],
     ) -> Result<IngressTicket, VoiceError> {
-        self.admit_transport_verification_in_exchange(requester, frame, None, false)
+        self.admit_transport_verification_in_progress(requester, frame, None, false)
     }
-    /// Only an actual native source completion supplies `retained_exchange`; an untrusted
-    /// envelope can select capacity solely through the bounded binding peek below.
-    pub(crate) fn admit_transport_verification_in_exchange(
+    /// Only a SAME-job native retained envelope supplies progress. An untrusted envelope
+    /// can select an existing SDP loan through the bounded peek, never a confirmation owner.
+    pub(crate) fn admit_transport_verification_in_progress(
         &self,
         requester: DeviceId,
         frame: &[u8],
-        retained_exchange: Option<&Arc<super::negotiation::Exchange>>,
+        retained_progress: Option<super::source::SourceProgress<'_>>,
         trusted_completion: bool,
     ) -> Result<IngressTicket, VoiceError> {
         if frame.is_empty() || frame.len() > super::MAX_ENVELOPE {
@@ -1205,26 +1205,25 @@ impl ActorOwner {
         self.current()?;
         let bytes = VERIFICATION_BUFFERS * frame.len() + VERIFICATION_OVERHEAD;
         let current_exchange = self.resources.exchange(self.group.hash);
-        let progress = if let Some(expected) = retained_exchange {
-            if !current_exchange
-                .as_ref()
-                .is_some_and(|current| Arc::ptr_eq(current, expected))
-                || !expected.uses_resources(&self.resources, self.group.hash)
-                || !expected.is_live()
-            {
-                return Err(VoiceError::Unauthorized);
-            }
-            Some(expected.clone())
-        } else {
+        let peeked = if retained_progress.is_none() {
             current_exchange.filter(|exchange| exchange.lends_verification(requester, frame))
+        } else {
+            None
         };
+        let progress = retained_progress.unwrap_or_else(|| {
+            peeked.as_ref().map_or(
+                super::source::SourceProgress::Ordinary,
+                super::source::SourceProgress::Exchange,
+            )
+        });
+        progress.require_current(&self.resources, self.group.hash)?;
         let allocate = || {
-            if let Some(exchange) = &progress {
-                exchange.charge(super::negotiation::Stage::Crypto, bytes)
-            } else {
-                self.resources
-                    .charge(self.group.hash, bytes, ResourceKind::Crypto)
-            }
+            progress.charge(
+                &self.resources,
+                self.group.hash,
+                bytes,
+                super::negotiation::Stage::Crypto,
+            )
         };
         // A retained affine completion has already paid for its immutable request and lower
         // custody. Polling its own busy lane must not spend requester/process tokens repeatedly.

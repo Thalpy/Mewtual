@@ -855,7 +855,7 @@ async fn root_prepaid_sdp_routes_keep_two_actual_lowers_charged_after_cancellati
     drop(_join); // closes unused exchange headroom; actual lower phase loans remain owned
     let retained = resources.counts().0;
     drop(responders);
-    assert_eq!(source.counts(), (1, 2, 0));
+    assert_eq!(source.counts(), (0, 0, 0), "permanently ended activity is collected after both actual responders drain");
     assert!(resources.counts().0 < retained, "route metadata and both lower phase/lane charges retire with the real responders");
 }
 
@@ -883,7 +883,8 @@ async fn voice_transport_source_end_and_driver_replacement_reject_queued_or_comp
             completed
         };
         assert_eq!(f._source.complete_voice_source(completed).map_err(|failure| failure.into_error()), Err(VoiceError::Unauthorized), "scenario {scenario}");
-        assert_eq!(f._source.voice_transport_actor().unwrap().source().unwrap().counts().1, 1);
+        assert_eq!(f._source.voice_transport_actor().unwrap().source().unwrap().counts().1, if scenario < 2 { 0 } else { 1 },
+            "only native activity End permits early collection; driver churn preserves attempts");
         if scenario < 2 { assert_eq!(f._source.queue_voice_source(original, activity), Err(VoiceError::Unauthorized)); }
         drop(replacement);
     }
@@ -1082,7 +1083,7 @@ async fn voice_transport_replaced_watcher_seeds_fresh_challenge_without_adopting
     assert!(f.recipient.voice_watch_peers(&new_watch).unwrap().is_empty(), "cached candidates grant no liveness");
     assert_eq!(ledger.complete(old.finish(None)).unwrap(), voice_v2::source::SourceOutcome::Retired);
     drop(lower);
-    assert_eq!(ledger.counts(), (2, 2, 1));
+    assert_eq!(ledger.counts(), (1, 1, 1), "old ended watcher history leaves after its actual Lower; fresh watcher keeps its own attempt");
     drop(fresh);
 }
 

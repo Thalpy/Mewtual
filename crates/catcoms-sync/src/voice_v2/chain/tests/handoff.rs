@@ -388,7 +388,16 @@ fn explicit_confirmation_retirement_keeps_actual_input_and_lower_work_paid_until
         original.upgrade().is_some(),
         "actual lower work still owns the original workflow"
     );
-    assert_eq!(pool.counts(), (METADATA_BYTES + ROW_BYTES + 512, 0));
+    assert_eq!(
+        pool.counts(),
+        (
+            METADATA_BYTES
+                + ROW_BYTES
+                + 512
+                + crate::voice_v2::resources::GROUP_FORWARD_METADATA_BYTES,
+            0
+        )
+    );
     assert!(prepare_chain(pool.clone(), binding(9), Arc::new(slots::Slots::default())).is_err());
     drop(lower);
     assert!(original.upgrade().is_none());

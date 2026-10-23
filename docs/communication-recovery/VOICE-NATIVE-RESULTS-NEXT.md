@@ -1,5 +1,28 @@
 # Next voice milestone: native result recovery
 
+## Current Source continuation (23 October; full validation in progress)
+
+The accepted native/browser contract is recorded in `VOICE-V2-NATIVE-HANDOFF-CONTRACT.md`.
+Published Derive checkpoint `583794de` (draft PR #53) passed the full Root/native/frontend gates;
+its old pending-validation statements below are historical. The newer continuation is in
+`target/communication-v2-progress-worktree`. HANDOVER records its source, current results and
+remaining implementation boundaries; it is not yet published or fully validated.
+
+The native scheduler now transfers already-published encrypted packets to Source automatically,
+borrowing the actual cache and paying Source's copy before allocation. It preserves the original
+Workflow, activity/deadline/attempt budget and current paid member map. Confirmation/SDP share two
+actual outgoing group positions; actual Lower custody delays reuse/retirement. Permanent native
+End permits idle Source collection without waiting for signed expiry, while retaining all real
+late owners. Root495 focused voice and native221 handoff/layout tests pass. Read-only re-review
+resolved the added roster-copy/bound-wording findings; production remains disabled.
+
+Next implementation remains: original-parent-bound native confirmation-child factories and lost
+reply recovery; canonical seal/open Input and SDK result adapters; established browser-key/phase
+transfer; measured native/IPC/SDK/RTC composition and supported multi-peer histories; actual native
+SDP/ICE factories/ingress; VoiceV2Native/App wiring; real blocked-TCP negotiation and combined
+acceptance. Signed Refused ACK/late-Lower evidence is not successful remote decrypt or RTC. Member
+media relay and physical audio/network acceptance remain open; only one desktop is available.
+
 ## Current native Derive continuation (23 October; validation checkpoint)
 
 Branch `communication-native-live` in `target/communication-final-proof-worktree` continues

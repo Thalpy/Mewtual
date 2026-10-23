@@ -6,6 +6,7 @@ use voice_v2::presence::{LocalJoin, WatchAuthority};
 use voice_v2::JoinKey;
 mod derivation;
 mod pair;
+mod progress;
 
 fn key(seed: u8) -> JoinKey {
     JoinKey::new([seed; 32], hex::decode("046b17d1f2e12c4247f8bce6e563a440f277037d812deb33a0f4a13945d898c2964fe342e2fe1a7f9b8ee7eb4a7c0f9e162bce33576b315ececbb6406837bf51f5").unwrap().try_into().unwrap()).unwrap()

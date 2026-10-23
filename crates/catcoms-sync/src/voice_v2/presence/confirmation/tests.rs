@@ -1674,7 +1674,10 @@ fn sdp_readiness_fits_actual_retained_three_flight_confirmation_without_repeatin
         f.pool.counts().0,
         // The peer row already exists from the challenged proof. Readiness additionally
         // prepays the local issuer's normal 2 KiB row before reserving the workflow.
-        before.0 + super::super::super::negotiation::EXCHANGE_BYTES + 2048
+        before.0
+            + super::super::super::negotiation::EXCHANGE_BYTES
+            + 2048
+            + crate::voice_v2::resources::GROUP_FORWARD_METADATA_BYTES
     );
     assert!(f.pool.counts().0 <= crate::voice_v2::resources::GROUP_BYTES);
     let retry = f

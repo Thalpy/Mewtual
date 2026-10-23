@@ -99,11 +99,19 @@ struct Pending {
 struct PendingRetirement {
     row: Arc<Row>,
     owners: Option<Pending>,
-    actor_handoff: bool,
 }
 impl Drop for PendingRetirement {
     fn drop(&mut self) {
-        drop(self.owners.take());
+        // The moved Pending remains the sole source of this historical flag. Keeping a
+        // second copy in the ticket needlessly enlarged every paid retirement position.
+        // Snapshot before destruction, but publish Closed only AFTER all original owners
+        // have dropped outside the native guards. No retry can mutate a Closing Pending.
+        let owners = self
+            .owners
+            .take()
+            .expect("original pending retirement owners");
+        let actor_handoff = owners.handed_off;
+        drop(owners);
         {
             let mut state = self
                 .row
@@ -112,9 +120,7 @@ impl Drop for PendingRetirement {
                 .unwrap_or_else(|error| error.into_inner());
             debug_assert!(matches!(state.body, Body::ClosingPending));
             state.body = Body::ClosedPending;
-            state.status.pending = PendingStatus::Closed {
-                actor_handoff: self.actor_handoff,
-            };
+            state.status.pending = PendingStatus::Closed { actor_handoff };
             // No engine settlement, ACK or Phase drainage is inferred from local closure.
         }
         self.row.changed.notify_waiters();
@@ -817,11 +823,9 @@ impl Ledger {
             };
             pending
         };
-        let actor_handoff = pending.handed_off;
         Ok(ClosePending::Retire(PendingRetirement {
             row: row.clone(),
             owners: Some(pending),
-            actor_handoff,
         }))
     }
     /// Recover actual terminal/settlement metadata even after phase closure or a native
@@ -940,7 +944,6 @@ impl Ledger {
             WorkOwners {
                 selected: live.selected.clone(),
                 action: live.action.clone(),
-                phase: live.phase.clone(),
                 _custody: custody,
             }
         };
@@ -1196,7 +1199,7 @@ impl Drop for Registration {
 struct WorkOwners {
     selected: Arc<SelectedHandoffOwner>,
     action: Arc<CryptoAction>,
-    phase: Arc<Phase>,
+    // This actual contribution also retains the SAME Phase; no duplicate Arc is needed.
     // Actual objects drop before the final phase contribution.
     _custody: CopyCustody,
 }
@@ -1212,7 +1215,7 @@ impl Work {
         &self.owners.as_ref().expect("live work").action
     }
     pub(crate) fn phase(&self) -> &Arc<Phase> {
-        &self.owners.as_ref().expect("live work").phase
+        self.owners.as_ref().expect("live work")._custody.phase()
     }
     pub(crate) fn selected(&self) -> &SelectedHandoffOwner {
         &self.owners.as_ref().expect("live work").selected
@@ -1306,10 +1309,9 @@ impl Drop for Work {
         let WorkOwners {
             selected,
             action,
-            phase,
             _custody: custody,
         } = self.owners.take().expect("one original worker");
-        drop((selected, action, phase));
+        drop((selected, action));
         {
             let mut state = self
                 .row

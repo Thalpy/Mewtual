@@ -7,6 +7,7 @@ use crate::voice_v2::presence::PairSetup;
 use catcoms_crypto::DeviceKeypair;
 use catcoms_rt::ManualClock;
 mod handoff;
+mod progress;
 
 fn binding(seed: u8) -> Binding {
     Binding {
@@ -57,13 +58,15 @@ fn fixed_metadata_allowance_covers_retained_owner_layouts() {
     // reservation/lane owners and their Arc counters, and the preallocated weak-action list.
     // Actual action/input/result rows have separate credits. This is a growth guard for our
     // retained Rust owners, not an allocator-slack or framework/engine heap measurement.
-    const ARC_OWNERS: usize = 4 + 2 + 3 + 3 + 3;
+    // The two outgoing WorkLanes and their Arc headers now have an independent shared
+    // group payment. Workflow still counts its actual handle and all enlarged Credits.
+    const ARC_OWNERS: usize = 4 + 2 + 1 + 3 + 3;
     let bytes = size_of::<PlanBinding>()
         + size_of::<HistoryPlan>()
         + size_of::<PreparedChain>()
         + size_of::<Workflow>()
         + 2 * size_of::<Reservation>()
-        + 3 * size_of::<WorkLane>()
+        + size_of::<WorkLane>()
         + 3 * size_of::<slots::Slots>()
         + 3 * size_of::<slots::ReservedSlots>()
         + ARC_OWNERS * 2 * size_of::<usize>();
@@ -80,6 +83,120 @@ fn fixed_metadata_allowance_covers_retained_owner_layouts() {
         ConfirmationRetirement::OBSERVER_MEMORY_BYTES
     );
     assert!(observer <= ConfirmationRetirement::OBSERVER_MEMORY_BYTES);
+}
+
+#[test]
+fn four_closed_workflows_release_idle_process_slots_but_an_actual_late_lower_keeps_custody() {
+    let pool = Arc::new(Resources::default());
+    let mut phases = Vec::new();
+    for group in 1..=4 {
+        let mut bound = binding(group);
+        bound.scope.group = [group; 32];
+        let chain = prepare_chain(pool.clone(), bound, Arc::new(slots::Slots::default())).unwrap();
+        let workflow = chain
+            .control
+            .lock()
+            .unwrap()
+            .workflow
+            .as_ref()
+            .unwrap()
+            .clone();
+        phases.push((chain, workflow));
+    }
+    assert_eq!(
+        pool.charge([5; 32], 1, ResourceKind::Forward).err(),
+        Some(VoiceError::Capacity)
+    );
+    let late = Arc::new(
+        phases[0]
+            .1
+            .charge(&pool, [1; 32], 1, ResourceKind::Forward)
+            .unwrap(),
+    );
+    for (chain, _) in &phases {
+        chain.close();
+    }
+    // Keep every closed phase alive, as a late input/query handle would. Only the real
+    // Lower retains the shared two-position owner; closed idle handles release theirs.
+    let mut work: Vec<_> = (0..4)
+        .map(|_| pool.charge([5; 32], 1, ResourceKind::Forward).unwrap())
+        .collect();
+    for _ in 0..2 {
+        work.push(pool.charge([6; 32], 1, ResourceKind::Forward).unwrap());
+    }
+    assert_eq!(
+        pool.charge([6; 32], 1, ResourceKind::Forward).err(),
+        Some(VoiceError::Capacity)
+    );
+    let last = late.clone();
+    drop(late);
+    assert!(pool.charge([6; 32], 1, ResourceKind::Forward).is_err());
+    drop(last); // actual transport/output custody ends, not a timeout or synthetic refund
+    for _ in 0..2 {
+        work.push(pool.charge([6; 32], 1, ResourceKind::Forward).unwrap());
+    }
+    drop((work, phases));
+    assert_eq!(pool.counts(), (0, 0));
+}
+
+#[test]
+fn real_confirmation_and_sdp_share_capacity_under_full_ordinary_pressure_without_cross_close() {
+    use crate::voice_v2::negotiation::{Exchange, Stage};
+    let pool = Arc::new(Resources::default());
+    let bound = binding(1);
+    let group = bound.scope.group;
+    let chain = prepare_chain(pool.clone(), bound, Arc::new(slots::Slots::default())).unwrap();
+    let workflow = chain
+        .control
+        .lock()
+        .unwrap()
+        .workflow
+        .as_ref()
+        .unwrap()
+        .clone();
+    let exchange =
+        Exchange::new_for_test(pool.clone(), group, Arc::new(slots::Slots::default())).unwrap();
+    let confirmation_lower = workflow
+        .charge(&pool, group, 512, ResourceKind::Forward)
+        .unwrap();
+    let sdp_lower = exchange.charge(Stage::Lower, 512).unwrap();
+    // The actual phase pair reserves only TWO positions. Ordinary public/helper traffic can
+    // use the other two without borrowing another phase's protocol or prepaid byte authority.
+    let ordinary: Vec<_> = (0..2)
+        .map(|_| pool.charge(group, 512, ResourceKind::Forward).unwrap())
+        .collect();
+    let fill = pool
+        .charge(
+            group,
+            crate::voice_v2::resources::GROUP_BYTES - pool.counts().0,
+            ResourceKind::Retained,
+        )
+        .unwrap();
+    let before = pool.counts();
+    assert_eq!(
+        exchange.charge(Stage::Lower, 512).err(),
+        Some(VoiceError::Capacity)
+    );
+    assert_eq!(pool.counts(), before);
+    drop(confirmation_lower); // actual old transport returns its original shared position
+    let sdp_next = exchange.charge(Stage::Lower, 512).unwrap();
+    chain.close();
+    drop(sdp_lower);
+    // Closing the original confirmation phase cannot close the surviving SDP owner's lane.
+    let sdp_after_close = exchange.charge(Stage::Lower, 512).unwrap();
+    assert!(workflow
+        .charge(&pool, group, 1, ResourceKind::Forward)
+        .is_err());
+    drop((
+        sdp_next,
+        sdp_after_close,
+        exchange,
+        ordinary,
+        fill,
+        workflow,
+        chain,
+    ));
+    assert_eq!(pool.counts(), (0, 0));
 }
 
 #[test]
@@ -491,7 +608,13 @@ fn idle_close_releases_every_unused_byte_and_slot_despite_retained_handles() {
     let chain = prepare_chain(pool.clone(), bound.clone(), slots.clone()).unwrap();
     assert_eq!(
         pool.counts(),
-        (ROWS * ROW_BYTES + VARIABLE_BYTES + METADATA_BYTES, 1)
+        (
+            ROWS * ROW_BYTES
+                + VARIABLE_BYTES
+                + METADATA_BYTES
+                + crate::voice_v2::resources::GROUP_FORWARD_METADATA_BYTES,
+            1
+        )
     );
     let ordinary = slots.charge(20).unwrap();
     assert!(slots.charge(1).is_err(), "all twelve future rows protected");
@@ -726,7 +849,13 @@ fn concurrent_preparations_install_only_one_group_workflow_and_loser_returns_all
     assert_ne!(first.is_ok(), second.is_ok());
     assert_eq!(
         pool.counts(),
-        (ROWS * ROW_BYTES + VARIABLE_BYTES + METADATA_BYTES, 1)
+        (
+            ROWS * ROW_BYTES
+                + VARIABLE_BYTES
+                + METADATA_BYTES
+                + crate::voice_v2::resources::GROUP_FORWARD_METADATA_BYTES,
+            1
+        )
     );
     first.or(second).unwrap().close();
     assert_eq!(pool.counts(), (0, 0));

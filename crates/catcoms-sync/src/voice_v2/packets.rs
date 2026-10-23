@@ -141,6 +141,9 @@ struct Outgoing {
     // Protected output remains tied to its original chain after encryption has settled.
     // This is a revocation identity only, never Workflow progress custody.
     chain: Option<CallLease>,
+    // Exact protected producer, already retained by this packet's byte credit. Source must
+    // borrow this SAME capacity; a live chain lease alone carries no prepaid progress bytes.
+    workflow: Option<Arc<super::chain::Workflow>>,
     _credit: Credit,
     exchange: Option<Arc<Exchange>>,
     // Native table custody, separate from retained bytes and actual transport copies.
@@ -455,6 +458,7 @@ pub(super) struct SourcePacketAuthority {
     pair: CallLease,
     packet: CallLease,
     chain: Option<CallLease>,
+    workflow: Option<Arc<super::chain::Workflow>>,
     clock: Arc<dyn Clock>,
     deadline: u64,
     exchange: Option<Arc<Exchange>>,
@@ -483,6 +487,16 @@ impl SourcePacketAuthority {
     pub(super) fn exchange(&self) -> Option<Arc<Exchange>> {
         self.exchange.clone()
     }
+    pub(super) fn progress(&self) -> super::source::SourceProgress<'_> {
+        match (&self.workflow, &self.exchange) {
+            (Some(workflow), None) => super::source::SourceProgress::Workflow(workflow),
+            (None, Some(exchange)) => super::source::SourceProgress::Exchange(exchange),
+            (None, None) => super::source::SourceProgress::Ordinary,
+            // Native packet construction never combines confirmation and SDP producers.
+            // Keep this invariant explicit rather than silently selecting one payment.
+            (Some(_), Some(_)) => unreachable!("one original packet progress producer"),
+        }
+    }
     /// A native action can have a shorter lifetime than its signed packet. Capture that
     /// immutable deadline in queued work so an idle endpoint cannot extend it by omitting GC.
     pub(super) fn limit_deadline(mut self, deadline: u64) -> Result<Self, VoiceError> {
@@ -510,6 +524,11 @@ impl SourcePacketAuthority {
                 _ => false,
             }
             && self.deadline == other.deadline
+            && match (&self.workflow, &other.workflow) {
+                (None, None) => true,
+                (Some(first), Some(second)) => Arc::ptr_eq(first, second),
+                _ => false,
+            }
             && self.expires == other.expires
             && match (&self.exchange, &other.exchange) {
                 (None, None) => true,
@@ -1145,6 +1164,16 @@ impl PacketLedger {
             Ok(grant)
         }
     }
+    /// Bounded, borrowed cache inspection for the native sender. This neither signs an
+    /// object nor grants authority to send it; source_authority checks the actual owners.
+    pub(super) fn published_source_packets(&self) -> impl Iterator<Item = &SignedObject> {
+        // Never expose an inert Prepared signature to Source. Authority is obtained again
+        // from the exact original row before each admission; this iterator grants none.
+        self.outgoing
+            .values()
+            .take(RESERVATIONS)
+            .filter_map(|outgoing| outgoing.sealed.published())
+    }
     /// Exact native outgoing receipt, not a caller-supplied signature or a join-wide grant.
     /// Equality compares immutable fields without allocating canonical packet copies.
     pub(super) fn source_authority(
@@ -1182,6 +1211,7 @@ impl PacketLedger {
             pair: pair.live.clone(),
             packet: outgoing.live.clone(),
             chain: outgoing.chain.clone(),
+            workflow: outgoing.workflow.clone(),
             deadline: outgoing
                 .source_deadline
                 .min(self.sdp_deadline(outgoing.exchange.as_ref())?),

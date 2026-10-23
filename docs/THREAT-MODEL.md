@@ -1,5 +1,32 @@
 # Threat model; client integrity & enforcement boundaries
 
+## Shared native progress candidate (23 October; validation incomplete)
+
+The continuation candidate shares two outgoing group positions across confirmation and SDP,
+with an independent1KiB owner payment. Only actual Lower credits retain those positions after
+phase close; closed idle inputs do not. Public/helper work may borrow an idle shared position
+with its own ordinary bytes, without bypassing actual slot counts or authentication.
+
+Protected outgoing packets carry their actual original Workflow into Source. The private
+retained ACK view binds that payment to the same envelope and cached hash. Native verification
+compares its pool/group/current allocation and live phase, never choosing a Workflow for public
+ingress or falling back after refusal. Pair preparation also prepays both endpoint origin/
+requester records before publication, without granting or resetting traffic allowance. These
+rows keep their existing limits and60s retention independently of Workflow.
+
+The native endpoint pass borrows only Published packet objects and funds Source's own payload
+copy before allocation, with unchanged signature/activity/current-origin checks. Its private
+member predicate borrows the paid Actor map and drops Group/Policy before Clock/Source reentry.
+Its caller first reconciles MLS and observes the directory. The32-row scan admits at most four
+new packets; up to32 bounded failed preparations may occur, rather than four total preparations.
+Exact cached retries do not clone, spend origin quota again or reset deadlines/attempts. Permanent
+native End permits idle map collection, but never refunds retained activity/authority/Lower custody.
+
+Focused signed Source/native pump/authenticated Refused ACK/End evidence now passes, including
+late actual Lower retirement. It is not positive remote decrypt or browser/RTC evidence. Full
+validation and complete native/browser composition remain pending; production is disabled. See
+the accepted handoff contract for remaining activation gates.
+
 ## Native signalling capacity policy revision (23 October; validation in progress)
 
 The native group byte ceiling is now512KiB; the aggregate native process pool remains2MiB.

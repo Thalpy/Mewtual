@@ -1,12 +1,67 @@
 # Mewtual; Handover
 
+## V2 native Source progress (23 October; full validation in progress)
+
+Continue in `target/communication-v2-progress-worktree`, branch `communication-v2-progress`.
+Its runtime starts at `85621697`; `754d055a` carries the same native pressure-test correction
+as published `9aa5d7bd`. The validated Derive checkpoint is published as `583794de` on
+`communication-native-live`, draft PR #53. This newer Source increment has not yet been
+published or fully validated. Preserve Main UI and the external-download worktree.
+
+Implemented in the continuation:
+
+- Confirmation and SDP share two original outgoing group positions, with an independent1KiB
+  owner payment. Actual Lower credits retain that same owner through transport/output drainage.
+  Phase close releases its own handle outside State; retained closed inputs do not pin idle
+  slots. Ordinary helper/public work may borrow idle positions with its own paid bytes.
+- Protected outgoing packets retain their typed original Workflow. Source scratch/record/Lower
+  preparation and private same-job ACK verification borrow that exact capacity. Current pool,
+  group and actual owner comparisons reject foreign or retired phases, with no fallback budget.
+- Both endpoint origin/requester rows are prepaid before pair publication. The selected immediate
+  responder's row is prepared before Source attempt debit. Pressure never renews traffic buckets,
+  packet deadlines or the original send allowance.
+- The native endpoint pump now borrows Published packets from its bounded32-row ledger and pays
+  Source scratch/record custody before cloning its payload. It admits at most four new packets
+  per pass; up to32 bounded failed preparations are possible. Cached retries neither clone nor
+  renew state. Prepared signatures remain inert. The private pass borrows the already-paid
+  Actor member map, releasing its guards before Clock and Source calls; its outer caller first
+  reconciles MLS and observes the directory. It creates no additional roster scratch.
+- Permanent actual join/watch End permits early idle Source map collection. A live call's
+  packet/pair/chain retirement preserves attempt history. Map removal is not drainage proof:
+  external activities, authorities and actual Lower owners retain original payments. Production
+  join/watch factories use fresh RNG incarnations; a replacement cannot adopt the earlier lease.
+- The enlarged lane custody made the native row graph2056B, exceeding its2048B payment. Work now
+  borrows the SAME Phase already retained by CopyCustody, removing one redundant Arc. Actual
+  worker retirement still precedes last-copy drainage. No cap or inventory was loosened.
+
+Fresh focused evidence: **495 Root voice tests pass**, including original Source progress
+under full ordinary pressure, actual protected publication/native pump/signed transport Refused
+ACK/End/late-Lower retirement, revised-limit fairness, closed-phase slot release, borrowed cache
+retry, and current50-member Actor-map rejection. The latter checks current membership/owners;
+it does not instrument heap allocation. Native handoff **221 tests pass**, including unchanged
+row/codec layout guards. Full Root validation is now running; full native/frontend and native
+check remain pending for this increment. Strict Root Clippy passes. Read-only actual-diff review
+resolved the unpaid roster-copy MEDIUM and clarified the32-preparation bound; no blocker/high/
+medium remains in this slice. Logs are `target/native-progress-*.log` in this checkout.
+
+Production remains disabled. The authenticated refusal proves transport/custody, not positive
+remote decrypt, WebCrypto, SDP/ICE/RTC or media. Native confirmation child factories, browser
+phase/key transfer, native SDK result adapters, causal Finish-to-SDP transfer, supported multi-peer
+history/capacity, complete VoiceV2Native/App integration and blocked-TCP negotiation are still
+required. Member media relay and physical audio/network acceptance are not established. Only one
+physical desktop is available. Do not flip activation or call these complete.
+
 ## Native Derive and blocked-TCP continuation (23 October; validation checkpoint)
 
-Continue in `target/communication-final-proof-worktree`, branch `communication-native-live`,
-from accepted integration `18ac9585`. Publication awaits the full validation gates. Do not edit
-Main's unrelated UI changes or the external-download worktree. Full Root validation is running;
-full native validation has not started. The previous complete combined gates below apply only to
-their frozen source. Keep heavy Cargo jobs serial, `-j 2`, using the existing Root/native targets.
+Historical implementation checkpoint in `target/communication-final-proof-worktree`, branch
+`communication-native-live`, from accepted integration `18ac9585`. It is now published at
+`583794de` in draft PR #53: full Root3279 pass/24 existing ignored; native700 pass; frontend2531
+pass; Root/native formatting, strict Clippy, native check, Svelte, production frontend build,
+ambient gate, cargo-deny, all ten rendered Edge flows, native build and actual startup pass.
+The unchanged Edge harness needed execution outside its GPU-denying sandbox. Native pressure
+fillers were corrected to the actual512KiB policy before the final700-test rerun. Frozen logs
+are `target/native-live-*.log` in that checkout. These complete gates apply to that source;
+they do not validate the newer Source continuation above. Keep heavy Cargo jobs serial, `-j 2`.
 
 Implemented in this worktree, with production activation/action dispatch STILL CLOSED:
 
@@ -30,7 +85,7 @@ Implemented in this worktree, with production activation/action dispatch STILL C
   actual last-field publisher, including real late input custody, gates channel closure/GC.
   Native ticket layout remains within2KiB by reusing exclusive lifecycle storage/closure slots.
 
-Focused evidence on the current code (no full-suite sign-off):
+Historical focused evidence before that frozen full-suite checkpoint:
 
 - Root `cargo test -p catcoms-sync voice --lib -j 2`: **473 pass**, including normal
   dispatch mixed-version ingress/egress, duplicate/equivocation flood, both Clock callback edges,

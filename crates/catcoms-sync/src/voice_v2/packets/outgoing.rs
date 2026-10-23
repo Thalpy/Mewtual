@@ -259,6 +259,7 @@ impl PacketLedger {
                 live: CallLease::default(),
                 crypto: RevocationOwner::default(),
                 chain: chain.clone(),
+                workflow,
                 _credit: credit,
                 exchange: exchange.clone(),
                 _slot: slot,

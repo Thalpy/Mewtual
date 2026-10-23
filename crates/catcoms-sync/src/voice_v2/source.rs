@@ -7,7 +7,9 @@ use super::runtime::{ActorOwner, EffectAuthority};
 use super::*;
 use catcoms_rt::{Clock, PeerId, RequestAuthority, SharedRequestKeepalive};
 use futures::FutureExt;
+use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet};
+use std::fmt;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -17,6 +19,79 @@ const ATTEMPTS: u8 = 3;
 /// Eligibility delay only; shared byte/flight capacity and actual lower custody may delay it.
 const HEDGE_MS: u64 = 500;
 type Key = (DeviceId, MessageId);
+
+/// Borrowed capacity provenance from one immutable native packet. This is deliberately
+/// narrower than ByteBudget: public ingress cannot supply a reservation or select a Workflow.
+/// Root's retained ACK view carries this together with the SAME packet and cached hash.
+#[derive(Clone, Copy)]
+pub(crate) enum SourceProgress<'a> {
+    Ordinary,
+    Workflow(&'a Arc<super::chain::Workflow>),
+    Exchange(&'a Arc<super::negotiation::Exchange>),
+}
+impl fmt::Debug for SourceProgress<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("SourceProgress { .. }")
+    }
+}
+impl SourceProgress<'_> {
+    pub(crate) fn charge(
+        self,
+        resources: &Arc<Resources>,
+        group: [u8; 32],
+        bytes: usize,
+        stage: super::negotiation::Stage,
+    ) -> Result<Credit, VoiceError> {
+        use super::negotiation::Stage;
+        if !matches!(stage, Stage::Crypto | Stage::Source | Stage::Lower) {
+            return Err(VoiceError::Scope);
+        }
+        match self {
+            Self::Ordinary => resources.charge(group, bytes, stage.resource_kind()),
+            Self::Workflow(workflow) => {
+                workflow.charge(resources, group, bytes, stage.resource_kind())
+            }
+            Self::Exchange(exchange) => {
+                if !exchange.uses_resources(resources, group) {
+                    return Err(VoiceError::Scope);
+                }
+                exchange.charge(stage, bytes)
+            }
+        }
+    }
+    /// Lookup only COMPARES the actual supplied owner. It never constructs packet authority
+    /// or replaces a refused/retired owner with current ordinary or another phase's capacity.
+    pub(crate) fn require_current(
+        self,
+        resources: &Arc<Resources>,
+        group: [u8; 32],
+    ) -> Result<(), VoiceError> {
+        let current = match self {
+            Self::Ordinary => true,
+            Self::Workflow(expected) => {
+                expected.uses_resources(resources, group)
+                    && expected.is_live()
+                    && resources
+                        .workflow(group)
+                        .as_ref()
+                        .is_some_and(|actual| Arc::ptr_eq(actual, expected))
+            }
+            Self::Exchange(expected) => {
+                expected.uses_resources(resources, group)
+                    && expected.is_live()
+                    && resources
+                        .exchange(group)
+                        .as_ref()
+                        .is_some_and(|actual| Arc::ptr_eq(actual, expected))
+            }
+        };
+        if current {
+            Ok(())
+        } else {
+            Err(VoiceError::Unauthorized)
+        }
+    }
+}
 
 #[derive(Clone, PartialEq, Eq)]
 enum Incarnation {
@@ -60,6 +135,12 @@ pub struct SourceActivity {
     packet: Option<super::packets::SourcePacketAuthority>,
 }
 impl SourceActivity {
+    fn progress(&self) -> SourceProgress<'_> {
+        self.packet.as_ref().map_or(
+            SourceProgress::Ordinary,
+            super::packets::SourcePacketAuthority::progress,
+        )
+    }
     fn exchange(&self) -> Option<Arc<super::negotiation::Exchange>> {
         self.packet
             .as_ref()
@@ -294,8 +375,8 @@ redacted_debug!(
 );
 
 impl SourceJob {
-    pub(crate) fn exchange(&self) -> Option<Arc<super::negotiation::Exchange>> {
-        self.flight.packet.activity.exchange()
+    pub(crate) fn progress(&self) -> SourceProgress<'_> {
+        self.flight.packet.activity.progress()
     }
     pub fn peer(&self) -> PeerId {
         self.peer
@@ -349,9 +430,16 @@ impl SourceLedger {
         let now = self.clock.now_ms();
         let mono = self.clock.monotonic_ms();
         state.packets.retain(|_, packet| {
-            now <= packet.object.expires().saturating_add(CLOCK_SKEW_MS)
-                || mono < packet.deadline
-                || packet.active.load(Ordering::Acquire) != 0
+            // SourceState also fences new Flight publication. Actual Lower owners always
+            // retain custody; a permanently ended native join/watch needs no idle retry
+            // record until signed expiry. Check ONLY its irreversible activity lease: chain
+            // completion, room loss or pair retirement must not reset a live call's attempts.
+            // Map removal is not drainage proof: external activities/authorities may still
+            // retain the original Workflow/Packet and its actual credit after this removal.
+            packet.active.load(Ordering::Acquire) != 0
+                || (packet.activity.lease.is_live()
+                    && (now <= packet.object.expires().saturating_add(CLOCK_SKEW_MS)
+                        || mono < packet.deadline))
         });
         state.cursors.retain(|_, cursor| {
             now <= cursor.expires.saturating_add(CLOCK_SKEW_MS) || mono < cursor.deadline
@@ -366,6 +454,28 @@ impl SourceLedger {
         activity: SourceActivity,
         room: RoomAuthority,
     ) -> Result<bool, VoiceError> {
+        self.admit_packet(actor, Cow::Owned(object), activity, room)
+    }
+    /// Native cache-to-Source transfer. The caller borrows its actual published packet;
+    /// Source pays canonical scratch and its retained copy BEFORE cloning any payload.
+    /// An exact cached retry does not clone, re-sign, renew its deadline or reset attempts.
+    /// This is not public ingress: the original LocalJoin/Watcher activity is still required.
+    pub(crate) fn admit_borrowed(
+        &self,
+        actor: &ActorOwner,
+        object: &SignedObject,
+        activity: SourceActivity,
+        room: RoomAuthority,
+    ) -> Result<bool, VoiceError> {
+        self.admit_packet(actor, Cow::Borrowed(object), activity, room)
+    }
+    fn admit_packet(
+        &self,
+        actor: &ActorOwner,
+        object: Cow<'_, SignedObject>,
+        activity: SourceActivity,
+        room: RoomAuthority,
+    ) -> Result<bool, VoiceError> {
         self.current(actor)?;
         actor.authorize_source(&object, &activity, &room, false)?;
         let key = (object.issuer(), object.id());
@@ -374,7 +484,7 @@ impl SourceLedger {
         if let Some(packet) = state.packets.get(&key) {
             // Both objects are immutable verified native values. Structural equality checks
             // the exact signed bytes without allocating another pair of canonical encodings.
-            if packet.object != object {
+            if packet.object != *object {
                 return Err(VoiceError::RetryMismatch);
             }
             if !packet.activity.same(&activity)
@@ -395,13 +505,13 @@ impl SourceLedger {
         // Native PacketLedger already owns cache/event bytes. Reserve additional canonical
         // scratch before hash/encode; a cached exact retry above needs neither allocation.
         let scratch_bytes = 2 * (body_bytes + 1024) + 4096;
-        let exchange = activity.exchange();
-        let _scratch = if let Some(exchange) = &exchange {
-            exchange.charge(super::negotiation::Stage::Crypto, scratch_bytes)?
-        } else {
-            self.resources
-                .charge(self.group, scratch_bytes, ResourceKind::Crypto)?
-        };
+        let progress = activity.progress();
+        let _scratch = progress.charge(
+            &self.resources,
+            self.group,
+            scratch_bytes,
+            super::negotiation::Stage::Crypto,
+        )?;
         let hash = object.hash();
         let now = self.clock.now_ms();
         let mono = self.clock.monotonic_ms();
@@ -414,12 +524,12 @@ impl SourceLedger {
         }
         let deadline = mono.saturating_add(remaining);
         let bytes = object.encode().len() + 512;
-        let credit = if let Some(exchange) = &exchange {
-            exchange.charge(super::negotiation::Stage::Source, bytes + 1024)?
-        } else {
-            self.resources
-                .charge(self.group, bytes + 1024, ResourceKind::Retained)?
-        };
+        let credit = progress.charge(
+            &self.resources,
+            self.group,
+            bytes + 1024,
+            super::negotiation::Stage::Source,
+        )?;
         let cursor_key = (object.issuer(), object.scope().room);
         let cursor_credit = if matches!(object.body(), Body::Announcement { .. })
             && !state.cursors.contains_key(&cursor_key)
@@ -439,6 +549,10 @@ impl SourceLedger {
             object.body().target().unwrap_or(object.issuer()),
             object.expires(),
         )?;
+        // Owned callers already paid their input copy at their boundary. The native pump
+        // borrows its original cache, so only this paid point creates Source's own copy.
+        // Allocation remains before the final origin debit and before infallible publication.
+        let object = object.into_owned();
         // All fallible persistent reservations precede the original-issuer transaction. Every
         // subsequent map publication is infallible; no rejected packet spends origin quota.
         actor.authorize_source(&object, &activity, &room, true)?;
@@ -633,6 +747,18 @@ impl SourceLedger {
                 Err(VoiceError::Capacity) => continue,
                 Err(error) => return Err(error),
             };
+            // A successful network submission can return an ACK while the ordinary pool is
+            // full. Prepare its immediate responder's normal rate/origin row BEFORE spending
+            // the attempt; a previously unseen helper must not strand an admitted completion
+            // on a later bookkeeping allocation. This grants/resets no traffic allowance.
+            let stamp = self.clock.monotonic_ms();
+            match actor.with_limits(|limits| {
+                limits.prepare_exchange_members(&[hop.device()], &self.resources, stamp)
+            }) {
+                Ok(()) => {}
+                Err(VoiceError::Capacity) => continue,
+                Err(error) => return Err(error),
+            }
             // Root framing and route authority share this same affine lower credit. Reserving
             // route metadata here avoids a fallible ordinary allocation after attempt debit.
             // Original ciphertext remains in Packet's independently paid Source record.
@@ -642,12 +768,12 @@ impl SourceLedger {
             // cannot hide two additional SDP encodings. Fixed wrapper/permit/route payments
             // remain unchanged, and the actual driver still retains this whole credit.
             let bytes = 2 * packet.bytes + 4096 + ROUTE_METADATA_BYTES;
-            let budget = if let Some(exchange) = packet.activity.exchange() {
-                exchange.charge(super::negotiation::Stage::Lower, bytes)
-            } else {
-                self.resources
-                    .charge(self.group, bytes, ResourceKind::Forward)
-            };
+            let budget = packet.activity.progress().charge(
+                &self.resources,
+                self.group,
+                bytes,
+                super::negotiation::Stage::Lower,
+            );
             let credit = match budget {
                 Ok(credit) => credit,
                 Err(VoiceError::Capacity) => continue,

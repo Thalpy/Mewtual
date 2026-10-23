@@ -9,7 +9,9 @@
 //! progress occupied; an idle old handle cannot. Neither owner may store an action strongly.
 
 use super::crypto_actions::{slots, CryptoAction, Key};
-use super::resources::{ByteBudget, Credit, Reservation, ResourceKind, Resources, WorkLane};
+use super::resources::{
+    ByteBudget, Credit, GroupForwardLanes, Reservation, ResourceKind, Resources, WorkLane,
+};
 use super::{CallLease, DeviceId, Nonce, Scope, VoiceError};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, Weak};
@@ -145,7 +147,6 @@ pub struct Workflow {
     control: Weak<PreparedChain>,
     reserve: Arc<Reservation>,
     crypto: Arc<WorkLane>,
-    lowers: [Arc<WorkLane>; 2],
     packets: super::packets::ConfirmationCapacity,
     state: Mutex<WorkflowState>,
     // MUST remain last. Arc's weak strong_count reaches0 BEFORE Drop/field destruction;
@@ -225,6 +226,9 @@ impl ConfirmationControl {
 }
 struct WorkflowState {
     closed: bool,
+    // Close takes ONLY this phase's handle. Actual Lower credits and other live phases
+    // retain the same group owner; idle inputs/history must not pin process work slots.
+    lowers: Option<Arc<GroupForwardLanes>>,
     // One IPC owner for the entire chain, including distinct rows. A lost renderer reply may
     // keep this occupied while the original physical work/result/cleanup still drains.
     handoff_busy: bool,
@@ -490,10 +494,7 @@ impl PreparedChain {
         });
         let reserve = resources.reserve(binding.scope.group, VARIABLE_BYTES)?;
         let crypto = resources.reserve_crypto_lane(binding.scope.group)?;
-        let lowers = [
-            resources.reserve_forward_lane(binding.scope.group)?,
-            resources.reserve_forward_lane(binding.scope.group)?,
-        ];
+        let lowers = resources.group_forward_lanes(binding.scope.group)?;
         let chain = Arc::new_cyclic(|control| Self {
             binding: binding.clone(),
             live: live.clone(),
@@ -507,10 +508,10 @@ impl PreparedChain {
                     control: control.clone(),
                     reserve,
                     crypto,
-                    lowers,
                     packets,
                     state: Mutex::new(WorkflowState {
                         closed: false,
+                        lowers: Some(lowers),
                         handoff_busy: false,
                     }),
                     _retirement: Some(RetirementPublisher(binding)),
@@ -609,6 +610,13 @@ impl Drop for PreparedChain {
     }
 }
 impl Workflow {
+    pub(crate) fn uses_resources(&self, resources: &Arc<Resources>, group: [u8; 32]) -> bool {
+        Arc::ptr_eq(resources, self.binding.resources()) && group == self.binding.scope.group
+    }
+    pub(crate) fn is_live(&self) -> bool {
+        let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        !state.closed && self.live.is_live() && self.binding.live()
+    }
     pub(super) fn confirmation_control(&self) -> ConfirmationControl {
         ConfirmationControl {
             control: self.control.clone(),
@@ -631,7 +639,7 @@ impl Workflow {
         if state.closed || !self.live.is_live() || !self.binding.live() {
             return Err(VoiceError::Unauthorized);
         }
-        let credit = self.charge_locked(resources, group, bytes, kind)?;
+        let credit = self.charge_locked(&state, resources, group, bytes, kind)?;
         drop(state);
         Ok(credit.with_custody(self.clone()))
     }
@@ -639,24 +647,18 @@ impl Workflow {
     // charge() recursively while holding that fence (notably from handoff admission).
     fn charge_locked(
         &self,
+        state: &WorkflowState,
         resources: &Arc<Resources>,
         group: [u8; 32],
         bytes: usize,
         kind: ResourceKind,
     ) -> Result<Credit, VoiceError> {
         let credit = if kind == ResourceKind::Forward {
-            let mut result = Err(VoiceError::Capacity);
-            for lane in &self.lowers {
-                result = ByteBudget::ReservedLane {
-                    reservation: self.reserve.clone(),
-                    lane: lane.clone(),
-                }
-                .charge(resources, group, bytes, kind);
-                if !matches!(result, Err(VoiceError::Capacity)) {
-                    break;
-                }
-            }
-            result?
+            state
+                .lowers
+                .as_ref()
+                .ok_or(VoiceError::Unauthorized)?
+                .charge(resources, group, &self.reserve, bytes)?
         } else if matches!(kind, ResourceKind::Crypto | ResourceKind::Retained) {
             ByteBudget::ReservedLane {
                 reservation: self.reserve.clone(),
@@ -683,6 +685,7 @@ impl Workflow {
             return Err(VoiceError::Capacity);
         }
         let credit = self.charge_locked(
+            &state,
             self.binding.resources(),
             self.binding.scope.group,
             bytes,
@@ -706,12 +709,17 @@ impl Workflow {
         }
     }
     fn close(&self) {
-        self.state.lock().unwrap_or_else(|e| e.into_inner()).closed = true;
+        let lowers = {
+            let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+            state.closed = true;
+            state.lowers.take()
+        };
         self.reserve.close();
         self.crypto.close();
-        for lane in &self.lowers {
-            lane.close();
-        }
+        // Outgoing lanes belong to the original group, shared with other native phases.
+        // Release this phase's handle outside its state fence. A real Lower or another live
+        // phase retains the shared owner, while closed idle inputs no longer pin slots.
+        drop(lowers);
         self.packets.close();
     }
 }
