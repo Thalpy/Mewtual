@@ -24,6 +24,8 @@ const TASK_AND_REPLY_BYTES: usize = 1024;
 // Existing protected 96 KiB Workflow supplies this variable loan. No extra engine lane or
 // group/process limit is introduced; framed input/result copies still debit this exact Phase.
 const DERIVATION_HANDOFF_BYTES: usize = 16 * 1024;
+mod confirmation;
+pub(super) use confirmation::{ensure_confirmation_row, ensure_incoming_row};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Refused {
@@ -191,6 +193,14 @@ async fn run(
     custody: FactoryCustody,
 ) -> Completion {
     let result = async {
+        if registration.has_publication()? {
+            // An earlier actual Root reply already reached this counted Pending. A busy
+            // previous handoff loan is a LOCAL attachment refusal, never permission to
+            // repeat the Actor factory after that reply, a lost caller or later expiry.
+            return registration
+                .attach_published(DERIVATION_HANDOFF_BYTES)
+                .map_err(Refused::from);
+        }
         registration.mark_handoff()?;
         let pair = actor.prepare_voice_pair(grant.clone(), selector).await?;
         let action = actor

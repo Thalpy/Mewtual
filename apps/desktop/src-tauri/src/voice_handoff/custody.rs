@@ -56,11 +56,28 @@ impl PreparedPhase {
         action: &CryptoAction,
         bytes: usize,
     ) -> Result<Arc<Phase>, VoiceError> {
+        self.try_bind(action, bytes).map_err(|(error, _)| error)
+    }
+    /// Preserve the original fixed preparation after a proven local refusal. A native
+    /// factory may already have published its Action, so attachment pressure must not lose
+    /// that Action or require fresh metadata payment on its next exact retry. This returns
+    /// the SAME preparation; it refunds no engine, nonce, attempt or transport handoff.
+    pub(crate) fn try_bind(
+        self,
+        action: &CryptoAction,
+        bytes: usize,
+    ) -> Result<Arc<Phase>, (VoiceError, Self)> {
         if !action.belongs_to(self.scope, &self.call) || !action.uses_resources(&self.resources) {
-            return Err(VoiceError::Unauthorized);
+            return Err((VoiceError::Unauthorized, self));
         }
-        let plan = action.protected_plan()?;
-        let loan = action.borrow_handoff(bytes)?;
+        let plan = match action.protected_plan() {
+            Ok(plan) => plan,
+            Err(error) => return Err((error, self)),
+        };
+        let loan = match action.borrow_handoff(bytes) {
+            Ok(loan) => loan,
+            Err(error) => return Err((error, self)),
+        };
         Ok(Arc::new(Phase {
             resources: self.resources,
             scope: self.scope,

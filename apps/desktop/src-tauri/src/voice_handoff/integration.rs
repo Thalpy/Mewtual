@@ -6,12 +6,36 @@ use catcoms_sync::voice_v2::presence::PairSelector;
 use service::tests::{opened_frame, opened_reply, opened_reply_kind};
 use sha2::{Digest, Sha256};
 use std::sync::Arc;
+mod confirmation;
+pub(crate) use confirmation::{confirmation_alias_claims, confirmation_round_trip};
 
 pub(crate) async fn derivation(
     state: &AppState,
     selected: &Arc<SelectedHandoffOwner>,
     selector: PairSelector,
 ) {
+    let _ = derivation_cycle(state, selected, selector, false).await;
+}
+
+/// Test-only native continuation. The same real Input/admit/Actor-result/ACK/settlement
+/// path returns its original loan instead of Ending. This does NOT run browser WebCrypto
+/// or prove browser key transfer; it supplies the actual paid parent to factory tests.
+pub(crate) async fn derivation_returned(
+    state: &AppState,
+    selected: &Arc<SelectedHandoffOwner>,
+    selector: PairSelector,
+) -> ledger::ResolvedRow {
+    derivation_cycle(state, selected, selector, true)
+        .await
+        .unwrap()
+}
+
+async fn derivation_cycle(
+    state: &AppState,
+    selected: &Arc<SelectedHandoffOwner>,
+    selector: PairSelector,
+    return_for_confirmation: bool,
+) -> Option<ledger::ResolvedRow> {
     let bootstrap::Status::Ready(public) = bootstrap::ensure(
         state,
         selected.id(),
@@ -149,6 +173,28 @@ pub(crate) async fn derivation(
         "native Derive complete before End; aggregate bytes/crypto {:?}; original group {:?} (setup ACKed; not an SDP peak)",
         selected.resources().counts(), selected.resources().group_counts(selected.binding().scope.group)
     );
+    if return_for_confirmation {
+        drop(late_input);
+        let mut returned = purpose;
+        returned.push(0);
+        let header = (8, 6, 0, id.logical());
+        let reply = settlement::apply(
+            &context,
+            &route,
+            opened_frame(&public, &route, header, &returned, None),
+        )
+        .seal()
+        .unwrap();
+        let status = opened_reply(&public, header, &returned, &reply);
+        assert_eq!(status.len(), replies::STATUS_BYTES);
+        assert_eq!(
+            status[209], 1,
+            "actual native Return compacted its local loan"
+        );
+        drop(reply);
+        assert!(selected.lease().is_live());
+        return Some(row);
+    }
     crate::end_voice_owner_inner(state, selected.id()).await;
     assert!(!selected.lease().is_live());
     let mut retire = purpose.clone();
@@ -206,4 +252,5 @@ pub(crate) async fn derivation(
     assert_eq!(&acknowledged[68..100], &proof.unwrap());
     drop(reply);
     assert!(state.voice_handoff.channel_may_close(selected));
+    None
 }

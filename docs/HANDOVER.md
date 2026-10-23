@@ -1,6 +1,83 @@
 # Mewtual; Handover
 
-## Hosted onward-chat failure and correction (23 October; validation in progress)
+## Native confirmation children (23 October; focused validation in progress)
+
+Continue this draft in `target/communication-native-children-worktree`, branch
+`communication-native-children`, from `5600fecd`. The Source/chat checkpoint is pushed in draft
+PR #53. It passed complete Root3,304 (24 existing ignored), native702 and frontend2,531 plus
+strict static/build checks in the frozen progress checkout, recorded at9004cb0a. Do not mix those results
+with this newer child draft. Heavy Cargo stays serial. All21 focused Actor tests pass, including
+admitted/queued caller loss, actual Actor stop with an uncollected receiver, success/refusal
+output collection and the4KiB complete wrapper guard. The Root full ordinary-pool test passes
+with original-permit reuse and foreign pool/room/grant/End rejection. The native draft compiles;
+Windows linking hit LNK1318 PDB LIMIT and requires process-only `_LINK_=/DEBUG:NONE`, the existing
+documented workaround. An initial native run passes228/230 tests including layout and actual
+Registry child/parent GC. Two new foreign-owner fixtures incorrectly tried binding a second
+LocalJoin to the SAME actual live lease; they now use an independent real owner with equal public
+fields, retaining the original lease/pool rejection and publication retry assertions. The native
+rerun passes all230 handoff tests (5.10s). The new TCP scenarios pass2/2 (40.14s): actual
+Hello/Proof/Finish traverses unjoined B with A-C forbidden, FIRST Respond follows real accepted
+decrypt Return/compaction, and alias-purpose/lost-input cases cover both explicit claim orderings.
+An initial TCP run exposed a terminal-Finish response reservation that blocked plan retirement;
+native now rejects that impossible role before payment/Actor admission. The regression asserts
+no orphan purpose and successful retirement of both parents after End. This is native test-AES
+confirmation, not browser derivation or SDP/ICE. Complete combined suites are still pending.
+The retry also encountered disk-full:25 old generated native PDB files (24.34GiB) were removed
+after exact-path validation, recorded in `target/native-pdb-cleanup.json`. No source/user data
+was removed; diff verification found no truncated source. Focused logs are `target/child-*.log`.
+
+The draft retains actual Root publications and the same fixed preparation across local bind
+refusal, skipping Actor factories on attachment retry. Original-parent child reservations share
+the existing32 positions and order against parent retirement under Index -> parent State. A child
+retains its actual parent and can only Return. The original parent owns whole-plan retirement;
+its bounded child scan excludes open descendants. Native fixed row payment is deliberately
+2,304B rather than2,048B (maximum extra8KiB for32 rows); group512KiB/process2MiB, Phase and Root
+plan payments, engine, attempt and row-count limits are unchanged. The expanded graph still needs
+its layout check. No history is evicted to create capacity.
+
+Actual same-plan roles1..9 and normalized predecessor/trigger purposes are claimed atomically
+with the returned Action. Outgoing message metadata is read from its actual input outside native
+gates; a missing payload keeps the same known Pending. Ordinary compaction retains the actual
+settled/ACKed Opened trigger, allowing FIRST Respond after Return without reconstructing an Arc
+from metadata. Root still rechecks current pair/token/epoch/authority. Roles10/11 and responses
+to high-side Finish refuse. A typed Root/Actor four-action fair pull supplies original pending
+Arcs. One affine4KiB snapshot permit funds its32-handle backing capacity and complete RPC
+metadata. The actual command/output and one bounded RPC waiter share paid custody, so neither
+caller loss nor queued-command destruction can release the payment before the last physical
+owner. Both success and refusal output retain it; reuse first destroys the actual Vec. It grants
+no engine or RTC authority. Caller-loss/Actor-stop and complete wrapper regressions are drafted.
+
+Draft regressions include local loan/full-pool attachment, equal-metadata replacement, End,
+parent/child reservation orderings, foreign parent/trigger and32-row exhaustion. New actual
+blocked-TCP fixtures attempt native Hello/Proof/Finish with test-only AES keys and both alias
+claim orderings, including lost input; the executed scope and results are recorded above.
+Read-only review identified compacted-trigger liveness and non-atomic role claim defects; the
+draft corrections and new regressions still require execution and final re-review.
+
+Production remains disabled. Child IPC grammar/Input/admission/result adapters, actual browser
+key/phase transfer, chain-final original-Session intent after ordinary Returns, supported
+multi-peer history/composition, SDP/ICE/RTC, restored-bridge negotiation, member media relay and
+physical audio/network acceptance remain open. The proposed TCP test uses native test-provider
+AES-GCM keys, not P256/HKDF/WebCrypto or a real WebView. External download resume stays separate.
+
+## Validated Source and onward-chat checkpoint (23 October)
+
+The combined runtime at `5600fecd` is pushed to `communication-native-live`, draft PR #53.
+Complete local gates on this frozen source pass: Root3,304 (24 existing ignored), native702
+(697 library plus5 ACL), frontend2,531, Svelte zero errors/warnings and production build.
+Root strict all-target/all-feature Clippy, native check and strict all-target Clippy, both
+format checks, ambient-dependency gate and cargo-deny pass. Deny used its normal external
+advisory cache after the sandbox denied its lock; the existing unmatched RUSTSEC-2026-0381
+ignore warning remains. Logs are `target/native-progress-*.log` in the progress checkout.
+No setup/process/frontend runtime changed after the earlier startup/flow checks below; those
+checks were not repeated for this Source/chat increment. This is local evidence, not a claim
+that the new hosted head has completed CI.
+
+The next native confirmation-child draft lives separately in
+`target/communication-native-children-worktree`; none of its changes are covered by these
+results or included in this checkpoint. Production V2 remains disabled.
+
+### Hosted onward-chat failure and correction
 
 The pushed Derive checkpoint `583794de` has a failing Linux native job in PR #53:
 `six_client_native_reversed_reopen_gossip_loss_and_command_load`,694 pass/1 fail. In the90s
@@ -25,16 +102,16 @@ response marker, retaining no payload. That metadata cannot prove signature acce
 knownness or import. Actual-diff re-review found no actionable findings after the MORE/PAGE and
 documentation corrections. The unchanged hostile six-client replay passes in272.83s, including
 the failed hosted phase. This is supporting evidence, not proof of the sole hosted cause.
-All2,531 frontend tests and Svelte checks (zero errors/warnings) also pass. Full Root/native
-combined validation remains pending; keep V2 disabled.
+The complete combined gates above also cover this correction. Keep V2 disabled pending the
+separate integration and acceptance work.
 
-## V2 native Source progress (23 October; full validation in progress)
+## V2 native Source progress (23 October; validated partial integration)
 
 Continue in `target/communication-v2-progress-worktree`, branch `communication-v2-progress`.
 Its runtime starts at `85621697`; `754d055a` carries the same native pressure-test correction
 as published `9aa5d7bd`. The validated Derive checkpoint is published as `583794de` on
-`communication-native-live`, draft PR #53. This newer Source increment has not yet been
-published or fully validated. Preserve Main UI and the external-download worktree.
+`communication-native-live`, draft PR #53. The Source/chat increment is now published at
+`5600fecd` with complete local validation above. Preserve Main UI and the external-download worktree.
 
 Implemented in the continuation:
 
@@ -67,12 +144,12 @@ under full ordinary pressure, actual protected publication/native pump/signed tr
 ACK/End/late-Lower retirement, revised-limit fairness, closed-phase slot release, borrowed cache
 retry, and current50-member Actor-map rejection. The latter checks current membership/owners;
 it does not instrument heap allocation. Native handoff **221 tests pass**, including unchanged
-row/codec layout guards. Full Root/native/frontend and native check remain pending for this increment. The initial
+row/codec layout guards. The complete combined checks are recorded above. The initial
 all-feature run reused a stale test executable and was stopped/excluded. Its affected sync/app/
 replication metadata (318files,493870bytes) was preserved under
 `target/source-pump-metadata-backup`; compiled dependencies/binaries were not cleaned. Fresh strict
-Root Clippy and all-feature no-run rebuild pass from this checkout. The newer chat correction
-above still needs fresh combined gates. Read-only actual-diff review
+Root Clippy and all-feature no-run rebuild pass from this checkout; the subsequent complete
+suites include the current chat correction. Read-only actual-diff review
 resolved the unpaid roster-copy MEDIUM and clarified the32-preparation bound; no blocker/high/
 medium remains in this slice. Logs are `target/native-progress-*.log` in this checkout.
 

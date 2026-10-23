@@ -1,5 +1,33 @@
 # Mewtual; Interfaces & Hooks Schema
 
+## Native confirmation child draft (23 October; unvalidated)
+
+The inactive native ledger adds original-parent `Start(predecessor)`, `Respond(trigger-row)`
+and actual incoming-action registration. These are trusted Rust factories, not new IPC opcodes.
+Every child retains its actual indexed Derive parent and uses that parent's opaque Root plan.
+Reservation and whole-plan retirement serialize under Index -> parent State. Native attachment
+claims the actual Action and role in that same transaction before fallible description/loan
+binding. A stored publication skips Actor work on retry and keeps its original preparation.
+Fixed native row cost is2,304B, still32 shared positions; group/process limits are unchanged.
+
+Roles1/4/7 are Hello,2/5/8 Proof and3/6/9 Finish. Direction follows the original low/high role;
+10/11 remain reserved and unsupported. Explicit Start predecessors use the prior actual Hello
+reservation id, including an unsealed/failed candidate. Response uses the actual same-parent
+accepted decrypt Action, retained through local Return/compaction; high-side Finish has none.
+A child can only Return. Original-parent plan-final intent after earlier Returns remains open.
+
+`Root::voice_confirmation_actions` and the typed ServerActor method return up to four original
+pending Arcs fairly without dequeueing or issuing authority. Trusted native callers transfer one
+affine4KiB snapshot permit into the call. Its bounded RPC waiter and actual command/output share
+paid custody until both collect, including Actor stop and Root refusal. Output exposes borrowed
+actions only; returning the same permit first destroys its actual32-handle backing Vec. The current Actor membership map is borrowed,
+not copied. Actual registration, current native selection, Root engine/result checks and eventual
+RTC admission remain independent. `ProtectedCryptoPlan::handshake` exposes fixed historical
+binding only. Neither method reconstructs an action, token or key from renderer metadata.
+
+No new production listener/desktop activation path is enabled. Focused/layout and full combined
+checks for this draft remain pending; see HANDOVER for its separate checkout and evidence scope.
+
 ## Native handoff continuation work (23 October)
 
 The native owner has accepted the renderer contract in

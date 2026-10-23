@@ -36,6 +36,12 @@ pub struct ProtectedCryptoPlan {
 redacted_debug!(ProtectedCryptoPlan);
 
 impl ProtectedCryptoPlan {
+    /// Historical request binding for a trusted native child factory after its Derive
+    /// action has compacted. This fixed value grants no admission, lookup or effect;
+    /// native must still retain this ORIGINAL plan and Root revalidates the actual call.
+    pub fn handshake(&self) -> Nonce {
+        self.binding.handshake
+    }
     /// Capacity provenance only. Native still has to recognize the exact Action allocation
     /// in its bounded original row before exposing input, admitting an engine or publishing.
     pub fn contains(&self, action: &CryptoAction) -> bool {

@@ -9,6 +9,7 @@ use rand_core::SeedableRng;
 use std::future::poll_fn;
 
 mod results;
+mod snapshot;
 
 fn found(seed: u64) -> Server<MemNetwork, ChaCha20Rng> {
     Server::found(
@@ -64,7 +65,7 @@ async fn park(actor: &ServerActor) -> crate::durable_chat::DurableSendReady {
 
 #[tokio::test]
 async fn native_voice_actor_installs_exact_endpoint_and_coalesces_revision_observation() {
-    let (actor, mut events, task, _runtime, grant) = start().await;
+    let (actor, mut events, task, runtime, grant) = start().await;
     let drain = tokio::spawn(async move { while events.recv().await.is_some() {} });
     let mut changes = actor.voice_endpoint_changes().await.unwrap();
     actor
@@ -77,6 +78,18 @@ async fn native_voice_actor_installs_exact_endpoint_and_coalesces_revision_obser
         .unwrap()
         .is_empty());
     let foreign = Arc::new(CallGrant::from_lease(grant.lease(), grant.scope()));
+    let permit = CryptoActionSnapshotPermit::new(&runtime.resources(), grant.scope()).unwrap();
+    let observed = actor
+        .voice_confirmation_actions(grant.clone(), permit)
+        .await
+        .unwrap();
+    assert!(observed.result().unwrap().is_empty());
+    let refused = actor
+        .voice_confirmation_actions(foreign.clone(), observed.return_permit())
+        .await
+        .unwrap();
+    assert_eq!(refused.result().err(), Some(VoiceError::Unauthorized));
+    drop(refused);
     assert_eq!(
         actor.voice_participant_peers(foreign.clone()).await.err(),
         Some(VoiceEndpointError::Protocol(VoiceError::Unauthorized)),

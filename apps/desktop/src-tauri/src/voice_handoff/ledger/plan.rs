@@ -7,8 +7,8 @@ use catcoms_sync::voice_v2::crypto_actions::{
 };
 
 pub(super) struct Plan {
-    identity: ProtectedCryptoPlan,
-    control: Option<ConfirmationControl>,
+    pub(super) identity: ProtectedCryptoPlan,
+    pub(super) control: Option<ConfirmationControl>,
     retirement: Option<ConfirmationRetirement>,
 }
 impl Plan {
@@ -81,7 +81,7 @@ impl ResolvedRow {
     /// any successor exists. Caller must resolve the original authenticated native owner.
     pub(crate) fn retire_plan(&self) -> Result<bool, VoiceError> {
         let ticket = {
-            let _index = self.indexed()?;
+            let index = self.indexed()?;
             let mut state = self
                 .row
                 .state
@@ -91,6 +91,9 @@ impl ResolvedRow {
                 || !state.status.engine.settled
                 || (state.status.engine.receipt.is_some() && !state.status.acknowledged)
             {
+                return Err(VoiceError::Capacity);
+            }
+            if !Ledger::children_locally_closed(&index, &self.row) {
                 return Err(VoiceError::Capacity);
             }
             let plan = state.plan_mut().ok_or(VoiceError::Unauthorized)?;

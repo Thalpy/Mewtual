@@ -4,6 +4,100 @@ use super::*;
 use voice_v2::crypto_actions::CryptoOutcome;
 
 #[tokio::test]
+async fn native_action_pull_recovers_original_pending_arcs_under_pressure_and_rejects_foreign_or_ended_calls(
+) {
+    let (mut root, _remote, runtime, _clock, grant, handshake) = low_fixture().await;
+    let action = root.prepare_voice_derivation(&grant, handshake).unwrap();
+    assert_eq!(action.protected_plan().unwrap().handshake(), handshake);
+    let resources = runtime.resources();
+    let group = grant.scope().group;
+    let before = resources.counts();
+    let other_pool = Arc::new(voice_v2::resources::Resources::default());
+    let permit =
+        voice_v2::crypto_actions::CryptoActionSnapshotPermit::new(&other_pool, grant.scope())
+            .unwrap();
+    let refused = root.voice_confirmation_actions(&grant, permit);
+    assert_eq!(
+        refused.result().err(),
+        Some(VoiceError::Unauthorized),
+        "equal scope cannot substitute another process pool"
+    );
+    assert_eq!(
+        other_pool.counts().0,
+        voice_v2::crypto_actions::CryptoActionSnapshotPermit::MEMORY_BYTES
+    );
+    drop(refused);
+    assert_eq!(other_pool.counts().0, 0);
+    let mut other_scope = grant.scope();
+    other_scope.room += 1;
+    let permit =
+        voice_v2::crypto_actions::CryptoActionSnapshotPermit::new(&resources, other_scope).unwrap();
+    let refused = root.voice_confirmation_actions(&grant, permit);
+    assert_eq!(
+        refused.result().err(),
+        Some(VoiceError::Unauthorized),
+        "the same pool does not authorize a different room"
+    );
+    drop(refused);
+    assert_eq!(resources.counts(), before);
+    let mut permit =
+        voice_v2::crypto_actions::CryptoActionSnapshotPermit::new(&resources, grant.scope())
+            .unwrap();
+    let pressure = resources
+        .charge(
+            group,
+            voice_v2::resources::GROUP_BYTES - resources.counts().0,
+            voice_v2::resources::ResourceKind::Retained,
+        )
+        .unwrap();
+    let full = resources.counts();
+    let waiter = permit.rpc_waiter().unwrap();
+    assert_eq!(permit.rpc_waiter().err(), Some(VoiceError::Capacity));
+    assert_eq!(
+        resources.counts(),
+        full,
+        "shared waiter ownership does not create a second payment"
+    );
+    drop(waiter);
+    for _ in 0..8 {
+        let observed = root.voice_confirmation_actions(&grant, permit);
+        let actions = observed.result().unwrap();
+        assert!(actions.len() <= 4 && observed.capacity() <= 32);
+        assert_eq!(actions.len(), 1);
+        assert!(Arc::ptr_eq(&actions[0], &action));
+        assert_eq!(
+            resources.counts(),
+            full,
+            "pull renews no execution/record allowance"
+        );
+        permit = observed.return_permit();
+        assert_eq!(
+            resources.counts(),
+            full,
+            "actual Vec dropped before original permit reuse"
+        );
+    }
+    let foreign = Arc::new(CallGrant::from_lease(grant.lease(), grant.scope()));
+    let refused = root.voice_confirmation_actions(&foreign, permit);
+    assert_eq!(refused.result().err(), Some(VoiceError::Unauthorized));
+    assert_eq!(
+        resources.counts(),
+        full,
+        "refusal output retains original payment"
+    );
+    permit = refused.return_permit();
+    root.stop_voice_endpoint(&grant);
+    let ended = root.voice_confirmation_actions(&grant, permit);
+    assert_eq!(ended.result().err(), Some(VoiceError::Unauthorized));
+    drop(ended);
+    assert_eq!(
+        action.admit_engine(action.engine_bytes()),
+        Err(VoiceError::Unauthorized)
+    );
+    drop(pressure);
+}
+
+#[tokio::test]
 async fn exact_endpoint_stop_does_not_retire_a_late_original_input_owner() {
     let (mut root, _remote, _runtime, _clock, grant, handshake) = low_fixture().await;
     let action = root.prepare_voice_derivation(&grant, handshake).unwrap();

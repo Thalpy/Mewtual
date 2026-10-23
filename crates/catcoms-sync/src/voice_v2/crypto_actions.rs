@@ -23,6 +23,8 @@ const CONFIRM_BYTES: usize = 512;
 const RECORD_BYTES: usize = 1024;
 mod handoff;
 mod results;
+mod snapshot;
+pub use snapshot::{CryptoActionSnapshot, CryptoActionSnapshotPermit, CryptoActionSnapshotWaiter};
 pub(crate) mod slots;
 pub use super::chain::{ConfirmationControl, ConfirmationRetirement, HandoffLoan};
 pub use handoff::{ProtectedCryptoBinding, ProtectedCryptoPlan};

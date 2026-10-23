@@ -1,12 +1,29 @@
 # Next voice milestone: native result recovery
 
-## Current Source continuation (23 October; full validation in progress)
+## Current integration status (23 October)
+
+Published Source/chat runtime `5600fecd`, documented/pushed at `9004cb0a` in draft PR #53, passes
+complete local Root3,304 (24 existing ignored), native702 and frontend2,531 tests plus strict
+static/build gates. HANDOVER records exact scope and logs. This supersedes the earlier pending
+Source-validation statements below; production V2 remains disabled.
+
+The next draft is isolated in `target/communication-native-children-worktree`: retained known
+publications, original-parent confirmation factories, atomic normalized role claims, retained
+accepted decrypt triggers after Return, and an affine paid Root/Actor action snapshot. Focused
+Actor21, Root pressure1, native handoff/layout230 and native TCP confirmation2 pass; complete
+combined suites are still in progress. The TCP check uses test-provider AES and actual native
+Source/helper/intake with A-C forbidden; it does not execute browser P256/HKDF. These results
+do not cover child IPC, actual browser key/phase transfer,
+chain-final Session delivery after ordinary Returns, SDP/ICE/RTC or member media relay. No
+physical audio/network acceptance is available from the single desktop.
+
+## Source continuation implementation
 
 The accepted native/browser contract is recorded in `VOICE-V2-NATIVE-HANDOFF-CONTRACT.md`.
 Published Derive checkpoint `583794de` (draft PR #53) passed the full Root/native/frontend gates;
 its old pending-validation statements below are historical. The newer continuation is in
 `target/communication-v2-progress-worktree`. HANDOVER records its source, current results and
-remaining implementation boundaries; it is not yet published or fully validated.
+remaining implementation boundaries; its complete validation and publication are recorded above.
 
 The native scheduler now transfers already-published encrypted packets to Source automatically,
 borrowing the actual cache and paying Source's copy before allocation. It preserves the original

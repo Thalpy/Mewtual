@@ -7,6 +7,7 @@ use catcoms_crypto::DeviceKeypair;
 use catcoms_sync::voice_v2::runtime::Runtime;
 use catcoms_sync::voice_v2::{key_reference, Scope};
 
+mod children;
 mod finalization;
 mod pending;
 mod retirement;
@@ -919,6 +920,7 @@ fn every_original_key_component_is_required_even_when_other_identity_components_
         executor: selected.executor(),
         lease: selected.lease().clone(),
         purpose,
+        parent: None,
     };
     assert!(key.matches(&selected, purpose));
     key.grant = foreign.grant_identity();

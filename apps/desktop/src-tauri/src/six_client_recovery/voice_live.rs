@@ -230,3 +230,122 @@ async fn native_v2_discovers_blocked_endpoints_through_unjoined_tcp_bridge_then_
     scenario.close(&[1, 2, 3]).await;
     scenario.rules.assert_graph();
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn native_v2_confirmation_child_uses_the_returned_actual_parent_over_blocked_tcp_discovery() {
+    let mut scenario = Scenario::new(false);
+    scenario.admit().await;
+    scenario.close(&[3, 4, 5]).await;
+    scenario.rules.drop_gossip.store(true, Ordering::Release);
+    for index in [0, 1, 2] {
+        enable(&scenario, index).await;
+    }
+    let a = join(&scenario, 1).await;
+    let c = join(&scenario, 2).await;
+    let ag = a.grant().unwrap();
+    let cg = c.grant().unwrap();
+    let discovered = both_fresh(&scenario, &a, &c, &ag, &cg, None, 0).await;
+    // A-C is forbidden by the real socket graph; unjoined B only serves discovery here.
+    // Test-only AES keys exercise native confirmation; this does not claim RTC or browser keys.
+    scenario.rules.assert_graph();
+    let (ap, cp) = tokio::join!(
+        crate::voice_handoff::integration::derivation_returned(
+            &scenario.online(1).state,
+            &a,
+            discovered[0].1
+        ),
+        crate::voice_handoff::integration::derivation_returned(
+            &scenario.online(2).state,
+            &c,
+            discovered[1].1
+        ),
+    );
+    if scenario.clients[1].identity.as_ref().unwrap().1
+        < scenario.clients[2].identity.as_ref().unwrap().1
+    {
+        crate::voice_handoff::integration::confirmation_round_trip(
+            &scenario.online(1).state,
+            &a,
+            &ap,
+            &scenario.online(2).state,
+            &c,
+            &cp,
+        )
+        .await;
+    } else {
+        crate::voice_handoff::integration::confirmation_round_trip(
+            &scenario.online(2).state,
+            &c,
+            &cp,
+            &scenario.online(1).state,
+            &a,
+            &ap,
+        )
+        .await;
+    }
+    crate::end_voice_owner_inner(&scenario.online(1).state, a.id()).await;
+    crate::end_voice_owner_inner(&scenario.online(2).state, c.id()).await;
+    ap.retire_plan().unwrap();
+    cp.retire_plan().unwrap();
+    drop((ap, cp, ag, cg));
+    scenario.close(&[0, 1, 2]).await;
+    scenario.rules.assert_graph();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn native_v2_confirmation_alias_claims_refuse_before_publication_in_both_barrier_orderings() {
+    for (wrong_first, lose_input) in [(true, false), (false, false), (true, true), (false, true)] {
+        let mut scenario = Scenario::new(false);
+        scenario.admit().await;
+        scenario.close(&[3, 4, 5]).await;
+        scenario.rules.drop_gossip.store(true, Ordering::Release);
+        for index in [0, 1, 2] {
+            enable(&scenario, index).await;
+        }
+        let a = join(&scenario, 1).await;
+        let c = join(&scenario, 2).await;
+        let ag = a.grant().unwrap();
+        let cg = c.grant().unwrap();
+        let discovered = both_fresh(&scenario, &a, &c, &ag, &cg, None, 0).await;
+        let (ap, cp) = tokio::join!(
+            crate::voice_handoff::integration::derivation_returned(
+                &scenario.online(1).state,
+                &a,
+                discovered[0].1
+            ),
+            crate::voice_handoff::integration::derivation_returned(
+                &scenario.online(2).state,
+                &c,
+                discovered[1].1
+            ),
+        );
+        if scenario.clients[1].identity.as_ref().unwrap().1
+            < scenario.clients[2].identity.as_ref().unwrap().1
+        {
+            crate::voice_handoff::integration::confirmation_alias_claims(
+                &scenario.online(1).state,
+                &a,
+                &ap,
+                wrong_first,
+                lose_input,
+            )
+            .await;
+        } else {
+            crate::voice_handoff::integration::confirmation_alias_claims(
+                &scenario.online(2).state,
+                &c,
+                &cp,
+                wrong_first,
+                lose_input,
+            )
+            .await;
+        }
+        crate::end_voice_owner_inner(&scenario.online(1).state, a.id()).await;
+        crate::end_voice_owner_inner(&scenario.online(2).state, c.id()).await;
+        ap.retire_plan().unwrap();
+        cp.retire_plan().unwrap();
+        drop((ap, cp, ag, cg));
+        scenario.close(&[0, 1, 2]).await;
+        scenario.rules.assert_graph();
+    }
+}

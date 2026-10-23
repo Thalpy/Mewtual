@@ -1,6 +1,36 @@
 # Threat model; client integrity & enforcement boundaries
 
-## Shared native progress candidate (23 October; validation incomplete)
+## Native confirmation child draft (23 October; validation incomplete)
+
+Child purpose reservation, original-parent retirement and publication/role claims share the
+native Index -> parent -> child ordering. Only child -> original parent strong ownership exists;
+a bounded indexed scan excludes open descendants before the parent freezes adoption. Equal
+public metadata cannot substitute a foreign original Root plan. Root still authenticates and
+rechecks membership, epoch, room, actual call and exact incoming token for every effect.
+
+Known Root publications survive local attachment pressure or missing input. Exact retries reuse
+that Action and original preparation, without another factory, deadline, nonce or attempt grant.
+Outgoing description comes from the actual Root input outside native guards. Local Pending
+closure remains explicit local closure, never Root absence or whole-plan drainage. Ordinary
+compaction retains an actual settled/ACKed Opened trigger for later first response; the native
+projection's retired bit cannot override Root's actual current-trigger check.
+
+Native fixed row payment grows from2,048B to2,304B before allocation (at most extra8KiB across32
+rows). This reduces available capacity rather than increasing any attacker budget: group512KiB,
+process2MiB,32 rows, Phase/Root-plan costs and work/rate/attempt limits remain unchanged. The
+enlarged complete wrapper inventory still needs validation. No terminal/uncertain history eviction
+or advertised16-peer composition follows. Child-only Return cannot mint chain-final proof.
+
+The typed pending-action pull uses the exact current participant and paid Actor member map.
+Its four original handles grant no engine or RTC authority. An affine4KiB permit pays the
+bounded32-handle snapshot and RPC graph before allocation. One CAS-bounded waiter and the actual
+command/output share that original payment: cancellation and Actor stop may collect either side
+first. Both success/refusal output retain it; returning the same permit destroys the actual Vec
+before reuse. No deadline, work or attempt allowance is returned. No stock IPC command accepts plaintext, keys or manufactured tokens.
+Production stays disabled pending child framing/admission/results, actual browser/RTC, measured
+composition and combined acceptance. Native test-provider AES-GCM is not WebView/physical proof.
+
+## Shared native progress checkpoint (23 October; partial integration)
 
 The continuation candidate shares two outgoing group positions across confirmation and SDP,
 with an independent1KiB owner payment. Only actual Lower credits retain those positions after

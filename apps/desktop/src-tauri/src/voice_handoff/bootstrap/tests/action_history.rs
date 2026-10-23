@@ -8,6 +8,74 @@ use crate::voice_handoff::ledger::{Begin as ActionBegin, Ledger, Purpose, RowId}
 use catcoms_sync::voice_v2::presence::PairSelector;
 use catcoms_sync::voice_v2::VoiceError;
 
+#[test]
+fn collected_child_history_pins_its_original_parent_until_actual_last_handle_collection() {
+    use crate::voice_handoff::{custody::CloseMode, ledger::ConfirmationPurpose};
+    let (mut coordinator, selected, selector) = selection();
+    let ledger = Arc::new(Ledger::default());
+    let registry = Registry::default();
+    let (output, route) = installed(&registry, selected.clone());
+    let ActionBegin::Factory(registration) = ledger
+        .begin(selected.clone(), Purpose::Derive(selector))
+        .unwrap()
+    else {
+        panic!("original parent factory")
+    };
+    let (join, action, pair) = actual_action(&coordinator, &selected);
+    let parent_id = registration
+        .attach(action.clone(), pair, 16 * 1024)
+        .unwrap();
+    let parent = ledger
+        .resolve(&selected, Purpose::Derive(selector), parent_id)
+        .unwrap();
+    action.settle_engine();
+    parent
+        .close_phase(route.session().identity(), CloseMode::Return)
+        .unwrap();
+    assert!(parent.try_compact().unwrap());
+    // No provider ran: the child is deliberately uncertain local history, not a claim of
+    // successful protocol confirmation. Its real strong parent edge is what this test pins.
+    let request = ConfirmationPurpose::Start(None);
+    let purpose = Purpose::Confirmation {
+        parent: parent_id,
+        request,
+    };
+    let (ActionBegin::Factory(registration), _) = ledger
+        .begin_child(selected.clone(), &parent, request)
+        .unwrap()
+    else {
+        panic!("original child factory")
+    };
+    let child_id = registration.id();
+    registration.mark_handoff().unwrap();
+    drop(registration);
+    let child = ledger.resolve(&selected, purpose, child_id).unwrap();
+    child.close_pending().unwrap();
+    coordinator.end(selected.id());
+    drop((join, action));
+    assert!(parent.retire_plan().unwrap());
+    retire(&registry, &selected);
+    drop((output, route, parent));
+    registry.collect_retired(&ledger); // Actual registry proof; no manufactured GC flags.
+    assert!(ledger.lookup_original(&selected, purpose).is_some());
+    assert!(
+        ledger
+            .lookup_original(&selected, Purpose::Derive(selector))
+            .is_some(),
+        "a held child must retain its same original parent after physical channel collection"
+    );
+    drop(child);
+    registry.collect_retired(&ledger);
+    assert!(ledger.lookup_original(&selected, purpose).is_none());
+    // Child destruction occurs outside Index; its parent edge was still real during that
+    // pass. A subsequent bounded pass can now collect the original parent without a cycle.
+    registry.collect_retired(&ledger);
+    assert!(ledger
+        .lookup_original(&selected, Purpose::Derive(selector))
+        .is_none());
+    assert!(ledger.resolve(&selected, purpose, child_id).is_err());
+}
+
 #[tokio::test]
 async fn unacknowledged_final_gc_requires_matching_physical_identity_and_late_metadata_drainage() {
     use crate::voice_handoff::custody::CloseMode;

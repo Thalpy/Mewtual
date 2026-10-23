@@ -2,7 +2,9 @@
 //! mailbox. Root owns protocol state and authorizes every first effect in its serialized turn.
 //! Plaintext stays with its actual native owner; no Tauri command, byte IPC or live dispatch.
 use super::*;
-use catcoms_sync::voice_v2::crypto_actions::{CryptoAction, CryptoResultReceipt};
+use catcoms_sync::voice_v2::crypto_actions::{
+    CryptoAction, CryptoActionSnapshot, CryptoActionSnapshotPermit, CryptoResultReceipt,
+};
 use catcoms_sync::voice_v2::presence::{FreshPeer, PairReceipt, PairSelector};
 use catcoms_sync::voice_v2::{CallGrant, CallLease, Nonce, VoiceError};
 use catcoms_sync::VoiceWatchGrant;
@@ -77,6 +79,11 @@ enum Command {
     },
     Changes {
         reply: Reply<tokio::sync::watch::Receiver<u64>>,
+    },
+    ConfirmationActions {
+        grant: Arc<CallGrant>,
+        permit: CryptoActionSnapshotPermit,
+        reply: Reply<CryptoActionSnapshot>,
     },
     Pair {
         grant: Arc<CallGrant>,
@@ -171,6 +178,15 @@ impl Command {
                     return;
                 }
                 let _ = reply.send(server.sync.voice_endpoint_changes());
+            }
+            Self::ConfirmationActions {
+                grant,
+                permit,
+                reply,
+            } => {
+                if !reply.is_closed() {
+                    let _ = reply.send(Ok(server.sync.voice_confirmation_actions(&grant, permit)));
+                }
             }
             Self::Pair {
                 grant,
@@ -382,6 +398,26 @@ impl ServerActor {
     ) -> Result<tokio::sync::watch::Receiver<u64>, VoiceEndpointError> {
         self.voice_endpoint_request(|reply| Command::Changes { reply })
             .await
+    }
+
+    /// Original pending actions from the exact native participant. The affine prepaid owner
+    /// transfers into the command and then its actual output, including a Root refusal. Caller
+    /// cancellation cannot release the32-handle snapshot/oneshot payment ahead of collection.
+    /// This rotates observation, never consumes tokens, admits engines or reconstructs keys.
+    pub async fn voice_confirmation_actions(
+        &self,
+        grant: Arc<CallGrant>,
+        permit: CryptoActionSnapshotPermit,
+    ) -> Result<CryptoActionSnapshot, VoiceEndpointError> {
+        // Must precede oneshot allocation: stop can destroy the queued command while this
+        // actual receiver remains unpolled; cancellation can destroy this waiter first.
+        let _waiter = permit.rpc_waiter().map_err(VoiceEndpointError::Protocol)?;
+        self.voice_endpoint_request(|reply| Command::ConfirmationActions {
+            grant,
+            permit,
+            reply,
+        })
+        .await
     }
 
     /// Recover the original native derivation row; neither a handshake ID nor a cached receipt

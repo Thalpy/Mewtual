@@ -8,7 +8,9 @@ use super::*;
 fn predicted_proof(row: &ResolvedRow, session: &SessionIdentity) -> [u8; 32] {
     use sha2::{Digest, Sha256};
     let (serial, version, input) = row.status().unwrap().action.unwrap();
-    let Purpose::Derive(selector) = row.row.key.purpose;
+    let Purpose::Derive(selector) = row.row.key.purpose else {
+        panic!("this proof fixture requires the original Derive parent")
+    };
     let mut hash = Sha256::new();
     hash.update(b"Mewtual native voice final retirement v1\0");
     hash.update(session.0);
