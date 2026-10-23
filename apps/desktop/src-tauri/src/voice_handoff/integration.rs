@@ -7,7 +7,10 @@ use service::tests::{opened_frame, opened_reply, opened_reply_kind};
 use sha2::{Digest, Sha256};
 use std::sync::Arc;
 mod confirmation;
-pub(crate) use confirmation::{confirmation_alias_claims, confirmation_round_trip};
+pub(crate) use confirmation::{
+    confirmation_alias_claims, confirmation_framed_round_trip, confirmation_rejected_result,
+    confirmation_round_trip,
+};
 
 pub(crate) async fn derivation(
     state: &AppState,

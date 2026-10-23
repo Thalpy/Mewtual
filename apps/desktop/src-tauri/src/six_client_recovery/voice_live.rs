@@ -233,6 +233,20 @@ async fn native_v2_discovers_blocked_endpoints_through_unjoined_tcp_bridge_then_
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn native_v2_confirmation_child_uses_the_returned_actual_parent_over_blocked_tcp_discovery() {
+    confirmation_over_blocked_tcp(false, false).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn native_v2_confirmation_framed_result_uses_actual_actor_body_and_original_phase() {
+    confirmation_over_blocked_tcp(true, false).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn native_v2_confirmation_rejected_result_remains_original_history_after_return() {
+    confirmation_over_blocked_tcp(true, true).await;
+}
+
+async fn confirmation_over_blocked_tcp(framed: bool, reject: bool) {
     let mut scenario = Scenario::new(false);
     scenario.admit().await;
     scenario.close(&[3, 4, 5]).await;
@@ -263,25 +277,69 @@ async fn native_v2_confirmation_child_uses_the_returned_actual_parent_over_block
     if scenario.clients[1].identity.as_ref().unwrap().1
         < scenario.clients[2].identity.as_ref().unwrap().1
     {
-        crate::voice_handoff::integration::confirmation_round_trip(
-            &scenario.online(1).state,
-            &a,
-            &ap,
-            &scenario.online(2).state,
-            &c,
-            &cp,
-        )
-        .await;
+        if reject {
+            crate::voice_handoff::integration::confirmation_rejected_result(
+                &scenario.online(1).state,
+                &a,
+                &ap,
+                &scenario.online(2).state,
+                &c,
+                &cp,
+            )
+            .await;
+        } else if framed {
+            crate::voice_handoff::integration::confirmation_framed_round_trip(
+                &scenario.online(1).state,
+                &a,
+                &ap,
+                &scenario.online(2).state,
+                &c,
+                &cp,
+            )
+            .await;
+        } else {
+            crate::voice_handoff::integration::confirmation_round_trip(
+                &scenario.online(1).state,
+                &a,
+                &ap,
+                &scenario.online(2).state,
+                &c,
+                &cp,
+            )
+            .await;
+        }
     } else {
-        crate::voice_handoff::integration::confirmation_round_trip(
-            &scenario.online(2).state,
-            &c,
-            &cp,
-            &scenario.online(1).state,
-            &a,
-            &ap,
-        )
-        .await;
+        if reject {
+            crate::voice_handoff::integration::confirmation_rejected_result(
+                &scenario.online(2).state,
+                &c,
+                &cp,
+                &scenario.online(1).state,
+                &a,
+                &ap,
+            )
+            .await;
+        } else if framed {
+            crate::voice_handoff::integration::confirmation_framed_round_trip(
+                &scenario.online(2).state,
+                &c,
+                &cp,
+                &scenario.online(1).state,
+                &a,
+                &ap,
+            )
+            .await;
+        } else {
+            crate::voice_handoff::integration::confirmation_round_trip(
+                &scenario.online(2).state,
+                &c,
+                &cp,
+                &scenario.online(1).state,
+                &a,
+                &ap,
+            )
+            .await;
+        }
     }
     crate::end_voice_owner_inner(&scenario.online(1).state, a.id()).await;
     crate::end_voice_owner_inner(&scenario.online(2).state, c.id()).await;

@@ -1,5 +1,58 @@
 # Mewtual; Handover
 
+## Child Input/result continuation (23 October; validation in progress)
+
+New work in `target/communication-confirmation-input-worktree` starts at history integration
+`6ab1df99`. It adds separate inactive child Input, engine-admission and cleanup adapters, with
+the larger decoder and parent handles scoped before any await. Input tag7 carries child and
+original parent RowIds, original protected binding, actual Root role/direction, sequence and
+borrowed AAD/body. Its chain identity remains the original parent serial. Data reply retains
+the actual InputCustody and Work through collection. Engine admission preserves Clock-before-
+UI-commit ordering and returns only the actual Root commit result. Receipt ACK, settlement and
+child-only Return resolve the exact original Session/parent/child purpose, including after End.
+Production admission and V2 activation remain disabled.
+
+Review found a MEDIUM draft defect: pair-flight and action serials use different counters, so
+comparing them rejected a genuine first Hello after Derive. That comparison is removed; the
+actual Phase/InputCustody establishes provenance. The real TCP fixture now explicitly asserts
+that unequal counters still project Input, and uses the framed native admission/cleanup paths.
+The new browser decoder preserves full parent/action/room integers and original binding;20
+focused parser tests pass, covering all nine roles in both directions, bounds, truncation,
+substitution, independent byte copies and malformed metadata. Svelte reports zero errors/warnings.
+Before the Result increment,252 focused native handoff tests and both actual TCP confirmation
+tests pass. Input/admission/cleanup run as authenticated frames. Scoping the synchronous
+decoder before later serialization keeps the complete measured Control peak12,252B/12,288B.
+All2,597 frontend tests, Svelte0/0 and production build pass. Native Result changes below have
+not yet compiled; their enlarged graph must pass the same unchanged bounds. A fresh complete
+Root suite is running separately on identical Root inputs; no second heavy Cargo is started.
+
+The Result draft transfers the original authenticated Data Buffer directly into the actual
+Actor body, with no plaintext Vec copy. One shared native owner retains the admitted UI commit,
+unique physical hold and original8KiB task contribution with both Worker/Response and the actual
+queued body/command/completed output. Worker teardown cannot release ordering ahead of a queued
+publication. Proven local metadata refusal restores the exact Buffer without an Actor request.
+Tests cover the actual queued body after caller loss, stopped Actor and uncollected output;
+new TCP scenarios cover the real framed Worker, dropped outer waiter behind an Actor barrier,
+and an actual Root Rejected receipt through ACK/settlement/Return/original Control history.
+The tests and complete Result memory inventories remain pending compilation. Direct real-child
+final-admission vs lock/unlock ordering is still an explicit focused coverage gap; the previous
+Derive tests cover that boundary only for Derive. Static re-review found no remaining confirmed
+defect after the shared-custody correction. Production remains Status/history only.
+
+Review of the next Begin gate found a cleanup prerequisite: exact child Return now closes an
+uncertain local Pending through the existing PendingRetirement, including after End/lock.
+It preserves ClosedPending with no Action, settlement or drained claim. This replaces the
+draft's earlier unconditional Pending refusal; invented ACK/Settle still refuse. The unit
+test covers idempotent authenticated Return, and the TCP alias test uses framed Return for
+an actual known publication whose input was permanently lost before attachment. Parent
+Plan-final closes the original Root control; unstarted registered actions retire there,
+while real admitted/input/lower owners continue to delay its actual witness. Native checks
+for this cleanup increment remain pending.
+
+Native first-child Begin/incoming-snapshot IPC, browser key/Phase transfer, SDP/ICE/RTC and
+multi-peer composition remain open. External download resume and the other signalling checkout
+are untouched. Only one physical desktop is available; no physical acceptance is claimed.
+
 ## Confirmation IPC continuation (23 October; validation in progress)
 
 Draft work in `target/communication-confirmation-ipc-worktree` extends the published
@@ -32,7 +85,16 @@ progressing. It was removed from the live helper; exact original authenticated h
 remain, and isolated full-pool tests still enforce no new credit. Actual child Rejected receipt
 recovery through this new framed handler remains a focused coverage follow-up; Root's rejection
 and generic result-history contracts already have separate tests. This run does not claim it.
-Full current native/static checks remain pending. Child Input, engine/result IPC,
+The complete native run finished725 passed/2 failed in675.93s. Both failures were existing
+active Keep/private-download recovery after B restart, outside this handoff diff. They passed
+an isolated serial rerun2/2 in25.39s; this does not erase the full-run failures or establish their
+cause. File recovery implementation remains the other agent's area. Native sign-off stays open
+pending reconciliation under combined load; no timeout or assertion was relaxed. Native check
+and strict all-target/all-feature Clippy pass. Full frontend2,577, current Svelte0/0 and production
+build pass; both formatting and ambient gates pass. Current Root sources/manifests remain
+unchanged from the previously validated3,310-test checkpoint; a fresh complete Root run remains
+pending. No startup/flow rerun is required for this inactive, non-setup/non-chat increment.
+Child Input, engine/result IPC,
 browser key/Phase transfer, SDP/ICE/RTC, live activation and media remain unfinished. External
 download resume and the other signalling checkout remain untouched.
 

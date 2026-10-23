@@ -31,6 +31,31 @@ impl ResolvedRow {
     }
 }
 
+impl Work {
+    /// Fixed identity of this actual child's retained original parent. In particular this
+    /// is NOT the child's serial, the renderer's role number, or a newly selected pair.
+    /// Work already owns the real child; both immutable keys and the strong parent survive
+    /// native Return/End. Returning metadata here grants no new engine or plan authority.
+    pub(in crate::voice_handoff) fn confirmation_parent_id(&self) -> Result<RowId, VoiceError> {
+        let Purpose::Confirmation { parent, .. } = self.row.key.purpose else {
+            return Err(VoiceError::Unauthorized);
+        };
+        let owner = self
+            .row
+            .key
+            .parent
+            .as_ref()
+            .ok_or(VoiceError::Unauthorized)?;
+        if owner.id != parent
+            || owner.key.parent.is_some()
+            || !matches!(owner.key.purpose, Purpose::Derive(_))
+        {
+            return Err(VoiceError::Unauthorized);
+        }
+        Ok(owner.id)
+    }
+}
+
 impl Ledger {
     /// Recover only a descendant of the actual original indexed parent. Public purpose
     /// fields are lookup hints; equal RowIds in another ledger or a detached parent cannot

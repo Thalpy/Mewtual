@@ -197,7 +197,34 @@ impl Buffer {
 struct ResultOwner {
     buffer: Buffer,
     range: Range<usize>,
+    // The ACTUAL queued command/completed reply must retain publication ordering even if
+    // the submitting task is torn down. Drop the bytes before the shared commit/position,
+    // and keep the metadata payment alive through both owners' destruction.
+    _publication: Option<Arc<PublicationCustody>>,
     _metadata: CopyCustody,
+}
+
+/// Native lifecycle custody only, never effect authority. The worker and the actor's actual
+/// byte owner share this one paid allocation. Worker cancellation cannot let lock or channel
+/// shutdown overtake an already queued publication on an independently running actor.
+pub(super) struct PublicationCustody {
+    _commit: tokio::sync::OwnedMutexGuard<()>,
+    _physical: super::channel::PhysicalHold,
+    // Last: pays the shared allocation and detached operation even after its worker dies.
+    _payment: CopyCustody,
+}
+impl PublicationCustody {
+    pub(super) fn new(
+        commit: tokio::sync::OwnedMutexGuard<()>,
+        physical: super::channel::PhysicalHold,
+        payment: CopyCustody,
+    ) -> Self {
+        Self {
+            _commit: commit,
+            _physical: physical,
+            _payment: payment,
+        }
+    }
 }
 impl AsRef<[u8]> for ResultOwner {
     fn as_ref(&self) -> &[u8] {
@@ -242,6 +269,17 @@ impl Phase {
         buffer: Buffer,
         range: Range<usize>,
     ) -> Result<VoiceConfirmationBody, (VoiceError, Buffer)> {
+        self.result_body_with_publication(buffer, range, None)
+    }
+    /// As above, retaining the original admitted UI commit and physical position with the
+    /// same result bytes through the actor command and its completed/uncollected output.
+    /// The caller prepays the one PublicationCustody allocation in its task contribution.
+    pub(super) fn result_body_with_publication(
+        self: &Arc<Self>,
+        buffer: Buffer,
+        range: Range<usize>,
+        publication: Option<Arc<PublicationCustody>>,
+    ) -> Result<VoiceConfirmationBody, (VoiceError, Buffer)> {
         if !Arc::ptr_eq(&buffer._custody.phase, self)
             || range.start > range.end
             || range.end > buffer.bytes().len()
@@ -256,6 +294,7 @@ impl Phase {
         let owner = ResultOwner {
             buffer,
             range,
+            _publication: publication,
             _metadata: metadata,
         };
         // Constructor layout/length bounds are established above and by the concrete guard
@@ -703,6 +742,92 @@ mod tests {
         drop(buffer);
         let layout = std::alloc::Layout::new::<ResultOwner>();
         assert!(layout.size() <= 128 && layout.align() <= 64);
+    }
+
+    #[tokio::test]
+    async fn actual_queued_actor_body_keeps_commit_position_and_payment_after_submitter_loss() {
+        use super::super::derivation_result::tests::Case;
+        use super::super::factory::tests::park;
+        // The real Actor deliberately rejects this synthetic pair. That is independent of
+        // the lifecycle under test: the ACTUAL command/body must retain custody while queued,
+        // after the RPC future is dropped, and in a completed but uncollected output.
+        for mode in 0..3 {
+            let lose_waiter = mode != 0;
+            let case = Case::new().await;
+            let work = case.row().work().unwrap();
+            let phase = work.phase().clone();
+            let mut incoming = case.frame(1, &case.bytes());
+            let physical = incoming.hold_position().unwrap();
+            let publication = Arc::new(PublicationCustody::new(
+                case.native
+                    .state
+                    .ui_session_commit
+                    .clone()
+                    .lock_owned()
+                    .await,
+                physical,
+                phase.copy(8 * 1024).unwrap(),
+            ));
+            let body = incoming
+                .result_body_with_publication(&phase, 0..16, Some(publication.clone()))
+                .unwrap();
+            let parked = park(&case.native.actor).await;
+            if mode == 2 {
+                // Stop is ahead of the result in the real mailbox but held at the SAME
+                // Actor barrier. Its receiver teardown must drop the queued body's guards.
+                case.native.actor.shutdown().await;
+            }
+            let mut rpc = Box::pin(case.native.actor.submit_voice_confirmation_result(
+                case.selected.grant().unwrap(),
+                case.action.clone(),
+                &body,
+                [7; 32],
+            ));
+            assert!(
+                poll_once(rpc.as_mut()).await.is_pending(),
+                "actual command enqueued behind barrier"
+            );
+            drop((incoming, publication, work));
+            assert!(case.native.state.ui_session_commit.try_lock().is_err());
+            assert!(case.route.session().header().is_err());
+            let mut idle = Box::pin(case.route.session().fixture_wait_physical_idle());
+            assert!(poll_once(idle.as_mut()).await.is_pending());
+            assert!(
+                phase.copy(8 * 1024).is_err(),
+                "queued body retains the task contribution"
+            );
+            if lose_waiter {
+                drop(rpc);
+                drop(body); // only the ACTUAL queued command now owns these guards
+                assert!(case.native.state.ui_session_commit.try_lock().is_err());
+                assert!(case.route.session().header().is_err());
+                assert!(poll_once(idle.as_mut()).await.is_pending());
+                drop(parked);
+                case.native.actor.member_count().await; // FIFO barrier after the queued turn
+            } else {
+                drop(parked);
+                let completed = rpc.await.unwrap();
+                assert!(
+                    completed.result().is_err(),
+                    "synthetic grant is never live authority"
+                );
+                drop(body);
+                assert!(case.native.state.ui_session_commit.try_lock().is_err());
+                assert!(case.route.session().header().is_err());
+                assert!(poll_once(idle.as_mut()).await.is_pending());
+                assert!(
+                    phase.copy(8 * 1024).is_err(),
+                    "uncollected output still pays custody"
+                );
+                drop(completed);
+            }
+            assert!(case.native.state.ui_session_commit.try_lock().is_ok());
+            assert_eq!(case.route.session().fixture_counts(), (false, 1, 1));
+            idle.await;
+            assert!(phase.copy(8 * 1024).is_ok());
+            case.retire();
+            case.native.close().await;
+        }
     }
 
     #[test]

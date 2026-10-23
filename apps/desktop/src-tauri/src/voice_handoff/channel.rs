@@ -193,6 +193,21 @@ impl Session {
             notified.await;
         }
     }
+    /// Test-only observation of one original position while preserving this Session for a
+    /// later exact history query. Production shutdown still requires close_admission first;
+    /// this fixture observer grants neither admission nor authority and never clears busy.
+    #[cfg(test)]
+    pub(in crate::voice_handoff) async fn fixture_wait_physical_idle(&self) {
+        loop {
+            let notified = self.idle.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            if !self.counters.lock().unwrap_or_else(|e| e.into_inner()).busy {
+                return;
+            }
+            notified.await;
+        }
+    }
 }
 impl Drop for Session {
     fn drop(&mut self) {
@@ -556,6 +571,16 @@ impl Incoming {
         phase: &Arc<Phase>,
         range: Range<usize>,
     ) -> Result<catcoms_app::VoiceConfirmationBody, Refused> {
+        self.result_body_with_publication(phase, range, None)
+    }
+    /// Publication custody moves with the actual buffer, rather than staying solely in a
+    /// cancellable worker. All local failures still restore the original opened body.
+    pub(super) fn result_body_with_publication(
+        &mut self,
+        phase: &Arc<Phase>,
+        range: Range<usize>,
+        publication: Option<Arc<super::custody::PublicationCustody>>,
+    ) -> Result<catcoms_app::VoiceConfirmationBody, Refused> {
         let plain = self.body.plain_bytes.ok_or(Refused::Body)?;
         if self.request.operation() != Operation::Result
             || !matches!(self.body.storage, Storage::Data(_))
@@ -578,7 +603,7 @@ impl Incoming {
         self.body.cipher_bytes = 16;
         self.body.plain_bytes = Some(0);
         self.filled = 16;
-        match phase.result_body(buffer, range) {
+        match phase.result_body_with_publication(buffer, range, publication) {
             Ok(body) => Ok(body),
             Err((error, buffer)) => {
                 self.body.storage = Storage::Data(buffer);

@@ -1,5 +1,23 @@
 # Threat model; client integrity & enforcement boundaries
 
+## Child result publication custody (23 October; inactive draft)
+
+Child Input/engine/result requests resolve the same actual Session, indexed original parent,
+selected owner, exact purpose and native action. Native Root input chooses role/direction;
+pair-flight and action serials are different counters and cannot establish provenance by
+numeric equality. Engine admission retains Clock-before-UI-commit ordering. First result
+publication retains the original UI commit through the Actor turn and actual output collection.
+
+The result bytes move from the authenticated request into the actual pinned Actor owner. Its
+shared native custody retains that commit, unique physical position and original task payment
+independently of the submitting worker. Dropping an RPC/worker cannot make lock or shutdown
+complete ahead of the queued command/body. The pinned owner stays within Root's existing128B
+owner bound; its additional shared allocation is separately paid/countable in the task's8KiB.
+Actor-body metadata still uses the existing4KiB allowance. Local refusal before enqueue restores
+the same original buffer; ambiguous publication never refunds a nonce, engine or attempt.
+Compilation, whole-graph measurement and new barrier/Rejected-result tests remain pending.
+Production V2/effect dispatch, browser/RTC composition and multi-peer acceptance remain closed.
+
 ## Confirmation metadata is not authority (23 October; inactive draft)
 
 The separate child grammar cannot enlarge v1 handler/request state or reinterpret a parent

@@ -1,6 +1,7 @@
 //! Actual native three-flight confirmation over the fixture's real permitted TCP graph.
-//! Test-only AES-GCM keys stand in for already-derived browser keys; this is NOT WebCrypto,
-//! native IPC child input/admission, P256/HKDF, SDP/ICE/RTC or audible-media acceptance.
+//! Test-only AES-GCM keys stand in for already-derived browser keys. Actual encrypted frames
+//! exercise native child Input/admission/results/cleanup, not WebCrypto/P256/HKDF, production
+//! effect dispatch, SDP/ICE/RTC or audible-media acceptance.
 use super::*;
 use aes_gcm::{aead::AeadInPlace, Aes256Gcm, KeyInit, Nonce, Tag};
 use catcoms_rt::{Clock, SystemClock};
@@ -112,6 +113,13 @@ pub(crate) async fn confirmation_alias_claims(
         )
         .await
         .unwrap();
+    let binding = action.protected_binding().unwrap();
+    let selector = PairSelector {
+        peer: binding.peer,
+        join: binding.peer_join,
+        key_ref: binding.peer_key,
+        epoch: binding.epoch,
+    };
     if lose_input {
         action.settle_engine();
         assert!(action.input().is_err());
@@ -185,7 +193,18 @@ pub(crate) async fn confirmation_alias_claims(
             retry.attach_published(16 * 1024),
             Err(VoiceError::Unauthorized)
         ));
-        let closed = child.close_pending().unwrap();
+        drop(_commit); // framed cleanup/bootstrap uses the same original UI boundary
+        cleanup_child(
+            state,
+            selected,
+            parent,
+            valid_request,
+            &child,
+            selector,
+            Cleanup::PendingReturn,
+        )
+        .await;
+        let closed = child.status().unwrap();
         assert!(!closed.drained && closed.action.is_none());
         return;
     }
@@ -262,7 +281,10 @@ async fn crypto_and_return(
     row: &ledger::ResolvedRow,
     parent: &ledger::ResolvedRow,
     purpose: ledger::ConfirmationPurpose,
+    framed_result: bool,
+    reject_opened: bool,
 ) -> CryptoOutcome {
+    project_and_admit(state, selected, row, parent, purpose).await;
     let work = row.work().unwrap();
     let input = work.phase().input(work.action()).unwrap();
     let _adapter = work.phase().copy(4096).unwrap();
@@ -284,11 +306,7 @@ async fn crypto_and_return(
             buffer.bytes_mut()[..len].copy_from_slice(&flight.plaintext);
             let mut iv = [0; 12];
             iv[4..].copy_from_slice(&flight.reservation.sequence.to_be_bytes());
-            // Admit the actual Root action before the test provider runs. The production
-            // child frame/UI commit adapter remains a separate unimplemented boundary.
-            work.action()
-                .admit_engine(work.action().engine_bytes())
-                .unwrap();
+            // The real framed child admission above already committed this exact engine.
             let tag = cipher
                 .encrypt_in_place_detached(
                     Nonce::from_slice(&iv),
@@ -305,9 +323,6 @@ async fn crypto_and_return(
             buffer.bytes_mut()[..len].copy_from_slice(&packet.ciphertext()[..len]);
             let mut iv = [0; 12];
             iv[4..].copy_from_slice(&packet.header.sequence.to_be_bytes());
-            work.action()
-                .admit_engine(work.action().engine_bytes())
-                .unwrap();
             cipher
                 .decrypt_in_place_detached(
                     Nonce::from_slice(&iv),
@@ -320,7 +335,36 @@ async fn crypto_and_return(
         }
         CryptoInput::Derive(_) => panic!("confirmation child"),
     };
+    let mut buffer = buffer;
+    if reject_opened {
+        assert!(opening && length != 0);
+        // Deliberately corrupt a provider's otherwise authenticated opened result. Native
+        // Root must record the actual protocol rejection, not accept a renderer success flag.
+        buffer.bytes_mut()[0] ^= 1;
+    }
     let tag = work.action().output_tag(&buffer.bytes()[..length]).unwrap();
+    let (work, _adapter) = if framed_result {
+        // The native test provider is finished before native result admission. Its own
+        // temporary4KiB adapter cannot overlap the separate8KiB worker +4KiB actor body.
+        drop((work, _adapter));
+        framed_submission(
+            state,
+            selected,
+            parent,
+            purpose,
+            row,
+            selector,
+            &buffer.bytes()[..length],
+        )
+        .await;
+        let work = row.work().unwrap();
+        let adapter = work.phase().copy(4096).unwrap();
+        (work, adapter)
+    } else {
+        (work, _adapter)
+    };
+    // Keep the original test-provider buffer/typed body/completed output after an exact
+    // Actor retry as well. Framed publication must not let cleanup forget these late owners.
     let body = work
         .phase()
         .result_body(buffer, 0..length)
@@ -349,12 +393,24 @@ async fn crypto_and_return(
     };
     let receipt = completion.result().unwrap();
     let outcome = receipt.outcome;
-    assert!(!matches!(outcome, CryptoOutcome::Rejected(_)));
+    assert_eq!(matches!(outcome, CryptoOutcome::Rejected(_)), reject_opened);
     let mut expected = row.status().unwrap();
-    assert!(
-        expected.engine.receipt.is_none(),
-        "native cache has not observed Actor publication"
-    );
+    if !framed_result {
+        assert!(
+            expected.engine.receipt.is_none(),
+            "native cache has not observed Actor publication"
+        );
+    } else {
+        assert!(
+            expected
+                .engine
+                .receipt
+                .as_ref()
+                .unwrap()
+                .same_transition(&receipt),
+            "framed first publication and typed retry keep the exact same result"
+        );
+    }
     expected.engine = work.action().terminal_status();
     assert!(expected
         .engine
@@ -371,12 +427,37 @@ async fn crypto_and_return(
         .as_ref()
         .unwrap()
         .same_transition(&receipt));
-    row.acknowledge(&receipt).unwrap();
-    row.settle().unwrap();
+    cleanup_child(
+        state,
+        selected,
+        parent,
+        purpose,
+        row,
+        selector,
+        Cleanup::Receipt(&receipt),
+    )
+    .await;
+    cleanup_child(
+        state,
+        selected,
+        parent,
+        purpose,
+        row,
+        selector,
+        Cleanup::Settle,
+    )
+    .await;
     drop((work, _adapter));
-    let route = route(state, selected).await;
-    row.close_phase(route.session().identity(), custody::CloseMode::Return)
-        .unwrap();
+    cleanup_child(
+        state,
+        selected,
+        parent,
+        purpose,
+        row,
+        selector,
+        Cleanup::Return,
+    )
+    .await;
     assert!(
         !row.try_compact().unwrap(),
         "actual Input/body/completed output still retain the loan"
@@ -402,6 +483,363 @@ async fn crypto_and_return(
     outcome
 }
 
+/// Pass actual output through the opened Data frame and native detached result worker.
+/// The Root receipt is independently bound to the original action/body, not a renderer flag.
+async fn framed_submission(
+    state: &AppState,
+    selected: &Arc<SelectedHandoffOwner>,
+    parent: &ledger::ResolvedRow,
+    purpose: ledger::ConfirmationPurpose,
+    row: &ledger::ResolvedRow,
+    selector: PairSelector,
+    output: &[u8],
+) {
+    let bootstrap::Status::Ready(public) = bootstrap::ensure(
+        state,
+        selected.id(),
+        selected.executor(),
+        &mut catcoms_rt::OsCryptoRng,
+    )
+    .await
+    .unwrap() else {
+        panic!("original channel")
+    };
+    let route = state.voice_channels.route(public.public().slot).unwrap();
+    let mut body = confirmation_prefix(parent.id(), purpose, selector);
+    let (serial, version, tag) = row.status().unwrap().action.unwrap();
+    body.extend_from_slice(&serial.to_be_bytes());
+    body.extend_from_slice(&version.to_be_bytes());
+    body.extend_from_slice(&tag);
+    let output_tag: [u8; 32] = Sha256::digest(output).into();
+    body.extend_from_slice(&output_tag);
+    body.extend_from_slice(&(output.len() as u16).to_be_bytes());
+    body.extend_from_slice(output);
+    let (phase, lose_waiter) = {
+        let work = row.work().unwrap();
+        (
+            work.phase().clone(),
+            work.action().protected_row().unwrap() == 1
+                && work.action().operation() == CryptoOperation::EncryptConfirmation,
+        )
+    };
+    let header = (
+        route.session().fixture_counts().1 + 1,
+        3,
+        1,
+        row.id().logical(),
+    );
+    let incoming = opened_frame(&public, &route, header, &body, Some(&phase));
+    let context = context::Context::new(state);
+    if lose_waiter {
+        use std::future::{poll_fn, Future};
+        use std::task::Poll;
+        let actor = actor(state, selected).await;
+        // Drive the ACTUAL outer handler up to its UI-commit await. A FIFO actor query
+        // completes the preceding binding observation, then the existing durable Ready
+        // barrier parks the actual publication turn without sleeps or asserted booleans.
+        let boundary = state.ui_session_commit.lock().await;
+        let mut pending = Box::pin(confirmation_result::commit(&context, &route, incoming));
+        assert!(poll_fn(|cx| Poll::Ready(pending.as_mut().poll(cx).is_pending())).await);
+        actor.member_count().await;
+        assert!(poll_fn(|cx| Poll::Ready(pending.as_mut().poll(cx).is_pending())).await);
+        let parked = factory::tests::park(&actor).await;
+        drop(boundary);
+        tokio::time::timeout(Duration::from_secs(15), async {
+            loop {
+                assert!(poll_fn(|cx| Poll::Ready(pending.as_mut().poll(cx).is_pending())).await);
+                match row.work() {
+                    Err(VoiceError::Capacity) => break, // actual detached Work owns the row
+                    Ok(work) => drop(work),
+                    Err(error) => panic!("unexpected pre-publication state: {error:?}"),
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        drop(pending); // actual outer JoinHandle loss must detach, never cancel publication
+        assert!(state.ui_session_commit.try_lock().is_err());
+        let mut ordering = Box::pin(state.ui_session_commit.lock());
+        assert!(poll_fn(|cx| Poll::Ready(ordering.as_mut().poll(cx).is_pending())).await);
+        drop(parked);
+        // The real worker retains the commit through Actor/body publication collection.
+        // Its Response's field destructors are NOT atomic: another thread can acquire this
+        // guard before Incoming/PhysicalHold finishes dropping. Await physical idle separately.
+        let guard = tokio::time::timeout(Duration::from_secs(15), ordering)
+            .await
+            .unwrap();
+        drop(guard);
+        tokio::time::timeout(
+            Duration::from_secs(15),
+            route.session().fixture_wait_physical_idle(),
+        )
+        .await
+        .unwrap();
+        assert!(!route.session().fixture_counts().0);
+        let status = row.reconcile().unwrap();
+        assert_eq!(
+            status.engine.receipt.as_ref().unwrap().output_tag,
+            output_tag
+        );
+        recover_child_history(state, selected, parent, purpose, row, selector, &status).await;
+        return;
+    }
+    let response = confirmation_result::commit(&context, &route, incoming)
+        .await
+        .unwrap();
+    let (result, incoming) = response.into_parts();
+    let status = result.unwrap();
+    assert!(status.action == Some((serial, version, tag)));
+    assert_eq!(
+        status.engine.receipt.as_ref().unwrap().output_tag,
+        output_tag
+    );
+    let reply = history::Response::new(incoming, Ok((row.id(), status.clone())))
+        .seal()
+        .unwrap();
+    assert_eq!(
+        opened_reply(&public, header, &body, &reply),
+        replies::status(row.id(), &status).unwrap()
+    );
+}
+
+/// Test-only canonical request prefix; renderer/native shared vectors test this grammar.
+fn confirmation_prefix(
+    parent: ledger::RowId,
+    purpose: ledger::ConfirmationPurpose,
+    selector: PairSelector,
+) -> Vec<u8> {
+    let mut body = vec![2];
+    body.extend_from_slice(selector.peer.as_bytes());
+    body.extend_from_slice(&selector.join);
+    body.extend_from_slice(&selector.key_ref);
+    body.extend_from_slice(&selector.epoch.to_be_bytes());
+    body.extend_from_slice(&parent.logical());
+    match purpose {
+        ledger::ConfirmationPurpose::Start(None) => body.push(0),
+        ledger::ConfirmationPurpose::Start(Some(previous)) => {
+            body.push(1);
+            body.extend_from_slice(&previous);
+        }
+        ledger::ConfirmationPurpose::Respond(trigger) => {
+            body.push(2);
+            body.extend_from_slice(&trigger.logical());
+        }
+        ledger::ConfirmationPurpose::Incoming(role) => body.extend_from_slice(&[3, role]),
+    }
+    body
+}
+
+enum Cleanup<'a> {
+    Receipt(&'a catcoms_sync::voice_v2::crypto_actions::CryptoResultReceipt),
+    Settle,
+    Return,
+    PendingReturn,
+}
+/// Exact authenticated action cleanup, including Return while actual Input/body/completion
+/// owners still survive. Original receipt digests are verified by native, not trusted here.
+async fn cleanup_child(
+    state: &AppState,
+    selected: &Arc<SelectedHandoffOwner>,
+    parent: &ledger::ResolvedRow,
+    purpose: ledger::ConfirmationPurpose,
+    row: &ledger::ResolvedRow,
+    selector: PairSelector,
+    cleanup: Cleanup<'_>,
+) {
+    let bootstrap::Status::Ready(public) = bootstrap::ensure(
+        state,
+        selected.id(),
+        selected.executor(),
+        &mut catcoms_rt::OsCryptoRng,
+    )
+    .await
+    .unwrap() else {
+        panic!("original channel")
+    };
+    let route = state.voice_channels.route(public.public().slot).unwrap();
+    let mut body = confirmation_prefix(parent.id(), purpose, selector);
+    let operation = match cleanup {
+        Cleanup::Receipt(_) => 4,
+        Cleanup::Settle => 5,
+        Cleanup::Return | Cleanup::PendingReturn => 6,
+    };
+    if operation == 6 {
+        body.push(0);
+    } else {
+        let (serial, version, tag) = row.status().unwrap().action.unwrap();
+        body.extend_from_slice(&serial.to_be_bytes());
+        body.extend_from_slice(&version.to_be_bytes());
+        body.extend_from_slice(&tag);
+        if let Cleanup::Receipt(receipt) = cleanup {
+            body.extend_from_slice(&requests::receipt_digest(receipt));
+        }
+    }
+    let header = (
+        route.session().fixture_counts().1 + 1,
+        operation,
+        0,
+        row.id().logical(),
+    );
+    let reply = confirmation_settlement::apply(
+        &context::Context::new(state),
+        &route,
+        opened_frame(&public, &route, header, &body, None),
+    )
+    .seal()
+    .unwrap();
+    let bytes = opened_reply(&public, header, &body, &reply);
+    assert_eq!(bytes.len(), replies::STATUS_BYTES);
+    if matches!(cleanup, Cleanup::PendingReturn) {
+        let status = row.status().unwrap();
+        assert!(matches!(
+            status.pending,
+            ledger::PendingStatus::Closed {
+                actor_handoff: true
+            }
+        ));
+        assert!(
+            status.action.is_none()
+                && !status.engine.settled
+                && !status.drained
+                && !status.acknowledged
+        );
+        assert_eq!(
+            bytes,
+            replies::status(row.id(), &status).unwrap(),
+            "actual ClosedPending; no invented ACK/settlement/drainage"
+        );
+        return;
+    }
+    assert_eq!(bytes[208], 1, "actual original receipt acknowledged");
+    if operation != 4 {
+        assert_eq!(bytes[68], 1, "actual engine settled");
+    }
+}
+
+/// Actual authenticated child Input and Clock-first native engine admission. Test provider
+/// AES below remains separate from browser/WebView acceptance; compare every lent AAD/body
+/// byte to the actual Root input before that provider consumes it.
+async fn project_and_admit(
+    state: &AppState,
+    selected: &Arc<SelectedHandoffOwner>,
+    row: &ledger::ResolvedRow,
+    parent: &ledger::ResolvedRow,
+    purpose: ledger::ConfirmationPurpose,
+) {
+    let selector = {
+        let work = row.work().unwrap();
+        let binding = work.action().protected_binding().unwrap();
+        PairSelector {
+            peer: binding.peer,
+            join: binding.peer_join,
+            key_ref: binding.peer_key,
+            epoch: binding.epoch,
+        }
+    };
+    let bootstrap::Status::Ready(public) = bootstrap::ensure(
+        state,
+        selected.id(),
+        selected.executor(),
+        &mut catcoms_rt::OsCryptoRng,
+    )
+    .await
+    .unwrap() else {
+        panic!("original channel")
+    };
+    let route = state.voice_channels.route(public.public().slot).unwrap();
+    let prefix = confirmation_prefix(parent.id(), purpose, selector);
+    let context = context::Context::new(state);
+    let header = (
+        route.session().fixture_counts().1 + 1,
+        1,
+        0,
+        row.id().logical(),
+    );
+    let reply = confirmation_input::pull(
+        &context,
+        &route,
+        opened_frame(&public, &route, header, &prefix, None),
+    )
+    .await
+    .unwrap();
+    assert!(
+        row.work().is_err(),
+        "uncollected Data reply owns its actual Work/input"
+    );
+    let data = opened_reply_kind(&public, header, &prefix, &reply, 1);
+    assert_eq!(&data[..2], &[1, 7]);
+    assert_eq!(&data[2..18], &row.id().logical());
+    assert_eq!(&data[66..82], &parent.id().logical());
+    drop(reply);
+    let work = row.work().unwrap();
+    let input = work.phase().input(work.action()).unwrap();
+    let role = work.action().protected_row().unwrap();
+    assert_eq!(data[417], role);
+    let (operation, sequence, aad, body) = match input.input() {
+        CryptoInput::EncryptConfirmation(flight) => {
+            if purpose == ledger::ConfirmationPurpose::Start(None) {
+                assert_ne!(
+                    flight.action,
+                    work.action().serial(),
+                    "pair-flight and Action serial spaces differ after Derive"
+                );
+            }
+            (
+                1,
+                flight.reservation.sequence,
+                flight.reservation.aad.as_slice(),
+                flight.plaintext.as_slice(),
+            )
+        }
+        CryptoInput::DecryptConfirmation(packet) => {
+            (2, packet.header.sequence, packet.aad(), packet.ciphertext())
+        }
+        CryptoInput::Derive(_) => panic!("actual child input"),
+    };
+    assert_eq!(data[416], operation);
+    assert_eq!(&data[418..426], &sequence.to_be_bytes());
+    assert_eq!(
+        u16::from_be_bytes(data[426..428].try_into().unwrap()) as usize,
+        aad.len()
+    );
+    assert_eq!(
+        u16::from_be_bytes(data[428..430].try_into().unwrap()) as usize,
+        body.len()
+    );
+    assert_eq!(&data[430..430 + aad.len()], aad);
+    assert_eq!(&data[430 + aad.len()..], body);
+    let serial = work.action().serial();
+    let engine_bytes = work.action().engine_bytes();
+    let mut admission = prefix;
+    admission.extend_from_slice(&serial.to_be_bytes());
+    admission.extend_from_slice(&work.action().version().to_be_bytes());
+    admission.extend_from_slice(&work.action().input_tag());
+    admission.extend_from_slice(&(engine_bytes as u32).to_be_bytes());
+    drop((input, work, data));
+    let header = (
+        route.session().fixture_counts().1 + 1,
+        2,
+        0,
+        row.id().logical(),
+    );
+    let reply = confirmation_admission::admit(
+        &context,
+        &route,
+        opened_frame(&public, &route, header, &admission, None),
+    )
+    .await
+    .unwrap();
+    let bytes = opened_reply(&public, header, &admission, &reply);
+    assert_eq!(bytes.len(), replies::PERMIT_BYTES);
+    assert_eq!(
+        &bytes[66..74],
+        &serial.to_be_bytes(),
+        "actual engine commit serial"
+    );
+    assert_eq!(&bytes[74..78], &(engine_bytes as u32).to_be_bytes());
+}
+
 /// Recover the actual accepted result before native refresh and again after local
 /// Return/compaction, not a synthetic receipt projection. This read borrows no new Phase.
 async fn recover_child_history(
@@ -424,24 +862,7 @@ async fn recover_child_history(
         panic!("original ready channel")
     };
     let route = state.voice_channels.route(public.public().slot).unwrap();
-    let mut body = vec![2];
-    body.extend_from_slice(selector.peer.as_bytes());
-    body.extend_from_slice(&selector.join);
-    body.extend_from_slice(&selector.key_ref);
-    body.extend_from_slice(&selector.epoch.to_be_bytes());
-    body.extend_from_slice(&parent.id().logical());
-    match purpose {
-        ledger::ConfirmationPurpose::Start(None) => body.push(0),
-        ledger::ConfirmationPurpose::Start(Some(previous)) => {
-            body.push(1);
-            body.extend_from_slice(&previous);
-        }
-        ledger::ConfirmationPurpose::Respond(trigger) => {
-            body.push(2);
-            body.extend_from_slice(&trigger.logical());
-        }
-        ledger::ConfirmationPurpose::Incoming(role) => body.extend_from_slice(&[3, role]),
-    }
+    let mut body = confirmation_prefix(parent.id(), purpose, selector);
     body.push(0); // Lookup only. Never reserve/rearm when recovering a lost reply.
     let expected = replies::status(row.id(), expected).unwrap();
     // Actual Source/Lower/intake work keeps progressing on other native tasks while this
@@ -469,6 +890,50 @@ pub(crate) async fn confirmation_round_trip(
     high: &Arc<SelectedHandoffOwner>,
     high_parent: &ledger::ResolvedRow,
 ) {
+    confirmation_round_trip_inner(
+        low_state,
+        low,
+        low_parent,
+        high_state,
+        high,
+        high_parent,
+        false,
+    )
+    .await;
+}
+/// Full native framed Input/admit/result/ACK/settle/Return, with explicit test-only AES keys.
+/// This is not browser key derivation, production effect dispatch or RTC acceptance.
+pub(crate) async fn confirmation_framed_round_trip(
+    low_state: &AppState,
+    low: &Arc<SelectedHandoffOwner>,
+    low_parent: &ledger::ResolvedRow,
+    high_state: &AppState,
+    high: &Arc<SelectedHandoffOwner>,
+    high_parent: &ledger::ResolvedRow,
+) {
+    confirmation_round_trip_inner(
+        low_state,
+        low,
+        low_parent,
+        high_state,
+        high,
+        high_parent,
+        true,
+    )
+    .await;
+}
+
+/// Actual native rejection is durable result history too. The browser/provider is untrusted:
+/// a malformed opened body of the expected length must not establish the pair. The same
+/// framed result/ACK/settlement/Return/history adapters handle its exact rejected receipt.
+pub(crate) async fn confirmation_rejected_result(
+    low_state: &AppState,
+    low: &Arc<SelectedHandoffOwner>,
+    low_parent: &ledger::ResolvedRow,
+    high_state: &AppState,
+    high: &Arc<SelectedHandoffOwner>,
+    high_parent: &ledger::ResolvedRow,
+) {
     let hello = outgoing(
         low_state,
         low,
@@ -482,7 +947,54 @@ pub(crate) async fn confirmation_round_trip(
             low,
             &hello,
             low_parent,
-            ledger::ConfirmationPurpose::Start(None)
+            ledger::ConfirmationPurpose::Start(None),
+            true,
+            false,
+        )
+        .await,
+        CryptoOutcome::Sealed { .. }
+    ));
+    let opened = incoming(high_state, high, high_parent).await;
+    assert!(matches!(
+        crypto_and_return(
+            high_state,
+            high,
+            &opened,
+            high_parent,
+            ledger::ConfirmationPurpose::Incoming(1),
+            true,
+            true,
+        )
+        .await,
+        CryptoOutcome::Rejected(_)
+    ));
+}
+
+async fn confirmation_round_trip_inner(
+    low_state: &AppState,
+    low: &Arc<SelectedHandoffOwner>,
+    low_parent: &ledger::ResolvedRow,
+    high_state: &AppState,
+    high: &Arc<SelectedHandoffOwner>,
+    high_parent: &ledger::ResolvedRow,
+    framed_results: bool,
+) {
+    let hello = outgoing(
+        low_state,
+        low,
+        low_parent,
+        ledger::ConfirmationPurpose::Start(None),
+    )
+    .await;
+    assert!(matches!(
+        crypto_and_return(
+            low_state,
+            low,
+            &hello,
+            low_parent,
+            ledger::ConfirmationPurpose::Start(None),
+            framed_results,
+            false
         )
         .await,
         CryptoOutcome::Sealed { .. }
@@ -494,7 +1006,9 @@ pub(crate) async fn confirmation_round_trip(
             high,
             &opened_hello,
             high_parent,
-            ledger::ConfirmationPurpose::Incoming(1)
+            ledger::ConfirmationPurpose::Incoming(1),
+            framed_results,
+            false
         )
         .await,
         CryptoOutcome::Opened
@@ -522,7 +1036,9 @@ pub(crate) async fn confirmation_round_trip(
             high,
             &proof,
             high_parent,
-            ledger::ConfirmationPurpose::Respond(opened_hello.id())
+            ledger::ConfirmationPurpose::Respond(opened_hello.id()),
+            framed_results,
+            false
         )
         .await,
         CryptoOutcome::Sealed { .. }
@@ -534,7 +1050,9 @@ pub(crate) async fn confirmation_round_trip(
             low,
             &opened_proof,
             low_parent,
-            ledger::ConfirmationPurpose::Incoming(2)
+            ledger::ConfirmationPurpose::Incoming(2),
+            framed_results,
+            false
         )
         .await,
         CryptoOutcome::Opened
@@ -552,7 +1070,9 @@ pub(crate) async fn confirmation_round_trip(
             low,
             &finish,
             low_parent,
-            ledger::ConfirmationPurpose::Respond(opened_proof.id())
+            ledger::ConfirmationPurpose::Respond(opened_proof.id()),
+            framed_results,
+            false
         )
         .await,
         CryptoOutcome::Sealed { .. }
@@ -564,7 +1084,9 @@ pub(crate) async fn confirmation_round_trip(
             high,
             &opened_finish,
             high_parent,
-            ledger::ConfirmationPurpose::Incoming(3)
+            ledger::ConfirmationPurpose::Incoming(3),
+            framed_results,
+            false
         )
         .await,
         CryptoOutcome::Opened

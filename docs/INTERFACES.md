@@ -1,5 +1,27 @@
 # Mewtual; Interfaces & Hooks Schema
 
+## Confirmation child Input/result adapters (23 October; inactive draft)
+
+Input tag7 has a430B fixed prefix with child RowId, original action identity, ORIGINAL parent
+RowId, full protected binding, engine bytes, native-selected role/direction and sequence, then
+u16 AAD/body lengths and borrowed bytes. Chain identity remains the original parent's serial.
+The browser decoder requires the exact original bootstrap/binding and preserves u64/u128 values.
+These fields describe the actual Root input; they cannot create an action, token or parent.
+The actual InputCustody/Work remains with the Data reply through collection.
+
+Separate inactive adapters admit only the actual Root engine permit, ACK the exact retained
+receipt, settle the original action and Return the child loan. Result3 moves the original opened
+Data Buffer into the Actor body. Its exact action/operation/output is resolved again natively;
+the original UI commit orders first publication against lock. Shared native custody follows the
+actual body/command/completed reply even after the worker is lost. Historical results are past
+metadata only. No effect opcode is enabled in the production listener. HANDOVER distinguishes
+passing Input checks from pending Result and complete-suite validation.
+
+An exact child Return also closes uncertain native Pending preparation after its actual
+factory/output has drained. Its ClosedPending reply deliberately retains no Action and
+asserts neither engine settlement nor Phase/Root drainage. This enables parent Plan-final;
+it never changes Return into a whole-plan retirement or proves an absent Root publication.
+
 ## Separate confirmation child request grammar (23 October; inactive draft)
 
 Child requests use version2, the unchanged104B parent pair selector, original16B parent RowId,
