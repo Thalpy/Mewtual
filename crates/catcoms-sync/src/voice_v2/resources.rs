@@ -271,6 +271,10 @@ impl ByteBudget {
 }
 
 impl Resources {
+    #[cfg(test)]
+    pub(super) fn lock_capacity_for_test(&self) -> impl Drop + '_ {
+        self.state.lock().unwrap()
+    }
     /// Prepay fixed native process infrastructure without allocating a group or a work slot.
     ///
     /// Zero, overflow and capacity refusal leave all counters unchanged. There is no early
@@ -496,6 +500,10 @@ impl Resources {
 }
 
 impl Reservation {
+    #[cfg(test)]
+    pub(super) fn lock_capacity_for_test(&self) -> impl Drop + '_ {
+        self.state.lock().unwrap()
+    }
     /// Permanently stop lending and release only the unused capacity. Outstanding copy, engine
     /// and lower-work owners retain their own bytes/slots until actual settlement. This is a
     /// capacity operation, never evidence that a call/action/workflow has safely completed.

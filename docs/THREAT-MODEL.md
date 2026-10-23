@@ -271,6 +271,20 @@ and no legacy signal is sent to it, including hangups and broadcasts whose roste
 after teardown. No join selects V2 until native activation exists, so
 legacy calls keep their recipient/replay and arrival-time presence residuals unchanged.
 
+## Native first-engine admission and frozen time (23 October)
+
+Clock callbacks stay outside native and Engine guards. Capacity preparation from the original
+lender may wait only before the final original-Clock sample; all later UI/Coordinator/Route/
+Engine acquisitions refuse contention. A busy gate cannot carry a saved timestamp across the
+deadline into first-work authority. Exact retries preserve the original permit/action identity
+and do not charge another engine. Concurrently published permits are reconciled after a local
+capacity refusal, then pass the same fresh-time and native checks.
+
+The candidate is not an admitted permit. Final commit moves the same credit; refusals and races
+dispose unused preparation outside final guards, including unwind. No Clock callback is moved
+under a capacity/native mutex, no generic attempt refund exists, and no caller's deadline is
+renewed. This inactive boundary does not establish live V2/RTC or physical acceptance.
+
 ## Preserving original retirement proof and bounded cleanup progress (22 October)
 
 Local 16 KiB return cannot become whole 96 KiB retirement by dropping Phase. Final-intent

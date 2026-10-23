@@ -1,5 +1,63 @@
 # Mewtual; Handover
 
+## Tokio advisory follow-up (23 October; full validation running)
+
+After the separate deadline correction7b9af8d5 was pushed, local/CI cargo-deny exposed
+RUSTSEC-2026-0386 in existing Tokio1.52.3. Both lockfiles now select patched1.53.3, changing
+only that package's version/checksum. No advisory exception or other package/edge changes.
+Cargo's initial precise update also rerouted existing Windows/socket dependency edges;
+those generated locks are saved under task target but are not the reviewed candidate.
+Complete `cargo metadata --locked --offline` validates the narrower locks in BOTH workspaces,
+and current cargo-deny passes (existing duplicate/advisory-not-detected warnings remain).
+Root strict Clippy/full suite are running on this patched checkpoint. The native733 pass
+below predates this dependency change; patched native tests/check/lint/build/startup remain
+pending. Frontend source/lockfile is unchanged from its2,577-test/check/build-passing run.
+
+## PR53 deadline review correction (23 October; validation in progress)
+
+`target/communication-admission-deadline-worktree` isolates the review finding against
+`e1610b5b`, based on published `ea105e45`. Engine admission previously sampled time before
+blocking Coordinator/Route/Engine and capacity locks, allowing first work to cross its
+immutable deadline. It now prepares an original-lender candidate credit before the final
+Clock sample, then uses only nonblocking UI commit -> Coordinator -> Route -> Engine fences.
+Unused preparation drops outside final guards. A local capacity refusal reconciles the same
+Engine if another exact caller installed its permit after preflight; final fresh-time/native
+checks still apply. Limits, identity, wire/persistence formats and production switches are unchanged.
+
+New regressions hold actual Engine, native Coordinator/Route and capacity fences, exercise
+concurrent exact admission and a real last-engine Reservation race, and preserve the existing
+Clock-reentrancy/settlement tests. The native fixture injects the same ManualClock before its
+controller/selected action is created. The Control inventory counts candidate/lender metadata.
+Static adversarial re-review has no remaining confirmed blocker/high/medium. A fresh Root
+executable passes all20 engine-action regressions and all404 focused V2 tests (12.35s).
+The native fixture initially failed compilation on two import paths; both are corrected and
+all250 focused native handoff tests now pass (15.59s), including the actual native deadline
+regression. The complete codec peak remains12,252B within12,288B. The complete native suite
+passes733 tests (728 library in670.45s plus5 ACL), including both previously failing active
+file recovery after bridge restart scenarios and onward automatic channel discovery. This
+successful full run did not reproduce that checkpoint's combined-load failures; their earlier
+cause remains undiagnosed. It does not establish physical-network acceptance. Native check
+and strict all-target/all-feature Clippy pass. The changed Root full suite remains pending.
+Frontend2,577 passes72.10s;
+Svelte reports zero errors/warnings and the production build passes (35.04s).
+The first two Root focus logs reused an old shared-target executable lacking the new tests
+and are EXCLUDED as evidence. Package-only fingerprint metadata was moved into a task backup
+before the fresh compile; no source or compiled library was deleted. The earlier full Root3,310
+pass covers the pre-correction inputs, not this changed Root runtime.
+
+Both formatting checks and the ambient-dependency gate pass. The refreshed dependency audit
+fails on existing pinned Tokio1.52.3, RUSTSEC-2026-0386 (`AsyncFd` I/O safety); its database
+recommends a patched Tokio line. No dependency or advisory-ignore change is included here,
+and this audit failure must remain explicit until the dependency update is separately validated.
+
+Unpublished Input/result and Begin/browser continuations remain in their separate worktrees.
+The Result draft's measured Control graph still exceeds12KiB; it is not part of this correction.
+The known-child browser continuation passes179 focused and2,619 full frontend tests (72.04s),
+with zero Svelte errors/warnings and a successful production build (35.91s). These results
+cover that separate browser draft, not native Begin or live browser/native integration.
+Unknown-Begin recovery, SDP/ICE/RTC, live adapter/group composition,
+media relay, combined acceptance and physical testing remain open. Only one desktop is available.
+Production V2 and action admission remain disabled.
 ## Result preparation custody and fixed Control fit (23 October; focused checks passed)
 
 The Result draft passes257 focused native handoff tests and all4 blocked-TCP confirmation

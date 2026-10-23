@@ -584,6 +584,27 @@ impl Route {
         drop(state);
         Ok(result)
     }
+    /// Final engine admission has sampled Root's original Clock. Preserve UI -> Coordinator
+    /// -> Row ordering but refuse contention here; waiting would reuse a stale deadline.
+    pub(super) fn try_with_open<T>(
+        &self,
+        commit: impl FnOnce() -> Result<T, catcoms_sync::voice_v2::VoiceError>,
+    ) -> Result<T, catcoms_sync::voice_v2::VoiceError> {
+        use catcoms_sync::voice_v2::VoiceError;
+        let state = match self.row.state.try_lock() {
+            Ok(state) => state,
+            Err(std::sync::TryLockError::Poisoned(error)) => error.into_inner(),
+            Err(std::sync::TryLockError::WouldBlock) => return Err(VoiceError::Capacity),
+        };
+        if state.closed || state.pending || !self.row.selected.lease().is_live() {
+            return Err(VoiceError::Unauthorized);
+        }
+        commit()
+    }
+    #[cfg(test)]
+    pub(super) fn fixture_lock_route(&self) -> impl Drop + '_ {
+        self.row.state.lock().unwrap()
+    }
     pub(super) fn session(&self) -> &Arc<Session> {
         &self.session
     }
