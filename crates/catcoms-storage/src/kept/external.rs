@@ -1258,28 +1258,258 @@ fn pin_folder(folder: &Path, expected: Option<FileIdentity>) -> io::Result<Optio
     // unknown, other accounts may well change the folder, so it counts as shared (fail closed).
     // ACLs (NFSv4, macOS `delete_child`) are not read; see THREAT-MODEL.
     let local = matches!(fs_class_of_dir(&dir), Ok(FsClass::Journal));
+    let me = rustix::process::geteuid().as_raw();
     Ok(Some(Pinned {
         shared: !local
             || shared_folder(
-                metadata.uid(),
-                metadata.mode(),
-                rustix::process::geteuid().as_raw(),
+                FolderOwnership {
+                    owner: metadata.uid(),
+                    group: metadata.gid(),
+                    mode: metadata.mode(),
+                },
+                me,
+                rustix::process::getegid().as_raw(),
+                |gid| system_group_is_private(gid, me),
             ),
         dir,
     }))
 }
 
-/// Whether accounts other than ours (and root) can modify entries in a folder with this owner and
-/// mode: owned by another account, or group- or other-writable without the sticky bit. A sticky
-/// folder (like `/tmp`) lets others create entries but not rename or remove ours. Pure, so it is
-/// tested on every platform. A user-private-group setup (0775, group of one) is classified as
-/// shared: the mode bits cannot tell who is in the group, so it fails closed.
+/// A folder's owner, group and permission bits, as `fstat` reports them.
+#[derive(Debug, Clone, Copy)]
 #[cfg_attr(not(unix), allow(dead_code))]
-pub(super) fn shared_folder(owner: u32, mode: u32, me: u32) -> bool {
-    const GROUP_OR_OTHER_WRITE: u32 = 0o022;
+pub(super) struct FolderOwnership {
+    pub(super) owner: u32,
+    pub(super) group: u32,
+    pub(super) mode: u32,
+}
+
+/// Whether accounts other than ours (and root) can modify entries in a folder. Pure, so it is
+/// tested on every platform.
+///
+/// - Owned by another account (neither us nor root): shared.
+/// - Sticky (like `/tmp`): others may create entries there but not rename or remove ours: private.
+/// - Other-writable without the sticky bit: always shared.
+/// - Group-writable without the sticky bit: private only for a user-private group (user decision,
+///   23 October): the folder is owned by our effective uid, its group is our effective primary
+///   gid, and `private_group(gid)` proves that no other account belongs to that group (see
+///   [`group_is_private`]). Anything else, including a group whose membership cannot be proven,
+///   stays shared (fail closed). macOS's shared `staff` group is never provable, so it stays
+///   shared.
+#[cfg_attr(not(unix), allow(dead_code))]
+pub(super) fn shared_folder(
+    folder: FolderOwnership,
+    me: u32,
+    my_group: u32,
+    private_group: impl FnOnce(u32) -> bool,
+) -> bool {
+    const OTHER_WRITE: u32 = 0o002;
+    const GROUP_WRITE: u32 = 0o020;
     const STICKY: u32 = 0o1000;
-    let foreign_owner = owner != me && owner != 0;
-    foreign_owner || (mode & GROUP_OR_OTHER_WRITE != 0 && mode & STICKY == 0)
+    if folder.owner != me && folder.owner != 0 {
+        return true;
+    }
+    if folder.mode & STICKY != 0 {
+        return false;
+    }
+    if folder.mode & OTHER_WRITE != 0 {
+        return true;
+    }
+    if folder.mode & GROUP_WRITE != 0 {
+        let user_private =
+            folder.owner == me && folder.group == my_group && private_group(folder.group);
+        return !user_private;
+    }
+    false
+}
+
+/// What `/etc/nsswitch.conf` said, for [`group_is_private`].
+#[derive(Debug, Clone)]
+#[cfg_attr(not(unix), allow(dead_code))]
+pub(super) enum NsSwitch {
+    /// The file does not exist (musl systems read only the files).
+    Absent,
+    Text(String),
+    /// It exists but could not be read: membership cannot be proven.
+    Unreadable,
+}
+
+/// The account databases a user-private group is proven from. `None` means the file could not be
+/// read (or was larger than [`ACCOUNT_FILE_LIMIT`]). Injected, so tests never read the real system.
+#[derive(Debug, Clone)]
+#[cfg_attr(not(unix), allow(dead_code))]
+pub(super) struct AccountFiles {
+    pub(super) passwd: Option<String>,
+    pub(super) group: Option<String>,
+    pub(super) nsswitch: NsSwitch,
+}
+
+/// Upper bound on each account database Mewtual reads; a larger file fails closed.
+#[cfg_attr(any(not(unix), test), allow(dead_code))]
+const ACCOUNT_FILE_LIMIT: u64 = 1 << 20;
+
+/// Whether group `gid` provably has no member but the account `me` (user decision, 23 October).
+/// Every condition must be proven from the local files; anything unprovable answers `false`:
+///
+/// - Account lookups come only from the files: `passwd` and `group` in `nsswitch.conf` list only
+///   `files`, `compat` or `systemd` (whose dynamic users get their own groups), or there is no
+///   `nsswitch.conf`. Directory services (`sss`, `ldap`, `nis`, `winbind`, ...) could add members
+///   Mewtual cannot see.
+/// - No NIS `+`/`-` lines, no malformed lines, and our own account is listed in `passwd`.
+/// - No other account (another uid) has `gid` as its primary group.
+/// - Exactly one `group` entry has `gid`, and its supplementary member list names nobody but us.
+///
+/// A group whose name equals the user name is only a supporting signal and is not required: the
+/// proof is the membership itself.
+#[cfg_attr(not(unix), allow(dead_code))]
+pub(super) fn group_is_private(files: &AccountFiles, gid: u32, me: u32) -> bool {
+    let files_only = |db: &str| -> bool {
+        let text = match &files.nsswitch {
+            NsSwitch::Absent => return true,
+            NsSwitch::Unreadable => return false,
+            NsSwitch::Text(text) => text,
+        };
+        let mut found = false;
+        for line in text.lines() {
+            let line = line.split('#').next().unwrap_or("").trim();
+            let Some((name, sources)) = line.split_once(':') else {
+                continue;
+            };
+            if name.trim() != db {
+                continue;
+            }
+            found = true;
+            let mut sources = sources
+                .split_whitespace()
+                .filter(|token| !token.starts_with('[') && !token.ends_with(']'))
+                .peekable();
+            if sources.peek().is_none()
+                || !sources.all(|source| matches!(source, "files" | "compat" | "systemd"))
+            {
+                return false;
+            }
+        }
+        found
+    };
+    if !files_only("passwd") || !files_only("group") {
+        return false;
+    }
+    let (Some(passwd), Some(group)) = (&files.passwd, &files.group) else {
+        return false;
+    };
+    let entries = |text: &str, fields: usize| -> Option<Vec<Vec<String>>> {
+        let mut rows = Vec::new();
+        for line in text.lines() {
+            let line = line.trim_end_matches('\r');
+            if line.trim().is_empty() || line.trim_start().starts_with('#') {
+                continue;
+            }
+            if line.starts_with('+') || line.starts_with('-') {
+                return None;
+            }
+            let row: Vec<String> = line.split(':').map(str::to_owned).collect();
+            if row.len() < fields {
+                return None;
+            }
+            rows.push(row);
+        }
+        Some(rows)
+    };
+    let (Some(users), Some(groups)) = (entries(passwd, 7), entries(group, 4)) else {
+        return false;
+    };
+    let mut my_names = Vec::new();
+    for user in &users {
+        let (Ok(uid), Ok(primary)) = (user[2].parse::<u32>(), user[3].parse::<u32>()) else {
+            return false;
+        };
+        if uid == me {
+            my_names.push(user[0].clone());
+        } else if primary == gid {
+            return false;
+        }
+    }
+    if my_names.is_empty() {
+        return false;
+    }
+    let mut matching = 0;
+    for entry in &groups {
+        let Ok(entry_gid) = entry[2].parse::<u32>() else {
+            return false;
+        };
+        if entry_gid != gid {
+            continue;
+        }
+        matching += 1;
+        let others = entry[3]
+            .split(',')
+            .map(str::trim)
+            .filter(|member| !member.is_empty())
+            .any(|member| !my_names.iter().any(|name| name == member));
+        if others {
+            return false;
+        }
+    }
+    matching == 1
+}
+
+/// Read one account database, bounded: an error when it cannot be read or is larger than
+/// [`ACCOUNT_FILE_LIMIT`].
+#[cfg(all(unix, not(test)))]
+fn read_account_file(path: &str) -> io::Result<String> {
+    use std::io::Read;
+    let mut text = String::new();
+    File::open(path)?
+        .take(ACCOUNT_FILE_LIMIT + 1)
+        .read_to_string(&mut text)?;
+    if text.len() as u64 > ACCOUNT_FILE_LIMIT {
+        return Err(io::Error::from(io::ErrorKind::InvalidData));
+    }
+    Ok(text)
+}
+
+/// [`group_is_private`] against this system's files. Only Linux and Android keep their account
+/// databases in these files; elsewhere (macOS uses Directory Services) membership is never
+/// provable, so a group-writable folder stays shared.
+#[cfg(all(unix, not(test)))]
+fn system_group_is_private(gid: u32, me: u32) -> bool {
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    {
+        let nsswitch = match read_account_file("/etc/nsswitch.conf") {
+            Ok(text) => NsSwitch::Text(text),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => NsSwitch::Absent,
+            Err(_) => NsSwitch::Unreadable,
+        };
+        let files = AccountFiles {
+            passwd: read_account_file("/etc/passwd").ok(),
+            group: read_account_file("/etc/group").ok(),
+            nsswitch,
+        };
+        group_is_private(&files, gid, me)
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "android")))]
+    {
+        let _ = (gid, me);
+        false
+    }
+}
+
+/// Tests never read the real account databases: they inject the files (or nothing, which fails
+/// closed).
+#[cfg(all(unix, test))]
+fn system_group_is_private(gid: u32, me: u32) -> bool {
+    ACCOUNT_FILES.with(|files| {
+        files
+            .borrow()
+            .as_ref()
+            .is_some_and(|files| group_is_private(files, gid, me))
+    })
+}
+#[cfg(all(unix, test))]
+thread_local! {
+    /// Test-only account databases for [`system_group_is_private`].
+    pub(in crate::kept) static ACCOUNT_FILES: std::cell::RefCell<Option<AccountFiles>> =
+        const { std::cell::RefCell::new(None) };
 }
 
 #[cfg(unix)]

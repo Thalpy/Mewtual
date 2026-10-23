@@ -892,6 +892,53 @@ fn unix_never_deletes_automatically_in_a_folder_other_accounts_can_modify() {
 
 #[cfg(unix)]
 #[test]
+fn unix_removes_in_a_group_writable_folder_only_for_a_user_private_group() {
+    // User decision, 23 October: a 0775 folder whose group is our own user-private group (proven
+    // from the account files, injected here) is private again, so Remove deletes; a group with
+    // another member stays shared and nothing is deleted.
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+    let me = rustix::process::geteuid().as_raw();
+    let my_gid = rustix::process::getegid().as_raw();
+    for (members, expected) in [
+        ("", PartialRemoval::Removed),
+        ("bob", PartialRemoval::SharedFolder),
+    ] {
+        let fx = fixture();
+        if fs::metadata(&fx.downloads).unwrap().gid() != my_gid {
+            // A set-group-id parent gave the folder another group: not this case.
+            return;
+        }
+        let mut store = open(&fx.vault);
+        let (id, lease) = completed(&mut store);
+        let mut file = started(&mut store, &lease, &fx.downloads);
+        file.accept(0, CHUNKS[0]).unwrap();
+        drop(file);
+        let ExportState::Writing(journal) = store.cancel_download(id).unwrap().unwrap() else {
+            panic!();
+        };
+        fs::set_permissions(&fx.downloads, fs::Permissions::from_mode(0o775)).unwrap();
+        external::ACCOUNT_FILES.with(|files| {
+            *files.borrow_mut() = Some(external::AccountFiles {
+                passwd: Some(format!(
+                    "me:x:{me}:{my_gid}:Me:/home/me:/bin/sh\nbob:x:4242:4242:Bob:/home/bob:/bin/sh\n"
+                )),
+                group: Some(format!("me:x:{my_gid}:{members}\nbob:x:4242:\n")),
+                nsswitch: external::NsSwitch::Absent,
+            })
+        });
+        let outcome = remove_partial(&journal, false, &mut rng());
+        external::ACCOUNT_FILES.with(|files| *files.borrow_mut() = None);
+        assert_eq!(outcome.unwrap(), expected, "members {members:?}");
+        assert_eq!(
+            staging(&fx.downloads).exists(),
+            expected == PartialRemoval::SharedFolder
+        );
+        fs::set_permissions(&fx.downloads, fs::Permissions::from_mode(0o755)).unwrap();
+    }
+}
+
+#[cfg(unix)]
+#[test]
 fn unix_a_shared_folder_tells_the_user_to_delete_only_its_own_file() {
     // Combined review M-A: in a folder other accounts can modify, the user is told to delete the
     // leftover only when the name still holds Mewtual's own file. A name the user already deleted,

@@ -321,31 +321,208 @@ fn folder_identity_follows_a_linked_folder_and_refuses_files_and_missing_folders
     assert!(unreachable(&missing));
 }
 
+const ME: u32 = 1000;
+const MY_GROUP: u32 = 1000;
+
+/// [`shared_folder`] for a folder with this owner, group and mode, where the private-group proof
+/// answers `private` (and records whether it was asked at all).
+fn shared(owner: u32, group: u32, mode: u32, private: bool) -> (bool, bool) {
+    let asked = std::cell::Cell::new(false);
+    let result = shared_folder(FolderOwnership { owner, group, mode }, ME, MY_GROUP, |_| {
+        asked.set(true);
+        private
+    });
+    (result, asked.get())
+}
+
 #[test]
 fn other_accounts_rule_follows_owner_and_mode_bits() {
     // PR51 H1 (Unix): automatic deletion is refused in a folder other accounts can modify.
-    const ME: u32 = 1000;
-    assert!(!shared_folder(ME, 0o755, ME), "a private home folder");
-    assert!(!shared_folder(ME, 0o700, ME));
+    let is_shared = |owner, group, mode, private| shared(owner, group, mode, private).0;
     assert!(
-        !shared_folder(0, 0o755, ME),
+        !is_shared(ME, MY_GROUP, 0o755, false),
+        "a private home folder"
+    );
+    assert!(!is_shared(ME, MY_GROUP, 0o700, false));
+    assert!(
+        !is_shared(0, 0, 0o755, false),
         "root-owned, not writable by others"
     );
     assert!(
-        !shared_folder(0, 0o1777, ME),
+        !is_shared(0, 0, 0o1777, false),
         "sticky /tmp: others cannot move our entries"
     );
-    assert!(shared_folder(0, 0o777, ME), "world-writable without sticky");
     assert!(
-        shared_folder(ME, 0o775, ME),
-        "group-writable (fails closed for a group of one)"
+        is_shared(0, 0, 0o777, true),
+        "world-writable without sticky"
     );
-    assert!(shared_folder(ME, 0o757, ME), "other-writable");
-    assert!(shared_folder(2000, 0o755, ME), "owned by another account");
     assert!(
-        shared_folder(2000, 0o1777, ME),
+        is_shared(ME, MY_GROUP, 0o757, true),
+        "other-writable is shared even with a private group"
+    );
+    assert!(is_shared(ME, MY_GROUP, 0o777, true));
+    assert!(
+        !is_shared(ME, MY_GROUP, 0o1777, true),
+        "world-writable but sticky"
+    );
+    assert!(
+        is_shared(2000, MY_GROUP, 0o755, true),
+        "owned by another account"
+    );
+    assert!(
+        is_shared(2000, 2000, 0o1777, true),
         "another account owns even a sticky folder"
     );
+}
+
+#[test]
+fn a_group_writable_folder_is_private_only_for_a_proven_user_private_group() {
+    // User decision, 23 October: 0775 counts as private only when the folder is ours, its group
+    // is our primary group, and that group provably has no other member.
+    assert_eq!(
+        shared(ME, MY_GROUP, 0o775, true),
+        (false, true),
+        "a user-private group"
+    );
+    assert_eq!(
+        shared(ME, MY_GROUP, 0o775, false),
+        (true, true),
+        "membership not proven: shared"
+    );
+    assert!(
+        shared(ME, 2000, 0o775, true).0,
+        "another group, whatever its members"
+    );
+    assert!(
+        shared(0, MY_GROUP, 0o775, true).0,
+        "owned by root, not by us"
+    );
+    // The proof is consulted only when everything else already holds.
+    assert!(!shared(ME, MY_GROUP, 0o755, false).1);
+    assert!(!shared(ME, 2000, 0o775, true).1);
+}
+
+/// Account files for a host where `alice` (uid and gid 1000) has a user-private group.
+fn accounts(passwd: &str, group: &str, nsswitch: NsSwitch) -> AccountFiles {
+    AccountFiles {
+        passwd: Some(passwd.to_owned()),
+        group: Some(group.to_owned()),
+        nsswitch,
+    }
+}
+const PASSWD: &str = "root:x:0:0:root:/root:/bin/bash\n\
+    alice:x:1000:1000:Alice:/home/alice:/bin/bash\n\
+    bob:x:1001:1001:Bob:/home/bob:/bin/bash\n";
+const GROUP: &str = "root:x:0:\nsudo:x:27:alice\nalice:x:1000:\nbob:x:1001:\n";
+const NSSWITCH: &str = "# comment\npasswd:         files systemd\ngroup:          files [SUCCESS=merge] systemd\nhosts: files dns\n";
+
+#[test]
+fn a_user_private_group_is_proven_only_from_the_local_files() {
+    let text = || NsSwitch::Text(NSSWITCH.into());
+    assert!(group_is_private(
+        &accounts(PASSWD, GROUP, text()),
+        MY_GROUP,
+        ME
+    ));
+    assert!(
+        group_is_private(&accounts(PASSWD, GROUP, NsSwitch::Absent), MY_GROUP, ME),
+        "no nsswitch.conf: the files are the only source"
+    );
+    // Listing ourselves as a supplementary member is still a group of one.
+    let self_member = GROUP.replace("alice:x:1000:", "alice:x:1000:alice");
+    assert!(group_is_private(
+        &accounts(PASSWD, &self_member, text()),
+        MY_GROUP,
+        ME
+    ));
+    // A differently named group of one is private too: the name is only a supporting signal.
+    let renamed = GROUP.replace("alice:x:1000:", "staff-alice:x:1000:");
+    assert!(group_is_private(
+        &accounts(PASSWD, &renamed, text()),
+        MY_GROUP,
+        ME
+    ));
+
+    // Another supplementary member.
+    let shared_member = GROUP.replace("alice:x:1000:", "alice:x:1000:bob");
+    assert!(!group_is_private(
+        &accounts(PASSWD, &shared_member, text()),
+        MY_GROUP,
+        ME
+    ));
+    // Another account's primary group.
+    let other_primary = PASSWD.replace("bob:x:1001:1001", "bob:x:1001:1000");
+    assert!(!group_is_private(
+        &accounts(&other_primary, GROUP, text()),
+        MY_GROUP,
+        ME
+    ));
+    // macOS: everyone's primary group is the shared `staff` (gid 20).
+    let staff = "root:*:0:0:System Administrator:/var/root:/bin/sh\n\
+        alice:*:1000:20:Alice:/Users/alice:/bin/zsh\n\
+        bob:*:1001:20:Bob:/Users/bob:/bin/zsh\n";
+    let staff_group = "staff:*:20:root\n";
+    assert!(!group_is_private(
+        &accounts(staff, staff_group, NsSwitch::Absent),
+        20,
+        ME
+    ));
+}
+
+#[test]
+fn unprovable_membership_fails_closed() {
+    let text = |value: &str| NsSwitch::Text(value.into());
+    let private = |files: AccountFiles| group_is_private(&files, MY_GROUP, ME);
+    // Directory services could add members Mewtual cannot see.
+    for nss in [
+        "passwd: files sss\ngroup: files sss\n",
+        "passwd: files\ngroup: files ldap\n",
+        "passwd: compat\ngroup: nis files\n",
+        "passwd: files\n",
+        "group: files\n",
+        "passwd:\ngroup: files\n",
+    ] {
+        assert!(!private(accounts(PASSWD, GROUP, text(nss))), "{nss:?}");
+    }
+    assert!(!private(accounts(PASSWD, GROUP, NsSwitch::Unreadable)));
+    // The group resolves only through NSS (no local entry), or twice.
+    let without = GROUP.replace("alice:x:1000:\n", "");
+    assert!(!private(accounts(PASSWD, &without, NsSwitch::Absent)));
+    let twice = format!("{GROUP}alice2:x:1000:\n");
+    assert!(!private(accounts(PASSWD, &twice, NsSwitch::Absent)));
+    // Our own account is not in the local files.
+    let no_me = PASSWD.replace("alice:x:1000:1000:Alice:/home/alice:/bin/bash\n", "");
+    assert!(!private(accounts(&no_me, GROUP, NsSwitch::Absent)));
+    // NIS compat lines and malformed lines.
+    assert!(!private(accounts(
+        &format!("{PASSWD}+::::::\n"),
+        GROUP,
+        NsSwitch::Absent
+    )));
+    assert!(!private(accounts(
+        PASSWD,
+        &format!("{GROUP}+:::\n"),
+        NsSwitch::Absent
+    )));
+    assert!(!private(accounts(
+        &format!("{PASSWD}broken:line\n"),
+        GROUP,
+        NsSwitch::Absent
+    )));
+    assert!(!private(accounts(
+        PASSWD,
+        &format!("{GROUP}x:x:notanumber:\n"),
+        NsSwitch::Absent
+    )));
+    // Unreadable files.
+    for (passwd, group) in [(None, Some(GROUP)), (Some(PASSWD), None)] {
+        let files = AccountFiles {
+            passwd: passwd.map(str::to_owned),
+            group: group.map(str::to_owned),
+            nsswitch: NsSwitch::Absent,
+        };
+        assert!(!private(files));
+    }
 }
 
 #[test]
