@@ -153,7 +153,7 @@ async fn journaled_export_through_the_actor_publishes_the_verified_plaintext_onc
     ));
     write_all(&run, &ready, &mut file).await;
     let path = publish(&run, &ready, &mut file).await;
-    file.finish(&mut rng());
+    file.finish(&mut rng()).unwrap();
     assert_eq!(std::fs::read(&path).unwrap(), run.data);
     assert_eq!(path.file_name().unwrap(), "cat.bin");
     bounded(run.actor.finish_download_export(ready.clone()))
@@ -176,7 +176,7 @@ async fn an_empty_file_is_acquired_and_saved_as_one_empty_chunk() {
     let checkpoint = file.checkpoint().unwrap();
     assert_eq!(checkpoint.written_chunks(), 1);
     let path = publish(&run, &ready, &mut file).await;
-    file.finish(&mut rng());
+    file.finish(&mut rng()).unwrap();
     assert_eq!(std::fs::read(&path).unwrap(), b"");
     run.close().await;
 }
@@ -264,7 +264,7 @@ async fn a_save_as_choice_never_interrupts_a_live_journaled_save() {
     // The interrupted-looking save is in fact untouched: it writes and publishes normally.
     write_all(&run, &first, &mut file).await;
     let path = publish(&run, &first, &mut file).await;
-    file.finish(&mut rng());
+    file.finish(&mut rng()).unwrap();
     assert_eq!(std::fs::read(path).unwrap(), run.data);
     assert_eq!(std::fs::read_dir(chosen.path()).unwrap().count(), 0);
     run.close().await;
@@ -330,7 +330,7 @@ async fn pause_mid_export_stops_effects_and_resume_continues_the_same_partial_fi
     write_all(&run, &second, &mut file).await;
     let path = publish(&run, &second, &mut file).await;
     // Native finishes the session (releasing its file lock) before anything reads the file.
-    file.finish(&mut rng());
+    file.finish(&mut rng()).unwrap();
     assert_eq!(
         path.file_name().unwrap(),
         "cat.bin",
@@ -454,7 +454,7 @@ async fn save_new_copy_and_replacement_transfers_release_stale_export_results() 
     let mut file = begin(&run, &replacement).await;
     write_all(&run, &replacement, &mut file).await;
     let path = publish(&run, &replacement, &mut file).await;
-    file.finish(&mut rng());
+    file.finish(&mut rng()).unwrap();
     assert_eq!(std::fs::read(path).unwrap(), run.data);
     run.close().await;
 }

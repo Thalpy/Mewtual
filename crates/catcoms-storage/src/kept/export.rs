@@ -772,6 +772,56 @@ pub fn remove_if_session(
     })
 }
 
+/// What a name holds relative to a native writer's own file, read-only (review M-4).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SessionAt {
+    /// The writer's own file is at the name.
+    Ours,
+    /// Nothing is at the name.
+    Absent,
+    /// Something else is there (another file, a link, a folder, an object without a number).
+    Other,
+    /// It could not be checked (for example another program holds it without sharing).
+    Unknown,
+}
+
+/// Read-only answer to "does `path` still hold the file with `id`?", so native tells the user to
+/// delete a leftover only when it is provably Mewtual's own (review M-4). Nothing is changed.
+pub fn session_at(path: &Path, id: SessionId) -> SessionAt {
+    match external::holds_session(path, id) {
+        Ok(Some(true)) => SessionAt::Ours,
+        Ok(Some(false)) => SessionAt::Other,
+        Ok(None) => SessionAt::Absent,
+        Err(_) => SessionAt::Unknown,
+    }
+}
+
+/// Create a missing Downloads folder (and its parents) the way every Mewtual writer does (review
+/// M-6). On Unix the folders get mode 0755, so a user-private-group umask (002, the default on
+/// several distributions) cannot make a folder Mewtual itself created look like one other accounts
+/// can modify, where nothing is deleted automatically. Existing folders keep their own mode.
+pub fn create_folder(folder: &Path) -> io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o755)
+            .create(folder)
+    }
+    #[cfg(not(unix))]
+    {
+        fs::create_dir_all(folder)
+    }
+}
+
+/// Best-effort flush of `folder`, for writers without a journal after their publication link
+/// (review L-1: never under the session commit guard). Some network filesystems refuse folder
+/// flushes; a refusal never fails the save.
+pub fn flush_folder(folder: &Path) {
+    let _ = persistence::directory_barrier(folder);
+}
+
 /// Publish a verified file written by a native writer that keeps no journal (PR51 M1): `file` is
 /// the handle this process created exclusively at `staging` and still holds; `final_path` is the
 /// absent name beside it. The final name is created without replacing anything and confirmed to
@@ -1242,6 +1292,34 @@ pub enum PartialRemoval {
     /// PR51 M2: the save was Published, but neither its final name nor its staging name is in the
     /// (reachable, still ours) folder any more.
     SavedFileMissing,
+    /// PR51 review M-1: the save was Published, but its final name now holds a different file (an
+    /// editor's atomic save, or a replacement), while our staging name still holds the original
+    /// saved bytes. Nothing is deleted; the user is told about the leftover copy.
+    SavedNameReplaced,
+}
+
+/// What a name holds, for [`remove_partial`]'s published-row decisions (PR51 review M-1). Unlike a
+/// plain "is it ours" boolean, a name that cannot be opened right now is `Unknown`, never "gone".
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum NameState {
+    /// Our file (by persisted identity) is at the name.
+    Ours,
+    /// Nothing is at the name.
+    Absent,
+    /// Something else is there: another file, a link, a folder, or an object without identity.
+    Other,
+    /// It could not be checked right now (for example another program holds it without sharing).
+    Unknown,
+}
+
+fn name_state(path: &Path, ours: FileIdentity) -> NameState {
+    match external::open_leaf(path, false) {
+        Ok(Leaf::Opened(_, observed)) if observed.identity == ours => NameState::Ours,
+        Ok(Leaf::Missing) => NameState::Absent,
+        Ok(Leaf::Opened(..) | Leaf::Foreign) => NameState::Other,
+        Err(error) if error.kind() == io::ErrorKind::Unsupported => NameState::Other,
+        Err(_) => NameState::Unknown,
+    }
 }
 impl PartialRemoval {
     /// Whether the caller may forget the journal.
@@ -1268,6 +1346,9 @@ impl PartialRemoval {
                 "The saved file was no longer in its folder, so its copy under the temporary .mewtual-part name was kept. Rename that file to keep it.",
             ),
             Self::SavedFileMissing => Some("The saved file was no longer in its folder."),
+            Self::SavedNameReplaced => Some(
+                "A different file now has the saved file's name, so the original copy under the temporary .mewtual-part name was kept. Delete it yourself if you no longer need it.",
+            ),
             Self::KeptSaved if saved => None,
             Self::KeptSaved => Some("This file had already been saved, so the saved copy was kept."),
             Self::OtherNameRemains => Some(
@@ -1355,8 +1436,11 @@ fn locate(journal: &ExportJournal, write: bool) -> Result<Located, ExportError> 
 /// stays in Removing; "Keep partly saved file" remains the escape).
 ///
 /// PR51 M2: `published` is true when the record was already Published. Its staging name is then
-/// deleted only while the final name still holds our file; otherwise the staging name is the only
-/// copy and is kept ([`PartialRemoval::KeptOnlyCopy`]).
+/// deleted only once the final name is proven to hold our file. Otherwise nothing is deleted: a
+/// staging name that is the only copy is kept ([`PartialRemoval::KeptOnlyCopy`], or
+/// [`PartialRemoval::SavedNameReplaced`] when another file took the saved name), both names gone
+/// is [`PartialRemoval::SavedFileMissing`], and a name that cannot be checked right now is
+/// `Unchecked` (review M-1).
 pub fn remove_partial(
     journal: &ExportJournal,
     published: bool,
@@ -1371,20 +1455,46 @@ pub fn remove_partial(
         Err(_) => return Ok(PartialRemoval::FolderUnreachable),
     }
     // Our final name holding our file means the save already completed under that name.
-    let final_is_ours = || {
-        matches!(
-            external::open_leaf(&folder.join(&journal.final_leaf), false),
-            Ok(Leaf::Opened(_, observed)) if observed.identity == journal.file_id
-        )
-    };
-    let staging_is_ours = || {
-        matches!(
-            external::open_leaf(&folder.join(&journal.staging), false),
-            Ok(Leaf::Opened(_, observed)) if observed.identity == journal.file_id
-        )
-    };
-    if published && !final_is_ours() && staging_is_ours() {
-        return Ok(PartialRemoval::KeptOnlyCopy);
+    let final_state = || name_state(&folder.join(&journal.final_leaf), journal.file_id);
+    let final_is_ours = || final_state() == NameState::Ours;
+    if published {
+        // PR51 M2 (review M-1): a saved row's staging name may be deleted only once its final name
+        // is proven to hold our file. Otherwise the staging name may be the only copy of the saved
+        // bytes, so nothing is deleted at all on this path, and every outcome says only what was
+        // actually seen.
+        match final_state() {
+            NameState::Ours => {}
+            // Cannot be checked right now (an indexer or antivirus holding it): proves nothing.
+            NameState::Unknown => return Ok(PartialRemoval::Unchecked),
+            final_name @ (NameState::Absent | NameState::Other) => {
+                let staging_name = name_state(&folder.join(&journal.staging), journal.file_id);
+                return Ok(match (final_name, staging_name) {
+                    (NameState::Absent, NameState::Ours) => PartialRemoval::KeptOnlyCopy,
+                    // The saved name now holds a different file (an editor's atomic save, or a
+                    // replacement); our original bytes stay under the staging name.
+                    (_, NameState::Ours) => PartialRemoval::SavedNameReplaced,
+                    (_, NameState::Unknown) => PartialRemoval::Unchecked,
+                    (_, NameState::Other) => PartialRemoval::LeftInPlace,
+                    (final_name, NameState::Absent) => {
+                        // Unix: a crash during an earlier removal can leave our file at a random
+                        // "removing" name; it would be the only copy. Look without deleting.
+                        match external::sweep_aside(
+                            &folder,
+                            journal.folder_id,
+                            journal.file_id,
+                            false,
+                        ) {
+                            Ok(external::Aside::Nothing) if final_name == NameState::Absent => {
+                                PartialRemoval::SavedFileMissing
+                            }
+                            // Nothing of ours is left; the saved name holds someone's other file.
+                            Ok(external::Aside::Nothing) => PartialRemoval::Removed,
+                            Ok(_) | Err(_) => PartialRemoval::Unchecked,
+                        }
+                    }
+                });
+            }
+        }
     }
     let verified = external::remove_verified(
         &folder,
@@ -1397,7 +1507,8 @@ pub fn remove_partial(
         Ok(Verified::Removed { links }) => {
             // Account for every other name the object had: our own final name (already saved)
             // and anything beyond it, which someone else made and which still holds plaintext.
-            let saved = final_is_ours();
+            // A published row only gets here with its final name proven ours a moment ago.
+            let saved = published || final_is_ours();
             let others = links.saturating_sub(1 + u64::from(saved));
             Ok(if others > 0 {
                 PartialRemoval::OtherNameRemains
@@ -1419,10 +1530,9 @@ pub fn remove_partial(
                     return Ok(PartialRemoval::Unchecked)
                 }
             }
-            Ok(if final_is_ours() {
+            // A published row only gets here with its final name proven ours a moment ago.
+            Ok(if final_is_ours() || published {
                 PartialRemoval::KeptSaved
-            } else if published {
-                PartialRemoval::SavedFileMissing
             } else {
                 PartialRemoval::Removed
             })
@@ -1640,7 +1750,7 @@ impl ExportFile {
         if !external::valid_leaf(name) || !external::valid_leaf(&external::staging_for(name)) {
             return Err(ExportError::Storage(StorageError::Malformed));
         }
-        fs::create_dir_all(folder).map_err(|error| match error.kind() {
+        create_folder(folder).map_err(|error| match error.kind() {
             io::ErrorKind::StorageFull => ExportError::Full,
             _ => ExportError::Local {
                 retryable: !external::unreachable(&error),
@@ -2201,18 +2311,16 @@ impl ExportFile {
         self.journal.clone()
     }
 
-    /// After Published: close the handle, then remove the staging name if it is still ours.
-    /// Returns whether that question is settled (no staging name of ours can remain). Review L3:
-    /// when it is not (the name could not be checked or deleted), native keeps the Published row
-    /// so the leftover second plaintext name stays tracked until Clear removes it.
-    ///
-    /// PR51 H1: only an outcome that actually removed our staging name counts as settled here. A
-    /// name left in place (in a folder other accounts can modify, held by another program, or not
-    /// provably ours) keeps the Published row so the user is told about the second name.
-    pub fn finish(self, rng: &mut dyn CryptoRngCore) -> bool {
+    /// After Published: close the handle, then remove the staging name if it is still ours, and
+    /// return what happened so native can say it truthfully (review M-5). Review L3: when the
+    /// name could not be checked or deleted (`Unchecked`, an error), native keeps the Published
+    /// row so the leftover second plaintext name stays tracked until Clear removes it; a folder
+    /// other accounts can modify (`SharedFolder`) never gets automatic deletion, so native tells
+    /// the user to delete the leftover instead of promising that Clear will.
+    pub fn finish(self, rng: &mut dyn CryptoRngCore) -> Result<PartialRemoval, ExportError> {
         let journal = self.journal.clone();
         drop(self);
-        matches!(remove_partial(&journal, true, rng), Ok(outcome) if outcome.cleared_staging())
+        remove_partial(&journal, true, rng)
     }
 
     /// Remove a just-created partial whose first journal publication failed.

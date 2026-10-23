@@ -167,7 +167,7 @@ async fn bridged_saved_copy(private: bool) {
             generation: 0,
         };
         let target = source.ready.cid();
-        let path = bounded(
+        let (path, _note) = bounded(
             "native private export streams to a fresh destination",
             stream_download_to_disk(
                 destination.path(),

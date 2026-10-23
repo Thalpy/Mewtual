@@ -70,7 +70,9 @@ fn fixture() -> Fixture {
     let root = tempfile::tempdir().unwrap();
     let vault = root.path().join("vault");
     let downloads = root.path().join("Downloads");
-    fs::create_dir_all(&downloads).unwrap();
+    // Review M-6: 0755 whatever the developer's umask, so the Unix shared-folder rule (which
+    // treats a group-writable folder as shared) does not change what these tests expect.
+    create_folder(&downloads).unwrap();
     Fixture {
         _root: root,
         vault,
@@ -164,7 +166,9 @@ fn fresh_export_publishes_without_replacement_and_releases_only_private_progress
     ));
     write_all(&mut file);
     let path = publish(&mut store, &lease, &mut file);
-    file.finish(&mut rng());
+    // Review M-5: finish says what happened to the staging name; here it went, the saved file
+    // stays.
+    assert_eq!(file.finish(&mut rng()).unwrap(), PartialRemoval::KeptSaved);
     assert_eq!(path, fx.downloads.join("notes.txt"));
     assert_eq!(fs::read(&path).unwrap(), CHUNKS.concat());
     assert!(
@@ -309,7 +313,7 @@ fn torn_or_extra_tail_after_the_checkpoint_is_verified_then_rewritten() {
         .unwrap();
     write_all(&mut file);
     let path = publish(&mut store, &lease, &mut file);
-    file.finish(&mut rng()); // releases the session lock, which on Windows also blocks other readers
+    file.finish(&mut rng()).unwrap(); // releases the session lock, which on Windows also blocks other readers
     assert_eq!(fs::read(path).unwrap(), CHUNKS.concat());
 }
 
@@ -364,7 +368,7 @@ fn checkpoint_claiming_more_than_the_file_rewinds_but_a_changed_byte_inside_it_h
         } else {
             write_all(&mut file);
             let path = publish(&mut store, &lease, &mut file);
-            file.finish(&mut rng());
+            file.finish(&mut rng()).unwrap();
             assert_eq!(fs::read(path).unwrap(), CHUNKS.concat());
         }
     }
@@ -752,7 +756,7 @@ fn publication_pins_the_proven_staging_file_across_the_link() {
         "the swap was attempted and refused"
     );
     let path = linked.unwrap();
-    file.finish(&mut rng());
+    file.finish(&mut rng()).unwrap();
     assert_eq!(fs::read(path).unwrap(), CHUNKS.concat());
 }
 
@@ -1108,6 +1112,116 @@ fn a_native_staging_name_is_removed_only_while_it_holds_our_open_file() {
 
 #[cfg(unix)]
 #[test]
+fn unix_never_renames_an_object_that_is_not_ours() {
+    // Review M-2: the name is verified before it is renamed aside, so a file that is not ours
+    // (here the user's own file at the staging name) is never moved, not even for a moment.
+    let fx = fixture();
+    let mut store = open(&fx.vault);
+    let (id, lease) = completed(&mut store);
+    let mut file = started(&mut store, &lease, &fx.downloads);
+    file.accept(0, CHUNKS[0]).unwrap();
+    drop(file);
+    let ExportState::Writing(journal) = store.cancel_download(id).unwrap().unwrap() else {
+        panic!();
+    };
+    let partial = staging(&fx.downloads);
+    fs::rename(&partial, fx.downloads.join("ours elsewhere")).unwrap();
+    fs::write(&partial, b"the user's own file").unwrap();
+    let renamed = std::rc::Rc::new(std::cell::Cell::new(false));
+    let seen = renamed.clone();
+    external::AFTER_ASIDE
+        .with(|hook| *hook.borrow_mut() = Some(Box::new(move |_: &Path, _: &Path| seen.set(true))));
+    let outcome = remove_partial(&journal, false, &mut rng());
+    external::AFTER_ASIDE.with(|hook| *hook.borrow_mut() = None);
+    assert_eq!(outcome.unwrap(), PartialRemoval::LeftInPlace);
+    assert!(!renamed.get(), "nothing was renamed aside");
+    assert_eq!(fs::read(&partial).unwrap(), b"the user's own file");
+}
+
+#[cfg(unix)]
+#[test]
+fn unix_a_name_that_cannot_be_put_back_is_never_reported_as_left_in_place() {
+    // Review M-2: our file is swapped for someone else's between the check and the rename, and
+    // a third file appears at the original name before the put-back. The foreign object stays at
+    // the random name, so the outcome must be an error (Unchecked: the save stays tracked), never
+    // "left in place".
+    let fx = fixture();
+    let mut store = open(&fx.vault);
+    let (id, lease) = completed(&mut store);
+    let mut file = started(&mut store, &lease, &fx.downloads);
+    file.accept(0, CHUNKS[0]).unwrap();
+    drop(file);
+    let ExportState::Writing(journal) = store.cancel_download(id).unwrap().unwrap() else {
+        panic!();
+    };
+    let ours = fx.downloads.join("ours, moved by someone");
+    let moved = ours.clone();
+    external::AFTER_ASIDE.with(|hook| {
+        *hook.borrow_mut() = Some(Box::new(move |original: &Path, aside: &Path| {
+            fs::rename(aside, &moved).unwrap();
+            fs::write(aside, b"someone else's file").unwrap();
+            fs::write(original, b"a third file").unwrap();
+        }))
+    });
+    let outcome = remove_partial(&journal, false, &mut rng());
+    external::AFTER_ASIDE.with(|hook| *hook.borrow_mut() = None);
+    assert_eq!(outcome.unwrap(), PartialRemoval::Unchecked);
+    assert_eq!(fs::read(staging(&fx.downloads)).unwrap(), b"a third file");
+    assert!(
+        ours.exists(),
+        "our file is wherever it was moved, untouched"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn unix_never_deletes_automatically_on_a_network_or_fuse_filesystem() {
+    // Review M-3: mode bits say who may change a folder only on a local filesystem this kernel
+    // enforces. A network or FUSE mount (modelled by an Unknown class) counts as shared.
+    let dir = tempfile::tempdir().unwrap();
+    let (file, staging, _final_path) = unjournaled_staging(dir.path(), b"partial plaintext");
+    let id = session_id(&file).unwrap();
+    let removal = injected(Effect::FsClass, io::ErrorKind::Other, || {
+        remove_if_session(dir.path(), "notes.txt.part", id, &mut rng())
+    });
+    assert_eq!(removal.unwrap(), SessionRemoval::SharedFolder);
+    assert!(staging.exists());
+    assert_eq!(
+        remove_if_session(dir.path(), "notes.txt.part", id, &mut rng()).unwrap(),
+        SessionRemoval::Removed
+    );
+    drop(file);
+}
+
+#[test]
+fn without_proc_no_save_starts_that_could_not_finish() {
+    // Review L-7: Linux and Android publish by linking the open descriptor through /proc. Without
+    // it (modelled here on every platform) no journal is started, and nothing is left behind.
+    let fx = fixture();
+    let created = injected(Effect::Descriptor, io::ErrorKind::NotFound, || {
+        ExportFile::create(&fx.downloads, "notes.txt", export_plan(), &mut rng())
+    });
+    assert!(matches!(created, Err(ExportError::Unsupported)));
+    assert_eq!(fs::read_dir(&fx.downloads).unwrap().count(), 0);
+    // The non-resumable writer's probe refuses too, before any plaintext (Unix only: Windows
+    // publishes under a pin instead and never asks).
+    #[cfg(unix)]
+    {
+        let staging = fx.downloads.join("notes.txt.part");
+        let file = external::create_leaf(&staging).unwrap();
+        let refused = injected(Effect::Descriptor, io::ErrorKind::NotFound, || {
+            confirm_staging_links(file, &fx.downloads, "notes.txt.part", &mut rng())
+        });
+        match refused {
+            Err(ExportError::Local { reason, .. }) => assert!(reason.contains("/proc"), "{reason}"),
+            other => panic!("expected the /proc refusal, got {other:?}"),
+        }
+        assert!(!staging.exists(), "the empty reservation is removed");
+    }
+}
+
+#[cfg(unix)]
+#[test]
 fn a_native_staging_name_in_a_folder_others_can_modify_is_left_in_place() {
     // PR51 H1: Unix never deletes automatically where other accounts can swap names.
     use std::os::unix::fs::PermissionsExt;
@@ -1126,6 +1240,119 @@ fn a_native_staging_name_in_a_folder_others_can_modify_is_left_in_place() {
         SessionRemoval::Removed
     );
     drop(file);
+}
+
+/// A published save whose staging name is still present (no `finish`), released to Deleting.
+fn saved_row_without_finish(fx: &Fixture) -> (PathBuf, ExportJournal) {
+    let mut store = open(&fx.vault);
+    let (id, lease) = completed(&mut store);
+    let mut file = started(&mut store, &lease, &fx.downloads);
+    write_all(&mut file);
+    let path = publish(&mut store, &lease, &mut file);
+    drop(file);
+    let ExportState::Published(saved) = store.cancel_download(id).unwrap().unwrap() else {
+        panic!("a saved row keeps its journal for cleanup");
+    };
+    (path, saved)
+}
+
+#[test]
+fn clearing_a_saved_row_whose_final_name_is_gone_keeps_the_only_copy() {
+    // PR51 M2: power loss on a filesystem that ignored the folder flush (or the user moving the
+    // file) can leave a Published record whose final name is gone while the staging name still
+    // holds the file. That staging name is then the only copy: Clear never deletes it, and says
+    // where it is. Review M-1: when another file now sits at the final name (an editor's atomic
+    // save), the original copy is kept too, but the notice never claims the saved file is gone or
+    // asks the user to rename the copy over that other file.
+    for replaced in [false, true] {
+        let fx = fixture();
+        let (path, saved) = saved_row_without_finish(&fx);
+        fs::remove_file(&path).unwrap();
+        if replaced {
+            fs::write(&path, b"a different file").unwrap();
+        }
+        let outcome = remove_partial(&saved, true, &mut rng()).unwrap();
+        let expected = if replaced {
+            PartialRemoval::SavedNameReplaced
+        } else {
+            PartialRemoval::KeptOnlyCopy
+        };
+        assert_eq!(outcome, expected, "replaced={replaced}");
+        assert!(outcome.settled() && !outcome.cleared_staging());
+        let notice = outcome.notice(true).unwrap();
+        assert!(notice.contains(".mewtual-part"));
+        assert_eq!(notice.contains("no longer in its folder"), !replaced);
+        assert_eq!(notice.contains("Rename"), !replaced);
+        assert_eq!(fs::read(staging(&fx.downloads)).unwrap(), CHUNKS.concat());
+        if replaced {
+            assert_eq!(fs::read(&path).unwrap(), b"a different file");
+        }
+    }
+}
+
+#[test]
+fn clearing_a_saved_row_whose_saved_name_was_replaced_says_nothing_false() {
+    // Review M-1: the staging name already went (an earlier Clear, or finish) and the user's
+    // editor later replaced the saved file. Nothing of ours is left; the saved row must not be
+    // told "The saved file was no longer in its folder."
+    let fx = fixture();
+    let (path, saved) = saved_row_without_finish(&fx);
+    fs::remove_file(staging(&fx.downloads)).unwrap();
+    fs::remove_file(&path).unwrap();
+    fs::write(&path, b"edited by the user").unwrap();
+    let outcome = remove_partial(&saved, true, &mut rng()).unwrap();
+    assert_eq!(outcome, PartialRemoval::Removed);
+    assert_eq!(outcome.notice(true), None);
+    assert_eq!(fs::read(&path).unwrap(), b"edited by the user");
+}
+
+#[test]
+fn clearing_a_saved_row_whose_names_are_both_gone_never_says_removed() {
+    // PR51 M2: neither name is left. A saved row says the saved file is gone (never "Saved" and
+    // never "removed"); an unfinished save with nothing left is simply removed.
+    let fx = fixture();
+    let (path, saved) = saved_row_without_finish(&fx);
+    fs::remove_file(&path).unwrap();
+    fs::remove_file(staging(&fx.downloads)).unwrap();
+    let outcome = remove_partial(&saved, true, &mut rng()).unwrap();
+    assert_eq!(outcome, PartialRemoval::SavedFileMissing);
+    assert!(outcome.settled());
+    assert_eq!(
+        outcome.notice(true),
+        Some("The saved file was no longer in its folder.")
+    );
+    assert_eq!(
+        remove_partial(&saved, false, &mut rng()).unwrap(),
+        PartialRemoval::Removed
+    );
+}
+
+#[cfg(windows)]
+#[test]
+fn a_saved_rows_final_name_held_by_another_program_is_not_treated_as_gone() {
+    // An indexer or antivirus can hold the just-saved file without sharing for a moment. That
+    // proves nothing about the final name, so Clear neither keeps a second name as "the only
+    // copy" nor deletes the staging name: it stays tracked (Unchecked) and a retry settles it.
+    use std::os::windows::fs::OpenOptionsExt;
+    let fx = fixture();
+    let (path, saved) = saved_row_without_finish(&fx);
+    let holder = fs::OpenOptions::new()
+        .read(true)
+        .share_mode(0)
+        .open(&path)
+        .unwrap();
+    assert_eq!(
+        remove_partial(&saved, true, &mut rng()).unwrap(),
+        PartialRemoval::Unchecked
+    );
+    assert!(staging(&fx.downloads).exists());
+    drop(holder);
+    assert_eq!(
+        remove_partial(&saved, true, &mut rng()).unwrap(),
+        PartialRemoval::KeptSaved
+    );
+    assert!(!staging(&fx.downloads).exists());
+    assert_eq!(fs::read(&path).unwrap(), CHUNKS.concat());
 }
 
 #[test]
@@ -1386,7 +1613,7 @@ fn an_uncertain_link_error_that_made_no_link_retries_instead_of_halting_changed(
     store
         .publish_download_export(&lease, &file.published_journal())
         .unwrap();
-    file.finish(&mut rng());
+    file.finish(&mut rng()).unwrap();
     assert_eq!(fs::read(path).unwrap(), CHUNKS.concat());
 }
 
@@ -1574,7 +1801,7 @@ fn an_empty_file_saves_as_one_empty_chunk_across_restart() {
         .unwrap();
     file.accept(0, b"").unwrap();
     let path = publish(&mut store, &lease, &mut file);
-    file.finish(&mut rng());
+    file.finish(&mut rng()).unwrap();
     assert_eq!(path, fx.downloads.join("empty.txt"));
     assert_eq!(fs::read(&path).unwrap(), b"");
     assert_eq!(view(&store), ExportView::Published);
@@ -1835,7 +2062,7 @@ fn disk_full_while_writing_persists_nothing_and_a_later_attempt_completes() {
     );
     write_all(&mut file);
     let path = publish(&mut store, &lease, &mut file);
-    file.finish(&mut rng());
+    file.finish(&mut rng()).unwrap();
     assert_eq!(fs::read(path).unwrap(), CHUNKS.concat());
 }
 

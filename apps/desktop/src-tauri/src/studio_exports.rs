@@ -213,18 +213,40 @@ where
     .await
     .map_err(|_| "GIF save worker failed".to_string())??;
     before_commit.await;
-    creative_blobs::finish_response(state, server, instance, generation, || {
+    let published = creative_blobs::finish_response(state, server, instance, generation, || {
         if cancellation.is_cancelled() {
             return Err("request cancelled".to_string());
         }
         staged.publish()
     })
-    .await??;
+    .await
+    .and_then(|published| published);
+    // Review L-1/M-5: settle the staging name on the blocking pool, outside the session guard and
+    // the registry lock, published or not. The note says when a name had to stay.
+    let path = staged.path.clone();
+    let note = tokio::task::spawn_blocking(move || {
+        if staged.published {
+            staged.settle()
+        } else {
+            staged.discard()
+        }
+    })
+    .await
+    .unwrap_or_else(|_| {
+        " Mewtual could not check the temporary GIF file, so it may have been left in place.".into()
+    });
+    if let Err(error) = published {
+        return Err(format!("{error}{note}"));
+    }
     // Revealing opens a system window, so it waits for no lock. It still belongs to the session
     // that started the export: a lock that won after the rename leaves the GIF in Downloads but
     // neither reveals it nor reports success behind the lock screen.
     drop(require_ui_session_generation(state, generation).await?);
-    Ok(revealed(&staged.path, reveal))
+    let mut saved = revealed(&path, reveal);
+    if !note.is_empty() {
+        private_downloads::append_warning(&mut saved, note.trim_start());
+    }
+    Ok(saved)
 }
 
 /// Bytes written and synced to a `.part` beside an absent final name. Publication atomically
@@ -233,40 +255,50 @@ where
 /// PR51 H1/M1: the staging handle stays open for the whole life of the stage. Publication names
 /// exactly its object (`publish_unjournaled`), and the staging name is only ever removed while it
 /// still proves to be that object; a name swapped in meanwhile, or (Unix) a Downloads folder other
-/// accounts can modify, is left alone. Dropping an unpublished stage on a runtime worker does that
-/// short check-and-delete there, as the plain delete before it did.
+/// accounts can modify, is left alone. `save_gif` settles or discards the stage on the blocking
+/// pool (review L-1); only a stage dropped on another path (a failure inside `stage_gif` or a
+/// panicking worker) is cleaned up by `Drop`, silently.
 struct StagedGif {
     file: std::fs::File,
     staging: PathBuf,
     path: PathBuf,
     published: bool,
+    /// `settle` or `discard` already handled the staging name; `Drop` leaves it alone.
+    settled: bool,
 }
 
 impl StagedGif {
+    /// Publish exactly the staged object at the final name (PR51 M1). Only the link, which runs
+    /// under the session guard and registry lock; the staging name is settled afterwards.
     fn publish(&mut self) -> Result<(), String> {
-        self.publish_with_cleanup(|file, path| remove_staging(file, path).map(drop))
-    }
-
-    /// `cleanup` removes the staging name after a committed link; a test seam for its failure.
-    fn publish_with_cleanup(
-        &mut self,
-        cleanup: impl FnOnce(&std::fs::File, &Path) -> std::io::Result<()>,
-    ) -> Result<(), String> {
         let file = &self.file;
-        publish_staged_download_with(
-            &self.staging,
-            &self.path,
-            |from, to| catcoms_storage::kept::publish_unjournaled(file, from, to),
-            |path| cleanup(file, path),
-        )?;
+        publish_staged_download_with(&self.staging, &self.path, |from, to| {
+            catcoms_storage::kept::publish_unjournaled(file, from, to)
+        })?;
         self.published = true;
         Ok(())
+    }
+
+    /// After publication: flush the folder, remove the staging name (verified) and return the
+    /// sentence to append when it had to stay (review M-5).
+    fn settle(&mut self) -> String {
+        self.settled = true;
+        settle_published_staging(&self.file, &self.staging)
+    }
+
+    /// A failed or cancelled export: remove the unpublished staging name (verified) and return the
+    /// sentence to append when it had to stay.
+    fn discard(&mut self) -> String {
+        self.settled = true;
+        let removal = remove_staging(&self.file, &self.staging);
+        let id = catcoms_storage::kept::session_id(&self.file).ok();
+        left_in_place(&self.staging, &removal, id, Leftover::Partial)
     }
 }
 
 impl Drop for StagedGif {
     fn drop(&mut self) {
-        if !self.published {
+        if !self.published && !self.settled {
             // The handle is still open here (fields drop after this body), so the number the
             // removal verifies cannot belong to another file yet.
             let _ = remove_staging(&self.file, &self.staging);
@@ -289,11 +321,15 @@ fn stage_gif(
         staging,
         path,
         published: false,
+        settled: false,
     };
-    // A failure drops `staged`, which removes the staging name through its still-open handle.
-    write_staging(&mut staged.file, gif, &cancelled, &mut before_chunk)?;
+    // A failure removes the staging name through its still-open handle (verified), and says so
+    // when it had to stay (review M-5).
+    if let Err(error) = write_staging(&mut staged.file, gif, &cancelled, &mut before_chunk) {
+        return Err(format!("{error}{}", staged.discard()));
+    }
     if cancelled() {
-        return Err("request cancelled".into());
+        return Err(format!("request cancelled{}", staged.discard()));
     }
     Ok(staged)
 }

@@ -4,7 +4,7 @@ use super::*;
 
 fn chosen_folder(fx: &Fixture) -> PathBuf {
     let folder = fx.downloads.with_file_name("Chosen place");
-    fs::create_dir_all(&folder).unwrap();
+    create_folder(&folder).unwrap(); // 0755 on Unix whatever the umask (review M-6)
     folder
 }
 fn begin_chosen(
@@ -152,7 +152,7 @@ fn a_chosen_destination_publishes_at_the_exact_name_and_resumes_there_after_rest
         .unwrap();
     write_all(&mut file);
     let path = publish(&mut store, &lease, &mut file);
-    file.finish(&mut rng());
+    file.finish(&mut rng()).unwrap();
     assert_eq!(path, folder.join("report.bin"));
     assert_eq!(fs::read(path).unwrap(), CHUNKS.concat());
 }

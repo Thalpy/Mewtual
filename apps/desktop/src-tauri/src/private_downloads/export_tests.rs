@@ -226,7 +226,9 @@ impl ExportPorts for Arc<Fake> {
 fn downloads() -> (tempfile::TempDir, PathBuf) {
     let root = tempfile::tempdir().unwrap();
     let folder = root.path().join("Downloads");
-    std::fs::create_dir(&folder).unwrap();
+    // 0755 on Unix whatever the umask, so the shared-folder rule cannot change the expectations
+    // (review M-6).
+    catcoms_storage::kept::create_folder(&folder).unwrap();
     (root, folder)
 }
 
@@ -296,7 +298,7 @@ fn a_session_dropped_on_the_async_side_closes_on_the_blocking_pool() {
 /// A folder the user picked in Save as, beside (not inside) the Downloads folder.
 fn chosen_place(root: &tempfile::TempDir, name: &str) -> (PathBuf, Destination) {
     let folder = root.path().join("Chosen place");
-    std::fs::create_dir_all(&folder).unwrap();
+    catcoms_storage::kept::create_folder(&folder).unwrap();
     let choice = ChosenDestination::validate(&folder.join(name)).unwrap();
     (folder, Destination::Chosen(Arc::new(choice)))
 }

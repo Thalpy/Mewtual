@@ -108,6 +108,9 @@ fn studio_gif_safe_download_never_overwrites_and_reports_reveal_failure() {
     drop(abandoned);
     let mut staged = stage_gif(dir.path(), &gif, || false, || {}).unwrap();
     staged.publish().unwrap();
+    // Publication is only the link; settling removes our staging name (and says nothing when it
+    // went).
+    assert_eq!(staged.settle(), "");
     let saved = revealed(&staged.path, |_| Err("no desktop".into()));
     drop(staged);
     assert!(!saved.displayed);
@@ -156,10 +159,17 @@ fn studio_export_link_is_committed_when_staging_cleanup_fails() {
     let gif = encode_gif(&golden(), GIF_MAX_BYTES, || false).unwrap();
     let mut staged = stage_gif(dir.path(), &gif, || false, || {}).unwrap();
     let (path, staging) = (staged.path.clone(), staged.staging.clone());
-    staged
-        .publish_with_cleanup(|_, _| Err(std::io::ErrorKind::PermissionDenied.into()))
-        .unwrap();
+    staged.publish().unwrap();
     assert!(staged.published);
+    // The settling after the commit fails: the export stays committed and the note says the
+    // temporary copy, still provably ours, could not be removed (review M-5).
+    let note = settle_published_staging_with(&staged.file, &staging, |_, _| {
+        Err(std::io::ErrorKind::PermissionDenied.into())
+    });
+    assert!(
+        note.contains("could not be removed; delete it yourself"),
+        "{note}"
+    );
     drop(staged);
     assert_eq!(std::fs::read(path).unwrap(), gif);
     assert!(

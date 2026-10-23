@@ -802,6 +802,10 @@ pub(super) async fn resume_preflight(
             };
             match blocking(move || candidate.verify(&plan)).await? {
                 Ok(path) => {
+                    // PR51 M2: the interrupted session's link may not be durable yet; flush the
+                    // folder (best effort, on the pool) before Published is recorded.
+                    let flushed = journal.clone();
+                    let _ = blocking(move || flush_destination(&flushed)).await;
                     actor
                         .download_export_edge(
                             preflight.clone(),
@@ -889,6 +893,8 @@ where
 }
 
 /// Shown with a successful save whose temporary staging name could not be removed (review L3).
+/// Said only when our staging name could not be checked or deleted right now (review M-5), the one
+/// case in which a later Clear can still remove it.
 pub(super) const STAGING_LEFT: &str = "A temporary second name for the saved file could not be removed yet. Clear this file in Transfers to remove it.";
 
 /// Shown when Save new copy goes ahead although the old partial could not be reached.
@@ -1373,9 +1379,32 @@ async fn stop(
 /// A completed journaled save.
 pub(super) struct Exported {
     pub(super) path: PathBuf,
-    /// No staging name of ours can remain. Review L3: when false, the caller keeps the Published
-    /// record so the leftover second plaintext name stays visible until Clear removes it.
+    /// The caller may release the record. Review L3: when false (our staging name could not be
+    /// checked or deleted right now), the caller keeps the Published record and says so with
+    /// [`STAGING_LEFT`], so the leftover second plaintext name stays visible until Clear removes
+    /// it.
     pub(super) staging_cleared: bool,
+    /// Review M-5: what to tell the user when the record is released but a file stays (a folder
+    /// other accounts can modify, where Clear could not remove it either, or a name that no longer
+    /// holds our file).
+    pub(super) staging_note: Option<&'static str>,
+}
+
+/// Review M-5: the staging name of a saved file stays because other accounts can change the
+/// folder, so nothing there is deleted automatically, now or by Clear.
+pub(super) const STAGING_SHARED: &str = "Other accounts can change this folder, so the temporary .mewtual-part copy of the saved file was left there. Delete it yourself if you no longer need it.";
+
+/// Review M-5: map what happened to our staging name after publication to (may the record be
+/// released, what to tell the user). Only a name that could not be checked or deleted right now
+/// keeps the record, because only then can a later Clear still remove it.
+fn after_publication(
+    outcome: Result<PartialRemoval, catcoms_storage::kept::ExportError>,
+) -> (bool, Option<&'static str>) {
+    match outcome {
+        Ok(PartialRemoval::Unchecked | PartialRemoval::FolderUnreachable) | Err(_) => (false, None),
+        Ok(PartialRemoval::SharedFolder) => (true, Some(STAGING_SHARED)),
+        Ok(outcome) => (true, outcome.notice(true)),
+    }
 }
 
 /// Journaled export of a verified private copy. `Ok(None)` means a fresh save cannot be journaled
@@ -1465,17 +1494,14 @@ pub(super) async fn export_sequence(
                         .await
                         .map_err(user_message)?;
                     // The caller releases the record next; drop our second (staging) name first,
-                    // and keep the record if that cannot be settled (review L3).
-                    let staging_cleared = blocking(move || {
-                        matches!(
-                            remove_partial(&journal, true, &mut OsCryptoRng),
-                            Ok(outcome) if outcome.cleared_staging()
-                        )
-                    })
-                    .await?;
+                    // and keep the record if that cannot be settled (review L3, M-5).
+                    let (staging_cleared, staging_note) = after_publication(
+                        blocking(move || remove_partial(&journal, true, &mut OsCryptoRng)).await?,
+                    );
                     return Ok(Some(Exported {
                         path,
                         staging_cleared,
+                        staging_note,
                     }));
                 }
                 ExportReopen::Halt(halt) => return Err(record_halt(ports, journal, halt).await),
@@ -1617,10 +1643,12 @@ pub(super) async fn export_sequence(
     // After the guard: removal of our staging name (verified, PR51 H1). The folder was flushed
     // before Published; the removal flushes the folder itself on Unix.
     let session = file.take();
-    let staging_cleared = blocking(move || session.finish(&mut OsCryptoRng)).await?;
+    let (staging_cleared, staging_note) =
+        after_publication(blocking(move || session.finish(&mut OsCryptoRng)).await?);
     Ok(Some(Exported {
         path,
         staging_cleared,
+        staging_note,
     }))
 }
 

@@ -16,8 +16,10 @@
 //!   followed to some other file.
 //! - Unix: `dev`, `ino` and `nlink` from `fstat` on the opened handle, cross-checked against
 //!   `lstat` of the path so that a symbolic link at our name is refused rather than followed.
-//!   **This branch is compile-unverified on the Windows development host**; Linux CI is its first
-//!   compiler. It uses only stable `std`.
+//!   **This branch never runs on the Windows development host** (it is compiled and Clippy-checked
+//!   for Android targets there); Linux CI is its first runner and macOS is not built at all. It
+//!   uses stable `std`, `libc` constants and, since the PR51 review, `rustix` for the
+//!   directory-relative calls (`openat`, `renameat`, `linkat`, `unlinkat`, `fstatfs`).
 //! - Both: the object's **birth time** (`Metadata::created`, `statx` on Linux) is part of the
 //!   identity. ext4 and xfs reuse a deleted file's inode number quickly; without birth time a
 //!   later file from another program could inherit our partial's `(dev, ino)` and be truncated
@@ -30,15 +32,15 @@
 //! itself a junction or symlink is the user's configured location, and its target's identity is
 //! what the journal records and later compares.
 //!
-//! Residual limit (documented in THREAT-MODEL): std offers no delete-by-handle, and a handle-based
-//! delete needs `SetFileInformationByHandle`/`unlinkat` through `unsafe`, which the workspace
-//! denies. So deletion, the link-probe cleanup and (on Unix) publication are path-based calls made
-//! after a handle-based identity check. On Windows, publication holds a delete-denying handle on
-//! the staging file across its hard link ([`open_leaf_pinned`]), which closes that window there.
-//! What remains is: removing a proven staging name, removing the link probe, and the Unix
-//! publication link. Anyone with write access to that folder (the same user, or another user of a
-//! shared folder) who swaps the name at exactly that moment can make Mewtual delete or publish
-//! the swapped object.
+//! Deletion and publication (PR51 review; THREAT-MODEL has the guarantees). No `unsafe` is used:
+//! every automatic delete goes through [`remove_verified`], which on Windows deletes through a
+//! delete-denying handle verified to be the object (`fs_at`), and on Unix renames the verified
+//! name aside relative to a pinned folder descriptor, verifies it again and unlinks it (`rustix`),
+//! never in a folder other accounts can (or may) modify; on Unix the guarantee therefore holds only
+//! against other accounts. Publication names exactly the held object: Linux and Android link the
+//! open descriptor through `/proc/self/fd` ([`link_open`]); Windows holds a delete-denying pin on
+//! the staging name across the path-based link ([`open_leaf_pinned`], [`publish_session`]); macOS
+//! links by path and relies on the post-link check alone.
 //!
 //! Creating a new partial is also path-based (picker review L4): the folder identity check and
 //! the exclusive create are separate calls. Each creation with a captured folder identity
@@ -322,8 +324,8 @@ pub(super) fn open_leaf(path: &Path, write: bool) -> io::Result<Leaf> {
 /// as it is open: nobody can rename, replace or delete this file, or rename the folder that
 /// contains it, until it is dropped. Publication holds it across the hard link so the object it
 /// just proved is ours is exactly the object that gains the final name. Our own `hard_link` still
-/// works (it does not ask for delete access). Unix has no share modes; there the check and the
-/// path-based link remain separate calls (documented in THREAT-MODEL).
+/// works (it does not ask for delete access). Unix has no share modes; there Linux and Android
+/// link the open descriptor instead ([`link_open`]) and macOS relies on the post-link check.
 pub(super) fn open_leaf_pinned(path: &Path) -> io::Result<Leaf> {
     open_leaf_as(path, false, true)
 }
@@ -647,6 +649,13 @@ pub(super) enum Effect {
     /// Any handle identity query (`observe`), to model a filesystem without stable identities
     /// (some network shares and FUSE mounts) on a test host that has them.
     Identity,
+    /// The check that the open download can be linked by descriptor (`/proc/self/fd` on Linux),
+    /// to model a container without `/proc` on any test host (review L-7).
+    Descriptor,
+    /// Unix: classifying a pinned folder's filesystem, to model a network or FUSE mount (an
+    /// `Unknown` class) on a test host whose temporary folder is local (review M-3).
+    #[cfg_attr(not(unix), allow(dead_code))]
+    FsClass,
     /// The sealed record write in `persistence.rs` (not an external path); shares the seam so a
     /// test can model a full vault volume.
     RecordWrite,
@@ -704,7 +713,15 @@ thread_local! {
     /// hook gets the original name's path.
     pub(in crate::kept) static BEFORE_REMOVE: std::cell::RefCell<LinkHook> =
         const { std::cell::RefCell::new(None) };
+    /// Test-only interleaving point in Unix [`remove_verified`], right after the name was renamed
+    /// aside and before the object there is verified (review M-2). The hook gets the original
+    /// name's path and the aside path.
+    #[cfg(unix)]
+    pub(in crate::kept) static AFTER_ASIDE: std::cell::RefCell<AsideHook> =
+        const { std::cell::RefCell::new(None) };
 }
+#[cfg(all(test, unix))]
+pub(in crate::kept) type AsideHook = Option<Box<dyn FnMut(&Path, &Path)>>;
 
 #[cfg(test)]
 fn before_remove(path: &Path) {
@@ -716,6 +733,17 @@ fn before_remove(path: &Path) {
 }
 #[cfg(not(test))]
 fn before_remove(_path: &Path) {}
+
+#[cfg(all(test, unix))]
+fn after_aside(original: &Path, aside: &Path) {
+    AFTER_ASIDE.with(|hook| {
+        if let Some(hook) = hook.borrow_mut().as_mut() {
+            hook(original, aside);
+        }
+    });
+}
+#[cfg(all(not(test), unix))]
+fn after_aside(_original: &Path, _aside: &Path) {}
 
 /// What a destination's filesystem is known to support (PR51 M3). Fail closed: only filesystems
 /// whose identity and hard links Mewtual relies on get a journal.
@@ -750,7 +778,29 @@ pub(super) fn fs_class(folder: &Path) -> io::Result<FsClass> {
             .read(true)
             .custom_flags(libc::O_DIRECTORY | libc::O_NONBLOCK | libc::O_CLOEXEC)
             .open(folder)?;
-        let stat = rustix::fs::fstatfs(&dir).map_err(io::Error::from)?;
+        fs_class_of_dir(&dir)
+    }
+    #[cfg(windows)]
+    {
+        let canonical = fs::canonicalize(folder)?;
+        Ok(classify_windows_canonical(&canonical.to_string_lossy()))
+    }
+    #[cfg(not(any(windows, unix)))]
+    {
+        let _ = folder;
+        Ok(FsClass::Unknown)
+    }
+}
+
+/// Unix: [`fs_class`] of a folder already held open, so a pinned folder is classified without
+/// resolving its path again.
+#[cfg(unix)]
+fn fs_class_of_dir(dir: &File) -> io::Result<FsClass> {
+    if inject(Effect::FsClass).is_err() {
+        return Ok(FsClass::Unknown);
+    }
+    {
+        let stat = rustix::fs::fstatfs(dir).map_err(io::Error::from)?;
         #[cfg(any(target_os = "linux", target_os = "android"))]
         {
             // `f_type` is a signed long whose width varies; the magic numbers are 32-bit.
@@ -776,16 +826,6 @@ pub(super) fn fs_class(folder: &Path) -> io::Result<FsClass> {
             let _ = stat;
             Ok(FsClass::Unknown)
         }
-    }
-    #[cfg(windows)]
-    {
-        let canonical = fs::canonicalize(folder)?;
-        Ok(classify_windows_canonical(&canonical.to_string_lossy()))
-    }
-    #[cfg(not(any(windows, unix)))]
-    {
-        let _ = folder;
-        Ok(FsClass::Unknown)
     }
 }
 
@@ -941,13 +981,16 @@ pub(super) enum Verified {
 ///   Long-lived handles elsewhere keep std's default share mode, which allows this open.
 /// - Unix (no delete-by-inode exists): the folder is pinned by a descriptor (following a configured
 ///   folder link, then checked against `folder_id` when known). If other accounts can modify it
-///   (owner neither us nor root, or group- or other-writable without the sticky bit), nothing is
-///   deleted (`Shared`). Otherwise the name is renamed, relative to that descriptor, to a random
-///   unguessable name (no-replace where the platform has it), the object now at that name is
-///   opened without following links and verified, and it is unlinked only if it is ours; otherwise
-///   it is renamed back (no-replace) and reported `NotOurs`. A process running as the same
-///   account that watches the folder could still swap the random name in the window before the
-///   unlink; such a process already has the authority to delete the file itself.
+///   (owner neither us nor root, or group- or other-writable without the sticky bit) or may (a
+///   network, FUSE or unrecognized filesystem, whose permissions this kernel does not decide;
+///   review M-3), nothing is deleted (`Shared`). Otherwise the name is verified where it is (an
+///   object that is not ours is never renamed; review M-2), renamed relative to that descriptor to
+///   a random unguessable name (no-replace where the platform has it), verified again there, and
+///   unlinked only if it is still ours; otherwise it is put back without replacing anything and
+///   reported `NotOurs`, or, if it cannot be put back, the call fails (the caller keeps tracking
+///   the save). A process running as the same account that watches the folder could still swap
+///   the random name in the window before the unlink; such a process already has the authority
+///   to delete the file itself.
 pub(super) fn remove_verified(
     folder: &Path,
     folder_id: Option<FileIdentity>,
@@ -980,16 +1023,42 @@ pub(super) fn remove_verified(
         if pinned.shared {
             return Ok(Verified::Shared);
         }
+        // Review M-2: verify at the original name first, so an object that is not ours (a
+        // directory, a link, the user's own file) is never renamed at all. Only a swap between
+        // this check and the rename below can still move a foreign object aside, and the second
+        // check at the aside name catches that.
+        match open_at_nofollow(&pinned.dir, leaf) {
+            Ok(Some(file)) => {
+                if verify(&file, expected)?.is_none() {
+                    return Ok(Verified::NotOurs);
+                }
+            }
+            Ok(None) => return Ok(Verified::NotOurs),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Verified::Missing),
+            Err(error) => return Err(error),
+        }
         let aside = aside_name(rng);
         match rename_no_replace(&pinned.dir, leaf, &aside) {
             Ok(()) => {}
             Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Verified::Missing),
             Err(error) => return Err(error),
         }
+        after_aside(&folder.join(leaf), &folder.join(&aside));
         let verdict = match open_at_nofollow(&pinned.dir, &aside) {
             Ok(Some(file)) => verify(&file, expected),
             Ok(None) => Ok(None),
             Err(error) => Err(error),
+        };
+        // Putting an object back must succeed before anything is reported about it: a failure
+        // leaves it at the random name, so the outcome is an error (the caller keeps tracking the
+        // save as Unchecked), never "not ours" or "left in place".
+        let put_back = |pinned: &Pinned| {
+            rename_back(&pinned.dir, &aside, leaf).map_err(|error| {
+                io::Error::new(
+                    error.kind(),
+                    format!("a name moved aside for checking could not be put back: {error}"),
+                )
+            })
         };
         match verdict {
             Ok(Some(links)) => {
@@ -999,19 +1068,20 @@ pub(super) fn remove_verified(
                         .map_err(io::Error::from)
                 });
                 if let Err(error) = removed {
-                    // Never leave our plaintext at an unrecorded name: put it back.
-                    let _ = rename_back(&pinned.dir, &aside, leaf);
+                    // Never leave our plaintext at an unrecorded name: put it back. If that fails
+                    // too, a journaled save's next Remove finds it by identity (`sweep_aside`).
+                    let _ = put_back(&pinned);
                     return Err(error);
                 }
                 let _ = pinned.dir.sync_all();
                 Ok(Verified::Removed { links })
             }
             Ok(None) => {
-                let _ = rename_back(&pinned.dir, &aside, leaf);
+                put_back(&pinned)?;
                 Ok(Verified::NotOurs)
             }
             Err(error) => {
-                let _ = rename_back(&pinned.dir, &aside, leaf);
+                put_back(&pinned)?;
                 Err(error)
             }
         }
@@ -1140,7 +1210,8 @@ fn open_for_delete(path: &Path) -> io::Result<Option<File>> {
 #[cfg(unix)]
 struct Pinned {
     dir: File,
-    /// Other accounts can modify entries in it, so nothing is deleted automatically.
+    /// Other accounts can (or may, on a filesystem whose permissions this kernel does not decide)
+    /// modify entries in it, so nothing is deleted automatically.
     shared: bool,
 }
 
@@ -1163,13 +1234,20 @@ fn pin_folder(folder: &Path, expected: Option<FileIdentity>) -> io::Result<Optio
         }
     }
     let metadata = dir.metadata()?;
+    // Review M-3: mode bits describe who may change a folder only on a local filesystem whose
+    // permissions are enforced by this kernel. On network and FUSE mounts (CIFS shows the mount
+    // owner and `dir_mode`, sshfs hides the remote host's accounts) and wherever the class is
+    // unknown, other accounts may well change the folder, so it counts as shared (fail closed).
+    // ACLs (NFSv4, macOS `delete_child`) are not read; see THREAT-MODEL.
+    let local = matches!(fs_class_of_dir(&dir), Ok(FsClass::Journal));
     Ok(Some(Pinned {
+        shared: !local
+            || shared_folder(
+                metadata.uid(),
+                metadata.mode(),
+                rustix::process::geteuid().as_raw(),
+            ),
         dir,
-        shared: shared_folder(
-            metadata.uid(),
-            metadata.mode(),
-            rustix::process::geteuid().as_raw(),
-        ),
     }))
 }
 
@@ -1231,7 +1309,14 @@ fn rename_no_replace(dir: &File, from: &str, to: &str) -> io::Result<()> {
 }
 
 /// Put an object renamed aside back at its original name, never replacing anything that appeared
-/// there meanwhile (then it stays at the aside name, which a later Remove sweeps if it is ours).
+/// there meanwhile (then it stays at the aside name and the call fails, so the caller reports an
+/// error; a later Remove of a journaled save finds its own file there by identity).
+///
+/// Review M-2: where no-replace rename is missing (NFS, CIFS, many FUSE), the fallback is a hard
+/// link back (which refuses an existing name atomically) and then the removal of the aside name,
+/// never a "check, then plain rename" that could replace an object created in between. Where that
+/// link fails too (a directory, a filesystem without links), the object stays aside and the call
+/// fails.
 #[cfg(unix)]
 fn rename_back(dir: &File, aside: &str, leaf: &str) -> io::Result<()> {
     #[cfg(any(target_os = "linux", target_os = "android", target_vendor = "apple"))]
@@ -1241,13 +1326,9 @@ fn rename_back(dir: &File, aside: &str, leaf: &str) -> io::Result<()> {
         Err(rustix::io::Errno::NOTSUP) => {}
         Err(error) => return Err(error.into()),
     }
-    match rustix::fs::statat(dir, leaf, rustix::fs::AtFlags::SYMLINK_NOFOLLOW) {
-        Err(rustix::io::Errno::NOENT) => {
-            rustix::fs::renameat(dir, aside, dir, leaf).map_err(io::Error::from)
-        }
-        Ok(_) => Err(io::Error::from(io::ErrorKind::AlreadyExists)),
-        Err(error) => Err(error.into()),
-    }
+    rustix::fs::linkat(dir, aside, dir, leaf, rustix::fs::AtFlags::empty())
+        .map_err(io::Error::from)?;
+    rustix::fs::unlinkat(dir, aside, rustix::fs::AtFlags::empty()).map_err(io::Error::from)
 }
 /// No-replace publication primitive: refuses an existing destination on every platform. Linux and
 /// Android publish through [`link_open`] instead and do not probe, so they never call it.
@@ -1269,6 +1350,9 @@ pub(super) fn link(from: &Path, to: &Path) -> io::Result<()> {
 /// journal is never started where it could not finish that way. Elsewhere publication links by
 /// path (Windows under the delete-denying pin; macOS without one), so the answer is yes.
 pub(super) fn link_by_descriptor_available(file: &File) -> bool {
+    if inject(Effect::Descriptor).is_err() {
+        return false;
+    }
     #[cfg(any(target_os = "linux", target_os = "android"))]
     {
         use std::os::unix::fs::MetadataExt;
@@ -1297,7 +1381,8 @@ pub(super) fn link_by_descriptor_available(file: &File) -> bool {
 ///   pinned by a descriptor checked against `folder_id` when the caller has one (a writer without a
 ///   journal has none). The new name is for exactly the object we hold open, whatever has happened
 ///   to the staging name meanwhile, so a swapped staging name can never become the final name.
-///   `ENOENT` (no `/proc`, or the object has no names left) and `EXDEV` mean no link was made.
+///   `ENOENT` (no `/proc`, or the object has no names left) and `EXDEV` mean no link was made and
+///   are reported as `Unsupported`.
 /// - Elsewhere: the path-based no-replace hard link from `staging` (Windows callers hold the
 ///   delete-denying pin across it; macOS has no link by descriptor, so the post-link check is its
 ///   only guarantee).
@@ -1337,15 +1422,20 @@ pub(super) fn link_open(
             Err(rustix::io::Errno::EXIST) => {
                 return Err(io::Error::from(io::ErrorKind::AlreadyExists))
             }
+            // Review L-3: a definite "no link was made" (no /proc any more, the object has no
+            // names left, or the folder is now on another device). `Unsupported` lets the
+            // journaled session halt without treating the save as possibly published.
             Err(rustix::io::Errno::NOENT) | Err(rustix::io::Errno::XDEV) => {
                 return Err(io::Error::new(
-                    io::ErrorKind::NotFound,
+                    io::ErrorKind::Unsupported,
                     "the saved file could not be linked from the open download",
                 ))
             }
             Err(error) => return Err(error.into()),
         }
-        let _ = pinned.dir.sync_all();
+        // Review L-1: no folder flush here. This runs under the session commit guard; the
+        // journaled sequence flushes the folder after releasing it (PR51 M2), and the writers
+        // without a journal flush it when they settle their staging name.
         inject(Effect::LinkReport)
     }
     #[cfg(not(any(target_os = "linux", target_os = "android")))]
@@ -1398,6 +1488,16 @@ fn open_nofollow(path: &Path, pinned: bool) -> io::Result<AtName> {
             Ok(AtName::Foreign)
         }
         Err(error) => Err(error),
+    }
+}
+
+/// Read-only: whether `path` holds the object with `id` (review M-4). `Ok(None)` when nothing is
+/// there; `Ok(Some(false))` for anything else (another file, a link, a folder, no file number).
+pub(super) fn holds_session(path: &Path, id: SessionId) -> io::Result<Option<bool>> {
+    match open_nofollow(path, false)? {
+        AtName::Object(found) => Ok(Some(verify(&found, Expected::Session(id))?.is_some())),
+        AtName::Missing => Ok(None),
+        AtName::Foreign => Ok(Some(false)),
     }
 }
 
