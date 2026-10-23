@@ -550,6 +550,7 @@ impl Registry {
 }
 /// Native-only immutable control routing. Retain the actual row, Session and paid public
 /// output across IO; copied session IDs alone cannot create this owner or authorize actions.
+#[derive(Clone)]
 pub(super) struct Route {
     row: Arc<Row>,
     session: Arc<Session>,

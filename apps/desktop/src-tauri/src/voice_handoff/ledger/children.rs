@@ -15,6 +15,26 @@ pub(crate) enum ConfirmationPurpose {
 }
 
 impl ResolvedRow {
+    /// Immutable original parent purpose for native adapter/test projection. It supplies
+    /// no current grant or factory authority, including after ordinary Return.
+    pub(in crate::voice_handoff) fn confirmation_selector(
+        &self,
+    ) -> Result<PairSelector, VoiceError> {
+        let _index = self.indexed()?;
+        match self.row.key.purpose {
+            Purpose::Derive(selector) if self.row.key.parent.is_none() => Ok(selector),
+            _ => Err(VoiceError::Unauthorized),
+        }
+    }
+
+    /// Native routing hint only: the retained publication is still resolved/rechecked by
+    /// resume_known_child under Index at final admission. A browser cannot supply this bit.
+    pub(in crate::voice_handoff) fn has_pending_publication(&self) -> Result<bool, VoiceError> {
+        let _index = self.indexed()?;
+        let state = self.row.state.lock().unwrap_or_else(|e| e.into_inner());
+        Ok(matches!(&state.body, Body::Pending(pending) if pending.published.is_some()))
+    }
+
     /// Fixed historical binding from the SAME original opaque plan, including after
     /// Derive compaction. It supplies no current-call or child-reservation permission.
     pub(crate) fn confirmation_handshake(&self) -> Result<[u8; 32], VoiceError> {
@@ -57,6 +77,70 @@ impl Work {
 }
 
 impl Ledger {
+    /// Resume ONLY an already indexed child with a known original publication. Unlike
+    /// begin_child, a role hint here can never reserve an empty position or call Root. The
+    /// actual parent/child allocations are rechecked together under Index before rearming
+    /// attachment. Missing/uncertain publications require a real native intake snapshot.
+    pub(in crate::voice_handoff) fn resume_known_child(
+        self: &Arc<Self>,
+        selected: Arc<SelectedHandoffOwner>,
+        parent: &ResolvedRow,
+        child: &ResolvedRow,
+        request: ConfirmationPurpose,
+    ) -> Result<Begin, VoiceError> {
+        let purpose = Purpose::Confirmation {
+            parent: parent.id(),
+            request,
+        };
+        if !Arc::ptr_eq(self, &parent.ledger)
+            || !Arc::ptr_eq(self, &child.ledger)
+            || !selected.lease().is_live()
+            || parent.row.key.parent.is_some()
+            || !matches!(parent.row.key.purpose, Purpose::Derive(_))
+            || !parent.row.key.matches(&selected, parent.row.key.purpose)
+            || !child.row.key.matches(&selected, purpose)
+            || !child
+                .row
+                .key
+                .parent
+                .as_ref()
+                .is_some_and(|actual| Arc::ptr_eq(actual, &parent.row))
+            || !matches!(child.row.key.purpose, Purpose::Confirmation { parent: id, .. } if id == parent.id())
+        {
+            return Err(VoiceError::Unauthorized);
+        }
+        let mut index = self.index.lock().unwrap_or_else(|e| e.into_inner());
+        for row in [&parent.row, &child.row] {
+            if !index
+                .rows
+                .get(row.id.slot)
+                .and_then(Option::as_ref)
+                .is_some_and(|actual| actual.id == row.id && Arc::ptr_eq(actual, row))
+            {
+                return Err(VoiceError::Unauthorized);
+            }
+        }
+        {
+            let state = child.row.state.lock().unwrap_or_else(|e| e.into_inner());
+            match &state.body {
+                Body::Pending(pending) if pending.published.is_none() || pending.worker => {
+                    return Err(VoiceError::Capacity)
+                }
+                Body::ClosingPending => return Err(VoiceError::Capacity),
+                Body::Pending(_) => {}
+                _ => return Ok(Begin::Existing(child.id())),
+            }
+        }
+        // Index still pins the EXACT existing row, so begin_indexed cannot allocate a new
+        // purpose in the gap between provenance validation and original attachment retry.
+        self.begin_indexed(
+            selected,
+            child.row.key.purpose,
+            Some(&parent.row),
+            &mut index,
+        )
+    }
+
     /// Recover only a descendant of the actual original indexed parent. Public purpose
     /// fields are lookup hints; equal RowIds in another ledger or a detached parent cannot
     /// substitute for the strong parent allocation captured before child publication.

@@ -16,7 +16,7 @@ pub(in crate::voice_handoff) async fn ensure_confirmation_row(
         // role number, parent handle or cached descriptor cannot manufacture that token.
         return Err(Refused::Closed);
     }
-    ensure(context, route, parent, request, None, physical).await
+    ensure(context, route, parent, request, None, None, physical).await
 }
 
 /// Register the ACTUAL action from the original participant's authenticated Root intake.
@@ -35,7 +35,33 @@ pub(in crate::voice_handoff) async fn ensure_incoming_row(
         return Err(VoiceError::Unauthorized.into());
     }
     let request = ConfirmationPurpose::Incoming(action.protected_row()?);
-    ensure(context, route, parent, request, Some(action), physical).await
+    ensure(
+        context,
+        route,
+        parent,
+        request,
+        Some(action),
+        None,
+        physical,
+    )
+    .await
+}
+
+/// Retry attachment from the SAME already-retained publication, without requiring a
+/// rotating pending snapshot to rediscover an action whose input may already be settled.
+/// Unknown or uncertain rows cannot reserve a purpose or reach a role-only Root factory.
+pub(in crate::voice_handoff) async fn ensure_known_incoming_row(
+    context: &Context,
+    route: &Route,
+    parent: &ResolvedRow,
+    child: &ResolvedRow,
+    request: ConfirmationPurpose,
+    physical: PhysicalHold,
+) -> Result<RowId, Refused> {
+    if !matches!(request, ConfirmationPurpose::Incoming(_)) {
+        return Err(VoiceError::Unauthorized.into());
+    }
+    ensure(context, route, parent, request, None, Some(child), physical).await
 }
 
 async fn ensure(
@@ -44,6 +70,7 @@ async fn ensure(
     parent: &ResolvedRow,
     request: ConfirmationPurpose,
     incoming: Option<Arc<catcoms_sync::voice_v2::crypto_actions::CryptoAction>>,
+    known: Option<&ResolvedRow>,
     physical: PhysicalHold,
 ) -> Result<RowId, Refused> {
     if !physical.belongs_to(route.session()) {
@@ -81,9 +108,21 @@ async fn ensure(
     }
     let grant = selected.grant()?;
     let handshake = parent.confirmation_handshake()?;
-    let (begin, trigger) = context
-        .ledger
-        .begin_child(selected.clone(), parent, request)?;
+    let (begin, trigger) = if let Some(child) = known {
+        // Compare the actual caller-supplied parent AND child allocations, plus full
+        // purpose, under one Index. Re-resolving only child.id() here would incorrectly
+        // accept an equal-label handle from another original ledger.
+        (
+            context
+                .ledger
+                .resume_known_child(selected.clone(), parent, child, request)?,
+            None,
+        )
+    } else {
+        context
+            .ledger
+            .begin_child(selected.clone(), parent, request)?
+    };
     let registration = match begin {
         Begin::Existing(id) => return Ok(id),
         Begin::Factory(registration) => registration,

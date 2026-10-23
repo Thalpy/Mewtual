@@ -100,6 +100,21 @@ fn recover_original(
 }
 
 #[cfg(test)]
+pub(super) fn serialization_layout_bytes() -> usize {
+    // Complete synchronous Response::seal -> replies::status/receipt_digest call graph.
+    // Canonical bytes coexist with the retained Status and its Encoded destination; count
+    // both inline arrays conservatively. The physical reply/scratch/crypto stage is counted
+    // separately in channel's complete Control guard, never hidden in a task payment.
+    std::mem::size_of::<Response>()
+        + std::mem::size_of::<Status>()
+        + std::mem::size_of::<Encoded>()
+        + replies::STATUS_BYTES
+        + std::mem::size_of::<sha2::Sha256>()
+        + std::mem::size_of::<RowId>()
+        + 128 // digest/output/scalar/borrowed argument temporaries
+}
+
+#[cfg(test)]
 pub(super) fn layout_bytes() -> usize {
     // Conservative synchronous graph beyond the codec's existing physical state/scratch.
     // Count output, resolver snapshots, canonical response, digest state and argument guards.

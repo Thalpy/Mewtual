@@ -2,6 +2,47 @@
 //! signed discovery fixture; these tests do not claim Actor intake, IPC, or WebView success.
 use super::*;
 
+#[test]
+fn known_retry_cannot_reserve_or_rearm_an_uncertain_child_without_actual_publication() {
+    let (coordinator, selected, selector) = selection();
+    let ledger = Arc::new(Ledger::default());
+    let (_join, _action, parent) = returned_parent(&ledger, &coordinator, &selected, selector);
+    let request = ConfirmationPurpose::Incoming(1);
+    let (Begin::Factory(ticket), _) = ledger
+        .begin_child(selected.clone(), &parent, request)
+        .unwrap()
+    else {
+        panic!("original child")
+    };
+    ticket.mark_handoff().unwrap();
+    let id = ticket.id();
+    drop(ticket);
+    let child = ledger
+        .lookup_child(&selected, &parent, request, Some(id))
+        .unwrap();
+    assert!(!child.has_pending_publication().unwrap());
+    let before = selected.resources().counts();
+    for _ in 0..8 {
+        assert!(matches!(
+            ledger.resume_known_child(selected.clone(), &parent, &child, request),
+            Err(VoiceError::Capacity)
+        ));
+        assert_eq!(selected.resources().counts(), before);
+        assert!(child.status().unwrap().action.is_none());
+        assert!(!child.has_pending_publication().unwrap());
+    }
+    let other = Arc::new(Ledger::default());
+    assert!(matches!(
+        other.resume_known_child(selected.clone(), &parent, &child, request),
+        Err(VoiceError::Unauthorized)
+    ));
+    child.close_pending().unwrap();
+    assert!(
+        matches!(ledger.resume_known_child(selected.clone(), &parent, &child, request).unwrap(), Begin::Existing(actual) if actual == id)
+    );
+    parent.retire_plan().unwrap();
+}
+
 fn returned_parent(
     ledger: &Arc<Ledger>,
     coordinator: &Coordinator,

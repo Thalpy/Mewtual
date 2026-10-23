@@ -1,5 +1,37 @@
 # Mewtual; Handover
 
+## Authenticated child Begin draft (23 October; native validation pending)
+
+`target/communication-confirmation-begin-worktree` starts at frozen Input/result draft
+`b572281d`. It adds an inactive v2 Begin adapter for original-parent Start/Respond and incoming
+adoption. Begin(false) remains read-only history. Begin(true) pays one8KiB ordinary native task
+before work, retaining the actual Incoming/unique physical hold/weak context/original Route
+through snapshot, factory and completed output. It takes one separately prepaid4KiB Actor
+snapshot per incoming request, examines at most four actual actions, checks native Decrypt,
+exact role and original opaque parent plan, then destroys the snapshot before factory admission.
+The handler never polls for fifteen seconds; only the TCP test harness retries as ingress runs.
+No UI commit spans the read-only snapshot. Existing factory fences recheck actual UI generation,
+server incarnation, selection and Route after observation, before native child adoption.
+
+Known publications resume by exact indexed parent AND child allocations and full purpose under
+one Index. Missing/unpublished Pending cannot reserve or rearm a role-only factory, and a known
+publication retry does not depend on the rotating snapshot rediscovering settled input. Root
+attachment refusal remains exact and local; framed Pending Return closes it without inventing
+Root absence, settlement or drainage. The TCP harness now uses actual Begin frames throughout,
+with a separate real known-Incoming/permanent-input-loss scenario. Unit tests cover unpublished
+known retry and actual detached Begin caller loss while the Actor snapshot is parked/stopped,
+including physical/payment drainage and no strong mounted-store retention during the wait.
+
+Static review requested full synchronous reply serialization accounting after the task payment
+drops; the Control inventory now includes that graph. The8KiB task,4KiB snapshot and existing4KiB
+factory are separate paid lifetimes, with snapshot destruction before factory admission. All
+limits are unchanged. Native compilation, measured bounds and focused/full tests remain pending.
+The fresh Root suite and the frozen Input/result native check are serialized ahead of this
+draft; no runtime source is edited in a checkout with an active Cargo run. Frontend inputs are
+unchanged from the2,597-test/Svelte/build-passing Input draft. Production stays Status/history
+only. Browser key/Phase transfer, SDP/ICE/RTC, the live adapter, supported multi-peer composition,
+media relay and combined/physical acceptance remain open; only one desktop is available.
+
 ## Child Input/result continuation (23 October; validation in progress)
 
 New work in `target/communication-confirmation-input-worktree` starts at history integration

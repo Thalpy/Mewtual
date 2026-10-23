@@ -233,20 +233,25 @@ async fn native_v2_discovers_blocked_endpoints_through_unjoined_tcp_bridge_then_
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn native_v2_confirmation_child_uses_the_returned_actual_parent_over_blocked_tcp_discovery() {
-    confirmation_over_blocked_tcp(false, false).await;
+    confirmation_over_blocked_tcp(false, false, false).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn native_v2_confirmation_framed_result_uses_actual_actor_body_and_original_phase() {
-    confirmation_over_blocked_tcp(true, false).await;
+    confirmation_over_blocked_tcp(true, false, false).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn native_v2_confirmation_rejected_result_remains_original_history_after_return() {
-    confirmation_over_blocked_tcp(true, true).await;
+    confirmation_over_blocked_tcp(true, true, false).await;
 }
 
-async fn confirmation_over_blocked_tcp(framed: bool, reject: bool) {
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn native_v2_confirmation_known_incoming_retry_survives_permanent_input_loss() {
+    confirmation_over_blocked_tcp(true, false, true).await;
+}
+
+async fn confirmation_over_blocked_tcp(framed: bool, reject: bool, known_incoming: bool) {
     let mut scenario = Scenario::new(false);
     scenario.admit().await;
     scenario.close(&[3, 4, 5]).await;
@@ -277,7 +282,17 @@ async fn confirmation_over_blocked_tcp(framed: bool, reject: bool) {
     if scenario.clients[1].identity.as_ref().unwrap().1
         < scenario.clients[2].identity.as_ref().unwrap().1
     {
-        if reject {
+        if known_incoming {
+            crate::voice_handoff::integration::confirmation_known_incoming_retry(
+                &scenario.online(1).state,
+                &a,
+                &ap,
+                &scenario.online(2).state,
+                &c,
+                &cp,
+            )
+            .await;
+        } else if reject {
             crate::voice_handoff::integration::confirmation_rejected_result(
                 &scenario.online(1).state,
                 &a,
@@ -309,7 +324,17 @@ async fn confirmation_over_blocked_tcp(framed: bool, reject: bool) {
             .await;
         }
     } else {
-        if reject {
+        if known_incoming {
+            crate::voice_handoff::integration::confirmation_known_incoming_retry(
+                &scenario.online(2).state,
+                &c,
+                &cp,
+                &scenario.online(1).state,
+                &a,
+                &ap,
+            )
+            .await;
+        } else if reject {
             crate::voice_handoff::integration::confirmation_rejected_result(
                 &scenario.online(2).state,
                 &c,

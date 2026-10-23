@@ -7,6 +7,7 @@ pub(crate) mod bootstrap;
 mod channel;
 pub(crate) mod commands;
 mod confirmation_admission;
+mod confirmation_begin;
 mod confirmation_history;
 mod confirmation_input;
 mod confirmation_result;

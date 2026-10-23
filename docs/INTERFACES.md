@@ -1,5 +1,15 @@
 # Mewtual; Interfaces & Hooks Schema
 
+## Child Begin adoption (23 October; inactive draft)
+
+Existing v2 Begin8(true) now has a separate inactive native executor. Start/Respond resolve
+the original indexed parent and use the existing counted factory. Incoming(role) takes one
+bounded native snapshot and adopts only its actual original Decrypt action matching that role
+and opaque plan. Missing input returns a retryable Capacity refusal without reserving a child
+from the role alone. Exact known-publication attachment retries use the SAME indexed child,
+without snapshot dependency or another Actor factory. Begin(false) remains read-only history.
+The production listener does not dispatch this executor. HANDOVER records pending validation.
+
 ## Confirmation child Input/result adapters (23 October; inactive draft)
 
 Input tag7 has a430B fixed prefix with child RowId, original action identity, ORIGINAL parent

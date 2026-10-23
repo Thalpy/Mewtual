@@ -1,5 +1,18 @@
 # Threat model; client integrity & enforcement boundaries
 
+## Incoming Begin ownership (23 October; inactive draft)
+
+A renderer role never creates a token or native action. The Begin worker retains the original
+physical request through one paid native snapshot and actual output collection, so caller loss
+cannot repeatedly free the same channel while old snapshots remain queued. Snapshot ownership
+is affine and independent of the additional paid task; its real Vec/permit is destroyed before
+factory admission. The worker retains weak native context, not mounted storage. Read-only
+snapshot waits hold no UI commit; subsequent actual factory admission repeats current UI,
+selection/server/Route fences. Known publication retries compare actual indexed parent/child
+allocations and full purpose under one Index. They neither create an unknown position nor
+require settled input to reappear in the rotating snapshot. No new effect opcode is admitted
+in production. Compilation, composition bounds and new cancellation/TCP tests remain pending.
+
 ## Child result publication custody (23 October; inactive draft)
 
 Child Input/engine/result requests resolve the same actual Session, indexed original parent,

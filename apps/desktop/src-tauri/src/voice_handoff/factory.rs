@@ -25,10 +25,11 @@ const TASK_AND_REPLY_BYTES: usize = 1024;
 // group/process limit is introduced; framed input/result copies still debit this exact Phase.
 const DERIVATION_HANDOFF_BYTES: usize = 16 * 1024;
 mod confirmation;
-// The inactive factories are compiled in production, but only the integration fixtures
-// call them before the authenticated child dispatcher is connected.
-#[cfg(test)]
-pub(super) use confirmation::{ensure_confirmation_row, ensure_incoming_row};
+// The inactive authenticated Begin adapter and integration fixtures call these factories.
+// The production listener still rejects effect admission before child dispatch.
+pub(super) use confirmation::{
+    ensure_confirmation_row, ensure_incoming_row, ensure_known_incoming_row,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Refused {

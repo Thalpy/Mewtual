@@ -57,17 +57,43 @@ async fn outgoing(
     parent: &ledger::ResolvedRow,
     request: ledger::ConfirmationPurpose,
 ) -> ledger::ResolvedRow {
-    let route = route(state, selected).await;
-    let id = factory::ensure_confirmation_row(
+    let bytes = begin_frame(state, selected, parent, request).await;
+    assert_eq!(bytes.len(), replies::STATUS_BYTES);
+    let id = ledger::RowId::from_logical(bytes[2..18].try_into().unwrap()).unwrap();
+    resolve(state, selected, parent, request, id)
+}
+
+/// Actual v2 Begin(true) request/Control reply, independently authenticated by the browser
+/// codec fixture. These allocation-heavy fixture Vecs do not claim application-copy bounds.
+async fn begin_frame(
+    state: &AppState,
+    selected: &Arc<SelectedHandoffOwner>,
+    parent: &ledger::ResolvedRow,
+    purpose: ledger::ConfirmationPurpose,
+) -> Vec<u8> {
+    let bootstrap::Status::Ready(public) = bootstrap::ensure(
+        state,
+        selected.id(),
+        selected.executor(),
+        &mut catcoms_rt::OsCryptoRng,
+    )
+    .await
+    .unwrap() else {
+        panic!("original channel")
+    };
+    let route = state.voice_channels.route(public.public().slot).unwrap();
+    let selector = parent.confirmation_selector().unwrap();
+    let mut body = confirmation_prefix(parent.id(), purpose, selector);
+    body.push(1); // exact original factory/attachment retry, never a replacement purpose
+    let header = (route.session().fixture_counts().1 + 1, 8, 0, [0; 16]);
+    let reply = confirmation_begin::begin(
         &context::Context::new(state),
         &route,
-        parent,
-        request,
-        factory::tests::physical(&route),
+        opened_frame(&public, &route, header, &body, None),
     )
     .await
     .unwrap();
-    resolve(state, selected, parent, request, id)
+    opened_reply(&public, header, &body, &reply)
 }
 
 /// Two real native registrations compete for the SAME actual Root Hello. Exercise both
@@ -194,6 +220,11 @@ pub(crate) async fn confirmation_alias_claims(
             Err(VoiceError::Unauthorized)
         ));
         drop(_commit); // framed cleanup/bootstrap uses the same original UI boundary
+        assert_eq!(
+            begin_frame(state, selected, parent, valid_request).await,
+            replies::refused(factory::Refused::Protocol(VoiceError::Unauthorized)),
+            "known publication retry never calls another factory"
+        );
         cleanup_child(
             state,
             selected,
@@ -220,59 +251,28 @@ async fn incoming(
     state: &AppState,
     selected: &Arc<SelectedHandoffOwner>,
     parent: &ledger::ResolvedRow,
+    role: u8,
 ) -> ledger::ResolvedRow {
-    // Pay the actual Root snapshot capacity BEFORE its mailbox call. Original action Arcs
-    // and any late output retain their own independent Root record/input payments.
-    let mut permit = catcoms_sync::voice_v2::crypto_actions::CryptoActionSnapshotPermit::new(
-        &selected.resources(),
-        selected.binding().scope,
-    )
-    .unwrap();
-    let actor = actor(state, selected).await;
-    let grant = selected.grant().unwrap();
     let start = SystemClock.monotonic_ms();
-    let action = loop {
-        let snapshot = actor
-            .voice_confirmation_actions(grant.clone(), permit)
-            .await
-            .unwrap();
-        let found = snapshot
-            .result()
-            .unwrap()
-            .iter()
-            .find(|action| {
-                action.operation() == CryptoOperation::DecryptConfirmation
-                    && parent.contains_plan_action(action).unwrap()
-            })
-            .cloned();
-        permit = snapshot.return_permit();
-        if let Some(action) = found {
-            break action;
+    let request = ledger::ConfirmationPurpose::Incoming(role);
+    let id = loop {
+        // The HANDLER does one bounded observation. Only this test harness retries while
+        // real network ingress is progressing; no fifteen-second loop enters the listener.
+        let bytes = begin_frame(state, selected, parent, request).await;
+        if bytes.len() == replies::STATUS_BYTES {
+            break ledger::RowId::from_logical(bytes[2..18].try_into().unwrap()).unwrap();
         }
+        assert_eq!(
+            bytes,
+            replies::refused(factory::Refused::Protocol(VoiceError::Capacity))
+        );
         assert!(
             SystemClock.monotonic_ms().saturating_sub(start) < 15_000,
             "authenticated native confirmation did not arrive through the permitted TCP bridge"
         );
         SystemClock.sleep(Duration::from_millis(25)).await;
     };
-    let role = action.protected_row().unwrap();
-    let route = route(state, selected).await;
-    let id = factory::ensure_incoming_row(
-        &context::Context::new(state),
-        &route,
-        parent,
-        action,
-        factory::tests::physical(&route),
-    )
-    .await
-    .unwrap();
-    resolve(
-        state,
-        selected,
-        parent,
-        ledger::ConfirmationPurpose::Incoming(role),
-        id,
-    )
+    resolve(state, selected, parent, request, id)
 }
 
 async fn crypto_and_return(
@@ -954,7 +954,7 @@ pub(crate) async fn confirmation_rejected_result(
         .await,
         CryptoOutcome::Sealed { .. }
     ));
-    let opened = incoming(high_state, high, high_parent).await;
+    let opened = incoming(high_state, high, high_parent, 1).await;
     assert!(matches!(
         crypto_and_return(
             high_state,
@@ -968,6 +968,110 @@ pub(crate) async fn confirmation_rejected_result(
         .await,
         CryptoOutcome::Rejected(_)
     ));
+}
+
+/// Native known-Incoming retry must not depend on the rotating pending snapshot after a
+/// lost attachment/permanent input loss. This deliberately stops before confirmation, and
+/// verifies exact local Pending closure rather than inventing a successful decrypt receipt.
+pub(crate) async fn confirmation_known_incoming_retry(
+    low_state: &AppState,
+    low: &Arc<SelectedHandoffOwner>,
+    low_parent: &ledger::ResolvedRow,
+    high_state: &AppState,
+    high: &Arc<SelectedHandoffOwner>,
+    high_parent: &ledger::ResolvedRow,
+) {
+    let hello = outgoing(
+        low_state,
+        low,
+        low_parent,
+        ledger::ConfirmationPurpose::Start(None),
+    )
+    .await;
+    assert!(matches!(
+        crypto_and_return(
+            low_state,
+            low,
+            &hello,
+            low_parent,
+            ledger::ConfirmationPurpose::Start(None),
+            true,
+            false
+        )
+        .await,
+        CryptoOutcome::Sealed { .. }
+    ));
+    let mut permit = catcoms_sync::voice_v2::crypto_actions::CryptoActionSnapshotPermit::new(
+        &high.resources(),
+        high.binding().scope,
+    )
+    .unwrap();
+    let actor = actor(high_state, high).await;
+    let start = SystemClock.monotonic_ms();
+    let action = loop {
+        // Test harness only: this needs the ACTUAL original Action before simulating lost
+        // input. The production Begin handler performs only one snapshot per invocation.
+        let snapshot = actor
+            .voice_confirmation_actions(high.grant().unwrap(), permit)
+            .await
+            .unwrap();
+        let action = snapshot
+            .result()
+            .unwrap()
+            .iter()
+            .find(|action| {
+                action.operation() == CryptoOperation::DecryptConfirmation
+                    && action.protected_row().unwrap() == 1
+                    && high_parent.contains_plan_action(action).unwrap()
+            })
+            .cloned();
+        permit = snapshot.return_permit();
+        if let Some(action) = action {
+            break action;
+        }
+        assert!(SystemClock.monotonic_ms().saturating_sub(start) < 15_000);
+        SystemClock.sleep(Duration::from_millis(25)).await;
+    };
+    drop(permit);
+    action.settle_engine(); // permanent loss before any native Phase/Input exposure
+    let route = route(high_state, high).await;
+    assert!(matches!(
+        factory::ensure_incoming_row(
+            &context::Context::new(high_state),
+            &route,
+            high_parent,
+            action,
+            factory::tests::physical(&route)
+        )
+        .await,
+        Err(factory::Refused::Protocol(VoiceError::Unauthorized))
+    ));
+    let purpose = ledger::ConfirmationPurpose::Incoming(1);
+    let child = high_state
+        .voice_handoff
+        .lookup_child(high, high_parent, purpose, None)
+        .unwrap();
+    assert!(child.has_pending_publication().unwrap());
+    let status = child.status().unwrap();
+    assert!(status.action.is_none());
+    for _ in 0..2 {
+        assert_eq!(
+            begin_frame(high_state, high, high_parent, purpose).await,
+            replies::refused(factory::Refused::Protocol(VoiceError::Unauthorized)),
+            "known action attachment refusal, not missing snapshot Capacity"
+        );
+        assert!(child.status().unwrap() == status);
+    }
+    cleanup_child(
+        high_state,
+        high,
+        high_parent,
+        purpose,
+        &child,
+        high_parent.confirmation_selector().unwrap(),
+        Cleanup::PendingReturn,
+    )
+    .await;
 }
 
 async fn confirmation_round_trip_inner(
@@ -999,7 +1103,7 @@ async fn confirmation_round_trip_inner(
         .await,
         CryptoOutcome::Sealed { .. }
     ));
-    let opened_hello = incoming(high_state, high, high_parent).await;
+    let opened_hello = incoming(high_state, high, high_parent, 1).await;
     assert_eq!(
         crypto_and_return(
             high_state,
@@ -1043,7 +1147,7 @@ async fn confirmation_round_trip_inner(
         .await,
         CryptoOutcome::Sealed { .. }
     ));
-    let opened_proof = incoming(low_state, low, low_parent).await;
+    let opened_proof = incoming(low_state, low, low_parent, 2).await;
     assert_eq!(
         crypto_and_return(
             low_state,
@@ -1077,7 +1181,7 @@ async fn confirmation_round_trip_inner(
         .await,
         CryptoOutcome::Sealed { .. }
     ));
-    let opened_finish = incoming(high_state, high, high_parent).await;
+    let opened_finish = incoming(high_state, high, high_parent, 3).await;
     assert_eq!(
         crypto_and_return(
             high_state,
