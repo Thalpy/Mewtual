@@ -1,13 +1,22 @@
 # Mewtual; Handover
 
-## Plan-final continuation (23 October; focused checks pass, full native pending)
+## Validated confirmation and Plan-final checkpoint (23 October)
 
-New work is isolated in `target/communication-native-continuation-worktree`, based on the
-frozen confirmation-child checkpoint `534b641e`, with reviewed lint follow-up and published
-Source history integrated. Root3,310/native713/frontend2,531 passed on the earlier checkpoint;
-the newer full native result is still pending here. Keep those input scopes explicit.
+Combined runtime `f1f2e48c` in `target/communication-native-continuation-worktree` passes
+complete native724 (719 library plus5 ACL), frontend2,538, Svelte zero errors/warnings and
+production build. All241 focused handoff tests pass, including the11 Plan-final regressions.
+Root3,310 (24 existing ignored) and strict Root Clippy passed on the identical Root source at
+`534b641e`; no Root runtime, bins, Cargo manifest/lock or scripts changed afterward. The native
+full result also covers its reviewed lint follow-up. Current native check and strict all-target/
+all-feature Clippy, Root/native formatting, ambient-dependency gate and unchanged-dependency
+cargo-deny pass. No failures remain. Logs are `target/plan-final-*.log`; Root/deny logs are in
+`target/communication-native-children-worktree/target/child-*.log`. Publication adds documentation
+only. Heavy Cargo ran serially. No setup/runtime/process spawning changed, and this inactive
+cleanup path is outside the rendered send/friend flows, so earlier startup/flow gates were not
+repeated. The build retains the existing large-bundle warning; deny retains its existing warning.
+Read-only adversarial reviews found no remaining blocker/high/medium after the recorded fixes.
 
-The draft adds a separate original-Session Plan-final intent after ordinary action Returns.
+The checkpoint adds a separate original-Session Plan-final intent after ordinary action Returns.
 The actual UI commit orders it against both normal channel closures. Cleanup routing accepts
 the exact original canonical registry/session after End, without weakening first-effect checks.
 Admission retains the actual paid Session until the fixed paid Row owns its original identity.
@@ -34,8 +43,8 @@ The complete measured codec graph is12,252B within12,288B Control; the Plan adap
 3,520B. Keep the actual compiler-future/identity/output inventory current: headroom is small.
 The initial native test build failed only on private fixture references and unpolled-future
 temporary lifetimes; explicit fixture exports and earlier temporary destruction corrected them.
-No failing test was skipped or assertion weakened. Full native and current strict/static checks
-remain pending. Root runtime sources are unchanged from the3,310-test frozen child checkpoint.
+No failing test was skipped or assertion weakened. The complete combined checks above include
+the corrected harness and reviewed lint follow-up.
 Complete child IPC, actual browser key/phase transfer, SDP/ICE/RTC,
 multi-peer composition, member media relay and physical acceptance remain unfinished.
 
@@ -50,7 +59,7 @@ Copy/borrow style and the intentionally inline original-preparation error. Revie
 commit `1aab8e81` makes the reexport test-only, keeps implementations compiled, simplifies the
 same guard, removes redundant Copy/borrow syntax and documents a narrow large-error allowance
 which avoids a fresh Box under pressure. Native strict all-target/all-feature Clippy now passes.
-The native suite is being repeated after that follow-up before publication. No runtime limit,
+The complete combined724-test native run above covers that follow-up. No runtime limit,
 security condition, ownership, retry or refund behavior changed. Logs are `target/child-*.log`.
 Heavy Cargo remains serial; no setup/process/frontend runtime changed, so earlier startup and
 flow gates were not repeated for this inactive increment.
@@ -84,8 +93,8 @@ Windows native linking needed the documented process-only `_LINK_=/DEBUG:NONE` w
 LNK1318 PDB LIMIT. A disk-full retry removed25 exact-path-checked old generated PDB files,
 24.34GiB, recorded in `target/native-pdb-cleanup.json`; no source/user data was removed.
 
-The next unvalidated native/browser Plan-final draft is isolated in
-`target/communication-native-continuation-worktree`; its newer results are separate. Production
+The combined Plan-final implementation and validation are recorded above. The next isolated
+confirmation-IPC draft is in `target/communication-confirmation-ipc-worktree` and is excluded. Production
 remains disabled. Child IPC Input/admission/results, browser key/Phase transfer, full original-
 Session Plan-final integration, supported multi-peer histories, SDP/ICE/RTC, restored-bridge
 negotiation, member media relay and physical acceptance remain open. Only one desktop is

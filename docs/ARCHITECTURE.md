@@ -1,6 +1,6 @@
 # Mewtual; Architecture
 
-## Separate Plan-final continuation draft (23 October; validation pending)
+## Separate Plan-final continuation (23 October; validated inactive integration)
 
 After an ordinary action Return the parent retains its original Root plan, independently of
 the discarded variable Phase. A new Plan-final intent records the original native Session
@@ -13,7 +13,7 @@ not infer success from a missing control, dead lease, returned loan or renderer 
 and exact ACK remain separate, and forced GC still needs the original physical witness, late
 Root readiness and actual last metadata-owner collection. Existing Phase Return/Retire semantics
 remain unchanged. The new inactive mode2 Control adapter and explicit browser reply decoder are
-not production enablement; native tests are pending. Full child/browser/SDP/ICE/RTC composition
+not production enablement;241 focused and724 complete native tests pass. Full child/browser/SDP/ICE/RTC composition
 and media remain open; see HANDOVER for the frozen checkpoint and current draft evidence.
 
 ## Integrated V2 scheduling boundary (23 October)

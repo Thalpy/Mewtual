@@ -1,6 +1,6 @@
 # Mewtual; Interfaces & Hooks Schema
 
-## Original Plan-final adapter draft (23 October; native validation pending)
+## Original Plan-final adapter (23 October; validated inactive integration)
 
 The inactive authenticated grammar extends existing ClosePhase opcode6 with distinct mode2
 `ClosePlan`. Mode0 Return and mode1 Phase Retire retain their exact bytes and immutable meaning;
@@ -12,8 +12,8 @@ needed. It remains valid cleanup after End/lock, but cannot install intent after
 Plan final receipts use kind2 in the existing100B layout, with a distinct proof domain. Generic
 FinalAck7 accepts only the stored issuance, original Session and exact proof. Browser decoding
 must explicitly expect `retire-plan`; default Phase decoding still rejects kind2. Shared Rust/TS
-vectors cover Pending/Issued/ACK. All241 focused native handoff tests pass; HANDOVER tracks complete validation, which is
-still pending. Production loopback admission still permits only Status9/existing-history Begin8(false).
+vectors cover Pending/Issued/ACK. All241 focused native handoff and724 complete native tests pass; HANDOVER records the
+complete validation scope. Production loopback admission still permits only Status9/existing-history Begin8(false).
 Child framing/results, browser key/Phase transfer and live RTC integration remain incomplete.
 
 Retained browser broker14 uses separate Plan cleanup only after authenticated Phase-Unauthorized
@@ -22,7 +22,7 @@ is selected it cannot revert; issuance and ACK decode with that same mode. Origi
 remain through final ACK and native setup/channel preflight. Old HMR pools refuse reload rather
 than create a second allocator. Framed browser mocks pass; this is still inactive native dispatch.
 
-## Native confirmation child draft (23 October; unvalidated)
+## Native confirmation child checkpoint (23 October; inactive integration)
 
 The inactive native ledger adds original-parent `Start(predecessor)`, `Respond(trigger-row)`
 and actual incoming-action registration. These are trusted Rust factories, not new IPC opcodes.
@@ -37,7 +37,7 @@ Roles1/4/7 are Hello,2/5/8 Proof and3/6/9 Finish. Direction follows the original
 reservation id, including an unsealed/failed candidate. Response uses the actual same-parent
 accepted decrypt Action, retained through local Return/compaction; high-side Finish has none.
 A child can only Return. Original-parent Plan-final intent after earlier Returns is implemented
-in the newer inactive adapter draft above; its browser integration and native validation remain open.
+in the newer inactive adapter draft above; its framed browser cleanup is implemented; complete child/browser key transfer remains open.
 
 `Root::voice_confirmation_actions` and the typed ServerActor method return up to four original
 pending Arcs fairly without dequeueing or issuing authority. Trusted native callers transfer one
@@ -48,8 +48,8 @@ not copied. Actual registration, current native selection, Root engine/result ch
 RTC admission remain independent. `ProtectedCryptoPlan::handshake` exposes fixed historical
 binding only. Neither method reconstructs an action, token or key from renderer metadata.
 
-No new production listener/desktop activation path is enabled. Focused/layout and full combined
-checks for this draft remain pending; see HANDOVER for its separate checkout and evidence scope.
+No new production listener/desktop activation path is enabled. Focused/layout and complete combined
+checks pass; see HANDOVER for its separate checkout and evidence scope.
 
 ## Native handoff continuation work (23 October)
 

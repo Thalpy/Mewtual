@@ -1,5 +1,39 @@
 # Chat, files and voice implementation evidence
 
+## Native confirmation and original Plan-final checkpoint (23 October)
+
+Combined runtime `f1f2e48c`, with documentation-only publication afterward, passes complete
+native724 (719 library plus5 ACL) and frontend2,538, Svelte zero errors/warnings and production
+build. All241 focused native handoff tests pass. Root3,310 (24 existing ignored) and strict Root
+Clippy passed on the identical Root source at `534b641e`; no Root/bins/manifests/locks/scripts
+changed afterward. Current native check, strict all-target/all-feature Clippy, Root/native
+formatting, ambient-dependency gate and unchanged-dependency cargo-deny pass. HANDOVER records
+the frozen checkouts, logs, initial fixture/lint failures and corrections. No test was skipped,
+limit enlarged or refusal/retry assertion removed to pass. No setup/runtime/process placement
+changed; earlier startup/flow gates were not repeated for this inactive cleanup path.
+
+Native children retain their actual original parent and already-published Root action through
+local refusal or caller loss. Atomic normalized role claims and actual retained accepted Opened
+triggers allow FIRST Respond after Return. A paid affine Root/Actor snapshot retains original
+actions through both caller and command/output collection. Actual TCP Hello/Proof/Finish crosses
+unjoined B with A-C forbidden; source/native/Root transitions and parent retirement are checked.
+The provider uses fixed test AES keys. This is not P256/HKDF/browser IPC, SDP/ICE negotiation,
+restored-D negotiation, audible media or physical-network acceptance.
+
+Separate Plan-final intent after ordinary Returns binds the original canonical Session and
+actual UI commit. Its original retirement ticket, exact issuance/ACK, forced-GC provenance,
+late owners, both close orderings, full pool pressure and authenticated wrong-binding requests
+are covered. Browser broker14 latches mode2 only after authenticated definite Phase refusal
+plus exact settled/localDrained metadata. Lost/Pending Phase stays mode1; lost/Pending/wrong-kind
+Plan replies retain mode2, original keys and counters. Real WebCrypto framed-mock tests cover
+those retries; the production listener still serves only Status/history.
+
+**Production V2 remains disabled.** The separate confirmation-IPC grammar draft is excluded.
+Complete child Input/admission/results, browser key/Phase transfer, SDP/ICE/RTC and the live
+VoiceV2Native adapter, supported multi-peer composition, member media relay and combined/
+physical acceptance remain open. Only one physical desktop is available; external download
+resume remains another agent's work. This checkpoint cannot close the communication plan.
+
 ## Validated native Derive checkpoint (23 October)
 
 Runtime commit `85621697` plus native test correction `9aa5d7bd` passed the complete local
