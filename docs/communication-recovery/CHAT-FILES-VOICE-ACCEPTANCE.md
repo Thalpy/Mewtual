@@ -1,5 +1,43 @@
 # Chat, files and voice implementation evidence
 
+## Native/Node WebCrypto interoperability (23 October; full gates running)
+
+The isolated draft on bfe8439e now passes the actual single-pair TCP scenario with A-C
+forbidden and unjoined B forwarding signed envelopes. Two Node processes import the actual
+browser broker with non-extractable selected keys; actual authenticated native HTTP/BYOB
+carries Derive and all six Hello/Proof/Finish operations. Every step requires original native
+receipts, ACK/settlement/Return and eventual original End/final/channel collection. Both
+endpoints must recover their same intake from a deliberately forced real Input Capacity
+refusal before a genuine native Derived receipt. An earlier single-case run passes 9.47s;
+all seven current-source real TCP scenarios pass together in 63.58s.
+
+Focused native passes 284 tests (22.17s); browser channel focus passes 141 (2.32s). Complete
+service measures 24,664B/32KiB and physical Control 12,220B/12KiB without limit changes.
+Strict standalone Node TypeScript checking passes. Read-only adversarial re-review reports
+no remaining blocker/high/medium. The earlier TCP attempt's unexplained uncertainty remains
+unconfirmed; a diagnostic-only rerun passed 11.42s before the new forced-refusal case.
+HANDOVER preserves the earlier failed compile and constructor-test evidence too.
+
+Complete frontend passes 2,638 tests (68.85s), Svelte zero errors/warnings, production build
+(1m13s) and all ten isolated Edge flows. Complete native first passed 765/failed one (723.44s)
+before ACL tests: a known-parent native producer retry unwrapped Protocol(Capacity). Its
+precise pressure source is unconfirmed. A separate reviewed fixture gap ignored early
+preflight Capacity while waiting for UI arrival. Both corrections preserve original purpose,
+body/action/Phase/deadline, require actual forced refusal and subsequent native success,
+and retain the detached publication proof. Corrected handoff focus passes 285 (22.82s),
+including bounded-observer timeout with actual payment/position retention and shutdown
+drainage; strict native Clippy passes (56.42s). The next TCP run passed six/failed one
+(61.91s) on a torn Arc-count UI-arrival inference. An exact cfg(test) authenticated-request
+sequence marker now observes actual post-preflight progress; UI/Actor admission and detached
+publication remain separate mandatory proofs. Current focus passes 285 (22.59s), all seven
+TCP cases pass (63.58s), strict native Clippy passes (55.48s), and actual physical Control is
+12,228B/12KiB including the test-only observer. Complete service stays 24,664B/32KiB. Full
+native/check/build/startup remain pending. Read-only re-review reports no remaining blocker/high/medium.
+The Root inputs remain identical to the completed 3,314-pass run (24 existing ignored).
+Shipping dispatch is still read-only. Independent pair
+readiness, packaged WebView/CSP/ACL, production work delivery, native SDP/ICE/RTC, supported
+multi-peer composition, media relay and combined/physical acceptance remain open.
+
 ## Native-origin producer (23 October; runtime 7edf9192)
 
 The private paid native producer passes 282 focused handoff tests (21.78s), including nine

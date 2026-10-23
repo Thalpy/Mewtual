@@ -5,6 +5,101 @@ use crate::voice_authority::SelectedHandoffOwner;
 use catcoms_sync::voice_v2::presence::PairSelector;
 use catcoms_sync::voice_v2::{Body, CallGrant};
 
+/// Two actual browser brokers, not fixed AES providers or framed endpoint mocks. This
+/// proves a single-pair Node/native cycle; it does not establish WebView policy or live RTC.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn native_webcrypto_confirmation_uses_real_http_and_blocked_tcp_member_bridge() {
+    use crate::voice_handoff::integration::webcrypto::{catch_fixture, Endpoint, Failure};
+    async fn endpoint(scenario: &Scenario, index: usize) -> Result<Endpoint, Failure> {
+        let state = scenario.online(index).state.clone();
+        let owner = catch_fixture(async {
+            let controller = prepare_voice_controller_inner(&state).await.unwrap();
+            activate_voice_owner_inner(&state, controller.clone())
+                .await
+                .unwrap();
+            let owner =
+                prepare_voice_owner_inner(&state, controller, 1, channel_id("general").to_string())
+                    .await
+                    .unwrap();
+            activate_voice_owner_inner(&state, owner.clone())
+                .await
+                .unwrap();
+            owner
+        })
+        .await?;
+        match catch_fixture(Endpoint::prepare(state, owner)).await {
+            Ok(result) => result,
+            Err(error) => Err(error),
+        }
+    }
+    let mut scenario = Scenario::new(false);
+    scenario.admit().await;
+    scenario.close(&[3, 4, 5]).await;
+    scenario.rules.drop_gossip.store(true, Ordering::Release);
+    for index in [0, 1, 2] {
+        enable(&scenario, index).await;
+    }
+    // B owns no controller, endpoint key, call owner or crypto broker. Actual TCP policy
+    // forbids A-C; only the original member helper path can deliver the signed envelopes.
+    let endpoints = tokio::join!(endpoint(&scenario, 1), endpoint(&scenario, 2));
+    let (mut a, mut c) = match endpoints {
+        (Ok(a), Ok(c)) => (a, c),
+        (Ok(mut a), Err(error)) => {
+            a.collect().await;
+            std::panic::resume_unwind(error)
+        }
+        (Err(error), Ok(mut c)) => {
+            c.collect().await;
+            std::panic::resume_unwind(error)
+        }
+        (Err(error), Err(_)) => std::panic::resume_unwind(error),
+    };
+    let cycle = catch_fixture(async {
+        let a_selected = a.selected();
+        let c_selected = c.selected();
+        let ag = a_selected.grant().unwrap();
+        let cg = c_selected.grant().unwrap();
+        let discovered = both_fresh(&scenario, &a_selected, &c_selected, &ag, &cg, None, 0).await;
+        let (ap, cp) = tokio::join!(a.derive(discovered[0].1), c.derive(discovered[1].1));
+        let (low, low_parent, high, high_parent) =
+            if scenario.clients[1].identity.as_ref().unwrap().1
+                < scenario.clients[2].identity.as_ref().unwrap().1
+            {
+                (&mut a, &ap, &mut c, &cp)
+            } else {
+                (&mut c, &cp, &mut a, &ap)
+            };
+        low.start(low_parent).await;
+        let hello = high.incoming(high_parent, 1).await;
+        high.respond(high_parent, hello).await;
+        let proof = low.incoming(low_parent, 2).await;
+        low.respond(low_parent, proof).await;
+        high.incoming(high_parent, 3).await;
+        scenario.rules.assert_graph();
+        // Pair establishment/current RTC authority still needs its independent native query.
+        // Every step above separately requires actual original Sealed/Opened native receipts.
+        drop((ap, cp, ag, cg));
+    })
+    .await;
+    if let Err(error) = cycle {
+        let (a, c) = tokio::join!(catch_fixture(a.collect()), catch_fixture(c.collect()));
+        assert!(
+            a.is_ok() && c.is_ok(),
+            "both failed-cycle endpoints must finish resource collection"
+        );
+        std::panic::resume_unwind(error);
+    }
+    // Both collection attempts finish even if the other endpoint fails an assertion.
+    let (a, c) = tokio::join!(catch_fixture(a.close()), catch_fixture(c.close()));
+    for outcome in [a, c] {
+        match outcome {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) | Err(error) => std::panic::resume_unwind(error),
+        }
+    }
+    scenario.close(&[0, 1, 2]).await;
+}
+
 async fn enable(scenario: &Scenario, index: usize) {
     let running = scenario.online(index);
     let generation = running.state.ui_session_generation.load(Ordering::Acquire);

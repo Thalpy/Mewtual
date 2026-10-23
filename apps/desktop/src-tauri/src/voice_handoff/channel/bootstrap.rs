@@ -138,6 +138,10 @@ impl Prepared {
             _bootstrap: self.bootstrap,
             _browser_control: self.browser_control,
             control_lane: self.control_lane,
+            #[cfg(test)]
+            input_pressure: std::sync::atomic::AtomicBool::new(false),
+            #[cfg(test)]
+            result_preflight_sequence: std::sync::atomic::AtomicU64::new(0),
         });
         // The browser has not performed ECDH/HKDF/sealing merely because native arithmetic
         // finished. Install this same credit before exposing public setup; do not re-charge.

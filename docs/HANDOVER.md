@@ -1,5 +1,99 @@
 # Mewtual; Handover
 
+## Native/Node WebCrypto interoperability (23 October; full native gate pending)
+
+`target/communication-native-webcrypto-worktree` builds on published `bfe8439e`; its current
+continuation is excluded from that earlier producer's validation below. A private cfg(test)
+mode connects the actual paid HTTP listener to the existing exact-version native adapters.
+Header authentication precedes original Phase lookup and Data allocation. Shipping dispatch
+remains read-only. Complete service and Control layout guards retain their capacities;
+their combined effect-future/synchronous-admission measurements are recorded below.
+
+Two separate Node processes import the actual broker and use non-extractable selected keys,
+real HTTP/fetch/BYOB and the original native producer. Their fixed 4KiB control frames allow
+only public key/selection/bootstrap/orchestration metadata. The new blocked-TCP scenario
+requires actual native Derive and all six Sealed/Opened confirmation receipts, ACK, settlement
+and Return, followed by original End/final ACK/collection. An earlier single-case run passes
+in 9.47s; all seven current-source TCP cases pass together in 63.58s. Each endpoint must first
+observe one deliberately forced authenticated Input
+Capacity refusal from the actual adapter, retry the same intake, and obtain a genuine native
+Derived receipt. The private negative seam is absent from shipping code and releases its
+server-map guard before response transmission; it supplies no fabricated result or authority.
+The browser child handle exposes only its cached authenticated RowId, never a supplied hint,
+action grant or pair-readiness claim; broker version 18 rejects older retained shapes.
+
+Browser channel focus passes all 141 cases, Svelte reports zero errors/warnings, production
+frontend build passes (54.62s), and Node syntax and standalone strict TypeScript checking
+pass. The first native compile stopped before tests on two fixture-interface errors; the
+second found that the proposed enum re-export retained its private visibility. Private
+start/incoming/respond helpers now avoid widening that interface. Review found retryable
+metadata refusals were unwrapped, non-close IO was unbounded and setup readiness was ignored.
+The draft now passes callback failures to the same broker, injects one publication and one
+collection refusal, adds one bounded preparation wake, checks actual ready/setup drainage,
+and explicitly collects original child/service resources before reporting failed steps.
+A wedged-child regression now passes. The v3 focus ran 284 tests: 283 passed/one failed
+(21.97s). Complete service layout passes at 24,648B/32KiB, and physical Control stays
+12,220B/12KiB. The failure reached the cold registry's earlier allocation (mapped Binding),
+not the service-payment Capacity refusal it intended to test. The regression now separately
+requires exact cold/warm constructor refusal stages and original-owner revocation. No limit
+or production behavior changed. Corrected focus passes all 284 tests (22.30s); after the
+negative seam it passes all 284 again (22.17s), with complete service 24,664B/32KiB and
+unchanged physical Control 12,220B/12KiB. The first actual native/Node TCP attempt returned
+an unexplained uncertain intake; its cause was not recorded and remains unconfirmed. A
+diagnostic-only rerun passed (11.42s), followed by the forced-refusal current-source pass
+(9.47s). These passes do not diagnose that original uncertainty. An invocation passed a
+Cargo jobs option to libtest and launched no tests; the corrected invocation is the 284-test
+run above. Read-only re-review reports no remaining blocker/high/medium. The
+initial standalone script type check found missing callback return annotations; explicit
+public DTO types correct these, and the subsequent --strict check passes. Current browser
+channel focus passes 141 tests (2.32s). The complete frontend passes all 2,638 tests
+(68.85s), Svelte zero errors/warnings, production build (1m13s) and all ten Edge flows. The
+sandboxed flow launch produced no owned debugger endpoint; its isolated retry outside the
+sandbox passed. Root inputs remain byte-identical to the completed 3,314-pass run at
+5388993f (24 existing ignored).
+
+The first complete native run passed 765 library tests and failed one (723.44s); Cargo
+stopped before the five command-policy tests. Captured panic integration.rs:91 was the
+known-parent native producer retry unwrapping Protocol(Capacity). The exact underlying
+pressure source is unconfirmed. The fixture now collects only exact native worker Capacity
+and retries its same Context/Route/selector within the original bound; construction/layout
+refusal and task loss still fail. A held-map producer retry must actually refuse, collect,
+preserve the uncommitted original row/action/history and then recover that same row.
+
+Read-only review independently found a MEDIUM in the existing lost-waiter fixture: it waited
+only for commit/store Arc-count arrival, ignoring an early completed preparation Capacity.
+This was not the captured failure above. The new loop polls actual Result as well as the
+arrival barrier. It forces the first real map refusal, authenticates exact Capacity and
+collects its Response/reply/physical owners before the same body/output/action/Phase/deadline
+retries. After actual UI arrival, the Actor park, lost waiter, commit/physical drainage and
+mandatory original receipt before replay remain required. Re-review then found that the
+producer's pre-await deadline check did not bound a parked observer. One fixed remaining-
+budget timeout now covers the whole observer loop, including retry sleep, and the forced
+one-shot. Timeout detaches rather than aborting/refunding actual work. Its new parked-Actor
+regression distinguishes the expected timeout from unrelated failure, proves the actual
+8KiB/native position and shutdown wait survive, then requires exact resource return after
+actual Actor release/collection. Corrected handoff focus passes 285 tests (22.82s), and strict
+native Clippy passes (56.42s).
+
+The next seven-case TCP run passed six/failed one (61.91s): known-incoming hit the new
+fixture's inferred UI-arrival assertion while the map was still deliberately held. Two Arc
+counts can form a torn snapshot during Context upgrade/drop. They no longer schedule the
+test. A cfg(test)-only exact Session/request-sequence observation is written only after real
+Result preflight returns and before its UI await. Completed Result is polled first; forced
+Capacity must never mark its sequence. A marker proves preparation only. Actual UI/Actor,
+lost-waiter/publication and independent mounted-context lifetime checks remain required.
+No marker exists in shipping code. Read-only re-review reports no remaining blocker/high/
+medium. Current strict native Clippy passes (55.48s), handoff focus passes all 285 (22.59s),
+and all seven real TCP cases pass (63.58s), including the previously failing framing and
+known-incoming scenarios and the actual Node cycle. Physical Control now measures
+12,228B/12KiB including the test-only sequence field; complete service remains 24,664B/32KiB.
+Root/native formatting, ambient and diff checks pass. Complete native/check/build/startup
+remain pending. No shipping effect dispatcher is enabled.
+
+An independent established-pair query, production work delivery, full native/WebCrypto
+acceptance, SDP/ICE/RTC, supported group composition, media relay and combined/physical
+acceptance remain open. This draft enables no production effects or live V2 switch.
+
 ## Native-origin producer (23 October; validated runtime 7edf9192)
 
 The isolated native producer draft builds on published3d5b688b. Its private
@@ -40,10 +134,9 @@ passes (2m39s) and the actual application startup check passes (2.93s). These lo
 inputs remain byte-identical to their recorded complete successful runs below. Production work pull,
 actual HTTP effect delivery, native/WebCrypto interoperability and live V2 remain incomplete.
 
-Further interoperability code is isolated, uncommitted and unvalidated in
-`target/communication-native-webcrypto-worktree`; it is excluded from this checkpoint. Its
-browser row-observation change passes all 141 channel tests. The native/Node HTTP fixture,
-combined service layout and complete suites have not yet run. No production mode is enabled.
+At bfe8439e, the isolated interoperability draft was excluded from that checkpoint. The newer
+continuation above records its actual Node/native cycle, layout and current validation.
+No production mode is enabled.
 
 ## Current continuation checkpoint (23 October; validated runtime 9109f20d)
 

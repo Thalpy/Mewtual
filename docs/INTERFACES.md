@@ -1,5 +1,25 @@
 # Mewtual; Interfaces & Hooks Schema
 
+## Authenticated browser child row and private interoperability fixture (23 October)
+
+`VoiceChannelConfirmationHandle.row()` returns its cached authenticated native RowId or
+null. Caller-supplied continuation hints never authenticate that value. An authenticated
+Begin/Input/history response may establish the original row; Pending establishes lookup
+identity only, not action admission or pair readiness. Native Respond still independently
+requires its original same-parent accepted Opened action. Broker18 refuses older retained
+HMR shapes rather than adopting an incompatible handle.
+
+A private cfg(test) listener mode selects exact v1/v2 native adapters only after real Header
+authentication and AEAD opening. Result Data allocation resolves the original Phase before
+allocation. Shipping construction retains the existing read-only dispatcher; no IPC or HTTP
+flag can enable the fixture. Two separate Node processes use the actual broker, WebCrypto,
+non-extractable selected keys and HTTP/BYOB transport. Their fixed 4KiB control frames carry
+only public selection/bootstrap/work metadata, never Input, Result, keys or SDP bytes.
+The Node Origin shim supplies no evidence about packaged WebView/CSP/ACL behavior.
+Current Windows test measurements include its negative seam and exact post-preflight
+sequence observer: physical Control 12,228B/12KiB, complete service 24,664B/32KiB. The observer
+proves preparation of that request only; actual UI/Actor admission is separately tested.
+
 ## Private native-origin Derive (23 October; draft)
 
 `factory::native::produce_derivation(Context, Route, PairSelector)` is a private Rust entry,

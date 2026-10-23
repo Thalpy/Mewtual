@@ -1682,6 +1682,7 @@ async fn fixed_runner_future_and_output_fit_the_prepaid_infrastructure_peak() {
         port: bound.port,
         context: bound.context,
         credit: bound.credit,
+        fixture_effects: bound.fixture_effects,
         phase: Arc::new(std::sync::atomic::AtomicU8::new(0)),
     };
     let future = state.run(cancelled);

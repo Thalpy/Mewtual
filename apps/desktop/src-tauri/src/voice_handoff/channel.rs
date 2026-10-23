@@ -70,9 +70,36 @@ pub(super) struct Session {
     // Prepaid from existing ordinary Crypto limits, independently of setup/data work.
     // Terminal browser control cannot depend on a fresh slot when other work fills the pool.
     control_lane: Arc<WorkLane>,
+    // Negative-only interoperability seam. It cannot authenticate/admit anything and
+    // is absent from shipping Sessions; the actual adapter must produce the refusal.
+    #[cfg(test)]
+    input_pressure: AtomicBool,
+    // Observation only: an exact physical Result reached its actual post-preflight UI wait.
+    // Monotonic request sequences prevent a previous attempt from satisfying a new barrier.
+    #[cfg(test)]
+    result_preflight_sequence: std::sync::atomic::AtomicU64,
 }
 pub(super) struct SessionIdentity(pub(super) [u8; 32]);
 impl Session {
+    #[cfg(test)]
+    pub(super) fn fixture_arm_input_pressure(&self) {
+        assert!(
+            !self.input_pressure.swap(true, Ordering::AcqRel),
+            "one original Input pressure observation at a time"
+        );
+    }
+    #[cfg(test)]
+    pub(super) fn fixture_take_input_pressure(&self) -> bool {
+        self.input_pressure.swap(false, Ordering::AcqRel)
+    }
+    #[cfg(test)]
+    pub(super) fn fixture_input_pressure_pending(&self) -> bool {
+        self.input_pressure.load(Ordering::Acquire)
+    }
+    #[cfg(test)]
+    pub(super) fn fixture_result_preflight_sequence(&self) -> u64 {
+        self.result_preflight_sequence.load(Ordering::Acquire)
+    }
     pub(super) fn identity(&self) -> &Arc<SessionIdentity> {
         &self.identity
     }
@@ -139,6 +166,8 @@ impl Session {
             _bootstrap: bootstrap,
             _browser_control: browser_control,
             control_lane,
+            input_pressure: AtomicBool::new(false),
+            result_preflight_sequence: std::sync::atomic::AtomicU64::new(0),
         }))
     }
     /// Own the paid scratch BEFORE reading unauthenticated HTTP. A single position continues
@@ -548,6 +577,17 @@ pub(super) struct Incoming {
     worker: HeaderWorker,
 }
 impl Incoming {
+    /// Read-only test observation from the real prepared worker. This changes no authority,
+    /// counters, capacity or scheduling and cannot be selected by HTTP or ordinary IPC.
+    #[cfg(test)]
+    pub(super) fn fixture_mark_result_ui_wait(&self) {
+        assert!(self.body.plain_bytes.is_some() && self.operation() == Operation::Result);
+        self.worker
+            .position
+            .session
+            .result_preflight_sequence
+            .store(self.request.sequence(), Ordering::Release);
+    }
     /// Native allocation binding, not a copied slot/session label. A successfully opened
     /// request from another Session cannot authorize work through this Route.
     pub(super) fn belongs_to(&self, session: &Arc<Session>) -> bool {

@@ -7,6 +7,7 @@ use service::tests::{opened_frame, opened_reply, opened_reply_kind};
 use sha2::{Digest, Sha256};
 use std::sync::Arc;
 mod confirmation;
+pub(crate) mod webcrypto;
 pub(crate) use confirmation::{
     confirmation_alias_claims, confirmation_framed_round_trip, confirmation_known_incoming_retry,
     confirmation_rejected_result, confirmation_round_trip,
@@ -31,6 +32,102 @@ pub(crate) async fn derivation_returned(
     derivation_cycle(state, selected, selector, true)
         .await
         .unwrap()
+}
+
+/// Fixture driver for one immutable native purpose. Only a collected worker's exact
+/// protocol Capacity is retryable; task construction/layout refusal and actor loss fail.
+/// Neither a fresh transport observer nor this fixed test bound renews Root's pair deadline.
+async fn original_native_derivation(
+    context: &context::Context,
+    route: &bootstrap::Route,
+    selector: PairSelector,
+    clock: &dyn catcoms_rt::Clock,
+    deadline: u64,
+) -> ledger::RowId {
+    // Bound the entire observer, including a parked producer or Clock retry sleep. Dropping
+    // its opaque waiter detaches the actual task; timeout neither aborts nor proves drainage.
+    let remaining = deadline.saturating_sub(clock.monotonic_ms());
+    tokio::time::timeout(std::time::Duration::from_millis(remaining), async {
+      let mut refusals = 0u32;
+      loop {
+        assert!(
+            clock.monotonic_ms() < deadline,
+            "original native derivation bound expired after {refusals} capacity refusals"
+        );
+        let completion = factory::native::produce_derivation(context, route, selector)
+            .expect("actual native task construction must fit its original payment")
+            .await
+            .expect("actual native producer must finish");
+        let result = completion.result();
+        // Uncollected completion still owns the native Session position and its payment.
+        // Release those actual owners before scheduling the same original purpose again.
+        drop(completion);
+        match result {
+            Ok(id) => return id,
+            Err(factory::Refused::Protocol(catcoms_sync::voice_v2::VoiceError::Capacity)) => {
+                refusals += 1;
+                eprintln!("native producer exact purpose retry {refusals}; remaining original bound ms {}", deadline.saturating_sub(clock.monotonic_ms()));
+                clock.sleep(std::time::Duration::from_millis(100)).await;
+            }
+            Err(error) => panic!(
+                "actual native producer failed after {refusals} capacity refusals: {error:?}"
+            ),
+        }
+      }
+    }).await.expect("native producer observation exceeded its original bound")
+}
+
+#[tokio::test]
+async fn timed_out_native_observer_keeps_actual_payment_and_position_until_parked_worker_drains() {
+    use std::future::{poll_fn, Future};
+    use std::task::Poll;
+    let fixture = crate::voice_activation_tests::Fixture::new().await;
+    let context = context::Context::new(&fixture.state);
+    let (_, selected, selector) = factory::tests::selection(&fixture).await;
+    let route = factory::tests::channel_route(&fixture, &selected).await;
+    let clock = crate::voice_runtime(&fixture.state).clock();
+    let pool = selected.resources();
+    let before = pool.counts();
+    let parked = factory::tests::park(&fixture.actor).await;
+    let observed = tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        webcrypto::catch_fixture(original_native_derivation(
+            &context,
+            &route,
+            selector,
+            clock.as_ref(),
+            clock.monotonic_ms().saturating_add(100),
+        )),
+    )
+    .await;
+    let exact_timeout = match observed {
+        Ok(Err(error)) => error.downcast_ref::<String>().is_some_and(|message| {
+            message.starts_with("native producer observation exceeded its original bound")
+        }),
+        _ => false,
+    };
+    let retained = pool.counts() == (before.0 + 8 * 1024, before.1)
+        && matches!(
+            route.session().native_hold(),
+            Err(channel::Refused::Capacity)
+        );
+    let mut shutdown = Box::pin(fixture.state.voice_channels.stop_and_wait_for_physical());
+    let stalled = poll_fn(|cx| Poll::Ready(shutdown.as_mut().poll(cx).is_pending())).await;
+    drop(parked);
+    let collected = tokio::time::timeout(std::time::Duration::from_secs(5), shutdown)
+        .await
+        .is_ok();
+    let after = pool.counts();
+    fixture.close().await;
+    assert!(
+        exact_timeout,
+        "only this observer's bounded timeout is expected; outer timeout and unrelated panic fail"
+    );
+    assert!(
+        retained && stalled && collected,
+        "timeout must retain real task/position/payment until actual shutdown collection"
+    );
+    assert_eq!(after, before);
 }
 
 async fn derivation_cycle(
@@ -71,28 +168,55 @@ async fn derivation_cycle(
         // Native-origin work has no browser request to borrow. Exercise its OWN paid
         // producer/Session drain position on these genuine blocked-TCP pairs. The child
         // provider below is still a test provider, not browser P256/HKDF acceptance.
-        let output = factory::native::produce_derivation(&context, &route, selector)
-            .unwrap()
-            .await
-            .unwrap();
-        let id = output.result().unwrap();
-        drop(output);
+        let clock = crate::voice_runtime(state).clock();
+        let id = original_native_derivation(
+            &context,
+            &route,
+            selector,
+            clock.as_ref(),
+            clock.monotonic_ms().saturating_add(10_000),
+        )
+        .await;
         let row = state
             .voice_handoff
             .resolve(selected, ledger::Purpose::Derive(selector), id)
             .unwrap();
         let original = row.status().unwrap();
         assert!(original.action.is_some() && original.engine.receipt.is_none());
-        let retry = factory::native::produce_derivation(&context, &route, selector)
+        let deadline = row
+            .work()
             .unwrap()
-            .await
-            .unwrap();
-        assert_eq!(retry.result().unwrap(), id);
+            .action()
+            .protected_binding()
+            .unwrap()
+            .deadline;
+        // Deterministically exercise the refusal that previously escaped this fixture's
+        // one-shot retry. Native preflight, not a fabricated error, must refuse before
+        // another Actor effect; the published original row/action must remain unchanged.
+        let pressure = state.servers.lock().await;
+        let refusal = tokio::time::timeout(
+            std::time::Duration::from_millis(deadline.saturating_sub(clock.monotonic_ms())),
+            factory::native::produce_derivation(&context, &route, selector).unwrap(),
+        )
+        .await
+        .expect("forced native refusal must remain within its original bound")
+        .unwrap();
+        assert_eq!(
+            refusal.result(),
+            Err(factory::Refused::Protocol(
+                catcoms_sync::voice_v2::VoiceError::Capacity
+            ))
+        );
+        drop(refusal);
+        drop(pressure);
+        assert!(row.status().unwrap() == original);
+        let retry =
+            original_native_derivation(&context, &route, selector, clock.as_ref(), deadline).await;
+        assert_eq!(retry, id);
         assert!(
             row.status().unwrap() == original,
             "native producer retry preserves the same uncommitted action"
         );
-        drop(retry);
         id
     } else {
         let mut begin = purpose.clone();

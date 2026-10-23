@@ -1,5 +1,29 @@
 # Threat model; client integrity & enforcement boundaries
 
+## Native/Node fixture boundary (23 October; no production activation)
+
+The real blocked-TCP single-pair fixture now uses separate actual WebCrypto brokers and
+native-authenticated HTTP, rather than shared test AES keys. It requires real original
+Derive and all six confirmation receipts plus exact ACK/settlement/Return and End/final
+collection. This narrows the cryptographic interoperability gap; it does not establish
+independent pair readiness, packaged WebView policy, live work delivery, RTC or audible media.
+
+The effect dispatcher and negative Input contention flag are cfg(test) only. The latter
+holds the real server-map mutex after authenticated v1 Input selection, forcing actual
+preflight Capacity before Work/Input/Actor admission, then releases it before transmission.
+The Node oracle retries the same intake only after a fresh authenticated Capacity observed
+during that attempt. No refusal or timeout manufactures drainage, receipt, grant or deadline.
+Unexplained uncertainty fails with bounded operation/length/refusal-code diagnostics; no
+payload, key, Input or Result is logged. Actual child/pipe/stderr/service collection is
+attempted on failures too, with an acknowledged-wedge regression that rejects EOF as success.
+
+The lost-waiter fixture observes the actual authenticated request sequence after preflight;
+independently sampled Arc counts cannot establish that boundary. Its cfg(test) marker grants
+no admission. Current Windows debug measurements fit unchanged payments: complete service
+24,664B/32KiB and physical Control 12,228B/12KiB including the test-only observer. These inventory application owners, not arbitrary SDK,
+allocator, OS socket, thread-stack or RSS overhead. Other layouts must still pass the same
+runtime guards. Supported multi-peer composition remains unvalidated.
+
 ## Native-origin task custody (23 October; inactive integration)
 
 Private native Derive production pays its complete preparation/task/output before any await;

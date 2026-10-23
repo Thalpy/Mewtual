@@ -67,6 +67,10 @@ pub(super) struct BoundServer {
     port: u16,
     context: Option<Context>,
     credit: Arc<ProcessRetainedCredit>,
+    /// A private test constructor alone enables effects. This field and its dispatcher
+    /// do not exist in the shipping binary; neither HTTP nor IPC can select this mode.
+    #[cfg(test)]
+    fixture_effects: bool,
 }
 /// Even a finished, uncollected JoinHandle retains the original process payment. Group/input
 /// credits remain owned by their own rows/Sessions; this credit cannot pay for those bytes.
@@ -92,6 +96,17 @@ impl BoundServer {
         context: Context,
     ) -> Result<Self, Refused> {
         Self::bind_inner(registry, runtime, origin, Some(context))
+    }
+    #[cfg(test)]
+    pub(in crate::voice_handoff) fn bind_effect_fixture(
+        registry: Arc<Registry>,
+        runtime: Arc<Runtime>,
+        origin: Origin,
+        context: Context,
+    ) -> Result<Self, Refused> {
+        let mut server = Self::bind_inner(registry, runtime, origin, Some(context))?;
+        server.fixture_effects = true;
+        Ok(server)
     }
     fn bind_inner(
         registry: Arc<Registry>,
@@ -119,6 +134,8 @@ impl BoundServer {
             port,
             context,
             credit: Arc::new(credit),
+            #[cfg(test)]
+            fixture_effects: false,
         })
     }
     pub(super) fn port(&self) -> u16 {
@@ -141,6 +158,8 @@ impl BoundServer {
             context: self.context,
             credit: self.credit,
             #[cfg(test)]
+            fixture_effects: self.fixture_effects,
+            #[cfg(test)]
             phase: phase.clone(),
         };
         let future = state.run(cancelled);
@@ -161,6 +180,10 @@ impl BoundServer {
 }
 
 fn worker_layout<F>(future: &F) -> usize {
+    #[cfg(test)]
+    let fixture_admission = fixture_effects::admission_layout_bytes();
+    #[cfg(not(test))]
+    let fixture_admission = 0;
     std::mem::size_of_val(future)
         + std::mem::size_of::<BoundServer>()
         + std::mem::size_of::<RunningServer>()
@@ -169,6 +192,7 @@ fn worker_layout<F>(future: &F) -> usize {
         + 2 * std::mem::size_of::<usize>() // managed Host's Arc control block
         + TASK_AND_HANDLE_BYTES
         + Context::retained_layout_bytes()
+        + fixture_admission
 }
 
 /// Keep infrastructure in ONE state with known field order even when the future is aborted.
@@ -181,6 +205,8 @@ struct ServerState {
     port: u16,
     context: Option<Context>,
     credit: Arc<ProcessRetainedCredit>,
+    #[cfg(test)]
+    fixture_effects: bool,
     /// Passive test-only scheduling observation. It creates no production callback or API.
     #[cfg(test)]
     phase: Arc<std::sync::atomic::AtomicU8>,
@@ -242,6 +268,10 @@ impl ServerState {
             // Construct one absolute timer per accepted socket. Neither a read nor a change
             // of phase can renew it. Stop/expiry win even against continuously-ready traffic.
             let mut connection = Connection::new(stream);
+            #[cfg(test)]
+            {
+                connection.fixture_effects = self.fixture_effects;
+            }
             tokio::select! {
                 biased;
                 _ = &mut stop => break false,
@@ -291,6 +321,8 @@ struct Connection<S = TcpStream> {
     scratch: [u8; http::HEADER_BYTES],
     filled: usize,
     output: Output,
+    #[cfg(test)]
+    fixture_effects: bool,
 }
 impl<S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin> Connection<S> {
     fn new(stream: S) -> Self {
@@ -302,6 +334,8 @@ impl<S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin> Connection<S> {
             scratch: [0; http::HEADER_BYTES],
             filled: 0,
             output: Output::new(),
+            #[cfg(test)]
+            fixture_effects: false,
         }
     }
     async fn serve(
@@ -348,7 +382,16 @@ impl<S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin> Connection<S> {
                 .set_filled(self.filled)
                 .map_err(|_| Refused::Header)?;
             current(clock, deadline)?;
-            self.incoming = Some(
+            #[cfg(test)]
+            let incoming = if self.fixture_effects {
+                fixture_effects::admit(
+                    worker,
+                    port,
+                    origin.value(),
+                    route,
+                    context.ok_or(Refused::Binding)?,
+                )?
+            } else {
                 worker
                     .admit_service_control(
                         port,
@@ -356,8 +399,13 @@ impl<S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin> Connection<S> {
                         route.session_id(),
                         context.is_some(),
                     )
-                    .map_err(|_| Refused::Header)?,
-            );
+                    .map_err(|_| Refused::Header)?
+            };
+            #[cfg(not(test))]
+            let incoming = worker
+                .admit_service_control(port, origin.value(), route.session_id(), context.is_some())
+                .map_err(|_| Refused::Header)?;
+            self.incoming = Some(incoming);
             let incoming = self.incoming.as_mut().ok_or(Refused::Body)?;
             while !incoming.remaining_mut().is_empty() {
                 current(clock, deadline)?;
@@ -376,20 +424,16 @@ impl<S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin> Connection<S> {
             // can never become a second request because this connection is always closed.
             current(clock, deadline)?;
             incoming.open().map_err(|_| Refused::Body)?;
-            self.reply = Some(match incoming.operation() {
-                Operation::Status => {
-                    let incoming = self.incoming.take().ok_or(Refused::Body)?;
-                    status(route, incoming)?
-                }
-                Operation::BeginDerive => {
-                    let context = context.ok_or(Refused::Binding)?;
-                    let incoming = self.incoming.take().ok_or(Refused::Body)?;
-                    super::history::recover(context, route, incoming)
-                        .seal()
-                        .map_err(|_| Refused::Body)?
-                }
-                _ => return Err(Refused::Binding), // fail closed if the whitelist ever drifts
-            });
+            let incoming = self.incoming.take().ok_or(Refused::Body)?;
+            #[cfg(test)]
+            let reply = if self.fixture_effects {
+                fixture_effects::respond(context.ok_or(Refused::Binding)?, route, incoming).await?
+            } else {
+                read_only(context, route, incoming)?
+            };
+            #[cfg(not(test))]
+            let reply = read_only(context, route, incoming)?;
+            self.reply = Some(reply);
             let reply = self.reply.as_ref().ok_or(Refused::Body)?;
             self.output.reply(origin, reply.body().len())?;
         }
@@ -417,6 +461,27 @@ impl<S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin> Connection<S> {
         Ok(())
     }
 }
+
+/// Shipping dispatch remains read-only. A channel setup or native test-mode constructor
+/// does not turn a renderer request into production action authority.
+fn read_only(
+    context: Option<&Context>,
+    route: &Route,
+    incoming: Incoming,
+) -> Result<CompletedReply, Refused> {
+    match incoming.operation() {
+        Operation::Status => status(route, incoming),
+        Operation::BeginDerive => {
+            super::history::recover(context.ok_or(Refused::Binding)?, route, incoming)
+                .seal()
+                .map_err(|_| Refused::Body)
+        }
+        _ => Err(Refused::Binding),
+    }
+}
+
+#[cfg(test)]
+pub(in crate::voice_handoff) mod fixture_effects;
 
 /// The shipping setup acknowledgement, also exercised by the actual native/TCP fixture.
 /// Only this exact original authenticated Session may acknowledge its setup SDK drainage;

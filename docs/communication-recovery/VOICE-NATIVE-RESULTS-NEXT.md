@@ -1,5 +1,44 @@
 # Next voice milestone: native result recovery
 
+## Native/Node interoperability continuation (23 October)
+
+The draft on bfe8439e now passes a genuine native/Node single-pair cycle: separate actual
+WebCrypto brokers, non-extractable selected keys, authenticated native HTTP/BYOB, real A-C
+blocked TCP via unjoined B, Derive and all six Hello/Proof/Finish receipts and exact final
+collection. It deliberately forces actual local Input Capacity and requires retry of the
+original intake before native Derived success. Focused native284 and browser141 pass;
+HANDOVER records exact measurements, failure history and pending complete gates.
+
+This proves neither independent established-pair authority nor packaged WebView/ACL/CORS,
+production work delivery or RTC. Remaining work below must keep those boundaries explicit;
+shipping effects and V2 activation are still disabled. The native/Node fixture supersedes
+the earlier statement that all native TCP confirmation uses fixed AES keys, not the remaining
+implementation prerequisites. One desktop still cannot provide separate physical-network
+and two-device audio acceptance.
+
+### Next query boundary (reviewed design; not implemented)
+
+Expose a fixed native `Confirming/Established` observation for the actual grant, original
+PairSelector and handshake through ChannelSync and the bounded Actor mailbox. Resolve only
+the existing participant/pair: never call a pair factory or clone its transcript to answer
+this query. Require the original grant allocation, live call/watch and exact scope, peer,
+join/key reference and protected epoch equal to the current context epoch. LocalJoin's
+existing `pair_established` alone does not enforce that protected-epoch comparison. Fresh
+current-owner/room/watch checks must still precede return, with Clock callbacks outside final
+native gates. The observation grants no SDP/RTC authority and must create no action, packet,
+deadline renewal or revision wake.
+
+Local confirmation is asymmetric: native signing Finish establishes low locally; high
+establishes only after committed Finish open. Query both real endpoints independently. Pin
+low Established/high Confirming with Finish held, plus wrong grant/selector/handshake,
+End/replacement/lock, epoch/policy/member/room change and ordinary discovery-expiry cases.
+Do not retire Finish retry custody from a local Established observation.
+
+Subsequent production work delivery needs its own prepaid bounded metadata projection tied to
+the actual selected owner, parent and Row/action. The coalesced revision watch is a wake, not
+a replayable cursor. Preserve Unknown/Pending/attached and lost-reply/output custody; neither
+this query nor a renderer `paired` item replaces final native SDP admission.
+
 ## Current implementation boundary (23 October; combined continuation)
 
 The child-v2 grammar and Begin/Input/admission/result/ACK/settlement/Return adapters now

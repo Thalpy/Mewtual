@@ -528,81 +528,142 @@ async fn framed_submission(
     if role == 1 && operation == CryptoOperation::EncryptConfirmation {
         use std::future::{poll_fn, Future};
         use std::task::Poll;
-        let header = (
-            route.session().fixture_counts().1 + 1,
-            3,
-            1,
-            row.id().logical(),
-        );
-        let incoming = opened_frame(&public, &route, header, &body, Some(&phase));
+        // Resolve Actor before deliberately holding its map; otherwise the fixture itself
+        // would block before exercising actual preflight's nonblocking refusal.
         let actor = actor(state, selected).await;
-        // Drive the ACTUAL outer handler up to its UI-commit await. A FIFO actor query
-        // completes the preceding binding observation, then the existing durable Ready
-        // barrier parks the actual publication turn without sleeps or asserted booleans.
-        let boundary = state.ui_session_commit.lock().await;
-        let commit_owners = Arc::strong_count(&state.ui_session_commit);
-        let store_owners = Arc::strong_count(&state.store);
-        let mut pending = Box::pin(confirmation_result::commit(&context, &route, incoming));
-        assert!(poll_fn(|cx| Poll::Ready(pending.as_mut().poll(cx).is_pending())).await);
-        // Work is now reserved BEFORE the detached preparation starts. Its worker flag
-        // alone cannot establish binding completion/UI admission. The actual original
-        // commit handle survives its UI wait while LiveContext has already been destroyed.
-        tokio::time::timeout(Duration::from_secs(15), async {
-            while Arc::strong_count(&state.ui_session_commit) <= commit_owners
-                || Arc::strong_count(&state.store) != store_owners
-            {
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
-        .unwrap();
-        let parked = factory::tests::park(&actor).await;
-        drop(boundary);
-        tokio::time::timeout(Duration::from_secs(15), async {
-            loop {
-                assert!(poll_fn(|cx| Poll::Ready(pending.as_mut().poll(cx).is_pending())).await);
-                // The test's boundary is gone. Only the actual detached worker can now
-                // own this original UI commit through the parked Actor publication.
-                if state.ui_session_commit.try_lock().is_err() {
-                    assert!(matches!(row.work(), Err(VoiceError::Capacity)));
-                    break;
+        let mut force_capacity = true;
+        let mut refusals = 0u32;
+        loop {
+            assert!(
+                clock.monotonic_ms() < original_deadline,
+                "original Hello result deadline exhausted after {refusals} capacity refusals"
+            );
+            let header = (
+                route.session().fixture_counts().1 + 1,
+                3,
+                1,
+                row.id().logical(),
+            );
+            let incoming = opened_frame(&public, &route, header, &body, Some(&phase));
+            // Hold UI admission while distinguishing actual preparation completion from
+            // arrival at that wait. A completed Capacity response must be polled/collected.
+            // Separate Arc counts can form a torn snapshot during Context upgrade/drop;
+            // only this exact request's actual post-preflight marker proves arrival.
+            let boundary = state.ui_session_commit.lock().await;
+            let pressure = if force_capacity {
+                Some(state.servers.lock().await)
+            } else {
+                None
+            };
+            let store_owners = Arc::strong_count(&state.store);
+            let mut pending = Box::pin(confirmation_result::commit(&context, &route, incoming));
+            let early = tokio::time::timeout(Duration::from_secs(15), async {
+                loop {
+                    if let Poll::Ready(response) =
+                        poll_fn(|cx| Poll::Ready(pending.as_mut().poll(cx))).await
+                    {
+                        break Some(response);
+                    }
+                    if route.session().fixture_result_preflight_sequence() == header.0 {
+                        break None;
+                    }
+                    tokio::task::yield_now().await;
                 }
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
-        .unwrap();
-        drop(pending); // actual outer JoinHandle loss must detach, never cancel publication
-        assert!(state.ui_session_commit.try_lock().is_err());
-        let mut ordering = Box::pin(state.ui_session_commit.lock());
-        assert!(poll_fn(|cx| Poll::Ready(ordering.as_mut().poll(cx).is_pending())).await);
-        drop(parked);
-        // The real worker retains the commit through Actor/body publication collection.
-        // Its Response's field destructors are NOT atomic: another thread can acquire this
-        // guard before Incoming/PhysicalHold finishes dropping. Await physical idle separately.
-        let guard = tokio::time::timeout(Duration::from_secs(15), ordering)
+            })
             .await
             .unwrap();
-        drop(guard);
-        tokio::time::timeout(
-            Duration::from_secs(15),
-            route.session().fixture_wait_physical_idle(),
-        )
-        .await
-        .unwrap();
-        assert!(!route.session().fixture_counts().0);
-        let status = row.reconcile().unwrap();
-        assert_eq!(
-            status
-                .engine
-                .receipt
-                .as_ref()
-                .expect("detached original publication must finish before any replay")
-                .output_tag,
-            output_tag
-        );
-        recover_child_history(state, selected, parent, purpose, row, selector, &status).await;
-        return;
+            if let Some(response) = early {
+                let reply = response
+                    .expect("actual original result worker must fit its unchanged payment")
+                    .seal()
+                    .unwrap();
+                let plain = opened_reply(&public, header, &body, &reply);
+                drop(pending);
+                drop(reply);
+                assert!(!route.session().fixture_counts().0);
+                assert_eq!(
+                    plain,
+                    replies::refused(factory::Refused::Protocol(VoiceError::Capacity)),
+                    "only authenticated Capacity may precede UI admission"
+                );
+                let status = row.reconcile().unwrap();
+                assert_eq!(status.action, Some((serial, version, tag)));
+                assert!(status.engine.receipt.is_none());
+                assert_ne!(
+                    route.session().fixture_result_preflight_sequence(),
+                    header.0,
+                    "preflight refusal must never mark this request prepared"
+                );
+                drop(pressure);
+                drop(boundary);
+                force_capacity = false;
+                refusals += 1;
+                eprintln!(
+                    "native Hello exact preflight retry {refusals}; remaining original ms {}",
+                    original_deadline.saturating_sub(clock.monotonic_ms())
+                );
+                clock.sleep(Duration::from_millis(100)).await;
+                continue;
+            }
+            assert!(
+                !force_capacity && refusals > 0,
+                "held map must refuse before UI admission"
+            );
+            assert_eq!(
+                Arc::strong_count(&state.store),
+                store_owners,
+                "actual prepared worker must not retain broad store ownership through its UI wait"
+            );
+            drop(pressure);
+            // A FIFO actor query completes preparation, then the existing durable Ready
+            // barrier parks the ACTUAL publication. This successful retry must still prove
+            // waiter loss, commit ownership and original receipt before any later replay.
+            let parked = factory::tests::park(&actor).await;
+            drop(boundary);
+            tokio::time::timeout(Duration::from_secs(15), async {
+                loop {
+                    assert!(
+                        poll_fn(|cx| Poll::Ready(pending.as_mut().poll(cx).is_pending())).await
+                    );
+                    if state.ui_session_commit.try_lock().is_err() {
+                        assert!(matches!(row.work(), Err(VoiceError::Capacity)));
+                        break;
+                    }
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await
+            .unwrap();
+            drop(pending); // real waiter loss detaches, never cancels actual publication
+            assert!(state.ui_session_commit.try_lock().is_err());
+            let mut ordering = Box::pin(state.ui_session_commit.lock());
+            assert!(poll_fn(|cx| Poll::Ready(ordering.as_mut().poll(cx).is_pending())).await);
+            drop(parked);
+            let guard = tokio::time::timeout(Duration::from_secs(15), ordering)
+                .await
+                .unwrap();
+            drop(guard);
+            // Commit and physical field destructors are not atomic; collect both witnesses.
+            tokio::time::timeout(
+                Duration::from_secs(15),
+                route.session().fixture_wait_physical_idle(),
+            )
+            .await
+            .unwrap();
+            assert!(!route.session().fixture_counts().0);
+            let status = row.reconcile().unwrap();
+            assert_eq!(
+                status
+                    .engine
+                    .receipt
+                    .as_ref()
+                    .expect("detached original publication must finish before any replay")
+                    .output_tag,
+                output_tag
+            );
+            recover_child_history(state, selected, parent, purpose, row, selector, &status).await;
+            return;
+        }
     }
     // Force one real, authenticated local refusal on Finish. The actual native worker
     // observes the held registry; it must not manufacture a terminal result. Releasing

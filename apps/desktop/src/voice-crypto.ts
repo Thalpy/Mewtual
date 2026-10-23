@@ -130,7 +130,13 @@ export type VoiceChannelDerivationHandle = Readonly<{ attempt(): Promise<VoiceCh
  * its original purpose and prepaid claim until authenticated history or parent-final cleanup
  * resolves it. Neither a historical result nor a cleanup proof confers RTC readiness. */
 export type VoiceChannelConfirmationOutcome = VoiceConfirmationOutcome | VoiceIpcActionReply;
-export type VoiceChannelConfirmationHandle = Readonly<{ attempt(): Promise<VoiceChannelConfirmationOutcome> }>;
+export type VoiceChannelConfirmationHandle = Readonly<{
+  attempt(): Promise<VoiceChannelConfirmationOutcome>;
+  /** Already authenticated native child RowId, or null before native adoption. A supplied
+   * hint alone never appears here. This shares the original immutable string and conveys
+   * no action, engine, receipt or Respond authority; native validates that independently. */
+  row(): string | null;
+}>;
 /** Opaque: only the creating broker's WeakMap contains the non-extractable private key. */
 export type VoiceJoinKeyHandle = Readonly<{ publicKey(): Uint8Array<ArrayBuffer> }>;
 export type VoiceSelectedKeyAdmission = Readonly<{
@@ -250,7 +256,7 @@ type ConfirmationIntake = {
   running: boolean; returned: boolean; outcome: VoiceChannelConfirmationOutcome | null;
   // Fixed history is claimed at publication, before Input. Until an ActionRecord adopts
   // it, the original global preclaimed slot remains in broker.reservedRows too.
-  rowClaim: boolean;
+  rowClaim: boolean; rowAuthenticated: boolean;
 };
 /** The SAME prepaid claim becomes BrowserChain. No refund/recharge, new deadline, or second
  * group/execution position exists between admitting the Data read and publishing the chain. */
@@ -409,7 +415,7 @@ function context(label: string, transcript: Uint8Array): Uint8Array<ArrayBuffer>
  * unsettled work. Revoking an owner never frees a running promise; only its real settlement does.
  * A derive pipeline uses one permit for sequential import/ECDH/HKDF work, never parallel calls. */
 export class VoiceCryptoBroker {
-  readonly version = 17;
+  readonly version = 18;
   readonly subtle: SubtleCrypto;
   private readonly native: VoiceCryptoAdmission;
   private active = 0;
@@ -1120,14 +1126,14 @@ export class VoiceCryptoBroker {
     if (chain.retainedBytes + Math.max(chain.enginePeak, 16 * 1024) + 4 * 2064 > CHAIN_VARIABLE) throw new Error("voice continuation intake capacity reached");
     const intake: ConfirmationIntake = { chain, purpose: selected, row: row ?? null, identity: original,
       native: original ? channel.confirmationNative(selected, row!, original) : null, record: null, handle: null!, pending: null,
-      running: false, returned: false, outcome: null, rowClaim: true };
+      running: false, returned: false, outcome: null, rowClaim: true, rowAuthenticated: false };
     intake.handle = Object.freeze({ attempt: () => {
       if (intake.outcome) return Promise.resolve(intake.outcome);
       if (!intake.pending) intake.pending = signal<VoiceChannelConfirmationOutcome>();
       const answer = intake.pending.promise;
       intake.record?.retry?.resolve(); channel.wake(); this.startConfirmation(intake);
       return answer;
-    } });
+    }, row: () => intake.rowAuthenticated ? intake.row : null });
     // Publish before any transport, subscription, engine or scheduler callback. End sees
     // this purpose even if its Begin was never attempted or its row reply was lost.
     chain.reservedRows--; // claimed history cannot be refunded as unused by End
@@ -1802,6 +1808,7 @@ class RetainedIpcChannel {
         intake.identity.version !== reply.identity.version || intake.identity.inputTag !== reply.identity.inputTag)) throw new Error("voice Begin identity changed");
     if (!intake.identity && reply.identity?.action === intake.chain.record?.identity.action) throw new Error("voice Begin reused parent action");
     intake.row = reply.row;
+    intake.rowAuthenticated = true;
     if (!intake.identity && reply.identity) {
       intake.identity = reply.identity;
       intake.native = this.confirmationNative(intake.purpose, reply.row, reply.identity);
@@ -1822,9 +1829,13 @@ class RetainedIpcChannel {
     if (!intake.row || !intake.identity || !intake.native) throw new Error("attached confirmation required");
     const row = intake.row, identity = intake.identity;
     return this.actionRpc(intake.purpose.parent, row, { kind: "input" }, "input", false, (opened, kind) => {
-      if (kind === 0) return decodeVoiceIpcActionReply(opened, row);
-      return decodeVoiceIpcConfirmationInput(opened, { row, parent: intake.purpose.parentRow,
-        identity, bootstrap: this.bootstrap!, binding: intake.chain.binding });
+      const reply = kind === 0 ? decodeVoiceIpcActionReply(opened, row)
+        : decodeVoiceIpcConfirmationInput(opened, { row, parent: intake.purpose.parentRow,
+          identity, bootstrap: this.bootstrap!, binding: intake.chain.binding });
+      // Publish only after the original authenticated response has passed its exact row
+      // and input/identity checks. Generic refusal does not authenticate a supplied hint.
+      if ("binding" in reply || reply.kind === "status") intake.rowAuthenticated = true;
+      return reply;
     }, intake.purpose);
   }
   returnConfirmation(intake: ConfirmationIntake): Promise<VoiceIpcActionReply> {
@@ -2413,7 +2424,7 @@ export function windowVoiceCryptoBroker(
   const host = window as Record<symbol, unknown>;
   const previous = host[BROKER] as VoiceCryptoBroker | undefined;
   if (previous) {
-    if (previous.version !== 17 || typeof previous.nativeConfirmationFromChannel !== "function" || typeof previous.nativeDerivationFromChannel !== "function" || typeof previous.recoverChannelHistory !== "function" || typeof previous.prepareChainFromChannel !== "function" || typeof previous.nativeChannel !== "function" || typeof previous.run !== "function" || typeof previous.selectJoinKey !== "function" || typeof previous.retrySelectedJoinKeys !== "function" ||
+    if (previous.version !== 18 || typeof previous.nativeConfirmationFromChannel !== "function" || typeof previous.nativeDerivationFromChannel !== "function" || typeof previous.recoverChannelHistory !== "function" || typeof previous.prepareChainFromChannel !== "function" || typeof previous.nativeChannel !== "function" || typeof previous.run !== "function" || typeof previous.selectJoinKey !== "function" || typeof previous.retrySelectedJoinKeys !== "function" ||
         typeof previous.registerProtectedConfirmation !== "function" ||
         typeof previous.registerProtectedDerivation !== "function" || typeof previous.registerConfirmation !== "function" || typeof previous.createPair !== "function") {
       throw new Error("voice crypto broker version changed; reload required");

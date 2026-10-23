@@ -235,6 +235,10 @@ async fn prepare(
 ) -> Result<Admitted, Refused> {
     let selected = route.selected();
     let commit = super::factory::preflight_binding(context, route).await?;
+    // Observe actual preparation, never infer it from independently sampled Arc counts.
+    // Shipping code has no observer or branch; the fixture still holds UI admission here.
+    #[cfg(test)]
+    incoming.fixture_mark_result_ui_wait();
     let commit = commit.lock_owned().await;
     let context = context.upgrade().ok_or(Refused::Closed)?;
     context

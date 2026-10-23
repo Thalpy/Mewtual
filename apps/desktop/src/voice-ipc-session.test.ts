@@ -529,10 +529,12 @@ test("known child uses original derived keys through framed Input, permit, resul
   const f = await fixture(t), child = await framedConfirmation(f);
   assert.equal((await child.derive()).kind, "accepted");
   const handle = child.handle(), baseline = f.broker.counts().bytes, pair = child.ready.derivation.pair();
+  assert.equal(handle.row(), null, "a supplied child hint is not authenticated native metadata");
   assert.deepEqual(f.rowBudget(), { reserved: 11, actions: 1 });
   assert.equal(child.handle(), handle);
   const before = f.counts().steps.length, outcome = await handle.attempt();
   assert.equal(outcome.kind, "accepted");
+  assert.equal(handle.row(), child.row, "exact authenticated Input adopts the original native row");
   assert.equal(f.broker.counts().bytes, baseline, "no new96KiB envelope or row reservation");
   assert.equal(child.ready.derivation.pair(), pair, "ordinary Return preserves the same pair");
   assert.deepEqual(f.rowBudget(), { reserved: 10, actions: 2 }, "one original descriptor claim transfers into one actual record");
@@ -547,9 +549,11 @@ test("known child uses original derived keys through framed Input, permit, resul
 test("first child Begin publishes one original claim and coalesces through authenticated adoption", async t => {
   const f = await fixture(t), child = await framedConfirmation(f); await child.derive();
   const baseline = f.broker.counts().bytes, handle = child.begin();
+  assert.equal(handle.row(), null);
   assert.equal(child.begin(), handle); assert.deepEqual(f.rowBudget(), { reserved: 11, actions: 1 });
   const pending = handle.attempt(); assert.equal(handle.attempt(), pending);
   assert.equal((await pending).kind, "accepted"); assert.deepEqual(child.begins(), [true]);
+  assert.equal(handle.row(), child.row);
   assert.equal(child.handle(), handle, "authenticated adoption retains the same descriptor/handle");
   assert.equal(f.broker.counts().bytes, baseline); assert.deepEqual(f.rowBudget(), { reserved: 10, actions: 2 });
 });
@@ -558,7 +562,9 @@ test("lost Begin retries the same purpose without replacing its original pair or
   const f = await fixture(t), child = await framedConfirmation(f); await child.derive(); child.loseBegin();
   const pair = child.ready.derivation.pair(), handle = child.begin(), baseline = f.broker.counts().bytes;
   assert.equal((await handle.attempt()).kind, "uncertain"); assert.equal(child.counts().inputs, 0);
+  assert.equal(handle.row(), null, "lost native reply cannot authenticate an unknown row");
   assert.equal((await handle.attempt()).kind, "accepted"); assert.deepEqual(child.begins(), [true, true]);
+  assert.equal(handle.row(), child.row);
   assert.equal(child.ready.derivation.pair(), pair); assert.equal(f.broker.counts().bytes, baseline);
   assert.equal(child.counts().admissions, 1); assert.equal(child.counts().results, 1);
 });
@@ -568,6 +574,7 @@ test("Pending Begin has no invented action and later adopts only its original au
   const handle = child.begin(), pending = await handle.attempt();
   assert.equal(pending.kind, "status"); if (pending.kind !== "status") throw new Error("actual Pending required");
   assert.equal(pending.pending, "open"); assert.equal(pending.identity, null);
+  assert.equal(handle.row(), child.row, "Pending authenticates only a row, never an action or accepted trigger");
   assert.equal(child.counts().inputs, 0); assert.equal(child.counts().admissions, 0);
   child.beginMode("attached"); assert.equal((await handle.attempt()).kind, "accepted");
   assert.deepEqual(child.begins(), [true, true]); assert.deepEqual(f.rowBudget(), { reserved: 10, actions: 2 });
@@ -863,7 +870,9 @@ test("known child completion cannot renew the original browser deadline or encry
 for (const offset of [81, 417, 425]) test(`known child bound Input mutation at${offset} cannot reach engine admission`, async t => {
   const f = await fixture(t), child = await framedConfirmation(f); await child.derive();
   child.alter(bytes => { bytes[offset] ^= 1; return bytes; });
-  assert.equal((await child.handle().attempt()).kind, "uncertain");
+  const handle = child.handle();
+  assert.equal((await handle.attempt()).kind, "uncertain");
+  assert.equal(handle.row(), null, "invalid Input cannot authenticate a supplied row hint");
   assert.equal(child.counts().admissions, 0); assert.equal(child.counts().results, 0);
 });
 
