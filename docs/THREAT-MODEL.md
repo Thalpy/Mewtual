@@ -27,7 +27,7 @@ late actual Lower retirement. It is not positive remote decrypt or browser/RTC e
 validation and complete native/browser composition remain pending; production is disabled. See
 the accepted handoff contract for remaining activation gates.
 
-## Native signalling capacity policy revision (23 October; validation in progress)
+## Native signalling capacity policy revision (23 October; validated partial checkpoint)
 
 The native group byte ceiling is now512KiB; the aggregate native process pool remains2MiB.
 This pool accounts declared signalling owners, not total application RSS or opaque SDK/OS
