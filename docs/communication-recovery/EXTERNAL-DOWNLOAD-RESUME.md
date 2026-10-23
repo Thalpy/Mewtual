@@ -1067,11 +1067,11 @@ failed. All go through `external::remove_verified`:
   Mewtual deletes nothing automatically. A process running as the same account could swap the
   random name in the instant before the unlink; such a process can already delete the file
   itself."
-- User-private groups (review M-6, a decision for the user): with a umask of 002 (default for user
-  groups on several distributions), folders the user creates are group-writable (0775) and count
-  as shared, so Mewtual deletes nothing there automatically and every save in such a folder leaves
-  a temporary copy for the user to delete. Folders Mewtual creates itself (a missing Downloads) get
-  0755 explicitly, and the test fixtures pin their modes.
+- User-private groups (review M-6; user decision, 23 October, see "User decisions" below): a
+  group-writable folder without the sticky bit counts as private only when it is owned by our
+  effective uid, its group is our effective primary gid, and the local account files prove that
+  group has no other member; anything unprovable stays shared. Folders Mewtual creates itself (a
+  missing Downloads) get 0755 explicitly, and the test fixtures pin their modes.
 
 **M1, publication link.** Two guarantees: (a) never report a save that did not happen; (b) never
 give the final name to an object other than the one verified. Both writers now publish exactly the
@@ -1109,8 +1109,9 @@ now has the saved name (an editor's atomic save), the original copy is kept and 
 exactly that (`SavedNameReplaced`); both names gone is `SavedFileMissing` ("The saved file was no
 longer in its folder."); a final or staging name that cannot be checked right now (an indexer
 holding it) is `Unchecked` and the row stays until a retry; a staging name already gone with
-someone else's file at the saved name is simply `Removed`. The row still reads "Saved" until it is
-cleared: a decision for the user (below).
+someone else's file at the saved name is simply `Removed`. Since the user's decision of 23 October
+the row no longer reads "Saved" until it is cleared: Transfers checks the saved file and says when
+it is missing or replaced, offering Save again (see "User decisions" below).
 
 **M3, filesystem support (fail closed).** See the support matrix below. Unix decides with
 `fstatfs` (Apple: `f_fstypename` plus `MNT_LOCAL`). Windows has no vetted crate that reports the
@@ -1129,7 +1130,7 @@ index is not presented as universally unique.
 | SMB, mapped drives (Windows) | No | Yes, if the server gives file numbers; otherwise refused before writing | Yes, by verified handle | Recognized by the `\\?\UNC\` canonical path. |
 | FAT, exFAT (Windows) | No | No (refused before writing) | n/a | No hard links, so publication is impossible. |
 | OneDrive and other cloud folders (Windows) | Yes, on NTFS | Yes | Yes | The provider uploads partial plaintext as it is written. Placeholders are the same file. |
-| ext2/3/4, xfs, btrfs, f2fs, tmpfs (Linux) | Yes, when the filesystem reports birth times (tmpfs on older kernels and ext4 with 128-byte inodes may not; the save then falls back) | Yes | Yes, except in folders other accounts can modify (mode bits; ACLs are not read) | Needs `/proc/self/fd`. |
+| ext2/3/4, xfs, btrfs, f2fs, tmpfs (Linux) | Yes, when the filesystem reports birth times (tmpfs on older kernels and ext4 with 128-byte inodes may not; the save then falls back) | Yes | Yes, except in folders other accounts can modify (mode bits; ACLs are not read; a group-writable folder of a user-private group proven from `/etc/passwd`, `/etc/group` and `nsswitch.conf` counts as private) | Needs `/proc/self/fd`. |
 | overlayfs, FUSE, NFS, SMB/CIFS, 9p (Linux) | No | Yes if the mount supports hard links; otherwise the save fails at publication after writing, and the partial is left for the user | No (counted as shared, review M-3) | Container `/tmp` on overlayfs gets no journal. Unix does not probe links here: the probe name could not be removed. |
 | vfat, exFAT (Linux) | No | No (refused before writing) | n/a | |
 | APFS, HFS+ (macOS, local) | Yes, unverified | Yes | As on Linux | Not built in CI; publication guarantee (a) only. |
@@ -1202,6 +1203,63 @@ Short re-review of those fixes (`e3db72ea..f38d01ea`): no blocker, high or mediu
 | LOW 3: code comments described the old order | Fixed (`remove_verified`, `Verified::Shared`, `PartialRemoval::SharedFolder`). |
 | LOW 4: test gaps | Added `save_another_copy_of_an_unreachable_saved_row_says_what_was_left`, missing and foreign names in a shared folder for `remove_if_session` (Linux CI), and a notice check that matches both shared-folder instructions; the LOW 3 coverage gap is stated above. |
 | LOW 5: the junction sentence in THREAT-MODEL said "Changed" only | Fixed: "halts, as Changed or Unavailable". |
+
+## User decisions (23 October)
+
+Implemented:
+
+- **Group-writable folders: trust a proven user-private group.** A group-writable folder without
+  the sticky bit counts as private (so Remove and the writers' cleanup may delete there) only when
+  all of these hold: it is owned by our effective uid; its group is our effective primary gid;
+  and that group provably has no other member. The proof (`group_is_private`) comes only from the
+  local files, read bounded with std (1 MiB each): `nsswitch.conf` lists only `files`, `compat` or
+  `systemd` for `passwd` and `group` (or is absent); `passwd` and `group` have no NIS `+`/`-` or
+  malformed lines and list our own account; no other uid has that group as its primary group;
+  exactly one `group` entry has that gid, and its supplementary members name nobody but us. A
+  group name equal to the user name is not required (only a supporting signal; the membership is
+  the proof). Anything unprovable stays shared (directory services such as `sss`, `ldap`, `nis`;
+  unreadable files; a group that resolves only through NSS). macOS keeps its account databases in
+  Directory Services, so membership is never provable there and `staff` (gid 20) stays shared;
+  Android has no `/etc/passwd`, so it fails closed too. World-writable stays shared unless sticky.
+  Tests inject the account files (`ACCOUNT_FILES` in tests; production reads the real files):
+  `a_group_writable_folder_is_private_only_for_a_proven_user_private_group`,
+  `a_user_private_group_is_proven_only_from_the_local_files`, `unprovable_membership_fails_closed`,
+  `other_accounts_rule_follows_owner_and_mode_bits`, and on Linux CI
+  `unix_removes_in_a_group_writable_folder_only_for_a_user_private_group`. Seven guards were broken
+  one at a time and each turned a test red (owner, primary gid, other primary, other member,
+  unresolvable group, NSS sources, world-writable).
+- **Lost saved file: check and say so.** Replaces the "Saved until cleared" residual. When
+  Transfers is shown (once per visit) and after acting on a Saved row, the renderer asks
+  `check_saved_download(server, download, expectedIntent)`. Native reads the record (revision and
+  Published journal), runs `saved_presence` (read-only: the folder must still be the identified one,
+  then the final name is opened without following links and compared by identity) on the blocking
+  pool with one of two check slots, and waits at most `SAVED_CHECK_WAIT` (3 s, Keep's bound) on
+  the sanctioned clock, holding no session commit guard while it waits; without a free slot it
+  answers `unknown` at once. The answer is returned only while the record is the same Saved record
+  (revision and journal) before and after and the UI session and server entry are unchanged; the
+  renderer keeps it only for the same view and row revision. Outcomes: `present` keeps "Saved";
+  `missing` shows "The saved file is no longer there"; `replaced` shows "The saved file was changed
+  or replaced" (never claimed as ours); both offer **Save again**, the existing explicit fresh save
+  from the private encrypted copy (no-replace, fresh or numbered name, never automatic);
+  `unknown` (timeout, folder unreachable or moved, busy, a refused or unreadable answer) keeps
+  "Saved" with the quiet hint "Saved, could not check the file". Clear is unchanged. No path in any
+  answer, error or log. The new command is `account-read` in `security/command-policy.json`,
+  granted in `capabilities/main.json`, listed in `tauri-command-security.ts` and mocked in the
+  visual fixture. Tests: storage
+  `a_saved_file_check_says_what_is_at_the_saved_name_without_changing_anything`; native
+  `saved_check_tests` (each outcome, the timeout, stale record before and after, session change,
+  the bounded read-only production check); frontend `a saved file check says what it found...`,
+  `a saved file check answer is a closed word...`, and the production-text App.svelte tests
+  `Transfers checks each Saved row's file once per visit...` and `a saved file check answered after
+  the row or view changed never relabels anything` (both renderer fences and the native
+  after-check fence break-checked).
+
+Recorded, no change:
+
+- "Warning once is enough": the R2-M3 minimum option stays (the old-partial notice travels with
+  every result of the replacement save; no durable record of an abandoned partial).
+- The Unix rename-aside before unlink, and Windows FAT/exFAT detection only at the creation probe,
+  are accepted as implemented.
 
 ## Ledger (23 October, PR51 review rounds)
 

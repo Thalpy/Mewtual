@@ -551,8 +551,15 @@ Where it works:
 Mewtual only ever deletes a partly saved file it can prove is its own. On Linux and macOS it
 deletes nothing automatically in a folder that other accounts on the computer can change, nor on a
 network or FUSE drive; it says so, and you can delete the leftover `.mewtual-part` or `.part` file
-yourself. If your system gives your own folders group write access (a umask of 002, common for
-per-user groups), Mewtual treats them the same way.
+yourself. A folder that gives your own per-user group write access (a umask of 002) still counts
+as yours on Linux when the system's account files show that nobody else is in that group; if
+they cannot show it (for example accounts that come from a directory service), and always on
+macOS, Mewtual treats the folder as shared.
+
+When Transfers is open, Mewtual checks each **Saved** file. If it is no longer there, or a
+different file now has its name, the row says so and offers **Save again**, which saves a new copy
+from Mewtual's private copy under a free name. If the file could not be checked (the drive is
+unplugged, for example), the row still says Saved and adds that it could not check.
 
 ### What loads by itself, and how big it may be
 

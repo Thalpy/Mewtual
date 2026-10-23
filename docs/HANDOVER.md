@@ -1157,14 +1157,15 @@ design document). No `unsafe` was added. Native's fallback writer, GIF export an
 use the new `session_id`/`remove_if_session`/`publish_unjournaled`. An adversarial review of those
 changes found no blocker or high; its six mediums (published-row removal, Unix rename-before-verify,
 network/FUSE mode bits, untruthful "delete it yourself", silent leftovers after a successful save,
-user-private groups) are fixed or settled in the design document. Open: Unix behaviour runs only in
-Linux CI, macOS is not built in CI, ReFS is unverified, a Published row whose final name was lost
-still reads "Saved" until cleared, on default user-private-group systems every save leaves a
-temporary copy for the user to delete, and no test pins a Remove landing between the flush and
-Published. The user's second review of `86664d94` (R2-M1 to R2-M3, R2-L1: a stalled Remove
-disabling other rows, the Save as turn held across validation, Save new copy's old-partial notice
-lost on failure, deferred closes escaping export capacity) is fixed; dispositions in the design
-document.
+user-private groups) are fixed or settled in the design document. The user's second review of
+`86664d94` (R2-M1 to R2-M3, R2-L1: a stalled Remove disabling other rows, the Save as turn held
+across validation, Save new copy's old-partial notice lost on failure, deferred closes escaping
+export capacity) is fixed; dispositions in the design document. User decisions of 23 October,
+implemented: a group-writable folder of a user-private group proven from the local account files
+counts as private (unprovable stays shared, macOS always shared), and Transfers checks each Saved
+row's file (new read-only command `check_saved_download`), saying when it is missing or replaced
+and offering Save again. Open: Unix behaviour runs only in Linux CI, macOS is not built in CI,
+ReFS is unverified, and no test pins a Remove landing between the flush and Published.
 
 ## Chat history adversarial checkpoint (2026-10-20)
 

@@ -623,8 +623,11 @@ writer keeps those properties.
   (guaranteed against every process); no attribute is ever changed, through a path or a handle.
   Unix has no delete-by-inode, so the guarantee is narrower: **automatic deletion is guaranteed
   only against processes running as other accounts.** In a folder other accounts can modify (owner
-  neither us nor root, or group- or other-writable without the sticky bit; a user-private group
-  folder at 0775 counts as shared) and on any network, FUSE or unrecognized filesystem (whose
+  neither us nor root, or group- or other-writable without the sticky bit; a group-writable folder
+  counts as private only when it is ours, its group is our primary group, and the local account
+  files prove that group has no other member, user decision of 23 October; membership that cannot
+  be proven, as with directory services or on macOS, stays shared) and on any network, FUSE or
+  unrecognized filesystem (whose
   permissions this kernel does not decide; ACLs are not read), nothing is deleted automatically and
   the user is told to delete the leftover, but only after a read-only check that it still holds
   Mewtual's own file. Elsewhere the name is verified where it is (a foreign object is never moved),
@@ -709,9 +712,11 @@ writer keeps those properties.
   refused before writing. A volume whose device
   number changes across reboot reports Changed. The destination folder is flushed after the link
   and before Published is recorded (PR51 M2), but flushes are best effort, so power loss can still
-  lose a just-published name on filesystems that ignore them; a saved row whose final name is gone
-  still reads "Saved" until it is cleared, and its Clear keeps the staging name when that is the
-  only copy and says so. A destination that
+  lose a just-published name on filesystems that ignore them; Transfers then checks a saved row's
+  file (read-only, bounded, fenced by session and row revision; user decision of 23 October) and
+  says when it is missing or replaced, offering an explicit Save again, and Clear keeps the
+  staging name when that is the only copy and says so. The check reads the saved folder from native
+  only; the renderer gets one of four words, never a path. A destination that
   hangs during the guarded link can delay Lock, as the existing writer could, and every other
   command that takes the process-wide session commit guard until the operating system gives up.
   The post-publication media check reads the destination outside that guard and off the async

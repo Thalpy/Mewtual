@@ -650,6 +650,16 @@ Rust interfaces:
   export_custody()` (catcoms-app, read-only) feeds `OnPool::with_custody`, so a session closed on
   the blocking pool keeps the export permit until the close finishes (`ExportPorts::custody`,
   `SaveSource::custody`).
+- User decisions (23 October): new renderer command `check_saved_download(server, download,
+  expectedIntent) -> "present" | "missing" | "replaced" | "unknown"` (`account-read`, main window
+  only; read-only, bounded by two check slots and a 3 s sanctioned-clock wait, no session commit
+  guard while waiting; the stale-download error when the row's revision or Saved journal changed,
+  "no longer active" after Lock or a server replacement; never a path). Renderer:
+  `checkedSavedCheck`, and `privateDownloadDetail`/`privateDownloadActions` take the row's check
+  (Save again for `missing`/`replaced`, which is the existing `fresh` action). Storage:
+  `saved_presence(&ExportJournal) -> SavedPresence` (`Ours`, `Missing`, `Replaced`, `Unknown`).
+  Unix removal treats a group-writable folder as private only for a user-private group proven from
+  `/etc/passwd`, `/etc/group` and `/etc/nsswitch.conf` (internal `group_is_private`).
   Contracts and the support matrix:
   [EXTERNAL-DOWNLOAD-RESUME](communication-recovery/EXTERNAL-DOWNLOAD-RESUME.md#pr51-review-user-at-86664d94-design-note).
 - Remove, Keep partly saved file and Save new copy share one process-wide cleanup claim per
