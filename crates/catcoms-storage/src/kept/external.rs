@@ -1878,7 +1878,8 @@ pub(super) fn link_open(
                 Err(error) if error.kind() == io::ErrorKind::NotFound => {
                     return Err(io::Error::new(
                         io::ErrorKind::NotFound,
-                        "the partly saved file is not in the destination folder",
+                        "the partly saved file is not in the destination folder; it may still \
+                         be in a folder that was moved or renamed",
                     ))
                 }
                 Err(error) => return Err(error),
