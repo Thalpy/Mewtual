@@ -114,6 +114,35 @@ async fn native_voice_actor_installs_exact_endpoint_and_coalesces_revision_obser
         "actor commands cannot manufacture a proven pair from request metadata"
     );
     assert!(!changes.has_changed().unwrap());
+    let missing = PairSelector {
+        peer: catcoms_crypto::DeviceId::from_bytes([9; 32]),
+        join: [9; 32],
+        key_ref: [9; 32],
+        epoch: 0,
+    };
+    assert_eq!(
+        actor
+            .voice_pair_confirmation(grant.clone(), missing, [0; 32])
+            .await,
+        Err(VoiceEndpointError::Protocol(VoiceError::Unauthorized))
+    );
+    // An abandoned read-only command must not publish a wake or manufacture pair state.
+    let (reply, lost) = oneshot::channel();
+    drop(lost);
+    actor
+        .cmd_tx
+        .send(AppCommand::VoiceEndpoint(VoiceEndpointCommand(
+            Command::PairConfirmation {
+                grant: grant.clone(),
+                selector: missing,
+                handshake: [0; 32],
+                reply,
+            },
+        )))
+        .await
+        .unwrap();
+    actor.member_count().await;
+    assert!(!changes.has_changed().unwrap());
     actor
         .start_voice_endpoint(grant.clone(), [81; 32], point())
         .await
@@ -145,6 +174,10 @@ async fn native_voice_actor_installs_exact_endpoint_and_coalesces_revision_obser
     assert_eq!(
         actor.voice_endpoint_changes().await.err(),
         Some(VoiceEndpointError::Stopped)
+    );
+    assert_eq!(
+        actor.voice_pair_confirmation(grant, missing, [0; 32]).await,
+        Err(VoiceEndpointError::Stopped)
     );
 }
 

@@ -2,7 +2,7 @@
 //! pair state is injected. This test proves signalling custody, not audible WebRTC media.
 use super::*;
 use crate::voice_authority::SelectedHandoffOwner;
-use catcoms_sync::voice_v2::presence::PairSelector;
+use catcoms_sync::voice_v2::presence::{PairSelector, VoicePairConfirmation};
 use catcoms_sync::voice_v2::{Body, CallGrant};
 
 /// Two actual browser brokers, not fixed AES providers or framed endpoint mocks. This
@@ -10,6 +10,32 @@ use catcoms_sync::voice_v2::{Body, CallGrant};
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn native_webcrypto_confirmation_uses_real_http_and_blocked_tcp_member_bridge() {
     use crate::voice_handoff::integration::webcrypto::{catch_fixture, Endpoint, Failure};
+    async fn observation(
+        actor: &catcoms_app::ServerActor,
+        clock: &dyn catcoms_rt::Clock,
+        grant: &Arc<CallGrant>,
+        selector: PairSelector,
+        handshake: [u8; 32],
+    ) -> VoicePairConfirmation {
+        bounded("exact native pair confirmation observation", async {
+            loop {
+                match actor
+                    .voice_pair_confirmation(grant.clone(), selector, handshake)
+                    .await
+                {
+                    Ok(state) => return state,
+                    // Real final Group/Policy contention is a proven pre-observation refusal.
+                    // Retry ONLY that same identity; neither wrong state nor a stale grant is
+                    // success. The outer bound also covers an Actor reply which never arrives.
+                    Err(catcoms_app::VoiceEndpointError::Protocol(
+                        catcoms_sync::voice_v2::VoiceError::Capacity,
+                    )) => clock.sleep(std::time::Duration::from_millis(20)).await,
+                    Err(error) => panic!("native pair observation refused: {error:?}"),
+                }
+            }
+        })
+        .await
+    }
     async fn endpoint(scenario: &Scenario, index: usize) -> Result<Endpoint, Failure> {
         let state = scenario.online(index).state.clone();
         let owner = catch_fixture(async {
@@ -61,23 +87,56 @@ async fn native_webcrypto_confirmation_uses_real_http_and_blocked_tcp_member_bri
         let cg = c_selected.grant().unwrap();
         let discovered = both_fresh(&scenario, &a_selected, &c_selected, &ag, &cg, None, 0).await;
         let (ap, cp) = tokio::join!(a.derive(discovered[0].1), c.derive(discovered[1].1));
-        let (low, low_parent, high, high_parent) =
+        let a_handshake = ap.confirmation_handshake().unwrap();
+        let c_handshake = cp.confirmation_handshake().unwrap();
+        let a_clock = crate::voice_runtime(&scenario.online(1).state).clock();
+        let c_clock = crate::voice_runtime(&scenario.online(2).state).clock();
+        let observations = || async {
+            let (a, c) = tokio::join!(
+                observation(
+                    &scenario.online(1).actor,
+                    a_clock.as_ref(),
+                    &ag,
+                    discovered[0].1,
+                    a_handshake
+                ),
+                observation(
+                    &scenario.online(2).actor,
+                    c_clock.as_ref(),
+                    &cg,
+                    discovered[1].1,
+                    c_handshake
+                ),
+            );
+            [a, c]
+        };
+        assert_eq!(observations().await, [VoicePairConfirmation::Confirming; 2]);
+        let (low, low_parent, high, high_parent, low_index) =
             if scenario.clients[1].identity.as_ref().unwrap().1
                 < scenario.clients[2].identity.as_ref().unwrap().1
             {
-                (&mut a, &ap, &mut c, &cp)
+                (&mut a, &ap, &mut c, &cp, 0)
             } else {
-                (&mut c, &cp, &mut a, &ap)
+                (&mut c, &cp, &mut a, &ap, 1)
             };
         low.start(low_parent).await;
         let hello = high.incoming(high_parent, 1).await;
         high.respond(high_parent, hello).await;
         let proof = low.incoming(low_parent, 2).await;
         low.respond(low_parent, proof).await;
+        // Hold the final browser open even if transport has already delivered the signed
+        // Finish. Sender signing is local establishment, not proof of receiver confirmation.
+        let held = observations().await;
+        assert_eq!(held[low_index], VoicePairConfirmation::Established);
+        assert_eq!(held[1 - low_index], VoicePairConfirmation::Confirming);
         high.incoming(high_parent, 3).await;
+        assert_eq!(
+            observations().await,
+            [VoicePairConfirmation::Established; 2]
+        );
         scenario.rules.assert_graph();
-        // Pair establishment/current RTC authority still needs its independent native query.
-        // Every step above separately requires actual original Sealed/Opened native receipts.
+        // Each step separately required its original native receipt. These independent pair
+        // observations still grant no SDP/ICE/RTC authority or packaged WebView acceptance.
         drop((ap, cp, ag, cg));
     })
     .await;

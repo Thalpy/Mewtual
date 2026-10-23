@@ -5,7 +5,9 @@ use super::*;
 use catcoms_sync::voice_v2::crypto_actions::{
     CryptoAction, CryptoActionSnapshot, CryptoActionSnapshotPermit, CryptoResultReceipt,
 };
-use catcoms_sync::voice_v2::presence::{FreshPeer, PairReceipt, PairSelector};
+use catcoms_sync::voice_v2::presence::{
+    FreshPeer, PairReceipt, PairSelector, VoicePairConfirmation,
+};
 use catcoms_sync::voice_v2::{CallGrant, CallLease, Nonce, VoiceError};
 use catcoms_sync::VoiceWatchGrant;
 
@@ -89,6 +91,12 @@ enum Command {
         grant: Arc<CallGrant>,
         selector: PairSelector,
         reply: Reply<PairReceipt>,
+    },
+    PairConfirmation {
+        grant: Arc<CallGrant>,
+        selector: PairSelector,
+        handshake: Nonce,
+        reply: Reply<VoicePairConfirmation>,
     },
     Derive {
         grant: Arc<CallGrant>,
@@ -197,6 +205,20 @@ impl Command {
                     return;
                 }
                 let _ = reply.send(server.sync.prepare_voice_pair(&grant, selector));
+            }
+            Self::PairConfirmation {
+                grant,
+                selector,
+                handshake,
+                reply,
+            } => {
+                if !reply.is_closed() {
+                    let _ = reply.send(
+                        server
+                            .sync
+                            .voice_pair_confirmation(&grant, selector, handshake),
+                    );
+                }
             }
             Self::Derive {
                 grant,
@@ -330,6 +352,24 @@ impl ServerActor {
         })
         .await
     }
+    /// Fixed local confirmation observation for the original grant, selector and handshake.
+    /// Mailbox loss is uncertain metadata, never proof of establishment or a reason to create
+    /// a replacement pair. Re-query the same identity; later SDP admission remains independent.
+    pub async fn voice_pair_confirmation(
+        &self,
+        grant: Arc<CallGrant>,
+        selector: PairSelector,
+        handshake: Nonce,
+    ) -> Result<VoicePairConfirmation, VoiceEndpointError> {
+        self.voice_endpoint_request(|reply| Command::PairConfirmation {
+            grant,
+            selector,
+            handshake,
+            reply,
+        })
+        .await
+    }
+
     async fn voice_endpoint_request<T: Send + 'static>(
         &self,
         build: impl FnOnce(Reply<T>) -> Command + Send,

@@ -24,6 +24,15 @@ pub struct PairReceipt {
 }
 redacted_debug!(PairSelector, PairReceipt);
 
+/// Local native observation, never a key, SDP/RTC capability or proof of remote receipt.
+/// Low establishes on signing Finish; high establishes only after committing its open.
+/// In particular, observing Established must not discard the original Finish retry owner.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VoicePairConfirmation {
+    Confirming,
+    Established,
+}
+
 pub(crate) struct ProtectedPair<'a> {
     pub actor: &'a ActorOwner,
     pub room: &'a RoomAuthority,
@@ -32,6 +41,72 @@ pub(crate) struct ProtectedPair<'a> {
 }
 
 impl LocalJoin {
+    /// Observe only an existing protected pair. Caller must supply the actual participant's
+    /// original implicit watcher and recheck native grant custody before entering this seam.
+    /// No transcript, action, packet, timer or source allowance is created by observation.
+    pub(crate) fn protected_pair_confirmation(
+        &mut self,
+        request: ProtectedPair<'_>,
+        handshake: Nonce,
+        authority: &Authority<'_>,
+        clock: &dyn Clock,
+        final_owner: impl FnOnce(u64, u64) -> Result<(), VoiceError>,
+    ) -> Result<VoicePairConfirmation, VoiceError> {
+        let ProtectedPair {
+            actor,
+            room,
+            watch,
+            selector,
+        } = request;
+        self.owned(authority)?;
+        let pair = self
+            .confirmations
+            .pairs
+            .get(&handshake)
+            .ok_or(VoiceError::Unauthorized)?;
+        // Reject substitutions before housekeeping: an invalid query must not select another
+        // pair to retire. pair_current alone deliberately does not enforce protected epochs.
+        if pair.binding.peer != selector.peer
+            || pair.binding.join != selector.join
+            || pair.binding.key_ref != selector.key_ref
+            || pair.protected_epoch != Some(selector.epoch)
+            || selector.epoch != authority.context.epoch
+            || room.scope != self.scope
+            || !room.lease.is_live()
+            || !watch.is_live()
+            || !actor.uses_resources(&self.resources)
+        {
+            return Err(VoiceError::Unauthorized);
+        }
+        // This can call Clock and retire expired/removed state, including dropping ledger
+        // owners. It must finish OUTSIDE the final Group/Policy guards below.
+        let established = self.pair_established(handshake, authority, clock)?;
+        let pair = &self.confirmations.pairs[&handshake];
+        actor.with_local_origin(selector.peer, authority.context, |wall, mono, origin| {
+            final_owner(wall, mono)?;
+            if !room.lease.is_live()
+                || !watch.is_live()
+                || !self.lease.is_live()
+                || pair.retired
+                || !pair.pin.is_live()
+                || pair.protected_epoch != Some(origin.epoch())
+            {
+                return Err(VoiceError::Unauthorized);
+            }
+            if !established && mono >= pair.deadline {
+                return Err(VoiceError::Freshness);
+            }
+            // Reuse the original actor's pure final session fence. This publishes no effect;
+            // the result is a snapshot at this boundary and grants no later admission.
+            origin.publish(|| ())
+        })?;
+        Ok(if established {
+            VoicePairConfirmation::Established
+        } else {
+            VoicePairConfirmation::Confirming
+        })
+    }
+
     /// Caller selects evidence only from the actual participant's implicit watcher. Discovery
     /// is needed for first admission, not exact recovery of an independently pinned pair.
     pub(crate) fn admit_protected_pair(

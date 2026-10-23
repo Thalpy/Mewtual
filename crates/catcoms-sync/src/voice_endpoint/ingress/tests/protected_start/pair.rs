@@ -2,6 +2,7 @@
 use super::*;
 use voice_v2::presence::PairSelector;
 use voice_v2::resources::ResourceKind;
+mod confirmation;
 
 #[derive(Default)]
 struct Probe {

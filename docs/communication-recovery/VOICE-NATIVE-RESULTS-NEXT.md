@@ -18,9 +18,9 @@ the earlier statement that all native TCP confirmation uses fixed AES keys, not 
 implementation prerequisites. One desktop still cannot provide separate physical-network
 and two-device audio acceptance.
 
-### Next query boundary (reviewed design; not implemented)
+### Native query boundary (continuation implemented; validation pending)
 
-Expose a fixed native `Confirming/Established` observation for the actual grant, original
+The continuation exposes a fixed native `Confirming/Established` observation for the actual grant, original
 PairSelector and handshake through ChannelSync and the bounded Actor mailbox. Resolve only
 the existing participant/pair: never call a pair factory or clone its transcript to answer
 this query. Require the original grant allocation, live call/watch and exact scope, peer,
@@ -28,10 +28,13 @@ join/key reference and protected epoch equal to the current context epoch. Local
 existing `pair_established` alone does not enforce that protected-epoch comparison. Fresh
 current-owner/room/watch checks must still precede return, with Clock callbacks outside final
 native gates. The observation grants no SDP/RTC authority and must create no action, packet,
-deadline renewal or revision wake.
+deadline renewal or healthy revision wake. Existing control validation, reconciliation and
+context eligibility retain their normal roster allocations; the member predicate copies only
+two booleans. The query adds no persistent owner. The Actor wrapper
+retains its ordinary bounded mailbox/oneshot overhead.
 
 Local confirmation is asymmetric: native signing Finish establishes low locally; high
-establishes only after committed Finish open. Query both real endpoints independently. Pin
+establishes only after committed Finish open. Tests query both real endpoints independently and pin
 low Established/high Confirming with Finish held, plus wrong grant/selector/handshake,
 End/replacement/lock, epoch/policy/member/room change and ordinary discovery-expiry cases.
 Do not retire Finish retry custody from a local Established observation.

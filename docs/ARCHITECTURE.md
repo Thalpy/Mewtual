@@ -1,5 +1,17 @@
 # Mewtual; Architecture
 
+## Native pair observation (23 October; inactive integration)
+
+The bounded Actor exposes a fixed Confirming/Established query backed by the existing
+protected LocalJoin pair, not a crypto result or a new pair factory. The query validates
+the original participant/grant/watch and immutable peer/join/key/handshake/epoch, then
+uses the original Actor's short current-view fence. Callback-bearing time/expiry work
+stays outside Group/Policy. Existing validation, reconciliation and context eligibility retain
+their normal roster allocations; the query's member predicate copies only two booleans. No
+persistent owner, action, deadline renewal or healthy revision
+wake is introduced. Local Finish signing and remote Finish open establish independently.
+This observation grants no future SDP/RTC permission and does not enable work delivery.
+
 ## Private native-origin work producer (23 October; draft)
 
 Native Derive production has a separate origin from browser-authenticated requests. It

@@ -15,7 +15,7 @@ use std::sync::Arc;
 mod confirmation;
 pub use confirmation::{
     ConfirmationOutput, CryptoFlight, FlightSubmission, OpenedFlight, PairReceipt, PairSelector,
-    PairSetup, ReceiveProgress,
+    PairSetup, ReceiveProgress, VoicePairConfirmation,
 };
 pub(crate) use confirmation::{
     ProtectedDerivation, ProtectedDerivationResult, ProtectedOpenedResult, ProtectedPair,

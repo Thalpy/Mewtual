@@ -1,12 +1,30 @@
 # Threat model; client integrity & enforcement boundaries
 
+## Native confirmation observations (23 October; inactive integration)
+
+Pair status cannot be supplied by the renderer or reconstructed by running a pair factory.
+The native query binds the actual grant allocation, original implicit watcher and exact
+existing protected peer/join/key/handshake/epoch. A new MLS epoch cannot adopt an old pair
+by changing only the query's epoch. The final original Group/Policy fence repeats current
+actor/member/room/call/watch/pin checks after callback-bearing Clock/expiry housekeeping.
+Final-fence contention is retryable Capacity, not missing membership: the preliminary
+member predicate snapshots only the local/selected-peer booleans from the reconciled Actor
+view and propagates errors. It neither copies the MLS roster nor turns a failed native
+view read into pair retirement. Healthy polling neither renews time nor produces revision feedback.
+
+An Established snapshot describes this endpoint at that fence. Sender Finish signing does
+not prove remote receipt, and the query must not release Finish retry custody or authorize
+future SDP. Discovery expiry alone does not end an established pair. Production delivery,
+RTC admission and packaged WebView integration remain separate unimplemented boundaries.
+
 ## Native/Node fixture boundary (23 October; no production activation)
 
 The real blocked-TCP single-pair fixture now uses separate actual WebCrypto brokers and
 native-authenticated HTTP, rather than shared test AES keys. It requires real original
 Derive and all six confirmation receipts plus exact ACK/settlement/Return and End/final
 collection. This narrows the cryptographic interoperability gap; it does not establish
-independent pair readiness, packaged WebView policy, live work delivery, RTC or audible media.
+packaged WebView policy, live work delivery, RTC or audible media. The continuation adds an
+independent native pair observation described above; its current validation is in HANDOVER.
 
 The effect dispatcher and negative Input contention flag are cfg(test) only. The latter
 holds the real server-map mutex after authenticated v1 Input selection, forcing actual

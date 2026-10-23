@@ -26,7 +26,7 @@ mod result;
 mod start;
 pub(crate) use derivation::{ProtectedDerivation, ProtectedDerivationResult};
 pub(crate) use pair::ProtectedPair;
-pub use pair::{PairReceipt, PairSelector};
+pub use pair::{PairReceipt, PairSelector, VoicePairConfirmation};
 pub(crate) use response::ProtectedResponse;
 pub(crate) use result::{ProtectedOpenedResult, ProtectedSealedResult};
 pub(crate) use start::ProtectedStart;

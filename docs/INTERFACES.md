@@ -1,5 +1,25 @@
 # Mewtual; Interfaces & Hooks Schema
 
+## Native pair confirmation observation (23 October; inactive integration)
+
+`ChannelSync::voice_pair_confirmation(&Arc<CallGrant>, PairSelector, handshake)` and the
+typed bounded `ServerActor` request return `VoicePairConfirmation::{Confirming, Established}`.
+Only an existing protected pair belonging to that actual participant's original grant and
+implicit watcher can answer. Peer, remote join/key reference, handshake and creation epoch
+must match; the protected epoch must still equal the current native context epoch. Current
+actor, membership, policy, room incarnation and call/watch/pair leases are rechecked.
+
+The fixed result is local observation, never a capability, remote delivery receipt or SDP/RTC
+admission. Low becomes Established on signing Finish; high only after committing its open.
+An Established answer must not retire Finish retry custody. Healthy repeated observation
+creates no persistent owner, charge, action, packet, deadline renewal or revision wake. The
+member predicate copies only two booleans; control/directory validation, reconciliation and
+context eligibility retain their normal roster allocations;
+the Actor wrapper retains its ordinary bounded mailbox/oneshot overhead. Clock callbacks and
+expiry retirement run outside final Group/Policy guards, which use a fresh sample and refuse
+contention. Reply loss requires requerying the same identity, never inferring establishment.
+This adds no Tauri command, serialized byte path, wire or persistence format.
+
 ## Authenticated browser child row and private interoperability fixture (23 October)
 
 `VoiceChannelConfirmationHandle.row()` returns its cached authenticated native RowId or
