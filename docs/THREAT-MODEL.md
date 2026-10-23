@@ -659,11 +659,19 @@ writer keeps those properties.
 - **Creation.** Creating a partial is path-based: every creation with a captured folder identity
   re-reads it afterwards and removes (verified as above) and refuses a partial that landed in a
   swapped folder; a swap and swap-back inside that window leaves at most an empty partial there,
-  because creation then requires the partial's name to hold our own handle's object (a link probe
-  on Windows, a read-only no-follow name check on Unix) and refuses otherwise, even if a file was
-  planted at our name. The Unix name check was lost when PR51 M3 replaced the Unix link probe with
-  `fstatfs` and was restored after Linux CI caught it. Residual: that check also resolves the folder
-  by path, so a third swap timed between the folder recheck and the name check is not detected.
+  because creation then requires the partial's name to hold our own handle's object and refuses
+  otherwise, even if a file was planted at our name. On Unix the recheck reads the folder identity
+  and the name through one folder descriptor, so a third swap cannot pass it, and a failed check is
+  the same refusal as a changed folder (never a quiet switch to the non-resumable writer). On
+  Windows the link probe makes the name check by path, so a third swap timed between the recheck
+  and the probe is a residual there. The Unix name check was lost when PR51 M3 replaced the Unix
+  link probe with `fstatfs` and was restored after Linux CI caught it. Without a captured folder
+  identity (an identity-less chosen folder, native's one-click Downloads reservation) only the
+  path-based name check stands. Open follow-up (introduced by PR51 M1): on Linux the
+  non-resumable writer's publication links its open descriptor into the folder pinned by path
+  without its identity, so someone who can rename the chosen folder and put another at its path
+  before publication gets our file's final name in that folder (at `86664d94` the path-based link
+  from the staging name failed there instead). Windows checks the staging name under its pin.
 - **Filesystem support (PR51 M3, fail closed).** Unix journals only on filesystems `fstatfs`
   identifies as local with stable identities (ext2/3/4, xfs, btrfs, f2fs, tmpfs, each only when it
   reports birth times; APFS and HFS+ that are `MNT_LOCAL`); FAT, vfat and exFAT are refused before

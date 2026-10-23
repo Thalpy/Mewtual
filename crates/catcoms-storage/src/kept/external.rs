@@ -47,9 +47,11 @@
 //! re-checks it after creating and removes (by proven handle identity) and refuses a partial that
 //! landed in a swapped folder. A swap and swap-back that both fall between the two checks still
 //! puts an empty partial in the other folder; creation then requires the partial's name to hold
-//! our own handle's object (whenever the filesystem reports identities: the link probe on Windows,
-//! a read-only no-follow name check on Unix, `links_supported` in `export.rs`), so it refuses and no
-//! plaintext is ever written there, even if a file was planted at our name meanwhile.
+//! our own handle's object (whenever the filesystem reports identities), so it refuses and no
+//! plaintext is ever written there, even if a file was planted at our name meanwhile. Unix reads
+//! the folder identity and the name through one folder descriptor (`folder_holds_session`), so a
+//! third swap cannot pass either; Windows proves the name with the link probe (`links_supported` in
+//! `export.rs`), which resolves the folder by path again.
 use std::ffi::{OsStr, OsString};
 use std::fs::{self, File, OpenOptions};
 use std::io;
@@ -422,8 +424,8 @@ fn open_leaf_as(path: &Path, write: bool, pinned: bool) -> io::Result<Leaf> {
 ///
 /// This is a path-based call made after the caller's folder identity check, so the folder can be
 /// swapped in between. Every caller with a captured folder identity re-checks it afterwards
-/// (picker review L4, `confirm_folder` in `export.rs`) and removes a partial that landed in a
-/// swapped folder; `links_supported` then checks the name still holds our own handle's object.
+/// (picker review L4, `confirm_folder` in `export.rs`), on Unix together with the name, and
+/// refuses when the folder was swapped or the name no longer holds our own handle's object.
 pub(super) fn create_leaf(path: &Path) -> io::Result<File> {
     #[cfg(test)]
     BEFORE_CREATE.with(|hook| {
@@ -708,6 +710,12 @@ thread_local! {
     /// Test-only interleaving point right after a successful exclusive creation (picker
     /// re-review LOW 2): a test swaps the folder back and plants a file at our name.
     pub(in crate::kept) static AFTER_CREATE: std::cell::RefCell<LinkHook> =
+        const { std::cell::RefCell::new(None) };
+    /// Test-only interleaving point in Unix `folder_holds_session`, after creation's path-based
+    /// folder identity recheck and before the pinned name check: a test swaps the folder a third
+    /// time there. The hook gets the partial's path.
+    #[cfg(unix)]
+    pub(in crate::kept) static BEFORE_NAME_CHECK: std::cell::RefCell<LinkHook> =
         const { std::cell::RefCell::new(None) };
     /// Test-only interleaving point in [`remove_verified`], after the identity was verified and
     /// before the delete (PR51 H1): a test replaces the name with someone else's file there. The
@@ -1824,8 +1832,10 @@ pub(super) fn linkat_error(errno: rustix::io::Errno) -> io::Error {
 /// `folder`, never replacing anything.
 ///
 /// - Linux and Android: `linkat` of `/proc/self/fd/N` with `AT_SYMLINK_FOLLOW` into the folder,
-///   pinned by a descriptor checked against `folder_id` when the caller has one (a writer without a
-///   journal has none). The new name is for exactly the object we hold open, whatever has happened
+///   pinned by a descriptor checked against `folder_id` when the caller has one (the writers
+///   without a journal pass none, even at a chosen place whose identity was captured, so a folder
+///   put at their path before publication receives the final name; a recorded follow-up). The new
+///   name is for exactly the object we hold open, whatever has happened
 ///   to the staging name meanwhile, so a swapped staging name can never become the final name.
 ///   Errors are reported by [`linkat_error`].
 /// - Elsewhere: the path-based no-replace hard link from `staging` (Windows callers hold the
@@ -1932,6 +1942,42 @@ pub(super) fn holds_session(path: &Path, id: SessionId) -> io::Result<Option<boo
         AtName::Object(found) => Ok(Some(verify(&found, Expected::Session(id))?.is_some())),
         AtName::Missing => Ok(None),
         AtName::Foreign => Ok(Some(false)),
+    }
+}
+
+/// Unix, read-only: whether the folder at `folder` is still the one with `folder_id` and holds the
+/// object with `id` at `leaf`, both read through one descriptor of that folder.
+///
+/// Creation checks this right after its exclusive create (picker re-review LOW 2, restored after
+/// the Linux CI failures at `516ab8d0`; `confirm_folder` in `export.rs`). Reading the identity and
+/// the name through the same descriptor is what makes the answer about one directory: two
+/// path-based reads (an identity read, then a name check) can each be answered by a different
+/// folder if someone swaps the path between them, which let a third swap pass the check (review of
+/// that fix, MEDIUM 2). `false` means not provably ours: a different or identity-less folder at
+/// the path, nothing at the name, or another object there. An error means it could not be read.
+#[cfg(unix)]
+pub(super) fn folder_holds_session(
+    folder: &Path,
+    folder_id: FileIdentity,
+    leaf: &str,
+    id: SessionId,
+) -> io::Result<bool> {
+    #[cfg(test)]
+    BEFORE_NAME_CHECK.with(|hook| {
+        if let Some(hook) = hook.borrow_mut().as_mut() {
+            hook(&folder.join(leaf));
+        }
+    });
+    // Never deletes: no account or ACL reads.
+    let Some(pinned) = pin_folder(folder, Some(folder_id), false)? else {
+        return Ok(false);
+    };
+    match open_at_nofollow(&pinned.dir, leaf) {
+        Ok(Some(found)) => Ok(verify(&found, Expected::Session(id))?.is_some()),
+        // A link or a FIFO at our name.
+        Ok(None) => Ok(false),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(error),
     }
 }
 

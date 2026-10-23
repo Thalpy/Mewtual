@@ -616,6 +616,16 @@ fn a_refused_descriptor_link_is_reported_as_no_link_made() {
         io::ErrorKind::StorageFull
     );
     assert_ne!(linkat_error(Errno::IO).kind(), io::ErrorKind::Unsupported);
+    // AppArmor and SELinux deny with EACCES, a read-only mount gives EROFS: these keep their own
+    // kinds (and stay "possibly linked") if the definite list above ever grows.
+    assert_eq!(
+        linkat_error(Errno::ACCESS).kind(),
+        io::ErrorKind::PermissionDenied
+    );
+    assert_eq!(
+        linkat_error(Errno::ROFS).kind(),
+        io::ErrorKind::ReadOnlyFilesystem
+    );
 }
 
 #[cfg(any(target_os = "linux", target_os = "android"))]

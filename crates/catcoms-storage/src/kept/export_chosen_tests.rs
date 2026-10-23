@@ -411,8 +411,9 @@ fn a_remembered_choice_is_preflighted_without_creating_anything() {
 fn a_swap_and_swap_back_around_creation_with_a_planted_file_writes_nothing() {
     // Picker re-review LOW 2: the folder is swapped before the create (our partial lands in the
     // other folder), then restored with a file planted at our name before the recheck. The
-    // identity recheck passes; the link probe must still refuse, because the probe name is not our
-    // handle's object, and the planted file must be left alone.
+    // identity recheck passes; creation must still refuse, because the name is not our handle's
+    // object (Unix: the pinned name check in `confirm_folder`; Windows: the link probe names the
+    // planted file), and the planted file must be left alone.
     // The swapped-in folder is a link (junction on Windows) to a decoy directory: Windows refuses
     // to rename a directory while our new file inside it is open, but removing a link is allowed.
     let fx = fixture();
@@ -449,7 +450,19 @@ fn a_swap_and_swap_back_around_creation_with_a_planted_file_writes_nothing() {
     let created = choice.create_unjournaled(&mut rng());
     external::BEFORE_CREATE.with(|hook| *hook.borrow_mut() = None);
     external::AFTER_CREATE.with(|hook| *hook.borrow_mut() = None);
-    assert!(created.is_err(), "the planted file is never adopted");
+    #[cfg(unix)]
+    assert!(
+        matches!(
+            created,
+            Err(ExportError::Refused(ChoiceRefusal::FolderChanged))
+        ),
+        "the planted file is never adopted"
+    );
+    #[cfg(not(unix))]
+    assert!(
+        matches!(created, Err(ExportError::Local { .. })),
+        "the planted file is never adopted"
+    );
     assert_eq!(
         fs::read(folder.join("report.bin.part")).unwrap(),
         b"planted",
@@ -462,6 +475,80 @@ fn a_swap_and_swap_back_around_creation_with_a_planted_file_writes_nothing() {
     );
 }
 
+/// Picker re-review LOW 2: run `create` while the chosen `folder` is swapped for a directory link
+/// to a fresh decoy just before the exclusive create (so our partial lands in the decoy) and
+/// swapped back right after it, planting a file named `plant` in the restored folder when given.
+/// With `third_swap` (Unix only) the folder is swapped for the decoy once more just before the
+/// pinned name check, after the path-based identity recheck has passed. Returns the result and the
+/// decoy, or `None` when this host cannot create directory links. The swapped-in folder is a link
+/// (a junction on Windows) because Windows refuses to rename a directory while our new file inside
+/// it is open, but removing a link is allowed.
+fn with_swaps_around_creation<T>(
+    folder: &Path,
+    plant: Option<&str>,
+    third_swap: bool,
+    create: impl FnOnce() -> T,
+) -> Option<(T, PathBuf)> {
+    let original = folder.with_file_name("Original");
+    let decoy = folder.with_file_name("Decoy");
+    fs::create_dir(&decoy).unwrap();
+    let probe = folder.with_file_name("Link probe");
+    if !external::tests::link_directory(&decoy, &probe) {
+        eprintln!("skipped: this host cannot create a directory link");
+        return None;
+    }
+    fs::remove_dir(&probe)
+        .or_else(|_| fs::remove_file(&probe))
+        .unwrap();
+    let swap_in = |path: PathBuf, held: PathBuf, target: PathBuf| -> Box<dyn FnMut(&Path)> {
+        Box::new(move |_: &Path| {
+            fs::rename(&path, &held).unwrap();
+            assert!(external::tests::link_directory(&target, &path));
+        })
+    };
+    let first = swap_in(folder.to_owned(), original.clone(), decoy.clone());
+    external::BEFORE_CREATE.with(|hook| *hook.borrow_mut() = Some(first));
+    let (path, held, planted) = (
+        folder.to_owned(),
+        original.clone(),
+        plant.map(str::to_owned),
+    );
+    external::AFTER_CREATE.with(|hook| {
+        *hook.borrow_mut() = Some(Box::new(move |_| {
+            fs::remove_dir(&path)
+                .or_else(|_| fs::remove_file(&path))
+                .unwrap();
+            fs::rename(&held, &path).unwrap();
+            if let Some(planted) = &planted {
+                fs::write(path.join(planted), b"planted").unwrap();
+            }
+        }))
+    });
+    #[cfg(unix)]
+    if third_swap {
+        let third = swap_in(folder.to_owned(), original.clone(), decoy.clone());
+        external::BEFORE_NAME_CHECK.with(|hook| *hook.borrow_mut() = Some(third));
+    }
+    #[cfg(not(unix))]
+    assert!(
+        !third_swap,
+        "Windows has no pinned name check to interleave with"
+    );
+    let result = create();
+    external::BEFORE_CREATE.with(|hook| *hook.borrow_mut() = None);
+    external::AFTER_CREATE.with(|hook| *hook.borrow_mut() = None);
+    #[cfg(unix)]
+    external::BEFORE_NAME_CHECK.with(|hook| *hook.borrow_mut() = None);
+    Some((result, decoy))
+}
+
+/// No file in `folder` holds a single byte (our abandoned partial is empty or was removed).
+fn holds_no_plaintext(folder: &Path) -> bool {
+    fs::read_dir(folder)
+        .unwrap()
+        .all(|entry| entry.unwrap().metadata().unwrap().len() == 0)
+}
+
 #[test]
 fn a_swap_and_swap_back_around_a_journaled_creation_starts_no_journal() {
     // The same attack against the journaled writer (Linux CI regression: on Unix PR51 had dropped
@@ -470,39 +557,30 @@ fn a_swap_and_swap_back_around_a_journaled_creation_starts_no_journal() {
     let fx = fixture();
     let folder = chosen_folder(&fx);
     let choice = ChosenDestination::validate(&folder.join("report.bin")).unwrap();
-    let original = folder.with_file_name("Original");
-    let decoy = folder.with_file_name("Decoy");
-    fs::create_dir(&decoy).unwrap();
-    let probe = folder.with_file_name("Link probe");
-    if !external::tests::link_directory(&decoy, &probe) {
-        eprintln!("skipped: this host cannot create a directory link");
-        return;
-    }
-    fs::remove_dir(&probe)
-        .or_else(|_| fs::remove_file(&probe))
-        .unwrap();
     let staging_name = external::staging_for("report.bin");
-    let (path, held, target) = (folder.clone(), original.clone(), decoy.clone());
-    external::BEFORE_CREATE.with(|hook| {
-        *hook.borrow_mut() = Some(Box::new(move |_| {
-            fs::rename(&path, &held).unwrap();
-            assert!(external::tests::link_directory(&target, &path));
-        }))
-    });
-    let (path, held, planted) = (folder.clone(), original.clone(), staging_name.clone());
-    external::AFTER_CREATE.with(|hook| {
-        *hook.borrow_mut() = Some(Box::new(move |_| {
-            fs::remove_dir(&path)
-                .or_else(|_| fs::remove_file(&path))
-                .unwrap();
-            fs::rename(&held, &path).unwrap();
-            fs::write(path.join(&planted), b"planted").unwrap();
-        }))
-    });
-    let created = ExportFile::create_chosen(&choice, export_plan(), &mut rng());
-    external::BEFORE_CREATE.with(|hook| *hook.borrow_mut() = None);
-    external::AFTER_CREATE.with(|hook| *hook.borrow_mut() = None);
-    assert!(created.is_err(), "no journal starts on a planted name");
+    let Some((created, decoy)) =
+        with_swaps_around_creation(&folder, Some(&staging_name), false, || {
+            ExportFile::create_chosen(&choice, export_plan(), &mut rng())
+        })
+    else {
+        return;
+    };
+    // Unix: a detected swap is a refusal, never `Unsupported`, which would quietly hand the save
+    // to the non-resumable writer (review of the Linux CI fix, MEDIUM 1). Windows: the link probe
+    // names the planted file and is inconclusive; native's fallback then checks the folder again.
+    #[cfg(unix)]
+    assert!(
+        matches!(
+            created,
+            Err(ExportError::Refused(ChoiceRefusal::FolderChanged))
+        ),
+        "no journal starts on a planted name"
+    );
+    #[cfg(not(unix))]
+    assert!(
+        matches!(created, Err(ExportError::Unsupported)),
+        "no journal starts on a planted name"
+    );
     assert_eq!(
         fs::read(folder.join(&staging_name)).unwrap(),
         b"planted",
@@ -513,6 +591,114 @@ fn a_swap_and_swap_back_around_a_journaled_creation_starts_no_journal() {
         0,
         "our own partial, in the other folder, holds no plaintext"
     );
+}
+
+#[test]
+fn a_swap_and_swap_back_around_creation_with_nothing_planted_writes_nothing() {
+    // Review of the Linux CI fix, LOW 3: a name missing from the restored folder is never ours
+    // either, for both writers.
+    for journaled in [true, false] {
+        let fx = fixture();
+        let folder = chosen_folder(&fx);
+        let choice = ChosenDestination::validate(&folder.join("report.bin")).unwrap();
+        let Some((created, decoy)) = with_swaps_around_creation(&folder, None, false, || {
+            if journaled {
+                ExportFile::create_chosen(&choice, export_plan(), &mut rng()).map(drop)
+            } else {
+                choice.create_unjournaled(&mut rng()).map(drop)
+            }
+        }) else {
+            return;
+        };
+        #[cfg(unix)]
+        assert!(
+            matches!(
+                created,
+                Err(ExportError::Refused(ChoiceRefusal::FolderChanged))
+            ),
+            "journaled: {journaled}"
+        );
+        // Windows: the probe finds nothing to link at our name, which reads as a folder without
+        // links. Misleading but safe (recorded in the design doc).
+        #[cfg(not(unix))]
+        assert!(
+            matches!(created, Err(ExportError::NoLinks)),
+            "journaled: {journaled}"
+        );
+        assert_eq!(fs::read_dir(&folder).unwrap().count(), 0, "the real folder");
+        assert!(holds_no_plaintext(&decoy), "journaled: {journaled}");
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn a_third_swap_before_the_name_check_is_refused() {
+    // Review of the Linux CI fix, MEDIUM 2: swapped before the create, swapped back before the
+    // path-based identity recheck (which passes), then swapped for the decoy again before the name
+    // check. Two path-based reads would each have been answered by a different folder; the pinned
+    // check reads the identity and the name through one descriptor and refuses.
+    for journaled in [true, false] {
+        let fx = fixture();
+        let folder = chosen_folder(&fx);
+        let choice = ChosenDestination::validate(&folder.join("report.bin")).unwrap();
+        let Some((created, decoy)) = with_swaps_around_creation(&folder, None, true, || {
+            if journaled {
+                ExportFile::create_chosen(&choice, export_plan(), &mut rng()).map(drop)
+            } else {
+                choice.create_unjournaled(&mut rng()).map(drop)
+            }
+        }) else {
+            return;
+        };
+        assert!(
+            matches!(
+                created,
+                Err(ExportError::Refused(ChoiceRefusal::FolderChanged))
+            ),
+            "journaled: {journaled}"
+        );
+        let original = folder.with_file_name("Original");
+        assert_eq!(
+            fs::read_dir(&original).unwrap().count(),
+            0,
+            "the real folder"
+        );
+        assert!(holds_no_plaintext(&decoy), "journaled: {journaled}");
+    }
+}
+
+#[test]
+fn a_swap_and_swap_back_around_an_identityless_reservation_writes_nothing() {
+    // Without a captured folder identity nothing re-checks the folder, so the only defence is that
+    // the staging name must hold our new file (Unix: the path-based check in
+    // `confirm_staging_links`; Windows: the link probe). Native's one-click Downloads reservation
+    // takes the same path.
+    let fx = fixture();
+    let folder = chosen_folder(&fx);
+    let choice = identityless(&folder, "report.bin");
+    let Some((created, decoy)) =
+        with_swaps_around_creation(&folder, Some("report.bin.part"), false, || {
+            choice.create_unjournaled(&mut rng()).map(drop)
+        })
+    else {
+        return;
+    };
+    assert!(
+        matches!(
+            created,
+            Err(ExportError::Local {
+                retryable: false,
+                ..
+            })
+        ),
+        "the planted file is never adopted"
+    );
+    assert_eq!(
+        fs::read(folder.join("report.bin.part")).unwrap(),
+        b"planted",
+        "the planted file is left alone"
+    );
+    assert!(holds_no_plaintext(&decoy));
 }
 
 #[test]

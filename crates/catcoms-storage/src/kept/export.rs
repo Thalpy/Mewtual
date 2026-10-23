@@ -667,11 +667,15 @@ impl ChosenDestination {
 }
 
 /// Probe, on a file the caller just created exclusively as `folder/staging_leaf`, that the folder
-/// can make the no-replace hard link every writer publishes with. Returns the file when it can.
-/// Otherwise the file is removed (only while its name still proves to be that file) and the save
-/// is refused before any plaintext is written: `NoLinks` for a folder that refuses links (FAT,
-/// exFAT), a local failure when the probe could not be confirmed or cleaned up, or (Linux and
-/// Android) when `/proc/self/fd` is unavailable, because [`publish_unjournaled`] links from it.
+/// can make the no-replace hard link every writer publishes with (Windows: a link probe; Unix: the
+/// filesystem type), and that `folder/staging_leaf` holds that file right now (Windows: the probe;
+/// Unix: a read-only, no-follow check by in-session number, which also catches a folder swapped
+/// and swapped back around the create where no folder identity was captured). Returns the file
+/// when both hold. Otherwise the file is removed (only while its name still proves to be that
+/// file) and the save is refused before any plaintext is written: `NoLinks` for a folder that
+/// refuses links (FAT, exFAT), a local failure when the probe or the name could not be confirmed
+/// or cleaned up, or (Linux and Android) when `/proc/self/fd` is unavailable, because
+/// [`publish_unjournaled`] links from it.
 ///
 /// Shared by the chosen-place reservation ([`ChosenDestination::create_unjournaled`]) and native's
 /// one-click Downloads reservation for folders that cannot carry a journal (re-review 2 LOW 4:
@@ -684,16 +688,19 @@ pub fn confirm_staging_links(
     rng: &mut dyn CryptoRngCore,
 ) -> Result<File, ExportError> {
     let failure = match links_supported(folder, staging_leaf, &file, rng) {
-        LinkProbe::Works => return Ok(file),
+        LinkProbe::Works if staging_holds(&file, folder, staging_leaf) => return Ok(file),
         LinkProbe::Refused => ExportError::NoLinks,
-        // A probe name may still point at this file; never fill it with plaintext. The
+        // Windows: a probe name may still point at this file; never fill it with plaintext. The
         // abandoned file is empty, so a leftover probe name discloses nothing.
         // Re-review LOW B: also reached when the probe name is not provably our own file (a
         // transient hold by an indexer, or a swapped name), so say "confirmed", not only
         // "removed". Refusing is the safe direction; the user can try again.
         // Combined review LOW 6: on a folder that gives no file numbers (some SMB servers) the
         // empty reservation and probe name cannot be proven ours, so they stay; say so.
-        LinkProbe::Inconclusive => ExportError::Local {
+        // Unix: the filesystem type could not be read, or the staging name does not hold our
+        // file (a folder swapped around the create, or a name replaced since); our empty file
+        // may then remain wherever it was created.
+        LinkProbe::Works | LinkProbe::Inconclusive => ExportError::Local {
             retryable: false,
             reason: "a temporary name in that folder could not be confirmed or removed; empty \
                      temporary files may remain there"
@@ -711,11 +718,44 @@ pub fn confirm_staging_links(
     Err(failure)
 }
 
+/// Whether `folder/leaf` holds `file`'s object right now, for [`confirm_staging_links`]. Unix: a
+/// read-only, no-follow open compared by in-session number (picker re-review LOW 2; without a
+/// captured folder identity this path-based check is the only swap check, and with one
+/// [`confirm_folder`] has already made the stronger pinned check). Windows: the link probe in
+/// [`links_supported`] has already proven it, so this adds nothing there.
+fn staging_holds(file: &File, folder: &Path, leaf: &str) -> bool {
+    #[cfg(unix)]
+    {
+        external::session_id(file).is_ok_and(|id| {
+            matches!(
+                external::holds_session(&folder.join(leaf), id),
+                Ok(Some(true))
+            )
+        })
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (file, folder, leaf);
+        true
+    }
+}
+
 /// Picker review L4: the folder identity check before an exclusive creation and the path-based
 /// creation itself are separate calls, so a folder swapped in between would receive this save's
 /// partial and, later, its plaintext. Re-check the folder after creating. On a mismatch (or a
 /// folder that no longer reports an identity) remove the partial this call just created, only
 /// once its handle identity proves the name is still ours, and refuse with `changed`.
+///
+/// A swap before the create and a swap back before this recheck passes the identity read, so the
+/// recheck must also prove that the name `created` holds our handle's object (picker re-review
+/// LOW 2): otherwise our handle is a partial in the other folder and every byte would go there.
+/// Unix proves both here, through one descriptor of the folder (`external::folder_holds_session`),
+/// so a third swap between the two reads cannot pass either. PR51 M3 had dropped the Unix name
+/// check together with the Unix link probe; Linux CI caught it. Windows still proves the name with
+/// the link probe that follows (`links_supported`), which resolves the folder by path again, so the
+/// third swap remains a Windows residual. A name that is not provably ours is a refusal with
+/// `changed`, never `Unsupported`: a detected swap must not quietly hand the save to the
+/// non-resumable writer (review of the Linux CI fix, MEDIUM 1).
 fn confirm_folder(
     folder: &Path,
     captured: FileIdentity,
@@ -724,13 +764,25 @@ fn confirm_folder(
     changed: ExportError,
     rng: &mut dyn CryptoRngCore,
 ) -> Result<File, ExportError> {
-    match external::folder_identity(folder) {
-        Ok(id) if id == captured => Ok(file),
-        _ => {
-            remove_created(file, created, rng);
-            Err(changed)
-        }
+    let same = matches!(external::folder_identity(folder), Ok(id) if id == captured);
+    #[cfg(unix)]
+    let same = same
+        && created
+            .file_name()
+            .and_then(|leaf| leaf.to_str())
+            .is_some_and(|leaf| {
+                external::session_id(&file).is_ok_and(|id| {
+                    matches!(
+                        external::folder_holds_session(folder, captured, leaf, id),
+                        Ok(true)
+                    )
+                })
+            });
+    if same {
+        return Ok(file);
     }
+    remove_created(file, created, rng);
+    Err(changed)
 }
 
 /// Remove a file this call created exclusively a moment ago, through [`external::remove_verified`]
@@ -1668,16 +1720,18 @@ fn exclusive(file: &File) -> Result<(), ExportError> {
     }
 }
 
-/// Outcome of the hard-link probe on a freshly created partial.
+/// Outcome of [`links_supported`] on a freshly created partial.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum LinkProbe {
-    /// A probe name was linked to our file, proven to be it (when an identity exists) and removed.
+    /// Windows: a probe name was linked to our file, proven to be it and removed. Unix: the
+    /// filesystem type allows links and, on Linux and Android, `/proc/self/fd` is usable.
     Works,
-    /// The link call itself failed. Every publication is that same no-replace link, so no writer
-    /// can finish in this folder (FAT, exFAT; Linux vfat reports this as a permission error).
+    /// Every publication is a no-replace link, so no writer can finish in this folder. Windows:
+    /// the probe's link call itself failed (FAT, exFAT). Unix: `fstatfs` reports FAT, vfat or exFAT.
     Refused,
-    /// Linking worked but the probe could not be confirmed or removed (for example an indexer
-    /// holding the new name). Linking is possible, but a journal should not depend on it.
+    /// Windows: linking worked but the probe could not be confirmed or removed (for example an
+    /// indexer holding the new name, or a probe that named another file). Unix: the filesystem type
+    /// could not be read. Either way a journal should not depend on this folder.
     Inconclusive,
     /// Linux or Android without a usable `/proc/self/fd`: publication links the open descriptor
     /// through it (PR51 M1), so no save can finish here safely.
@@ -1700,14 +1754,13 @@ enum LinkProbe {
 /// save fails at publication). A probe there would leave a second name for the partial in any
 /// folder where Unix refuses automatic deletion (one other accounts can modify).
 ///
-/// Both platforms also prove that the staging name holds the object behind `source` right now
-/// (picker re-review LOW 2): a folder swapped before the exclusive create and swapped back with a
-/// file planted at our name passes the folder identity recheck, and only this name check notices
-/// that our handle is a file in the other folder. Windows proves it with the probe (the probe name
-/// links whatever is at the staging name); Unix with a read-only, no-follow open of the staging
-/// name compared by in-session number. (Linux CI regression: PR51 had dropped the check on Unix
-/// together with the probe, so with a planted file the partial, and later its plaintext, lived in
-/// the swapped-in folder.)
+/// The staging name must also hold the object behind `source` right now (picker re-review LOW 2:
+/// a folder swapped before the exclusive create and swapped back, perhaps with a file planted at
+/// our name, passes a path-based folder identity recheck while our handle is a file in the other
+/// folder). On Windows the probe proves that (it links whatever is at the staging name). On Unix
+/// the caller proves it: [`confirm_folder`] for a creation with a captured folder identity, and
+/// [`confirm_staging_links`] with a path-based check otherwise. PR51 had dropped that check on Unix
+/// together with the probe; Linux CI caught it.
 fn links_supported(
     folder: &Path,
     staging: &str,
@@ -1716,28 +1769,16 @@ fn links_supported(
 ) -> LinkProbe {
     #[cfg(unix)]
     {
-        let _ = &rng;
+        let _ = (staging, &rng);
         match external::fs_class(folder) {
-            Ok(external::FsClass::NoLinks) => return LinkProbe::Refused,
-            Ok(_) => {}
-            Err(_) => return LinkProbe::Inconclusive,
+            Ok(external::FsClass::NoLinks) => LinkProbe::Refused,
+            // PR51 M1: Linux and Android publish every save by linking the open descriptor through
+            // /proc (`external::publish_session`, `link_open`). Without /proc no save could finish
+            // safely, so refuse before any plaintext is written (fail closed).
+            Ok(_) if !external::link_by_descriptor_available(source) => LinkProbe::NoDescriptor,
+            Ok(_) => LinkProbe::Works,
+            Err(_) => LinkProbe::Inconclusive,
         }
-        let ours = external::session_id(source).is_ok_and(|id| {
-            matches!(
-                external::holds_session(&folder.join(staging), id),
-                Ok(Some(true))
-            )
-        });
-        if !ours {
-            return LinkProbe::Inconclusive;
-        }
-        // PR51 M1: Linux and Android publish every save by linking the open descriptor through
-        // /proc (`external::publish_session`, `link_open`). Without /proc no save could finish
-        // safely, so refuse before any plaintext is written (fail closed).
-        if !external::link_by_descriptor_available(source) {
-            return LinkProbe::NoDescriptor;
-        }
-        LinkProbe::Works
     }
     #[cfg(not(unix))]
     {
@@ -1944,7 +1985,9 @@ impl ExportFile {
     }
 
     /// Shared tail of both creations: prove identity and hard-link support on the file this call
-    /// just created exclusively, then build the Writing(0) journal for the caller to persist.
+    /// just created exclusively, then build the Writing(0) journal for the caller to persist. Both
+    /// callers have already run [`confirm_folder`], which on Unix also proved that the staging name
+    /// holds this file in the captured folder; on Windows the link probe here proves the name.
     fn adopt_created(
         file: File,
         folder: &Path,

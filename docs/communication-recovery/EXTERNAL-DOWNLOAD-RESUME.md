@@ -535,13 +535,21 @@ proves it is ours, and refuses (`FolderChanged` at a chosen place, a local failu
 A swap and swap-back that both fall between the two identity reads still leaves an empty partial
 in the other folder; creation then refuses, because it requires the partial's name to hold our own
 handle's object whenever the filesystem reports identities (re-review LOW 2 added this to
-`create_unjournaled`), so no plaintext is written there even if a file was planted at our name. On
-Windows the link probe makes that check; on Unix, where creation makes no link (PR51 M3), a
-read-only no-follow check of the name does (restored after the Linux CI failures at 516ab8d0, see
-below). An identity-less chosen folder has no swap check at all (as before). The
-proven removal leaves a just-created partial in place when its name cannot be opened right then
-(for example another program holding it); that empty file then blocks a remembered choice with
-`PartialExists` until the user deletes it.
+`create_unjournaled`), so no plaintext is written there even if a file was planted at our name.
+On Unix, where creation makes no link (PR51 M3), the recheck itself (`confirm_folder`) reads the
+folder identity and the name through one folder descriptor (`external::folder_holds_session`), so
+a third swap between the reads cannot pass either, and a name that is not provably ours is the
+same refusal as a changed folder, never a quiet switch to the non-resumable writer (both added
+after the Linux CI failures at 516ab8d0, see below). On Windows the link probe that follows makes
+the name check; it resolves the folder by path again, so a third swap timed between the recheck and
+the probe remains a Windows residual, and a probe that names another file is inconclusive
+(`Unsupported` for the journaled writer, whose native fallback then checks the folder again). An
+identity-less chosen folder (and native's one-click Downloads reservation) has no folder identity
+to recheck; there the staging name must still hold our new file (`confirm_staging_links`:
+path-based on Unix, the probe on Windows), which catches a swap and swap-back but not a swap timed
+around that check. The proven removal leaves a just-created partial in place when its name cannot
+be opened right then (for example another program holding it); that empty file then blocks a
+remembered choice with `PartialExists` until the user deletes it.
 
 ## Tests
 
@@ -1313,17 +1321,19 @@ host cannot reproduce them; WSL Ubuntu (Rust 1.89) did.
   back) and `create_unjournaled`, and the journaled `create` and `create_chosen` too, kept a handle
   on our partial in the swapped-in folder, so the plaintext would have been written there and
   linked under the final name in that folder. The test's hooks sit in `create_leaf` around the real
-  path-based create, so the seam matched production; the test was right. Fix: Unix again requires
-  the staging name to hold our handle's object, now with a read-only, no-follow open compared by
-  in-session number (`session_id` and `holds_session`), which creates no second name. A failed
-  check is `Inconclusive`: the journaled creation removes nothing it cannot prove ours and returns
-  `Unsupported` (native then uses the non-resumable writer, which runs the same check against the
-  folder as it is now); the non-resumable reservation refuses. Regression tests: the original test
-  (non-resumable writer) and the new `a_swap_and_swap_back_around_a_journaled_creation_starts_no_journal`
-  (journaled `create_chosen`); both fail on Linux without the check and pass with it. Residual, as
-  before PR51: like the Windows probe and the Unix probe it replaces, the check resolves the folder
-  by path, so a third swap timed between the folder identity recheck and the name check could still
-  pass it; reading both through one pinned folder descriptor would close that window (follow-up).
+  path-based create, so the seam matched production; the test was right. Fix (`bbdbdf99`, then
+  hardened after review in the follow-up commit): Unix again requires the staging name to hold our
+  handle's object, read-only (a no-follow open compared by in-session number), which creates no
+  second name. With a captured folder identity the check is part of the recheck in
+  `confirm_folder`, which reads the identity and the name through one folder descriptor
+  (`external::folder_holds_session`) and refuses on failure exactly as for a changed folder
+  (`FolderChanged` at a chosen place, the retryable local failure in Downloads); it removes nothing
+  it cannot prove ours. Without one, `confirm_staging_links` checks the name by path and refuses.
+  Regression tests: the original test (non-resumable writer) and
+  `a_swap_and_swap_back_around_a_journaled_creation_starts_no_journal` (journaled `create_chosen`),
+  both now pinning the exact refusal; `a_swap_and_swap_back_around_creation_with_nothing_planted_writes_nothing`,
+  `a_third_swap_before_the_name_check_is_refused` (Unix) and
+  `a_swap_and_swap_back_around_an_identityless_reservation_writes_nothing`.
 - **`a_folder_without_links_is_refused_at_creation_and_halts_at_publication`,
   `chosen::a_chosen_folder_without_links_is_refused_before_any_plaintext_exists`,
   `chosen::a_downloads_reservation_without_links_is_refused_before_any_plaintext`: a test-seam
@@ -1335,19 +1345,34 @@ host cannot reproduce them; WSL Ubuntu (Rust 1.89) did.
   link probe's failure on Windows, `fstatfs` reporting vfat or exFAT through `Effect::FsClass` on
   Unix). Production is unchanged for these three.
 - **Real Linux link failures at publication.** `linkat` of `/proc/self/fd/N` reported only
-  `ENOENT` and `EXDEV` as a definite refusal. `EPERM` (vfat, `protected_hardlinks`, a security
-  module), `EMLINK` and `EOPNOTSUPP` (`ENOTSUP`) now are too (`external::linkat_error`), so the
+  `ENOENT` and `EXDEV` as a definite refusal. `EPERM` (vfat, `protected_hardlinks`, seccomp),
+  `EMLINK` and `EOPNOTSUPP` (`ENOTSUP`) now are too (`external::linkat_error`), so the
   journaled save halts as unavailable (persisted; Save new copy or Save as elsewhere) without being
   marked possibly linked, and the writers without a journal fail and clean up their staging name by
   verified removal. A no-links folder is still refused before any plaintext exists where Mewtual
   can tell (`NoLinks` from `fstatfs` on Unix, the probe on Windows); a mount that refuses links
   although its type suggests otherwise is found only at publication, after writing, as the support
-  matrix says. Test: `a_refused_descriptor_link_is_reported_as_no_link_made` (Linux and Android).
+  matrix says. AppArmor and SELinux deny with `EACCES`, which (like `EIO`, `ENOSPC` and `EROFS`)
+  keeps its own kind and stays "possibly linked"; the save still halts truthfully. Test:
+  `a_refused_descriptor_link_is_reported_as_no_link_made` (Linux and Android).
 
-Each fixed guard was broken on purpose and its test went red on Linux: the Unix name check (both
-swap tests), `journal_capable` accepting a no-links filesystem (the first and second seam tests),
-`links_supported` ignoring a no-links filesystem (the second and third), and `EPERM` dropped from
-`linkat_error` (the mapping test).
+Each fixed guard was broken on purpose and its test went red on Linux: at `bbdbdf99` the Unix name
+check (both swap tests), `journal_capable` accepting a no-links filesystem (the first and second
+seam tests), `links_supported` ignoring a no-links filesystem (the second and third), and `EPERM`
+dropped from `linkat_error` (the mapping test); after the review fixes, the pinned check without
+the folder identity (the third-swap test), `confirm_folder` ignoring the name (all four swap tests
+with a captured identity), the identity-less name check always passing (its test), and
+`links_supported` ignoring a no-links filesystem again (the second and third seam tests).
+
+Adversarial review of `bbdbdf99` and dispositions (no blocker or high finding):
+
+| Finding | Disposition |
+| --- | --- |
+| MEDIUM 1: a detected swap became `Unsupported`, so native quietly switched to the non-resumable writer, whose Linux publication pins the folder by path without its identity (`link_open(.., None, ..)`): renaming the chosen folder aside and putting another at its path before publication, with no race, gives the final name in that folder | Fixed for creation: a name that is not provably ours is now the changed-folder refusal, never `Unsupported`. Open follow-up for publication, needing a decision: the gap was introduced by PR51 M1 (at `86664d94` the non-resumable writer linked by path from its staging name, which a swapped-in folder does not hold, so the link failed), and it also applies to folders that always use the non-resumable writer (CIFS, FUSE). Two fixes: (1) carry the chosen folder's identity into the non-resumable writer's publication (an interface change through native and the GIF export), which keeps PR51 M1's behavior; or (2) on Linux, check inside the pinned folder that the staging name holds our file before `linkat`, as Windows does under its pin. Option 2 is storage-only, but it reverses PR51 M1's tested contract that Linux publishes our open file even after its staging name was swapped (`an_unjournaled_save_publishes_only_its_own_open_file`; the save would fail instead, with nothing linked). |
+| MEDIUM 2: the third swap, between the path-based identity recheck and a path-based name check | Fixed on Unix: `confirm_folder` reads both through one folder descriptor. Test: `a_third_swap_before_the_name_check_is_refused` (break-checked). Windows keeps the residual (its probe resolves the folder by path; a folder-relative probe needs `fs_at`); recorded. |
+| LOW 3: tests asserted only `is_err()`, no case without a planted file, `EACCES`/`EROFS` not pinned | Fixed: exact refusals per platform, the nothing-planted test for both writers, the identity-less test, and `EACCES`/`EROFS` in the mapping test. A swap test through Downloads `create` was not added (same `confirm_folder` path, which maps to its retryable local failure). |
+| LOW 4: doc and comment drift (`LinkProbe` and `confirm_staging_links` docs, the original test's comment, `link_open`'s "a writer without a journal has none", `EPERM` and "a security module", THREAT-MODEL silent on the fallback) | Fixed. |
+| Residuals (no fix): a hard link to our partial planted at the staging name passes the name check (other accounts are stopped by `protected_hardlinks`, and the journal's single-link check catches it while writing); native's Downloads fallback has no folder identity check; on Windows a swap and swap-back with nothing planted reports `NoLinks` (misleading but safe); a umask that removes the owner's read bit would make the read-only name check refuse | Recorded. |
 
 ## Ledger (23 October, PR51 review rounds)
 

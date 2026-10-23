@@ -603,7 +603,8 @@ Rust interfaces:
   `ChosenDestination::{validate, create_unjournaled}` are the only other external entry points.
   Every creation with a captured folder identity re-reads it after creating its partial and
   refuses a swapped folder; creation also requires the partial's name to hold the new partial
-  (the link probe on Windows, a read-only no-follow name check on Unix).
+  (the link probe on Windows; on Unix a read-only check made with the identity recheck through
+  one folder descriptor, whose failure is the same refusal as a changed folder).
 - The non-resumable fallback writer (native `stream_download_staged`, used when a fresh save
   cannot be journaled) also runs its staging, writes, sync, cleanup and publication link on the
   blocking pool, and `SaveSource::liveness` is rechecked when each queued staging or write worker
