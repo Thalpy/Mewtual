@@ -898,10 +898,11 @@ pub fn flush_folder(folder: &Path) {
 /// the handle this process created exclusively at `staging` and still holds; `final_path` is the
 /// absent name beside it. The final name is created without replacing anything and confirmed to
 /// hold the object behind `file`; the staging name is left for the caller to remove with
-/// [`remove_if_session`]. Per platform: Linux and Android link from the open descriptor, so a
-/// swapped staging name can never be published; Windows holds a delete-denying pin on the staging
-/// name across the link; macOS relies on the post-link check alone (a foreign object found at the
-/// final name fails the save and both names are left alone).
+/// [`remove_if_session`]. Per platform: Linux and Android link from the open descriptor into the
+/// folder pinned once the staging name was found to hold `file` inside it, so neither a swapped
+/// staging name nor a folder swapped in at the path can be published; Windows holds a
+/// delete-denying pin on the staging name across the link; macOS relies on the post-link check
+/// alone (a foreign object found at the final name fails the save and both names are left alone).
 ///
 /// Errors: `AlreadyExists` when the final name was taken (nothing linked); `InvalidInput` when the
 /// two paths are not plain names in one folder; otherwise see the platform notes above.

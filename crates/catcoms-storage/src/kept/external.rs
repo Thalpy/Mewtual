@@ -699,8 +699,10 @@ pub(super) fn inject(effect: Effect) -> io::Result<()> {
 pub(in crate::kept) type LinkHook = Option<Box<dyn FnMut(&Path)>>;
 #[cfg(test)]
 thread_local! {
-    /// Test-only interleaving point just before the path-based hard link: a test models another
-    /// program acting on the source path at exactly that moment.
+    /// Test-only interleaving point just before the publication link (Linux and Android: after the
+    /// folder is pinned and, without a journal, the staging name was checked inside it; elsewhere
+    /// just before the path-based hard link): a test models another program acting on the source
+    /// path at exactly that moment.
     pub(in crate::kept) static BEFORE_LINK: std::cell::RefCell<LinkHook> =
         const { std::cell::RefCell::new(None) };
     /// Test-only interleaving point just before an exclusive creation (picker review L4): a test
@@ -1832,12 +1834,15 @@ pub(super) fn linkat_error(errno: rustix::io::Errno) -> io::Error {
 /// `folder`, never replacing anything.
 ///
 /// - Linux and Android: `linkat` of `/proc/self/fd/N` with `AT_SYMLINK_FOLLOW` into the folder,
-///   pinned by a descriptor checked against `folder_id` when the caller has one (the writers
-///   without a journal pass none, even at a chosen place whose identity was captured, so a folder
-///   put at their path before publication receives the final name; a recorded follow-up). The new
-///   name is for exactly the object we hold open, whatever has happened
-///   to the staging name meanwhile, so a swapped staging name can never become the final name.
-///   Errors are reported by [`linkat_error`].
+///   pinned by a descriptor. The journaled session checks that descriptor against its `folder_id`.
+///   The writers without a journal pass none, so the staging name must instead hold our object
+///   inside that same pinned folder before the link (review of the Linux CI fix, MEDIUM 1(b)):
+///   otherwise a folder put at the path before publication would receive the final name, which
+///   PR51 M1 had allowed and the path-based link at `86664d94` had not. The new name is for exactly
+///   the object we hold open, whatever happens to the staging name after that check, so a swapped
+///   staging name can never become the final name. Link errors are reported by `linkat_error`;
+///   a failed staging check is `NotFound` (gone) or `InvalidData` (another object), with nothing
+///   linked.
 /// - Elsewhere: the path-based no-replace hard link from `staging` (Windows callers hold the
 ///   delete-denying pin across it; macOS has no link by descriptor, so the post-link check is its
 ///   only guarantee).
@@ -1851,14 +1856,7 @@ pub(super) fn link_open(
     #[cfg(any(target_os = "linux", target_os = "android"))]
     {
         use std::os::unix::io::AsRawFd;
-        let _ = staging;
         inject(Effect::Link)?;
-        #[cfg(test)]
-        BEFORE_LINK.with(|hook| {
-            if let Some(hook) = hook.borrow_mut().as_mut() {
-                hook(&folder.join(staging));
-            }
-        });
         // Never deletes, and runs under the session commit guard: no account or ACL reads.
         let Some(pinned) = pin_folder(folder, folder_id, false)? else {
             return Err(io::Error::new(
@@ -1866,6 +1864,32 @@ pub(super) fn link_open(
                 "the destination folder changed",
             ));
         };
+        // Without a folder identity, bind the folder by our object instead: the staging name in
+        // this very descriptor must hold it. Our object can only have a name in the folder its
+        // creation proved, unless someone with write access to that folder moves it there or
+        // hard-links it (blocked for other accounts by `protected_hardlinks`), so the final name
+        // lands beside our partial. Checked before the link window below, not across it: a
+        // staging swap after this check still publishes our own open file (PR51 M1's contract).
+        if folder_id.is_none() {
+            let id = session_id(file)?;
+            match open_at_nofollow(&pinned.dir, staging) {
+                Ok(Some(found)) if verify(&found, Expected::Session(id))?.is_some() => {}
+                Ok(_) => return Err(session_changed()),
+                Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                    return Err(io::Error::new(
+                        io::ErrorKind::NotFound,
+                        "the partly saved file is not in the destination folder",
+                    ))
+                }
+                Err(error) => return Err(error),
+            }
+        }
+        #[cfg(test)]
+        BEFORE_LINK.with(|hook| {
+            if let Some(hook) = hook.borrow_mut().as_mut() {
+                hook(&folder.join(staging));
+            }
+        });
         let magic = format!("/proc/self/fd/{}", file.as_raw_fd());
         match rustix::fs::linkat(
             rustix::fs::CWD,
@@ -1994,8 +2018,10 @@ fn session_changed() -> io::Error {
 /// still holds open, the absent name `folder/final_leaf`, never replacing anything, then confirm
 /// that the final name holds that very object.
 ///
-/// - Linux and Android: [`link_open`] links from the open descriptor into the pinned folder, so a
-///   staging name swapped after the caller verified the bytes can never become the final name.
+/// - Linux and Android: [`link_open`] first checks, inside the pinned folder, that the staging name
+///   holds `file`'s object (so a folder put at the path since cannot receive the final name), then
+///   links from the open descriptor into that same folder, so a staging name swapped after that
+///   check can never become the final name.
 /// - Windows: the staging name is first opened with the delete-denying pin and checked to be
 ///   `file`'s object. While the pin is held nobody can rename, replace or delete it, or rename its
 ///   folders, so the path-based link names exactly the object checked.
@@ -2008,8 +2034,8 @@ fn session_changed() -> io::Error {
 ///
 /// Errors: `AlreadyExists` (the final name is taken; nothing was linked), `NotFound` (the staging
 /// name is gone or the folder changed; nothing was linked), `Unsupported` (no file number to check
-/// against, or on Linux and Android a definite no-link from the descriptor: no `/proc`, the object
-/// has no names left, or another device), `InvalidData` (a name holds another object; nothing of
+/// against, or on Linux and Android a definite no-link from the descriptor, see `linkat_error`),
+/// `InvalidData` (a name holds another object; nothing of
 /// ours is reported published), or the link's own error.
 pub(super) fn publish_session(
     file: &File,

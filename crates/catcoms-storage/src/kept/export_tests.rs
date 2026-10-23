@@ -1192,6 +1192,49 @@ fn an_unjournaled_save_publishes_only_its_own_open_file() {
     drop(file);
 }
 
+#[cfg(any(target_os = "linux", target_os = "android"))]
+#[test]
+fn an_unjournaled_save_is_published_only_beside_its_partial() {
+    // Review of the Linux CI fix, MEDIUM 1(b): the folder is renamed aside and another one put at
+    // its path before publication. Without a journal nothing records the folder's identity, so the
+    // descriptor link must not name our file in whatever folder the path now leads to (PR51 M1 did;
+    // the path-based link at 86664d94 failed there). Nothing is linked, our partial stays where it
+    // is, and a file planted at our staging name in the new folder is not ours either.
+    let dir = tempfile::tempdir().unwrap();
+    let folder = dir.path().join("Chosen place");
+    fs::create_dir(&folder).unwrap();
+    let (file, staging, final_path) = unjournaled_staging(&folder, b"verified bytes");
+    let aside = dir.path().join("Moved away");
+    fs::rename(&folder, &aside).unwrap();
+    fs::create_dir(&folder).unwrap();
+    assert_eq!(
+        publish_unjournaled(&file, &staging, &final_path)
+            .unwrap_err()
+            .kind(),
+        io::ErrorKind::NotFound
+    );
+    assert_eq!(
+        fs::read_dir(&folder).unwrap().count(),
+        0,
+        "nothing in the new folder"
+    );
+    fs::write(&staging, b"planted").unwrap();
+    assert_eq!(
+        publish_unjournaled(&file, &staging, &final_path)
+            .unwrap_err()
+            .kind(),
+        io::ErrorKind::InvalidData
+    );
+    assert!(!final_path.exists(), "never linked into the new folder");
+    assert_eq!(fs::read(&staging).unwrap(), b"planted");
+    assert_eq!(
+        fs::read(aside.join("notes.txt.part")).unwrap(),
+        b"verified bytes"
+    );
+    assert!(!aside.join("notes.txt").exists());
+    drop(file);
+}
+
 #[test]
 fn an_unjournaled_save_never_replaces_a_taken_name_or_leaves_its_folder() {
     let dir = tempfile::tempdir().unwrap();

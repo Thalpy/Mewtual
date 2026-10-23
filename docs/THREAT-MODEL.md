@@ -648,6 +648,11 @@ writer keeps those properties.
 - **Publication (PR51 M1).** Both writers give the final name to exactly the object behind the
   handle they verified. Linux and Android link that handle's descriptor through `/proc/self/fd`
   into the pinned folder (no `/proc`: no journal, and the fallback writer refuses before writing).
+  The journaled session checks the pinned folder against its recorded identity; the writers without
+  a journal have none, so they first check that the staging name inside the pinned folder holds
+  their object, and a folder put at the path before publication gets nothing (the first PR51 M1
+  change allowed that; the review of the Linux CI fix caught it). A staging name swapped after that
+  check still cannot become the final name.
   Windows holds a delete-denying pin on the staging name, checked to be our object, across the
   path-based link, which also blocks renaming its folders (but not retargeting a junction among
   its ancestors, which someone with write access to that junction could do; the save then halts,
@@ -667,11 +672,7 @@ writer keeps those properties.
   and the probe is a residual there. The Unix name check was lost when PR51 M3 replaced the Unix
   link probe with `fstatfs` and was restored after Linux CI caught it. Without a captured folder
   identity (an identity-less chosen folder, native's one-click Downloads reservation) only the
-  path-based name check stands. Open follow-up (introduced by PR51 M1): on Linux the
-  non-resumable writer's publication links its open descriptor into the folder pinned by path
-  without its identity, so someone who can rename the chosen folder and put another at its path
-  before publication gets our file's final name in that folder (at `86664d94` the path-based link
-  from the staging name failed there instead). Windows checks the staging name under its pin.
+  path-based name check stands.
 - **Filesystem support (PR51 M3, fail closed).** Unix journals only on filesystems `fstatfs`
   identifies as local with stable identities (ext2/3/4, xfs, btrfs, f2fs, tmpfs, each only when it
   reports birth times; APFS and HFS+ that are `MNT_LOCAL`); FAT, vfat and exFAT are refused before

@@ -1089,7 +1089,10 @@ object behind the handle they hold (`ExportFile::link`; `publish_unjournaled` fo
 writer and the GIF export):
 
 - Linux and Android: (a) and (b). `linkat` of `/proc/self/fd/N` with `AT_SYMLINK_FOLLOW` into the
-  pinned folder. Without a usable `/proc` no journal is started and the fallback writer refuses
+  pinned folder (the journaled session checks it against its recorded identity; the writers
+  without a journal first check that the staging name inside it holds their object, added after
+  the Linux CI review, so a folder swapped in at the path gets nothing). Without a usable `/proc`
+  no journal is started and the fallback writer refuses
   before any plaintext is written (fail closed, "this system does not provide /proc, which Mewtual
   needs to publish a save safely"). `/proc` disappearing between creation and a later Resume makes
   the link fail definitively (`ENOENT`/`EXDEV` become `Unsupported`), which halts the journal as
@@ -1361,17 +1364,21 @@ check (both swap tests), `journal_capable` accepting a no-links filesystem (the 
 seam tests), `links_supported` ignoring a no-links filesystem (the second and third), and `EPERM`
 dropped from `linkat_error` (the mapping test); after the review fixes, the pinned check without
 the folder identity (the third-swap test), `confirm_folder` ignoring the name (all four swap tests
-with a captured identity), the identity-less name check always passing (its test), and
-`links_supported` ignoring a no-links filesystem again (the second and third seam tests).
+with a captured identity), the identity-less name check always passing (its test),
+`links_supported` ignoring a no-links filesystem again (the second and third seam tests), and the
+publication's staging check skipped for writers without a journal (its test).
 
 Adversarial review of `bbdbdf99` and dispositions (no blocker or high finding):
 
 | Finding | Disposition |
 | --- | --- |
-| MEDIUM 1: a detected swap became `Unsupported`, so native quietly switched to the non-resumable writer, whose Linux publication pins the folder by path without its identity (`link_open(.., None, ..)`): renaming the chosen folder aside and putting another at its path before publication, with no race, gives the final name in that folder | Fixed for creation: a name that is not provably ours is now the changed-folder refusal, never `Unsupported`. Open follow-up for publication, needing a decision: the gap was introduced by PR51 M1 (at `86664d94` the non-resumable writer linked by path from its staging name, which a swapped-in folder does not hold, so the link failed), and it also applies to folders that always use the non-resumable writer (CIFS, FUSE). Two fixes: (1) carry the chosen folder's identity into the non-resumable writer's publication (an interface change through native and the GIF export), which keeps PR51 M1's behavior; or (2) on Linux, check inside the pinned folder that the staging name holds our file before `linkat`, as Windows does under its pin. Option 2 is storage-only, but it reverses PR51 M1's tested contract that Linux publishes our open file even after its staging name was swapped (`an_unjournaled_save_publishes_only_its_own_open_file`; the save would fail instead, with nothing linked). |
+| MEDIUM 1: a detected swap became `Unsupported`, so native quietly switched to the non-resumable writer, whose Linux publication pins the folder by path without its identity (`link_open(.., None, ..)`): renaming the chosen folder aside and putting another at its path before publication, with no race, gives the final name in that folder | Fixed for creation: a name that is not provably ours is now the changed-folder refusal, never `Unsupported`. Fixed for publication too (re-review recommendation): the gap was introduced by PR51 M1 (at `86664d94` the non-resumable writer linked by path from its staging name, which a swapped-in folder does not hold, so the link failed) and also reached the Downloads fallback, the GIF export and folders that always use the non-resumable writer (CIFS, FUSE). On Linux and Android, `link_open` without a folder identity now pins the folder, checks that the staging name inside that descriptor holds our object (`NotFound` when it is not there, `InvalidData` when another object is), and only then links our descriptor into the same descriptor. The check sits before the link window, so a staging swap after it still publishes our own file and PR51 M1's contract (`an_unjournaled_save_publishes_only_its_own_open_file`) is unchanged; only the test hook moved after the check. The journaled path keeps its identity-bound pin. Test: `an_unjournaled_save_is_published_only_beside_its_partial` (Linux and Android; break-checked). |
 | MEDIUM 2: the third swap, between the path-based identity recheck and a path-based name check | Fixed on Unix: `confirm_folder` reads both through one folder descriptor. Test: `a_third_swap_before_the_name_check_is_refused` (break-checked). Windows keeps the residual (its probe resolves the folder by path; a folder-relative probe needs `fs_at`); recorded. |
 | LOW 3: tests asserted only `is_err()`, no case without a planted file, `EACCES`/`EROFS` not pinned | Fixed: exact refusals per platform, the nothing-planted test for both writers, the identity-less test, and `EACCES`/`EROFS` in the mapping test. A swap test through Downloads `create` was not added (same `confirm_folder` path, which maps to its retryable local failure). |
 | LOW 4: doc and comment drift (`LinkProbe` and `confirm_staging_links` docs, the original test's comment, `link_open`'s "a writer without a journal has none", `EPERM` and "a security module", THREAT-MODEL silent on the fallback) | Fixed. |
+| Re-review LOW-A: the docs said the storage-only publication fix would reverse PR51 M1's contract | Moot: taken with the check before the link window, which keeps the contract. |
+| Re-review LOW-B: THREAT-MODEL's Publication bullet did not mention the identity gap | Fixed with the gap: the bullet now says how each writer binds the folder. |
+| Re-review LOW-C: transient failures of the Unix name check (session number, descriptor exhaustion, I/O, the umask case) read as "the folder changed" | Recorded: fails safe and matches the existing handling of a failed folder identity read in the same recheck; the wording is not evidence of an attack. |
 | Residuals (no fix): a hard link to our partial planted at the staging name passes the name check (other accounts are stopped by `protected_hardlinks`, and the journal's single-link check catches it while writing); native's Downloads fallback has no folder identity check; on Windows a swap and swap-back with nothing planted reports `NoLinks` (misleading but safe); a umask that removes the owner's read bit would make the read-only name check refuse | Recorded. |
 
 ## Ledger (23 October, PR51 review rounds)
