@@ -233,9 +233,14 @@ test("Transfers checks each Saved row's file once per visit and keeps only a cur
   await app.checkSaved();
   assert.equal(app.calls.length, 2, "each visit checks again");
   assert.equal(app.savedFor(a), "present");
-  // Acting on the Saved row drops its answer, so the refresh after the action checks again.
+  // Acting on the Saved row checks it again at the next refresh, but its last answer stays on
+  // screen until then (decisions review L3).
   await app.act(a, "remove");
-  assert.equal(app.savedFor(a), null);
+  assert.equal(app.savedFor(a), "present");
+  const asked = app.calls.filter(([name]: [string]) => name === "check_saved_download").length;
+  app.rows([a, b]); // the fixture's refresh empties the list; the native list still has the row
+  await app.checkSaved();
+  assert.equal(app.calls.filter(([name]: [string]) => name === "check_saved_download").length, asked + 1);
   // A failed or unreadable answer claims nothing new: "unknown" for that same revision.
   for (const reply of [Promise.reject("This download changed. Open Transfers and try again."), "C:\\Users\\me\\cat.bin"]) {
     const app = fixture(); app.rows([a]);
@@ -243,6 +248,27 @@ test("Transfers checks each Saved row's file once per visit and keeps only a cur
     await app.checkSaved();
     assert.equal(app.savedFor(a), "unknown");
   }
+});
+test("Saved rows are checked one at a time and an overlapping refresh asks for nothing twice", async () => {
+  // Decisions review M1: native runs two check workers; the renderer asks one at a time.
+  const app = fixture(), held = deferred();
+  const rows = ["1", "2", "3"].map((n) => ({ ...saved, id: n.repeat(64), cid: n.repeat(64), status: "saved" }));
+  app.rows(rows); app.replies.set("check_saved_download", held.promise);
+  const checking = app.checkSaved();
+  await Promise.resolve(); await Promise.resolve();
+  const asked = () => app.calls.filter(([name]: [string]) => name === "check_saved_download").length;
+  assert.equal(asked(), 1, "one check in flight");
+  await app.checkSaved();
+  assert.equal(asked(), 1, "an overlapping refresh does not ask again");
+  held.resolve("present"); await checking;
+  assert.equal(asked(), 3, "the rest follow, one by one");
+  for (const row of rows) assert.equal(app.savedFor(row), "present");
+});
+test("Transfers runs the check from its refresh and starts a new visit when shown", () => {
+  // Decisions review L5: the two call sites that make the check happen at all.
+  const text = (name: string) => tree.statements.find((n) => ts.isFunctionDeclaration(n) && n.name?.text === name)?.getText(tree) ?? "";
+  assert.match(text("refreshFiles"), /if \(view === "downloads"\) void checkSavedRows\(\);/);
+  assert.match(text("switchView"), /if \(v === "downloads"\) savedCheckVisit\+\+;/);
 });
 test("a saved file check answered after the row or view changed never relabels anything", async () => {
   // The row's revision changes (Save another copy) while its check is in flight.

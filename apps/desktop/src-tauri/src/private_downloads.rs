@@ -458,8 +458,8 @@ pub(super) trait SavedCheckPorts: Send + Sync {
     /// The record's revision and its saved journal now, `Some` only while it is a Saved
     /// (Published) record.
     async fn saved(&self) -> Result<Option<(u64, ExportJournal)>, String>;
-    /// Read-only check of the saved name. Production answers `Unknown` at once without a free
-    /// check slot.
+    /// Read-only check of the saved name. Production waits for one of two check slots; the
+    /// sequence's bounded wait covers that wait too.
     async fn presence(&self, journal: ExportJournal) -> Result<SavedPresence, String>;
     /// Sanctioned-clock wait bounding how long the check waits for [`SavedCheckPorts::presence`].
     async fn wait(&self, delay: Duration);
@@ -512,13 +512,15 @@ fn check_slots() -> Arc<tokio::sync::Semaphore> {
         .clone()
 }
 
-/// [`saved_presence`] on the blocking pool with a slot of `pool`, or `Unknown` at once when none is
-/// free (Keep's pattern).
+/// [`saved_presence`] on the blocking pool with a slot of `pool`. Decisions review M1: it waits for
+/// a free slot instead of answering `Unknown` at once, so a third Saved row is checked once an
+/// earlier check finishes; the wait holds no thread, and [`saved_check_sequence`] bounds it with
+/// [`SAVED_CHECK_WAIT`] like the check itself. At most the pool's size of workers ever run.
 pub(super) async fn saved_presence_in(
     pool: Arc<tokio::sync::Semaphore>,
     journal: ExportJournal,
 ) -> Result<SavedPresence, String> {
-    let Ok(slot) = pool.try_acquire_owned() else {
+    let Ok(slot) = pool.acquire_owned().await else {
         return Ok(SavedPresence::Unknown);
     };
     blocking(move || {

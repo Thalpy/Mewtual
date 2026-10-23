@@ -356,7 +356,8 @@ async fn save_another_copy_of_an_unreachable_saved_row_says_what_was_left() {
     let (fake, release, _inside) = Fake::new(&journal);
     drop(release);
     fake.record.lock().unwrap().export = Some(ExportState::Published(journal.clone()));
-    let claim = CleanupClaim::acquire(7, id(0xA8)).unwrap();
+    // Claims are process-wide: each test uses its own Download ID so parallel tests never collide.
+    let claim = CleanupClaim::acquire(7, id(0xC1)).unwrap();
     let (_intent, notice) = abandon_sequence(&fake, claim, 3).await.unwrap();
     assert_eq!(notice, Some(OLD_SAVED_UNREACHABLE));
     assert!(!OLD_SAVED_UNREACHABLE.contains("partly saved"));
@@ -374,7 +375,7 @@ async fn save_new_copy_reads_published_after_its_retire() {
     drop(release);
     fake.publish_on_retire
         .store(true, std::sync::atomic::Ordering::SeqCst);
-    let claim = CleanupClaim::acquire(7, id(0xA7)).unwrap();
+    let claim = CleanupClaim::acquire(7, id(0xC2)).unwrap();
     let (_intent, notice) = abandon_sequence(&fake, claim, 3).await.unwrap();
     assert_eq!(notice, PartialRemoval::KeptOnlyCopy.notice(true));
     assert!(staging.exists(), "the only copy is kept");
@@ -393,7 +394,7 @@ async fn a_failed_new_copy_still_reports_the_old_partial_it_left_behind() {
     std::fs::rename(staging.parent().unwrap(), &unplugged).unwrap();
     let (fake, release, _inside) = Fake::new(&journal);
     drop(release);
-    let claim = CleanupClaim::acquire(7, id(0xA6)).unwrap();
+    let claim = CleanupClaim::acquire(7, id(0xC3)).unwrap();
     let (_intent, left_behind) = abandon_sequence(&fake, claim, 3).await.unwrap();
     assert_eq!(left_behind, Some(OLD_PARTIAL_UNREACHABLE));
     assert!(

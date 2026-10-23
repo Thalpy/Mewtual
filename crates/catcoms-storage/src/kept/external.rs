@@ -1025,7 +1025,7 @@ pub(super) fn remove_verified(
     }
     #[cfg(unix)]
     {
-        let pinned = match pin_folder(folder, folder_id)? {
+        let pinned = match pin_folder(folder, folder_id, true)? {
             Some(pinned) => pinned,
             None => return Ok(Verified::FolderChanged),
         };
@@ -1139,7 +1139,7 @@ pub(super) fn sweep_aside(
 ) -> io::Result<Aside> {
     #[cfg(unix)]
     {
-        let Some(pinned) = pin_folder(folder, Some(folder_id))? else {
+        let Some(pinned) = pin_folder(folder, Some(folder_id), true)? else {
             return Ok(Aside::Nothing);
         };
         let mut names = Vec::new();
@@ -1234,10 +1234,16 @@ struct Pinned {
 }
 
 /// Unix: open `folder` (following a configured folder link), check it against `expected` when
-/// known, and classify whether other accounts can modify it. `None` means it is not the expected
-/// folder any more.
+/// known, and, with `classify`, decide whether other accounts can modify it. `None` means it is
+/// not the expected folder any more. Without `classify` (the publication link, which never deletes
+/// and runs under the session commit guard) nothing about accounts or ACLs is read and `shared` is
+/// `true` (fail closed, unused there).
 #[cfg(unix)]
-fn pin_folder(folder: &Path, expected: Option<FileIdentity>) -> io::Result<Option<Pinned>> {
+fn pin_folder(
+    folder: &Path,
+    expected: Option<FileIdentity>,
+    classify: bool,
+) -> io::Result<Option<Pinned>> {
     use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
     let dir = OpenOptions::new()
         .read(true)
@@ -1251,28 +1257,65 @@ fn pin_folder(folder: &Path, expected: Option<FileIdentity>) -> io::Result<Optio
             Err(error) => return Err(error),
         }
     }
+    if !classify {
+        return Ok(Some(Pinned { dir, shared: true }));
+    }
     let metadata = dir.metadata()?;
     // Review M-3: mode bits describe who may change a folder only on a local filesystem whose
     // permissions are enforced by this kernel. On network and FUSE mounts (CIFS shows the mount
     // owner and `dir_mode`, sshfs hides the remote host's accounts) and wherever the class is
     // unknown, other accounts may well change the folder, so it counts as shared (fail closed).
-    // ACLs (NFSv4, macOS `delete_child`) are not read; see THREAT-MODEL.
+    // NFSv4 and macOS ACLs are not read; see THREAT-MODEL.
     let local = matches!(fs_class_of_dir(&dir), Ok(FsClass::Journal));
     let me = rustix::process::geteuid().as_raw();
-    Ok(Some(Pinned {
-        shared: !local
-            || shared_folder(
-                FolderOwnership {
-                    owner: metadata.uid(),
-                    group: metadata.gid(),
-                    mode: metadata.mode(),
-                },
-                me,
-                rustix::process::getegid().as_raw(),
-                |gid| system_group_is_private(gid, me),
-            ),
-        dir,
-    }))
+    let shared = !local
+        || shared_folder(
+            FolderOwnership {
+                owner: metadata.uid(),
+                group: metadata.gid(),
+                mode: metadata.mode(),
+            },
+            me,
+            rustix::process::getegid().as_raw(),
+            // Decisions review HIGH: with an extended POSIX ACL the group bits in the mode are the
+            // ACL mask, which caps named users and groups, so the group-write bit may be another
+            // account's write access. Only a folder without one can rest on the group proof.
+            |gid| !extended_acl_present(&dir) && system_group_is_private(gid, me),
+        );
+    Ok(Some(Pinned { dir, shared }))
+}
+
+/// Whether `dir` carries an extended POSIX access ACL, or one cannot be ruled out. Linux and
+/// Android read `system.posix_acl_access` (size only, through `rustix`, no `unsafe`); elsewhere an
+/// ACL is never ruled out (macOS ACLs are not read, and macOS never proves a private group).
+#[cfg(unix)]
+fn extended_acl_present(dir: &File) -> bool {
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    {
+        // An empty buffer asks only for the value's size; the value itself is never read.
+        let mut size_only: [u8; 0] = [];
+        acl_present_from(rustix::fs::fgetxattr(
+            dir,
+            "system.posix_acl_access",
+            &mut size_only[..],
+        ))
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "android")))]
+    {
+        let _ = dir;
+        true
+    }
+}
+
+/// The answer of [`extended_acl_present`] for a `getxattr` result: the attribute exists (an
+/// extended ACL), it does not (`ENODATA`), the filesystem has no ACL support (`EOPNOTSUPP`), or
+/// anything else, which cannot rule an ACL out (fail closed).
+#[cfg(any(target_os = "linux", target_os = "android"))]
+pub(super) fn acl_present_from(result: rustix::io::Result<usize>) -> bool {
+    !matches!(
+        result,
+        Err(rustix::io::Errno::NODATA) | Err(rustix::io::Errno::OPNOTSUPP)
+    )
 }
 
 /// A folder's owner, group and permission bits, as `fstat` reports them.
@@ -1325,7 +1368,7 @@ pub(super) fn shared_folder(
 
 /// What `/etc/nsswitch.conf` said, for [`group_is_private`].
 #[derive(Debug, Clone)]
-#[cfg_attr(not(unix), allow(dead_code))]
+#[cfg_attr(not(any(target_os = "linux", target_os = "android")), allow(dead_code))]
 pub(super) enum NsSwitch {
     /// The file does not exist (musl systems read only the files).
     Absent,
@@ -1334,64 +1377,124 @@ pub(super) enum NsSwitch {
     Unreadable,
 }
 
-/// The account databases a user-private group is proven from. `None` means the file could not be
-/// read (or was larger than [`ACCOUNT_FILE_LIMIT`]). Injected, so tests never read the real system.
+/// Everything a user-private group is proven from. Injected, so tests never read the real system
+/// (production: [`load_account_files`] on `/`).
 #[derive(Debug, Clone)]
-#[cfg_attr(not(unix), allow(dead_code))]
+#[cfg_attr(not(any(target_os = "linux", target_os = "android")), allow(dead_code))]
 pub(super) struct AccountFiles {
+    /// `/etc/passwd`; `None` when it could not be read or was larger than [`ACCOUNT_FILE_LIMIT`].
     pub(super) passwd: Option<String>,
+    /// `/etc/group`, likewise.
     pub(super) group: Option<String>,
     pub(super) nsswitch: NsSwitch,
+    /// systemd's other account sources (consulted only when `nsswitch.conf` lists `systemd`):
+    /// `Some(false)` when no userdb record directory has an entry and systemd-homed is not
+    /// running, `Some(true)` when one has or it is, `None` when that could not be checked.
+    pub(super) userdb_records: Option<bool>,
+    /// This process sees the host's accounts: its uid and gid maps are the identity map and no
+    /// container marker exists. Inside a user namespace or a container, `/etc` does not describe
+    /// the accounts that can reach a bind-mounted folder.
+    pub(super) host_namespace: bool,
 }
 
 /// Upper bound on each account database Mewtual reads; a larger file fails closed.
-#[cfg_attr(any(not(unix), test), allow(dead_code))]
+#[cfg_attr(not(any(target_os = "linux", target_os = "android")), allow(dead_code))]
 const ACCOUNT_FILE_LIMIT: u64 = 1 << 20;
 
+/// The `nsswitch.conf` sources a user-private group may be proven from.
+#[cfg_attr(not(any(target_os = "linux", target_os = "android")), allow(dead_code))]
+const FILE_SOURCES: [&str; 3] = ["files", "compat", "systemd"];
+
+/// The service names of one `nsswitch.conf` database line, with `[...]` action groups removed
+/// character by character (glibc ends a service name at `[` and starts one right after `]`, so
+/// `ldap[NOTFOUND=return]` names `ldap`). `None` for unbalanced brackets (fail closed).
+#[cfg_attr(not(any(target_os = "linux", target_os = "android")), allow(dead_code))]
+fn nss_services(sources: &str) -> Option<Vec<&str>> {
+    let mut services = Vec::new();
+    let mut depth = 0usize;
+    let mut start = None;
+    for (index, c) in sources.char_indices() {
+        let separator = c.is_whitespace() || c == '[' || c == ']';
+        if separator || depth > 0 {
+            if let Some(from) = start.take() {
+                services.push(&sources[from..index]);
+            }
+        }
+        match c {
+            '[' => depth += 1,
+            ']' => depth = depth.checked_sub(1)?,
+            _ if depth == 0 && !separator && start.is_none() => start = Some(index),
+            _ => {}
+        }
+    }
+    if depth != 0 {
+        return None;
+    }
+    if let Some(from) = start {
+        services.push(&sources[from..]);
+    }
+    Some(services)
+}
+
 /// Whether group `gid` provably has no member but the account `me` (user decision, 23 October).
-/// Every condition must be proven from the local files; anything unprovable answers `false`:
+/// Every condition must be proven; anything unprovable answers `false`:
 ///
-/// - Account lookups come only from the files: `passwd` and `group` in `nsswitch.conf` list only
-///   `files`, `compat` or `systemd` (whose dynamic users get their own groups), or there is no
-///   `nsswitch.conf`. Directory services (`sss`, `ldap`, `nis`, `winbind`, ...) could add members
-///   Mewtual cannot see.
+/// - This process sees the host's accounts ([`AccountFiles::host_namespace`]).
+/// - Account lookups come only from the files: `passwd` and `group` in `nsswitch.conf` (and
+///   `initgroups`, when present, which login uses for supplementary groups) list only `files`,
+///   `compat` or `systemd`, or there is no `nsswitch.conf`. Directory services (`sss`, `ldap`,
+///   `nis`, `winbind`, ...) could add members Mewtual cannot see. When `systemd` is listed, its
+///   userdb records and systemd-homed (which can add members or primary groups that `/etc` never
+///   shows) must provably be absent.
 /// - No NIS `+`/`-` lines, no malformed lines, and our own account is listed in `passwd`.
 /// - No other account (another uid) has `gid` as its primary group.
 /// - Exactly one `group` entry has `gid`, and its supplementary member list names nobody but us.
 ///
 /// A group whose name equals the user name is only a supporting signal and is not required: the
-/// proof is the membership itself.
-#[cfg_attr(not(unix), allow(dead_code))]
+/// proof is the membership itself. Not readable from files (residual, THREAT-MODEL): `gshadow`
+/// members, group credentials granted by privileged launchers, and sessions that kept a group
+/// after an account was removed from it.
+#[cfg_attr(not(any(target_os = "linux", target_os = "android")), allow(dead_code))]
 pub(super) fn group_is_private(files: &AccountFiles, gid: u32, me: u32) -> bool {
-    let files_only = |db: &str| -> bool {
+    if !files.host_namespace {
+        return false;
+    }
+    // Every database line's services, or `None` when any line is unusable.
+    let lines = |db: &str| -> Option<Vec<Vec<&str>>> {
         let text = match &files.nsswitch {
-            NsSwitch::Absent => return true,
-            NsSwitch::Unreadable => return false,
+            NsSwitch::Absent => return Some(Vec::new()),
+            NsSwitch::Unreadable => return None,
             NsSwitch::Text(text) => text,
         };
-        let mut found = false;
+        let mut found = Vec::new();
         for line in text.lines() {
             let line = line.split('#').next().unwrap_or("").trim();
             let Some((name, sources)) = line.split_once(':') else {
                 continue;
             };
-            if name.trim() != db {
-                continue;
-            }
-            found = true;
-            let mut sources = sources
-                .split_whitespace()
-                .filter(|token| !token.starts_with('[') && !token.ends_with(']'))
-                .peekable();
-            if sources.peek().is_none()
-                || !sources.all(|source| matches!(source, "files" | "compat" | "systemd"))
-            {
-                return false;
+            if name.trim() == db {
+                found.push(nss_services(sources)?);
             }
         }
-        found
+        Some(found)
     };
-    if !files_only("passwd") || !files_only("group") {
+    let absent = matches!(files.nsswitch, NsSwitch::Absent);
+    let mut uses_systemd = false;
+    for (db, required) in [("passwd", true), ("group", true), ("initgroups", false)] {
+        let Some(found) = lines(db) else {
+            return false;
+        };
+        if found.is_empty() && required && !absent {
+            return false;
+        }
+        for services in &found {
+            if services.is_empty() || !services.iter().all(|s| FILE_SOURCES.contains(s)) {
+                return false;
+            }
+            uses_systemd |= services.contains(&"systemd");
+        }
+    }
+    if uses_systemd && files.userdb_records != Some(false) {
         return false;
     }
     let (Some(passwd), Some(group)) = (&files.passwd, &files.group) else {
@@ -1453,10 +1556,11 @@ pub(super) fn group_is_private(files: &AccountFiles, gid: u32, me: u32) -> bool 
     matching == 1
 }
 
-/// Read one account database, bounded: an error when it cannot be read or is larger than
+/// Read one account file, bounded: an error when it cannot be read or is larger than
 /// [`ACCOUNT_FILE_LIMIT`].
-#[cfg(all(unix, not(test)))]
-fn read_account_file(path: &str) -> io::Result<String> {
+#[cfg(unix)]
+#[cfg_attr(not(any(target_os = "linux", target_os = "android")), allow(dead_code))]
+fn read_account_file(path: &Path) -> io::Result<String> {
     use std::io::Read;
     let mut text = String::new();
     File::open(path)?
@@ -1468,24 +1572,82 @@ fn read_account_file(path: &str) -> io::Result<String> {
     Ok(text)
 }
 
-/// [`group_is_private`] against this system's files. Only Linux and Android keep their account
-/// databases in these files; elsewhere (macOS uses Directory Services) membership is never
-/// provable, so a group-writable folder stays shared.
+/// Whether a `/proc/self/{uid,gid}_map` text is the identity map of the initial namespace.
+#[cfg_attr(not(any(target_os = "linux", target_os = "android")), allow(dead_code))]
+pub(super) fn identity_map(text: &str) -> bool {
+    let mut lines = text.lines().filter(|line| !line.trim().is_empty());
+    let first = lines
+        .next()
+        .map(|line| line.split_whitespace().collect::<Vec<_>>());
+    lines.next().is_none() && first.as_deref() == Some(&["0", "0", "4294967295"][..])
+}
+
+/// The systemd userdb record directories and the systemd-homed socket, relative to the root.
+#[cfg_attr(not(any(target_os = "linux", target_os = "android")), allow(dead_code))]
+const USERDB_DIRS: [&str; 5] = [
+    "etc/userdb",
+    "run/userdb",
+    "run/host/userdb",
+    "usr/local/lib/userdb",
+    "usr/lib/userdb",
+];
+#[cfg_attr(not(any(target_os = "linux", target_os = "android")), allow(dead_code))]
+const HOMED_SOCKET: &str = "run/systemd/userdb/io.systemd.Home";
+
+/// Everything [`group_is_private`] needs, read from below `root` (`/` in production; a prepared
+/// folder in tests). Each file is read bounded; each userdb directory only up to its first entry.
+#[cfg(unix)]
+#[cfg_attr(not(any(target_os = "linux", target_os = "android")), allow(dead_code))]
+pub(super) fn load_account_files(root: &Path) -> AccountFiles {
+    let nsswitch = match read_account_file(&root.join("etc/nsswitch.conf")) {
+        Ok(text) => NsSwitch::Text(text),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => NsSwitch::Absent,
+        Err(_) => NsSwitch::Unreadable,
+    };
+    let mut userdb_records = Some(false);
+    for dir in USERDB_DIRS {
+        match fs::read_dir(root.join(dir)) {
+            Ok(mut entries) => {
+                if entries.next().is_some() {
+                    userdb_records = Some(true);
+                }
+            }
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            // Could not look: not provably absent (only `Some(false)` passes).
+            Err(_) => userdb_records = None,
+        }
+    }
+    match fs::symlink_metadata(root.join(HOMED_SOCKET)) {
+        Ok(_) => userdb_records = Some(true),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+        Err(_) => userdb_records = None,
+    }
+    let map = |name: &str| {
+        read_account_file(&root.join("proc/self").join(name)).is_ok_and(|text| identity_map(&text))
+    };
+    let container = [
+        "run/.containerenv",
+        ".dockerenv",
+    ]
+    .iter()
+    .any(|marker| !matches!(fs::symlink_metadata(root.join(marker)), Err(error) if error.kind() == io::ErrorKind::NotFound));
+    AccountFiles {
+        passwd: read_account_file(&root.join("etc/passwd")).ok(),
+        group: read_account_file(&root.join("etc/group")).ok(),
+        nsswitch,
+        userdb_records,
+        host_namespace: map("uid_map") && map("gid_map") && !container,
+    }
+}
+
+/// [`group_is_private`] against this system. Only Linux and Android keep their account databases
+/// in these files; elsewhere (macOS uses Directory Services) membership is never provable, so a
+/// group-writable folder stays shared.
 #[cfg(all(unix, not(test)))]
 fn system_group_is_private(gid: u32, me: u32) -> bool {
     #[cfg(any(target_os = "linux", target_os = "android"))]
     {
-        let nsswitch = match read_account_file("/etc/nsswitch.conf") {
-            Ok(text) => NsSwitch::Text(text),
-            Err(error) if error.kind() == io::ErrorKind::NotFound => NsSwitch::Absent,
-            Err(_) => NsSwitch::Unreadable,
-        };
-        let files = AccountFiles {
-            passwd: read_account_file("/etc/passwd").ok(),
-            group: read_account_file("/etc/group").ok(),
-            nsswitch,
-        };
-        group_is_private(&files, gid, me)
+        group_is_private(&load_account_files(Path::new("/")), gid, me)
     }
     #[cfg(not(any(target_os = "linux", target_os = "android")))]
     {
@@ -1652,7 +1814,8 @@ pub(super) fn link_open(
                 hook(&folder.join(staging));
             }
         });
-        let Some(pinned) = pin_folder(folder, folder_id)? else {
+        // Never deletes, and runs under the session commit guard: no account or ACL reads.
+        let Some(pinned) = pin_folder(folder, folder_id, false)? else {
             return Err(io::Error::new(
                 io::ErrorKind::NotFound,
                 "the destination folder changed",

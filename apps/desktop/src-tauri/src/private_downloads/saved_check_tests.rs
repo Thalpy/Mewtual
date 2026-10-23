@@ -162,19 +162,31 @@ async fn the_production_check_is_bounded_and_read_only() {
     let (root, journal, _) = journals();
     let downloads = root.path().join("Downloads");
     let before = std::fs::read_dir(&downloads).unwrap().count();
-    // No free slot: Unknown at once, without touching the folder.
-    let none = Arc::new(tokio::sync::Semaphore::new(0));
-    assert_eq!(
-        saved_presence_in(none, journal.clone()).await,
-        Ok(SavedPresence::Unknown)
-    );
-    // With a slot: the real read-only check (this journal never got its final name).
+    // Decisions review M1: with the only slot held by an earlier check, a later check waits for
+    // it (holding no thread) and then gives a real answer instead of an immediate "unknown".
     let one = Arc::new(tokio::sync::Semaphore::new(1));
+    let held = one.clone().try_acquire_owned().unwrap();
+    let waiting = tokio::spawn(saved_presence_in(one.clone(), journal.clone()));
+    tokio::task::yield_now().await;
+    assert!(!waiting.is_finished(), "it waits for the slot");
+    drop(held);
+    // The real read-only check (this journal never got its final name).
     assert_eq!(
-        saved_presence_in(one.clone(), journal).await,
+        tokio::time::timeout(Duration::from_secs(20), waiting)
+            .await
+            .expect("answers once the slot is free")
+            .unwrap(),
         Ok(SavedPresence::Missing)
     );
     assert_eq!(one.available_permits(), 1, "the slot is returned");
+    // The sequence bounds that wait like the check: a pool that never frees answers "unknown".
+    let never = Arc::new(tokio::sync::Semaphore::new(0));
+    assert!(
+        tokio::time::timeout(Duration::from_millis(50), saved_presence_in(never, journal))
+            .await
+            .is_err(),
+        "without the sequence's bound it would wait"
+    );
     assert_eq!(
         std::fs::read_dir(&downloads).unwrap().count(),
         before,

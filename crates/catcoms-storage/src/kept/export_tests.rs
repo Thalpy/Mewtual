@@ -899,14 +899,18 @@ fn unix_removes_in_a_group_writable_folder_only_for_a_user_private_group() {
     use std::os::unix::fs::{MetadataExt, PermissionsExt};
     let me = rustix::process::geteuid().as_raw();
     let my_gid = rustix::process::getegid().as_raw();
-    for (members, expected) in [
-        ("", PartialRemoval::Removed),
-        ("bob", PartialRemoval::SharedFolder),
+    // Decisions review HIGH: an extended ACL granting another account write makes the folder
+    // shared even with a proven private group.
+    for (members, acl, expected) in [
+        ("", false, PartialRemoval::Removed),
+        ("bob", false, PartialRemoval::SharedFolder),
+        ("", true, PartialRemoval::SharedFolder),
     ] {
         let fx = fixture();
         if fs::metadata(&fx.downloads).unwrap().gid() != my_gid {
-            // A set-group-id parent gave the folder another group: not this case.
-            return;
+            // A set-group-id parent gave the folder another group; give it ours (decisions
+            // review L5: never skip silently).
+            std::os::unix::fs::chown(&fx.downloads, None, Some(my_gid)).unwrap();
         }
         let mut store = open(&fx.vault);
         let (id, lease) = completed(&mut store);
@@ -917,6 +921,39 @@ fn unix_removes_in_a_group_writable_folder_only_for_a_user_private_group() {
             panic!();
         };
         fs::set_permissions(&fx.downloads, fs::Permissions::from_mode(0o775)).unwrap();
+        if acl {
+            #[cfg(any(target_os = "linux", target_os = "android"))]
+            {
+                // user::rwx, user:4242:rwx, group::rwx, mask::rwx, other::r-x (version 2 format).
+                let mut blob = 2u32.to_le_bytes().to_vec();
+                for (tag, perm, id) in [
+                    (0x01u16, 7u16, u32::MAX),
+                    (0x02, 7, 4242),
+                    (0x04, 7, u32::MAX),
+                    (0x10, 7, u32::MAX),
+                    (0x20, 5, u32::MAX),
+                ] {
+                    blob.extend(tag.to_le_bytes());
+                    blob.extend(perm.to_le_bytes());
+                    blob.extend(id.to_le_bytes());
+                }
+                match rustix::fs::setxattr(
+                    &fx.downloads,
+                    "system.posix_acl_access",
+                    &blob,
+                    rustix::fs::XattrFlags::empty(),
+                ) {
+                    Ok(()) => {}
+                    Err(rustix::io::Errno::OPNOTSUPP) => {
+                        eprintln!("this filesystem has no POSIX ACLs; the ACL case does not apply");
+                        continue;
+                    }
+                    Err(error) => panic!("setting the ACL failed: {error}"),
+                }
+            }
+            #[cfg(not(any(target_os = "linux", target_os = "android")))]
+            continue;
+        }
         external::ACCOUNT_FILES.with(|files| {
             *files.borrow_mut() = Some(external::AccountFiles {
                 passwd: Some(format!(
@@ -924,11 +961,13 @@ fn unix_removes_in_a_group_writable_folder_only_for_a_user_private_group() {
                 )),
                 group: Some(format!("me:x:{my_gid}:{members}\nbob:x:4242:\n")),
                 nsswitch: external::NsSwitch::Absent,
+                userdb_records: Some(false),
+                host_namespace: true,
             })
         });
         let outcome = remove_partial(&journal, false, &mut rng());
         external::ACCOUNT_FILES.with(|files| *files.borrow_mut() = None);
-        assert_eq!(outcome.unwrap(), expected, "members {members:?}");
+        assert_eq!(outcome.unwrap(), expected, "members {members:?}, acl {acl}");
         assert_eq!(
             staging(&fx.downloads).exists(),
             expected == PartialRemoval::SharedFolder

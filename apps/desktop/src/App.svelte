@@ -12211,24 +12211,30 @@
     if (server === null || locked) return;
     const due = privateDownloads.filter((row) => row.status === "saved" && !savedChecking[row.id] &&
       !(savedChecks[row.id]?.intent === row.intent && savedChecks[row.id]?.visit === visit));
-    await Promise.all(due.map(async (row) => {
-      const token = Symbol("saved check");
-      savedChecking[row.id] = token;
-      let result: SavedCheck = "unknown";
-      try {
-        result = checkedSavedCheck(await invoke<unknown>("check_saved_download",
-          { server, download: row.id, expectedIntent: row.intent }));
-      } catch {
-        // Native refused (a changed row, Lock) or the answer was unreadable: claim nothing new.
-        result = "unknown";
-      } finally {
-        if (savedChecking[row.id] === token) delete savedChecking[row.id];
+    // One check at a time (decisions review M1): native runs at most two workers and waits for a
+    // free one within its bound, so a burst of rows never turns into "could not check". The whole
+    // batch is claimed up front, so an overlapping refresh never asks for the same rows again.
+    const token = Symbol("saved checks");
+    for (const row of due) savedChecking[row.id] = token;
+    try {
+      for (const row of due) {
+        if (!unlockedViewCurrent(gen, server)) return;
+        let result: SavedCheck = "unknown";
+        try {
+          result = checkedSavedCheck(await invoke<unknown>("check_saved_download",
+            { server, download: row.id, expectedIntent: row.intent }));
+        } catch {
+          // Native refused (a changed row, Lock) or the answer was unreadable: claim nothing new.
+          result = "unknown";
+        }
+        if (!unlockedViewCurrent(gen, server)) return;
+        const now = privateDownloads.find((other) => other.id === row.id);
+        if (!now || now.status !== "saved" || now.intent !== row.intent) continue;
+        savedChecks[row.id] = { intent: row.intent, result, visit };
       }
-      if (!unlockedViewCurrent(gen, server)) return;
-      const now = privateDownloads.find((other) => other.id === row.id);
-      if (!now || now.status !== "saved" || now.intent !== row.intent) return;
-      savedChecks[row.id] = { intent: row.intent, result, visit };
-    }));
+    } finally {
+      for (const row of due) if (savedChecking[row.id] === token) delete savedChecking[row.id];
+    }
   }
   /** The latest check of `row`'s file for this exact revision, or `null`. */
   function savedCheckFor(row: PrivateDownload): SavedCheck | null {
@@ -12236,8 +12242,11 @@
     return checked && checked.intent === row.intent && row.status === "saved" ? checked.result : null;
   }
   function runPrivateDownloadAction(row: PrivateDownload, kind: PrivateDownloadActionKind) {
-    // Acting on a Saved row checks its file again when the list refreshes afterwards.
-    if (row.status === "saved") delete savedChecks[row.id];
+    // Acting on a Saved row checks its file again when the list refreshes afterwards. The last
+    // answer stays on screen until then (decisions review L3): a row known to be missing never
+    // flashes back to plain "Saved".
+    const checked = savedChecks[row.id];
+    if (row.status === "saved" && checked) savedChecks[row.id] = { ...checked, visit: -1 };
     if (kind === "resume") return resumePrivateDownload(row);
     if (kind === "fresh") return resumePrivateDownload(row, true);
     if (kind === "saveAs") return resumePrivateDownload(row, false, true);

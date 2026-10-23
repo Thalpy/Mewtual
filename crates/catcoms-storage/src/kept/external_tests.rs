@@ -408,6 +408,8 @@ fn accounts(passwd: &str, group: &str, nsswitch: NsSwitch) -> AccountFiles {
         passwd: Some(passwd.to_owned()),
         group: Some(group.to_owned()),
         nsswitch,
+        userdb_records: Some(false),
+        host_namespace: true,
     }
 }
 const PASSWD: &str = "root:x:0:0:root:/root:/bin/bash\n\
@@ -519,10 +521,116 @@ fn unprovable_membership_fails_closed() {
         let files = AccountFiles {
             passwd: passwd.map(str::to_owned),
             group: group.map(str::to_owned),
-            nsswitch: NsSwitch::Absent,
+            ..accounts(PASSWD, GROUP, NsSwitch::Absent)
         };
         assert!(!private(files));
     }
+}
+
+#[test]
+fn directory_services_cannot_hide_behind_nsswitch_syntax() {
+    // Decisions review M2: glibc ends a service name at `[` and starts one right after `]`, and
+    // `initgroups` supplies supplementary groups at login.
+    let text = |value: &str| NsSwitch::Text(value.into());
+    let private = |files: AccountFiles| group_is_private(&files, MY_GROUP, ME);
+    for nss in [
+        "passwd: files\ngroup: files ldap[NOTFOUND=return]\n",
+        "passwd: files\ngroup: files [SUCCESS=merge]sss\n",
+        "passwd: files\ngroup: files\ninitgroups: files sss\n",
+        "passwd: files\ngroup: files [NOTFOUND=return\n",
+        "passwd: files\ngroup: files ]\n",
+        "passwd: files\ngroup: files\ninitgroups:\n",
+    ] {
+        assert!(!private(accounts(PASSWD, GROUP, text(nss))), "{nss:?}");
+    }
+    assert!(private(accounts(
+        PASSWD,
+        GROUP,
+        text("passwd: files\ngroup: files [NOTFOUND=return]\ninitgroups: files\n")
+    )));
+    assert_eq!(
+        nss_services("files ldap[NOTFOUND=return] [SUCCESS=merge]sss  systemd"),
+        Some(vec!["files", "ldap", "sss", "systemd"])
+    );
+    assert_eq!(nss_services("files [x"), None);
+}
+
+#[test]
+fn systemd_accounts_and_containers_fail_closed() {
+    // Decisions review M3: nss-systemd also serves userdb records and systemd-homed, which can add
+    // members or primary groups that /etc never shows. M4: inside a user namespace or a container,
+    // /etc does not describe the accounts that can reach a bind-mounted folder.
+    let systemd = || NsSwitch::Text(NSSWITCH.into());
+    let with = |userdb_records, host_namespace| AccountFiles {
+        userdb_records,
+        host_namespace,
+        ..accounts(PASSWD, GROUP, systemd())
+    };
+    assert!(group_is_private(&with(Some(false), true), MY_GROUP, ME));
+    assert!(!group_is_private(&with(Some(true), true), MY_GROUP, ME));
+    assert!(!group_is_private(&with(None, true), MY_GROUP, ME));
+    assert!(!group_is_private(&with(Some(false), false), MY_GROUP, ME));
+    // Without `systemd` listed, its records are not consulted.
+    let files_only = AccountFiles {
+        userdb_records: None,
+        ..accounts(
+            PASSWD,
+            GROUP,
+            NsSwitch::Text("passwd: files\ngroup: files\n".into()),
+        )
+    };
+    assert!(group_is_private(&files_only, MY_GROUP, ME));
+    // The identity map of the initial namespace, and nothing else.
+    assert!(identity_map("         0          0 4294967295\n"));
+    assert!(!identity_map("0 100000 65536\n"));
+    assert!(!identity_map("0 0 4294967295\n1 1 1\n"));
+    assert!(!identity_map(""));
+}
+
+#[cfg(any(target_os = "linux", target_os = "android"))]
+#[test]
+fn an_extended_acl_is_never_ruled_out_without_proof() {
+    // Decisions review HIGH: with an extended POSIX ACL the group bits are the ACL mask, which can
+    // carry another account's write access.
+    assert!(acl_present_from(Ok(0)));
+    assert!(acl_present_from(Ok(44)));
+    assert!(!acl_present_from(Err(rustix::io::Errno::NODATA)));
+    assert!(!acl_present_from(Err(rustix::io::Errno::OPNOTSUPP)));
+    assert!(acl_present_from(Err(rustix::io::Errno::ACCESS)));
+}
+
+#[cfg(unix)]
+#[test]
+fn the_account_files_are_read_bounded_from_the_root() {
+    // Decisions review L5: the production loader, pointed at a prepared root.
+    let root = tempfile::tempdir().unwrap();
+    let put = |path: &str, text: &str| {
+        let path = root.path().join(path);
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(path, text).unwrap();
+    };
+    put("etc/passwd", PASSWD);
+    put("etc/group", GROUP);
+    put("proc/self/uid_map", "0 0 4294967295\n");
+    put("proc/self/gid_map", "0 0 4294967295\n");
+    let files = load_account_files(root.path());
+    assert!(matches!(files.nsswitch, NsSwitch::Absent));
+    assert_eq!(files.userdb_records, Some(false));
+    assert!(files.host_namespace);
+    assert!(group_is_private(&files, MY_GROUP, ME));
+    // A userdb record, a container marker, a non-identity map, an oversized file.
+    put("usr/lib/userdb/bob.user", "{}");
+    put("etc/nsswitch.conf", NSSWITCH);
+    let files = load_account_files(root.path());
+    assert_eq!(files.userdb_records, Some(true));
+    assert!(!group_is_private(&files, MY_GROUP, ME));
+    put("run/.containerenv", "");
+    assert!(!load_account_files(root.path()).host_namespace);
+    fs::remove_file(root.path().join("run/.containerenv")).unwrap();
+    put("proc/self/uid_map", "0 100000 65536\n");
+    assert!(!load_account_files(root.path()).host_namespace);
+    put("etc/passwd", &"x".repeat(1024 * 1024 + 1));
+    assert!(load_account_files(root.path()).passwd.is_none());
 }
 
 #[test]
