@@ -62,6 +62,9 @@ impl PreparedPhase {
     /// factory may already have published its Action, so attachment pressure must not lose
     /// that Action or require fresh metadata payment on its next exact retry. This returns
     /// the SAME preparation; it refunds no engine, nonce, attempt or transport handoff.
+    // A local refusal returns the SAME already-paid preparation inline. Boxing its error
+    // would add a fallible, separately owned allocation while ordinary capacity is full.
+    #[allow(clippy::result_large_err)]
     pub(crate) fn try_bind(
         self,
         action: &CryptoAction,

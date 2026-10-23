@@ -98,9 +98,9 @@ impl Ledger {
         if !parent_state.status.drained
             || parent_state.final_phase.is_some()
             || parent_state.final_delivery().is_some()
-            || !parent_state
+            || parent_state
                 .plan()
-                .is_some_and(|plan| plan.control.is_some())
+                .is_none_or(|plan| plan.control.is_none())
         {
             return Err(VoiceError::Capacity);
         }
