@@ -113,7 +113,8 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             members: self.group.member_device_ids().into_iter().collect(),
             policy: self.group_policy.as_ref().map(GroupPolicy::digest),
             eligible,
-            indirect: self.policy_allows_member_mesh(),
+            // Shared with voice_v2_context: the local VoiceRouting switch can only narrow this.
+            indirect: self.voice_indirect_allowed(),
         };
         if let Some(voice) = &mut self.voice_runtime {
             if let Some(owner) = &mut voice.current {

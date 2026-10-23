@@ -1,5 +1,13 @@
 # Next voice milestone: native result recovery
 
+## Integration status (23 October, validation pending)
+
+PR #52 now includes target `2f08bde0` and its off-by-default V2 scheduler/call-driver contract.
+Both documentation histories are preserved. Combined validation and review are pending;
+`193f220f` results below describe only the prior isolated native checkpoint. Input/permit,
+atomic admission, action adapters, post-End browser cleanup and actual Actor/WebView acceptance
+remain outstanding. No production gate is enabled by the merge.
+
 ## Validated terminal delivery; remaining handoff work (23 October)
 
 Frozen runtime `193f220f4761844946740ee7b7d32f870b50722f` passed Root 3,254, native 685 (including five ACL) and frontend

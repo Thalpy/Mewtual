@@ -102,7 +102,8 @@ const BUDGETS: &[(&str, u8, usize)] = &[
         MAX_CONTROL_REQUEST,
     ),
     ("KIND_BLOB_PAGE", KIND_BLOB_PAGE, MAX_BLOB_PAGE),
-    // The inert V2 transport returns only a fixed signed ACK, never the envelope. Both
+    // The V2 transport (dispatched only when VoiceRouting enables service) returns only a fixed
+    // signed ACK, never the envelope. Both
     // verify_voice_response and the detached forwarder reject ACKs above 512 bytes; this
     // conservative receive ceiling also covers all three fixed-width status encodings.
     ("KIND_VOICE_TRANSPORT", KIND_VOICE_TRANSPORT, 512),

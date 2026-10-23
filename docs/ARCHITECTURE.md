@@ -1,5 +1,20 @@
 # Mewtual; Architecture
 
+## Integrated V2 scheduling boundary (23 October)
+
+The target's V2 transport now coexists with native terminal-delivery state. Root routes kind 28
+and drives source/helper/endpoint work only through the local VoiceRouting switch; it defaults
+to Disabled, preserving the old empty response and no V2 scheduling. Forwarding serves bound
+member routes without granting endpoint participation or keys. Direct narrows policy and
+revokes the affected runtime lease; Disabled/Forwarding pauses preserve the native join.
+
+The renderer pins legacy/V2 mode before a join becomes current. V2 rooms exclude legacy
+writers, including delayed hangups, before presence or RTC mutation. Activation remains
+unavailable: the call driver is a contract-tested consumer of a native interface that is not
+implemented. Native loopback action/final dispatch stays disabled. See VOICE-V2-CALL-DRIVER.md
+for exact contracts, retained risks and enablement gates; HANDOVER records combined validation.
+Older claims that kind 28 is undispatched describe the default, not the opt-in test seam.
+
 ## Original-channel terminal delivery (23 October)
 
 The inactive adapter distinguishes returning an action's16KiB loan from retiring its whole

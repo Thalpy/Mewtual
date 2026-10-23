@@ -77,7 +77,9 @@ mod group_policy;
 mod owner_tenure;
 mod voice_endpoint;
 mod voice_runtime;
+mod voice_schedule;
 pub use voice_endpoint::VoiceWatchGrant;
+pub use voice_schedule::VoiceRouting;
 pub mod voice_v2;
 pub use catcoms_mls::{GroupMode, GroupPolicy, PolicyError};
 pub use owner_tenure::{
@@ -182,8 +184,10 @@ const KIND_JOIN_FORWARD: u8 = 11;
 /// the strict v1 PEX bundle is a compatibility boundary: older peers answer an unknown kind with
 /// an empty response instead of rejecting otherwise valid peer records.
 const KIND_SWITCHBOARD_OFFER: u8 = 12;
-/// Reserved V2 transport codec/integration seam; deliberately absent from live dispatch until
-/// native endpoint ownership and the bounded actor forwarding/completion path are integrated.
+/// V2 voice transport (docs/communication-recovery/VOICE-SIGNALLING-V2.md). Dispatched to
+/// `serve_voice_transport` only when the local `VoiceRouting` switch enables service (it is
+/// Disabled by default, which answers like an unknown kind); `voice_schedule` then drives its
+/// endpoint/source/helper work. Kind 8 keeps its released transcript and behaviour.
 const KIND_VOICE_TRANSPORT: u8 = 28;
 /// Pre-admission proof-of-reply-channel request. Public so the desktop's retained pre-join
 /// transport can verify it before constructing `ChannelSync` and disclosing the bearer invite.
@@ -4235,6 +4239,9 @@ pub struct ChannelSync<T: MeshTransport, R: CryptoRngCore> {
     registry_seeds: registry_seed::SeedRequests,
     epoch_service: epoch_service::EpochService,
     voice_runtime: Option<voice_runtime::VoiceRuntime>,
+    /// Detached V2 voice flights and the local rollout switch. Independent of `voice_runtime`:
+    /// lower flights outlive an actor detach and are settled (and refused) by this Root.
+    voice_schedule: voice_schedule::VoiceSchedule,
     // A cancelled subscribe/unsubscribe may already have reached the transport. Reconcile this uncertain
     // topic before calculating the next routing diff; never lose unsubscribe ownership.
     routing_subscription_pending: Option<Topic>,
@@ -4759,6 +4766,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             rng,
             clock: clock.clone(),
             voice_runtime: None,
+            voice_schedule: voice_schedule::VoiceSchedule::default(),
             file_wrap_key,
             ledger: InviteLedger::new(),
             docs: HashMap::new(),
@@ -6387,6 +6395,9 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         // Receipts and helper forwards compete in one persistent bounded admission rotation.
         // A denied pass cannot advance away from the class owed the next available slot.
         self.queue_automatic_notifications();
+        // One bounded V2 voice pass per tick (renewals, challenges, proofs, source and helper
+        // flights). Its flights are owned on self, so a cancelled tick cannot lose them.
+        self.pump_voice_schedule();
         // Apply any routing-label rotation from a previous tick: subscribe the new
         // label's topics and drop the ones that aged out of the grandfather window.
         self.resync_if_needed().await;
@@ -6491,6 +6502,12 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
                 }
                 if data.first() == Some(&KIND_STUDIO_SEED) {
                     self.queue_checkpoint_seed(KIND_STUDIO_SEED, from, &data[1..], responder);
+                    return Ok(true);
+                }
+                // V2 voice keeps its responder: admission binds the typed signed ACK to this exact
+                // request. Bound-peer/requester work is charged before any signature check inside.
+                if data.first() == Some(&KIND_VOICE_TRANSPORT) && self.voice_transport_enabled() {
+                    self.serve_voice_transport(from, &data, responder);
                     return Ok(true);
                 }
                 let response = match data.split_first() {

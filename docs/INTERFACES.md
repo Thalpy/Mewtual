@@ -1,5 +1,20 @@
 # Mewtual; Interfaces & Hooks Schema
 
+## Integrated V2 routing and call contract (23 October)
+
+VoiceRouting is an explicitly local Root control with Disabled as its default. Opt-in normal
+dispatch/scheduling uses existing authenticated V2 endpoint/source/helper admission. Changing
+to or from Direct revokes the affected runtime policy lease; Disabled/Forwarding pauses do not
+convert or end it. No desktop caller enables this switch.
+
+VoiceV2Call's native interface requires exact-retry start/submit/end and non-dequeueing event
+pulls; these commands are not implemented by this integration. Events and RTC effects bind
+exact join, peer allocation and OfferId; submission reports local admission, never delivery.
+App mode pinning excludes legacy writers into a V2 join, but voiceV2Activation is unavailable.
+The native handoff whitelist remains Status9 and existing-history Begin8(false). Input/permit,
+SDP/ICE actions, authenticated post-End browser final exchange and real WebView acceptance
+remain prerequisites. VOICE-V2-CALL-DRIVER.md records the complete incoming contract.
+
 ## Inactive terminal closure and final receipt (23 October)
 
 ClosePhase6 requires version1, complete104B purpose and one mode byte:0 returns the original

@@ -105,8 +105,10 @@
   import { disposeStreamAudioGraph } from "./stream-audio";
   import {
     bufferIce, directionIdle, hangupTargets, heartbeatRecovery, isCurrentVoiceRoom, mergePeerState,
-    videoSlotPlan, VIDEO_BITRATE, type PeerState, type SlotDirection, type VideoKind,
+    legacyCallSignalAdmission, legacyCallSignalEgress, legacyCallSignalKind,
+    videoSlotPlan, VIDEO_BITRATE, type CallSignalMode, type PeerState, type SlotDirection, type VideoKind,
   } from "./voice-signaling";
+  import { voiceV2Activation } from "./voice-v2-call";
   import {
     DEFAULT_STREAM_SETTINGS, MAX_STREAM_AUDIO_SOURCES, PeerVideoBudgetController, captureResolutionKnownAfterConstraint,
     estimatedMeshMbps, isStreamHeight,
@@ -13126,6 +13128,14 @@
   // Call-server members whose fingerprint another member shares, so call labels can say so.
   let callSharedIds = $state<ReadonlySet<string>>(new Set());
   let activeCallLease = 0; // binds async call-only caches to this exact room lifecycle
+  // Which signalling protocol owns the current join (voice-signaling.ts CallSignalMode). Pinned by
+  // joinVoice before anything is sent and reset only by leaveVoice, so a V2 join never falls back
+  // to legacy. V2 is not chosen yet (voiceV2Activation lists what is missing), so every call is
+  // legacy today and the V2 gates in handleCallSignal/sendSignal stay inert until activation.
+  let callSignalMode: CallSignalMode = "legacy";
+  // Legacy kinds already diagnosed as excluded in this join: each protocol word is recorded once,
+  // so legacy peers pinging a V2 room every five seconds cannot flood the diagnostics ring.
+  const legacyExcludedKinds = new Set<string>();
   // Names and avatars on the call surfaces MUST resolve against the room's server, never the
   // viewed one. `profiles` is replaced wholesale on every server switch (see refreshProfiles),
   // so reading it from the call bar re-labelled you and every peer the moment you clicked
@@ -13404,6 +13414,9 @@
     // wrote, so it is safe to record and it is what turns a wall of identical warnings into
     // "every ice candidate failed while the offer got through".
     const kind = typeof msg.type === "string" ? msg.type : "unknown";
+    // Nothing legacy leaves for a V2 join's room: a legacy hello or ping would invite older builds
+    // into the protected call, and a legacy bye is not how a V2 join leaves (the native end is).
+    if (legacyCallSignalEgress({ mode: callSignalMode, inCall, callServer, callChannel, server, channel: msg.callId }) === "suppress") return false;
     try {
       const { value: submitted } = await invokeDebugged<boolean>("send_call_signal", {
         server,
@@ -13451,7 +13464,12 @@
   function broadcast(msg: Record<string, unknown>) {
     const server = callServer;
     const selfId = callSelfId;
-    if (server !== null && selfId) void broadcastOn(server, selfId, msg);
+    if (server === null || !selfId) return;
+    // Decide legacy egress now, for the join that created this message. broadcastOn awaits the
+    // roster first; by then teardown (or the next call) may have reset the global mode, and the
+    // final check in sendSignal would judge this old V2-room message by the new state.
+    if (legacyCallSignalEgress({ mode: callSignalMode, inCall, callServer, callChannel, server, channel: msg.callId }) === "suppress") return;
+    void broadcastOn(server, selfId, msg);
   }
   /**
    * Say goodbye, on every route at once, before the room is torn down.
@@ -13474,6 +13492,11 @@
    */
   function announceHangup(server: number, selfId: string, channel: string) {
     const farewell = { callId: channel, type: "bye" };
+    // Bind the legacy decision to the join being left, before the roster await below: leaveVoice
+    // resets callSignalMode synchronously after this returns, so a check at send time would let a
+    // V2 join's farewell out as a legacy bye. A V2 join leaves through its native end instead.
+    const legacyFarewell =
+      legacyCallSignalEgress({ mode: callSignalMode, inCall, callServer, callChannel, server, channel }) === "send";
     const edges: string[] = [];
     for (const [id, peer] of Object.entries(callPeers)) {
       edges.push(id);
@@ -13481,6 +13504,7 @@
         try { peer.dc.send(JSON.stringify({ t: "bye" })); } catch { /* edge already gone */ }
       }
     }
+    if (!legacyFarewell) return;
     void (async () => {
       // Peers with an edge are told whatever the roster read does, including nothing at all: an
       // established edge is better evidence that someone is in this room than the online list is.
@@ -19261,6 +19285,9 @@
     // slow: nothing was set, so the button did nothing, no error appeared, and the only visible
     // fact was that leaving a call had cost the ability to join another one. So the room is entered
     // first and the microphone attaches to it when (and if) the device answers.
+    // Pin the protocol before the room becomes current and before the first hello, so no legacy
+    // signal is admitted into (or sent from) a V2 join in between.
+    callSignalMode = voiceV2Activation().available ? "v2" : "legacy";
     localStream = null;
     micOn = false;
     callServer = server;
@@ -19446,6 +19473,9 @@
     callSelfId = "";
     callSharedIds = new Set();
     activeCallLease = 0;
+    // After announceHangup above: a V2 room's legacy bye stays suppressed until the call is gone.
+    callSignalMode = "legacy";
+    legacyExcludedKinds.clear();
     defaultRouteIpv4 = null;
     callProfiles = {};
     peerTransport = {};
@@ -19604,9 +19634,24 @@
     } catch {
       return;
     }
-    const cid = msg.callId as string | undefined;
-    const type = msg.type as string | undefined;
-    if (!cid || !type) return;
+    // Validate the parsed shape before any gate or state. Room and type must be non-empty strings:
+    // presence keys are built with `${server}:${channel}`, which coerced other values into a real
+    // room (an array ["7"] or the number 7 became "7") after they had slipped past the V2 fence.
+    if (!msg || typeof msg !== "object" || Array.isArray(msg)) return;
+    const cid = msg.callId;
+    const type = msg.type;
+    if (typeof cid !== "string" || !cid || typeof type !== "string" || !type) return;
+    // A V2 join's room has no legacy writer: no legacy presence, peer, SDP, ICE or bye may touch it,
+    // whatever capability fields are missing or whichever helper relayed it (VOICE-SIGNALLING-V2.md).
+    // This runs before the presence writes below. Other rooms keep their legacy presence meaning.
+    if (legacyCallSignalAdmission({ mode: callSignalMode, inCall, callServer, callChannel, server, channel: cid }) === "exclude") {
+      const kind = legacyCallSignalKind(type);
+      if (!legacyExcludedKinds.has(kind)) {
+        legacyExcludedKinds.add(kind);
+        diagRecord({ section: "voice", code: "VOICE.V2.LEGACY_EXCLUDED", level: "info", fields: { kind } });
+      }
+      return;
+    }
     const currentRoom = inCall && isCurrentVoiceRoom(callServer, callChannel, server, cid);
     // Presence: both "hello" (a newcomer) and "voice-ping" (heartbeat) mean someone's in a room.
     if (type === "hello" || type === "voice-ping") {

@@ -1,5 +1,19 @@
 # Chat, files and voice implementation evidence
 
+## Native handoff and V2 target integration (23 October, validation pending)
+
+This tree integrates native terminal-delivery checkpoint `05dcc2c2` with target `2f08bde0`
+(PR #50). Both implementations are preserved: runtime paths changed on only one side, and
+only the dated THREAT-MODEL and acceptance sections conflicted. Both sections are retained.
+The complete combined suites and actual-diff review are pending; earlier counts below apply
+only to their named sources. In particular, `193f220f` predates the target V2 merge.
+
+Production gates are unchanged. VoiceRouting defaults to Disabled; the desktop activation
+factory is unavailable. Native loopback admission remains Status9/existing-history Begin8(false)
+only. The new finalization adapter and action dispatch remain disabled. This integration adds
+no SDP/ICE delivery, post-End browser cleanup, media relay or physical acceptance.
+External download resume is outside this change. Its separate worktree was not modified.
+
 ## Validated native terminal delivery (23 October)
 
 Frozen runtime `193f220f4761844946740ee7b7d32f870b50722f` passed the complete local suites. This checkpoint implements native
@@ -55,6 +69,32 @@ keys through final ACK, and actual Actor/MLS/WebView action acceptance. Engine a
 needs a synchronous native/Root commit boundary with Clock callbacks outside locks; it must not
 authorize work using a stale UI/route check. Exact action settlement cannot wait for whole-chain
 retirement. Live V2/RTC, relay, combined rollout and independent physical acceptance remain open.
+
+## V2 dispatch, scheduling and call driver (22 October, branch `communication-v2-signalling`)
+
+Isolated from `f227b4f7`; details, contract and limits are in
+[VOICE-V2-CALL-DRIVER](VOICE-V2-CALL-DRIVER.md). Kind-28 dispatch and a production scheduler for
+the existing endpoint/source/helper seams sit behind a local `VoiceRouting` switch that is
+**Disabled by default** (the old empty reply; nothing scheduled). The renderer pins `legacy`/`v2`
+per join and excludes every legacy writer from a V2 join's room. A dedicated V2 call driver
+targets a narrow native interface with contract tests. It is **not activated**: no native
+commands implement that interface and SDP/ICE action delivery is still pending.
+
+Focused results: `cargo test -p catcoms-sync --lib -- voice` passes 458, zero failures, including
+A-B-C discovery through unjoined B and recovery through replacement D under normal ticks, with
+hop oracles showing only bound routes were used. Frontend voice/identity/lifecycle/wiring tests
+pass 93, and Svelte check reports zero errors and warnings. Read-only adversarial review found one
+blocker (default-on service contradicting the decision's gate) and six medium issues; all are
+resolved with regressions confirmed to fail when reverted. A second, external PR #50 review
+found five P2 issues (shared-slot fairness, pair loss on presence expiry during reconnect,
+stranded submits after lost replies, malformed-room presence coercion and a deferred legacy bye
+after V2 teardown); all are fixed with failing-when-reverted regressions recorded in the driver
+document. Its re-review closed those and found that an exhausted receipt window was treated as
+pair death (a P2 closing a connected call on presence expiry) plus a late-timer retry (P3); both
+are fixed, and an unconditional native "retire lapsed joins" requirement that contradicted the
+established-pair rule is withdrawn. Mem transport is not physical A-C exclusion; no WebView crypto, real RTC, SDP
+forwarding or audio is claimed. Complete suites were not run in this session (the primary owns
+them).
 
 ## Validated proof retention and automatic cleanup retry (22 October)
 

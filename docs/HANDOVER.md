@@ -1,5 +1,19 @@
 # Mewtual; Handover
 
+## Native handoff and V2 target integration (23 October, validation pending)
+
+This tree integrates native terminal-delivery checkpoint `05dcc2c2` with target `2f08bde0`
+(PR #50). Both implementations are preserved: runtime paths changed on only one side, and
+only the dated THREAT-MODEL and acceptance sections conflicted. Both sections are retained.
+The complete combined suites and actual-diff review are pending; earlier counts below apply
+only to their named sources. In particular, `193f220f` predates the target V2 merge.
+
+Production gates are unchanged. VoiceRouting defaults to Disabled; the desktop activation
+factory is unavailable. Native loopback admission remains Status9/existing-history Begin8(false)
+only. The new finalization adapter and action dispatch remain disabled. This integration adds
+no SDP/ICE delivery, post-End browser cleanup, media relay or physical acceptance.
+External download resume is outside this change. Its separate worktree was not modified.
+
 ## Validated native terminal delivery (23 October)
 
 Frozen runtime `193f220f4761844946740ee7b7d32f870b50722f` passed the complete local suites. This checkpoint implements native
