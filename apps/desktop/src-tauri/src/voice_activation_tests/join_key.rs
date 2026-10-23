@@ -1,6 +1,9 @@
 //! Real native actor/bridge boundaries; this is not WebView/RTC or physical audio acceptance.
 use super::*;
+// Pressure must track the actual native policy, including future reviewed policy revisions.
+// A historical256KiB filler no longer exercises capacity refusal at the current512KiB limit.
 use crate::voice_join_key::{admit_inner, publish_inner, settle_inner};
+use catcoms_sync::voice_v2::resources::GROUP_BYTES;
 use std::future::{poll_fn, Future};
 use std::pin::Pin;
 use std::task::Poll;
@@ -81,7 +84,7 @@ async fn selected_join_key_real_root_capacity_retries_the_original_point() {
     let pressure = resources
         .charge(
             group,
-            256 * 1024 - resources.counts().0,
+            GROUP_BYTES - resources.counts().0,
             catcoms_sync::voice_v2::resources::ResourceKind::Retained,
         )
         .unwrap();
