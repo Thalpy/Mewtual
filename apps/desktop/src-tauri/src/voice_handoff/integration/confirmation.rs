@@ -339,7 +339,7 @@ async fn crypto_and_return(
             .unwrap()
     };
     let receipt = completion.result().unwrap();
-    let outcome = receipt.outcome.clone();
+    let outcome = receipt.outcome;
     assert!(!matches!(outcome, CryptoOutcome::Rejected(_)));
     row.acknowledge(&receipt).unwrap();
     row.settle().unwrap();

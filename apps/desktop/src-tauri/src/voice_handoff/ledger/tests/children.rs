@@ -24,7 +24,7 @@ fn returned_parent(
     // not pretend that the pair derived keys or that a subsequent Actor Start can succeed.
     let endpoint = FixtureChannel::new(selected.resources(), selected.binding().scope.group);
     parent
-        .close_phase(&endpoint.session.identity(), CloseMode::Return)
+        .close_phase(endpoint.session.identity(), CloseMode::Return)
         .unwrap();
     assert!(ledger.compact(id).unwrap());
     (join, action, parent)
@@ -67,7 +67,7 @@ fn child_reservation_wins_before_parent_retirement_and_blocks_it_until_local_clo
         .is_some_and(|row| Arc::ptr_eq(row, &parent.row)));
     let endpoint = FixtureChannel::new(selected.resources(), selected.binding().scope.group);
     assert!(matches!(
-        child.close_phase(&endpoint.session.identity(), CloseMode::Retire),
+        child.close_phase(endpoint.session.identity(), CloseMode::Retire),
         Err(VoiceError::Unauthorized)
     ));
     let closed = child.close_pending().unwrap();
