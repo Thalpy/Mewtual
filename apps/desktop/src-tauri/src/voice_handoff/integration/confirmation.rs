@@ -587,16 +587,13 @@ async fn framed_submission(
     let response = confirmation_result::commit(&context, &route, incoming)
         .await
         .unwrap();
-    let (result, incoming) = response.into_parts();
-    let status = result.unwrap();
+    let reply = response.seal().unwrap();
+    let status = row.reconcile().unwrap();
     assert!(status.action == Some((serial, version, tag)));
     assert_eq!(
         status.engine.receipt.as_ref().unwrap().output_tag,
         output_tag
     );
-    let reply = history::Response::new(incoming, Ok((row.id(), status.clone())))
-        .seal()
-        .unwrap();
     assert_eq!(
         opened_reply(&public, header, &body, &reply),
         replies::status(row.id(), &status).unwrap()

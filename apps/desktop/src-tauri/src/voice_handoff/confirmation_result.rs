@@ -2,7 +2,7 @@
 //! through actor publication and completed-output collection, including after socket loss.
 //! This effect executor is not exposed by the listener: ingress serves only Status and read-only history.
 use super::bootstrap::Route;
-use super::channel::{BodyKind, Incoming, Operation};
+use super::channel::{self, BodyKind, CompletedReply, Incoming, Operation};
 use super::context::Context;
 use super::custody::{CopyCustody, PublicationCustody};
 use super::factory::Refused;
@@ -39,16 +39,23 @@ impl Response {
     /// admitted worker has transferred and collected it through the actual actor body.
     /// Incoming still owns the same physical header/response nonce. Fixed result metadata
     /// never proves that independent browser/Input/Phase owners have drained.
-    pub(super) fn into_parts(self) -> (Result<Status, Refused>, Incoming) {
+    pub(super) fn seal(self) -> Result<CompletedReply, channel::Refused> {
         let Self {
             result,
             work,
             payment,
             incoming,
         } = self;
+        let result = result.and_then(|status| {
+            let id = super::ledger::RowId::from_logical(incoming.logical())?;
+            Ok((id, status))
+        });
+        // Keep the actual Work/publication payment through synchronous serialization too.
+        // Historical/refusal replies have no task payment and use fixed physical Control.
+        let reply = super::history::Response::new(incoming, result).seal();
         drop(work);
         drop(payment);
-        (result, incoming)
+        reply
     }
 }
 
@@ -161,17 +168,20 @@ async fn prepare(
 ) -> Result<Prepared, Refused> {
     let context = context.upgrade().ok_or(Refused::Closed)?;
     let (original, identity, tag, output_range) = decode_result(&context, route, incoming)?;
-    let status = original.reconcile()?;
-    if status.action != Some((identity.serial, identity.version, identity.input_tag)) {
-        return Err(Refused::Protocol(VoiceError::Unauthorized));
-    }
-    if let Some(receipt) = &status.engine.receipt {
-        if receipt.output_tag != tag {
-            return Err(Refused::Protocol(VoiceError::RetryMismatch));
+    {
+        // Drop the history snapshot before first-effect awaits. Its dynamic receipt owners
+        // are not needed for admission and must not coexist with the later worker graph.
+        let status = original.reconcile()?;
+        if status.action != Some((identity.serial, identity.version, identity.input_tag)) {
+            return Err(Refused::Protocol(VoiceError::Unauthorized));
         }
-        // History resolves without upgrading the old grant or current UI authorization.
-        // This supplies no keys, readiness in a replacement browser, or fresh RTC authority.
-        return Ok(Prepared::Historical(status));
+        if let Some(receipt) = &status.engine.receipt {
+            if receipt.output_tag != tag {
+                return Err(Refused::Protocol(VoiceError::RetryMismatch));
+            }
+            // History is past metadata, with no current grant/keys/RTC authority.
+            return Ok(Prepared::Historical(status));
+        }
     }
     let selected = route.selected();
     {
@@ -296,13 +306,27 @@ pub(super) fn layout_bytes() -> usize {
     ) -> usize {
         std::mem::size_of::<F>() + std::mem::size_of::<F::Output>()
     }
-    future(commit)
-        + std::mem::size_of::<super::context::LiveContext>()
+    let decode = std::mem::size_of::<super::context::LiveContext>()
         + std::mem::size_of::<Request<'static>>()
         + 2 * std::mem::size_of::<super::ledger::ResolvedRow>()
+        + std::mem::size_of::<sha2::Sha256>()
+        + 32
+        + std::mem::size_of::<Action>()
+        + std::mem::size_of::<Range<usize>>()
+        + 128;
+    let validate = std::mem::size_of::<super::context::LiveContext>()
         + std::mem::size_of::<Status>()
         + std::mem::size_of::<Admitted>()
-        + 128
+        + std::mem::size_of::<sha2::Sha256>()
+        + 32
+        + 128;
+    // The borrowing decoder returns before any await; validation finishes before the worker
+    // is spawned, and Response::seal runs only after actual task/output collection. Include
+    // the complete synchronous reply graph explicitly, even without a worker payment.
+    future(commit)
+        + decode
+            .max(validate)
+            .max(super::history::serialization_layout_bytes())
 }
 
 #[cfg(test)]

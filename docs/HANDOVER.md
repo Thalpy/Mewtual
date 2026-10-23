@@ -39,6 +39,13 @@ final-admission vs lock/unlock ordering is still an explicit focused coverage ga
 Derive tests cover that boundary only for Derive. Static re-review found no remaining confirmed
 defect after the shared-custody correction. Production remains Status/history only.
 
+A later accounting re-review found a MEDIUM evidence gap: Result's synchronous SHA and
+post-collection history serialization were not explicitly inventoried. These graphs are now
+separate measured stages; the historical Status is scoped before first-effect awaits, and
+Response::seal retains actual Work/publication through synchronous reply construction. The
+same12KiB limit remains mandatory. This correction was made before the queued native Cargo
+started; compilation/measurements remain pending, so no current Result fit is claimed yet.
+
 Review of the next Begin gate found a cleanup prerequisite: exact child Return now closes an
 uncertain local Pending through the existing PendingRetirement, including after End/lock.
 It preserves ClosedPending with no Action, settlement or drained claim. This replaces the
