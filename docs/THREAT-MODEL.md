@@ -515,8 +515,8 @@ writer keeps those properties.
   into the pinned folder (no `/proc`: no journal, and the fallback writer refuses before writing).
   Windows holds a delete-denying pin on the staging name, checked to be our object, across the
   path-based link, which also blocks renaming its folders (but not retargeting a junction among
-  its ancestors, which someone with write access to that junction could do; the save then halts as
-  Changed and is never reported saved). macOS has no link by descriptor (narrowed): the link is by
+  its ancestors, which someone with write access to that junction could do; the save then halts,
+  as Changed or Unavailable, and is never reported saved). macOS has no link by descriptor (narrowed): the link is by
   path, and the post-link check only guarantees that a foreign object at the final name is never
   reported as saved; it is then left alone with the staging name. On Linux a confinement policy
   (AppArmor, SELinux, snap, seccomp) can deny the descriptor link although `/proc` is present;

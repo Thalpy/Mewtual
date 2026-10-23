@@ -1184,7 +1184,7 @@ No blocker or high.
 | M-A: on Unix a journaled removal in a shared folder answered `SharedFolder` ("delete it yourself") before checking the name, so a name the user had already deleted, or another account's file, produced that instruction | Fixed: the read-only check at the original name comes first; `Shared` only for a name verified ours, `Missing`/`NotOurs` otherwise. Test (Linux CI): `unix_a_shared_folder_tells_the_user_to_delete_only_its_own_file` (missing, foreign, saved row with its staging name gone). |
 | LOW 1: saved rows and network/FUSE folders worded as "the partly saved file" and "Other accounts can change" | Fixed: `SharedFolder.notice(saved)` names the temporary copy for a saved row (and `STAGING_SHARED` is gone in favour of it); Save another copy of an unreachable saved row says "The folder of the earlier saved copy is unavailable, so its files there were left in place."; all shared-folder sentences say "This folder may be changed by other accounts". |
 | LOW 2: `abandon_sequence` read `published` before its retire | Fixed: from the read after the retire. Test: `save_new_copy_reads_published_after_its_retire`. |
-| LOW 3: the jam-sheet export cleaned up a failed write under the session commit guard on an async worker | Fixed: `write_download_held` plus `FailedWrite::clean_up`, which the jam-sheet export runs after dropping the guard (the success path keeps the guard across the write and the reveal as before). The write itself still runs on the async worker, as it did before PR51. |
+| LOW 3: the jam-sheet export cleaned up a failed write under the session commit guard on an async worker | Fixed: `write_download_held` plus `FailedWrite::clean_up`, which the jam-sheet export runs after dropping the guard (the success path keeps the guard across the write and the reveal as before). The write itself still runs on the async worker, as it did before PR51. Coverage gap: no unit test, because a write into a freshly created local file cannot be made to fail deterministically without a writer seam; checked by reading. |
 | LOW 4: panic paths after publication (silent fallback settle; `?` after Published in the export sequence) | Fixed: a hedged sentence for a panicked settle; `after_publication` takes the worker result and keeps the record instead of failing a committed save. Test: `after_publication_keeps_the_record_only_when_clear_can_still_help`. |
 | LOW 5: doc drift (`cleared_staging`, `publish_session` errors, "with all four held") | Fixed in code docs, INTERFACES and THREAT-MODEL. |
 | LOW 6: empty files left on Windows SMB folders without file numbers | The refusal now says "empty temporary files may remain there". No plaintext. |
@@ -1192,6 +1192,42 @@ No blocker or high.
 | Design: on Windows the pin blocks renaming the folder's ancestors but not retargeting an ancestor junction, so guarantee (b) holds only without such a writable junction (the save halts as Changed, never reported saved) | Documented residual (THREAT-MODEL). |
 | Design: four stalled validations or cleanups on a hard NFS mount disable Save as or Remove until they return; R2-M1 lets one window start concurrent Removes, the fifth reports busy | Documented; the messages are truthful and a retry recovers. |
 | Design: Unix writers without a journal: a failed unlink plus a failed put-back leave plaintext at a `mewtual-removing-` name that no record or message mentions | Documented residual (same-account or kernel failure paths only). |
+
+Short re-review of those fixes (`e3db72ea..f38d01ea`): no blocker, high or medium.
+
+| Finding | Disposition |
+| --- | --- |
+| LOW 1: in a shared folder, another account's file we may not read made Remove retry forever (and a saved row promise a Clear that cannot help) | Fixed: permission denied at the name in a shared folder is `NotOurs` (nothing is deleted there anyway). Test: a mode-0 "foreign-unreadable" case in `unix_a_shared_folder_tells_the_user_to_delete_only_its_own_file` (Linux CI, skipped as root). |
+| LOW 2: a crash leftover at a `mewtual-removing-` name, found by identity after the folder became shared, is reported with the staging name's wording | Documented residual: the file is verified ours; only the name in the message is wrong (crash during a removal, then a permission change). |
+| LOW 3: code comments described the old order | Fixed (`remove_verified`, `Verified::Shared`, `PartialRemoval::SharedFolder`). |
+| LOW 4: test gaps | Added `save_another_copy_of_an_unreachable_saved_row_says_what_was_left`, missing and foreign names in a shared folder for `remove_if_session` (Linux CI), and a notice check that matches both shared-folder instructions; the LOW 3 coverage gap is stated above. |
+| LOW 5: the junction sentence in THREAT-MODEL said "Changed" only | Fixed: "halts, as Changed or Unavailable". |
+
+## Ledger (23 October, PR51 review rounds)
+
+Focused commands at the final PR51 commit (Windows host), all passing unless noted:
+
+- `cargo test -p catcoms-storage --lib kept::`: 142 passed (the Unix-only tests run in Linux CI).
+- `cargo test -p catcoms-app --lib actor::file_transfers`: 62 passed alone and with
+  `--test-threads=1`. In parallel runs one export test sometimes fails with "file transfers are
+  busy" (the process-wide `process_jobs` pool is shared by the parallel tests of one binary); the
+  app crate only gained a read accessor and test call-site updates in this work.
+- Native `--lib` filters `private_downloads studio download streamed_save fallback
+  stops_the_save lock publish in_downloads_flag device_name keep_session jam_sheet`: 234 passed.
+  (A loaded earlier run timed out once in the Node-subprocess studio acceptance test, which passes
+  alone in 9 s.)
+- The complete frontend suite: 2,366 passed, 0 failed; `npm run check`: 0 errors, 0 warnings.
+- Strict native Clippy (all targets, all features, `-D warnings`), root Clippy for storage, sync and
+  app, Clippy for `x86_64-linux-android` and `armv7-linux-androideabi` on storage, `cargo fmt`
+  (root and native), `scripts/check-no-ambient.sh`, `scripts/check-store-raw-fs.sh`, root and native
+  `cargo check --locked`: clean.
+- `cargo deny check`: root advisories, bans, licenses and sources ok; native 12 advisory errors,
+  the same as the baseline, none in `fs_at`, `rustix`, `aligned`, `as-slice`, `cvt` or `nix`.
+
+Not run (reserved or manual): the complete root and native suites, `npm run build`,
+`test:startup`, `test:flows`, real Save as dialogs, Pause or Lock during real external writes,
+restart after an interrupted save, FAT/exFAT and network volumes, ReFS, OneDrive, power loss, and
+any Unix or macOS execution (Linux CI runs the Unix tests; macOS is never compiled).
 
 ## Ledger (22 October)
 
