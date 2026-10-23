@@ -1,64 +1,56 @@
 # Mewtual; Handover
 
-## Native confirmation children (23 October; focused validation in progress)
+## Native confirmation checkpoint (23 October; final lint follow-up)
 
-Continue this draft in `target/communication-native-children-worktree`, branch
-`communication-native-children`, from `5600fecd`. The Source/chat checkpoint is pushed in draft
-PR #53. It passed complete Root3,304 (24 existing ignored), native702 and frontend2,531 plus
-strict static/build checks in the frozen progress checkout, recorded at9004cb0a. Do not mix those results
-with this newer child draft. Heavy Cargo stays serial. All21 focused Actor tests pass, including
-admitted/queued caller loss, actual Actor stop with an uncollected receiver, success/refusal
-output collection and the4KiB complete wrapper guard. The Root full ordinary-pool test passes
-with original-permit reuse and foreign pool/room/grant/End rejection. The native draft compiles;
-Windows linking hit LNK1318 PDB LIMIT and requires process-only `_LINK_=/DEBUG:NONE`, the existing
-documented workaround. An initial native run passes228/230 tests including layout and actual
-Registry child/parent GC. Two new foreign-owner fixtures incorrectly tried binding a second
-LocalJoin to the SAME actual live lease; they now use an independent real owner with equal public
-fields, retaining the original lease/pool rejection and publication retry assertions. The native
-rerun passes all230 handoff tests (5.10s). The new TCP scenarios pass2/2 (40.14s): actual
-Hello/Proof/Finish traverses unjoined B with A-C forbidden, FIRST Respond follows real accepted
-decrypt Return/compaction, and alias-purpose/lost-input cases cover both explicit claim orderings.
-An initial TCP run exposed a terminal-Finish response reservation that blocked plan retirement;
-native now rejects that impossible role before payment/Actor admission. The regression asserts
-no orphan purpose and successful retirement of both parents after End. This is native test-AES
-confirmation, not browser derivation or SDP/ICE. Complete combined suites are still pending.
-The retry also encountered disk-full:25 old generated native PDB files (24.34GiB) were removed
-after exact-path validation, recorded in `target/native-pdb-cleanup.json`. No source/user data
-was removed; diff verification found no truncated source. Focused logs are `target/child-*.log`.
+Runtime `534b641e` in `target/communication-native-children-worktree` passed complete local
+Root3,310 (24 existing ignored), native713 (708 library plus5 ACL), and frontend2,531 tests,
+all with zero failures. Svelte reports zero errors/warnings; production build, both formatting
+checks, ambient-dependency gate, Root strict Clippy and cargo-deny pass. Native check passed
+with unused exports; strict native Clippy then identified those exports, a Boolean spelling,
+Copy/borrow style and the intentionally inline original-preparation error. Reviewed lint-only
+commit `1aab8e81` makes the reexport test-only, keeps implementations compiled, simplifies the
+same guard, removes redundant Copy/borrow syntax and documents a narrow large-error allowance
+which avoids a fresh Box under pressure. Native strict all-target/all-feature Clippy now passes.
+The native suite is being repeated after that follow-up before publication. No runtime limit,
+security condition, ownership, retry or refund behavior changed. Logs are `target/child-*.log`.
+Heavy Cargo remains serial; no setup/process/frontend runtime changed, so earlier startup and
+flow gates were not repeated for this inactive increment.
 
-The draft retains actual Root publications and the same fixed preparation across local bind
-refusal, skipping Actor factories on attachment retry. Original-parent child reservations share
-the existing32 positions and order against parent retirement under Index -> parent State. A child
-retains its actual parent and can only Return. The original parent owns whole-plan retirement;
-its bounded child scan excludes open descendants. Native fixed row payment is deliberately
-2,304B rather than2,048B (maximum extra8KiB for32 rows); group512KiB/process2MiB, Phase and Root
-plan payments, engine, attempt and row-count limits are unchanged. The expanded graph still needs
-its layout check. No history is evicted to create capacity.
+The new TCP scenarios pass2/2 (40.14s): actual Hello/Proof/Finish traverses unjoined B with A-C
+forbidden, FIRST Respond follows real accepted decrypt Return/compaction, and alias-purpose/
+lost-input cases cover both explicit claim orderings. An initial run found an impossible
+terminal-Finish response reservation which blocked retirement; the factory now refuses it before
+payment/Actor admission. Both parents retire after End. These tests use native test-provider
+AES-GCM, not browser P256/HKDF, SDP/ICE/RTC, restored-D negotiation or physical audio/network.
 
-Actual same-plan roles1..9 and normalized predecessor/trigger purposes are claimed atomically
-with the returned Action. Outgoing message metadata is read from its actual input outside native
-gates; a missing payload keeps the same known Pending. Ordinary compaction retains the actual
-settled/ACKed Opened trigger, allowing FIRST Respond after Return without reconstructing an Arc
-from metadata. Root still rechecks current pair/token/epoch/authority. Roles10/11 and responses
-to high-side Finish refuse. A typed Root/Actor four-action fair pull supplies original pending
-Arcs. One affine4KiB snapshot permit funds its32-handle backing capacity and complete RPC
-metadata. The actual command/output and one bounded RPC waiter share paid custody, so neither
-caller loss nor queued-command destruction can release the payment before the last physical
-owner. Both success and refusal output retain it; reuse first destroys the actual Vec. It grants
-no engine or RTC authority. Caller-loss/Actor-stop and complete wrapper regressions are drafted.
+Native retains actual Root publications and the original paid preparation through proven local
+attachment refusal. Exact retry skips Actor creation. Child reservations share32 positions,
+retain only child-to-original-parent strong ownership and serialize against parent retirement.
+Atomic attachment claims actual plan/action/normalized role before description or binding.
+Roles1/4/7 are Hello,2/5/8 Proof and3/6/9 Finish;10/11 remain unsupported. Actual accepted Opened
+triggers survive Return/compaction for FIRST Respond; native status cannot override Root checks.
+Children can only Return. Fixed native Row payment is2,304B, maximum extra8KiB across32 rows;
+group512KiB/process2MiB, original Phase/Root payments, engine/work/attempt limits are unchanged.
+The full layout and actual Registry parent/child collection guards pass; no history is evicted.
 
-Draft regressions include local loan/full-pool attachment, equal-metadata replacement, End,
-parent/child reservation orderings, foreign parent/trigger and32-row exhaustion. New actual
-blocked-TCP fixtures attempt native Hello/Proof/Finish with test-only AES keys and both alias
-claim orderings, including lost input; the executed scope and results are recorded above.
-Read-only review identified compacted-trigger liveness and non-atomic role claim defects; the
-draft corrections and new regressions still require execution and final re-review.
+The typed Root/Actor pull fairly borrows up to four original pending actions without dequeueing.
+One affine4KiB permit funds its32-handle backing capacity and complete RPC graph. Actual command/
+output and one CAS-bounded waiter share custody until both collect, including caller loss and
+Actor stop. Success/refusal retain payment; reuse destroys the old Vec first. All21 focused
+Actor tests and the full ordinary-pool Root regression pass. Initial fixture errors and the
+compacted-trigger/non-atomic-claim review findings are corrected; actual-diff re-review found no
+remaining blocker/high/medium. Tests never assert browser/physical drainage from renderer flags.
 
-Production remains disabled. Child IPC grammar/Input/admission/result adapters, actual browser
-key/phase transfer, chain-final original-Session intent after ordinary Returns, supported
-multi-peer history/composition, SDP/ICE/RTC, restored-bridge negotiation, member media relay and
-physical audio/network acceptance remain open. The proposed TCP test uses native test-provider
-AES-GCM keys, not P256/HKDF/WebCrypto or a real WebView. External download resume stays separate.
+Windows native linking needed the documented process-only `_LINK_=/DEBUG:NONE` workaround for
+LNK1318 PDB LIMIT. A disk-full retry removed25 exact-path-checked old generated PDB files,
+24.34GiB, recorded in `target/native-pdb-cleanup.json`; no source/user data was removed.
+
+The next unvalidated native/browser Plan-final draft is isolated in
+`target/communication-native-continuation-worktree`; its newer results are separate. Production
+remains disabled. Child IPC Input/admission/results, browser key/Phase transfer, full original-
+Session Plan-final integration, supported multi-peer histories, SDP/ICE/RTC, restored-bridge
+negotiation, member media relay and physical acceptance remain open. Only one desktop is
+available. External download resume remains another agent's work.
 
 ## Validated Source and onward-chat checkpoint (23 October)
 
