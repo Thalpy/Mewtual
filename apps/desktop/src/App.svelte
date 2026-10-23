@@ -12206,9 +12206,10 @@
   // revision, off the async runtime natively (bounded, read-only). An answer is kept only while
   // the view and the row are still the ones it was asked for, so a stale answer never relabels a
   // newer row; a failed or stale check claims nothing.
-  async function checkSavedRows() {
+  async function checkSavedRows(rerun = true) {
     const server = activeServerId, gen = viewGeneration, visit = savedCheckVisit;
     if (server === null || locked) return;
+    let dropped = false;
     const due = privateDownloads.filter((row) => row.status === "saved" && !savedChecking[row.id] &&
       !(savedChecks[row.id]?.intent === row.intent && savedChecks[row.id]?.visit === visit));
     // One check at a time (decisions review M1): native runs at most two workers and waits for a
@@ -12229,11 +12230,20 @@
         }
         if (!unlockedViewCurrent(gen, server)) return;
         const now = privateDownloads.find((other) => other.id === row.id);
-        if (!now || now.status !== "saved" || now.intent !== row.intent) continue;
+        if (!now || now.status !== "saved" || now.intent !== row.intent) {
+          dropped = true;
+          continue;
+        }
         savedChecks[row.id] = { intent: row.intent, result, visit };
       }
     } finally {
       for (const row of due) if (savedChecking[row.id] === token) delete savedChecking[row.id];
+    }
+    // Re-review LOW 2: a row that changed while the batch ran (its answer was dropped) was skipped
+    // by any refresh in the meantime because the batch held it; check it once more now. Only once,
+    // so a row that keeps changing cannot keep this going.
+    if (rerun && dropped && view === "downloads" && unlockedViewCurrent(gen, server)) {
+      await checkSavedRows(false);
     }
   }
   /** The latest check of `row`'s file for this exact revision, or `null`. */

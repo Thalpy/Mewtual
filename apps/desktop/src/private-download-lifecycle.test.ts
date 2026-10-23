@@ -34,7 +34,7 @@ function fixture() {
     "privateDownloadChatSave", "privateDownloadOffers", "isSaveAsCancelled", "privateDownloadSaveAsIsNewCopy", "checkedSavedCheck", "file", `
     let activeServerId = 1, viewGeneration = 2, locked = false, error = "", privateDownloadBusy = {};
     let privateDownloads = [], privateDownloadSaves = {}, downloads = {}, activeSaves = {}, uuid = 0, refreshes = 0;
-    let savedChecks = {}, savedChecking = {}, savedCheckVisit = 1;
+    let savedChecks = {}, savedChecking = {}, savedCheckVisit = 1, view = "downloads";
     const calls = [], notices = [], views = [], replies = new Map(), filesByCid = new Map([[file.cid, file]]);
     const crypto = { randomUUID: () => "op-" + (++uuid) }, fileInventoryGate = { invalidate() {} };
     const dlKey = (server,cid) => server + ":" + cid;
@@ -271,15 +271,31 @@ test("Transfers runs the check from its refresh and starts a new visit when show
   assert.match(text("switchView"), /if \(v === "downloads"\) savedCheckVisit\+\+;/);
 });
 test("a saved file check answered after the row or view changed never relabels anything", async () => {
-  // The row's revision changes (Save another copy) while its check is in flight.
+  // The row's revision changes (Save another copy) while its check is in flight: the older
+  // revision's answer is dropped, and the newer revision gets its own check at once (re-review
+  // LOW 2), never the old answer.
   {
     const app = fixture(), held = deferred(), a = { ...saved, status: "saved" };
     app.rows([a]); app.replies.set("check_saved_download", held.promise);
     const checking = app.checkSaved();
     app.rows([{ ...a, intent: "4" }]);
-    held.resolve("replaced"); await checking;
-    assert.equal(app.savedFor({ ...a, intent: "4" }), null, "the older revision's answer never labels the newer row");
+    held.resolve("replaced");
+    app.replies.set("check_saved_download", "present");
+    await checking;
+    assert.deepEqual(app.calls.map(([, args]: [string, { expectedIntent: string }]) => args.expectedIntent), ["3", "4"]);
+    assert.equal(app.savedFor({ ...a, intent: "4" }), "present", "its own answer, not the older revision's");
     assert.equal(app.savedFor(a), null);
+  }
+  // A row that keeps changing is re-checked only once per batch.
+  {
+    const app = fixture(), a = { ...saved, status: "saved" };
+    app.rows([a]);
+    let intent = 3;
+    app.replies.set("check_saved_download", {
+      then(resolve: (value: string) => void) { app.rows([{ ...a, intent: String(++intent) }]); resolve("present"); },
+    });
+    await app.checkSaved();
+    assert.equal(app.calls.length, 2, "one re-run, then it stops");
   }
   // Lock (or a server switch) lands while it is in flight.
   for (const change of ["lock", "server"] as const) {

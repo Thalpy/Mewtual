@@ -1593,6 +1593,15 @@ const USERDB_DIRS: [&str; 5] = [
 ];
 #[cfg_attr(not(any(target_os = "linux", target_os = "android")), allow(dead_code))]
 const HOMED_SOCKET: &str = "run/systemd/userdb/io.systemd.Home";
+/// Files that mark a container, relative to the root (re-review LOW 1: containers without a user
+/// namespace keep identity uid/gid maps, so the maps alone do not reveal them).
+#[cfg_attr(not(any(target_os = "linux", target_os = "android")), allow(dead_code))]
+const CONTAINER_MARKERS: [&str; 4] = [
+    "run/.containerenv",
+    ".dockerenv",
+    "run/systemd/container",
+    "run/host/container-manager",
+];
 
 /// Everything [`group_is_private`] needs, read from below `root` (`/` in production; a prepared
 /// folder in tests). Each file is read bounded; each userdb directory only up to its first entry.
@@ -1625,12 +1634,15 @@ pub(super) fn load_account_files(root: &Path) -> AccountFiles {
     let map = |name: &str| {
         read_account_file(&root.join("proc/self").join(name)).is_ok_and(|text| identity_map(&text))
     };
-    let container = [
-        "run/.containerenv",
-        ".dockerenv",
-    ]
-    .iter()
-    .any(|marker| !matches!(fs::symlink_metadata(root.join(marker)), Err(error) if error.kind() == io::ErrorKind::NotFound));
+    // Podman, Docker, systemd as the container's init (any manager, including nspawn without a
+    // user namespace and privileged LXC), and nspawn's own marker. A marker that cannot be ruled
+    // out counts as present.
+    let container = CONTAINER_MARKERS.iter().any(|marker| {
+        !matches!(
+            fs::symlink_metadata(root.join(marker)),
+            Err(error) if error.kind() == io::ErrorKind::NotFound
+        )
+    });
     AccountFiles {
         passwd: read_account_file(&root.join("etc/passwd")).ok(),
         group: read_account_file(&root.join("etc/group")).ok(),

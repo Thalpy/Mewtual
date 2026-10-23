@@ -624,9 +624,17 @@ fn the_account_files_are_read_bounded_from_the_root() {
     let files = load_account_files(root.path());
     assert_eq!(files.userdb_records, Some(true));
     assert!(!group_is_private(&files, MY_GROUP, ME));
-    put("run/.containerenv", "");
-    assert!(!load_account_files(root.path()).host_namespace);
-    fs::remove_file(root.path().join("run/.containerenv")).unwrap();
+    for marker in [
+        "run/.containerenv",
+        ".dockerenv",
+        "run/systemd/container",
+        "run/host/container-manager",
+    ] {
+        put(marker, "");
+        assert!(!load_account_files(root.path()).host_namespace, "{marker}");
+        fs::remove_file(root.path().join(marker)).unwrap();
+    }
+    assert!(load_account_files(root.path()).host_namespace);
     put("proc/self/uid_map", "0 100000 65536\n");
     assert!(!load_account_files(root.path()).host_namespace);
     put("etc/passwd", &"x".repeat(1024 * 1024 + 1));
