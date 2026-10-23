@@ -1284,6 +1284,8 @@ Adversarial review of these two changes (`516ab8d0..d291cb88`) and dispositions:
 | L3: acting on a Saved row briefly showed plain "Saved" | Fixed: the last answer stays until the re-check replaces it. |
 | L4: INTERFACES error wording | Fixed. |
 | L5: test gaps | Added the call-site test, the bounded loader test on a prepared root, and the set-group-id case now changes the folder's group instead of skipping. `ActorSavedCheck` itself (actor-backed) stays untested; its fences are covered through the sequence. |
+| Re-review LOW 1: containers without a user namespace (nspawn without `-U`, privileged LXC) keep identity maps and no Docker/Podman marker | Fixed: `/run/systemd/container` and `/run/host/container-manager` are markers too. Test: the loader test checks every marker. |
+| Re-review LOW 2: a row that changed during a batch was skipped by the refresh meanwhile and stayed unchecked | Fixed: one re-run of the batch when an answer was dropped as stale (never more, so a row that keeps changing cannot loop). Tests: the stale-row case now expects the new revision's own check; a row that keeps changing gets exactly one re-run (re-run break-checked). |
 
 Recorded, no change:
 
