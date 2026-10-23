@@ -55,8 +55,11 @@ security policy and the transport fixtures. The driver depends on a native adapt
    packet. These are cheap checks with no reconcile, directory read or route index, so an idle
    attached actor pays almost nothing per turn;
 3. `pump_voice_endpoint` (renewed announcements, watcher challenges, join proofs: at most 4);
-4. `prepare_voice_sources` (at most 4 flights);
-5. `prepare_voice_forwards` (at most 4 flights; `Forwarding` only).
+4. source flights and helper forwards (at most 4 each; helpers only under `Forwarding`). Both
+   classes charge the same four per-group forwarding slots, so they take turns: the class owed
+   the next opportunity prepares first and keeps that claim, across capacity refusals, until it
+   actually receives a flight. Under contention they alternate per freed slot; an idle class does
+   not hold slots back from the other.
 
 It runs at the top of each `run_once`, after each served kind-28 request, after each flight
 completion, and on a 250 ms wake on the voice clock while V2 state is live. Helper edges now wait
@@ -104,6 +107,14 @@ the gated send. While a join is V2:
 A wholly legacy call is unchanged. V2 is selected only when `voiceV2Activation()` is available,
 which it is not.
 
+Two asynchronous edges are closed explicitly. Every legacy signal must carry a string room and
+type before any gate or state is touched: presence keys are built with `${server}:${channel}`,
+which used to coerce a room such as `["7"]` into the protected room after it had failed the V2
+fence (the fence itself now also treats a malformed room as protected during a V2 call). And a
+V2 join's hangup and broadcasts decide legacy egress when they are created, before their roster
+await, because teardown resets the mode synchronously and another call may start before the
+roster read returns.
+
 ## The V2 call driver contract
 
 `VoiceV2Call` owns one V2 call. All authority stays native; the driver fences RTC effects.
@@ -132,6 +143,10 @@ Items: `peer` (native watcher proof made this exact join fresh), `peer-gone` (re
 retired), `paired` (key confirmation done), `offer`/`answer`/`ice` (decrypted and committed by
 native for the exact pair and OfferId), `bye` (exact join) and `ended` (our join ended: epoch,
 policy, removed, room, locked, replaced, capacity). Malformed items are refused before any effect.
+Native must send `peer-gone` `retired` for a remote join once its signed delegation has lapsed
+without renewal (at most 30 s plus 5 s skew after the last renewal): `expired` alone keeps an
+established pair, so without that retirement a vanished peer that never reaches RTC `failed` would
+stay listed for the rest of the call.
 
 Driver rules:
 
@@ -143,6 +158,14 @@ Driver rules:
   ICE for any other join are ignored, so a delayed bye cannot dismiss a newer join.
 - The initiator's offer runs on the pair's serialized chain, so an answer or ICE that outruns our
   own submit reply waits for the OfferId it echoes instead of being judged stale.
+- Offer/answer submits whose replies are lost keep retrying the exact action through the native
+  receipt window (20 s: the packet's 15 s signed expiry plus 5 s skew), reporting `uncertain`
+  only while that recovery is scheduled, then end in an explicit `failed` state ("leave and
+  rejoin to retry"). ICE submits keep their short bounded retry.
+- Presence expiry (`peer-gone` with `expired`) never destroys an established pair, whatever the
+  RTC state: it marks presence stale and keeps the connection and OfferId, because native keeps
+  the pair across discovery expiry and would never re-confirm it. Renewal of the same join
+  restores fresh presence. Unpaired candidates simply expire.
 - ICE for a retired or foreign OfferId is refused, never reassigned. Early ICE waits for its
   remote description: at most 8 candidates / 16 KiB per pair, refused rather than evicting.
 - Every RTC continuation and callback is fenced by call generation, exact peer record and OfferId.
@@ -158,7 +181,7 @@ Driver rules:
 
 Frontend focused tests (Node, real modules and the production App.svelte handler text):
 
-- `voice-v2-call.test.ts`: 27 contract tests, including a delayed same-room bye after join
+- `voice-v2-call.test.ts`: 33 contract tests, including a delayed same-room bye after join
   replacement, old-join retirement arriving before the newer join's confirmation, simultaneous
   joins and crossed offers, stale and early ICE, ICE and answers outrunning our own OfferId, lost
   start/submit/pull replies, ending during an uncertain start, duplicate results, remount with a
@@ -172,7 +195,8 @@ Frontend focused tests (Node, real modules and the production App.svelte handler
 - `voice-signaling.test.ts`, `call-identity.test.ts`, `call-wiring.test.ts` (gate order pins).
 - Mutation checks: disabling the exact-join bye check, the start-after-end fence, the App gate,
   the chained offer, pending-join promotion or uncertain-start recovery each turned exactly the
-  intended test red. All 81 focused frontend tests pass; Svelte check reports zero errors/warnings.
+  intended test red. All 91 focused frontend tests pass on the refreshed branch; Svelte check
+  reports zero errors/warnings.
 
 Rust scheduling regressions in `voice_runtime/transport_tests.rs` drive the normal sync tick and
 normal dispatch; no test calls a pump, prepares a flight or serves kind 28 by hand:
@@ -192,7 +216,8 @@ normal dispatch; no test calls a pump, prepares a flight or serves kind 28 by ha
 - The quiet wake exists only while V2 state or real lower custody is live, and stops after the
   retained packet expires and its lower request has actually retired.
 
-`cargo test --locked -p catcoms-sync --lib -- voice`: 448 passed, 0 failed (isolated target, two
+`cargo test --locked -p catcoms-sync --lib -- voice`: 458 passed, 0 failed on the refreshed
+branch, including the shared-slot fairness regression (448 before the refresh; isolated target, two
 jobs). The first run of the revised code passed 446 and failed 2. The existing helper-retry test
 assumed back-to-back attempts, which is the intentional retry-gap contract change, now explicit in
 the test. The new quiet-wake test also assumed a packet could expire while an unconsumed lower
@@ -202,6 +227,24 @@ tests. `cargo fmt --check` and `scripts/check-no-ambient.sh` pass.
 
 The Mem transport connects every peer; these tests show V2 used only bound routes, not physical
 A-C exclusion. No WebView crypto, SDP forwarding, real RTC or audible media is claimed.
+
+### PR #50 review (second, external)
+
+Five P2 findings, each fixed with a regression confirmed to fail when its fix is reverted:
+
+| Finding | Regression |
+| --- | --- |
+| Source-first admission let a bridge's own traffic starve accepted helper work | Bridge holding all four shared slots, released one at a time with its own source hedge eligible: the helper gets the second freed slot, then the classes alternate. |
+| Presence expiry during RTC reconnect destroyed an unrecoverable pair | Expiry after `disconnected`, and during the first connection: the pair, connection and OfferId survive and same-join renewal restores presence. |
+| Four lost submit replies stranded the offer under "still trying" | Recovery by exact retry inside the receipt window applies the waiting answer; past the window the peer is explicitly `failed` with no hidden retries. |
+| Non-string rooms bypassed the legacy fence into protected presence | Real handler plus real presence-key functions: arrays, numbers, objects, nulls and missing fields write and delete nothing, in both modes. |
+| Deferred hangup/broadcast sent a legacy bye after V2 teardown | Real unmount, leave, hangup, broadcast and send with the roster read held across teardown and a new call: zero legacy sends; legacy hangup unchanged. |
+
+The branch was refreshed onto the moved shared head; both doc conflicts were dated top sections.
+The reviewer also reported a pre-existing hosted failure in
+`six_client_native_reversed_reopen_gossip_loss_and_command_load` (594 passed, 1 failed, same
+assertion on the base commit). It predates this change and is tracked separately; it is not
+established as harmless.
 
 ## Activation (explicitly incomplete)
 
@@ -214,7 +257,10 @@ Before `voiceV2Activation()` may report available:
 3. App wiring for V2 peers (tracks, data channels, `ontrack` fenced by the driver's `isCurrent`),
    plus the visual fixture commands;
 4. an agreed default for `VoiceRouting` and a desktop path to change it;
-5. real TCP A-B-C with A-C forbidden, then native WebView and physical audio acceptance.
+5. real TCP A-B-C with A-C forbidden, then native WebView and physical audio acceptance;
+6. adapter acceptance for buffered early ICE expiring by its original signed expiry, and for
+   bounded ownership/accounting of RTC work queued after the event cursor has advanced (the
+   driver bounds counts and bytes but cannot itself see native expiry or engine custody).
 
 ## Remaining limitations
 
@@ -223,7 +269,9 @@ Before `voiceV2Activation()` may report available:
 - The legacy exclusion also covers `juke`, so the shared jukebox has no transport in a V2 room
   until it gets a V2 or data-channel path.
 - Diagnostics record each excluded legacy kind once per join, not every signal.
-- Presence lapse with live media is shown as stale rather than torn down; removal always tears down.
+- Presence expiry marks an established, still-viable pair stale rather than tearing it down; a
+  dead pair (RTC `failed`, or negotiation `failed`/`refused`) is torn down at expiry or as soon as
+  a stale pair's RTC fails. Bye, removal and retirement always tear down.
 - The 250 ms quiet wake costs a timer per group while V2 state is live.
 - A start whose every reply was lost leaves native to collect the unadopted owner.
 - This branch adds a dated THREAT-MODEL section and an acceptance-ledger entry. ARCHITECTURE,
@@ -243,3 +291,15 @@ Residual LOW findings from the read-only re-review (no blocker/high/medium remai
 3. The cheap work check reads the current actor before reconcile, so a newly installed actor can
    miss one wake until the next tick reconciles. It never grants authority.
 4. The activation-to-wiring test matches App text only.
+5. Pre-existing: `take_ready_using` can return Err after earlier jobs in the same batch spent their
+   attempts, and its cursor then restarts at the failing packet. No error source is reachable
+   today (revoked leases are skipped first); skipping the failing packet is the hardening.
+6. `announceHangup` still sends the data-channel `{t:"bye"}` on legacy edges regardless of mode;
+   harmless now (no legacy edges exist in a V2 room), but App V2 wiring must leave through the
+   native end and must not let a data-channel bye alter V2 records.
+
+The second re-review (after the external PR #50 findings) found one new medium: keeping every
+established pair on expiry let vanished peers linger and fill the peer ceiling. It is fixed with
+the dead-pair rule above, the native `retired` contract line and two regressions. It also noted
+that the last offer retry could land just after the receipt window; retries now stop before a
+retry would cross it.

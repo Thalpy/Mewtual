@@ -10,7 +10,9 @@ work before signatures, exact-frame tickets, role-bound signed ACKs); the schedu
 authority and dials nothing. `Forwarding` lets any current member under active authenticated
 PeerToPeer policy act as a one-helper relay: it sees signed envelopes, metadata and ciphertext
 sizes, never endpoint keys. Per-pass work is bounded (4 endpoint responses, 4 source and 4 helper
-flights, 8 retained completions); helper edges wait 500 ms between their three attempts. The
+flights, 8 retained completions); helper edges wait 500 ms between their three attempts, and
+source and helper flights take fair turns at the four shared per-group slots, so a bridge's own
+traffic cannot starve helper custody it has acknowledged. The
 switch can only narrow policy: any change involving `Direct` revokes the runtime policy lease and
 ends live V2 joins, watchers, helper edges and pending replies (never converting them to legacy);
 `Disabled` <-> `Forwarding` pauses service without ending native state. Default-on service still
@@ -18,7 +20,9 @@ needs the ADR's flood, mixed-version and real-topology gates.
 
 The renderer pins `legacy` or `v2` per call join. A V2 join's room accepts no legacy writer: every
 legacy hello, ping, offer, answer, ICE, bye and juke is excluded before presence or peer state
-changes, and no legacy signal is sent to it. No join selects V2 until native activation exists, so
+changes, malformed (non-string) rooms are refused before they can be coerced into a presence key,
+and no legacy signal is sent to it, including hangups and broadcasts whose roster reads finish
+after teardown. No join selects V2 until native activation exists, so
 legacy calls keep their recipient/replay and arrival-time presence residuals unchanged.
 
 ## Preserving original retirement proof and bounded cleanup progress (22 October)
