@@ -538,19 +538,32 @@ async fn framed_submission(
         // completes the preceding binding observation, then the existing durable Ready
         // barrier parks the actual publication turn without sleeps or asserted booleans.
         let boundary = state.ui_session_commit.lock().await;
+        let commit_owners = Arc::strong_count(&state.ui_session_commit);
+        let store_owners = Arc::strong_count(&state.store);
         let mut pending = Box::pin(confirmation_result::commit(&context, &route, incoming));
         assert!(poll_fn(|cx| Poll::Ready(pending.as_mut().poll(cx).is_pending())).await);
-        actor.member_count().await;
-        assert!(poll_fn(|cx| Poll::Ready(pending.as_mut().poll(cx).is_pending())).await);
+        // Work is now reserved BEFORE the detached preparation starts. Its worker flag
+        // alone cannot establish binding completion/UI admission. The actual original
+        // commit handle survives its UI wait while LiveContext has already been destroyed.
+        tokio::time::timeout(Duration::from_secs(15), async {
+            while Arc::strong_count(&state.ui_session_commit) <= commit_owners
+                || Arc::strong_count(&state.store) != store_owners
+            {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
         let parked = factory::tests::park(&actor).await;
         drop(boundary);
         tokio::time::timeout(Duration::from_secs(15), async {
             loop {
                 assert!(poll_fn(|cx| Poll::Ready(pending.as_mut().poll(cx).is_pending())).await);
-                match row.work() {
-                    Err(VoiceError::Capacity) => break, // actual detached Work owns the row
-                    Ok(work) => drop(work),
-                    Err(error) => panic!("unexpected pre-publication state: {error:?}"),
+                // The test's boundary is gone. Only the actual detached worker can now
+                // own this original UI commit through the parked Actor publication.
+                if state.ui_session_commit.try_lock().is_err() {
+                    assert!(matches!(row.work(), Err(VoiceError::Capacity)));
+                    break;
                 }
                 tokio::task::yield_now().await;
             }

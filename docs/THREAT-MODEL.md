@@ -1,5 +1,16 @@
 # Threat model; client integrity & enforcement boundaries
 
+## Result preparation cancellation (23 October; inactive adapter)
+
+Early Work/task ownership cannot authorize an Actor effect. After scoped binding observation,
+only the original UI-commit handle and weak context survive its parked wait; fresh original
+UI/selection/Route checks follow. One unique lifecycle custody then receives that actual
+commit before a Body/Actor clone exists. Every early refusal retains physical/task payment
+through completed-output collection. An ordered Worker prevents cancellation from releasing
+physical busy before actual Work retirement publishes its flag/copy drainage. Tests block that
+real retirement fence and inspect the actual destructor's Arc progress, with no simulated
+success/drainage bit. Accepted/rejected framed Root results and caller-loss TCP tests pass;
+this establishes no live browser/RTC, multi-peer or physical-audio claim.
 ## Known-child continuation ownership (23 October; inactive browser draft)
 
 A renderer child descriptor cannot create a native plan, row or token. The original selected

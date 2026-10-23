@@ -554,6 +554,15 @@ impl ResolvedRow {
     pub(crate) fn work(&self) -> Result<Work, VoiceError> {
         self.ledger.work(self.row.id)
     }
+    /// Opaque ACTUAL retirement fence for cancellation/drop-order regressions. Exposes no
+    /// mutable row state and changes no production synchronization or drop behavior.
+    #[cfg(test)]
+    pub(in crate::voice_handoff) fn fixture_hold_work_retirement(&self) -> impl Drop + '_ {
+        self.row
+            .state
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+    }
     /// Requires prior authenticated browser closure; neither this handle nor a renderer's
     /// claim of drainage can establish that protocol precondition by itself.
     pub(crate) async fn wait_compacted(&self) -> Result<Status, VoiceError> {
