@@ -13,13 +13,16 @@ commands implement that interface and SDP/ICE action delivery is still pending.
 Focused results: `cargo test -p catcoms-sync --lib -- voice` passes 458, zero failures, including
 A-B-C discovery through unjoined B and recovery through replacement D under normal ticks, with
 hop oracles showing only bound routes were used. Frontend voice/identity/lifecycle/wiring tests
-pass 91, and Svelte check reports zero errors and warnings. Read-only adversarial review found one
+pass 93, and Svelte check reports zero errors and warnings. Read-only adversarial review found one
 blocker (default-on service contradicting the decision's gate) and six medium issues; all are
 resolved with regressions confirmed to fail when reverted. A second, external PR #50 review
 found five P2 issues (shared-slot fairness, pair loss on presence expiry during reconnect,
 stranded submits after lost replies, malformed-room presence coercion and a deferred legacy bye
 after V2 teardown); all are fixed with failing-when-reverted regressions recorded in the driver
-document. Mem transport is not physical A-C exclusion; no WebView crypto, real RTC, SDP
+document. Its re-review closed those and found that an exhausted receipt window was treated as
+pair death (a P2 closing a connected call on presence expiry) plus a late-timer retry (P3); both
+are fixed, and an unconditional native "retire lapsed joins" requirement that contradicted the
+established-pair rule is withdrawn. Mem transport is not physical A-C exclusion; no WebView crypto, real RTC, SDP
 forwarding or audio is claimed. Complete suites were not run in this session (the primary owns
 them).
 

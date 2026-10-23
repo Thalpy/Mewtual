@@ -143,10 +143,12 @@ Items: `peer` (native watcher proof made this exact join fresh), `peer-gone` (re
 retired), `paired` (key confirmation done), `offer`/`answer`/`ice` (decrypted and committed by
 native for the exact pair and OfferId), `bye` (exact join) and `ended` (our join ended: epoch,
 policy, removed, room, locked, replaced, capacity). Malformed items are refused before any effect.
-Native must send `peer-gone` `retired` for a remote join once its signed delegation has lapsed
-without renewal (at most 30 s plus 5 s skew after the last renewal): `expired` alone keeps an
-established pair, so without that retirement a vanished peer that never reaches RTC `failed` would
-stay listed for the rest of the call.
+`retired` reports actual native retirement of that join or pair (removal, tombstone, confirmed
+replacement), never a mere lapse of discovery. This keeps the decision's rule that an established
+pair is independent of observation refresh/expiry (VOICE-SIGNALLING-V2 "a working established
+pair remains"): a call whose media path is healthy must not end because its signalling bridge is
+temporarily unavailable. An earlier draft required native to retire every join whose delegation
+lapsed; that would have tied call lifetime to continuous signalling renewal and is withdrawn.
 
 Driver rules:
 
@@ -160,12 +162,18 @@ Driver rules:
   own submit reply waits for the OfferId it echoes instead of being judged stale.
 - Offer/answer submits whose replies are lost keep retrying the exact action through the native
   receipt window (20 s: the packet's 15 s signed expiry plus 5 s skew), reporting `uncertain`
-  only while that recovery is scheduled, then end in an explicit `failed` state ("leave and
-  rejoin to retry"). ICE submits keep their short bounded retry.
-- Presence expiry (`peer-gone` with `expired`) never destroys an established pair, whatever the
-  RTC state: it marks presence stale and keeps the connection and OfferId, because native keeps
-  the pair across discovery expiry and would never re-confirm it. Renewal of the same join
-  restores fresh presence. Unpaired candidates simply expire.
+  only while that recovery is scheduled. The absolute deadline is checked immediately before every
+  retry dispatch, so a timer that resumes late sends nothing. When the window closes the peer is
+  `unresolved` ("leave and rejoin if there is no audio"): the outcome is unknown, because native
+  may have delivered it and the call may be connected. ICE submits keep their short bounded retry.
+- Presence expiry (`peer-gone` with `expired`) never destroys an established pair unless there is
+  definitive evidence that it is dead: RTC `failed`, or an authoritative native refusal with no
+  connected media. It marks presence stale and keeps the connection and OfferId, because native
+  keeps the pair across discovery expiry and would never re-confirm it; renewal of the same join
+  restores fresh presence. An `unresolved` submit is never evidence of death. A stale pair is
+  retired as soon as its RTC reaches `failed`: a peer that truly vanished stops answering ICE
+  consent checks (RFC 7675), so a connected or checking path fails on its own. Unpaired candidates
+  simply expire.
 - ICE for a retired or foreign OfferId is refused, never reassigned. Early ICE waits for its
   remote description: at most 8 candidates / 16 KiB per pair, refused rather than evicting.
 - Every RTC continuation and callback is fenced by call generation, exact peer record and OfferId.
@@ -181,7 +189,7 @@ Driver rules:
 
 Frontend focused tests (Node, real modules and the production App.svelte handler text):
 
-- `voice-v2-call.test.ts`: 33 contract tests, including a delayed same-room bye after join
+- `voice-v2-call.test.ts`: 35 contract tests, including a delayed same-room bye after join
   replacement, old-join retirement arriving before the newer join's confirmation, simultaneous
   joins and crossed offers, stale and early ICE, ICE and answers outrunning our own OfferId, lost
   start/submit/pull replies, ending during an uncertain start, duplicate results, remount with a
@@ -195,7 +203,7 @@ Frontend focused tests (Node, real modules and the production App.svelte handler
 - `voice-signaling.test.ts`, `call-identity.test.ts`, `call-wiring.test.ts` (gate order pins).
 - Mutation checks: disabling the exact-join bye check, the start-after-end fence, the App gate,
   the chained offer, pending-join promotion or uncertain-start recovery each turned exactly the
-  intended test red. All 91 focused frontend tests pass on the refreshed branch; Svelte check
+  intended test red. All 93 focused frontend tests pass on the refreshed branch; Svelte check
   reports zero errors/warnings.
 
 Rust scheduling regressions in `voice_runtime/transport_tests.rs` drive the normal sync tick and
@@ -269,9 +277,14 @@ Before `voiceV2Activation()` may report available:
 - The legacy exclusion also covers `juke`, so the shared jukebox has no transport in a V2 room
   until it gets a V2 or data-channel path.
 - Diagnostics record each excluded legacy kind once per join, not every signal.
-- Presence expiry marks an established, still-viable pair stale rather than tearing it down; a
-  dead pair (RTC `failed`, or negotiation `failed`/`refused`) is torn down at expiry or as soon as
-  a stale pair's RTC fails. Bye, removal and retirement always tear down.
+- Presence expiry marks an established pair stale rather than tearing it down; only definitive
+  evidence (RTC `failed`, or an authoritative refusal without connected media) tears it down at
+  expiry, or later once a stale pair's RTC fails. Bye, removal and retirement always tear down.
+- **Design decision required before activation:** a pair that lost presence before negotiation
+  completed, and whose RTC therefore never starts connectivity checks, never reaches `failed` on
+  its own. It stays listed as stale (within the 16-peer ceiling) until bye, removal, retirement or
+  leave. Retiring it after a grace period would be a call-lifetime policy, deliberately not chosen
+  here; whatever is chosen must keep a healthy media path independent of signalling renewal.
 - The 250 ms quiet wake costs a timer per group while V2 state is live.
 - A start whose every reply was lost leaves native to collect the unadopted owner.
 - This branch adds a dated THREAT-MODEL section and an acceptance-ledger entry. ARCHITECTURE,
@@ -299,7 +312,22 @@ Residual LOW findings from the read-only re-review (no blocker/high/medium remai
    native end and must not let a data-channel bye alter V2 records.
 
 The second re-review (after the external PR #50 findings) found one new medium: keeping every
-established pair on expiry let vanished peers linger and fill the peer ceiling. It is fixed with
-the dead-pair rule above, the native `retired` contract line and two regressions. It also noted
-that the last offer retry could land just after the receipt window; retries now stop before a
-retry would cross it.
+established pair on expiry let vanished peers linger and fill the peer ceiling. A dead-pair rule
+and two regressions fixed that; it also noted that the last offer retry could land just after
+the receipt window.
+
+The external re-review of `a47363ec` closed all five original findings and found two issues in
+that refinement, both now fixed:
+
+- **P2:** the dead-pair rule counted an exhausted receipt window (then called `failed`) as death,
+  so presence expiry could close a call whose answer native had delivered and whose media was
+  connected. The state is now `unresolved` (outcome unknown) and is never evidence of death; the
+  regression loses every answer receipt while RTC connects (and while it is still connecting),
+  then expires and renews presence, and requires the same connection and negotiation throughout.
+- **P3:** a retry timer resuming long after the window could still dispatch. The absolute deadline
+  is now checked immediately before each retry; the regression resumes the timer 25 s late.
+
+It also flagged that my earlier mandatory "retire every lapsed join" native contract contradicted
+the decision's established-pair rule and would cut healthy media during a signalling partition.
+That requirement is withdrawn (see the contract above); vanished-peer cleanup relies on definitive
+RTC failure, and the pre-negotiation case is recorded as a design decision.
