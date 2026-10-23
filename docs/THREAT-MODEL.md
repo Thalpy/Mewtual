@@ -659,8 +659,11 @@ writer keeps those properties.
 - **Creation.** Creating a partial is path-based: every creation with a captured folder identity
   re-reads it afterwards and removes (verified as above) and refuses a partial that landed in a
   swapped folder; a swap and swap-back inside that window leaves at most an empty partial there,
-  because the link probe that follows requires the probe name to be our own handle's object, even
-  if a file was planted at our name.
+  because creation then requires the partial's name to hold our own handle's object (a link probe
+  on Windows, a read-only no-follow name check on Unix) and refuses otherwise, even if a file was
+  planted at our name. The Unix name check was lost when PR51 M3 replaced the Unix link probe with
+  `fstatfs` and was restored after Linux CI caught it. Residual: that check also resolves the folder
+  by path, so a third swap timed between the folder recheck and the name check is not detected.
 - **Filesystem support (PR51 M3, fail closed).** Unix journals only on filesystems `fstatfs`
   identifies as local with stable identities (ext2/3/4, xfs, btrfs, f2fs, tmpfs, each only when it
   reports birth times; APFS and HFS+ that are `MNT_LOCAL`); FAT, vfat and exFAT are refused before

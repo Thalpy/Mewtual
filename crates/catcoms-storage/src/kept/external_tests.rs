@@ -589,6 +589,37 @@ fn systemd_accounts_and_containers_fail_closed() {
 
 #[cfg(any(target_os = "linux", target_os = "android"))]
 #[test]
+fn a_refused_descriptor_link_is_reported_as_no_link_made() {
+    // Linux CI follow-up: every refusal that proves `linkat` made no name halts the journaled
+    // session as unavailable (Unsupported) instead of being treated as possibly published; a taken
+    // name stays AlreadyExists; anything else keeps its own kind (possibly linked).
+    use rustix::io::Errno;
+    for errno in [
+        Errno::NOENT,
+        Errno::XDEV,
+        Errno::PERM,
+        Errno::MLINK,
+        Errno::OPNOTSUPP,
+    ] {
+        assert_eq!(
+            linkat_error(errno).kind(),
+            io::ErrorKind::Unsupported,
+            "{errno:?}"
+        );
+    }
+    assert_eq!(
+        linkat_error(Errno::EXIST).kind(),
+        io::ErrorKind::AlreadyExists
+    );
+    assert_eq!(
+        linkat_error(Errno::NOSPC).kind(),
+        io::ErrorKind::StorageFull
+    );
+    assert_ne!(linkat_error(Errno::IO).kind(), io::ErrorKind::Unsupported);
+}
+
+#[cfg(any(target_os = "linux", target_os = "android"))]
+#[test]
 fn an_extended_acl_is_never_ruled_out_without_proof() {
     // Decisions review HIGH: with an extended POSIX ACL the group bits are the ACL mask, which can
     // carry another account's write access.

@@ -355,7 +355,7 @@ fn a_downloads_reservation_without_links_is_refused_before_any_plaintext() {
     let staging = fx.downloads.join("notes.txt.part");
     let file = external::create_leaf(&staging).unwrap();
     assert!(matches!(
-        injected(Effect::Link, io::ErrorKind::PermissionDenied, || {
+        without_links(io::ErrorKind::PermissionDenied, || {
             confirm_staging_links(file, &fx.downloads, "notes.txt.part", &mut rng())
         }),
         Err(ExportError::NoLinks)
@@ -463,6 +463,59 @@ fn a_swap_and_swap_back_around_creation_with_a_planted_file_writes_nothing() {
 }
 
 #[test]
+fn a_swap_and_swap_back_around_a_journaled_creation_starts_no_journal() {
+    // The same attack against the journaled writer (Linux CI regression: on Unix PR51 had dropped
+    // the staging-name check with the link probe, so the journal would have started with its
+    // handle on a partial in the swapped-in folder and written the plaintext there).
+    let fx = fixture();
+    let folder = chosen_folder(&fx);
+    let choice = ChosenDestination::validate(&folder.join("report.bin")).unwrap();
+    let original = folder.with_file_name("Original");
+    let decoy = folder.with_file_name("Decoy");
+    fs::create_dir(&decoy).unwrap();
+    let probe = folder.with_file_name("Link probe");
+    if !external::tests::link_directory(&decoy, &probe) {
+        eprintln!("skipped: this host cannot create a directory link");
+        return;
+    }
+    fs::remove_dir(&probe)
+        .or_else(|_| fs::remove_file(&probe))
+        .unwrap();
+    let staging_name = external::staging_for("report.bin");
+    let (path, held, target) = (folder.clone(), original.clone(), decoy.clone());
+    external::BEFORE_CREATE.with(|hook| {
+        *hook.borrow_mut() = Some(Box::new(move |_| {
+            fs::rename(&path, &held).unwrap();
+            assert!(external::tests::link_directory(&target, &path));
+        }))
+    });
+    let (path, held, planted) = (folder.clone(), original.clone(), staging_name.clone());
+    external::AFTER_CREATE.with(|hook| {
+        *hook.borrow_mut() = Some(Box::new(move |_| {
+            fs::remove_dir(&path)
+                .or_else(|_| fs::remove_file(&path))
+                .unwrap();
+            fs::rename(&held, &path).unwrap();
+            fs::write(path.join(&planted), b"planted").unwrap();
+        }))
+    });
+    let created = ExportFile::create_chosen(&choice, export_plan(), &mut rng());
+    external::BEFORE_CREATE.with(|hook| *hook.borrow_mut() = None);
+    external::AFTER_CREATE.with(|hook| *hook.borrow_mut() = None);
+    assert!(created.is_err(), "no journal starts on a planted name");
+    assert_eq!(
+        fs::read(folder.join(&staging_name)).unwrap(),
+        b"planted",
+        "the planted file is left alone"
+    );
+    assert_eq!(
+        fs::metadata(decoy.join(&staging_name)).unwrap().len(),
+        0,
+        "our own partial, in the other folder, holds no plaintext"
+    );
+}
+
+#[test]
 fn removing_a_just_created_partial_needs_its_identity_to_still_match() {
     // Picker re-review LOW 3: the proven-removal branch of `remove_created`.
     let fx = fixture();
@@ -526,7 +579,7 @@ fn a_chosen_folder_without_links_is_refused_before_any_plaintext_exists() {
     let folder = chosen_folder(&fx);
     let choice = ChosenDestination::validate(&folder.join("report.bin")).unwrap();
     assert!(matches!(
-        injected(Effect::Link, io::ErrorKind::Unsupported, || {
+        without_links(io::ErrorKind::Unsupported, || {
             ExportFile::create_chosen(&choice, export_plan(), &mut rng())
         }),
         Err(ExportError::NoLinks)
@@ -535,7 +588,7 @@ fn a_chosen_folder_without_links_is_refused_before_any_plaintext_exists() {
     // The same refusal on an identity-less folder, through the non-resumable reservation.
     let choice = identityless(&folder, "report.bin");
     assert!(matches!(
-        injected(Effect::Link, io::ErrorKind::PermissionDenied, || {
+        without_links(io::ErrorKind::PermissionDenied, || {
             choice.create_unjournaled(&mut rng())
         }),
         Err(ExportError::NoLinks)

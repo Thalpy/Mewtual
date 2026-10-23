@@ -1695,10 +1695,19 @@ enum LinkProbe {
 /// in-session number of the staging file we hold (`source`), so a name swapped in meanwhile is
 /// never deleted. A filesystem that gives no number to check gets `Inconclusive` (fail closed).
 ///
-/// Unix (PR51 M3): no probe. The filesystem type from `fstatfs` decides instead: FAT, vfat and
-/// exFAT refuse links (`Refused`); every other type is assumed to link (if it does not, the save
-/// fails at publication). A probe there would leave a second name for the partial in any folder
-/// where Unix refuses automatic deletion (one other accounts can modify).
+/// Unix (PR51 M3): no link probe. The filesystem type from `fstatfs` decides instead: FAT, vfat
+/// and exFAT refuse links (`Refused`); every other type is assumed to link (if it does not, the
+/// save fails at publication). A probe there would leave a second name for the partial in any
+/// folder where Unix refuses automatic deletion (one other accounts can modify).
+///
+/// Both platforms also prove that the staging name holds the object behind `source` right now
+/// (picker re-review LOW 2): a folder swapped before the exclusive create and swapped back with a
+/// file planted at our name passes the folder identity recheck, and only this name check notices
+/// that our handle is a file in the other folder. Windows proves it with the probe (the probe name
+/// links whatever is at the staging name); Unix with a read-only, no-follow open of the staging
+/// name compared by in-session number. (Linux CI regression: PR51 had dropped the check on Unix
+/// together with the probe, so with a planted file the partial, and later its plaintext, lived in
+/// the swapped-in folder.)
 fn links_supported(
     folder: &Path,
     staging: &str,
@@ -1707,16 +1716,28 @@ fn links_supported(
 ) -> LinkProbe {
     #[cfg(unix)]
     {
-        let _ = (staging, &rng);
+        let _ = &rng;
         match external::fs_class(folder) {
-            Ok(external::FsClass::NoLinks) => LinkProbe::Refused,
-            // PR51 M1: Linux and Android publish every save by linking the open descriptor through
-            // /proc (`external::publish_session`, `link_open`). Without /proc no save could finish
-            // safely, so refuse before any plaintext is written (fail closed).
-            Ok(_) if !external::link_by_descriptor_available(source) => LinkProbe::NoDescriptor,
-            Ok(_) => LinkProbe::Works,
-            Err(_) => LinkProbe::Inconclusive,
+            Ok(external::FsClass::NoLinks) => return LinkProbe::Refused,
+            Ok(_) => {}
+            Err(_) => return LinkProbe::Inconclusive,
         }
+        let ours = external::session_id(source).is_ok_and(|id| {
+            matches!(
+                external::holds_session(&folder.join(staging), id),
+                Ok(Some(true))
+            )
+        });
+        if !ours {
+            return LinkProbe::Inconclusive;
+        }
+        // PR51 M1: Linux and Android publish every save by linking the open descriptor through
+        // /proc (`external::publish_session`, `link_open`). Without /proc no save could finish
+        // safely, so refuse before any plaintext is written (fail closed).
+        if !external::link_by_descriptor_available(source) {
+            return LinkProbe::NoDescriptor;
+        }
+        LinkProbe::Works
     }
     #[cfg(not(unix))]
     {
@@ -2332,8 +2353,11 @@ impl ExportFile {
                     reason: "the saved name was taken by another file".into(),
                 });
             }
-            // Creation proved linking works here, so this folder changed underneath us. A retry
-            // cannot fix it; stop as a persisted halt instead of a transient failure.
+            // A definite refusal: no link was made (on Linux and Android see
+            // `external::linkat_error`). Creation proved linking works here on Windows and
+            // presumed it from the filesystem type on Unix, so this folder changed underneath us
+            // or cannot link after all. A retry cannot fix it; stop as a persisted halt (Save new
+            // copy or Save as elsewhere) instead of a transient failure.
             Err(error) if error.kind() == io::ErrorKind::Unsupported => {
                 return Err(ExportError::Halted(ExportHalt::Unavailable));
             }

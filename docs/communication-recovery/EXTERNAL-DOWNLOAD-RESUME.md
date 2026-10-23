@@ -533,10 +533,12 @@ exclusive create are separate calls. Every creation (`create`, `create_chosen`, 
 creating; on a mismatch it removes its own partial, only while that name's handle identity still
 proves it is ours, and refuses (`FolderChanged` at a chosen place, a local failure in Downloads).
 A swap and swap-back that both fall between the two identity reads still leaves an empty partial
-in the other folder; the link probe that follows then fails, because every probe requires the
-probe name to be our own handle's object whenever the filesystem reports identities (re-review
-LOW 2 added this to `create_unjournaled`), so no plaintext is written there even if a file was
-planted at our name. An identity-less chosen folder has no swap check at all (as before). The
+in the other folder; creation then refuses, because it requires the partial's name to hold our own
+handle's object whenever the filesystem reports identities (re-review LOW 2 added this to
+`create_unjournaled`), so no plaintext is written there even if a file was planted at our name. On
+Windows the link probe makes that check; on Unix, where creation makes no link (PR51 M3), a
+read-only no-follow check of the name does (restored after the Linux CI failures at 516ab8d0, see
+below). An identity-less chosen folder has no swap check at all (as before). The
 proven removal leaves a just-created partial in place when its name cannot be opened right then
 (for example another program holding it); that empty file then blocks a remembered choice with
 `PartialExists` until the user deletes it.
@@ -1083,8 +1085,11 @@ writer and the GIF export):
   before any plaintext is written (fail closed, "this system does not provide /proc, which Mewtual
   needs to publish a save safely"). `/proc` disappearing between creation and a later Resume makes
   the link fail definitively (`ENOENT`/`EXDEV` become `Unsupported`), which halts the journal as
-  unavailable without treating the save as possibly published (review L-3). The folder flush is
-  not done inside the guarded link (review L-1).
+  unavailable without treating the save as possibly published (review L-3). Since the Linux CI
+  follow-up, `EPERM`, `EMLINK` and `EOPNOTSUPP` (`ENOTSUP`) are definite refusals too
+  (`external::linkat_error`): before, `EPERM` halted with the save marked as possibly linked, and
+  `EMLINK` and `EOPNOTSUPP` were retryable failures, so Resume retried a link that could not
+  succeed. The folder flush is not done inside the guarded link (review L-1).
 - Windows: (a) and (b). A delete-denying pin on the staging name, checked to be our object, is held
   across the path-based link (the existing test also pins that the folder cannot be renamed).
 - macOS: (a) only (narrowed). The link is by path; the post-link check fails the save when the
@@ -1293,6 +1298,56 @@ Recorded, no change:
   every result of the replacement save; no durable record of an abandoned partial).
 - The Unix rename-aside before unlink, and Windows FAT/exFAT detection only at the creation probe,
   are accepted as implemented.
+
+## Linux CI failures at `516ab8d0` (reproduced at `c7fcaca1`)
+
+Four `catcoms-storage` export tests failed on Linux. They run only in Linux CI, and the Windows
+host cannot reproduce them; WSL Ubuntu (Rust 1.89) did.
+
+- **`chosen::a_swap_and_swap_back_around_creation_with_a_planted_file_writes_nothing`: a product
+  defect, fixed.** At `86664d94` the Unix branch of `links_supported` hard-linked the staging
+  *name* to a probe name and required the probe to be our handle's object, which is what defeated
+  a folder swapped before the exclusive create and swapped back with a file planted at our name
+  (picker re-review LOW 2). PR51 M3 (`90de8c03`) replaced the Unix probe with `fstatfs` and dropped
+  that check with it. On Linux the folder identity recheck then passed (the original folder is
+  back) and `create_unjournaled`, and the journaled `create` and `create_chosen` too, kept a handle
+  on our partial in the swapped-in folder, so the plaintext would have been written there and
+  linked under the final name in that folder. The test's hooks sit in `create_leaf` around the real
+  path-based create, so the seam matched production; the test was right. Fix: Unix again requires
+  the staging name to hold our handle's object, now with a read-only, no-follow open compared by
+  in-session number (`session_id` and `holds_session`), which creates no second name. A failed
+  check is `Inconclusive`: the journaled creation removes nothing it cannot prove ours and returns
+  `Unsupported` (native then uses the non-resumable writer, which runs the same check against the
+  folder as it is now); the non-resumable reservation refuses. Regression tests: the original test
+  (non-resumable writer) and the new `a_swap_and_swap_back_around_a_journaled_creation_starts_no_journal`
+  (journaled `create_chosen`); both fail on Linux without the check and pass with it. Residual, as
+  before PR51: like the Windows probe and the Unix probe it replaces, the check resolves the folder
+  by path, so a third swap timed between the folder identity recheck and the name check could still
+  pass it; reading both through one pinned folder descriptor would close that window (follow-up).
+- **`a_folder_without_links_is_refused_at_creation_and_halts_at_publication`,
+  `chosen::a_chosen_folder_without_links_is_refused_before_any_plaintext_exists`,
+  `chosen::a_downloads_reservation_without_links_is_refused_before_any_plaintext`: a test-seam
+  mismatch.** They injected a failure of `Effect::Link` to model FAT, but Unix makes no link at
+  creation since PR51 M3, so there was no link to fail and creation succeeded. The guess that the
+  `/proc/self/fd` `linkat` path skips the hook is refuted: `link_open` calls
+  `inject(Effect::Link)` on every platform, and the publication half of the first test relies on
+  it. Fix: the tests model a no-links folder where each platform decides it (`without_links`: the
+  link probe's failure on Windows, `fstatfs` reporting vfat or exFAT through `Effect::FsClass` on
+  Unix). Production is unchanged for these three.
+- **Real Linux link failures at publication.** `linkat` of `/proc/self/fd/N` reported only
+  `ENOENT` and `EXDEV` as a definite refusal. `EPERM` (vfat, `protected_hardlinks`, a security
+  module), `EMLINK` and `EOPNOTSUPP` (`ENOTSUP`) now are too (`external::linkat_error`), so the
+  journaled save halts as unavailable (persisted; Save new copy or Save as elsewhere) without being
+  marked possibly linked, and the writers without a journal fail and clean up their staging name by
+  verified removal. A no-links folder is still refused before any plaintext exists where Mewtual
+  can tell (`NoLinks` from `fstatfs` on Unix, the probe on Windows); a mount that refuses links
+  although its type suggests otherwise is found only at publication, after writing, as the support
+  matrix says. Test: `a_refused_descriptor_link_is_reported_as_no_link_made` (Linux and Android).
+
+Each fixed guard was broken on purpose and its test went red on Linux: the Unix name check (both
+swap tests), `journal_capable` accepting a no-links filesystem (the first and second seam tests),
+`links_supported` ignoring a no-links filesystem (the second and third), and `EPERM` dropped from
+`linkat_error` (the mapping test).
 
 ## Ledger (23 October, PR51 review rounds)
 

@@ -150,6 +150,24 @@ fn injected<T>(effect: Effect, kind: io::ErrorKind, run: impl FnOnce() -> T) -> 
     result
 }
 
+/// Run `run` against a folder that cannot make hard links (FAT, exFAT), modelled where each
+/// platform decides that at creation: Windows links a probe name, so its link fails with `kind`
+/// (Linux vfat reports a permission error, others "unsupported"); Unix makes no link at creation
+/// (PR51 M3) and reads the filesystem type instead, so `fstatfs` reports a no-links filesystem
+/// (the class seam's `Unsupported` means vfat or exFAT). Linux CI: before this, an injected link
+/// failure had no link to fail on Unix and these tests could not pass there.
+pub(super) fn without_links<T>(kind: io::ErrorKind, run: impl FnOnce() -> T) -> T {
+    #[cfg(unix)]
+    {
+        let _ = kind;
+        injected(Effect::FsClass, io::ErrorKind::Unsupported, run)
+    }
+    #[cfg(not(unix))]
+    {
+        injected(Effect::Link, kind, run)
+    }
+}
+
 #[test]
 fn fresh_export_publishes_without_replacement_and_releases_only_private_progress() {
     let fx = fixture();
@@ -2264,12 +2282,14 @@ fn disk_full_while_writing_persists_nothing_and_a_later_attempt_completes() {
 #[test]
 fn a_folder_without_links_is_refused_at_creation_and_halts_at_publication() {
     // FAT and exFAT report identities but cannot link, and every publication (journaled or the
-    // non-resumable writer) is a no-replace link: refuse before any plaintext exists. Linux vfat
-    // reports the failure as a permission error, so the kind does not matter.
+    // non-resumable writer) is a no-replace link: refuse before any plaintext exists. Windows
+    // decides with a link probe whose failure kind does not matter; Unix decides with `fstatfs`
+    // (see `without_links`). At publication a real Linux `EPERM` (what vfat reports) is a definite
+    // refusal like the injected `Unsupported` below (`external::linkat_error`).
     for kind in [io::ErrorKind::Unsupported, io::ErrorKind::PermissionDenied] {
         let fx = fixture();
         assert!(matches!(
-            injected(Effect::Link, kind, || {
+            without_links(kind, || {
                 ExportFile::create(&fx.downloads, "notes.txt", export_plan(), &mut rng())
             }),
             Err(ExportError::NoLinks)

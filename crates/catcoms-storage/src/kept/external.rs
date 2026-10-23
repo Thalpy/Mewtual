@@ -46,8 +46,9 @@
 //! the exclusive create are separate calls. Each creation with a captured folder identity
 //! re-checks it after creating and removes (by proven handle identity) and refuses a partial that
 //! landed in a swapped folder. A swap and swap-back that both fall between the two checks still
-//! puts an empty partial in the other folder; the link probe that follows requires the probe name
-//! to be our own handle's object (whenever the filesystem reports identities), so it fails and no
+//! puts an empty partial in the other folder; creation then requires the partial's name to hold
+//! our own handle's object (whenever the filesystem reports identities: the link probe on Windows,
+//! a read-only no-follow name check on Unix, `links_supported` in `export.rs`), so it refuses and no
 //! plaintext is ever written there, even if a file was planted at our name meanwhile.
 use std::ffi::{OsStr, OsString};
 use std::fs::{self, File, OpenOptions};
@@ -422,7 +423,7 @@ fn open_leaf_as(path: &Path, write: bool, pinned: bool) -> io::Result<Leaf> {
 /// This is a path-based call made after the caller's folder identity check, so the folder can be
 /// swapped in between. Every caller with a captured folder identity re-checks it afterwards
 /// (picker review L4, `confirm_folder` in `export.rs`) and removes a partial that landed in a
-/// swapped folder; every link probe that follows checks the probe names our own handle.
+/// swapped folder; `links_supported` then checks the name still holds our own handle's object.
 pub(super) fn create_leaf(path: &Path) -> io::Result<File> {
     #[cfg(test)]
     BEFORE_CREATE.with(|hook| {
@@ -1796,6 +1797,29 @@ pub(super) fn link_by_descriptor_available(file: &File) -> bool {
     }
 }
 
+/// How a failed `linkat` of the open download is reported. `EEXIST` is a taken name (nothing was
+/// linked; the journaled session picks a numbered name). A refusal that proves no link was made
+/// is `Unsupported`, so the journaled session halts as unavailable (persisted, offering Save new
+/// copy) without treating the save as possibly published, and the writers without a journal fail
+/// and clean up their staging name: `ENOENT` (no `/proc` any more, or the object has no names
+/// left), `EXDEV` (the folder is now on another device), `EPERM` (a filesystem that refuses hard
+/// links, or `protected_hardlinks`), `EMLINK` (too many links) and `EOPNOTSUPP` (review L-3 and the
+/// Linux CI follow-up). Anything else keeps its own kind and is treated as possibly linked.
+#[cfg(any(target_os = "linux", target_os = "android"))]
+pub(super) fn linkat_error(errno: rustix::io::Errno) -> io::Error {
+    use rustix::io::Errno;
+    match errno {
+        Errno::EXIST => io::Error::from(io::ErrorKind::AlreadyExists),
+        Errno::NOENT | Errno::XDEV | Errno::PERM | Errno::MLINK | Errno::OPNOTSUPP => {
+            io::Error::new(
+                io::ErrorKind::Unsupported,
+                "the saved file could not be linked from the open download",
+            )
+        }
+        other => other.into(),
+    }
+}
+
 /// PR51 M1: give the object behind `file` (the verified, open session) the name `final_leaf` in
 /// `folder`, never replacing anything.
 ///
@@ -1803,8 +1827,7 @@ pub(super) fn link_by_descriptor_available(file: &File) -> bool {
 ///   pinned by a descriptor checked against `folder_id` when the caller has one (a writer without a
 ///   journal has none). The new name is for exactly the object we hold open, whatever has happened
 ///   to the staging name meanwhile, so a swapped staging name can never become the final name.
-///   `ENOENT` (no `/proc`, or the object has no names left) and `EXDEV` mean no link was made and
-///   are reported as `Unsupported`.
+///   Errors are reported by [`linkat_error`].
 /// - Elsewhere: the path-based no-replace hard link from `staging` (Windows callers hold the
 ///   delete-denying pin across it; macOS has no link by descriptor, so the post-link check is its
 ///   only guarantee).
@@ -1842,19 +1865,7 @@ pub(super) fn link_open(
             rustix::fs::AtFlags::SYMLINK_FOLLOW,
         ) {
             Ok(()) => {}
-            Err(rustix::io::Errno::EXIST) => {
-                return Err(io::Error::from(io::ErrorKind::AlreadyExists))
-            }
-            // Review L-3: a definite "no link was made" (no /proc any more, the object has no
-            // names left, or the folder is now on another device). `Unsupported` lets the
-            // journaled session halt without treating the save as possibly published.
-            Err(rustix::io::Errno::NOENT) | Err(rustix::io::Errno::XDEV) => {
-                return Err(io::Error::new(
-                    io::ErrorKind::Unsupported,
-                    "the saved file could not be linked from the open download",
-                ))
-            }
-            Err(error) => return Err(error.into()),
+            Err(errno) => return Err(linkat_error(errno)),
         }
         // Review L-1: no folder flush here. This runs under the session commit guard; the
         // journaled sequence flushes the folder after releasing it (PR51 M2), and the writers
