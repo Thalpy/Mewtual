@@ -26,7 +26,9 @@ mod results;
 mod snapshot;
 pub use snapshot::{CryptoActionSnapshot, CryptoActionSnapshotPermit, CryptoActionSnapshotWaiter};
 pub(crate) mod slots;
-pub use super::chain::{ConfirmationControl, ConfirmationRetirement, HandoffLoan};
+pub use super::chain::{
+    ConfirmationControl, ConfirmationCustody, ConfirmationRetirement, HandoffLoan,
+};
 pub use handoff::{ProtectedCryptoBinding, ProtectedCryptoPlan};
 pub use results::{CryptoHandoffStatus, CryptoOutcome, CryptoResultReceipt, CryptoResultStatus};
 pub(super) use results::{ResultBinding, TerminalResult};

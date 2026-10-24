@@ -54,6 +54,183 @@ fn fingerprint(
 }
 
 #[test]
+fn native_key_custody_requires_actual_finish_and_retains_exact_window_without_retiring_low_source()
+{
+    let (mut p, finish) = ready_to_finish();
+    let control = finish.confirmation_control().unwrap();
+    let plan = finish.protected_plan().unwrap();
+    assert_eq!(
+        plan.confirmation_custody(&control, 1_000).err(),
+        Some(VoiceError::Capacity)
+    );
+    let (object, _) = protected_seal(&mut p.f.low, &p.low, &finish, &p.f.clock);
+    let pool = p.f.pool.clone();
+    let fill = pool
+        .charge(
+            p.f.low.context.scope.group,
+            GROUP_BYTES - pool.counts().0,
+            ResourceKind::Retained,
+        )
+        .unwrap();
+    let before = pool.counts();
+    let custody = plan
+        .confirmation_custody(&control, p.f.clock.monotonic_ms())
+        .unwrap();
+    assert!(plan.contains_custody(&custody));
+    assert_eq!(
+        (
+            custody.message(),
+            custody.object_hash(),
+            custody.epoch(),
+            custody.transition_until()
+        ),
+        (object.id(), object.hash(), p.f.low.context.epoch, 31_000)
+    );
+    assert_eq!(custody.remaining_at(1_000), Ok(30_000));
+    assert_eq!(
+        pool.counts(),
+        before,
+        "fixed original custody has no new reserve or allocation"
+    );
+    let activity =
+        p.f.low
+            .join
+            .source_packet_activity(
+                &object,
+                &ca(&p.f.low.context, &p.f.low.lease),
+                Arc::new(p.f.clock.clone()),
+            )
+            .unwrap();
+    assert!(
+        activity.check(&object).is_ok(),
+        "key custody did not close LOW Finish"
+    );
+    p.f.clock.advance_ms(15_000);
+    assert!(
+        activity.check(&object).is_err(),
+        "old Source authority kept its first deadline"
+    );
+    assert_eq!(custody.remaining_at(16_000), Ok(15_000));
+    assert_eq!(
+        plan.confirmation_custody(&control, 16_000)
+            .unwrap()
+            .transition_until(),
+        31_000
+    );
+    assert_eq!(custody.remaining_at(31_000), Err(VoiceError::Freshness));
+    assert_eq!(
+        plan.confirmation_custody(&control, 31_000).err(),
+        Some(VoiceError::Freshness)
+    );
+    drop(fill);
+}
+
+#[test]
+fn native_key_custody_equal_wire_labels_cannot_adopt_another_actual_plan_or_control() {
+    let (mut p, finish) = ready_to_finish();
+    let control = finish.confirmation_control().unwrap();
+    let plan = finish.protected_plan().unwrap();
+    protected_seal(&mut p.f.low, &p.low, &finish, &p.f.clock);
+    let custody = plan.confirmation_custody(&control, 1_000).unwrap();
+    let (mut foreign, action) = ready_to_finish();
+    let other_control = action.confirmation_control().unwrap();
+    let other_plan = action.protected_plan().unwrap();
+    protected_seal(&mut foreign.f.low, &foreign.low, &action, &foreign.f.clock);
+    assert_eq!(
+        plan.handshake(),
+        other_plan.handshake(),
+        "identical public labels are intentional"
+    );
+    assert!(!other_plan.contains_custody(&custody));
+    assert_eq!(
+        other_plan.confirmation_custody(&control, 1_000).err(),
+        Some(VoiceError::Unauthorized)
+    );
+    assert_eq!(
+        plan.confirmation_custody(&other_control, 1_000).err(),
+        Some(VoiceError::Unauthorized)
+    );
+}
+
+#[test]
+fn native_key_custody_survives_high_affine_extraction_but_never_grants_old_action_or_sdp_authority()
+{
+    let (mut p, finish) = ready_to_finish();
+    let (object, plain) = protected_seal(&mut p.f.low, &p.low, &finish, &p.f.clock);
+    let (_, high) = admit(&mut p.f.high, &p.high, object, &p.f.clock);
+    let control = high.confirmation_control().unwrap();
+    let plan = high.protected_plan().unwrap();
+    opened(
+        &mut p.f.high,
+        &p.high,
+        &high,
+        &plain,
+        &p.f.clock,
+        &mut p.f.rng,
+    );
+    let custody = plan.confirmation_custody(&control, 1_000).unwrap();
+    let room = room(&p.f.high);
+    let successor =
+        p.f.high
+            .join
+            .prepare_high_sdp_successor(
+                &p.high,
+                &room,
+                p.f.id,
+                &[],
+                &ca(&p.f.high.context, &p.f.high.lease),
+                &p.f.clock,
+                |_, _| Ok(()),
+            )
+            .unwrap();
+    assert_eq!(custody.remaining_at(1_000), Ok(30_000));
+    assert!(plan.contains_custody(&plan.confirmation_custody(&control, 1_000).unwrap()));
+    assert!(!successor.owner.is_live());
+    assert!(high.admit_engine(high.engine_bytes()).is_err());
+    assert!(p
+        .f
+        .high
+        .join
+        .prepare_crypto_chain(p.f.id, &ca(&p.f.high.context, &p.f.high.lease), &p.f.clock)
+        .is_err());
+    assert_eq!(custody.transition_until(), 31_000);
+}
+
+#[test]
+fn native_key_custody_end_and_original_epoch_revocation_refuse_new_and_retained_proofs() {
+    for end in [false, true] {
+        let (mut p, finish) = ready_to_finish();
+        let control = finish.confirmation_control().unwrap();
+        let plan = finish.protected_plan().unwrap();
+        protected_seal(&mut p.f.low, &p.low, &finish, &p.f.clock);
+        let custody = plan.confirmation_custody(&control, 1_000).unwrap();
+        if end {
+            p.f.low.lease.revoke();
+        } else {
+            p.low
+                .sync_view(View {
+                    epoch: p.f.low.context.epoch + 1,
+                    members: [p.f.low.context.local, p.f.high.context.local].into(),
+                    policy: p.f.low.context.scope.policy,
+                    eligible: true,
+                    indirect: true,
+                })
+                .unwrap();
+        }
+        assert_eq!(custody.remaining_at(1_000), Err(VoiceError::Unauthorized));
+        assert_eq!(
+            plan.confirmation_custody(&control, 1_000).err(),
+            Some(VoiceError::Unauthorized)
+        );
+        assert_eq!(
+            custody.transition_until(),
+            31_000,
+            "historical bound cannot be rewritten"
+        );
+    }
+}
+
+#[test]
 fn await_ready_actual_finish_keeps_native_identity_and_first_expiry_through_lost_replies_and_old_source_expiry(
 ) {
     let (mut p, finish) = ready_to_finish();

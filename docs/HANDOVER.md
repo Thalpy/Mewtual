@@ -1,5 +1,41 @@
 # Mewtual; Handover
 
+## Original key-custody proof continuation (24 October; channel work next)
+
+ProtectedCryptoPlan can now lend an opaque ConfirmationCustody through its actual original
+Control after native Finish. The private constructor compares PlanBinding allocation identity;
+no weak Control upgrade, new reservation, signing or Workflow is involved. Pure original
+call/pair/epoch observations and first-window expiry remain mandatory. This may survive
+expected HIGH extraction closure without reviving old confirmation/Source deadlines. It is
+not an authenticated browser Claim reply, key reconstruction, SDP or RTC authority.
+
+Four actual protected-Finish tests pass: full ordinary pressure, original LOW Finish Source
+preservation, fixed remaining window, equal-wire foreign plans/Controls, HIGH affine extraction,
+old action rejection, End and epoch change. Read-only review found no blocker/high/medium
+in this narrow proof. All558 focused voice tests pass (13.60s), strict all-target/all-feature
+Sync Clippy passes, and formatting/diff checks pass. At9cecca96 the native handoff302,
+all9 voice_live TCP scenarios (139.94s) and separate native cargo check passed. Complete
+newer-source suites remain pending; no physical acceptance follows.
+
+Next: opcode10 exact original-session Claim/Release in a separate bounded grammar, native
+parent obligation/freeze/finalization, and browser custody-versus-action lifetime split.
+Protect SAME keys before delayed Finish settlement crosses the original15s deadline; a
+local once-bounded custody-only state may start at authenticated Finish Input, while every
+old action still uses its original deadline. Initial LOW custody must not require SDP
+extraction or stop Finish retries. Later Ready/adoption must additionally install exact
+successor cleanup/drainage before any SDP activation. The old Workflow witness cannot
+establish that a new SDP owner has drained. No new channel wire operation exists yet.
+
+Claim integration review constraints: recover an EXISTING same-Session Claim after End/lock/
+expiry with its original receipt and zero remaining custody, so a lost initial reply cannot
+deadlock Release. Normal Plan-final/channel close must require Release, but independent
+dead-owner GC must still work after exact actual physical collection, dead original lease
+and real Root drainage; forced discard is not Release/ACK. Bind collected evidence to Claim's
+exact Session too, and reset old session_collected on first Claim. Keep any removed owners
+outside Index/Row guards and measure Claim plus coexisting final-delivery storage under the
+unchanged Row2304/Control12KiB payments. Pin lost Claim/End recovery, physical-proof mismatch,
+abandoned claimant GC and Release-versus-final races before enabling this command.
+
 ## High-side inert SDP successor (24 October; focused validation passed)
 
 LocalJoin now has an unscheduled native HIGH-only pending factory after actual protected

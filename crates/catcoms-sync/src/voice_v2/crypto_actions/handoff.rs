@@ -36,6 +36,22 @@ pub struct ProtectedCryptoPlan {
 redacted_debug!(ProtectedCryptoPlan);
 
 impl ProtectedCryptoPlan {
+    /// Lend finite key custody only for this exact original plan and captured Control after
+    /// actual native Finish publication. LOW retains Finish retry authority; no lane moves.
+    /// Native must still enforce original parent/Session/UI Claim and Release lifecycle.
+    /// This neither derives browser keys nor creates confirmation/SDP/RTC authority.
+    pub fn confirmation_custody(
+        &self,
+        control: &ConfirmationControl,
+        mono: u64,
+    ) -> Result<super::super::chain::ConfirmationCustody, VoiceError> {
+        control.custody_for(&self.binding, mono)
+    }
+    /// Exact fixed native allocation identity, independent of copied metadata and old phase
+    /// closure. This grants no first effect; the native adapter must recheck current custody.
+    pub fn contains_custody(&self, custody: &super::super::chain::ConfirmationCustody) -> bool {
+        custody.belongs_to(&self.binding)
+    }
     /// Historical request binding for a trusted native child factory after its Derive
     /// action has compacted. This fixed value grants no admission, lookup or effect;
     /// native must still retain this ORIGINAL plan and Root revalidates the actual call.

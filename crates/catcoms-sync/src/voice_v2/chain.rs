@@ -30,7 +30,7 @@ pub(super) use admission::ConfirmationConsent;
 pub(in crate::voice_v2) use start::{StartAdmission, StartCandidate};
 pub use transfer::{PreparedSdpCapacity, TransferredSdpCapacity};
 pub(in crate::voice_v2) use transfer::{SuccessorProof, TransferredParts};
-pub use transition::FinishEvidence;
+pub use transition::{ConfirmationCustody, FinishEvidence};
 pub(in crate::voice_v2) use transition::{FinishIdentity, PreparedFinishWindow};
 // Confirmation-only envelope. Stacking this on the existing SDP reserve is not whole-chain
 // readiness; the supported chain still needs a measured, explicit phase transfer.

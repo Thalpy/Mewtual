@@ -32,6 +32,93 @@ pub struct FinishEvidence {
     until: u64,
 }
 redacted_debug!(FinishEvidence);
+
+/// Opaque custody of the ORIGINAL native confirmed binding. This grants only a bounded
+/// reason for the existing browser to retain its existing keys; it grants no confirmation,
+/// source, SDP, activation, crypto, or RTC effect and cannot recreate missing browser keys.
+///
+/// A native adapter must additionally latch its exact parent/Session/UI admission, freeze
+/// child adoption and retain this owner through authenticated Release before Plan-final.
+/// Public FinishEvidence and equal serialized identifiers cannot construct this proof.
+pub struct ConfirmationCustody {
+    binding: Arc<PlanBinding>,
+}
+redacted_debug!(ConfirmationCustody);
+impl ConfirmationCustody {
+    pub fn message(&self) -> MessageId {
+        self.record().identity.message
+    }
+    pub fn object_hash(&self) -> [u8; 32] {
+        self.record().identity.hash
+    }
+    pub fn epoch(&self) -> u64 {
+        self.binding.epoch
+    }
+    pub fn transition_until(&self) -> u64 {
+        self.record().until
+    }
+    /// Sample native monotonic time outside locks/callbacks, then check the SAME original
+    /// owner at final native admission. The adapter must never accept renderer-supplied time.
+    /// Return only a relative bound; browser and native monotonic clocks are different domains.
+    pub fn remaining_at(&self, mono: u64) -> Result<u64, VoiceError> {
+        if !self.binding.value.live() || !self.binding.transition.epoch_is_live() {
+            return Err(VoiceError::Unauthorized);
+        }
+        let until = self.record().until;
+        if mono >= until {
+            return Err(VoiceError::Freshness);
+        }
+        Ok(until - mono)
+    }
+    pub(in crate::voice_v2) fn belongs_to(&self, binding: &Arc<PlanBinding>) -> bool {
+        Arc::ptr_eq(&self.binding, binding)
+    }
+    fn record(&self) -> &FinishRecord {
+        self.binding
+            .transition
+            .finish
+            .get()
+            .expect("original native Finish custody")
+    }
+}
+
+impl ConfirmationControl {
+    /// Only the actual protected plan can lend this private constructor its fixed allocation.
+    /// One PlanBinding is created for exactly one PreparedChain, so pointer equality supplies
+    /// original provenance without upgrading/dropping a weak Control under native Row locks.
+    pub(in crate::voice_v2) fn custody_for(
+        &self,
+        binding: &Arc<PlanBinding>,
+        mono: u64,
+    ) -> Result<ConfirmationCustody, VoiceError> {
+        if !Arc::ptr_eq(&self.binding, binding)
+            || !self.binding.value.live()
+            || self
+                .binding
+                .transition
+                .epoch
+                .get()
+                .is_some_and(|epoch| !epoch.is_live())
+        {
+            return Err(VoiceError::Unauthorized);
+        }
+        if self.binding.transition.finish.get().is_none() {
+            return Err(if mono >= self.binding.deadline {
+                VoiceError::Freshness
+            } else {
+                VoiceError::Capacity
+            });
+        }
+        let custody = ConfirmationCustody {
+            binding: self.binding.clone(),
+        };
+        // Old transition Closed after HIGH's affine extraction is expected. Original call,
+        // pair and actor/session/policy/epoch cells still fence this finite key custody. The
+        // native parent must separately refuse a new Claim after Plan-final/Release/End.
+        custody.remaining_at(mono)?;
+        Ok(custody)
+    }
+}
 impl FinishEvidence {
     pub fn message(&self) -> MessageId {
         self.message

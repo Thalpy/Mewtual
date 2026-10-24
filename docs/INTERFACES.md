@@ -1,5 +1,20 @@
 # Mewtual; Interfaces & Hooks Schema
 
+## Original native key-custody proof (24 October; channel Claim/Release pending)
+
+`ProtectedCryptoPlan::confirmation_custody(control, native_mono)` returns an opaque fixed
+ConfirmationCustody only for the identical original plan/Control allocation after actual
+native Finish publication. It retains no Workflow. Exact native call/pair/actor/session/policy
+epoch cells and the original immutable Finish window fence `remaining_at`. Native must sample
+its own Clock outside gates; renderer time is not accepted. Old phase Closed after HIGH
+extraction is expected and grants no renewed confirmation authority. `contains_custody`
+compares original allocation identity; copied FinishEvidence cannot construct this proof.
+
+This trusted Rust API is not an authenticated browser receipt. A channel Claim must still
+bind the same original parent/Session/UI admission, wait for actual Return/children drainage,
+freeze child adoption, retain one obligation through uncertainty and block Plan-final until
+exact Release. That adapter and browser custody/action lifetime split remain unimplemented.
+
 ## Native high-side pending successor (24 October; unscheduled)
 
 `LocalJoin::prepare_high_sdp_successor` accepts only the original protected HIGH pair after
