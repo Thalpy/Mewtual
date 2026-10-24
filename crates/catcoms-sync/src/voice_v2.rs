@@ -1311,7 +1311,10 @@ impl<T: catcoms_rt::MeshTransport, R: catcoms_rt::CryptoRngCore> crate::ChannelS
     /// Inactive/persistence-pending pins refuse rather than masquerading as absent legacy policy.
     pub fn voice_v2_context(&self, room: u128) -> Result<Context, VoiceError> {
         if !self.group.is_active()
-            || !self.group.contains_device(&self.device.device_id())
+            // Borrow the actual local MLS leaf. members()/contains_device() materialize
+            // owned Member/roster copies before this bounded native operation is funded.
+            // Another roster member's identity must not substitute for this instance's own.
+            || !self.group.has_local_device(&self.device.device_id())
             || self
                 .group_policy
                 .as_ref()

@@ -110,6 +110,11 @@ enum Command {
         helpers: [Option<DeviceId>; 2],
         reply: Reply<bool>,
     },
+    HighReadyConnected {
+        grant: Arc<CallGrant>,
+        handshake: Nonce,
+        reply: Reply<bool>,
+    },
     QueueReady {
         grant: Arc<CallGrant>,
         handshake: Nonce,
@@ -282,6 +287,19 @@ impl Command {
                         [None, Some(_)] => Err(VoiceError::Malformed),
                     };
                     let _ = reply.send(result);
+                }
+            }
+            Self::HighReadyConnected {
+                grant,
+                handshake,
+                reply,
+            } => {
+                if !reply.is_closed() {
+                    let _ = reply.send(
+                        server
+                            .sync
+                            .prepare_voice_high_ready_connected(&grant, handshake),
+                    );
                 }
             }
             Self::QueueReady {
@@ -490,6 +508,20 @@ impl ServerActor {
             grant,
             handshake,
             helpers,
+            reply,
+        })
+        .await
+    }
+    /// Select authenticated connected member helpers inside Root, then recover/prepare the
+    /// same immutable HIGH Ready. The caller supplies no helper or version-compatibility hint.
+    pub async fn prepare_voice_high_ready_connected(
+        &self,
+        grant: Arc<CallGrant>,
+        handshake: Nonce,
+    ) -> Result<bool, VoiceEndpointError> {
+        self.voice_endpoint_request(|reply| Command::HighReadyConnected {
+            grant,
+            handshake,
             reply,
         })
         .await

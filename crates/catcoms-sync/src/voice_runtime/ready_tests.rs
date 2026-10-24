@@ -191,6 +191,124 @@ fn admit(node: &mut VoiceTestNode, envelope: Envelope) -> Result<EndpointReceipt
 }
 
 #[tokio::test]
+async fn root_connected_ready_selects_unjoined_bound_helper_and_preserves_it_across_churn() {
+    let (mut f, grants, handshake, low) = confirmed().await;
+    let high = 1 - low;
+    let helper = f.b.as_ref().unwrap().device_id();
+    let mut prepared = false;
+    for _ in 0..80 {
+        let node = if high == 0 { &mut f.a } else { &mut f.c };
+        match node.prepare_voice_high_ready_connected(&grants[high], handshake) {
+            Ok(true) => {
+                prepared = true;
+                break;
+            }
+            Err(VoiceError::Capacity) => {}
+            other => panic!("original connected Ready preparation refused: {other:?}"),
+        }
+        f.tick(3).await;
+        f.clock.advance_ms(25);
+    }
+    assert!(prepared);
+    let object = {
+        let node = if high == 0 { &mut f.a } else { &mut f.c };
+        assert!(!node
+            .queue_voice_high_ready(&grants[high], handshake)
+            .unwrap());
+        let actor = node.voice_transport_actor().unwrap();
+        let jobs = actor
+            .source()
+            .unwrap()
+            .take_ready(actor, &node.voice_bound_routes())
+            .unwrap();
+        jobs.iter()
+            .find(|job| matches!(job.object().body(), Body::PairReadyRound { .. }))
+            .expect("actual native Ready Source")
+            .object()
+            .clone()
+    };
+    let Body::PairReadyRound { header, .. } = object.body() else {
+        unreachable!();
+    };
+    assert_eq!(
+        header.helpers,
+        vec![helper],
+        "unbound members and endpoints are not helper candidates"
+    );
+    assert!(f
+        .b
+        .as_ref()
+        .unwrap()
+        .voice_runtime
+        .as_ref()
+        .unwrap()
+        .endpoints
+        .implicit_watch_for_test()
+        .is_none());
+    drop(f.b.take());
+    bind_nodes(&mut f.a, &mut f.d).await;
+    bind_nodes(&mut f.d, &mut f.c).await;
+    let node = if high == 0 { &mut f.a } else { &mut f.c };
+    assert!(node
+        .prepare_voice_high_ready_connected(&grants[high], handshake)
+        .unwrap());
+    assert!(
+        node.queue_voice_high_ready(&grants[high], handshake)
+            .unwrap(),
+        "new connections recover the SAME first Ready, never a replacement Source budget"
+    );
+}
+
+#[tokio::test]
+async fn root_ready_retries_do_not_rebuild_roster_or_directory_and_stale_epoch_refuses() {
+    let (mut f, grants, handshake, low) = confirmed().await;
+    let high = 1 - low;
+    let counters = |node: &VoiceTestNode| {
+        let runtime = node.voice_runtime.as_ref().unwrap();
+        (runtime.view_builds, runtime.directory_reads)
+    };
+    let before = [counters(&f.a), counters(&f.c)];
+    for _ in 0..3 {
+        let high_node = if high == 0 { &mut f.a } else { &mut f.c };
+        match high_node.prepare_voice_high_ready_connected(&grants[high], handshake) {
+            Ok(true) | Err(VoiceError::Capacity) => {}
+            other => panic!("original HIGH Ready retry refused: {other:?}"),
+        }
+        match high_node.queue_voice_high_ready(&grants[high], handshake) {
+            Ok(_) | Err(VoiceError::Unauthorized | VoiceError::Capacity) => {}
+            other => panic!("original HIGH queue retry refused: {other:?}"),
+        }
+        let low_node = if low == 0 { &mut f.a } else { &mut f.c };
+        match low_node.prepay_voice_low_sdp(&grants[low], handshake) {
+            Ok(()) | Err(VoiceError::Capacity) => {}
+            other => panic!("original LOW prepayment refused: {other:?}"),
+        }
+        assert_eq!(
+            low_node.prepare_voice_low_sdp(&grants[low], handshake),
+            Err(VoiceError::Unauthorized),
+            "no remote Ready has been dispatched in this test"
+        );
+    }
+    assert_eq!([counters(&f.a), counters(&f.c)], before,
+        "even refused/retried native Ready operations must not clone the full roster or parse the directory");
+    let removed = f.d.device_id();
+    let node = if high == 0 { &mut f.a } else { &mut f.c };
+    // Simulate an actual MLS epoch change before its normal finally-style reconciliation
+    // hook runs. Validation-only must DENY the old Actor view, never refresh old authority.
+    node.group.remove_member(&node.device, &removed).unwrap();
+    let before = counters(node);
+    assert_eq!(
+        node.prepare_voice_high_ready_connected(&grants[high], handshake),
+        Err(VoiceError::Unauthorized)
+    );
+    assert_eq!(
+        node.queue_voice_high_ready(&grants[high], handshake),
+        Err(VoiceError::Unauthorized)
+    );
+    assert_eq!(counters(node), before);
+}
+
+#[tokio::test]
 async fn root_low_ready_shared_namespace_actual_success_retry_collision_and_delayed_transfer() {
     let (mut f, grants, handshake, low) = confirmed().await;
     let high = 1 - low;

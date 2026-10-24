@@ -1,5 +1,23 @@
 # Threat model; client integrity & enforcement boundaries
 
+## Ready scheduling and release ordering (24 October)
+
+A renderer cannot turn Current key retention or local old-work drainage into early64KiB SDP
+storage. Native records actual HIGH/LOW core drainage on the original Session/parent KeyClaim
+before opcode12 can allocate. Fixed progress has no live SDK/RTC or fresh-round authority.
+KeyRelease validates all original proofs, then atomically closes the same Root successor gate
+BEFORE publishing Released. Workers parked at Actor waits and Source final admission cannot
+publish from an earlier Current observation. Cancellation does not refund real Lower/SDK owners.
+
+Ready's allocation-bounded validation compares actual current MLS epoch/policy/local-own-leaf
+with the paid Actor view. Existing mutation hooks retain immediate revocation on successful
+and partial-error transitions; validation never reconciles an old grant into renewed authority.
+Directory mutation hooks observe local/gossip/catch-up changes before later awaits, including
+prefix-applying failures. A current-member descriptor alone never establishes a helper: exact
+bound proof, unique current-member peer relation and actual connection lease are required.
+Helpers need not join the call. No compatible-version advertisement or live V2/RTC/media claim
+follows from connected membership or this initial finite Ready progression.
+
 ## SDK custody cannot be erased by storage or transport cleanup (24 October)
 
 Native SDK admission resolves the actual original Session/KeyClaim/storage proof and records

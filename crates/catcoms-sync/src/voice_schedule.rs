@@ -147,7 +147,14 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
     /// read this one function, so their `indirect` bits always agree. `Disabled` deliberately
     /// does not change it: pausing service must not end native state.
     pub(super) fn voice_indirect_allowed(&self) -> bool {
-        self.voice_schedule.routing != VoiceRouting::Direct && self.policy_allows_member_mesh()
+        // Voice contexts must remain bounded before their worker can reserve progress.
+        // The generic member-mesh predicate materializes the complete MLS roster. Check
+        // the SAME active P2P pin here, with this actual instance's borrowed local leaf;
+        // another member's identity cannot stand in for local membership.
+        self.voice_schedule.routing != VoiceRouting::Direct
+            && self.group_mode() == GroupMode::PeerToPeer
+            && self.group.is_active()
+            && self.group.has_local_device(&self.device.device_id())
     }
 
     pub(super) fn voice_transport_enabled(&self) -> bool {

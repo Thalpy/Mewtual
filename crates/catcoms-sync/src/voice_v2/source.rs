@@ -585,6 +585,30 @@ impl SourceLedger {
         activity: SourceActivity,
         room: RoomAuthority,
     ) -> Result<bool, VoiceError> {
+        self.admit_packet_before_final(actor, object, activity, room, || {})
+    }
+    /// Deterministic seam immediately before the final Source origin transaction. Production
+    /// supplies no callback. Tests can arm a Clock hook only after every preflight/payment,
+    /// so an earlier rejection cannot conceal a missing final currency check.
+    #[cfg(test)]
+    pub(crate) fn admit_borrowed_before_final_for_test(
+        &self,
+        actor: &ActorOwner,
+        object: &SignedObject,
+        activity: SourceActivity,
+        room: RoomAuthority,
+        before_final: impl FnOnce(),
+    ) -> Result<bool, VoiceError> {
+        self.admit_packet_before_final(actor, Cow::Borrowed(object), activity, room, before_final)
+    }
+    fn admit_packet_before_final(
+        &self,
+        actor: &ActorOwner,
+        object: Cow<'_, SignedObject>,
+        activity: SourceActivity,
+        room: RoomAuthority,
+        before_final: impl FnOnce(),
+    ) -> Result<bool, VoiceError> {
         self.current(actor)?;
         actor.authorize_source(&object, &activity, &room, false)?;
         let key = (object.issuer(), object.id());
@@ -682,6 +706,7 @@ impl SourceLedger {
         let object = object.into_owned();
         // All fallible persistent reservations precede the original-issuer transaction. Every
         // subsequent map publication is infallible; no rejected packet spends origin quota.
+        before_final();
         actor.authorize_source(&object, &activity, &room, true)?;
         if let Some(credit) = cursor_credit {
             state.cursors.insert(

@@ -1573,27 +1573,30 @@ async fn confirmation_round_trip_inner(
     if framed_results {
         // Only actual application-framed Finish results arm native custody. The legacy
         // test-only result path deliberately cannot manufacture this transition proof.
-        super::transition::custody_cycle(
-            high_state,
-            high,
-            high_parent,
-            if matches!(mode, ConfirmationMode::Orphan) {
-                super::transition::Cleanup::SdkAdmissionRace
-            } else {
-                super::transition::Cleanup::Live
-            },
-        )
-        .await;
-        super::transition::custody_cycle(
-            low_state,
-            low,
-            low_parent,
-            if matches!(mode, ConfirmationMode::Orphan) {
-                super::transition::Cleanup::Orphan
-            } else {
-                super::transition::Cleanup::Ended
-            },
-        )
-        .await;
+        let peer_ready = tokio::sync::Barrier::new(2);
+        tokio::join!(
+            super::transition::custody_cycle(
+                high_state,
+                high,
+                high_parent,
+                if matches!(mode, ConfirmationMode::Orphan) {
+                    super::transition::Cleanup::SdkAdmissionRace
+                } else {
+                    super::transition::Cleanup::Live
+                },
+                &peer_ready,
+            ),
+            super::transition::custody_cycle(
+                low_state,
+                low,
+                low_parent,
+                if matches!(mode, ConfirmationMode::Orphan) {
+                    super::transition::Cleanup::Orphan
+                } else {
+                    super::transition::Cleanup::Ended
+                },
+                &peer_ready,
+            )
+        );
     }
 }

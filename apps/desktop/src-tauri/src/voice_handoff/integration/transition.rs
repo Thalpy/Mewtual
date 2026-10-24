@@ -77,6 +77,7 @@ pub(super) async fn custody_cycle(
     selected: &Arc<SelectedHandoffOwner>,
     parent: &ledger::ResolvedRow,
     cleanup: Cleanup,
+    peer_ready: &tokio::sync::Barrier,
 ) {
     let end_before_recovery = !matches!(cleanup, Cleanup::Live | Cleanup::SdkAdmissionRace);
     let bootstrap::Status::Ready(public) = bootstrap::ensure(
@@ -90,6 +91,9 @@ pub(super) async fn custody_cycle(
         panic!("original channel")
     };
     let route = state.voice_channels.route(public.public().slot).unwrap();
+    // This post-authentication fixture previously kept automatic production dormant. Its
+    // setup has actually completed; allow the same native scheduler as a real browser ACK.
+    route.acknowledge_setup().unwrap();
     let context = context::Context::new(state);
     let claim = body(parent, None);
 
@@ -131,6 +135,16 @@ pub(super) async fn custody_cycle(
     assert!(u32::from_be_bytes(first[178..182].try_into().unwrap()) > 0);
     let receipt: [u8; 32] = first[182..214].try_into().unwrap();
     let key_proof = super::key_session::adopt(state, &public, &route, parent, receipt).await;
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        while !parent.ready_test_complete() {
+            clock.sleep(std::time::Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("actual automatic native Ready/core drainage stalled");
+    // Both native Ready consumers must finish before either endpoint intentionally releases
+    // its key in this cleanup fixture. No synthetic Ready/CoreDrained flag is installed.
+    peer_ready.wait().await;
     let sdk = super::sdp::exercise(
         state,
         &public,

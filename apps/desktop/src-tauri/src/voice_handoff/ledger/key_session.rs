@@ -10,6 +10,7 @@ pub(super) struct KeyClaim {
     pub(super) custody: EstablishedKeyCustody,
     pub(super) receipt: [u8; 32],
     pub(super) released: bool,
+    pub(super) ready: super::ready::ReadyProgress,
     pub(super) sdp: Option<super::sdp::Claim>,
 }
 pub(in crate::voice_handoff) struct KeySessionReceipt {
@@ -61,6 +62,24 @@ impl Claim {
     }
 }
 impl ResolvedRow {
+    /// Retain the SAME paid Root observer for release-ordering tests. A Released receipt
+    /// alone would not prove that an already parked Root continuation was fenced.
+    #[cfg(test)]
+    pub(in crate::voice_handoff) fn key_custody_for_test(&self) -> EstablishedKeyCustody {
+        let _index = self.indexed().unwrap();
+        let state = self.row.state.lock().unwrap();
+        state
+            .plan()
+            .unwrap()
+            .transition
+            .as_ref()
+            .unwrap()
+            .key
+            .as_ref()
+            .unwrap()
+            .custody
+            .clone()
+    }
     /// Fixture-only independent oracle for actual opcode11 native publication. Metadata,
     /// queued work or a browser boolean cannot satisfy the real TCP acceptance scenario.
     #[cfg(test)]
@@ -190,6 +209,9 @@ impl ResolvedRow {
             custody,
             receipt: hash.finalize().into(),
             released: false,
+            // Latched only at this actual original-session adoption publication. A
+            // maintenance tick or renderer Ready boolean cannot create this intent.
+            ready: super::ready::ReadyProgress::Pending,
             sdp: None,
         });
         let receipt = claim
@@ -226,6 +248,11 @@ impl ResolvedRow {
             if key.receipt != proof {
                 return Err(VoiceError::Unauthorized);
             }
+            // Cleanup does not take the UI commit guard. Fence the actual original Root
+            // binding BEFORE publishing Released, so a parked Ready/SDP actor continuation
+            // cannot use an earlier Current snapshot to publish after this release wins.
+            // This atomic operation neither refunds capacity nor asserts SDK drainage.
+            key.custody.close_successor_effects();
             key.released = true;
             let receipt = claim
                 .key_snapshot(self.row.id, action, handshake)

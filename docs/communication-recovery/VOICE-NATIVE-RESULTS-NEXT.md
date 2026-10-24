@@ -1,5 +1,59 @@
 # Next voice milestone: native result recovery
 
+## Operational initial Ready (24 October; validation in progress)
+
+Native key adoption now latches a finite Ready intent on the original KeyClaim and nudges
+its existing paid native worker. Maintenance retries through canonical channels in bounded
+batches, sharing each channel's one native position with ordinary confirmation/discovery.
+Both Ready and ordinary attempts retain their priority/cursor until a worker is actually
+admitted; urgent selection also services an owed ordinary opportunity. No new queue, group limit or retry allowance exists.
+HIGH selects at most two authenticated connected member helpers inside Root, recovers its
+frozen choice before inspecting new routes, prepares/extracts core192KiB+Ready32KiB, observes
+actual old Workflow drainage and queues its original Ready. LOW prepays, then extracts only
+after actual native Ready admission. The original30s Finish window is not extended.
+
+Opcode12 now refuses with authenticated Capacity until the native CoreDrained milestone.
+Browser-local drainage or a Current key receipt cannot allocate the64KiB sidecar early.
+KeyRelease fences the SAME original Root successor binding before reporting Released. Final
+Ready Source publication, queued transport authority, LOW admission/extraction and SDP observers
+see that irreversible gate; actual SDK/storage/Lower owners retain their own release duties.
+
+Ready validation uses the current paid Actor membership map and fixed local/peer/helper
+identity snapshots, plus the actual MLS instance's borrowed local leaf. It does not rebuild
+a full roster or parse the directory on each retry. Existing MLS/policy/routing/document
+mutation hooks still reconcile/revoke synchronously, including partial-error paths. Comparing
+the actual current MLS epoch/policy/local identity with the Actor view independently refuses
+stale validation. Connection leases are captured outside Group/Policy; descriptors alone are
+not helper authority. Connected membership does not advertise version compatibility.
+
+The current automatic real-TCP A-B-C scenario passed in15.70s with A-C forbidden and B
+unjoined, without explicit Ready preparation/queue/extraction calls. Both Node/browser
+endpoints then used actual HTTP12/13 custody; independent native records were required.
+Native worker layout measured5704/8192B. Root Ready104, local MLS identity2 and native
+maintenance5 focused regressions pass. The complete2717-test frontend suite, Svelte check,
+production frontend build and browser flow gate pass on this Ready increment.
+
+An intermediate TCP timeout exposed a real scheduler starvation: ordinary admission followed
+by an urgent Ready refusal incorrectly gave up Ready's next turn. Ready priority/cursor now
+commit only on actual worker admission, as do ordinary stage/Pending cursors. Deterministic
+tests hold the real NativeHold across both contention directions and cover2/4 original
+Pending rows and all4 ordinary stages. Read-only re-review found no remaining B/H/M in
+these scheduling/release/validation boundaries. Redacted stage and endpoint-progress
+observations now distinguish a local refused attempt from missing remote progress.
+
+The older full root/native baseline runs were stopped after further code changes; they
+are NOT complete-suite passes. Complete final suites/gates remain required before final
+handoff. All318 native handoff regressions pass (38.04s), as do strict Root all-target/
+all-feature Clippy, strict native all-target Clippy, explicit native check, formatting,
+ambient and diff checks. Current complete Root/native suites are running sequentially on M:.
+A fresh cargo deny run still fails on RUSTSEC-2026-0387; bans/licences/sources pass. No
+advisory ignore or dependency upgrade is included here.
+
+This implements the first finite native Ready progression, not live V2 completion. Typed
+SDP seal/open, private native commit/delivery, PC generation and actual ICE/RTC, renewed rounds,
+multi-peer compaction/composition, member media relay and combined acceptance remain open.
+Independent two-device/network audible acceptance still needs hardware beyond this desktop.
+
 ## Ordered HTTP/TCP custody composition (24 October)
 
 The existing native Ready scenario now continues into real Node/browser opcode12/13 calls at
@@ -21,7 +75,7 @@ Current checks also pass the complete2,717-test frontend suite, Svelte checks, f
 both strict Clippy gates (root all-target/all-feature and native all-target), explicit native
 check, formatting/diff/ambient checks and browser flow gate. The flow gate needed normal
 process permissions: sandboxed Edge GPU startup crashed before app assertions; no browser
-security setting or harness code was relaxed. Complete root/native suites are still running.
+security setting or harness code was relaxed. Those root/native baseline runs were later stopped; current validation status is above.
 cargo deny still reports RUSTSEC-2026-0387; bans, licences and sources pass.
 
 ## Independent SDK custody (24 October; operational RTC remains open)

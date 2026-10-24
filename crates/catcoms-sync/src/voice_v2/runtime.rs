@@ -719,6 +719,30 @@ impl ActorOwner {
         self.check_route_view(&state, &policy, context.local, context)?;
         check(&|id| state.members.contains_key(&id))
     }
+    /// Allocation-free bounded native preparation against the SAME paid membership map.
+    /// Capture transport observations before entering this fence; the callback may inspect
+    /// only immutable bounded records and pure lease gates. Contention is retryable capacity,
+    /// never permission to substitute self-asserted descriptors or an older roster.
+    pub(crate) fn try_with_current_members<T>(
+        &self,
+        context: &super::Context,
+        check: impl FnOnce(&dyn Fn(DeviceId) -> bool) -> Result<T, VoiceError>,
+    ) -> Result<T, VoiceError> {
+        self.current()?;
+        let state = match self.group.state.try_lock() {
+            Ok(state) => state,
+            Err(std::sync::TryLockError::Poisoned(error)) => error.into_inner(),
+            Err(std::sync::TryLockError::WouldBlock) => return Err(VoiceError::Capacity),
+        };
+        let policy = match self.gate.policy.try_lock() {
+            Ok(policy) => policy,
+            Err(std::sync::TryLockError::Poisoned(error)) => error.into_inner(),
+            Err(std::sync::TryLockError::WouldBlock) => return Err(VoiceError::Capacity),
+        };
+        self.current()?;
+        self.check_route_view(&state, &policy, context.local, context)?;
+        check(&|id| state.members.contains_key(&id))
+    }
     pub(crate) fn source_context(&self, scope: super::Scope) -> Result<super::Context, VoiceError> {
         self.current()?;
         // Directory/grant validation also enters this path. EffectiveClock invokes the original

@@ -65,6 +65,82 @@ fn prepay(p: &mut ProtectedFixture) {
         .prepay_low_sdp_successor(&p.low, p.f.id, &ca(&p.f.low.context, &p.f.low.lease))
         .unwrap();
 }
+
+/// Capture the actual LOW key observer while its Finish action is still pending, then
+/// complete the real HIGH open. No copied identifier can manufacture this fence owner.
+fn confirmed_with_low_keys() -> (
+    ProtectedFixture,
+    crate::voice_v2::crypto_actions::EstablishedKeyCustody,
+) {
+    let (mut p, finish) = super::super::super::transition::ready_to_finish();
+    let control = finish.confirmation_control().unwrap();
+    let plan = finish.protected_plan().unwrap();
+    let (object, plain) = protected_seal(&mut p.f.low, &p.low, &finish, &p.f.clock);
+    let mono = p.f.clock.monotonic_ms();
+    let finite = plan.confirmation_custody(&control, mono).unwrap();
+    let keys = plan.established_key_custody(&finite, mono).unwrap();
+    let (_, action) = admit(&mut p.f.high, &p.high, object, &p.f.clock);
+    opened(
+        &mut p.f.high,
+        &p.high,
+        &action,
+        &plain,
+        &p.f.clock,
+        &mut p.f.rng,
+    );
+    (p, keys)
+}
+
+#[test]
+fn low_key_release_fences_ready_before_admission_at_final_publication_and_after_acceptance() {
+    for ordering in 0..3 {
+        let (mut p, keys) = confirmed_with_low_keys();
+        let object = install(&mut p, &[]);
+        prepay(&mut p);
+        match ordering {
+            0 => {
+                keys.close_successor_effects();
+                assert_eq!(
+                    admit_ready(&mut p, &object).err(),
+                    Some(VoiceError::Unauthorized)
+                );
+            }
+            1 => {
+                let requester = p.f.high.context.local;
+                assert_eq!(
+                    admit_envelope(
+                        &mut p,
+                        &Envelope::Direct(object.clone()),
+                        requester,
+                        |_, _| {
+                            keys.close_successor_effects();
+                            Ok(())
+                        },
+                    )
+                    .err(),
+                    Some(VoiceError::Unauthorized)
+                );
+                assert!(
+                    p.f.low.join.confirmations.pairs[&p.f.id]
+                        .ready_admission
+                        .is_none(),
+                    "a winning final release cannot publish causal Ready"
+                );
+            }
+            _ => {
+                let accepted = admit_ready(&mut p, &object).unwrap();
+                keys.close_successor_effects();
+                assert!(!accepted.authorized_at(p.f.clock.now_ms(), p.f.clock.monotonic_ms()));
+            }
+        }
+        assert_eq!(
+            advance(&mut p).err(),
+            Some(VoiceError::Unauthorized),
+            "none of the orderings may extract/activate a released key's successor"
+        );
+        assert!(!keys.is_current());
+    }
+}
 fn changed(
     p: &ProtectedFixture,
     object: &SignedObject,

@@ -124,6 +124,8 @@ pub(super) async fn release(
     proof: [u8; 32],
     ended: bool,
 ) {
+    let original = parent.key_custody_for_test();
+    let current_before = original.is_current();
     let recovered = exchange(state, public, route, parent, &body(parent, claim, None)).await;
     assert_eq!(&recovered[..2], &[4, if ended { 2 } else { 1 }]);
     assert_eq!(
@@ -144,6 +146,11 @@ pub(super) async fn release(
         .await,
         replies::refused(factory::Refused::Protocol(VoiceError::Unauthorized))
     );
+    assert_eq!(
+        original.is_current(),
+        current_before,
+        "an invalid release must not close the original Root successor binding"
+    );
     for _ in 0..2 {
         let released = exchange(
             state,
@@ -155,6 +162,14 @@ pub(super) async fn release(
         .await;
         assert_eq!(&released[..2], &[4, 3]);
         assert_eq!(&released[202..234], &proof);
+        assert!(
+            !original.is_current(),
+            "native Released must fence the exact Root observer a parked worker retained"
+        );
+        assert!(matches!(
+            original.prepare_sdp_handoff(),
+            Err(VoiceError::Unauthorized)
+        ));
     }
     let terminal = exchange(state, public, route, parent, &body(parent, claim, None)).await;
     assert_eq!(

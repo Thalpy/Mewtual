@@ -49,6 +49,38 @@ fn tamper_stored_leaf(owner: &MlsDevice, leaf: u32, field: &str, length: usize) 
 }
 
 #[test]
+fn local_device_query_borrows_own_leaf_after_an_oversized_restored_remote_leaf() {
+    let alice = MlsDevice::generate().unwrap();
+    let bob = MlsDevice::generate().unwrap();
+    let mut group = ServerGroup::create(&alice).unwrap();
+    let added = group
+        .add_member(
+            &alice,
+            bob.key_package_for_invite(&group.group_id(), [39; 16])
+                .unwrap(),
+        )
+        .unwrap();
+    let bob_group = ServerGroup::join(&bob, &added.welcome).unwrap();
+    assert_eq!(bob_group.group.own_leaf_index().u32(), 1);
+    // members() would clone this entire earlier credential before reaching Bob. The
+    // production local query instead reads Bob's borrowed leaf directly by native index.
+    tamper_stored_leaf(
+        &bob,
+        0,
+        "credential/serialized_credential_content",
+        64 * 1024,
+    );
+    let snapshot = snapshot_server(&bob, &bob_group).unwrap();
+    let (restored_owner, restored) = restore_server(&snapshot).unwrap();
+    assert!(restored.is_active());
+    assert!(restored.has_local_device(&restored_owner.device_id()));
+    assert!(
+        !restored.has_local_device(&alice.device_id()),
+        "a different current member must not satisfy local native admission"
+    );
+}
+
+#[test]
 fn member_catalog_native_count_reuses_observation_until_a_commit_changes_epoch() {
     let owner = MlsDevice::generate().unwrap();
     let mut group = ServerGroup::create(&owner).unwrap();

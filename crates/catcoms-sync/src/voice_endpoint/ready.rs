@@ -3,7 +3,132 @@
 use super::*;
 use voice_v2::packets::Authority;
 
+/// Snapshot only identities this factory can query, from the already-paid exact Actor
+/// roster. Never allocate a full MLS Vec/HashSet on the small native producer payment.
+/// This is not an epoch lease; original/final Actor gates still validate the current view.
+fn ready_member_snapshot(
+    actor: &voice_v2::runtime::ActorOwner,
+    context: &voice_v2::Context,
+    peer: DeviceId,
+    helpers: &[DeviceId],
+) -> Result<[Option<DeviceId>; 4], VoiceError> {
+    if helpers.len() > 2 {
+        return Err(VoiceError::Bounds);
+    }
+    let candidates = [
+        Some(context.local),
+        Some(peer),
+        helpers.first().copied(),
+        helpers.get(1).copied(),
+    ];
+    actor.try_with_current_members(context, |member| {
+        Ok(candidates.map(|candidate| candidate.filter(|id| member(*id))))
+    })
+}
+
 impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
+    /// Native application preparation with a bounded, authenticated helper choice. A member
+    /// need not join this call to bridge it. This advertises no protocol-version capability;
+    /// actual V2 endpoint/helper dispatch still authenticates and admits every packet.
+    pub fn prepare_voice_high_ready_connected(
+        &mut self,
+        grant: &Arc<CallGrant>,
+        handshake: voice_v2::Nonce,
+    ) -> Result<bool, VoiceError> {
+        self.validate_current_voice_call_grant(grant)?;
+        let context = self.voice_v2_context(grant.scope().room)?;
+        let voice = self
+            .voice_runtime
+            .as_ref()
+            .ok_or(VoiceError::Unauthorized)?;
+        let participant = voice
+            .endpoints
+            .participant
+            .as_ref()
+            .ok_or(VoiceError::Unauthorized)?;
+        if !std::sync::Weak::ptr_eq(&participant.grant, &Arc::downgrade(grant))
+            || !participant.watch.is_live()
+        {
+            return Err(VoiceError::Unauthorized);
+        }
+        let actor = voice.current.as_ref().ok_or(VoiceError::Unauthorized)?;
+        let (peer, frozen) = actor.try_with_current_members(&context, |member| {
+            participant.join.high_ready_helpers(
+                handshake,
+                &Authority {
+                    context: &context,
+                    lease: &participant.lease,
+                    member,
+                },
+            )
+        })?;
+        let helpers = match frozen {
+            Some(helpers) => helpers,
+            None => self.voice_ready_helpers(&context, peer)?,
+        };
+        match helpers {
+            [None, None] => self.prepare_voice_high_ready(grant, handshake, &[]),
+            [Some(a), None] => self.prepare_voice_high_ready(grant, handshake, &[a]),
+            [Some(a), Some(b)] => self.prepare_voice_high_ready(grant, handshake, &[a, b]),
+            [None, Some(_)] => Err(VoiceError::Malformed),
+        }
+    }
+
+    /// Do not call voice_bound_routes here: its full connection/path snapshot and roster
+    /// maps can exceed the native producer's small payment. Preserve its authentication
+    /// checks with fixed output, one captured lease, and the already-paid Actor roster.
+    fn voice_ready_helpers(
+        &self,
+        context: &voice_v2::Context,
+        endpoint: DeviceId,
+    ) -> Result<[Option<DeviceId>; 2], VoiceError> {
+        let mut helpers = [None, None];
+        if !context.indirect || context.scope.policy.is_none() {
+            return Ok(helpers);
+        }
+        if self.member_peers.len() > MAX_PEER_RECORDS || self.peer_records.len() > MAX_PEER_RECORDS
+        {
+            return Err(VoiceError::Capacity);
+        }
+        let actor = self.voice_transport_actor()?;
+        for proof in &self.member_peers {
+            if !proof.bound
+                || proof.device == context.local
+                || proof.device == endpoint
+                || helpers.contains(&Some(proof.device))
+                || self
+                    .peer_records
+                    .get(&proof.device)
+                    .is_none_or(|record| record.peer_id != *proof.peer.as_bytes())
+            {
+                continue;
+            }
+            // Transport can run its own locks/callbacks; capture it BEFORE Group/Policy.
+            let Some(connection) = self.transport.connection_lease(proof.peer) else {
+                continue;
+            };
+            let eligible = actor.try_with_current_members(context, |member| {
+                Ok(connection.is_live()
+                    && member(proof.device)
+                    && !self.peer_records.iter().any(|(other, record)| {
+                        *other != proof.device
+                            && record.peer_id == *proof.peer.as_bytes()
+                            && member(*other)
+                    }))
+            })?;
+            if !eligible {
+                continue;
+            }
+            // Deterministic smallest-two selection independent of VecDeque/HashMap order.
+            if helpers[0].is_none_or(|first| proof.device < first) {
+                helpers[1] = helpers[0];
+                helpers[0] = Some(proof.device);
+            } else if helpers[1].is_none_or(|second| proof.device < second) {
+                helpers[1] = Some(proof.device);
+            }
+        }
+        Ok(helpers)
+    }
     #[cfg(test)]
     pub(crate) fn occupy_voice_receipt_namespace_for_test(
         &mut self,
@@ -40,9 +165,8 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         handshake: voice_v2::Nonce,
         prepay_only: bool,
     ) -> Result<bool, VoiceError> {
-        self.validate_voice_call_grant(grant)?;
+        self.validate_current_voice_call_grant(grant)?;
         let context = self.voice_v2_context(grant.scope().room)?;
-        let members: HashSet<_> = self.group.member_device_ids().into_iter().collect();
         let voice = self
             .voice_runtime
             .as_mut()
@@ -62,10 +186,14 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         }
         let call = participant.lease.clone();
         let watch = participant.watch.clone();
+        let peer = participant.join.protected_ready_peer(handshake)?;
+        // LOW's Authority queries only local/peer; accepted helper membership is checked
+        // by its actual Ready receipt and final origin.contains_members transaction.
+        let members = ready_member_snapshot(actor, &context, peer, &[])?;
         let authority = Authority {
             context: &context,
             lease: &call,
-            member: &|id| members.contains(&id),
+            member: &|id| members.contains(&Some(id)),
         };
         if prepay_only {
             participant
@@ -89,15 +217,15 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         )?;
         Ok(successor.confirmation_drained())
     }
-    /// Queue only the original prepared HIGH Ready. This explicit native seam is separate
-    /// from application maintenance until LOW Ready/browser consumers are integrated.
+    /// Queue only the original prepared HIGH Ready. Native KeyClaim maintenance uses this
+    /// seam after actual core extraction; it exposes neither signing nor renderer input.
     /// `true` means the exact Source record already existed, never another retry allowance.
     pub fn queue_voice_high_ready(
         &mut self,
         grant: &Arc<CallGrant>,
         handshake: voice_v2::Nonce,
     ) -> Result<bool, VoiceError> {
-        self.validate_voice_call_grant(grant)?;
+        self.validate_current_voice_call_grant(grant)?;
         let context = self.voice_v2_context(grant.scope().room)?;
         let voice = self
             .voice_runtime
@@ -134,18 +262,17 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             .source()?
             .admit_borrowed(actor, object, activity, room)
     }
-    /// Prepare an existing confirmed HIGH pair. Application work scheduling/browser phase
-    /// consumers are separate; this native seam exposes no signature or unrestricted signer.
+    /// Prepare an existing confirmed HIGH pair. The native KeyClaim worker calls this
+    /// through the connected-helper selector; no signature or unrestricted signer escapes.
     pub fn prepare_voice_high_ready(
         &mut self,
         grant: &Arc<CallGrant>,
         handshake: voice_v2::Nonce,
         helpers: &[DeviceId],
     ) -> Result<bool, VoiceError> {
-        self.validate_voice_call_grant(grant)?;
+        self.validate_current_voice_call_grant(grant)?;
         let context = self.voice_v2_context(grant.scope().room)?;
         let clock = self.voice_v2_clock();
-        let members: HashSet<_> = self.group.member_device_ids().into_iter().collect();
         let voice = self
             .voice_runtime
             .as_mut()
@@ -179,6 +306,8 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         }
         let call = participant.lease.clone();
         let watch = participant.watch.clone();
+        let peer = participant.join.protected_ready_peer(handshake)?;
+        let members = ready_member_snapshot(actor, &context, peer, helpers)?;
         participant.join.install_high_ready_receive(
             actor,
             &room,
@@ -188,7 +317,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             &Authority {
                 context: &context,
                 lease: &call,
-                member: &|id| members.contains(&id),
+                member: &|id| members.contains(&Some(id)),
             },
             clock.as_ref(),
             &mut self.rng,

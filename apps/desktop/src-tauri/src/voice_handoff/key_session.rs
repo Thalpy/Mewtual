@@ -97,9 +97,16 @@ async fn prepare(
     };
     factory::require_current_selection(live.gate(), &authority, route.selected())?;
     let admission = super::transition::Admission::new(&live, &authority, route, &commit);
-    route
+    let receipt = route
         .try_with_open(|| row.adopt_key_session(&admission, action, handshake, claim, mono))
-        .map_err(Into::into)
+        .map_err(Refused::from)?;
+    drop(authority);
+    drop(commit);
+    drop(live);
+    // Adoption published the original pending hint. Nudge only AFTER all final guards
+    // drop; a busy native position/capacity refusal is retried by bounded maintenance.
+    let _ = factory::native::produce_ready(context, route, 0);
+    Ok(receipt)
 }
 fn encode_into(receipt: KeySessionReceipt, bytes: &mut [u8]) {
     assert_eq!(bytes.len(), REPLY_BYTES, "original paid key custody reply");

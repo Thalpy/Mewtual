@@ -1,5 +1,21 @@
 # Mewtual; Interfaces & Hooks Schema
 
+## Native initial Ready progression (24 October)
+
+ServerActor::prepare_voice_high_ready_connected accepts only the original CallGrant/handshake.
+Root recovers existing frozen helpers first; otherwise it chooses at most two current bound,
+connected member devices, excluding both endpoints and ambiguous peer aliases. No renderer
+helper list, route dial or negotiated capability is implied. Exact retries keep the original
+Root capacity/artifact/Source budget. Actual KeyClaim adoption schedules this through the
+existing native position; LOW's native Ready admission is still necessary before extraction.
+
+Opcode12 grammar is unchanged. A first Prepare returns authenticated Capacity until the
+original native KeyClaim records actual core/old-Workflow drainage. That milestone is private
+capacity history, not PC/SDP/RTC permission. Opcode11 exact Release first irreversibly closes
+that same Root binding's successor effects, while exact cleanup/recovery remains available.
+ServerGroup::has_local_device reads its borrowed actual local MLS leaf; active native voice
+contexts additionally check is_active and the current authenticated policy.
+
 ## Native SDK custody opcode13 (24 October; no RTC permission)
 
 Control request version6 is: original parent action serial/version(u64 BE each), inputTag32,

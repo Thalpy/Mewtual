@@ -8,7 +8,17 @@ mod source;
 async fn confirmed() -> (Fixture, voice_v2::Nonce) {
     confirmed_in(fixture().await).await
 }
-async fn confirmed_in(mut f: Fixture) -> (Fixture, voice_v2::Nonce) {
+async fn confirmed_in(f: Fixture) -> (Fixture, voice_v2::Nonce) {
+    let (fixture, handshake, _) = confirmed_with_keys(f).await;
+    (fixture, handshake)
+}
+async fn confirmed_with_keys(
+    mut f: Fixture,
+) -> (
+    Fixture,
+    voice_v2::Nonce,
+    voice_v2::chain::EstablishedKeyCustody,
+) {
     let hello = f.object.clone();
     let Body::Encrypted { header, .. } = hello.body() else {
         panic!("Hello")
@@ -118,6 +128,8 @@ async fn confirmed_in(mut f: Fixture) -> (Fixture, voice_v2::Nonce) {
         .into_iter()
         .find(|a| a.is_pending())
         .unwrap();
+    let plan = open.protected_plan().unwrap();
+    let control = open.confirmation_control().unwrap();
     open.admit_engine(open.engine_bytes()).unwrap();
     let result = f
         .receiver
@@ -130,8 +142,11 @@ async fn confirmed_in(mut f: Fixture) -> (Fixture, voice_v2::Nonce) {
         .unwrap();
     open.settle_engine();
     open.acknowledge_result(&result).unwrap();
+    let mono = f.clock.monotonic_ms();
+    let finite = plan.confirmation_custody(&control, mono).unwrap();
+    let keys = plan.established_key_custody(&finite, mono).unwrap();
     drop(open);
-    (f, handshake)
+    (f, handshake, keys)
 }
 
 fn offer(f: &Fixture, handshake: voice_v2::Nonce, id: u8) -> SignedObject {

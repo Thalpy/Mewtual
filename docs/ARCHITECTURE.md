@@ -1,5 +1,21 @@
 # Mewtual; Architecture
 
+## Initial Ready application scheduling (24 October)
+
+Actual KeyClaim adoption latches Pending on its original native parent. The existing paid
+native worker progresses HIGH core/Ready/Source or LOW native Ready/extraction. Canonical
+maintenance gives Ready urgent bounded turns while preserving an actual ordinary-worker
+opportunity across refusals. Fixed progress owns no Exchange/Workflow and grants no RTC use.
+Native64KiB storage waits for actual native core drainage. Exact KeyRelease closes original
+Root successor effects before its Released receipt, independently of the UI commit.
+
+Ready checks current Actor/MLS/directory authority without reconstructing a full roster on
+its small task payment. Mutation-time reconciliation remains unchanged and synchronous;
+validation compares actual epoch/policy/indirect/local-own-leaf against the paid Actor view.
+The bounded helper selector uses actual connection leases and current-member unique descriptor
+bindings, with no full connection snapshot/roster copy. This is initial finite progression;
+SDP/RTC, fresh rounds, multi-peer composition and relay remain unimplemented.
+
 ## Separate native/browser SDK custody (24 October)
 
 Native opcode13 adds a fixed, independently released SDK obligation under the original

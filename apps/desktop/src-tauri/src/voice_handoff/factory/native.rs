@@ -16,6 +16,9 @@ enum Selection {
         cursor: u8,
         incoming: Option<CryptoActionSnapshotPermit>,
     },
+    Ready {
+        cursor: u8,
+    },
     Consumed,
 }
 
@@ -117,6 +120,19 @@ pub(in crate::voice_handoff) fn produce_confirmation(
     spawn(context, route, Selection::Confirmation { cursor, incoming })
 }
 
+/// Advance the original KeyClaim's finite Ready intent using this channel's SAME native
+/// position/payment. A busy/refused nudge leaves the inline hint for fair maintenance.
+pub(in crate::voice_handoff) fn produce_ready(
+    context: &Context,
+    route: &Route,
+    cursor: u8,
+) -> Result<NativeWaiter, Refused> {
+    if !route.native_ready() {
+        return Err(Refused::Closed);
+    }
+    spawn(context, route, Selection::Ready { cursor })
+}
+
 fn spawn(context: &Context, route: &Route, selector: Selection) -> Result<NativeWaiter, Refused> {
     let runtime = tokio::runtime::Handle::try_current().map_err(|_| Refused::Stopped)?;
     {
@@ -211,6 +227,7 @@ fn layout<F: std::future::Future<Output = NativeCompletion>>(future: &F) -> usiz
         + admission.max(publication).max(discovery)
             .max(confirmation_observation).max(confirmation_admission)
             .max(confirmation_reconciliation)
+            .max(ready::layout_bytes())
 }
 async fn run_native(mut worker: Worker) -> NativeCompletion {
     // Complete preparation/publication in one paid state machine. Returning an intermediate
@@ -229,6 +246,7 @@ async fn execute(worker: &mut Worker) -> Result<RowId, Refused> {
         Selection::Confirmation { cursor, incoming } => {
             return execute_confirmation(worker, cursor, incoming).await;
         }
+        Selection::Ready { cursor } => return ready::execute(worker, cursor).await,
         Selection::Consumed => return Err(Refused::Closed),
     };
     execute_selected(worker, selector).await
@@ -440,5 +458,6 @@ async fn execute_selected(worker: &Worker, selector: PairSelector) -> Result<Row
     result
 }
 
+mod ready;
 #[cfg(test)]
 mod tests;

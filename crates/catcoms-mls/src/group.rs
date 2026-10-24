@@ -653,6 +653,18 @@ impl ServerGroup {
         self.member_device_ids().contains(id)
     }
 
+    /// Compare this actual MLS instance's borrowed local leaf signing key with `id`.
+    /// Unlike members(), own_leaf() borrows without cloning credentials/keys. Bounded
+    /// native admission must not materialize a roster (or clone one oversized restored
+    /// remote Member) before it can pay for work. This is stronger than finding `id`
+    /// anywhere in the roster: a misbound local device cannot borrow another member's role.
+    /// Authentication callers must also require is_active(); a removed instance is unusable.
+    pub fn has_local_device(&self, id: &DeviceId) -> bool {
+        self.group.own_leaf().is_some_and(|leaf| {
+            DeviceId::from_public_key_bytes(leaf.signature_key().as_slice()) == *id
+        })
+    }
+
     /// Whether this local MLS instance still belongs to the group after applied removals.
     pub fn is_active(&self) -> bool {
         self.group.is_active()
@@ -671,6 +683,28 @@ impl fmt::Debug for ServerGroup {
 #[cfg(test)]
 mod m1_tests {
     use super::*;
+
+    #[test]
+    fn local_device_query_does_not_adopt_another_current_member() {
+        let alice = MlsDevice::generate().unwrap();
+        let bob = MlsDevice::generate().unwrap();
+        let absent = MlsDevice::generate().unwrap();
+        let mut group = ServerGroup::create(&alice).unwrap();
+        assert!(group.has_local_device(&alice.device_id()));
+        assert!(!group.has_local_device(&bob.device_id()));
+        let package = bob
+            .key_package_for_invite(&group.group_id(), [17; 16])
+            .unwrap();
+        group.add_member(&alice, package).unwrap();
+        assert!(group.contains_device(&alice.device_id()));
+        assert!(group.contains_device(&bob.device_id()));
+        assert!(!group.has_local_device(&bob.device_id()));
+        assert!(!group.contains_device(&absent.device_id()));
+        group.remove_member(&alice, &bob.device_id()).unwrap();
+        assert!(group.contains_device(&alice.device_id()));
+        assert!(!group.contains_device(&bob.device_id()));
+        assert!(group.has_local_device(&alice.device_id()));
+    }
 
     /// The leaf identity excludes the HPKE encryption key, so a key rotation is not a discontinuity.
     ///

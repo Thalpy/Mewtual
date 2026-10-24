@@ -526,6 +526,58 @@ fn established_keys_reject_equal_labels_foreign_finish_and_whole_plan_close() {
 }
 
 #[test]
+fn key_release_fences_successors_without_rewriting_finish_or_retiring_actual_old_work() {
+    let (mut p, finish) = ready_to_finish();
+    let control = finish.confirmation_control().unwrap();
+    let plan = finish.protected_plan().unwrap();
+    protected_seal(&mut p.f.low, &p.low, &finish, &p.f.clock);
+    let finite = plan.confirmation_custody(&control, 1_000).unwrap();
+    let keys = plan.established_key_custody(&finite, 1_000).unwrap();
+    let before = p.f.pool.counts();
+    let original = (
+        finite.message(),
+        finite.object_hash(),
+        finite.transition_until(),
+    );
+    keys.close_successor_effects();
+    keys.close_successor_effects();
+    assert!(!keys.is_current());
+    assert_eq!(
+        p.f.pool.counts(),
+        before,
+        "fencing releases no actual owner"
+    );
+    assert_eq!(
+        finite.remaining_at(1_000),
+        Ok(30_000),
+        "the old finite Claim remains separate cleanup/Finish history"
+    );
+    assert_eq!(
+        (
+            finite.message(),
+            finite.object_hash(),
+            finite.transition_until()
+        ),
+        original
+    );
+    assert_eq!(
+        plan.established_key_custody(&finite, 1_000).err(),
+        Some(VoiceError::Unauthorized)
+    );
+    assert_eq!(
+        control.prepare_sdp_capacity().err(),
+        Some(VoiceError::Unauthorized)
+    );
+    let whole = control.retire_all();
+    assert!(
+        !whole.is_drained(),
+        "retained old packet/action owners still exist"
+    );
+    drop((finish, p));
+    assert!(whole.is_drained());
+}
+
+#[test]
 fn established_keys_follow_original_epoch_policy_session_and_call_revocation() {
     for cause in 0..4 {
         let (mut p, finish) = ready_to_finish();

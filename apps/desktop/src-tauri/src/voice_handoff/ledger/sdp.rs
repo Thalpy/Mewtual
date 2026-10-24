@@ -186,6 +186,12 @@ impl ResolvedRow {
         {
             return Err(VoiceError::Unauthorized);
         }
+        // Enforce the full native order, rather than relying on a renderer call sequence:
+        // core192KiB+Ready32KiB, actual old96KiB drainage, THEN the new64KiB sidecar.
+        // Current key retention or browser-local drainage alone cannot establish it.
+        if !key.ready.core_drained() {
+            return Err(VoiceError::Capacity);
+        }
         if key
             .sdp
             .as_ref()

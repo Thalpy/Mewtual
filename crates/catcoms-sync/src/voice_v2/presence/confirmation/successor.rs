@@ -49,7 +49,55 @@ impl Pair {
     }
 }
 
+/// Paired endpoint plus an optional immutable helper choice. Some([None, None]) is an
+/// already frozen direct choice; None alone permits first-time connected selection.
+pub(crate) type HighReadyHelpers = (DeviceId, Option<[Option<DeviceId>; 2]>);
+
 impl LocalJoin {
+    /// Fixed identity lookup for native membership snapshots. This is metadata only;
+    /// every preparation still validates role, epoch, Finish and the actual final owners.
+    pub(crate) fn protected_ready_peer(&self, handshake: Nonce) -> Result<DeviceId, VoiceError> {
+        let pair = self
+            .confirmations
+            .pairs
+            .get(&handshake)
+            .ok_or(VoiceError::Unauthorized)?;
+        if pair.protected_epoch.is_none() {
+            return Err(VoiceError::Unauthorized);
+        }
+        Ok(pair.binding.peer)
+    }
+    /// Metadata-only native scheduling observation. Recover an existing immutable helper
+    /// choice before looking at today's routes: churn cannot rewrite an admitted intent.
+    /// The actual preparation still rechecks finite Finish, original owners and final gates.
+    pub(crate) fn high_ready_helpers(
+        &self,
+        handshake: Nonce,
+        authority: &Authority<'_>,
+    ) -> Result<HighReadyHelpers, VoiceError> {
+        self.owned(authority)?;
+        let pair = self
+            .confirmations
+            .pairs
+            .get(&handshake)
+            .ok_or(VoiceError::Unauthorized)?;
+        if pair.low
+            || !pair.established
+            || pair.retired
+            || !pair.pin.is_live()
+            || pair.protected_epoch != Some(authority.context.epoch)
+        {
+            return Err(VoiceError::Unauthorized);
+        }
+        let frozen = pair.sdp_successor.as_ref().map(|preparation| {
+            let helpers = match preparation {
+                Preparation::Reserved { helpers, .. } => helpers.as_slice(),
+                Preparation::Transferred { owner, .. } => owner.helpers(),
+            };
+            [helpers.first().copied(), helpers.get(1).copied()]
+        });
+        Ok((pair.binding.peer, frozen))
+    }
     /// Borrow one original Ready plus its private Source provenance. The actual Root
     /// namespace is mandatory; a standalone signed-cache preparation cannot export work.
     pub(crate) fn ready_source_activity(
@@ -161,8 +209,8 @@ impl LocalJoin {
         }
     }
     /// Install the original HIGH bounded first-Offer inbox and commit the exact immutable
-    /// Ready marker. This native-only preparation is still unscheduled: actual Source/LOW
-    /// causal admission and recoverable Offer-token publication must precede activation.
+    /// Ready marker. The native KeyClaim worker schedules this before Source publication;
+    /// LOW causal admission and recoverable Offer-token publication still precede activation.
     /// No packet is exported here and generic SDP/crypto/RTC lenders remain inactive.
     ///
     /// All byte/table positions are acquired before the final native fence. A refusal keeps
@@ -234,9 +282,9 @@ impl LocalJoin {
     }
 
     /// Prepare one immutable HIGH Ready signature in native Pair custody. This deliberately
-    /// exposes no SignedObject or Source activity: receive installation, exact publication
-    /// and causal LOW admission are separate missing consumers. Application maintenance does
-    /// not schedule this API yet. Never expose its signer as unrestricted renderer IPC.
+    /// exposes no SignedObject or Source activity: the native KeyClaim worker must also
+    /// install receive custody, commit the marker and queue that exact original Source.
+    /// Never expose its signer as unrestricted renderer IPC.
     ///
     /// Refusal retains the same paid producer, first ID/timestamps and prepared signature.
     /// Final UI/session admission runs after signer callbacks under the actual native view.
@@ -305,11 +353,10 @@ impl LocalJoin {
     /// Exact retries keep the same reservation/lane/slots even across final-fence or registry
     /// Capacity. No Ready, new deadline, source attempt, crypto/SDP or RTC authority is created.
     ///
-    /// This native-only factory is deliberately not scheduled by application maintenance yet.
-    /// Causal Ready publication/admission and explicit browser key transfer must be implemented
-    /// before scheduling it; the low-side equivalent does not exist. The separate32KiB Ready
-    /// byte envelope is prepaid, but helper origin rows and the independently owned/quotaed
-    /// Ready Source must still be installed before any readiness can be promised.
+    /// This capacity-only substep is used by the native KeyClaim worker's HIGH preparation.
+    /// The higher-level factory also installs the actual receive promise and original marker;
+    /// the worker separately queues its paid Ready Source. LOW prepays and transfers through
+    /// its own native Ready-admission path. None of these steps grants browser SDP/RTC use.
     ///
     /// `final_owner` runs under the ACTUAL Group -> Policy guards. It must only check the
     /// original native grant/UI generation, without Clock sampling, runtime/ledger/Engine

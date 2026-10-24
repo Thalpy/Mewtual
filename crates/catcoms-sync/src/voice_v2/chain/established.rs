@@ -24,6 +24,18 @@ impl EstablishedKeyCustody {
             && self.binding.transition.epoch_is_live()
             && !self.binding.successor_closed.load(Ordering::Acquire)
     }
+    /// Irreversibly fence this original key domain's successor effects before publishing
+    /// native key release. This is a pure atomic operation: it is safe under the adapter's
+    /// final admission locks and invokes no callback, destructor or allocator.
+    ///
+    /// Already captured Ready/SDP workers must consult the SAME original binding at their
+    /// final publication/transport gate. UI locking alone cannot order those workers against
+    /// cleanup, which deliberately remains available after lock, End and old expiry.
+    /// This does not stop old confirmation retries, release any actual owner, clear a busy
+    /// flag or prove SDK/Lower drainage. Existing collection handles cancellation/wakeup.
+    pub fn close_successor_effects(&self) {
+        self.binding.successor_closed.store(true, Ordering::Release);
+    }
     pub(in crate::voice_v2) fn belongs_to(&self, binding: &Arc<PlanBinding>) -> bool {
         Arc::ptr_eq(&self.binding, binding)
     }

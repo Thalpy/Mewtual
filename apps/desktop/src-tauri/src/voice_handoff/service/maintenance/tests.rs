@@ -83,6 +83,138 @@ async fn idle(route: &Route) {
 }
 
 #[tokio::test]
+async fn continuously_observed_ready_hint_cannot_preempt_or_discard_original_ordinary_workers() {
+    for count in [2u8, 4] {
+        let f = Fixture::new().await;
+        let context = Context::new(&f.state);
+        let (_, selected, original) = selection(&f).await;
+        let route = channel_route(&f, &selected).await;
+        route.acknowledge_setup().unwrap();
+        let mut rows = Vec::new();
+        for number in 0..count {
+            let selector = PairSelector {
+                join: [number + 20; 32],
+                ..original
+            };
+            let Begin::Factory(registration) = f
+                .state
+                .voice_handoff
+                .begin(selected.clone(), Purpose::Derive(selector))
+                .unwrap()
+            else {
+                panic!("original Pending");
+            };
+            registration.mark_handoff().unwrap();
+            rows.push((selector, registration.id()));
+            drop(registration);
+        }
+        let mut cursor = Cursor::new();
+        let mut seen = Vec::new();
+        for _ in 0..count {
+            // A stale Ready observation is not authorization: the actual Ready worker
+            // finds no KeyClaim and refuses, but it REALLY owns this channel's NativeHold.
+            assert!(cursor
+                .turn_observing_ready(&context, &f.state.voice_channels, |_| true)
+                .is_none());
+            assert!(matches!(
+                route.session().native_hold(),
+                Err(crate::voice_handoff::channel::Refused::Capacity)
+            ));
+            let proposed = cursor.pending[0];
+            // Hold that exact unpolled Ready task across the ordinary visit. A refusal
+            // must preserve BOTH the stage and Pending cursor, not discard row0 each time
+            // and admit only row1 when the position becomes free.
+            assert!(cursor
+                .turn_observing_ready(&context, &f.state.voice_channels, |_| true)
+                .is_none());
+            assert!(!cursor.ready_first[0]);
+            assert_eq!(cursor.stage[0], 0);
+            assert_eq!(cursor.pending[0], proposed);
+            assert!(cursor.ready_first[1..].iter().all(|priority| *priority));
+            idle(&route).await;
+            let selector = cursor
+                .turn_observing_ready(&context, &f.state.voice_channels, |_| true)
+                .expect("the next free position must admit the original ordinary Pending");
+            assert!(
+                !seen.contains(&selector),
+                "an earlier original was selected/discarded during Ready contention"
+            );
+            seen.push(selector);
+            assert!(matches!(
+                route.session().native_hold(),
+                Err(crate::voice_handoff::channel::Refused::Capacity)
+            ));
+            cursor.urgent_ready(&context, &f.state.voice_channels);
+            idle(&route).await;
+            // Complete the SAME ordinary stage rotation; no artificial stage/cursor reset.
+            for _ in 0..3 {
+                assert!(cursor
+                    .turn_observing_ready(&context, &f.state.voice_channels, |_| false)
+                    .is_none());
+                idle(&route).await;
+            }
+        }
+        assert_eq!(seen.len(), usize::from(count));
+        for (selector, id) in rows {
+            let row = f
+                .state
+                .voice_handoff
+                .lookup_original(&selected, Purpose::Derive(selector))
+                .unwrap();
+            assert!(
+                row.id() == id,
+                "no replacement Row/deadline can make this test pass"
+            );
+            assert!(seen.contains(&selector));
+            row.close_pending().unwrap();
+        }
+        f.close().await;
+    }
+}
+
+/// Production calls the ordinary turn and urgent scan without yielding between them.
+/// A busy refusal MUST preserve Ready's next turn as well as the opposite ordinary debt.
+#[tokio::test]
+async fn refused_ready_visit_cannot_surrender_its_next_free_native_position_to_ordinary_work() {
+    let f = Fixture::new().await;
+    let context = Context::new(&f.state);
+    let (_, selected, _) = selection(&f).await;
+    let route = channel_route(&f, &selected).await;
+    route.acknowledge_setup().unwrap();
+    let mut cursor = Cursor::new();
+    for stage in 0..4 {
+        // Model Ready becoming visible just after this actual ordinary admission, as
+        // happens when a KeyClaim is adopted between the two production scans.
+        let _ = cursor.turn_observing_ready(&context, &f.state.voice_channels, |_| false);
+        assert!(route.session().native_hold().is_err());
+        assert!(cursor.ready_first[0]);
+        let ready_row = cursor.ready_rows[0];
+        assert_eq!(cursor.stage[0], (stage + 1) % 4);
+        let _ = cursor.turn_observing_ready(&context, &f.state.voice_channels, |_| true);
+        assert!(
+            cursor.ready_first[0],
+            "a refused Ready did not consume a real turn"
+        );
+        assert_eq!(cursor.ready_rows[0], ready_row);
+        idle(&route).await;
+        let _ = cursor.turn_observing_ready(&context, &f.state.voice_channels, |_| true);
+        assert!(
+            !cursor.ready_first[0],
+            "Ready must acquire the next free position"
+        );
+        assert!(route.session().native_hold().is_err());
+        assert_eq!(
+            cursor.stage[0],
+            (stage + 1) % 4,
+            "no ordinary worker jumped ahead"
+        );
+        assert_eq!(cursor.ready_rows[0], (ready_row + 1) % 32);
+        idle(&route).await;
+    }
+    f.close().await;
+}
+
+#[tokio::test]
 async fn pending_rotation_retries_every_original_across_interleaved_discovery_turns() {
     for count in [2u8, 4] {
         let f = Fixture::new().await;

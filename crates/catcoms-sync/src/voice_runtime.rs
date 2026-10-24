@@ -18,6 +18,10 @@ pub(super) struct VoiceRuntime {
     pub(super) routes: voice_transport::RouteOwners,
     pub(super) endpoints: voice_endpoint::EndpointOwners,
     next_collection: u64,
+    #[cfg(test)]
+    view_builds: u64,
+    #[cfg(test)]
+    directory_reads: u64,
 }
 impl VoiceRuntime {
     pub(super) fn observe_document(
@@ -84,6 +88,10 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             routes: voice_transport::RouteOwners::default(),
             endpoints: voice_endpoint::EndpointOwners::default(),
             next_collection: runtime.clock().monotonic_ms().saturating_add(1000),
+            #[cfg(test)]
+            view_builds: 0,
+            #[cfg(test)]
+            directory_reads: 0,
         });
         voice.candidates.push(owner);
         self.observe_voice_directory();
@@ -108,6 +116,10 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             voice.current = None;
         }
         let eligible = self.voice_v2_context(0).is_ok();
+        #[cfg(test)]
+        {
+            self.voice_runtime.as_mut().unwrap().view_builds += 1;
+        }
         let view = View {
             epoch: self.group.epoch(),
             members: self.group.member_device_ids().into_iter().collect(),
@@ -129,6 +141,10 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
 
     pub(super) fn observe_voice_directory(&mut self) {
         if let Some(voice) = &mut self.voice_runtime {
+            #[cfg(test)]
+            {
+                voice.directory_reads += 1;
+            }
             let doc = self
                 .docs
                 .get(&(DocType::ChannelIndex, voice.directory_doc))
@@ -249,6 +265,29 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         voice
             .directory
             .validate_call_grant(self.voice_transport_actor()?, grant)
+    }
+
+    /// Validate an already adopted native effect without rebuilding the whole roster or
+    /// directory on its small worker payment. Actual MLS/policy/document mutation hooks
+    /// still reconcile/revoke synchronously, including prefix-applying failures; do not
+    /// replace those hooks with this method. If reconciliation is not current, comparing
+    /// the ACTUAL MLS epoch/policy/local leaf with the paid Actor view refuses effects.
+    /// This neither refreshes an old grant nor adopts a replacement directory incarnation.
+    pub(super) fn validate_current_voice_call_grant(
+        &self,
+        grant: &voice_v2::CallGrant,
+    ) -> Result<(), VoiceError> {
+        let context = self.voice_v2_context(grant.scope().room)?;
+        if context.scope != grant.scope() {
+            return Err(VoiceError::Scope);
+        }
+        let actor = self.voice_transport_actor()?;
+        actor.try_with_current_members(&context, |_| Ok(()))?;
+        self.voice_runtime
+            .as_ref()
+            .ok_or(VoiceError::Unauthorized)?
+            .directory
+            .validate_call_grant(actor, grant)
     }
 }
 
