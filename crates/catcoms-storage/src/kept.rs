@@ -30,14 +30,17 @@ mod external;
 mod persistence;
 mod record;
 use downloads::Owner;
-pub use downloads::{DownloadExportLease, DownloadId, DownloadRun, DownloadStatus, DownloadStore};
+pub use downloads::{
+    DownloadBytes, DownloadExportLease, DownloadId, DownloadRun, DownloadStatus, DownloadStore,
+};
 pub use export::{
     confirm_staging_links, create_folder, flush_destination, flush_folder, partial_presence,
-    publish_unjournaled, remove_if_session, remove_partial, saved_presence, session_at, session_id,
-    ChoiceRefusal, ChosenDestination, DownloadObservation, ExportError, ExportFence, ExportFile,
-    ExportHalt, ExportJournal, ExportPlan, ExportPresence, ExportProbe, ExportProgress,
-    ExportReopen, ExportState, ExportView, PartialPresence, PartialRemoval, Publication,
-    SavedCandidate, SavedPresence, SessionAt, SessionId, SessionRemoval, EXPORT_CHECKPOINT_CHUNKS,
+    publish_unjournaled, remove_if_session, remove_partial, saved_file_path, saved_presence,
+    session_at, session_id, ChoiceRefusal, ChosenDestination, DownloadObservation, ExportError,
+    ExportFence, ExportFile, ExportHalt, ExportJournal, ExportPlan, ExportPresence, ExportProbe,
+    ExportProgress, ExportReopen, ExportState, ExportView, PartialPresence, PartialRemoval,
+    Publication, SavedCandidate, SavedPresence, SessionAt, SessionId, SessionRemoval,
+    EXPORT_CHECKPOINT_CHUNKS,
 };
 use persistence::{Transfer, DELETING, FORMAT, FORMAT_CHARGE, TRANSFERS};
 pub use record::{

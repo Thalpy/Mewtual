@@ -405,8 +405,11 @@ fn the_projection_says_a_choice_is_remembered_without_naming_it() {
         checked: false,
         export: ExportView::None,
         planned: true,
+        bytes: None,
     };
-    let json = serde_json::to_string(&project(status)).unwrap();
+    let json = serde_json::to_string(&project(status, false)).unwrap();
     assert!(json.contains("\"chosenPlace\":true"), "{json}");
+    // An unreadable manifest sends no byte counts rather than zeros.
+    assert!(json.contains("\"totalBytes\":null"), "{json}");
     assert!(!json.contains("path") && !json.contains("folder"), "{json}");
 }

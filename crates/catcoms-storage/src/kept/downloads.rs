@@ -65,6 +65,45 @@ pub struct DownloadStatus {
     pub export: super::ExportView,
     /// A "Save as" choice is remembered for the next save (no path or name is exposed).
     pub planned: bool,
+    /// Plaintext byte counts for the Transfers row, `None` when the saved manifest cannot be read
+    /// here (the row then shows chunk counts only). Sizes only, never a path, name or identity.
+    pub bytes: Option<DownloadBytes>,
+}
+
+/// Plaintext byte counts of one Download for the Transfers row (Transfers UX, PR #51). `total` is
+/// the manifest's declared plaintext size and `received` the sum of the declared sizes of the
+/// chunks already verified in the private copy (the export accepts every chunk at exactly its
+/// declared length, so these are the bytes a save will write). `saved` is what the external
+/// save's durable checkpoint covers: its written bytes while saving, the whole file once
+/// published, 0 without a journal.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct DownloadBytes {
+    pub received: u64,
+    pub saved: u64,
+    pub total: u64,
+}
+
+impl DownloadBytes {
+    /// Counts from the saved manifest bytes, the verified-chunk bitmap and the journal's written
+    /// bytes. A manifest that does not decode, or whose chunk count differs from the bitmap, gives
+    /// `None` rather than a guess (an empty file is a known total of 0, not `None`).
+    pub(super) fn of(manifest: &[u8], verified: &[bool], written: u64) -> Option<Self> {
+        let manifest = crate::FileManifest::decode_or_legacy(manifest).ok()?;
+        if manifest.chunks.len() != verified.len() {
+            return None;
+        }
+        let received = manifest
+            .chunks
+            .iter()
+            .zip(verified)
+            .filter(|(_, verified)| **verified)
+            .fold(0u64, |sum, (chunk, _)| sum.saturating_add(chunk.size));
+        Some(Self {
+            received: received.min(manifest.total_size),
+            saved: written.min(manifest.total_size),
+            total: manifest.total_size,
+        })
+    }
 }
 
 /// Observing lease for one verified completed private download in this mounted store. It cannot
@@ -130,13 +169,24 @@ impl<R: CryptoRngCore> KeptBlobStore<R> {
             .transfers
             .iter()
             .filter_map(|t| match t.record.owner() {
-                Owner::Download(id) => Some(DownloadStatus {
-                    id,
-                    state: self.transfer_state(t),
-                    checked: t.checked && !t.poisoned,
-                    export: self.export_view(t),
-                    planned: t.record.planned.is_some(),
-                }),
+                Owner::Download(id) => {
+                    let state = self.transfer_state(t);
+                    let written = match &t.record.export {
+                        super::export::Export::None => 0,
+                        super::export::Export::Writing(journal)
+                        | super::export::Export::Published(journal) => journal.written_bytes,
+                    };
+                    let bytes =
+                        DownloadBytes::of(&state.plan.manifest, &t.record.verified, written);
+                    Some(DownloadStatus {
+                        id,
+                        state,
+                        checked: t.checked && !t.poisoned,
+                        export: self.export_view(t),
+                        planned: t.record.planned.is_some(),
+                        bytes,
+                    })
+                }
                 Owner::Keep(_) => None,
             })
             .collect())

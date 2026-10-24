@@ -172,6 +172,13 @@ impl ExportJournal {
     fn folder_path(&self) -> Option<PathBuf> {
         external::decode_os(self.folder_id.platform(), &self.folder).map(PathBuf::from)
     }
+    /// Whether this journal's folder is exactly `folder`, for the Transfers row's "Saved to
+    /// Downloads" (Transfers UX, PR #51). The path forms are compared exactly, as native's
+    /// `saved_in_downloads` does for a save result, so a moved Downloads folder, other casing or a
+    /// link answers "no" and the row names no folder it cannot prove. The path itself stays here.
+    pub fn is_in_folder(&self, folder: &Path) -> bool {
+        self.folder_path().is_some_and(|own| own == folder)
+    }
 }
 
 /// Durable export state of one Download record. Keep records always carry `None`.
@@ -1676,6 +1683,21 @@ pub fn saved_presence(journal: &ExportJournal) -> SavedPresence {
         NameState::Absent => SavedPresence::Missing,
         NameState::Other => SavedPresence::Replaced,
         NameState::Unknown => SavedPresence::Unknown,
+    }
+}
+
+/// [`saved_presence`] for "Show in folder" (Transfers UX, PR #51): the saved file's path, only
+/// while the same read-only check proves the saved name still holds our file, else the presence
+/// that says why not. Native-only: the caller hands the path to the system file manager and never
+/// to the renderer. The check and the reveal are separate steps, so a file swapped in between is
+/// shown in its folder but never opened or run.
+pub fn saved_file_path(journal: &ExportJournal) -> Result<PathBuf, SavedPresence> {
+    match saved_presence(journal) {
+        SavedPresence::Ours => journal
+            .folder_path()
+            .map(|folder| folder.join(&journal.final_leaf))
+            .ok_or(SavedPresence::Unknown),
+        other => Err(other),
     }
 }
 

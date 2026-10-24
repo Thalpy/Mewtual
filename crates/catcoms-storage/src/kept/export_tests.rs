@@ -1554,20 +1554,28 @@ fn a_saved_file_check_says_what_is_at_the_saved_name_without_changing_anything()
     };
     let before = listing();
     assert_eq!(saved_presence(&saved), SavedPresence::Ours);
+    // Show in folder (Transfers UX) gets the path only while the same check proves it ours.
+    assert_eq!(saved_file_path(&saved), Ok(path.clone()));
     assert_eq!(listing(), before, "nothing changed");
     // Replaced by an editor's atomic save (a new file at the saved name).
     let original = fx.downloads.join("original copy");
     fs::rename(&path, &original).unwrap();
     fs::write(&path, b"edited by the user").unwrap();
     assert_eq!(saved_presence(&saved), SavedPresence::Replaced);
+    assert_eq!(saved_file_path(&saved), Err(SavedPresence::Replaced));
     assert_eq!(fs::read(&path).unwrap(), b"edited by the user");
     // Missing.
     fs::remove_file(&path).unwrap();
     assert_eq!(saved_presence(&saved), SavedPresence::Missing);
+    assert_eq!(saved_file_path(&saved), Err(SavedPresence::Missing));
     assert!(!path.exists(), "nothing was created");
     // The folder moved away: where the file went cannot be told, so it is not called missing.
     fs::rename(&fx.downloads, fx.downloads.with_file_name("Moved")).unwrap();
     assert_eq!(saved_presence(&saved), SavedPresence::Unknown);
+    assert_eq!(saved_file_path(&saved), Err(SavedPresence::Unknown));
+    // The Transfers row's "Saved to Downloads" compares the recorded folder exactly.
+    assert!(saved.is_in_folder(&fx.downloads));
+    assert!(!saved.is_in_folder(&fx.downloads.with_file_name("Moved")));
 }
 
 #[test]

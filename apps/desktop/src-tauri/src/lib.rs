@@ -18684,7 +18684,8 @@ pub fn run() {
             private_downloads::set_private_download_paused,
             private_downloads::retry_private_download,
             private_downloads::cancel_private_download,
-            private_downloads::check_saved_download
+            private_downloads::check_saved_download,
+            private_downloads::reveal_saved_download
         ])
         .build(context)
         .expect("error while building the Mewtual desktop app");

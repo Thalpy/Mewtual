@@ -210,5 +210,6 @@
   { "command": "set_private_download_paused", "risk": "account-write", "surfaces": ["main"] },
   { "command": "retry_private_download", "risk": "account-write", "surfaces": ["main"] },
   { "command": "cancel_private_download", "risk": "account-write", "surfaces": ["main"] },
-  { "command": "check_saved_download", "risk": "account-read", "surfaces": ["main"] }
+  { "command": "check_saved_download", "risk": "account-read", "surfaces": ["main"] },
+  { "command": "reveal_saved_download", "risk": "os-facing", "surfaces": ["main"] }
 ]
