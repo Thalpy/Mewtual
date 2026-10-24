@@ -76,3 +76,13 @@ test("visual fixture fails loudly for an unsupported native dependency", () => {
     /does not implement Tauri command: new_native_command/,
   );
 });
+
+test("file fixture separates cached bytes from explicitly kept copies", () => {
+  assert.equal(visualFixtureResponse("file_available"), true);
+  assert.deepEqual(visualFixtureResponse("get_kept_files"), {
+    supported: true, allocated_bytes: 0, limit_bytes: 1073741824, files: [], error: null,
+  });
+  assert.deepEqual(visualFixtureResponse("get_file_usage"), {
+    wiki_pages: [], status_count: 0, chat_count: 0, event_count: 0, pinned: false,
+  });
+});

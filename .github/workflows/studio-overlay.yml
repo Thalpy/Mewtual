@@ -1,0 +1,42 @@
+name: Studio Closing overlay foundation
+
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/studio-overlay.yml'
+      - '.github/scripts/check-studio-overlay-mutations.py'
+      - 'crates/catcoms-app/**'
+      - 'crates/catcoms-sync/**'
+      - 'crates/catcoms-replication/**'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_INCREMENTAL: '0'
+  RUSTFLAGS: '-D warnings'
+
+jobs:
+  overlay:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.89.0
+      - uses: Swatinem/rust-cache@v2
+      - name: Test Closing overlay core and store boundaries
+        run: >-
+          cargo test --locked -j 4 --config 'profile.test.package.catcoms-app.debug=0'
+          -p catcoms-app --lib studio_overlay_store_ -- --test-threads=4
+      - name: Verify isolated mutations and restored regressions
+        run: python3 .github/scripts/check-studio-overlay-mutations.py
+      - name: Preserve mutation and restoration evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: studio-overlay-mutations
+          path: |
+            logs/gate4-overlay-mutation-*.log
+            logs/gate4-overlay-restored-*.log
+          if-no-files-found: ignore

@@ -51,11 +51,20 @@ export const JAM_REMOTE_HOLD_MAX_MS = 30_000; // watchdog: a lost note-off may n
 // ceilings; none can bypass the per-source gates or master limiter.
 export const JAM_VOICE_PEAK_GAIN = 0.11;
 export const JAM_MASTER_GAIN = 0.72;
+// The shortest a voice may be taken to silence, whatever its release says. A patch may legally
+// ask for a release of 0, and cutting a sustained waveform mid-cycle is a step discontinuity: a
+// click, loudest on exactly the settings people reach for when they want a hard gate. Eight
+// milliseconds is under the threshold at which a tail is heard as a tail, and is never allowed to
+// outlast the watchdog window it is bounded by.
+export const JAM_VOICE_DECLICK_SECONDS = 0.008;
 export const JAM_FILTER_Q_MIN = 0.1;
 export const JAM_FILTER_Q_MAX = 18;
 export const JAM_FILTER_ENV_MAX_OCTAVES = 6;
 export const JAM_LFO_CUTOFF_MAX_OCTAVES = 4;
-export const JAM_EFFECT_SEND_MAX_GAIN = 0.5;
+// A send of 100 means all of this voice reaches that effect's input. It used to mean half, which
+// stacked with the effect's own wet return to put a maxed send 16 dB under the dry signal: the
+// knobs moved and nothing was audibly different, which is the same thing as not having them.
+export const JAM_EFFECT_SEND_MAX_GAIN = 1;
 export const JAM_FILTER_NYQUIST_RATIO = 0.45;
 export const JAM_LIMITER_THRESHOLD_DB = -12;
 export const JAM_LIMITER_KNEE_DB = 6;
@@ -95,6 +104,67 @@ export const PATCH_LFO_RATE_MIN_CHZ = 1; // centi-Hz: 0.01 Hz
 export const PATCH_LFO_RATE_MAX_CHZ = 1_200; // 12 Hz
 export const PATCH_LFO_DESTS = ["off", "cutoff", "pitch"] as const; // index = wire value
 export const PATCH_LFO_PITCH_DEPTH_CENTS = 25; // +/- at depth 100
+
+/**
+ * Every editable patch field's inclusive bound, shaped like the patch itself.
+ *
+ * The constants above are what the validator enforces; this is the same set arranged so the knobs
+ * and the scopes can consume it. Both used to carry their own copies of 24, 50, 5000, 8000, 18000,
+ * 1200 and 100, so a control could be moved outside what the validator would admit, or a scope
+ * could keep drawing against the old ceiling, and neither would fail a test: the copies happened
+ * to agree. A knob spreads its entry (`...PATCH_PARAM.e.a`) and a scope divides by `.max`, so a
+ * bound now has exactly one place to change.
+ *
+ * The oscillator's own wave index and the two mode lists are not here: those are enumerations
+ * rendered as named buttons, not ranges, and their ceiling is the list's own length.
+ */
+export const PATCH_PARAM = {
+  o: {
+    t: { min: -PATCH_TRANSPOSE_SEMITONES, max: PATCH_TRANSPOSE_SEMITONES },
+    c: { min: -PATCH_DETUNE_CENTS, max: PATCH_DETUNE_CENTS },
+    l: { min: 0, max: PATCH_LEVEL_MAX },
+  },
+  e: {
+    a: { min: 0, max: PATCH_ENV_ATTACK_MAX_MS },
+    d: { min: 0, max: PATCH_ENV_DECAY_MAX_MS },
+    s: { min: 0, max: PATCH_LEVEL_MAX },
+    r: { min: 0, max: PATCH_ENV_RELEASE_MAX_MS },
+  },
+  f: {
+    c: { min: PATCH_CUTOFF_MIN_HZ, max: PATCH_CUTOFF_MAX_HZ },
+    q: { min: 0, max: PATCH_LEVEL_MAX },
+    e: { min: -PATCH_FILTER_ENV_RANGE, max: PATCH_FILTER_ENV_RANGE },
+  },
+  l: {
+    r: { min: PATCH_LFO_RATE_MIN_CHZ, max: PATCH_LFO_RATE_MAX_CHZ },
+    d: { min: 0, max: PATCH_LEVEL_MAX },
+  },
+  x: {
+    c: { min: 0, max: PATCH_LEVEL_MAX },
+    d: { min: 0, max: PATCH_LEVEL_MAX },
+    r: { min: 0, max: PATCH_LEVEL_MAX },
+  },
+} as const;
+
+// --- The local patch library ------------------------------------------------------------------
+// How many recipes this device keeps, and how wide the label on a tile is. Two different twelves:
+// one is a storage bound, the other is how much of a name a button can show, and they are free to
+// move apart. SAVE refuses at the cap rather than evicting: a library that silently drops the
+// oldest entry to make room for the thirteenth is not a library, and nothing in the UI said so.
+export const JAM_SAVED_PATCHES_MAX = 12;
+export const JAM_PATCH_NAME_MAX_CHARS = 12;
+
+// --- jam-patch:v1 as a shared file -------------------------------------------------------------
+// A patch put into a server's encrypted share, so a room can trade sounds rather than each person
+// rebuilding one from the knobs. The file is exactly the canonical `jam-patch:v1` JSON the wire
+// announce carries and nothing else, so the ONE validator (`validateJamPatch`) admits both and a
+// downloaded patch can never be a shape the synth has not already agreed to render. Its name is
+// the file's name; a recipe carries no identity of its own beyond its id.
+export const JAM_PATCH_EXT = ".jampatch";
+export const JAM_PATCH_MIME = "application/x-mewtual-jampatch";
+// A three-oscillator patch canonicalizes to a few hundred bytes. The cap is generous against that
+// and still refuses to pull an arbitrarily large "patch" into the window before parsing it.
+export const JAM_PATCH_FILE_MAX_BYTES = 4_096;
 
 export interface JamOsc {
   w: number; // 0..3, index into PATCH_OSC_WAVES

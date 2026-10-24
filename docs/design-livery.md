@@ -1,13 +1,21 @@
 # Server livery (owner-published UI scheme); design
 
-Status: **implemented (L1–L3 ✅, 2026-08-15).** `DocType::Livery = 10` mirrors the Profile
+Status: **implemented (L1–L3 ✅, 2026-08-15; extended through 2026-09-06).** `DocType::Livery = 10` mirrors the Profile
 doc end to end (lazy open, doc sync + snapshot catch-up, generic persistence); writes are
 owner/admin-gated in `Server::set_livery` (same policy layer as roles; the attributable-but-
 not-rejected residual applies, as scoped below); the client validates on read, applies with
 the precedence below, and ships the Server-settings Livery section + the per-server
-Appearance follow-toggle. `tokens` overrides are plumbed but the publisher UI writes an
-empty map in v1 (preset + accent only). The shared **server icon** (`icon` key,
-`set_server_icon` invoke) has its backend half in place; no publisher UI yet. Not yet done:
+Appearance follow-toggle. `tokens` overrides went past the v1 plan: the publisher UI writes
+colour tokens (accent, ground/sidebar tint) **and** the typed non-colour vocabulary of
+`radius`, `font` and `pattern` (`App.svelte`: the `lv-grp` groups labelled `Corners`,
+`Typeface` and `Pattern`, iterating `LIVERY_RADIUS` / `LIVERY_FONTS` / `LIVERY_PATTERNS`),
+each an enum/catalog id validated on read (`design-livery-customisation-safety.md`). The shared **server icon** (`icon` key,
+`set_server_icon` invoke) has a full publisher UI: upload, replace and remove, filed beside
+the server name rather than under Livery (`App.svelte`: the `<h3>Server icon</h3>`
+`set-section` on the server-settings name page, with the Livery page's own entry in the
+`serverSettingsPage === "livery"` branch, the field labelled "Server icon: shown on
+everyone's rail"). The later sections below record the 2026-09-06 sidebar banner
+and founding-publish work, which is likewise shipped. Not yet done:
 rail-monogram tint (optional), the contrast floor and debounce mitigations (noted below,
 revisit if abused).
 
@@ -36,9 +44,24 @@ New `DocType::Livery` (next free discriminant in `catcoms-wire/src/context.rs` a
   preset: "aurum" | "nightshade" | "verdant" | "garnet" | "slate" | "",  // "" = default
   accent: "#rrggbb" | "",                    // optional accent override
   tokens: { "<allow-listed token>": "#rrggbb", ... },  // v1: may be empty/absent
-  icon: "<base64 image bytes>" | ""          // shared server icon; absent = "" = none
+  icon: "<base64 image bytes>" | "",         // shared server icon; absent = "" = none
+  cursor: "<base64 image bytes>" | "",       // shared cursor (≤16 KiB decoded); own command
+  name: "<text>" | "",                       // the group's published name; own command
+  banner: "<base64 image bytes>" | ""        // sidebar banner (≤96 KiB decoded); own command
 }
 ```
+
+- **`banner`** (2026-09-06) is the third image, with the same independent lifetime as the icon
+  and the cursor: its own command (`set_server_banner`, owner/admin), preserved untouched by
+  `set_livery`, cleared only with `""`. The UI cover-fits the upload into a 480×150 JPEG before
+  sharing it, and draws it across the top of the channel list (`.server-banner`) only while the
+  livery is followed, so the per-server opt-out hides it with the rest. It is rendered as an
+  image and never interpreted, like the icon.
+
+- **Founding publishes the look** (2026-09-06): the start surface's Found tab carries the same
+  livery panel as Server settings, Livery. `found` publishes the name, then the colours
+  (`set_livery`), then each chosen image, right after `found_server` returns; each is
+  best-effort, and a failure is a toast naming Server settings, Livery, never an error.
 
 - **`icon`** is an *additive* key (still `v: 1`; an older doc simply lacks it and reads as
   `""`). It carries the image **inline**; unlike a member avatar, which gossips a content

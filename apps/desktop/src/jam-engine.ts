@@ -32,6 +32,7 @@ import {
   TAKE_MAX_PATCHES,
   TAKE_ID_MAX_BYTES,
   TAKE_MAX_PARTICIPANTS,
+  JAM_VOICE_DECLICK_SECONDS,
   JAM_VOICE_PEAK_GAIN,
   PATCH_FILTER_MODES,
   PATCH_LFO_DESTS,
@@ -85,6 +86,15 @@ export type JamNoteInput = Readonly<{
   remote?: boolean;
   /** Receiver-only admission result; false advances sequencing without constructing audio. */
   render?: boolean;
+  /**
+   * How long this note has already been held, for a voice that a take seek is bringing back.
+   *
+   * Take playback joined mid-track has to open voices for notes whose attack happened before the
+   * offset. Zero, and the default, is an ordinary note starting now. Anything else back-dates the
+   * envelope's origin so the voice arrives at the level it has already reached instead of
+   * re-attacking. Live playing never sets it.
+   */
+  ageMs?: number;
 }>;
 
 export type JamNoteOffInput = Readonly<{
@@ -238,6 +248,20 @@ function holdAndCancel(param: AudioParam, at: number): void {
 
 function stopSource(source: AudioScheduledSourceNode, at: number): void {
   try { source.stop(at); } catch { /* already stopped */ }
+}
+
+/**
+ * How long a voice actually takes to reach silence, for a patch asking for `releaseMs`.
+ *
+ * One calculation, used by the ordinary note-off, by the audio-clock watchdog that ends a voice
+ * whose note-off never arrived, and by the take transport deciding how long to hold a finished
+ * take's graph open. They used to disagree: only the note-off applied the de-click floor, so a
+ * zero-release patch faded over 8 ms when released by hand and was cut off as a step by the
+ * watchdog, and the transport tore the graph down before the fade it had just asked for could
+ * finish. A floor that only some of the paths honour is not a floor.
+ */
+export function effectiveReleaseSeconds(releaseMs: number): number {
+  return Math.max(JAM_VOICE_DECLICK_SECONDS, Math.min(releaseMs, JAM_RELEASE_CAP_MS) / 1_000);
 }
 
 function disconnect(node: AudioNode): void {
@@ -529,7 +553,10 @@ export class JamEngine {
     input: JamNoteInput,
     playback?: Readonly<{ patches: JamPlaybackPatchSet; index: number }>,
   ): JamPlayResult {
-    if (this.disposed || !isMidiNote(input.note) || !isLegacyWave(input.wave) || !validSequence(input.sequence)) {
+    if (
+      this.disposed || !isMidiNote(input.note) || !isLegacyWave(input.wave) || !validSequence(input.sequence) ||
+      (input.ageMs !== undefined && (!Number.isFinite(input.ageMs) || input.ageMs < 0))
+    ) {
       return { ok: false, reason: "invalid" };
     }
     const playbackTable = playback ? this.playbackPatchSets.get(playback.patches) : undefined;
@@ -1055,7 +1082,17 @@ export class JamEngine {
   ): VoiceRuntime {
     const ctx = this.context;
     if (input.remote === false && ctx.state === "suspended") void ctx.resume().catch(() => {});
-    const at = ctx.currentTime;
+    const now = ctx.currentTime;
+    const attack = patch.e.a / 1_000;
+    const decay = patch.e.d / 1_000;
+    // A voice a take seek is reviving starts with its envelope already partly run. Every automation
+    // below is scheduled from `at` rather than from now, so a back-dated origin leaves the ramps in
+    // the past and the AudioParam timeline evaluates them to the value the voice has reached. The
+    // age is clamped to the envelope's own attack-plus-decay because everything past that shelf is
+    // the sustain level: clamping is audibly identical and keeps the automation near the present
+    // instead of scheduling a ten-minute-old ramp. `startAt` stays at the real now, since a source
+    // cannot begin in the past and a free-running oscillator's phase carries no meaning here.
+    const at = now - Math.min(input.ageMs === undefined ? 0 : input.ageMs / 1_000, attack + decay);
     const sourceName = input.channel.source;
     const bus = this.sourceBus(sourceName);
     const nodes: AudioNode[] = [];
@@ -1071,9 +1108,7 @@ export class JamEngine {
     filter.frequency.setValueAtTime(Math.min(patch.f.c, ctx.sampleRate * JAM_FILTER_NYQUIST_RATIO), at);
     filter.Q.setValueAtTime(JAM_FILTER_Q_MIN + (patch.f.q / 100) * (JAM_FILTER_Q_MAX - JAM_FILTER_Q_MIN), at);
 
-    const attack = patch.e.a / 1_000;
-    const decay = patch.e.d / 1_000;
-    const releaseSeconds = Math.min(patch.e.r, JAM_RELEASE_CAP_MS) / 1_000;
+    const releaseSeconds = effectiveReleaseSeconds(patch.e.r);
     const sustain = patch.e.s / 100;
     output.gain.setValueAtTime(0, at);
     output.gain.linearRampToValueAtTime(JAM_VOICE_PEAK_GAIN, at + attack);
@@ -1146,9 +1181,9 @@ export class JamEngine {
       params,
       releaseSeconds,
       hardHoldSeconds: JAM_REMOTE_HOLD_MAX_MS / 1_000,
+      startAt: now,
       watchdogLevel: JAM_VOICE_PEAK_GAIN * sustain,
     });
-    for (const source of sources) source.start(at);
     return runtime;
     } catch (error) {
       for (const source of sources) stopSource(source, ctx.currentTime);
@@ -1218,9 +1253,9 @@ export class JamEngine {
       params,
       releaseSeconds: 0.03,
       hardHoldSeconds: 0,
+      startAt: at,
       oneShotSeconds: tailSeconds,
     });
-    for (const source of sources) source.start(at);
     return runtime;
     } catch (error) {
       for (const source of sources) stopSource(source, ctx.currentTime);
@@ -1245,6 +1280,7 @@ export class JamEngine {
     params: AudioParam[];
     releaseSeconds: number;
     hardHoldSeconds: number;
+    startAt: number;
     watchdogLevel?: number;
     oneShotSeconds?: number;
   }): VoiceRuntime {
@@ -1269,7 +1305,11 @@ export class JamEngine {
         const now = this.context.currentTime;
         // A late note-off may shorten the watchdog tail, never cancel it and extend the hard stop.
         const remainingHardWindow = Math.max(0, stopAt - now);
-        const bounded = Math.max(0, Math.min(seconds, JAM_RELEASE_CAP_MS / 1_000, remainingHardWindow));
+        // The de-click floor sits INSIDE the hard window rather than beside it: a release of 0 must
+        // still be a ramp (a step to silence on a sustained waveform is a click), but it may never
+        // buy a voice more time than the watchdog already granted it.
+        const ceiling = Math.min(JAM_RELEASE_CAP_MS / 1_000, remainingHardWindow);
+        const bounded = Math.max(0, Math.min(Math.max(seconds, JAM_VOICE_DECLICK_SECONDS), ceiling));
         holdAndCancel(input.output.gain, now);
         input.output.gain.linearRampToValueAtTime(0, now + bounded);
         for (const source of input.sources) stopSource(source, now + bounded + 0.005);
@@ -1288,6 +1328,14 @@ export class JamEngine {
       },
     };
 
+    // Start each source, THEN schedule its stop. `stop()` on a source that has not started yet is
+    // an InvalidStateError, and `stopSource` treats every throw as "already stopped", so scheduling
+    // the stop first silently deleted the audio-clock deadline that every voice relies on to end
+    // and clean itself up. A looping drum never reaches its declared tail on its own that way: its
+    // gain decays to 0.0001 rather than to zero, so nothing else ends it, and its `onended`, its
+    // graph disconnect and its allocator slot were all waiting on a stop that was never scheduled.
+    // Starting here rather than in the callers is what makes the ordering impossible to get wrong
+    // again: one place owns the whole start-then-stop pair.
     for (const source of input.sources) {
       source.onended = () => {
         ended += 1;
@@ -1297,6 +1345,7 @@ export class JamEngine {
         this.voices.delete(input.id);
         this.allocator.finish(input.id);
       };
+      source.start(input.startAt);
       stopSource(source, stopAt + 0.005);
     }
     return runtime;
@@ -1346,9 +1395,13 @@ function createRoomGraph(ctx: AudioContext, destination: AudioNode): RoomGraph {
   limiter.release.value = JAM_LIMITER_RELEASE_SECONDS;
   dry.connect(master);
 
+  // Wet returns are set against a dry path of 1. Chorus is the one that has to come back nearly
+  // as loud as the dry signal, because the effect IS the interference between the two: a quiet
+  // copy of a note is just a quiet copy, and at the old 0.32 (0.16 after the send ceiling) a
+  // maxed chorus knob was 16 dB down and did nothing a person could hear.
   const chorusDelay = ctx.createDelay(0.05);
   nodes.push(chorusDelay);
-  const chorusWet = trackedGain(ctx, nodes, 0.32);
+  const chorusWet = trackedGain(ctx, nodes, 0.7);
   const chorusLfo = ctx.createOscillator();
   nodes.push(chorusLfo);
   sources.push(chorusLfo);
@@ -1359,16 +1412,22 @@ function createRoomGraph(ctx: AudioContext, destination: AudioNode): RoomGraph {
   chorus.connect(chorusDelay).connect(chorusWet).connect(master);
   chorusLfo.start();
 
+  // The echo's first repeat lands about 6 dB under the note that caused it, which is where a
+  // repeat reads as a deliberate echo rather than as a room artifact. The feedback is unchanged:
+  // it is what decides how many repeats there are, not how loud the first one is.
   const echo = ctx.createDelay(0.75);
   nodes.push(echo);
-  const echoWet = trackedGain(ctx, nodes, 0.28);
+  const echoWet = trackedGain(ctx, nodes, 0.5);
   const echoFeedback = trackedGain(ctx, nodes, 0.22);
   echo.delayTime.value = 0.28;
   delay.connect(echo);
   echo.connect(echoWet).connect(master);
   echo.connect(echoFeedback).connect(echo);
 
-  for (const [seconds, level] of [[0.071, 0.18], [0.113, 0.14], [0.173, 0.1]] as const) {
+  // Three early reflections, not a tail: this is a small room, and it is honest about being one.
+  // Levels raised together so a maxed reverb send sits about 3 dB under the dry note; the spacing
+  // and the count are unchanged, so the character is the same, only now loud enough to be one.
+  for (const [seconds, level] of [[0.071, 0.3], [0.113, 0.24], [0.173, 0.17]] as const) {
     const tap = ctx.createDelay(0.25);
     nodes.push(tap);
     const wet = trackedGain(ctx, nodes, level);

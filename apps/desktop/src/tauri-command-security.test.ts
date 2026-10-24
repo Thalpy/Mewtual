@@ -6,29 +6,222 @@ import { fileURLToPath } from "node:url";
 import { REVIEWED_TAURI_COMMANDS } from "./tauri-command-security.ts";
 
 const sourceDir = fileURLToPath(new URL(".", import.meta.url));
-const bridgePath = fileURLToPath(new URL("../src-tauri/src/lib.rs", import.meta.url));
+const nativeDir = fileURLToPath(new URL("../src-tauri/src/", import.meta.url));
+const bridgePath = join(nativeDir, "lib.rs");
 
+/**
+ * A floor on how many registered commands the extraction must find.
+ *
+ * This is the assertion the rest of this file was missing, and its absence is why fourteen
+ * commands went unreviewed for the whole life of the Studio feature. A regex that matches nothing,
+ * or that matches only part of the handler list, produces exactly the same green run as one that
+ * matches everything: the ledger below is written from whatever the extractor happened to see, so
+ * parity between two views of the same blind spot proves nothing at all. The old pattern could not
+ * match a path-qualified registration and quietly reported 154 of 168; nothing noticed.
+ *
+ * The number is deliberately well under the real count, so it needs no maintenance as commands come
+ * and go. Lower it only when the exposed surface has genuinely shrunk, never to get a run green.
+ */
+const MINIMUM_REGISTERED_COMMANDS = 150;
+
+/**
+ * A floor on how many frontend call sites the invoke scan must find, for the same reason.
+ *
+ * `invoked.length > 0` is not a floor: one surviving call site in one file would satisfy it while
+ * every other file had silently stopped being audited.
+ */
+const MINIMUM_FRONTEND_INVOCATIONS = 120;
+
+/**
+ * Every native source that can define a command, keyed by its path below `src-tauri/src`.
+ *
+ * Commands are not all in `lib.rs`, and every helper here used to read `lib.rs` alone.
+ * `creative_blobs.rs`, `studio.rs` and `studio/recovery.rs` define fourteen of them between them,
+ * so those fourteen were invisible to this entire file: not classified, not checked for the session
+ * gate, not even counted. Walking the tree instead of naming one file is what stops the next module
+ * from disappearing the same way.
+ */
+function nativeSources(): Map<string, string> {
+  const sources = new Map<string, string>();
+  const walk = (dir: string, prefix: string) => {
+    for (const entry of readdirSync(dir, { withFileTypes: true })) {
+      const path = join(dir, entry.name);
+      if (entry.isDirectory()) walk(path, `${prefix}${entry.name}/`);
+      else if (extname(entry.name) === ".rs") sources.set(`${prefix}${entry.name}`, readFileSync(path, "utf8"));
+    }
+  };
+  walk(nativeDir, "");
+  assert.ok(sources.has("lib.rs"), "the native bridge source must remain readable from here");
+  return sources;
+}
+
+/**
+ * The IPC names in the `generate_handler!` list.
+ *
+ * A registration is either a bare function name or a module path, and Tauri derives the IPC name
+ * from the function either way: `studio::recovery::studio_recovery_read` is invoked from the
+ * webview as `studio_recovery_read`. The module prefix is therefore stripped rather than kept.
+ * That holds only while no command configures its attribute, which the test below enforces instead
+ * of assuming.
+ */
 function registeredCommands(source: string): string[] {
   const body = /tauri::generate_handler!\[([\s\S]*?)\]\)/.exec(source)?.[1];
   assert.ok(body, "the Tauri generate_handler list must remain statically enumerable");
-  return [...body.matchAll(/^\s*([a-z][a-z0-9_]*)\s*,?\s*$/gm)].map((match) => match[1]);
+  return [...body.matchAll(/^\s*(?:[a-z][a-z0-9_]*::)*([a-z][a-z0-9_]*)\s*,?\s*$/gm)].map((match) => match[1]);
+}
+
+/**
+ * Command functions, wherever they are defined and whatever their visibility.
+ *
+ * The module commands are `pub(crate)`, which the old `(?:pub\s+)?` could not match. That is the
+ * same bug as the handler-list one wearing different clothes: two independent reasons the Studio
+ * surface stayed invisible, either of which was enough on its own.
+ *
+ * Rust comments may separate stacked attributes, and strings/comments may contain convincing
+ * command markers. Skip those lexically, then require a supported function prefix rather than
+ * searching ahead for an arbitrary `fn`. Unsupported command syntax fails the audit. This only
+ * repairs declaration extraction; the later body/gate checks remain a static source heuristic.
+ */
+function skipRustTrivia(source: string, start: number): number {
+  let cursor = start;
+  while (cursor < source.length) {
+    if (/\s/.test(source[cursor])) cursor += 1;
+    else if (source.startsWith("//", cursor)) {
+      const end = source.indexOf("\n", cursor + 2);
+      cursor = end < 0 ? source.length : end + 1;
+    } else if (source.startsWith("/*", cursor)) {
+      let depth = 1;
+      cursor += 2;
+      while (cursor < source.length && depth > 0) {
+        if (source.startsWith("/*", cursor)) { depth += 1; cursor += 2; }
+        else if (source.startsWith("*/", cursor)) { depth -= 1; cursor += 2; }
+        else cursor += 1;
+      }
+      assert.equal(depth, 0, "unterminated Rust comment in native command audit");
+    } else break;
+  }
+  return cursor;
+}
+
+function skipRustLiteral(source: string, start: number): number {
+  if (source[start] === '"') {
+    let cursor = start + 1;
+    while (cursor < source.length) {
+      if (source[cursor] === "\\") cursor += 2;
+      else if (source[cursor++] === '"') return cursor;
+    }
+    assert.fail("unterminated Rust string in native command audit");
+  }
+  if (/[rbc]/.test(source[start] ?? "")) {
+    const raw = /^(?:b|c)?r(#{0,255})"/.exec(source.slice(start));
+    if (raw) {
+      const closing = `"${raw[1]}`;
+      const end = source.indexOf(closing, start + raw[0].length);
+      assert.ok(end >= 0, "unterminated Rust raw string in native command audit");
+      return end + closing.length;
+    }
+  }
+  if (source[start] === "'") {
+    // A character is exactly one scalar/escape followed by its closing quote. A lifetime such
+    // as 'static has no such close and must not hide the code following it.
+    const character = /^'(?:[^'\\]|\\(?:u\{[0-9a-fA-F_]+\}|x[0-9a-fA-F]{2}|.))'/u.exec(source.slice(start));
+    if (character) return start + character[0].length;
+  }
+  return start;
+}
+
+function outerAttributeOpening(source: string, start: number): number | undefined {
+  if (source[start] !== "#") return undefined;
+  const opening = skipRustTrivia(source, start + 1);
+  return source[opening] === "[" ? opening : undefined;
+}
+
+function isCommandAttribute(source: string, opening: number): boolean {
+  let cursor = skipRustTrivia(source, opening + 1);
+  if (!/^tauri\b/.test(source.slice(cursor))) return false;
+  cursor = skipRustTrivia(source, cursor + "tauri".length);
+  if (!source.startsWith("::", cursor)) return false;
+  cursor = skipRustTrivia(source, cursor + 2);
+  if (!/^command\b/.test(source.slice(cursor))) return false;
+  cursor = skipRustTrivia(source, cursor + "command".length);
+  assert.equal(source[cursor], "]", "configured or unsupported tauri::command attribute; teach the extractor which IPC name it produces");
+  return true;
+}
+
+function skipRustAttribute(source: string, opening: number): number {
+  let cursor = opening + 1;
+  const expectedClosers = ["]"];
+  const pairs: Record<string, string> = { "[": "]", "(": ")", "{": "}" };
+  while (cursor < source.length) {
+    cursor = skipRustTrivia(source, cursor);
+    const literalEnd = skipRustLiteral(source, cursor);
+    if (literalEnd > cursor) { cursor = literalEnd; continue; }
+    const token = source[cursor];
+    if (pairs[token]) expectedClosers.push(pairs[token]);
+    else if (token !== undefined && "])}".includes(token)) {
+      assert.equal(token, expectedClosers.pop(), "mismatched Rust attribute delimiter in native command audit");
+      if (expectedClosers.length === 0) return cursor + 1;
+    }
+    cursor += 1;
+  }
+  assert.fail("unterminated Rust attribute in native command audit");
+}
+
+function commandDefinitions(source: string): { name: string; start: number }[] {
+  const definitions: { name: string; start: number }[] = [];
+  for (let cursor = 0; cursor < source.length;) {
+    cursor = skipRustTrivia(source, cursor);
+    const literalEnd = skipRustLiteral(source, cursor);
+    if (literalEnd > cursor) { cursor = literalEnd; continue; }
+    const opening = outerAttributeOpening(source, cursor);
+    if (opening === undefined) { cursor += 1; continue; }
+    const start = cursor;
+    const command = isCommandAttribute(source, opening);
+    cursor = skipRustTrivia(source, skipRustAttribute(source, opening));
+    if (!command) continue;
+    for (let next = outerAttributeOpening(source, cursor); next !== undefined; next = outerAttributeOpening(source, cursor)) {
+      // A command annotation must never disappear into another command's attribute stack.
+      assert.ok(!isCommandAttribute(source, next), "duplicate Tauri command attribute");
+      cursor = skipRustTrivia(source, skipRustAttribute(source, next));
+    }
+    const declaration = /^(?:pub(?:\s*\([^)]*\))?\s+)?(?:async\s+)?fn\s+([a-z][a-z0-9_]*)\b/.exec(source.slice(cursor));
+    assert.ok(declaration, "every Tauri command attribute must directly precede a supported named function");
+    definitions.push({ name: declaration[1], start });
+    cursor += declaration[0].length;
+  }
+  return definitions;
 }
 
 function commandFunctions(source: string): string[] {
-  return [...source.matchAll(/#\[tauri::command\]\s*(?:#\[[^\]]+\]\s*)*(?:pub\s+)?(?:async\s+)?fn\s+([a-z][a-z0-9_]*)/g)]
-    .map((match) => match[1]);
+  return commandDefinitions(source).map(({ name }) => name);
 }
 
-function commandSegments(source: string): Map<string, string> {
-  const attributes = [...source.matchAll(/#\[tauri::command\]/g)];
-  const segments = new Map<string, string>();
-  for (let index = 0; index < attributes.length; index += 1) {
-    const start = attributes[index].index;
-    const end = attributes[index + 1]?.index ?? source.indexOf("pub fn run()", start);
-    const segment = source.slice(start, end > start ? end : undefined);
-    const name = /(?:async\s+)?fn\s+([a-z][a-z0-9_]*)/.exec(segment)?.[1];
-    assert.ok(name, "every Tauri command attribute must precede a named function");
-    segments.set(name, segment);
+/**
+ * Where the last command in a file stops.
+ *
+ * Boundaries here are deliberately generous: a segment runs to the next command attribute and so
+ * may contain the helpers written between them. What it must not swallow is a `#[cfg(test)]`
+ * module, because test code calls the session-gate helpers freely and would make the last command
+ * in a file look gated when it is not.
+ */
+function endOfCommands(source: string, start: number): number {
+  const stops = ["\npub fn run()", "\n#[cfg(test)]"]
+    .map((marker) => source.indexOf(marker, start))
+    .filter((index) => index > start);
+  return stops.length > 0 ? Math.min(...stops) : source.length;
+}
+
+function commandSegments(sources: Map<string, string>): Map<string, { file: string; segment: string }> {
+  const segments = new Map<string, { file: string; segment: string }>();
+  for (const [file, source] of sources) {
+    const definitions = commandDefinitions(source);
+    for (let index = 0; index < definitions.length; index += 1) {
+      const { name, start } = definitions[index];
+      const end = definitions[index + 1]?.start ?? endOfCommands(source, start);
+      const segment = source.slice(start, end > start ? end : undefined);
+      assert.ok(!segments.has(name), `two native sources define a command named ${name}`);
+      segments.set(name, { file, segment });
+    }
   }
   return segments;
 }
@@ -78,6 +271,65 @@ function invokedCommands(source: string): string[] {
  */
 const INVOKE_WRAPPERS = ["diagnostics.ts"];
 
+test("native command extraction handles stacked attributes and intervening Rust trivia", () => {
+  const source = String.raw`
+#[allow(dead_code)]
+#[tauri::command]
+// Preserve a documented exception; fn comment_decoy() is not this command.
+#[allow(clippy::too_many_arguments)]
+/* outer comment /* nested comment with ] */ still outer */
+#[doc = "a closing bracket ] and fn string_decoy() and an escaped quote \""]
+#[example(values = [']', '['], text = r##"raw ] #[tauri::command] fn raw_decoy()"##)]
+pub(crate) async fn stacked_command() {}
+# [ tauri /* path trivia */ :: command ]
+/// Documentation after the command attribute.
+pub(super) fn plain_command() {}
+`;
+  assert.deepEqual(commandFunctions(source), ["stacked_command", "plain_command"]);
+  const segments = commandSegments(new Map([["fixture.rs", source]]));
+  assert.deepEqual([...segments.keys()], ["stacked_command", "plain_command"]);
+  assert.ok(!segments.get("stacked_command")!.segment.includes("fn plain_command"));
+});
+
+test("comments and literals cannot manufacture native command entries", () => {
+  const source = String.raw`
+// #[tauri::command] fn line_decoy() {}
+/* #[tauri::command] fn block_decoy() {} /* nested */ */
+const TEXT: &str = "#[tauri::command] fn string_decoy() {}";
+const RAW: &str = r#"#[tauri::command] fn raw_decoy() {}"#;
+const BYTE_RAW: &[u8] = br##"#[tauri::command] fn byte_decoy() {}"##;
+const C_RAW: &CStr = cr#"#[tauri::command] fn c_decoy() {}"#;
+const CHARACTER: char = '\'';
+const BYTE_CHARACTER: u8 = b']';
+fn helper<'a>(value: &'a str) -> &'a str { value }
+#[tauri::command]
+async fn actual_command() {}
+`;
+  assert.deepEqual(commandFunctions(source), ["actual_command"]);
+  assert.deepEqual([...commandSegments(new Map([["fixture.rs", source]])).keys()], ["actual_command"]);
+});
+
+test("unparsed command declarations fail closed instead of borrowing a later function", () => {
+  for (const suffix of [
+    "#[allow(dead_code) fn later() {}",
+    "#[example(values = [1, 2))] fn mismatched() {}",
+    "/* unterminated comment",
+    'const OTHER: &str = "not a function"; fn later() {}',
+    "struct Other; fn later() {}",
+    "#[tauri::command] fn duplicate() {}",
+  ]) {
+    assert.throws(() => commandFunctions(`#[tauri::command]\n${suffix}`));
+    assert.throws(() => commandSegments(new Map([["fixture.rs", `#[tauri::command]\n${suffix}`]])));
+  }
+  for (const attribute of [
+    '#[tauri::command(rename = "other")]',
+    '# [ tauri /* path trivia */ :: command (rename = "other") ]',
+    "#[tauri::command",
+  ]) {
+    assert.throws(() => commandFunctions(`${attribute}\nfn later() {}`));
+  }
+});
+
 function frontendSources(dir: string): string[] {
   const sources: string[] = [];
   for (const entry of readdirSync(dir, { withFileTypes: true })) {
@@ -95,20 +347,114 @@ function frontendSources(dir: string): string[] {
 }
 
 test("every native command is registered exactly once and classified for security review", () => {
-  const bridge = readFileSync(bridgePath, "utf8");
-  const registered = registeredCommands(bridge);
-  const functions = commandFunctions(bridge);
+  const sources = nativeSources();
+  const registered = registeredCommands(sources.get("lib.rs") ?? "");
+  const functions = [...sources.values()].flatMap(commandFunctions);
+  // The IPC name is the function name, which is what makes stripping the module path the right
+  // answer above. A configured attribute (`#[tauri::command(rename = "...")]`, or an async-runtime
+  // choice) would break that quietly and put a name in this ledger the webview never calls, so it
+  // is refused here until whoever adds one teaches the extractor what the IPC name became.
+  for (const [file, source] of sources) {
+    assert.doesNotMatch(
+      source,
+      /#\[tauri::command\s*\(/,
+      `${file} configures a tauri::command attribute; teach the extractor which IPC name it produces`,
+    );
+  }
+  assert.ok(
+    registered.length >= MINIMUM_REGISTERED_COMMANDS,
+    `extraction found only ${registered.length} registered commands, below the ${MINIMUM_REGISTERED_COMMANDS} floor: the handler list is being under-read, and a ledger written from an under-read list reviews nothing`,
+  );
   assert.equal(new Set(registered).size, registered.length, "duplicate command registration");
   assert.equal(new Set(REVIEWED_TAURI_COMMANDS).size, REVIEWED_TAURI_COMMANDS.length, "duplicate ledger entry");
   assert.deepEqual([...registered].sort(), [...functions].sort(), "command functions and handler list diverged");
   assert.deepEqual([...registered].sort(), [...REVIEWED_TAURI_COMMANDS].sort(), "update the security ledger");
 });
 
+test("the enforced permission chain holds end to end: registered, classified, granted, enabled", () => {
+  // SEC-IPC-001. There are four statements of what this app exposes and they have to agree, because
+  // each one is load-bearing in a different place. `generate_handler!` decides what exists;
+  // security/command-policy.json is what a human reviews and what build.rs feeds into the ACL
+  // manifest; capabilities/main.json is what the runtime actually grants; tauri.conf.json decides
+  // which capability files are live at all. A gap anywhere in that chain is silent: a command
+  // missing from the policy is denied everywhere with no compile error, and a capability file that
+  // is never enabled looks like a granted permission while granting nothing.
+  //
+  // The runtime half of this is proved separately, in src-tauri/tests/command_acl.rs, which asks
+  // the real RuntimeAuthority rather than reading these files. This test is the drift guard; that
+  // one is the behaviour proof. Neither replaces the other.
+  const policy: { command: string; risk: string; surfaces: string[] }[] =
+    JSON.parse(readFileSync(join(nativeDir, "..", "security", "command-policy.json"), "utf8"));
+  const capability = JSON.parse(readFileSync(join(nativeDir, "..", "capabilities", "main.json"), "utf8"));
+  const config = JSON.parse(readFileSync(join(nativeDir, "..", "tauri.conf.json"), "utf8"));
+
+  const registered = registeredCommands(nativeSources().get("lib.rs") ?? "");
+  const classified = policy.map((entry) => entry.command);
+  assert.equal(new Set(classified).size, classified.length, "duplicate command-policy entry");
+  assert.deepEqual(
+    [...classified].sort(),
+    [...registered].sort(),
+    "security/command-policy.json and the handler list diverged: an unclassified command is denied everywhere, and a classified one that no longer exists is a stale review",
+  );
+
+  // Surfaces are window labels, and a window label is a security identity. An unknown one here
+  // would be granted to nothing and read as though it were a boundary.
+  for (const entry of policy) {
+    assert.ok(entry.risk && typeof entry.risk === "string", `${entry.command} has no risk class`);
+    assert.ok(Array.isArray(entry.surfaces) && entry.surfaces.length > 0, `${entry.command} names no surface`);
+    for (const surface of entry.surfaces) {
+      assert.ok(
+        ["main", "security-approval"].includes(surface),
+        `${entry.command} names unknown surface ${surface}`,
+      );
+    }
+  }
+
+  // The app permissions in the capability are exactly the commands classified for that window.
+  // Core and plugin permissions carry a prefix and are governed by their own upstream manifests.
+  const granted = capability.permissions.filter((p: string) => p.startsWith("allow-") && !p.includes(":"));
+  const expected = policy
+    .filter((entry) => entry.surfaces.includes("main"))
+    .map((entry) => `allow-${entry.command.replace(/_/g, "-")}`);
+  assert.deepEqual(
+    [...granted].sort(),
+    [...expected].sort(),
+    "capabilities/main.json and the command policy disagree about what the main window may invoke",
+  );
+
+  // SEC-IPC-003. Explicit enablement, so a capability file cannot become live by being dropped in
+  // the directory, and a file that is present but unlisted cannot be mistaken for an active grant.
+  const enabled: string[] = config.app.security.capabilities;
+  assert.ok(Array.isArray(enabled) && enabled.length > 0, "tauri.conf.json must list capabilities explicitly");
+  const onDisk = readdirSync(join(nativeDir, "..", "capabilities"))
+    .filter((name) => extname(name) === ".json")
+    .map((name) => JSON.parse(readFileSync(join(nativeDir, "..", "capabilities", name), "utf8")).identifier);
+  assert.deepEqual([...onDisk].sort(), [...enabled].sort(), "a capability file is present but not enabled, or enabled but absent");
+  assert.ok(enabled.includes(capability.identifier), "the main capability must be enabled");
+  for (const window of capability.windows) {
+    assert.notEqual(window, "*", "a wildcard window scope grants every future window at once");
+  }
+});
+
 test("the frontend invokes only registered, security-classified literal commands", () => {
   const registered = new Set(registeredCommands(readFileSync(bridgePath, "utf8")));
   const reviewed = new Set<string>(REVIEWED_TAURI_COMMANDS);
-  const invoked = frontendSources(sourceDir).flatMap(invokedCommands);
-  assert.ok(invoked.length > 0, "expected to find frontend IPC calls");
+  const sources = frontendSources(sourceDir);
+  // An aliased import would rename every call through it past the marker below, which is this
+  // file's own blind spot one level down: a scan that finds nothing looks exactly like a scan that
+  // finds everything. The wrapper in `diagnostics.ts` is the one sanctioned indirection.
+  for (const source of sources) {
+    assert.doesNotMatch(
+      source,
+      /import\s*\{[^}]*\binvoke\s+as\b/,
+      "an aliased invoke import hides its call sites from this audit",
+    );
+  }
+  const invoked = sources.flatMap(invokedCommands);
+  assert.ok(
+    invoked.length >= MINIMUM_FRONTEND_INVOCATIONS,
+    `scan found only ${invoked.length} frontend IPC calls, below the ${MINIMUM_FRONTEND_INVOCATIONS} floor: call sites are being missed rather than audited`,
+  );
   for (const command of invoked) {
     assert.ok(registered.has(command), `frontend invokes unregistered command: ${command}`);
     assert.ok(reviewed.has(command), `frontend invokes unreviewed command: ${command}`);
@@ -116,7 +462,7 @@ test("the frontend invokes only registered, security-classified literal commands
 });
 
 test("every non-bootstrap native command visibly crosses the unlocked-session gate", () => {
-  const segments = commandSegments(readFileSync(bridgePath, "utf8"));
+  const segments = commandSegments(nativeSources());
   // Commands that must work before, or without, an unlocked session. The log_ui pair is here for
   // the same reason the vault ones are: a log that only works once you are unlocked cannot record
   // unlock failing, and cannot record the startup errors that leave a user with a blank window,
@@ -144,13 +490,31 @@ test("every non-bootstrap native command visibly crosses the unlocked-session ga
   // `op.actor` is the diagnostics-aware wrapper: it fetches the actor and binds it to the calling
   // operation's trace in one act, so a command cannot get one without the other. It reaches the
   // gate through `actor_of`, and the test below checks that it does rather than assuming it.
+  //
+  // `unlocked_ui_session_generation` is the gate the module commands reach first: it takes the
+  // commit lock, checks the session and returns the generation the rest of the operation is fenced
+  // against. It reaches `require_unlocked_session` directly, and the test below checks that rather
+  // than assuming it.
   const gatekeepers =
-    "actor_of|actor_instance_of|server_actor_of|require_unlocked_session|require_ui_session_generation|channel_target|op\\.actor";
-  for (const [command, segment] of segments) {
+    "actor_of|actor_instance_of|server_actor_of|require_unlocked_session|require_ui_session_generation|unlocked_ui_session_generation|channel_target|op\\.actor";
+  // Helpers trusted only inside the module that defines them.
+  //
+  // `invoke` is far too bare a name to trust everywhere: `lib.rs` already contains the token
+  // `invoke(` in prose, and one doc comment landing inside a segment would exempt a command that
+  // never gates at all. The Studio commands do gate, through their module's single custody fence,
+  // and the test below proves that fence reaches the shared helper. Scoping the name to the file
+  // that defines it keeps the audit honest in both directions.
+  const moduleGatekeepers = new Map([
+    ["studio.rs", "invoke|invoke_custody"],
+    ["studio/recovery.rs", "invoke_control|invoke_custody"],
+    ["studio/inspection.rs", "read"],
+  ]);
+  for (const [command, { file, segment }] of segments) {
     if (bootstrap.has(command)) continue;
+    const local = moduleGatekeepers.get(file);
     assert.match(
       segment,
-      new RegExp(`(?:${gatekeepers})\\s*\\(`),
+      new RegExp(`(?:${local ? `${gatekeepers}|${local}` : gatekeepers})\\s*\\(`),
       `${command} does not visibly cross the native session gate`,
     );
   }
@@ -166,7 +530,13 @@ test("every non-bootstrap native command visibly crosses the unlocked-session ga
  */
 test("every helper the session-gate audit trusts does the checking itself", () => {
   const bridge = readFileSync(bridgePath, "utf8");
-  for (const helper of ["actor_of", "actor_instance_of", "channel_target", "require_ui_session_generation"]) {
+  for (const helper of [
+    "actor_of",
+    "actor_instance_of",
+    "channel_target",
+    "require_ui_session_generation",
+    "unlocked_ui_session_generation",
+  ]) {
     const start = bridge.indexOf(`async fn ${helper}(`);
     assert.ok(start > 0, `${helper} is trusted by the audit but does not exist`);
     // The body runs to the next top-level item; enough to see what it calls.
@@ -191,6 +561,37 @@ test("every helper the session-gate audit trusts does the checking itself", () =
     /actor_of\s*\(/,
     "op.actor is trusted to gate commands but never reaches a helper that checks the session",
   );
+
+  // The Studio modules gate transitively too, and the chain is one link longer. `invoke_custody`
+  // is the single Ready/lease/session fence both Studio entry points funnel through, and `invoke`
+  // and `invoke_control` are one-call wrappers around it. Trusting those three names in the audit
+  // above without proving each link is exactly what would turn a passing audit into a false one:
+  // the fourteen Studio commands would then be classified, counted, and checked against nothing.
+  const studio = readFileSync(join(nativeDir, "studio.rs"), "utf8");
+  const recovery = readFileSync(join(nativeDir, "studio", "recovery.rs"), "utf8");
+  const inspection = readFileSync(join(nativeDir, "studio", "inspection.rs"), "utf8");
+  const chain = [
+    ["studio.rs", studio, "invoke_custody", "InvokeContext::new"],
+    ["studio.rs", studio, "invoke", "invoke_custody"],
+    ["studio/recovery.rs", recovery, "invoke_control", "invoke_custody"],
+    ["studio/inspection.rs", inspection, "read(", "read_with"],
+    ["studio/inspection.rs", inspection, "read_with", "InvokeContext::new"],
+  ] as const;
+  for (const [file, source, helper, reaches] of chain) {
+    const start = source.indexOf(`async fn ${helper}`);
+    assert.ok(start > 0, `${file}: ${helper} is trusted by the audit but does not exist`);
+    const end = source.indexOf("\n}", start);
+    assert.match(
+      source.slice(start, end),
+      new RegExp(`${reaches}\\s*\\(`),
+      `${file}: ${helper} is trusted to gate Studio commands but never reaches ${reaches}`,
+    );
+  }
+  const contextStart = studio.indexOf("impl InvokeContext {");
+  assert.ok(contextStart > 0, "original Studio operation context exists");
+  const context = studio.slice(contextStart, studio.indexOf("\n}", contextStart));
+  assert.match(context, /unlocked_ui_session_generation\s*\(/,
+    "original operation context must establish the unlocked session");
 });
 
 test("instrumented actor handles can only be trace-bound through Operation", () => {

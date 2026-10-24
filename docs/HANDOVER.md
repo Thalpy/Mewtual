@@ -5,19 +5,3494 @@ Authoritative current-state document. Read this first, then
 [`ARCHITECTURE.md`](ARCHITECTURE.md) (decisions + the adversarial-review fixes).
 [`THREAT-MODEL.md`](THREAT-MODEL.md) tracks what a modified ("hacked") client can/can't do;
 the protocol- vs honest-client-enforced boundary and the hardening backlog.
+[`MESSAGE-FLOW.md`](MESSAGE-FLOW.md) traces one message end to end (send, gossip, catch-up)
+and ranks the live hazards in that path.
 
-## Status (as of 2026-08-22)
+## Status (latest entry: 2026-09-15)
 
-- **P1 epoch-close implementation has started (2026-09-03, uncommitted).** Revision 5 of
+- **Four remaining-work handoffs prepared (2026-09-15).** The user requests commit/push and
+  implementation/review prompts for four agents. [Implementation handoffs](GATE4-AGENT-HANDOFFS.md)
+  assign runtime Save/handoff, manual/provisional lifecycle and repeated tenure, signed fault
+  repair, and integration/required suites. [Review preambles](GATE4-REVIEW-PREAMBLES.md) include
+  the outstanding core signing review and each future scope. These assignments divide the
+  remaining work; they do not reopen the accepted earlier combined scheduling block.
+  Agents use separate branches; Agent 4 owns shared contract docs and final integration.
+  Native Save exposure depends on reviewed runtime AND manual lifecycle. Gate 4 remains open.
+  Integration base `50f1f99d08f586c9d97637a8f510ae222362a511` preserves the merged `d7ec5b9`
+  jukebox fixture correction. Its change from `vimeo` to an unsupported fixture source is present;
+  it has not been independently retested in this documentation pass. Reverify historical broad
+  CI failures against the integrated code rather than treating the old queue failure as current.
+  This pass adds documentation only; the completed local code/test evidence follows below.
+
+- **Detached handoff preparation and finite signing checkpoint (2026-09-15; review pending).**
+  [Review scope and message](GATE4-HANDOFF-SIGNING-REVIEW.md), base `8190dc4`.
+  The existing synchronous core/store batch now uses public-context authority capture,
+  detached typed preparation, one-operation signing turns and detached complete assembly.
+  Private prepared changes bind exact envelopes/order/timestamps and the pristine actual
+  successor. Each signing turn checks live membership/key, MLS epoch, receipt owner and
+  independently observed tenure. Source accounting owner and verified receipt owner must
+  match; exact combined Prepared metadata is preflighted before signing. No prefix escapes.
+  Existing store durability/reference/publication fences and native contracts are unchanged.
+
+  The initial four core regressions pass for both kinds (13.73 s), including a full signed-byte
+  oracle from ordinary edits and a real MLS transition with unchanged owner. Its isolated MLS
+  mutant fails at the intended assertion, byte-exact restoration succeeds and the restored
+  test passes. All five final core regressions pass for both kinds (15.28 s), adding
+  accounting-owner mismatch and pre-sign combined-metadata checks to the implementation.
+  Log: `logs/gate4-handoff-preparation-tests-final.log`. Strict replication/app library-and-test
+  Clippy passes with one build job (66 s), after replacing one redundant Copy clone:
+  `logs/gate4-handoff-preparation-clippy.log`. Root formatting, Python syntax and both unique
+  mutation anchors pass. Both final authority mutations execute and are detected: MLS epoch
+  removal fails at `handoff.rs:180` (one test, 6.53 s), and accounting-owner removal fails at
+  `handoff.rs:248` (one test, 5.98 s). Each restores source byte-for-byte and passes its restored
+  regression for both kinds (12.98 / 12.01 s). Logs:
+  `logs/gate4-handoff-signing-{mls,owner}-{mutated,restored}.log` and
+  `logs/gate4-handoff-signing-mutation-driver-final.log`.
+  The full 256-operation app case uses actual stored branches and
+  checks all envelopes, complete projection/restart and unchanged durable records throughout.
+  Both kinds now pass. Diagnostic preparation / slowest individual signing / finish times are
+  11,901 / 35 / 10,545 ms for Index and 15,335 / 18 / 12,720 ms for Flipnote. These are small-seed
+  title-edit fixtures at the operation ceiling, not worst-case latency or heap qualification.
+  See [P1-PERFORMANCE](P1-PERFORMANCE.md). The complete focused store run passes: **25 tests,
+  zero failures, two opt-in profiles ignored**, in 1,515.95 s using one test thread. This includes
+  every durable write/flush interruption, full signed evidence, scope, publication/source
+  replacement and reference dependencies, original envelope/order/timestamp retention, and
+  the 256-operation case. Command: `cargo test --locked -j 1 --config
+  profile.test.package.catcoms-app.debug=0 -p catcoms-app --lib studio_overlay_handoff --
+  --test-threads=1 --nocapture`; log: `logs/gate4-handoff-preparation-store-retry.log`.
+  A local app-suite build with one build job failed in LLVM with out-of-memory before running
+  tests (`logs/gate4-handoff-preparation-store.log`). A concurrent formatting attempt also hit
+  memory exhaustion; the separate formatting rerun passes. The sequential app build retry
+  succeeds in 140 s. GitHub validation is configured; no run for `e65bfd8` was returned by the
+  commit workflow query before this documentation push. Prior inspection/native green runs
+  are evidence for their recorded older checkouts, not new signing-code validation.
+  These failures are not test passes. Runtime capture/permit/stamp scheduling and native local
+  Save/handoff still require integration and review; this checkpoint does not complete Gate 4.
+
+  Code/tests are committed at `e65bfd89acecd4e660edb0560410e1d02cec5e21`. The user has now
+  explicitly requested commit/push to the existing review branch. Origin and open PR #26
+  identify `Thalpy/Mewtual` / `Create-suite-2`; the branch retains the user's subsequent merge.
+  The relocated acceptance-order mutation also passes its executed-assertion check, using the
+  committed harness's exact selector and one build job. It fails at `eligibility.rs:219`
+  (one test, 34.94 s), restores the preparation source byte-for-byte, and the restored regression
+  passes (one test, 37.97 s). Logs: `logs/gate4-handoff-order-mutation-current.log`,
+  `logs/gate4-handoff-mutation-acceptance-order.log` and
+  `logs/gate4-handoff-restored-acceptance-order.log`. Other pre-existing handoff mutants were not
+  rerun locally in this checkpoint; the configured GitHub job retains all ten. Local validation
+  for this checkpoint is finished. The handoff source/tests match `e65bfd8`; the later integrated
+  jukebox fixture change is outside that validation. The evidence and agent handoffs add only docs.
+
+- **INSPECTION-TEST-001 closed by user re-review (2026-09-15).**
+  The user accepts the same-size authenticated replacement regression and targeted size-only
+  mutation described below, finding no remaining masking path and requesting no production
+  change. The read-only inspection production PASS stands. This closure does not claim a new
+  independent Cargo run. Gate 4 remains active: the next implementation splits handoff into
+  detached typed preparation, finite signing turns and detached complete-candidate assembly.
+  Native overlay Save/handoff, remaining lifecycle/tenure, runtime signed repair and combined
+  acceptance remain outstanding; Gate 5 is untouched.
+
+- **Read-only inspection PASS; INSPECTION-TEST-001 coverage correction (2026-09-15).**
+  The user accepts `0b28f06...c47ae0b`, with code/tests at `d5ca2ff`, finding no blocking
+  production defect. They independently inspected both actual GitHub job logs and all ten
+  mutation/restoration logs and verified artifact digests; they did not rerun Cargo locally.
+  The original P3 coverage finding was: adding an ordinary intent also grows the file, so the original
+  freshness regression does not distinguish full-digest checking from size-only checking.
+  No production correction is requested. Prior closures, including HANDOFF-002, stand.
+
+  The correction adds a separate Index/Flipnote regression with an ordinary pending envelope
+  established before capture, then changes only that unannotated envelope's fixed-width nonce.
+  The existing accounted writer seals the replacement. Both complete records must authenticate
+  and decode, have equal actual file sizes and different plaintext digests, and preserve exact
+  accepted metadata, target, author, basis, count and full projection. A fresh inspection must
+  succeed while the old stamp rejects, without either read/check changing durable bytes.
+  The mutation harness additionally replaces only the digest-sensitive comparison with the
+  reviewer's size-only comparison. The first local compile exhausted memory; a single-job
+  retry reached linking but failed because drive C had no free space. No tests executed in
+  either attempt. Approximately 360 MiB of generated incremental cache was removed from the
+  verified, unlinked `target/debug/incremental` workspace directory. The focused retry passes
+  both Index and Flipnote (one test, 56.20 s) at correction head
+  `d38df93f2ba49b20b632870d38d353e69e2d60d8`, pushed to `Create-suite-2` / PR #26. Command:
+  `cargo test --locked -j 1 --config profile.test.package.catcoms-app.debug=0 -p catcoms-app
+  --lib studio_inspection_same_size_authenticated_replacement_is_stale -- --nocapture`.
+  Log: `logs/gate4-inspection-digest-regression-final.log`. Strict app library/test Clippy
+  passes with one build job in 61 s (`logs/gate4-inspection-digest-clippy.log`); root formatting
+  and diff checks pass. The focused local mutation driver imports the committed harness's
+  fourth app mutation, uses the same exact test with `-j 1`, and detects the intended assertion
+  at `inspection.rs:182` (one executed failure, 27.62 s). It restores source bytes exactly, then
+  the restored test passes both document kinds (one test, 55.18 s). This is the new mutation
+  only; the complete default four-mutation harness runs separately on GitHub. Local logs:
+  `logs/gate4-inspection-digest-mutation-local.log` and
+  `logs/studio-inspection-mutations/app-3-local-{mutated,restored}.log`. No compile/empty-filter
+  failure is counted as mutation success. The user now closes the finding above; native
+  commands/result shapes and production behavior are unchanged.
+  Gate 4 remains active and incomplete; Gate 5 remains untouched.
+
+  GitHub [native run 34953124271](https://github.com/Thalpy/Mewtual/actions/runs/34953124271)
+  passes at `d38df93`, using PR merge checkout
+  `4f427fc59fd535a7d12ab7031b500f546585cec6`. The actual job log shows 25 native tests passing
+  (83.60 s), both existing preview mutations and both inspection mutations detected, with all
+  restored regressions passing. [Two-client run 34953124337](https://github.com/Thalpy/Mewtual/actions/runs/34953124337)
+  also passes.
+
+  GitHub [inspection run 34953124247](https://github.com/Thalpy/Mewtual/actions/runs/34953124247)
+  passes at the same merge checkout. The inspected actual job log records **10 store/actor
+  tests passing** (199.47 s), **two shared fixture tests passing** (52.31 s), and all **four
+  intended app mutation failures plus four restored passes**. The added size-only comparison
+  fails specifically at `inspection.rs:182` (one executed failure, 28.02 s), restores source
+  byte-for-byte and passes the restored two-kind regression (one test, 56.47 s).
+  The [app mutation artifact](https://github.com/Thalpy/Mewtual/actions/runs/34953124247/artifacts/10390418526)
+  contains eight individual logs, including
+  `app-3-mutated.log` and `app-3-restored.log`; its published SHA-256 is
+  `f3d7d5b6a9c5ce8931226238ae173d091d2a6510252ea9c38153e6653cfc17b0`.
+  The [foundation workflow](https://github.com/Thalpy/Mewtual/actions/runs/34953124188) also
+  passes. Follow-up status now confirms handoff run 34953124265 also passed; broad CI
+  34953124189 failed. No repository-wide green claim is made. Evidence updates after `d38df93`
+  change documentation only. Review base: `c47ae0b61b9b8adc0ab5e4bf798199413bfff73c`.
+
+- **Read-only inspection implementation checkpoint (2026-09-15; accepted above).**
+  The user reviews `aa0a81f...0b28f06` and passes the profiling instrumentation and
+  [detached-inspection proposal](GATE4-OVERLAY-RUNTIME-REVIEW.md) without findings or required
+  changes. They inspected source and recorded evidence, without independently running Cargo.
+  The acceptance excludes actor/native implementation, signing/commit integration and full
+  Gate 4. Code/test head `d5ca2ff1516852f15edf7fe5b09db07c61fcda56` implements read-only
+  capture/rebuild/currency/delivery through the existing
+  actor and native custody paths. `studio_overlay_read` is registered with the explicit main
+  window capability and account-read policy, returning a separate local-draft/absent result.
+  The [implementation review note](GATE4-INSPECTION-IMPLEMENTATION-REVIEW.md) supplies its exact
+  comparison; the subsequent user implementation acceptance and coverage correction are above.
+
+  Local results: five store inspection tests pass (209.74 s), including full-wrapper changes
+  preserving displayed draft/basis, presence/deletion/remount/scope/corruption, author/channel,
+  Prepared/Completed reads and both kinds at 256 operations. Two actor/resource tests pass
+  (41.07 s): a real checkpoint crosses the durable writer while draft reconstruction is paused;
+  cancellation/expiry preserve actual worker/result permit ownership. The shared native fixture
+  passes both real actor-produced Index/Flipnote cases (one test, 51.04 s), full projection and
+  unchanged durable records. Strict app library/test Clippy passes (26.77 s), and all six native
+  command security audit tests pass. Logs: `logs/gate4-inspection-{store,actor,fixture,clippy}.log`.
+  These runs do not claim maximal seed/metadata/heap coverage or repository-wide green.
+  The additional real MLS-join and same-snapshot sync-replacement regression passes (0.60 s):
+  unchanged intent bytes cannot legitimize a result from either obsolete live context.
+  Svelte checking reports zero errors and warnings. Native offline compilation is unavailable
+  because the local Cargo cache lacks `png`; GitHub runs native validation. Early codec-shape
+  runs with expensive Automerge setup were stopped, without claiming a pass. The final fixture
+  assembles typed baseline bytes and requires full public decoding plus a canonical checkpoint
+  round trip. Both maximum shapes now pass in 2.98 s: 64 Index objects with four creations and
+  four values per title/expiry register, and 999 Flipnote frames with all 1024 conflict fields.
+  Seeds measure 143,360 / 727,709 bytes in the standalone scope. The corresponding full vault
+  inspection test passes in 83.85 s, preserves exact stored bytes and rejects oversized sealed
+  input; its actual-group seeds measure 143,352 / 727,701 bytes. Logs:
+  `logs/gate4-inspection-{shapes-codec,maximal-store-codec}.log`. The fixture deliberately keeps
+  `[1; 16]` in the compact Index before replaying its local title edit. These are codec/input
+  boundaries, not signed-admission, heap or latency qualification. The initial mutation run
+  detected currency and channel removal, but a later
+  compile error in the newly added size fixture correctly failed the harness; the code was
+  restored and the fixture corrected. The complete final local mutation run now passes:
+  full-wrapper currency, channel and author removal each execute one test and fail at the
+  required assertion; each mutation restores source bytes exactly and its restored regression
+  passes. Log: `logs/gate4-inspection-mutations-final.log`; six individual logs are under
+  `logs/studio-inspection-mutations/app-*`. Root/native formatting and clean-source diff checks
+  pass after the final restoration.
+  Final strict app library/test Clippy passes in 23.70 s on the restored final code and fixtures
+  (`logs/gate4-inspection-final-clippy.log`).
+
+  GitHub [native run 34944924740](https://github.com/Thalpy/Mewtual/actions/runs/34944924740)
+  succeeds for `d5ca2ff`, using PR merge checkout
+  `27a883bc499cd43ef1c568a1014ae714412e8b5c`. The actual job log records **25 native tests
+  passing** (68.21 s), both existing preview mutations and restored passes, and both new
+  inspection mutations and restored passes. Removing only final inspection validity exposes
+  the fully converted draft at `inspection/tests.rs:115`; replacing the original context
+  between visits reaches the obsolete-result assertion at `inspection/tests.rs:164`.
+  Each mutation executes exactly one failing test with its intended message and restores source
+  bytes exactly. The uploaded mutation artifact's SHA-256 is
+  `f2d8dd45bce669b9b310c1829cb913f63eed3c3239b715c58d4452cea16820dd`.
+  [Two-client run 34944924758](https://github.com/Thalpy/Mewtual/actions/runs/34944924758)
+  also succeeds. These are focused results; broad CI is not green. The inspected current-head
+  cargo-deny log repeats the existing rustls 0.23.40 advisory `RUSTSEC-2026-0285` failure.
+  The inspected Linux frontend/Tauri job in
+  [CI run 34944924751](https://github.com/Thalpy/Mewtual/actions/runs/34944924751) passes all
+  **1,229 frontend tests** and Svelte checking, then fails strict native compilation on the
+  previously recorded unused `media_decode::as_mime` and `security_intent` APIs. This does not
+  contradict the focused native test workflow, which does not deny those baseline warnings.
+
+  GitHub [inspection run 34944924744](https://github.com/Thalpy/Mewtual/actions/runs/34944924744)
+  succeeds at the same merge checkout: **nine store/actor tests pass** (267.08 s), **two shared
+  fixture/shape tests pass** (57.90 s), and all three app mutations trigger their intended
+  executed assertions, restore byte-for-byte and pass restored source. The actual job log was
+  inspected; artifact SHA-256:
+  `4cf60c97d0774058a3a8edf53b84f99f10fae885c93c0ff171c274791ba6e1a6`.
+  The [overlay foundation workflow](https://github.com/Thalpy/Mewtual/actions/runs/34944924752)
+  also succeeds. At 08:20 UTC the [handoff run](https://github.com/Thalpy/Mewtual/actions/runs/34944924745)
+  has passed its normal test step and is still running its mutation step; no completed handoff
+  workflow PASS is claimed for this head yet. Evidence updates after `d5ca2ff` are documentation
+  only. New/changed relative documentation links and `git diff --check` pass.
+
+- **HANDOFF-002 closed; bounded handoff implementation accepted (2026-09-15).**
+  The user's re-review compares `85e7179...aa0a81f`, with correction code at `62f06d4`;
+  `aa0a81f` changes documentation only. No remaining implementation or regression-coverage
+  finding requires a change. The reviewer inspected the actual GitHub job and all 20 individual
+  mutation/restoration logs from [run 34903404377](https://github.com/Thalpy/Mewtual/actions/runs/34903404377),
+  merge checkout `a89f90bf685fded1d2e314fd754f2e2afe2de59b`: **24 normal handoff tests pass,
+  ten isolated mutations are detected, and ten restored regressions pass**. The artifact digest
+  matched. The reviewer did not rerun Cargo locally; the separate local checks below remain
+  their recorded execution evidence.
+
+  The acceptance explicitly excludes actor/native activation and full Gate 4 completion.
+  The user clarified **finish Gate 4 before Gate 5**. Gate 5 code is untouched. Remaining:
+  actor/native Closing-overlay lifecycle and bounded preparation/signing, manual and stale-base
+  handling including preview-based drafts, repeated-owner tenure, runtime signed fault repair,
+  and combined acceptance/required suites. See [BACKEND-IMPLEMENTATION](BACKEND-IMPLEMENTATION.md)
+  and [FLIPNOTE-UI-HOOKS](FLIPNOTE-UI-HOOKS.md). Earlier finding closures stand. The one-operation
+  injected write-crash matrix is distinct from the multi-operation fixtures and is not a
+  physical power-loss experiment.
+
+  Next: the [runtime proposal](GATE4-OVERLAY-RUNTIME-REVIEW.md) and opt-in custody profile identify
+  the required split before actor/native activation.
+  The accepted core/store call cannot simply run a 256-operation batch in the live actor.
+
+  Follow-up GitHub status verification on 2026-09-15 confirms the prior code's handoff,
+  [foundation](https://github.com/Thalpy/Mewtual/actions/runs/34903404540),
+  [native](https://github.com/Thalpy/Mewtual/actions/runs/34903404386) and
+  [two-client](https://github.com/Thalpy/Mewtual/actions/runs/34903404376) workflows succeeded.
+  The broader [CI run](https://github.com/Thalpy/Mewtual/actions/runs/34903404402) failed.
+  Its inspected Linux application log repeats the queue-entry regression at `lib.rs:9694`
+  (`e_unknown` included; 608 passed, one failed, ten ignored). Windows test, Linux desktop
+  and cargo-deny jobs also failed; their detailed earlier baseline findings remain below.
+  This status check is separate from the reviewer's inspection of all handoff artifacts.
+
+- **Overlay runtime proposal and custody profile ready for review (2026-09-15).**
+  [GATE4-OVERLAY-RUNTIME-REVIEW](GATE4-OVERLAY-RUNTIME-REVIEW.md) specifies capture, detached
+  inspection, complete-record currency and final native delivery ownership, followed by the
+  required private preparation/signing/commit split. It preserves the accepted handoff barriers.
+  No production behavior, actor/native command or Gate 5 code changes in this checkpoint.
+
+  The new opt-in profile passes **both tests**, exercising Index and Flipnote with 1, 32 and
+  256 typed accepted operations each, successful durable handoff, full projection/count after
+  reopen, retained pending intents and exact byte-preserving completed retry. Run:
+  `cargo test --locked -j 4 --config profile.test.package.catcoms-app.debug=0 -p catcoms-app
+  --lib profile_studio_overlay_handoff -- --ignored --test-threads=1 --nocapture`.
+  Log: `logs/gate4-overlay-custody-profile.log`; test execution 767.21 seconds. The initial
+  build reported two redundant `mut` bindings, removed without behavioral changes before the
+  final lint/regression checks. Measurements are from that otherwise identical test binary.
+
+  At 256 operations, measured warm handoff custody is **177,252 ms for Flipnote** and
+  **133,461 ms for Index**. Read/decode plus separate draft reconstruction is 26,227 / 19,539 ms.
+  These are unoptimized Windows test-profile observations on small bases, not release latency,
+  maximal-byte coverage, heap qualification or actor fairness evidence. Initial fixture intent
+  writes are batched; the measured decoding/candidate/handoff/retry paths use production adapters.
+  [P1-PERFORMANCE](P1-PERFORMANCE.md) records all six samples, exact scope and limitations.
+
+  Final `cargo fmt --all -- --check` and `cargo clippy --locked -j 4 -p catcoms-app --lib
+  --tests -- -D warnings` pass (Clippy: 35.76 seconds). The unchanged regression
+  `studio_overlay_handoff_signs_the_whole_branch_once_and_keeps_pending_intents` passes for
+  both Index and Flipnote in its one executed test (57.53 seconds), compiled after the `mut`
+  cleanup. Logs: `logs/gate4-overlay-runtime-{clippy,regression}.log`. New/changed documentation
+  links and `git diff --check` pass. No full-suite or new-head GitHub result is claimed.
+  The earlier handoff implementation remains accepted; this proposal/instrumentation needs
+  a separate user review. Review base: `aa0a81f34af6707ab05fd2a437412c38b79a82ff`.
+
+- **Historical HANDOFF-002 correction checkpoint (2026-09-14; accepted above on 2026-09-15).**
+  The user's review of `dd2fbc0...85e7179` requests one implementation correction. The local
+  source-to-intent dependency blocked ordinary reads, but reference inventory discarded it and
+  could install an incomplete pixel pin set after the required metadata disappeared. The review
+  found no additional defect in the other handoff boundaries. Prior finding closures stand.
+
+  The scan now retains bounded source requirements and authenticated metadata targets under full
+  numeric server/group/type/logical scope, then checks target equality before reference installation.
+  It reuses the normal one-record-per-step reads and existing count/byte rails. A new real-PIX
+  regression retains an overlay-only CID through missing metadata, fresh reopen, failed scan and
+  protected deletion, then restores the original metadata. Another regression supplies valid but
+  mismatched metadata or an ordinary ledger. The isolated inventory-check mutation is added to
+  the existing handoff harness. Code head: `62f06d49667d1c2db407cb1def2aef3da2aa01fe`, pushed to
+  `Create-suite-2` / [PR #26](https://github.com/Thalpy/Mewtual/pull/26). Re-review base:
+  `85e71798b4197e8a7ef7d1361e4418bd7ecd32d4`. HANDOFF-002 is now closed by the 2026-09-15 review above.
+
+  Local validation at `62f06d4` passes **24 focused tests**: two new reference-dependency tests,
+  seven creative-reference/protected-deletion tests, 13 inventory tests and two Studio inventory
+  cache tests. The commands use `cargo test --locked -j 4 --config
+  profile.test.package.catcoms-app.debug=0 -p catcoms-app --lib` with filters
+  `studio_overlay_handoff_reference_scan`, `store::creative_references::`,
+  `store::epoch_recovery::inventory::` and `store::epoch_studio::tests::inventory_cache::`.
+  Logs: `logs/gate4-handoff-002-{regressions,protection,inventory,cache}.log`.
+  `cargo clippy --locked -j 4 -p catcoms-app --lib --tests -- -D warnings` and
+  `cargo fmt --all -- --check` also pass.
+
+  Local `python .github/scripts/check-studio-handoff-mutations.py reference-dependency` detects
+  exactly one executed failing test at the intended scan assertion. Ignoring only the final
+  dependency-check result produces `known=true, deletion=Ok(true), retained=false`: the protected
+  store actually deletes the overlay-only PIX bytes. The harness restores the source byte for
+  byte, then the same regression passes (one executed test). Evidence:
+  `logs/gate4-handoff-mutation-reference-dependency.log`,
+  `logs/gate4-handoff-restored-reference-dependency.log` and
+  `logs/gate4-handoff-002-mutation-check.log`.
+
+  The [handoff workflow for this code](https://github.com/Thalpy/Mewtual/actions/runs/34903404377)
+  was running at this historical evidence update; the 2026-09-15 acceptance above records its
+  successful completion. That dedicated result does not establish repository-wide green.
+  The existing workflow now includes 24 normal handoff tests and ten isolated mutations/restored
+  cases, and uploads their individual logs. Broader baseline CI failures remain recorded below.
+  Subsequent evidence-only commits do not change the tested correction code or harness.
+
+  [The review note](GATE4-OVERLAY-HANDOFF-IMPLEMENTATION-REVIEW.md) and UI hooks track the correction.
+  The existing crash matrix has one accepted operation; dependent multi-operation replay and
+  partial-manifest cases are separate tests. No physical power-loss experiment is claimed.
+  Actor/native activation and full Gate 4 acceptance remain outside this correction.
+
+- **Closing overlay core/store handoff ready for adversarial implementation review (2026-09-14).**
+  Code checkpoint: `bf37cc48c45d09be6b63e97322171e506768fbf4`, pushed to `Create-suite-2`
+  ([PR #26](https://github.com/Thalpy/Mewtual/pull/26)); base:
+  `dd2fbc01ebb8a692964eec0df19dd201b225c936`. The corrected design is accepted and HANDOFF-001
+  is closed. [The implementation review note](GATE4-OVERLAY-HANDOFF-IMPLEMENTATION-REVIEW.md)
+  describes the concrete boundary and copyable adversarial review request.
+
+  The explicit Rust adapter requires the live member/author, independently observed current-owner
+  tenure and the pristine installed adjacent successor. It privately signs the entire accepted
+  sequence with original timestamps, preflights all replacement peaks, then persists Prepared,
+  the whole source once, and Completed after authenticating/flushing the actual signed source.
+  Pending ledger entries stay pending. Restart resolution completes exact evidence without replay,
+  returns absent same-source evidence durably to Active, and holds partial/conflicting evidence.
+  Rotation/adoption, ordinary writers/retries, retirement and page publication enforce the hold.
+
+  Inner metadata version 2 retains the complete target, older completed acknowledgement and retry
+  floor independently of the base and ordinary ledger. Completed retry checks channel before any
+  acknowledgement or sync. Checked v1 reads preserve original bytes. A new optional local source
+  wrapper byte requires matching intent metadata after restart and later source replacement; it
+  is charged to existing content limits and explicitly called out for implementation review.
+  There is no new network format or actor/native overlay command.
+
+  Local `cargo test --locked -j 4 --config profile.test.package.catcoms-app.debug=0
+  -p catcoms-app --lib studio -- --test-threads=4 --nocapture` passes **202 tests**, with one opt-in
+  profile ignored (`logs/gate4-handoff-studio-regressions.log`). This includes all 22 new handoff
+  tests and the existing overlay, source, rotation, replay, actor, preview and succession tests.
+  [GitHub's dedicated handoff workflow](https://github.com/Thalpy/Mewtual/actions/runs/34885437799)
+  passes all 22 normal tests, **nine isolated mutations and nine restored regressions**. Its
+  [job log](https://github.com/Thalpy/Mewtual/actions/runs/34885437799/job/104114827694) identifies
+  PR merge checkout `e37caec550a1e4c80b8b4fc1a5b90bc1366d0c99` for code head `bf37cc4`.
+  Artifact `studio-handoff-mutations` retains each failing and restored log. Every mutation
+  produced exactly one executed failing test at its intended assertion, and the harness restored
+  exact original source bytes before the passing regressions. The nine targets are completed
+  channel binding, full signed digest, source-version recheck, shared replacement fence,
+  publication fence, required intent metadata, retry floor, acceptance order and later source peak.
+  Mutation execution is from GitHub; no additional local mutation run is claimed.
+
+  [The existing foundation workflow](https://github.com/Thalpy/Mewtual/actions/runs/34885437449)
+  passes 12 tests, five isolated mutations and their restored regressions. Windows and Linux CI
+  format/Clippy steps pass. Local `cargo test --locked -j 4 -p catcoms-replication --lib
+  studio:: -- --test-threads=4` passes **98 tests**, none ignored
+  (`logs/gate4-handoff-replication.log`). All 300 selected local regressions pass. The new evidence
+  links and implementation review note are checked, and `git diff --check` passes.
+
+  The broader [CI run](https://github.com/Thalpy/Mewtual/actions/runs/34885437407) is not green:
+  its [cargo-deny job](https://github.com/Thalpy/Mewtual/actions/runs/34885437407/job/104114827568)
+  reports RUSTSEC-2026-0285 against Rustls 0.23.40 in the unchanged lockfile. It also logs an
+  uninstalled musl toolchain override before continuing to the advisory scan. Neither Cargo.lock,
+  rust-toolchain.toml nor the broad CI workflow changed in this checkpoint. This remains a separate
+  full-gate validation item; no repository-wide green is claimed.
+  Both application test jobs repeat only the existing
+  `tests::a_queue_entry_that_claims_to_be_both_kinds_is_not_a_track` failure at `lib.rs:9694`
+  (two entries including `e_unknown`, expected one): Windows **601 passed / 1 failed / 9 ignored**;
+  Linux **606 passed / 1 failed / 10 ignored**. The test and queue implementation are unchanged here.
+  The Linux desktop job repeats the previously recorded unused-code errors in `media_decode.rs`
+  and `security_intent.rs` under `-D warnings`; its Svelte check passes with zero errors/warnings.
+  Those frontend/native files are unchanged here.
+  [Native regressions](https://github.com/Thalpy/Mewtual/actions/runs/34885437391) and
+  [two-client acceptance](https://github.com/Thalpy/Mewtual/actions/runs/34885437409) pass for `bf37cc4`.
+  Evidence-only commits after `bf37cc4` change documentation, not the tested Rust/harness files.
+
+  Actor/native overlay scheduling, detached preparation and measured signing custody, manual
+  inspect/copy/export/disposition, stale-base and preview overlays remain open. Repeated-owner
+  tenure, signed fault repair and combined acceptance also remain. Gate 4 is still in block 2;
+  implementation acceptance is pending user adversarial review.
+
+- **HANDOFF-001 closed; corrected handoff design accepted (2026-09-14).**
+  The user accepts `b546c8d...dd2fbc01ebb8a692964eec0df19dd201b225c936` with no remaining
+  findings or required changes. This closes the retained-target design finding and authorizes
+  implementation of the [accepted core/store handoff](GATE4-OVERLAY-HANDOFF-REVIEW.md).
+  The implementation checkpoint is recorded above. No execution evidence or native command is
+  implied by the design PASS. OVERLAY-TEST-001 remains closed; Gate 4 remains in block 2.
+
+- **HANDOFF-001 design correction ready for re-review (2026-09-14).**
+  The user's review of `65db6ac...b546c8d` requests one correction: completed retry metadata
+  must retain an independently checkable channel binding after the full base is released.
+  Flipnote logical identity uses the object ID; the enclosing intent scope does not contain
+  its channel. Reusing an opaque basis fingerprint with a different request channel could
+  therefore produce a false exact-retry acknowledgement under the original compact field list.
+  The reviewer found no other design blocker; no production defect or handoff execution is claimed.
+
+  [The revised handoff proposal](GATE4-OVERLAY-HANDOFF-REVIEW.md) now requires a canonical complete
+  target in version-2 enclosing metadata, independently of the optional branch/acknowledgement.
+  Active/Prepared and completed targets must match it. The binding persists through base release,
+  legitimate ordinary retirement, acknowledgement rollover and retry-floor-only states. A completed
+  request must match that target before acknowledgement, source eligibility or sync-only retry.
+  Version-1 migration derives it from the checked base; both target encodings consume the existing
+  metadata limit. No reader or request can implicitly change the record's target.
+
+  The required future regression completes a real Flipnote handoff, releases its base, legitimately
+  retires the ordinary entries and reopens. Correct-channel retry must succeed without recreating
+  a branch; changing only the request channel must return a specific scope refusal without syncing
+  or changing intent bytes. An isolated removal of that request-target comparison must expose the
+  false acknowledgement. These are implementation requirements, not newly executed tests.
+  Documentation links, source references and whitespace are checked; no Rust/frontend code or
+  callable contract changes. HANDOFF-001 awaits user design re-review. OVERLAY-TEST-001 stays closed,
+  the foundation PASS stands, and Gate 4 remains in block 2 with the previously listed work open.
+
+- **OVERLAY-TEST-001 closed; next handoff design ready (2026-09-14).**
+  The user accepts `783486d...65db6ac2b1a2bdbad1b97786f9603877dd902e67` with no remaining
+  masking path or required changes. This closes OVERLAY-TEST-001; the foundation implementation
+  PASS stands. The reviewer inspected the successful [overlay workflow](https://github.com/Thalpy/Mewtual/actions/runs/34848383818)
+  and artifact: 12 normal tests, both constant-version assertion failures, byte-exact restoration
+  and passing restored cases at PR merge checkout `ec622a7aaaf193245ded5512c253879d85054e57`.
+  They did not rerun Cargo locally. Native and two-client workflows for `65db6ac` also pass;
+  its broad CI is failed, so no repository-wide green or Gate 4 acceptance is claimed.
+
+  The source audit for the next step is in
+  [GATE4-OVERLAY-HANDOFF-REVIEW.md](GATE4-OVERLAY-HANDOFF-REVIEW.md). Ordinary replay requires
+  signed historical evidence, while local reconstruction requires every accepted annotation.
+  The proposal therefore transfers a complete branch into its pristine verified expected
+  successor, persists a Prepared record before the signed source, and releases only the overlay
+  hold after exact source/manifest verification. Ordinary intents remain pending for receipts.
+  It specifies restart resolution, a fence at real source replacement paths, full signed-operation
+  hashes, bounded completed acknowledgements/retry floor and unchanged storage/reference limits.
+  The proposal awaits user adversarial design review before its implementation; no new runtime
+  behavior is enabled. This documentation checkpoint is checked for whitespace, links and source
+  references; no new Cargo run is claimed for it.
+
+  This continues block 2, not its completion. Actor/native/manual overlay lifecycle, changed-base
+  reconciliation, provisional-preview overlays, repeated-owner tenure, signed repair, the recorded
+  full-suite failures and final combined acceptance remain. UI hooks retain the current native
+  contract and keep durable overlay Save unavailable. No frontend or production Rust files change.
+
+- **Closing overlay implementation accepted; OVERLAY-TEST-001 correction (2026-09-14).**
+  The user accepts `ac23429...b1b0ec9` with evidence at `783486d`: no blocking production
+  defect and no production change requested. OVERLAY-TEST-001 is a non-blocking P3 regression
+  gap: flipping a caller fingerprint did not isolate the actual Closing source-version binding.
+  The reviewer independently inspected the successful overlay workflow and all six original
+  mutation/restoration logs at PR merge checkout `dc451e0992d8201503152225a7c79c0eb05ee431`.
+  They did not execute Cargo or the proposed source-version mutation locally.
+
+  Two new regressions exercise first acceptance and append, each for Index and Flipnote. A
+  separate valid sender prepares an operation before sealing; the real store ingest quarantines
+  it after Closing, then the receiver vault is reopened. The tests require changed persisted
+  snapshot/quarantine, unchanged source identity, receipt, close, expected seed and owner-tenure
+  input, successful fresh preparation, a different basis, and exact stale-basis refusal with
+  unchanged intent bytes. Already accepted exact retry still returns the same complete draft
+  with its original timestamp/count. First acceptance has a positive control using the fresh basis.
+  The harness now tests the reviewer's constant-source-version mutation independently against
+  both regressions. The focused pair passes (2 tests, 64.20s). Each constant-version mutation
+  fails at `overlay basis ignored changed persisted Closing source version` with exactly one
+  executed failed test (26.37s / 29.00s); byte-exact restoration is followed by one passing
+  regression per case (61.90s / 63.10s). The initial overly broad mutation anchor was rejected
+  before editing; the final anchor names the constructor's receipt assignment uniquely.
+  The local harness selects only the two `source-version-*` entries; the default GitHub run
+  retains all five cases and uploads the mutation/restoration logs. Local evidence is in
+  `logs/gate4-overlay-source-version-test.log`, `logs/gate4-overlay-source-version-mutations.log`
+  and the corresponding `gate4-overlay-{mutation,restored}-source-version-*.log` files.
+  `cargo clippy --locked -j 4 -p catcoms-app --lib --tests -- -D warnings` passes (36.14s).
+  Formatting and `git diff --check` pass. OVERLAY-TEST-001 awaits correction review.
+  Production Rust bytes are unchanged; no new API, native command or frontend file is added.
+
+  Previous-checkpoint GitHub results are now available: the dedicated overlay, native and
+  two-client workflows all pass. Broader CI is not green: the Windows app suite reports
+  `tests::a_queue_entry_that_claims_to_be_both_kinds_is_not_a_track` failing at `lib.rs:9694`
+  (577 passed, 1 failed, 9 ignored), and the Linux desktop job reports dead-code errors in
+  `media_decode.rs` and `security_intent.rs`. Those files are unchanged by `ac23429...b1b0ec9`.
+  These are separate full-gate follow-ups; the coverage correction does not fix or conceal them.
+
+  The foundation PASS does not enable actor/native overlays, automatic replay/disposition,
+  provisional-preview writes, repeated-owner tenure or signed repair. Gate 4 remains open.
+
+- **Closing overlay design accepted; core/store implementation (2026-09-14).**
+  Implementation checkpoint [`b1b0ec9`](https://github.com/Thalpy/Mewtual/commit/b1b0ec9b88f422f5f01cd4deca5cdb463bfe3871)
+  is pushed to `Create-suite-2`, based on `ac23429824ef25ab29c59cdaf2c4c7d99db6161a`.
+  The user accepts `d576af2e1fbe757b4fb6bcebb6326dd1a445b2f0` against `0b6e870`, with no
+  actionable design defect or required change. The review inspected the proposal and existing
+  source; it did not execute overlay tests. Its approval covers this internal foundation only.
+
+  `studio/overlay.rs` now supplies a separate checked Closing basis and local draft type. The
+  basis derives from a real typed settlement plan and source fingerprint. Draft reconstruction
+  reuses typed writers/validators, a private data graph, exact preflight, saved acceptance order
+  and original timestamps. It creates no editable epoch, signed log, receipt or publication permit.
+  Explicit Server Rust adapters obtain tenure from the actual sync instance; callers cannot put
+  tenure in the request. The store rechecks the actual source before first acceptance/append.
+
+  The shared `.intents` record gains an optional versioned local extension. Ordinary records and
+  the core ledger retain their original encodings. Accepted annotations bind full envelope hashes
+  to original ledger entries; failed ordinary Save cannot acquire an annotation. One branch,
+  256 entries, a 2 MiB seed and 64 KiB metadata must fit the existing complete-record and physical
+  budgets together. Both ordinary and overlay writes now use the same persistence helper and
+  sync-only exact-retry path. Accepted retries survive source/tenure changes after current member,
+  target, basis and full-envelope checks; new appends still require eligible Closing provenance.
+
+  Ordinary Apply refuses annotated operation IDs. Receipt and manual retirement retain them even
+  in mixed selections while ordinary covered entries can retire. Inventory includes base-only
+  pixels and all pending-operation references, and undecodable metadata prevents a successful
+  reference scan. The seed-reference regression removes the independent canonical fixture copy
+  and reopens the vault to isolate the base's contribution; it does not claim a complete runtime
+  reclamation/eviction scenario. The count fixture assembles 256 individually typed-admitted
+  annotations, requires full production decoding, and checks refusal of operation 257.
+
+  Ten new core/store regressions pass on the restored final source (123.37s), including both Index/Flipnote restart, uncertain
+  writes, exact retries after installation at the physical cap, deliberately reversed nonce-hash
+  order, codec/annotation rejection, both mixed retirement modes and orphan/replacement accounting.
+  The source/channel/Fault checks pass as part of that run. Existing intent tests pass (15,
+  8.34s), Studio core tests pass (98, 162.58s), and rotation store tests including the exhaustive
+  write/crash/restart case pass (8, 386.94s): 131 distinct affected tests in total.
+  Local Rust 1.89 commands use `--locked -j 4`; app tests also use
+  `--config 'profile.test.package.catcoms-app.debug=0'`, `CARGO_INCREMENTAL=0` and Windows
+  `_LINK_=/DEBUG:NONE`. The filters are `studio_overlay_store_`, `store::epoch_intents`,
+  `studio::` (replication crate), and `studio_rotation_store_`, each with `--test-threads=4`.
+  `cargo fmt --all -- --check`, `git diff --check`, and core/app library and test Clippy pass;
+  Clippy uses `-- -D warnings` (36.94s).
+  `.github/scripts/check-studio-overlay-mutations.py` checks ordinary Apply admission,
+  sequence validation and base-only CID enumeration independently, requires the intended one-test
+  assertion failure, restores bytes and reruns each regression. The dedicated `studio-overlay.yml`
+  workflow publishes those logs as an artifact. Locally all three isolated mutations fail at
+  their intended assertion with exactly one executed failing test (24.60s / 18.87s / 19.46s).
+  Source bytes are restored, then the respective regressions pass (50.63s / 55.63s / 44.22s).
+  Local logs are in ignored `logs/gate4-overlay-*.log`.
+  GitHub [overlay checks](https://github.com/Thalpy/Mewtual/actions/runs/34844201389),
+  [native checks](https://github.com/Thalpy/Mewtual/actions/runs/34844201234),
+  [two-client checks](https://github.com/Thalpy/Mewtual/actions/runs/34844201290) and
+  [CI](https://github.com/Thalpy/Mewtual/actions/runs/34844201267) have started for `b1b0ec9`;
+  their result is pending at this evidence update. Local results above are not GitHub results.
+
+  The repository-wide `scripts/check-no-ambient.sh` fails on six verified pre-existing findings:
+  `apps/desktop/src-tauri/src/media_decode.rs:333,426,444,504`,
+  `crates/catcoms-app/src/studio_exchange/tests/scheduling.rs:150`, and
+  `crates/catcoms-app/tests/support/studio_preview.rs:329`. Each reported call is present in the
+  baseline HEAD, outside this change. No full-repository green or full Gate 4 acceptance is claimed.
+
+  No frontend/native overlay command, automatic overlay replay/disposition, provisional-preview
+  write or new historical-tenure authority is enabled. The UI keeps Closing/Fault/awaiting-tenure
+  work unsaved and visible. Next integration must supply bounded actor/native preparation and a
+  complete replay/manual lifecycle before exposing durable overlay Save. Repeated-owner tenure,
+  signed repair and full Gate 4 acceptance remain open. This implementation awaits user
+  adversarial review; the design PASS does not accept its code. Frontend commits through `ac23429` are
+  preserved; this backend checkpoint changes no `apps/desktop/src` files.
+
+- **Combined scheduling accepted; Closing overlay design checkpoint (2026-09-13).**
+  The user's review of `134394e...6b71d96`, with documentation at `a40909e`, passes pacing,
+  queued retry preservation, pending authoritative priority, the three retained-custody actor
+  scenarios and the native abort-test eventual-release correction. No actionable production
+  or regression finding and no further changes are required. NATIVE-TEST-001 and TAIL-TEST-001
+  remain closed. The reviewer inspected source and actual GitHub native job logs, without
+  rerunning Cargo locally. The ignored local scheduler mutation logs were unavailable at the
+  published reference; their results remain recorded evidence. The 165-test broad run belongs
+  to `487cb0e`; the final `6b71d96` targeted/native evidence is listed below.
+
+  Keep the acceptance bounds: authoritative Index plus Registry, Index/Flipnote preview
+  pressure, controlled cancelled lower-transport ownership, 40 seconds of simulated scheduler
+  time, and priority of pending work rather than preemption. This closes block 1 of the four
+  remaining work areas. Durable Closing overlays/repeated tenure, runtime signed repair and
+  final combined acceptance remain; Gate 4 is not complete.
+
+  `GATE4-CLOSING-OVERLAY-REVIEW.md` proposes the next core/store foundation. An explicit local
+  branch must be distinguished from an unaccepted intent left by failed ordinary Save. It uses
+  a checked known-Closing expected seed, an optional local intent-record extension, unchanged
+  combined storage ceilings, ordered exact retries and restart/reference protection. It defines
+  required implementation tests and holds annotated intents until overlay-aware transitions
+  exist. The proposal awaits user adversarial design review before implementation. It does not
+  add native commands, enable preview writes, implement replay, or resolve Unknown tenure.
+
+  Frontend integration has landed separately (`0b6e870`):
+  `studio-native.ts` and `studio-session.ts` connect the existing Flipnote surface to native
+  commands/events. UI hooks now link those seams instead of describing only fixture stores.
+  This documentation checkpoint does not independently accept the UI or prove a live two-client
+  flow. No production/frontend/test code changes; validation is documentation links and diff
+  checks. Existing Rust/native results are historical evidence, not fresh runs of this checkpoint.
+
+- **Combined actor scheduling checkpoint `6b71d96` (2026-09-13; user review PASS).**
+  The new `studio_exchange/tests/scheduling.rs` fixture joins three real MLS members and proves
+  the receiver's two peers over authenticated catch-up. The current owner has different, prepared
+  Studio Index and Registry checkpoints; another member supplies unconfirmed head/seed/signed-tail
+  history. Owner requests and inbound traffic are hidden at the test transport, without a membership
+  change. Actual spawned actors execute ordinary Ready/vault leases and detached jobs.
+
+  Three cases retain all three preview-eligible reservations: three actual native-delivery guards;
+  two guards plus a cancelled real blocking parser; or two guards plus a cancelled serialized seed
+  request in the simulated transport's outbound table. A test-only actor command observes the real
+  ready cache and probes the actual allocator; an optional barrier pauses a real parser after it
+  acquires both process permits. It does not inject cached data, selections, clocks or scheduling
+  decisions. Real deliveries retain their seeds after handoff cancellation, including after cache
+  eviction. The lower transport keeps request bytes and the original cancelled request's keepalive.
+
+  A fourth watched target produces an authenticated authoritative Hint but cannot obtain a preview
+  slot. Restoring only owner transport reachability must then install both authoritative classes in
+  at most 160 idle passes / 40 seconds of simulated time. The test checks exact distinct projections,
+  checkpoint identities, Studio Open state, Registry epoch, durable reopen, unchanged membership and
+  owner, and zero free preview slots throughout. No later user Read, unwatch, restart or release of
+  retained custodians enables progress; at least one original seed remains before its expiry.
+  Before reconnection, neither checkpoint exists in the receiver's vault.
+
+  The fixture exposed an actual pacing defect: Registry and Studio head discovery can consume the
+  provider's two-request burst, and the immediate third (provisional) request is rejected repeatedly.
+  The bounded preview queue now waits one second for the shared head rail to refill before fresh
+  discovery. It reserves no capacity during that delay; duplicate Hints preserve order/deadline,
+  and existing authoritative preparation/installation priority stays intact. No native shape changes.
+  Initial code/UI prompt: `487cb0efe822be64f40e4551bcb59a1cc451ec2c`. Its broad local `studio_`
+  run passes 165 tests with one opt-in profile ignored (873.08s). Its first native workflow caught
+  repeated Reads starting fresh page work while a preview retry waited, plus a post-abort assertion
+  racing the worker's final guard drops. Final code `6b71d963e61e8b204946a3b44e6eb4b6dadfc17d`
+  defers new same-target page work while that bounded retry is queued. The native abort test keeps
+  all held-while-paused assertions and waits up to five seconds for actual final guard release.
+
+  Removing only `head_after` pacing fails the intended `preview 0 never became ready` assertion
+  after an authenticated Hint (5.21s). Removing only queued-target deferral makes the existing
+  shared native fixture fail at real preview admission under repeated Reads (30.69s). Both
+  scripts require one executed failing test, the intended assertion and nonzero status; compile
+  failures or zero tests cannot count. Each restores original source bytes in `finally` and checks
+  exact equality. Commands: `python logs/gate4-scheduling-mutation.py` and
+  `python logs/gate4-scheduling-read-mutation.py`; logs have matching rate/read-mutation names.
+
+  Final restored-source runs use Rust 1.89, `_LINK_=/DEBUG:NONE`, `CARGO_INCREMENTAL=0`:
+  `cargo test --locked -j 4 --config 'profile.test.package.catcoms-app.debug=0' -p catcoms-app
+  --lib FILTER -- --test-threads=N`. Filters: `studio_actor_owner_return_` (3 passes, N=1, 25.21s),
+  `studio_preview_` (4, N=4, 5.04s), `studio_actor_post_succession_joiner` (4, N=2, 43.44s).
+  The combined cases install both classes after 22.75s / 33s / 33s of simulated time while all
+  three preview reservations remain occupied. `cargo test --locked -j 4 -p catcoms-app
+  --test studio_preview_fixture -- --nocapture` passes the Index/Flipnote shared fixture (2.07s).
+  `cargo clippy --locked -j 4 -p catcoms-app --lib --tests -- -D warnings` passes (34.46s).
+  Root/native formatting passes. Exact local logs are `logs/gate4-scheduling-*.log`.
+
+  [Final native validation](https://github.com/Thalpy/Mewtual/actions/runs/34784331439), job
+  `103796946869`, passes all 19 Studio tests (5.72s). It used PR merge checkout
+  `f98b51007004086790c82b34a7a2b277402fee82` for `6b71d96`. The trust-flag mutation fails at its
+  intended assertion (1.17s); removing only final preview validity returns the expired JSON and
+  fails its intended assertion (1.16s). Source restoration and both reruns pass (2.10s each).
+  [Two-client acceptance](https://github.com/Thalpy/Mewtual/actions/runs/34784331297) passes all
+  Linux/Windows/NAT jobs. These targeted results do not claim the entire PR CI is green.
+
+  NATIVE-TEST-001 and TAIL-TEST-001 remain closed. The user accepts this bounded checkpoint;
+  it does not close durable Closing overlays/repeated tenure, signed repair or full Gate 4 acceptance.
+  The core UI can proceed using `FLIPNOTE-UI-BUILDER-PROMPT.md` and `FLIPNOTE-UI-HOOKS.md`.
+  Concurrent frontend changes are owned by the UI agent and are excluded from this backend commit.
+
+- **NATIVE-TEST-001 closed; core UI hookup ready to start (2026-09-13).**
+  The user's re-review accepts `a89bde6...134394e`, resolving the latter to
+  `134394e2fe163c62a08304dfb7082588c0a3bfed`, with no further changes required. Both Index and
+  Flipnote trust-state serialization and the isolated post-conversion preview fence are covered.
+  The reviewer inspected source and the actual GitHub job logs. Those runs used the PR merge
+  checkout for `c60de4e`; `134394e` is a documentation-only update. Cargo/mutations were not
+  independently rerun locally by the reviewer. The implementation PASS stands; this closes the
+  specific test finding, not combined scheduling acceptance or Gate 4.
+
+  The UI agent can now connect core Index/Flipnote read/create/edit, PIX save/fetch, invalidation
+  events, read-only awaiting-tenure previews and recovery controls. FLIPNOTE-UI-HOOKS now includes
+  a handoff scope and corrects the old ordinary-only read example to the two-result union.
+  Existing renderer stores/types are still fixtures and need an adapter. Backend work remains
+  for durable Closing overlays/repeated tenure, signed repair, claims and sound/Music/export.
+  This turn changes documentation only; no new production or test-code checkpoint needs review.
+
+- **Actor/native implementation PASS; NATIVE-TEST-001 follow-up (2026-09-13).**
+  The user accepts `a89bde68dc1083f6eaab9b15f5cada3f1ca9d704` against
+  `2a1814efc9fa1f22aed3c7ca5bbed627ae92f5d6`, finding no blocking production defect.
+  The review inspected source and recorded execution evidence; it did not rerun Cargo/mutations.
+  NATIVE-TEST-001 (P3) correctly observes that the earlier native conversion test only reads an
+  ordinary synthetic Index and therefore cannot detect preview trust-state/final-fence mutations.
+  No production change is requested. The implementation PASS stands; this finding remains open
+  pending user re-review of the tested correction.
+
+  The follow-up shares a test-only authenticated provider/actor fixture between a lightweight
+  app integration test and native tests. Both Index and Flipnote use real head/seed/signed-tail
+  exchange, cold parsing, actor admission and native `invoke_custody`/`read_view`. Successful
+  conversion must identify `AwaitingTenureReceipt`, retain complete content and seed/tail claims,
+  emit both preview flags and omit phase/publication. The negative variant advances only the
+  injected clock after successful conversion; native must reject the now-expired preview while
+  the session, actor instance and view-request generation remain valid. Focused GitHub CI also
+  changes the trust flag and removes only the final preview-validity condition in separate
+  mutations, requires the intended assertion failures, restores source bytes and reruns tests.
+  Local shared-fixture integration passes for Index and Flipnote (2.05s):
+  `cargo test --locked -j 4 -p catcoms-app --test studio_preview_fixture -- --nocapture`.
+  Focused integration-test Clippy passes with `-D warnings`; root/native formatting, locked
+  native manifest metadata, and mutation-script syntax/unique-anchor checks pass. Local Rust
+  uses `_LINK_=/DEBUG:NONE` and `CARGO_INCREMENTAL=0`.
+  [Native validation on `c60de4e`](https://github.com/Thalpy/Mewtual/actions/runs/34779683539) passes all
+  19 Studio tests (3.95s), including both new cases for Index and Flipnote. Two-client acceptance
+  also passes. Changing only the preview trust flag to false fails at `preview trust-state flag`
+  (0.75s); removing only the final preview-delivery condition fails at
+  `expired preview escaped final native delivery fence` (0.72s). In the latter mutation native
+  returns the converted value, demonstrating that session/instance/request checks did not mask
+  the missing preview check. Each mutation restores native source byte-for-byte in `finally`.
+  Both restored regressions pass (1.45s and 1.35s); mutation command:
+  `python3 .github/scripts/check-studio-preview-mutations.py`.
+  This is test/CI/documentation work only; runtime production logic is unchanged. NATIVE-TEST-001
+  awaits user re-review. Gate 4's combined authoritative-progress regression remains open, along
+  with Closing overlays/repeated tenure, signed repair and full acceptance.
+
+- **Gate 4 actor scheduling and native previews (2026-09-13; awaiting adversarial review).**
+  Published implementation: `be03b0b`; the workflow command-scalar correction is `febbd70`.
+  [Studio native validation on `febbd70`](https://github.com/Thalpy/Mewtual/actions/runs/34767022661)
+  passes all 17 native Studio tests (4.32s), including the new view-generation and late-conversion
+  rejection cases. Two-client acceptance also passes. The existing strict Linux native job still
+  stops on unused future `security_intent.rs` APIs, as it did on the parent; full PR CI is not green.
+  A targeted mutation changed the real worker's permit binding to an immediate drop. The paused-
+  worker test then failed at `cancelled waiter cannot refund the running worker`. The source was
+  restored byte-for-byte in `finally`; all four runtime tests pass again (5.09s). Evidence is in
+  `logs/gate4-preview-worker-mutation.log` and `logs/gate4-preview-runtime-restored.log`.
+
+  The receiver now queues a bounded target retry when authoritative discovery yields a Studio
+  Hint, releases that discovery's reservation, then separately prepares provisional head/seed/tail
+  jobs. Network waits and cold parsing leave native vault custody; generation fencing discards
+  delayed results after reset or replacement. Ready previews share the original retained seed
+  slot with native delivery, release parser permits, and expire at the original discovery deadline.
+  A separate three-permit subset inside the existing four process parser permits also leaves room
+  for authoritative preparation. Duplicate triggers preserve queue order. Authoritative work has
+  priority; Registry failure yields its paired Studio target, and failed Studio discovery advances
+  watched-target rotation. Ready previews yield for authoritative refresh after 30 seconds.
+
+  `StudioReady::execute_read` returns `StudioRead::Document` or the distinct
+  `StudioRead::AwaitingTenureReceipt(StudioPreview)`. The compatibility `execute` API still returns
+  ordinary views. Native Read/List serialize `awaitingTenureReceipt: true` and `provisional: true`
+  for preview content, without a current phase/publication claim or any new confirmed flag.
+  Stored sources take precedence, including empty ones; an absent Index's synthetic empty view
+  does not mask an available preview. No hint creates an epoch source, pointer or durable journal.
+  Native view-request generations suppress stale conversion results. A cancellable five-second
+  handoff retains the actor's checked state through native conversion/final fences after the vault
+  lease is dropped. Expiry/cancellation revokes delivery but does not refund a still-owned seed.
+  Explicit UI lock signals preview reset without awaiting actor command capacity; late results
+  from the old generation are discarded. Frontend files/layout were not changed.
+
+  Local validation uses Rust 1.89 with `_LINK_=/DEBUG:NONE`, `CARGO_INCREMENTAL=0` and:
+  `cargo test --locked -j 4 --config 'profile.test.package.catcoms-app.debug=0'
+  -p catcoms-app --lib FILTER -- --test-threads=4`.
+  The 16 `studio_exchange::tests::succession::` cases pass (145.39s), including both previously
+  ignored preview cases and the two known-CID PIX fetch/reopen cases. Seven
+  `studio_exchange::tests::unopened::` cases pass (72.91s); four
+  `studio::receiver::catchup::tests` pass (37.11s). After adding the reset fence, all four
+  `studio_actor_post_succession_joiner_` cases pass again (24.02s), including clearing an actual
+  actor preview before the next read. Four `studio_preview_` runtime/custody tests pass (5.07s):
+  real head/seed/parse/tail/parse jobs for three ready Index/art previews; original-slot retention
+  through late native delivery and authoritative Hint release; paused actual blocking-worker
+  cancellation/expiry; handoff cancellation, timeout, seed expiry and last-copy release; and
+  absent-Index fallback with installed-source precedence. Fixture parser pools are private to
+  avoid interference from parallel actor tests; they use the same scheduling and worker code.
+  Logs: `logs/gate4-preview-{succession,unopened,catchup,newcomers,runtime}-final.log`.
+  App/sync library/test Clippy and root/native formatting pass.
+
+  Local native Cargo checking stopped before compilation because uncached crates (including
+  `image`) could not be fetched through the restricted network. `.github/workflows/studio-native.yml`
+  runs native Studio regressions on GitHub independently of frontend packaging/strict lint gating;
+  it preserves the existing CI workflow. The previous head's strict CI already failed on the
+  app queue-kind test and unused future APIs in `security_intent.rs`; no full-CI pass is claimed.
+  Native execution status belongs to that workflow, not the local app results above.
+
+  This is meaningful block 1 implementation, not Gate 4 completion. The combined regression with
+  an owner becoming reachable without MLS churn and competing authoritative Studio/Registry
+  installations under three preview/cancelled-owner slots still needs completion. Durable Closing
+  overlays/repeated-tenure evidence, runtime signed repair and combined gate acceptance remain.
+  The next review should focus on the actor/native handoff, current-scope and generation fencing,
+  capacity lifetime, scheduling priority, trust-state serialization and the acceptance assertions.
+
+
+- **TAIL-TEST-001 closed; actor/native preview integration in progress (2026-09-13).**
+  The user's re-review passes `2a1814efc9fa1f22aed3c7ca5bbed627ae92f5d6` against
+  `47bf09860accb3e8c2bbba5eb72d2b4d8d05d26c`, with no further changes required.
+  The reviewer inspected the fixture and recorded validation, without rerunning Cargo or the
+  mutation. This closes the test finding only. Work now continues on scheduling and native
+  previews; Gate 4 remains open.
+
+- **Gate 4 signed-tail review and TAIL-TEST-001 (2026-09-13).** The user-provided review accepts
+  `47bf09860accb3e8c2bbba5eb72d2b4d8d05d26c` against `b3e54dc493d46ea7663533244561ababfc569ad4`
+  with no blocking production defect. The previous canonical-encoding P3 is closed. The reviewer
+  inspected source without running Cargo/mutations; aggregate traffic guards were accepted by
+  inspection, not by tests independently driving every counter to its limit.
+  TAIL-TEST-001 (P3) correctly found that the old inner-document fixture encrypted with B's key
+  before changing outer routing to A, so decryption failed before the intended comparison.
+  The misleading case is removed from the generic error matrix. A dedicated test now covers
+  Index and Flipnote with a correctly signed B operation manually padded/encrypted under A's
+  key and valid outer A routing. It first proves successful decryption, decoded-operation
+  equality, signature validity and the differing inner ID, then requires `EpochScope` directly
+  from `prepare_tail`. This correction changes tests/docs only. The bounded implementation's
+  PASS stands; it does not extend to actor/native integration or Gate 4 completion.
+
+  Validation with the existing environment (`_LINK_=/DEBUG:NONE`, `CARGO_INCREMENTAL=0`):
+  `cargo test --locked -j 4 --config 'profile.test.package.catcoms-replication.debug=0'
+  -p catcoms-replication --lib provisional_tail_rejects_inner_document -- --test-threads=1`
+  passes for both targets (one test, 0.26s; `logs/gate4-tail-test-001.log`). Temporarily replacing
+  only `if op.doc_type != doc_type || op.doc_id != self.doc_id` with the type-only check makes
+  the specific preparation assertion fail (0.14s; `logs/gate4-tail-test-001-mutation.log`).
+  The production file is restored byte-for-byte in `finally`. The restored `studio::provisional`
+  filter passes all six tests (1.02s; `logs/gate4-tail-test-001-restored.log`). Root formatting
+  and replication library/test Clippy pass. No sync/app suite rerun or packaging is claimed for
+  this test-only follow-up. Remaining block 1 work is actor scheduling, parser permits/fairness,
+  periodic revalidation and native preview delivery; the other three blocks remain open.
+
+- **Gate 4 signed-tail checkpoint (`47bf098`, 2026-09-13; bounded implementation passed review).** Continued the first
+  of the four remaining blocks. Distinct sync/app tail types consume an unconfirmed seed and
+  retain its original watch/attempt/member/provider/mount/server scope, fixed lifetime and seed
+  reservation through authenticated page I/O, detached typed parsing and scoped inspection.
+  The shared page transport adds a distinct unconfirmed binding and a lower-transport seed
+  keepalive; ordinary Studio and Registry framing/completion remain separate. The parsed graph
+  stays private and never becomes an EncryptedDoc, checkpoint origin, epoch gate or receipt
+  capability. Current author keys/signatures, scope, actor, seed ancestry, typed semantics and
+  domain markers are checked, with bounded pages, aggregate traffic/content and existing exact
+  checkpoint/recovery preflight. A failed page consumes its candidate. `tail_complete()` marks
+  a finite provider prefix only. No canonical source, pointer or journal is written by these
+  adapters, and ordinary reads/Apply remain unchanged. UI implementation remains user-owned.
+  The P3 canonical-encoding follow-up is also complete: both target schemas accept the alternate
+  raw-valid ordering before the final comparison rejects it; removing that comparison fails
+  the regression, and byte-restored source passes.
+
+  Local validation uses Rust 1.89 / the existing Build Tools, without new installs or packaging:
+  `PATH=C:\Users\phaso\.cargo\bin;%PATH%`, `_LINK_=/DEBUG:NONE`, `CARGO_INCREMENTAL=0`.
+  Run `cargo test --locked -j 4 --config 'profile.test.package.<package>.debug=0'
+  -p <package> --lib <filter> -- --test-threads=4` with:
+  replication / `studio::provisional` (5 pass, 1.16s), sync / `registry_seed` (35 pass, 6.40s),
+  sync / `registry_catchup` (13 pass, 2.38s), app / `studio_provisional_tail` (2 pass, 20.89s).
+  These are 55 focused tests, including 12 new tests: P3 plus four core tail, five sync tail
+  and two app tail cases. The real multi-page test covers Index and Flipnote fixed-prefix
+  service; app cases preserve full ordinary views, refused-Apply behavior and document/journal
+  absence after vault reopen. Lifecycle matrices cover completion and detached preparation/use.
+  `cargo clippy --locked -j 4 -p catcoms-replication -p catcoms-sync -p catcoms-app --lib --tests
+  -- -D warnings` and root formatting pass. Logs are `logs/gate4-preview-tail-{core,app,
+  seed-regressions,page-regressions,clippy}.log`.
+
+  Mutation harness: `logs/gate4-preview-tail-mutations.ps1`; assertions reject omitted current
+  membership checking, omitted inner signature verification, omitted post-parse expiry and lost
+  lower-transport seed custody. Every source is restored byte-for-byte in `finally`, followed
+  by the focused core/sync tail checks. P3's separate mutation/restored evidence is in
+  `logs/gate4-preview-canonical-order-{mutation,restored}.log`. These deliberate failures do
+  not represent failures on the restored implementation.
+
+  This is a review boundary before actor/native integration, not completion of block 1.
+  Scheduling, shared process worker permits/fairness, authoritative progress under three held
+  preview slots, periodic revalidation and native delivery fences remain pending. The two
+  newcomer preview cases remain ignored; no new run or pass is claimed. The other three blocks
+  remain Closing overlays/repeated-owner tenure, runtime signed repair and combined Gate 4
+  acceptance. See `logs/gate4-pending-reviews.md` for the published SHA and copyable request.
+
+- **Gate 4 seed review closure and progress (2026-09-13).** The user-provided review accepts
+  `b3e54dc` against `2f5a8a0` with no blocking implementation defect or required production
+  change. The reviewer inspected source and did not run Cargo or mutations. Its P3 coverage
+  follow-up was to independently challenge the canonical re-encoding comparison with a
+  correctly signed/hash-bound seed whose deterministic actor and complete typed schema are
+  valid, but whose root operations use a different order from the canonical writer. First
+  establish raw-change and typed-schema acceptance, then require provisional parsing to reject
+  it; removing the final comparison should make this regression fail. The earlier root fixture
+  fails earlier schema validation and does not isolate this check. This follow-up is completed
+  in the signed-tail entry above and did not block acceptance of the committed parser.
+  Gate 4 still requires substantial integration: actor scheduling, authenticated tails and
+  native newcomer previews with lifecycle/capacity/fairness evidence; persisted Closing overlays
+  and repeated-owner tenure handling; runtime signed fault/repair issuance, application and
+  distribution; then combined gate scenarios and final review. The reviewed rotation/recovery,
+  takeover/interruption and provisional discovery/seed foundations are complete at their stated
+  boundaries. Gate 4 is not yet at final acceptance, and commit counts are not a completion percentage.
+
+- **Gate 4 provisional seed checkpoint (`b3e54dc`, 2026-09-13; user review passed).** The user review
+  passes `0b32bad` against `1c90c41` and `2f5a8a0` against `0b32bad`, with no required code changes.
+  The reviewer inspected source and did not execute Rust tests. The suggested non-blocking
+  deadline regression now delays head completion to T+9s, allows inspection at T+59.999s and
+  rejects it at T+60s. Its deadline-reset mutation is caught. Future scheduling must coordinate authoritative
+  and provisional heads: a newer preparation of either class supersedes an in-flight head for
+  the same target, although it cannot revoke an already completed owner selection.
+  The current slice connects one-shot provisional seed transport and separate cold typed
+  validation. Consuming the opaque hint pins its member provider and preserves the original
+  60-second candidate expiry and capacity. The authoritative and provisional paths share
+  request cancellation, outbound slots, signed response authentication and bounded AEAD framing;
+  the response still must complete within its 10-second request deadline. Parsing verifies the
+  receipt's self-declared signature and bounded exact raw seed hash/actor/encoding, then typed
+  Index/Flipnote scope, channel/schema and byte-identical compact encoding. No network receipt
+  goes through vault restoration or produces VerifiedReceipt/VerifiedCheckpoint authority.
+  The separate unconfirmed projection retains claimed authorship without proving it. Preparation
+  owns raw bytes and capacity outside sync/store borrows; completion and each use recheck original
+  watch/attempt/member/endpoint/instance, with app mount/server/channel checks on top.
+  These direct adapters do not schedule actor workers or deliver native previews. Future worker
+  permits must survive cancellation independently of the retained seed slot; fairness and
+  competing Studio/Registry installation under preview pressure remain unproved. Authenticated
+  tails, delivery generations, overlays, tenure/repair work and full Gate 4 remain open.
+  Four app provisional tests pass (two new, including sixteen seed lifecycle combinations;
+  `logs/gate4-provisional-seed-app-final.log`, 22.34 seconds). They compare the complete ordinary Read
+  result and the absent Studio/Registry sources and owner/intent/recovery journals before/after
+  parsing, inspection and reopen. An absent Index's existing empty epoch-zero Read is preserved;
+  an absent Flipnote still reads None. A draft assertion incorrectly expected None for both and
+  was corrected without changing production logic. The raw/parsed holders and the existing
+  authoritative RegistrySeedFetch declare capacity last so field destruction frees content
+  before returning the slot, including an off-thread drop or unwind.
+  Final focused suites pass: sync `registry_seed::` 30 (six new, 4.54s), `receipt_head::` 25
+  (one new, 2.49s), replication `checkpoint` 10 (44.80s) and `receipt` 12 (6.11s), app
+  `studio_provisional` 4 and `studio_discovery` 7 (14.16s). The new seed tests include nonempty
+  Index/Flipnote content delivered by a proven non-owner, authenticated malformed receipt/raw
+  seed cases, original-deadline checks before/after parsing, lifecycle revocation at completion
+  and ready use, and cancellation/preparation/result custody with reserved authoritative capacity.
+  Three deliberate mutations are killed at assertions: resetting the hint deadline at completion
+  (0.28s), omitting the receipt self-signature (0.42s), and donating an unrelated lower-transport
+  capacity token (0.35s). Every source was restored byte-for-byte with SHA-256 verification by
+  `logs/gate4-provisional-seed-mutations.ps1`; logs use the `gate4-provisional-seed-mutation-` prefix.
+  Root formatting and replication/sync/app library/test Clippy pass (58.93s). A final fixture
+  refinement gives the wrong-actor case a valid typed schema; its focused rerun and sync Clippy
+  are recorded separately in `gate4-provisional-seed-negative-final.log` and
+  `gate4-provisional-seed-sync-clippy-final.log`.
+  Test commands use `cargo test --locked -j 4 --config 'profile.test.package.<crate>.debug=0'
+  -p <crate> --lib <filter> -- --test-threads=4` with the named crate/filter (the final negative
+  case uses one thread). Clippy uses `cargo clippy --locked -j 4 -p catcoms-replication
+  -p catcoms-sync -p catcoms-app --lib --tests -- -D warnings`; format uses
+  `cargo fmt --all -- --check`. All commands set process-only `CARGO_INCREMENTAL=0` and
+  `_LINK_=/DEBUG:NONE`. No dependency, build profile, installation or native/UI contract changed.
+  Before editing, obsolete generated `target/debug/deps/*.rcgu.o` files were removed after
+  verifying their exact workspace paths and absence of compiler processes, freeing about 1.2GB.
+  The two unfinished newcomer preview cases remain ignored and were not re-run in this slice.
+
+- **Gate 4 successor interruption acceptance (`2f5a8a0`, 2026-09-13; user review passed).** Remote branch
+  `Create-suite-2` now contains exact local discovery commit `0b32bad`; the earlier publishing
+  block is resolved. Its adversarial review has been requested from the user with a copyable
+  message; the subsequent review passes both checkpoints. Independent work extends the accepted
+  succession harness with real actor I/O interruptions before/after recovery and successor
+  writes. Four new tests cover eight Index/Flipnote scenarios with an installed epoch-one
+  old-owner checkpoint and a later Closing source. Only old history and the observed MLS
+  transition are fixtures; the actor constructs the successor's receipt and performs each
+  challenged write. The one-shot failure is scoped to a target and physical store, compiled
+  only under `cfg(test)`, and creates no receipt or source. It either returns an I/O error
+  before the chosen write or completes the real atomic write and then returns that error.
+  Immediate checks require the exact durable prefix: pending receipt/encoded close, untouched
+  frozen history until successor replacement, and full typed recovery before any successor
+  write. The actor/store are dropped and reopened; ordinary Read and idle passes must finish
+  that same decision, local publication and Registry pointer. The accepted harness also checks
+  full recovery, another fresh actor's edit and durable reopen. No fake actor completion,
+  replacement receipt or warm-store transfer is injected. This models I/O error plus loss of
+  volatile state, not process-abort or power-loss behavior.
+  The initial four-test run passes all eight cases (70.25 seconds;
+  `logs/gate4-successor-interruption-cases.log`). Two deliberate production mutations fail:
+  suppressing adoption recovery fails the pre-successor retained-snapshot assertion (27.23s),
+  and dropping the pending-owner retry fails local publication after a completed successor
+  write (61.37s). Both source files were restored byte-for-byte with SHA-256 verification;
+  the script/logs are `logs/gate4-successor-interruption-mutations.ps1` and
+  `logs/gate4-successor-interruption-mutation-*.log`. On restored source, filter
+  `studio_exchange::tests::succession` passes 14 tests with the two unfinished preview cases
+  still ignored (134.26 seconds; `logs/gate4-successor-interruption-succession-final.log`).
+  The original eight accepted succession cases and both known-CID newcomer cases still pass.
+  Filter `studio_frozen_owner_store` with `-- --test-threads=3 --nocapture` passes all three
+  existing store tests, including the full frozen-takeover write-failure matrix (411.01 seconds;
+  `logs/gate4-successor-interruption-store-final.log`). Total restored-source validation:
+  17 passes, four new tests/eight new interruption scenarios, and two ignored preview cases.
+  Root formatting and `cargo clippy --locked -j 4 -p catcoms-app --lib --tests -- -D warnings`
+  pass (36.37 seconds; `logs/gate4-successor-interruption-clippy.log`).
+  All app test commands use `cargo test --locked -j 4
+  --config 'profile.test.package.catcoms-app.debug=0' -p catcoms-app --lib` with the indicated
+  filter and `-- --test-threads=4 --nocapture` unless noted above. The initial compile ran out of disk while
+  writing Rust's query cache; only the verified generated `target/debug/incremental` directory
+  was removed. These runs set process-only `CARGO_INCREMENTAL=0` and `_LINK_=/DEBUG:NONE`.
+  No repository build profile, toolchain installation or dependency changed.
+  Direct A-to-B-to-A through rejoining encounters the already documented Unknown-tenure
+  dependency; neither the Welcome nor the old owner's reused key establishes its new tenure.
+  No authority inference or native/UI contract change is introduced.
+
+- **Gate 4 provisional head discovery (`0b32bad`, 2026-09-12; user review passed on 2026-09-13).**
+  The user accepted `1c90c41`'s allocation foundation without requested changes; the reviewer
+  inspected source and did not run Cargo. The next sync/app slice uses that quota for real
+  provisional head requests and opaque, volatile candidate metadata. Shared response
+  authentication remains separate from current-owner selection: provisional completion cannot
+  mint/supersede a selection. Proof/repair/absent-receipt answers return no candidate and release
+  custody, requiring the future scheduler's normal fresh authoritative retry. Receipt signature
+  and historical/current ownership claims remain unverified; no seed or preview is exposed.
+  The fixed 60-second candidate lifetime starts at preparation; head completion keeps its
+  10-second deadline. Watch/attempt generations, membership, endpoint and sync-instance checks
+  fence completion/use; any newer same-target head attempt invalidates the candidate. App
+  wrappers check mount/server/channel and detach without retaining Server/store borrows.
+  Tests cover actual authenticated member delivery, hostile signed responses, stale generations
+  and capacity held by unpolled/completed/candidate/cancelled transport owners. Preview parsing,
+  actor scheduling/fairness and native delivery remain pending. No UI/native contract change.
+  These adapters are currently exercised directly, not scheduled by the actor receiver.
+  Restored-source validation uses `cargo test --locked -j 4` with
+  `--config 'profile.test.package.catcoms-sync.debug=0' -p catcoms-sync --lib`:
+  `receipt_head:: -- --test-threads=4 --nocapture` passes 24 (7 new; 2.24 seconds;
+  `logs/gate4-provisional-discovery-head-final.log`), and `registry_seed::` with the same test
+  flags passes 24 (2.79 seconds; `logs/gate4-provisional-discovery-seed-regression.log`).
+  App runs use `--config 'profile.test.package.catcoms-app.debug=0' -p catcoms-app --lib`:
+  `studio_provisional_discovery -- --test-threads=2 --nocapture` passes 2 (9.57 seconds;
+  `logs/gate4-provisional-discovery-app-final.log`); `studio_discovery` with 4 threads passes 7
+  (10.49 seconds; `logs/gate4-provisional-discovery-app-regression.log`);
+  `studio_exchange::tests::succession` with 4 threads passes 10 with 2 ignored preview cases
+  (70.57 seconds; `logs/gate4-provisional-discovery-succession.log`);
+  `studio_actors_new_member` with 2 threads passes 2 (4.15 seconds;
+  `logs/gate4-provisional-discovery-new-member.log`). Total: 69 passes, 9 new tests.
+  Three temporary mutations fail at their intended assertions: bypassing response signature
+  verification, accepting a same-key stale-watch candidate and donating an unaccounted token to
+  lower transport. Source restoration was checked byte-for-byte;
+  `logs/gate4-provisional-discovery-mutation-*.log` record the failures. Explicit preview-gap
+  tests were not re-run; their last execution remains `7393165`. The documented process-only
+  `$env:_LINK_ = '/DEBUG:NONE'` workaround is still used; no toolchain/build-profile changes.
+  Root formatting and `cargo clippy --locked -j 4 -p catcoms-sync -p catcoms-app --lib --tests
+  -- -D warnings` pass (18.69 seconds; `logs/gate4-provisional-discovery-clippy.log`).
+  Full Gate 4 acceptance and the competing-class actor capacity/fairness regression remain open.
+
+- **Gate 4 provisional capacity foundation (`1c90c41`, 2026-09-12; user review passed).**
+  The user re-review of `7393165` passes and closes TEST-001/TEST-002 and PR-001 as a design
+  finding, with no further closure changes requested. The reviewer inspected source without
+  running Cargo. The accepted proposal now proceeds with the shared capacity prerequisite:
+  `registry_seed/capacity.rs` supplies an opaque three-of-four provisional memory reservation,
+  and existing authoritative discovery allocates from that same four-slot pool. It grants no
+  hint, seed or installation authority. Provisional fetching/parsing, scheduler fairness,
+  lifecycle validity and native preview reads remain unimplemented. Tests distinguish allocator
+  keepalive modelling from the existing real authenticated head/seed and transport paths.
+  The full competing-class actor progress regression remains pending; no native/UI changes.
+  The review's remaining obligations are retained: explicit unconfirmed-history assertions,
+  same-key rewatch, membership changes during parsing and late native delivery. Refused Apply
+  preserves specified document/journal state but may persist the app's server snapshot.
+  Validation on restored source: `cargo test --locked -j 4
+  --config 'profile.test.package.catcoms-sync.debug=0' -p catcoms-sync --lib registry_seed::
+  -- --test-threads=4 --nocapture` passes all 24 tests (6 new; 2.92 seconds;
+  `logs/gate4-provisional-capacity-sync-final.log`). The app command uses
+  `--config 'profile.test.package.catcoms-app.debug=0' -p catcoms-app --lib`:
+  `studio_exchange::tests::succession -- --test-threads=4 --nocapture` passes 10 with 2 preview
+  cases still ignored (70.16 seconds; `logs/gate4-provisional-capacity-succession.log`), and
+  `studio_actors_new_member -- --test-threads=2 --nocapture` passes both (4.32 seconds;
+  `logs/gate4-provisional-capacity-new-member.log`). The explicit preview failures were not
+  re-run for this allocator-only change; their last execution is recorded under `7393165`.
+  Two temporary mutations are killed at the expected assertions: permitting a fourth preview
+  reservation and bypassing shared accounting for authoritative discovery. Sources were restored
+  byte-for-byte; `logs/gate4-provisional-capacity-mutation-*.log` record the failures (0.10/0.15s).
+  Local execution also needed test-process-only `$env:_LINK_ = '/DEBUG:NONE'` after the Windows
+  linker reported LNK1318/PDB LIMIT. [MSVC documents this option](https://learn.microsoft.com/en-us/cpp/build/reference/debug-generate-debug-info?view=msvc-170)
+  as disabling PDB generation. Disk-full attempts were resolved by deleting only generated PDBs
+  and the verified Rust incremental cache. A disk-full documentation write truncated this file;
+  it was restored exactly from HEAD and this entry reapplied before diff verification.
+  No dependency, repository build-profile or installed-toolchain change was required.
+  Root formatting and `cargo clippy --locked -j 4 -p catcoms-sync -p catcoms-app --lib --tests
+  -- -D warnings` pass (28.74 seconds; `logs/gate4-provisional-capacity-clippy.log`).
+  Full-gate acceptance and the actor capacity/fairness regression are not claimed.
+
+- **Gate 4 joining review revision (`7393165`, 2026-09-12; user re-review passed).** The user accepted
+  `48fcc2e`'s ownership-transition and known-CID byte-persistence claims. PR-001 requests changes
+  to the proposed preview policy: all four retained slots could be filled by previews whose
+  replacement needed one of those same slots before even sending a head query. The revised
+  [proposal](GATE4-PROVISIONAL-READ-REVIEW.md) caps provisional custody at three of the four
+  shared slots, reserves authoritative Studio/Registry progress and separates eviction from
+  successful authoritative replacement. It retains resource keepalives and explicit generation
+  checks, including same-key rewatch, membership changes during parsing and late delivery.
+  The requested capacity/lifecycle runtime regressions are obligations, not claimed passes.
+  TEST-001 now checks captured Registry state and empty Studio/Registry owner, intent and
+  recovery journals after discovery, Read, refused Apply and reopen. The refusal must be the
+  exact retired-epoch error, with no orphan intent or staged recovery. TEST-002 adds a bounded
+  `cfg(test)` watch observation at actual authenticated Studio Hint completion, requiring the
+  expected target, peer, full provider identity and exact receipt without current-owner proof.
+  It never injects a hint or manufactures a selection. No production runtime semantics, native
+  command, event or UI layout changes. Preview reading/editing, Unknown-tenure evidence,
+  repeated-owner scenarios, interruption, signed repair and full Gate 4 acceptance remain open.
+  Final validation on the restored tree uses
+  `cargo test --locked -j 4 --config 'profile.test.package.catcoms-app.debug=0' -p catcoms-app --lib`:
+  filter `studio_exchange::tests::succession -- --test-threads=4 --nocapture` passes 10 with the
+  2 explicit preview cases ignored (78.14 seconds; `logs/gate4-joining-review-final-succession.log`);
+  filter `studio_actors_new_member -- --test-threads=2 --nocapture` passes both ordinary
+  Index/Flipnote discovery/install/tail regressions (4.31 seconds;
+  `logs/gate4-joining-review-new-member-regression.log`). Explicitly enabling
+  `studio_actor_post_succession_joiner_reads_ -- --ignored --test-threads=2 --nocapture` still
+  fails both at the missing-preview assertion, now AFTER exact authenticated Hint observation,
+  Registry/Read/refused-Apply guards and byte persistence checks
+  (`logs/gate4-joining-review-provisional-gap.log`). Three temporary counterexamples each failed
+  at the intended strengthened guard: dropped Studio head requests, an injected signed Registry
+  pointer write and persisting an intent before the correct retired-epoch refusal. Each modified
+  source was restored byte-for-byte; logs are `logs/gate4-joining-review-mutation-*.log`.
+  Root formatting and `cargo clippy --locked -j 4 -p catcoms-app --lib --tests -- -D warnings`
+  pass, covering both production-library and test configurations
+  (`logs/gate4-joining-review-clippy.log`). No fresh full-gate suite or capacity-runtime pass is claimed.
+
+- **Gate 4 post-succession joining / PIX checkpoint (`48fcc2e`, 2026-09-12;
+  ownership/known-CID evidence accepted; original proposal requested changes).**
+  `studio_exchange/tests/succession/joining.rs` adds two availability cases and two explicitly
+  ignored provisional-read acceptance cases. A real frame and its PIX bytes reach Bob before
+  takeover; Bob's actor issues the successor receipt/pointer and saves an independently checked
+  tail. The provider then restarts with sealed source/receipt/pointer/tail/pixels intact. A fresh
+  invitee joins after that restart, on a new network without Alice. This recycles Alice's low leaf
+  and changes ownership again: the newcomer becomes owner with Unknown tenure, while Bob
+  independently observes that transition. No authority is manufactured from the old receipt.
+  The known-CID tests fetch exact PIX bytes through the actor and again from the newcomer's
+  reopened vault with no provider connected, while checking that an unconfirmed hint did not
+  install a canonical Studio source or write owner/intent/recovery journals. The CID comes from
+  the fixture; successful byte fetch is not discovery or a usable Flipnote.
+  The provisional metadata read is a reproduced gap: Studio's `Hint` branch does not load the
+  hinted history, so Read returns None. The opt-in acceptance cases must remain visibly pending.
+  [The concrete next runtime proposal](GATE4-PROVISIONAL-READ-REVIEW.md) awaits user-provided
+  adversarial review; it adds a bounded, separately typed, unconfirmed read fallback. Durable
+  overlays and independent tenure evidence remain subsequent integration work. No production
+  code, native command or UI layout changes in this checkpoint. Gate 4 remains incomplete.
+  Local default-debug compilation twice exhausted disk space. Tests use a command-line-only
+  `--config 'profile.test.package.catcoms-app.debug=0'` override; build profiles are unchanged.
+  Final validation: `cargo test --locked -j 4 --config 'profile.test.package.catcoms-app.debug=0'
+  -p catcoms-app --lib studio_actor_post_succession_joiner -- --test-threads=2 --nocapture`
+  passes 2, ignores the 2 explicitly unfinished acceptance cases (23.48 seconds;
+  `logs/gate4-succession-joining-tests.log`). The same command with filter `studio_actor_new_owner`
+  and `--test-threads=4` passes all 8 accepted cases (52.92 seconds;
+  `logs/gate4-succession-joining-regression.log`). Explicitly running filter
+  `studio_actor_post_succession_joiner_reads_` with `--ignored --test-threads=2 --nocapture`
+  fails both at the intended missing-provisional-read assertion, after the PIX checks succeed
+  (23.70 seconds; `logs/gate4-succession-joining-provisional-gap.log`). Root formatting and
+  `cargo clippy --locked -j 4 -p catcoms-app --tests -- -D warnings` pass (9.65 seconds;
+  `logs/gate4-succession-joining-clippy.log`). Broader full-gate suites are not claimed.
+
+- **Gate 4 Index/checkpoint succession and restored-actor editing (`e3f6669`, 2026-09-12;
+  user accepted).** The matrix adds six cases to the reviewed Flipnote pair: Index
+  Open/Closing epoch-zero takeover and Index/Flipnote Open/Closing takeover of epoch one.
+  It checks inherited epoch/close/seed against the installed old-owner checkpoint and binds
+  the successor's physical document id to the newly issued receipt. Every case then restores a
+  fresh actor, saves another independently checked operation, and reopens the vault to require
+  the exact operation and pending intent with unchanged receipt/pointer. The eligible-history
+  fixture now supports typed Index edits; its old-owner close helper accepts the previous
+  receipt for same-tenure preparation. New-owner decisions still come from the runtime, and the
+  staged-Remove fixture restores strict single-committer policy before Studio runs. Production
+  code and native hooks are unchanged. All eight cases pass with
+  `cargo test --locked -j 4 -p catcoms-app --lib studio_actor_new_owner -- --test-threads=4 --nocapture`
+  (51.29 seconds; `logs/gate4-succession-expanded-tests.log`). The shared-fixture solo three-rotation
+  test also passes (35.66 seconds; `logs/gate4-succession-expanded-solo.log`). Root formatting and
+  `cargo clippy --locked -j 4 -p catcoms-app --tests -- -D warnings` pass
+  (`logs/gate4-succession-expanded-clippy.log`). Broader suites were not repeated for this test-only
+  slice; the previous ambient-check limitation remains below. User-provided review passed.
+  This does not cover repeated owner changes, post-succession joining/PIX availability or
+  interrupted successor installation. Signed repair and full Gate 4 acceptance remain open.
+
+- **Gate 4 succession assertion review (2026-09-12; SUC-001/SUC-002 closed).**
+  The user-provided re-review accepts `5d65998` and requests no further code changes for either
+  finding. This closes the narrow test slice; broader Gate 4 implementation and acceptance remain open.
+  The user-provided source review of `d7ea514` requested SUC-001 (Open expected projection could
+  accept a no-op Save) and SUC-002 (Closing accepted any error without immediate source/intent
+  comparison). The revised tests independently check the requested title and its author/nonce/id,
+  the durable exact operation and pending intent before rotation, and the precise Closing refusal
+  with unchanged physical document id, phase, operation count, projection and intent journal.
+  Production code and the transition/close fixtures are unchanged. Both revised cases passed.
+  Three temporary mutations failed at the intended new assertions: Open Apply replaced by Read,
+  an unrelated Closing error, and validation delayed until after intent persistence. The runner
+  restored both source files byte-for-byte (`logs/gate4-succession-mutation-*.log`). The final
+  `cargo test --locked -j 4 -p catcoms-app --lib studio_actor_new_owner -- --nocapture` run passes
+  both cases (25.07 seconds; `logs/gate4-succession-review-final-tests.log`). Root formatting and
+  `cargo clippy --locked -j 4 -p catcoms-app --tests -- -D warnings` pass
+  (`logs/gate4-succession-review-clippy.log`). Two compile attempts exhausted disk space before
+  tests; clearing only the generated Rust incremental cache allowed the reruns. Broader suites
+  were not repeated for this assertion-only correction; their prior results remain below.
+  The reviewer did not run Cargo; the prior local passes below are author evidence. Restart
+  coverage is an observed transition plus old-owner Open/Closing source, followed by completed
+  takeover and orderly shutdown/reopen. It does not interrupt the successor installation or
+  edit through a freshly restored successor actor, and proves no new multi-peer convergence.
+  The correction checkpoint is on `origin/Create-suite-2`. Next work is the remaining runtime
+  succession coverage, then signed fault/repair integration and full-gate acceptance.
+
+- **Gate 4 audit and actor succession tests (`d7ea514`, 2026-09-12; initial evidence).** The backend
+  checklist now records the omitted `dba52e5` frozen-owner core/store work and distinguishes
+  connected rotation/recovery from runtime succession, signed repair and full-gate acceptance.
+  `studio_exchange/tests/succession.rs` adds two passing actor Ready/lease/idle-worker cases:
+  an Open art source remains editable after an observed owner transition/restart, and an old
+  owner's Closing source stays closed to Save until takeover preserves it in recovery. Both
+  require a current-owner receipt, Open checkpoint, Registry pointer and durable reopen. Reuses
+  the eligible-history fixture plus a test-only helper preparing the actual old-owner close.
+  The staged-Remove fixture restores strict single-committer configuration before running Studio;
+  no product owner-transfer policy, native command or UI component changes. Fixtures are
+  header-only Flipnotes; post-succession PIX availability is not proved. Index, nonzero
+  inheritance, A-to-B-to-A, post-succession newcomer and signed repair remain open.
+  Focused command: `cargo test --locked -j 4 -p catcoms-app --lib studio_actor_new_owner -- --nocapture`
+  (2 passed; `logs/gate4-succession-focused.log`). The first fixture attempt correctly hit the
+  per-author cap when authored by a non-owner; it now uses the old owner's eligible history.
+  Frontend tests pass 1,189/1,189; root formatting and app-test Clippy with warnings denied pass
+  (`logs/gate4-succession-clippy.log`). Broader command:
+  `cargo test --locked -j 4 -p catcoms-app --lib studio_ -- --test-threads=4`
+  passes 138 tests, with one existing opt-in profiling test ignored (710.89 seconds;
+  `logs/gate4-audit-studio-tests.log`).
+  Ambient check fails on existing native `media_decode.rs` uses of `Instant::now()` at 333,
+  426, 444 and 504; no full-suite or gate-completion claim. This computer was initially missing
+  Rust/MSVC; Rust 1.89.0, rustfmt, Clippy and standalone Build Tools/SDK are now installed, with
+  no Visual Studio IDE. The initial Rust attempt failed before tests because the linker was
+  not yet installed. Application builds are left to GitHub per the user's direction.
+  The user supplies the adversarial review for this slice. At the user's request, commit and
+  push review checkpoints to `origin/Create-suite-2` when requesting review; a review request
+  no longer waits on an uncommitted local diff. Review findings still gate the next slice.
+
+- **The membership chain a member cannot complete is now typed and reported (`ed7f7d6`,
+  `f61e5dc`, `6576a46`, 2026-09-10).** A member behind by more than every reached peer's
+  retained `commit_log` used to be indistinguishable from an up-to-date one: both bands of the
+  dead zone (buffered-but-unchainable inside `max_commit_gap`, dropped outright past it)
+  returned `Verified { applied: 0 }`, which is byte-for-byte what an honest peer with nothing
+  to send returns, and the drain read that as "closed" and retired the recovery. Past
+  `max_commit_gap` nothing was logged at all. `CommitCatchupOutcome` now distinguishes
+  `Verified`/`Empty`/`Unanswered`/`Stranded { lowest_available }`; a `Stranded` answer no
+  longer closes the task, so the drain marks that source and re-queues for one whose log
+  reaches further back. `note_membership_chain_gap` keeps the best (lowest) offer seen at this
+  epoch in `MembershipChainGap { current_epoch, lowest_available, observed_at_ms }`, counts
+  `SyncStats::commit_chain_gaps_observed` once per epoch, warns, and exposes
+  `ChannelSync::membership_chain_gap()`; the record is filtered on read against the current
+  epoch, so any repair route retires it without knowing about it. **Deliberate limit, stated
+  plainly: this is detectability only. Nothing surfaces it in the UI and there is no repair
+  path.** `f61e5dc` adds the interrupted written-through heal (a paged exchange cut mid-walk,
+  both sides writing while apart, rejoining on a hub neither used so the resume cursor is
+  necessarily foreign). It does *not* guard deduplication, despite looking as though it
+  should, and its comment now says so; what it does catch is a serving peer subtracting its
+  own frontier instead of the requester's. `docs/MESSAGE-FLOW.md` §11 carries what is left,
+  and puts surfacing the stranded chain first.
+
+- **Catch-up pages by position, so a wide frontier cannot starve a peer (`78e5135`, `e0fda1e`,
+  `3595fd9`, `ba2c410`, 2026-09-10).** `export_catchup_since` recomputed the whole difference
+  every call, so a serving peer that could only send a prefix sent the *same* prefix forever.
+  With a frontier too narrow to name everything the requester holds, that prefix is history it
+  already has and the operations it needs sit behind a wall of duplicates it can never clear:
+  a livelock, not an inefficiency. `3595fd9` pins the cost (80 concurrent writers, 64-head cap,
+  16 duplicate branches ahead of one genuinely new operation) and records the boundary that
+  keeps ordinary histories safe: below the chunk budget the answer is `UNDERSTOOD`, whose
+  handler clears the stall counter before it can increment. `e0fda1e` is the interim half:
+  `MAX_CATCHUP_SINCE_HEADS` is now **512** (the serving peer's subtraction walk is O(document)
+  regardless of head count, and a maximal frontier frames to roughly 18 KiB against the 64 KiB
+  control-request bound), test-pinned both ways so the bound was raised rather than removed.
+  `78e5135` is the actual fix: `export_catchup_page` walks the log from a caller-supplied
+  position, skips what the requester claimed, stops on a byte budget and reports where to
+  resume, sizing *before* sealing. `KIND_CATCHUP_SINCE` carries an optional trailing
+  continuation and a truncated answer returns under its own marker `CATCHUP_SINCE_PAGE` with a
+  20-byte `CatchupCursor` (16-byte per-runtime provider stamp + `u32` position). **Both wire
+  directions are additive**: a build predating paging sends no field, that frame still decodes
+  and is answered the old way, and it is never sent the new marker. The cursor is deliberately
+  *not* authenticated: a forged position can only make a server skip operations the forger then
+  does not receive, so the provider stamp is a fence against an honest cross-peer or
+  cross-restart replay, not against a liar. A round that applies nothing but advances the walk
+  no longer counts against the source.
+
+- **Jam surface: six reproduced defects (`23aa9a5`, 2026-09-10).** Take seeking was a schedule
+  and not a sound: starting at the first event past the offset dropped every note-on behind it,
+  so joining the jukebox deck mid-track gave silence for a sounding chord and then note-offs for
+  voices nobody opened. `planTakeSeek` folds earlier events into held state and `noteOn` takes an
+  optional age that back-dates the envelope origin (clamped to attack+decay); drums are
+  deliberately not revived, because a pad is a one-shot. The shared-patch drawer was keyed by
+  CID, which is a content address and not a listing id, so identical canonical patch JSON
+  collided; it is now unkeyed. SAVE ended in a slice of the last twelve, a silent FIFO wearing a
+  bound's clothes; `keepSavedPatch` refuses at the cap and says so, while overwriting a name you
+  typed still works. `jam-contract.ts` claimed to be the single source of truth for patch bounds
+  and was not (the knobs and four scopes held their own copies); `PATCH_PARAM` is that table and
+  the controls spread from it. The filter's neutral setting said OFF and claimed a bypass that
+  does not exist; the label is WIDE and the tooltip is honest, v1 renderer semantics unchanged.
+  And the editor claimed a new patch was live up to a debounce plus the announce interval before
+  it was; a LIVE/APPLYING chip derived from the published bytes (not a flag, so no failure path
+  wedges it) says which, and a discrete choice skips the slider debounce. Fifteen of fifteen new
+  guards fail when their defect is put back.
+
+- **Studio recovery hold bounded; replay made slot-order proof (`39ceb76`, 2026-09-10).** The
+  seven-day eviction grace was never enforced: `EpochRecoveryAction::AdvanceTime` had no
+  production call site, so every settlement and installation path returned `RecoveryPending` for
+  as long as a persisted warning existed, and a document needing a third recovery slot stayed
+  Closing until somebody pressed Acknowledge. `advance_due_epoch_recovery_with_writer` promotes
+  a staged version whose persisted deadline has passed, under the caller's own accounting and
+  writer custody, and writes nothing before then so idle owner passes cannot restart the grace;
+  all four paths (Studio settlement and checkpoint adoption, Registry installation and adoption)
+  share it. Acknowledge now only brings the eviction forward. Replay screened the mutable
+  register in every retained and staged version but the element *birth* only in the first version
+  found; retained slots are newest-first and the staged slot is newer while sorting last, so slot
+  order decided a safety question. `selected()` returns the provenance, `choose()` requires every
+  version carrying the envelope to agree, `agreed_predecessor()` derives the explicit after-edge
+  the same way, and disagreement becomes Manual. One element id has one register, so this is a
+  determinism fix, not a recovered wrong write. Five regressions, each confirmed to fail when its
+  guard is removed.
+
+- **`MESSAGE-FLOW.md` and the regressions it asked for (`c590005`, `55b11ff`, `fc75db7`,
+  `c8f2719`, `360031d`, 2026-09-10).** [`MESSAGE-FLOW.md`](MESSAGE-FLOW.md) traces a message end
+  to end (send, gossip, catch-up) and ranks the hazards; §10 is now a record rather than a plan
+  and §11 carries what remains. Two older claims died there: catch-up serves the whole log, so
+  relay is transitive, and long-partition routing recovery is not the liveness failure it looked
+  like (`maybe_probe_for_missed_commits` fires on every `PeerConnected` for any non-committer,
+  and `authenticate_request` binds `req_epoch` without comparing it to the server's current
+  epoch, so a stale but still rostered member is not locked out of the control plane). Three
+  regressions came out of it. `c8f2719`: six members converge, split into three isolated
+  micelles, each writes, three authors are then dropped permanently, and the parts are rejoined
+  one link at a time by members who never all meet; E still ends up holding a message authored
+  by A. A partition is not something `MemNetwork` can express, so a micelle is its own hub and a
+  member changes micelle by snapshot-and-restore, which is also the honest model: the durable
+  state survives, the neighbourhood does not. `360031d`: three clocks diverge by three days
+  behind and a year ahead; convergence stays clean, a year-ahead stamp cannot become the read
+  ceiling, and one bad clock cannot drag the group's timeline. Its fourth assertion pins a
+  cross-layer contract that was previously implicit: a healed arrival sorting before the reader's
+  mark is not counted by `unread_summary` (the native cursor rule is positional) and
+  `lateArrivals` in `apps/desktop/src/unread.ts` is what reports it; without the frontend half
+  that arrival is silently already-read.
+
+- **Frozen-owner succession, and alpha.18 (`dba52e5`, 2026-09-10).** Shared first-new-tenure
+  checks for owner takeover of an already frozen source live in
+  `crates/catcoms-replication/src/epoch/succession.rs`: `frozen_owner_inheritance` validates the
+  INSTALLED opening (never an uninstalled remote target or an old owner's journal), re-decodes
+  and vault-verifies every receipt before allocation, and permits a same-tenure call only to
+  resume the exact previously journaled decision rather than generate a replacement for a pending
+  seal. `owner_rotation_needs_adoption` is a local routing hint only; `frozen_owner_decision`
+  (Studio and Registry owner modules, both over the shared helper) repeats the authority and
+  source checks. It does not reopen a gate or choose a seed: Studio/Registry still validate their
+  own full closure, persist the exact decision, and use whole-source recovery before checkpoint
+  adoption. Version bumped **0.3.0-alpha.17 → 0.3.0-alpha.18** across `package.json`,
+  `src-tauri/Cargo.toml` and `tauri.conf.json`.
+
+- **Gate 4 recovery/replay checkpoint (2026-09-10, worktree; gate still active).** Per-item
+  Restore/Copy, separately retryable pointer restoration and actor/native settlement
+  invalidations are connected without UI edits. Exact own current-log retries survive stale
+  previews/evicted snapshots; complete projection/deletion evidence fences new edits. Create
+  now writes through the current Open Index after rotation; the actor regression passes.
+  The watched worker conservatively replays only its own durable envelopes, checks ALL retained
+  recovery selections, orders stable-id prerequisites and refuses automatic overwrite of newer
+  values. The user explicitly approved manual disposition: unsafe replay leaves pending only
+  after full-envelope recovery is re-flushed, never as receipt finality. Missing evidence stays
+  pending; the ordinary two snapshots plus staged warning bound manual recovery. Current-log
+  entries cannot use that removal path. Seven replay tests and two store-disposition tests
+  (including the recovery/ledger before/after-write crash matrix) pass. Restore app/native,
+  pointer, event-payload and lifecycle regressions pass. Read-only replay/Restore review has no
+  remaining blocker/high. Focused follow-ups: sustained-gossip replay fairness, a cold large
+  Index reference, recovery changing mid-pass and forced event backpressure.
+  Full native tests passed (207), frontend tests passed (1,144), and root fmt/Clippy passed.
+  Root full suite is still running in `logs/gate4-recovery-replay-root.log`; it exposed an
+  existing Registry error-message compatibility assertion, now fixed by preserving its original
+  receipt-specific text (not weakening the test). Final suites must run after all Gate 4 code.
+  Next: running-app owner succession and signed repair, then full-gate acceptance. Repair's
+  v2 issuer-tenure and bounded persistent loser-screening prerequisite has nine focused tests
+  plus all 25 existing epoch-close tests passing; it is not runtime repair or permission to exit
+  Fault. Logs: `gate4-replay-focused.log`, `gate4-manual-recovery-focused.log`,
+  `gate4-recovery-replay-{native,frontend}.log`, `gate4-repair-book-focused.log`,
+  `gate4-repair-epoch-close.log` under `logs/`. No canonical mockup or UI component changed.
+
+- **Gate 4 integration checkpoint, not gate completion (`cbed5b7`, 2026-09-10).** Studio now reuses the
+  existing accounted owner journal, exact-envelope intent retirement and recovery-first separate
+  successor replacement. The existing recently watched idle worker drives owner rotation,
+  installed-head availability, Registry pointer refresh and authenticated Registry open-tail
+  paging; no new finality system or mutable cache was added. Solo owner three-rotation/reopen,
+  Index/art crash boundaries, actual two-member Registry pages, per-bucket Fault isolation and
+  superseded-page rejection have focused tests. New native `studio_recovery_list/read/export/
+  acknowledge` commands share ordinary Save custody. Export is a bounded historical backup,
+  not `.pixa`, a blob archive or an import promise. All retained/staged slots validate before
+  acknowledgement, exact warning ids bind retries, and JSON/base64 conversion stays inside
+  the final UI/server generation guard. Actual Closing/Fault inspection and late lock/generation
+  regressions pass. The UI-hook guide is updated; no UI component or canonical mockup changed.
+  Read-only review's conversion-fence high and superseded Registry-page medium were fixed and
+  re-reviewed. Residual focused gaps: large Registry replacement/restart with stale prepared
+  source, and explicit actor ready-completion fairness. Corrupt live source metadata can refuse
+  recovery List, while known snapshot Read/Export remain independent of that source.
+  The first integration baseline root suite had 498 app passes, two Registry
+  joining fixture failures and nine existing ignored tests; that attempt did NOT pass.
+  Those failures were traced to ManualClock outrunning detached CPU preparation. A test-only
+  tracked-preparation barrier leaves actors runnable and changes no production deadline; all
+  six unopened fixtures then passed, as did an explicit expired-head/fresh-request regression.
+  The corrected full root rerun subsequently passed (`logs/gate4-integration-root-recheck.log`,
+  including 504 app tests). The original failure is retained here as historical evidence.
+  The baseline native suite (201), frontend suite (1,144), native check, Clippy, formatting and
+  ambient dependency check passed. Subsequent focused recovery app/native suites each passed
+  three tests. Final full suites must be rerun after the remaining Gate 4 work; no complete-gate
+  claim is made here. Logs: `logs/gate4-runtime-*.log`, `gate4-unopened-preparation.log`,
+  `gate4-registry-expired-preparation.log`, `gate4-controls-focused.log` and
+  `gate4-native-controls-focused.log` (all under `logs/`).
+  The newer entry above supersedes this checkpoint's replay/Restore/event status. Running-app
+  succession and signed repair, then acceptance/review/full verification remain. User-owned package/version edits
+  remain separate and untouched. No push destination has been assumed.
+
+- **Flipnote Gate 4 started: typed Studio owner/settlement core (`9799c6f`, 2026-09-09).** Index/art now
+  prepare and resume an exact owner close/receipt pair through existing P1 verification, then
+  prepare recovery-bound adjacent settlement and construct a separate checked successor.
+  Closure heads, not the later live projection, determine the seed. Complete author/envelopes
+  distinguish included/excluded operations; the whole restart-unit fingerprint fences plans.
+  The actual compactor decides whether even a fully included source loses evidence: deletions,
+  conflict overflow and original art insertion gaps still require recovery. Successors preserve
+  repair anti-replay bookkeeping. No new wire/vault format, store owner or native API is added.
+  Seven focused regressions cover Index/art exact resume/restart/newer edits, installed retry,
+  malformed inputs, quarantine invalidation, included deletions/conflicts, epochs above 4096 and
+  A-to-B-to-A owner tenure; existing overflow/maximal-seed tests exercise omission detection.
+  Read-only adversarial review found no remaining blocker/high/medium/low. Carry forward two
+  focused coverage cases with the store integration: a real greater-than-64-head new-decision
+  refusal and a missing-closure-head preparation refusal (public-record bounds and shared
+  validator coverage exist). Journal/recovery/intent crash tests belong at that new store path.
+  Verification passed: `cargo test --all --all-features` (including 483 app tests and 178
+  replication unit tests; existing ignored tests unchanged),
+  `cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml` (201 tests),
+  `npm.cmd --prefix apps/desktop test` (1,144 tests), `cargo fmt --all -- --check`,
+  `cargo clippy --all-targets --all-features -- -D warnings`,
+  `cargo check --manifest-path apps/desktop/src-tauri/Cargo.toml`,
+  `bash scripts/check-no-ambient.sh` and staged/unstaged diff checks. Evidence:
+  `logs/gate4-studio-owner-focused.log`, `logs/gate4-owner-root-final.log`,
+  `logs/gate4-owner-native-final.log`, `logs/gate4-owner-frontend-final.log`,
+  `logs/gate4-owner-clippy-final.log` and `logs/gate4-owner-native-check.log`.
+  An interrupted root run was rerun to completion; no test was skipped or weakened.
+  This is a core-only slice, not Gate 4 acceptance. No frontend source changed, so frontend
+  static/build and visual checks were not run; the full frontend unit suite did run.
+  Next: reuse the accounted owner journal and recovery-first installation for Studio, then
+  runtime rotation, Registry pointer/tail driving, replay/succession and recovery commands.
+  [FLIPNOTE-UI-HOOKS](FLIPNOTE-UI-HOOKS.md) is now the maintained frontend integration map:
+  actual current commands/events, lossless ids, Save/retry semantics, projection adaptation and
+  explicitly pending controls. The canonical UI remains user-owned and was not edited.
+
+- **Flipnote Gate 3 Index/art runtime integration complete (`5f24262`, 2026-09-09).** Extends
+  `b6f137b` and the existing native receiver rather than adding a second replication system.
+  Unopened saved-key service uses exact prepaid head/seed/page interests in the existing queues,
+  with original full-identity, membership, rate, expiry and owner-proof checks. Requests never
+  add/retarget UI receive watches. Local owner snapshot persistence is lifecycle-driven with
+  30-second failed-save retries. Detached Registry/Studio verification shares the existing four
+  process slots; Registry graph retention has a fixed 30-second local-clock deadline.
+  Automatic recently accessed Index/art discovery now joins through Registry checkpoint, current
+  owner Studio head, expected seed, recovery-first install and saved open-tail pages. Original
+  watch generations fence late work. Closing survives expired selection and Server/vault restart;
+  ordinary Read restores the volatile watch, then retries need no further action. Associated
+  large Registry records use detached footprint preparation before accounting; exact bootstrap
+  installation results and checked prepared sources warm the same full-wrapper inventory LRU.
+  Unrelated Registry writes retain their cold behavior. Adoption of an already-large
+  local Registry is deferred, not permission to treat its pointer projection as current.
+  Tests include actual actors whose new device joins after the fixture receipt (Index and art),
+  unopened provider restart, Closing restart, cancellation/debt, failed owner-snapshot retry and
+  four idle Registry caches releasing slots for a fifth Studio source. A larger saved Registry
+  test also covers a competing bucket request during local preparation without pausing joining.
+  The first root run caught seven compatibility regressions in cache behavior, preparation error
+  text and remount handling; these were fixed without loosening the existing cold-work rails or
+  tests. Focused regressions and the final full run pass. Final read-only adversarial re-review
+  found no remaining blocker/high/medium in this boundary. Verification passed:
+  `cargo test --all --all-features` (including 483 app tests; nine existing app tests remain ignored,
+  including profiling/child-process entries and the previously documented membership harness flake),
+  `cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml` (201 tests),
+  `npm.cmd --prefix apps/desktop test` (1,144 tests), `cargo fmt --all -- --check`,
+  `cargo clippy --all-targets --all-features -- -D warnings`,
+  `cargo check --manifest-path apps/desktop/src-tauri/Cargo.toml`,
+  `bash scripts/check-no-ambient.sh` and diff checks. Evidence: `logs/gate3-runtime-root-final.log`,
+  `logs/gate3-runtime-native-final.log`, `logs/gate3-runtime-frontend.log`,
+  `logs/gate3-runtime-clippy-final.log`, `logs/gate3-runtime-native-check.log` and
+  `logs/gate3-final-*.log`. No new ignored tests. UI and unrelated version/package edits remain
+  untouched. Next Gate 4: owner receipt/rotation driving, Registry pointer publication and
+  tail receive, succession, intent replay and recovery actions/events. No automatic owner issuance
+  or broader Creative Suite completion is claimed.
+
+- **Flipnote gate 3, cooperative Studio checkpoint joining (2026-09-09; historical milestone,
+  extended by the runtime entry above).** Studio now extends
+  the existing Registry head/seed engine using additive kinds 24/25, typed channel/object scopes
+  and separate signature domains. All pending/rate/outbound/retained limits are shared. Detached
+  prepare/fetch/complete keeps the live Server available and rechecks exact attempt/selection,
+  full endpoint identity, MLS and fixed deadlines. Cancelled lower-driver work retains both
+  outbound and seed slots. Arbitrary logical-key generations are weak/reaped; Studio head/seed
+  registrations are each capped at sixteen. Registry 21/22 wire bytes remain unchanged, but its
+  cooperative request wrappers now also use connected-only I/O, not implicit dialing.
+  `studio_exchange/discovery.rs` binds the private selection to physical mount, numeric server
+  and channel. The existing Studio source/gate/budget now saves Closing or Fault before optional
+  seed work, typed whole-source recovery before the separate successor, and never retires intents
+  from a checkpoint alone. Exact retries preserve later edits; staged warnings and failed writes
+  survive restart. Ordinary Studio restart v1 is unchanged; adoption has explicit v2 state.
+  Warm-only head/seed service uses exact source/journal agreement, source flush and journal re-save
+  before proof; post-handoff publication failure requires exact republication. Missing indexed,
+  corrupt or cold state never becomes an authoritative empty result. No remote request prepares
+  the whole-server owner snapshot.
+  Adversarial review found and fixed Registry's 4,096-epoch ceiling leaking into shared adoption
+  restart validation. A regression failed before the correction; Index/art Closing/Fault and
+  source-only crash tests now cover epochs 4096/4097 while Registry retains its own bound.
+  Review/re-review found no remaining blocker/high/medium in these cooperative adapters. The
+  low cancellation-test masking gap was fixed with an independent retained-slot assertion.
+  Focused evidence: 18 Studio sync tests, six app/store discovery tests and five Studio store
+  adoption tests pass. The actual joined-member path uses `request_channel_index_catchup`, not
+  a fixture-only endpoint promotion: owner proof → Closing → seed → durable recovery/install →
+  open-tail page → disk reopen. Further cases cover remount/server/channel changes after head
+  or seed, source/journal durability failures and post-handoff exact retry.
+  Verification: full root `cargo test --all --all-features` passed; native tests passed 201
+  and frontend tests passed 1,144. The final retained-slot assertion also passes in the
+  focused 18-test Studio sync rerun. Root/native formatting, root all-target/all-feature
+  Clippy (`-D warnings`), native `cargo check`, ambient-dependency gate and diff checks passed.
+  Evidence is in `logs/gate3-checkpoint-*` and `logs/gate3-studio-sync-final.log`.
+  **At this milestone Gate 3 was not closed:** this was explicit adapter integration. The runtime
+  entry above now completes service for saved keys
+  without a provider UI watch, automatic Registry/Studio discovery and source preparation under
+  the native actor lifecycle, including restart/expiry while Closing. Do not rebuild these
+  completed protocol/store adapters. Gate 4 still owns automatic receipt issuance, succession,
+  replay/recovery actions and old-owner provisional-view consumption; UI remains user-owned.
+
+- **Flipnote gate 3, automatic same-epoch catch-up (2026-09-09).** Additive Studio request kind 23
+  now uses Registry's existing page queue/rates/outbound/receiver capacity with a distinct
+  Studio response domain and exact channel/type/key/full-device binding. The app retains the
+  original frontier and one page/cursor, saving the whole page before progress. Connected-only
+  signed requests detach from Server/native custody; the same actor remains available for the
+  other member's requests. One tracked network attempt and source-preparation waiter per actor
+  share the existing process-wide four preparation slots through actual worker termination.
+  Cold watched sources use bounded public-context capture/rebuild/attach into the sole source
+  slot. A small remote Index still takes bounded cold ingress and preserves large open art.
+  Native's five-second injected-clock idle wake repairs a missed last edit even without future
+  gossip; it adds no actor timer arm. Existing command-versus-legacy-outbox cancellation debt
+  remains, not a claim of cancellation-safe legacy publication.
+
+  Bounded service/client/gossip turns prevent starvation. A held page wins its next persistence
+  pass. Full wrapper/mount/server/actor/owner/MLS replacement invalidates prepared results;
+  healthy supersession retries rather than reporting a disk fault. Channel removal and MLS
+  changes between fetch and save discard unusable pages without cursor advance. Actual
+  storage/admission failure retains the existing explicit-access-only pause. Provider cursors
+  remint on runtime/mount change. UI, games and blob-fetch policy remain untouched.
+
+  Focused coverage: kind-23 golden/query tamper/shared rate and cancellation slots; distinct
+  members transfer 70 saved operations across three network pages and reopen; two real actors
+  simultaneously repair missed independent edits without additional Read/Save. Nine receiver
+  regressions include membership change after completion, sustained service/client fairness,
+  displaced >256-KiB art and a remote small Index that does not evict art. Preparation tests
+  cover exact wrapper edits, remount, MLS and corruption. Native tests pin the no-gossip idle wake.
+  Verification: root `cargo test --all --all-features` passed on the first run. The final
+  post-review run passed all app (472), replication and sync unit tests but hit the existing
+  real-TCP DCUtR upgrade timeout (also documented in older handover runs). The exact unchanged
+  failing executable passed immediately on retry (0.14 s); the focused Cargo target also passed.
+  No test was weakened or skipped. Native `cargo test --manifest-path apps/desktop/src-tauri/
+  Cargo.toml` passed 201 tests; frontend `npm --prefix apps/desktop test` passed 1,144. Root and
+  native formatting, root all-target/all-feature Clippy with `-D warnings`, native `cargo check`,
+  Git Bash ambient-dependency gate and `git diff --check` passed. Logs use `logs/gate3-*`.
+
+  Read-only adversarial review inspected the actual diff and surrounding paths. All blocker/
+  high/medium findings in this milestone are resolved; current-tense roadmap/interface/threat
+  summaries have been updated. **Gate 3 remains open:** unopened-provider logical service,
+  keyed registry/Studio head discovery, expected-seed fetch and recovery-first Studio adoption
+  still need wiring and newcomer acceptance. That acceptance uses prepared current-owner
+  receipts. Gate 4 retains automatic issuance, succession and the separate provisional
+  old-owner hinted-checkpoint consumer; a hint must never be upgraded to a verified selection.
+  Inventory still has its original local 64-record / 1024-entry / 8-MiB read / 256-KiB cold
+  rails. This work grants neither a heap/latency promise nor proof of current finality.
+
+- **Flipnote gate 3, cooperative same-epoch Studio pages (2026-09-09, `86ed32a`).** Studio now reuses the
+  existing Registry page walk through a thin typed wrapper, preserving Registry-v1 MAC/golden
+  bytes. Studio's separate cursor domain additionally binds channel and actual document type/key.
+  Counts/bytes/cursor expiry, prefix freezing, wide-head fallback, current-author resealing and
+  explicit checkpoint/historical-authority holds remain the existing bounded algorithm.
+
+  `ServerStore::serve_studio_page` checks membership/MAC before I/O and serves only the exact
+  prepared owned source after authenticated-wrapper/context rechecks. It never cold-restores
+  inside a page request. `ingest_studio_page` shares the live receiver's checked ownership transfer
+  and existing typed gate/save path: validate all entries, save once, then return counts/frontier.
+  Bad middle input writes no prefix. A rename followed by an I/O error can leave the whole new
+  page; no success is returned, accounting is invalidated and exact retry after reconciliation
+  deduplicates. Empty/duplicate pages check Open/current concrete target and flush held bytes;
+  truly absent epoch zero stays absent. Changed/previously warm results follow the same one-slot
+  retention policy. Original request heads/seed stay fixed throughout a cursor pass.
+
+  Focused regressions exercise distinct-member Index/art 70-op multi-page transfer and reopen,
+  duplicate resealing, append/reload, 65 independent heads, removed author in a later page,
+  seed mismatch/Fault, channel/type/key/cursor tampering and expiry/remint. A new independent .NET
+  HMAC vector pins Studio framing while the old Registry vector remains unchanged. Store tests
+  cover malformed and validly signed bad middle input, missing dependencies, empty/closed/wrong
+  epoch and page caps, before-write/after-rename/empty-and-duplicate-flush failures, and a real
+  >256-KiB saved provider/receiver avoiding full restores. Receiving creates no own intents.
+
+  Verification passed: `cargo test --all --all-features` (454 app, 166 replication and all
+  remaining workspace/integration/doc suites), the separate native suite (200), the frontend
+  suite (1144), formatting, strict workspace Clippy, the ambient-dependency gate through Git
+  Bash, and `git diff --check`. Focused page tests passed (15 replication, 5 store); this slice
+  adds 11 always-run regressions and leaves existing ignored tests unchanged. The read-only
+  adversarial review found no Blocker/High/Medium issues; its Low storage-inventory wording
+  clarification was fixed. No native/UI source changed, so no frontend build or screenshot was
+  needed. No new performance claim is made. Unrelated desktop version/config edits are preserved.
+
+  **Still not automatic reconnect:** these are tested core/vault adapters, not a Studio network
+  route, responder/rate/lifecycle wrapper or receiver cursor owner. Low-level callers must supply
+  authenticated transport identities, current actor/native custody and provider-secret restart
+  lifetime. No raw seed/receipt installation, discovery, settlement or UI code is added. Cold
+  first-open/local Save performance and the one-slot/256-KiB cold limits remain unchanged.
+  **Next:** authenticated Studio page exchange and receiver continuation/retry ownership, then
+  reconnect scheduling and keyed discovery/seed installation, using the existing adapters.
+
+- **Flipnote gate 3, one owned active Studio source (2026-09-09, `0d74190`).** The mounted store now retains
+  one verified owned Studio restart unit, moved rather than cloned. Warm automatic ingest and
+  timeline reads authenticate the exact whole physical wrapper again, checking mount, scope,
+  actor/group/MLS and (for ingest) a fresh complete inventory/budget. They use the same typed
+  gate and durable save. Failed takes discard the graph; unchanged flushes preserve its actual
+  physical stamp, and changed writes stamp exactly the successfully saved bytes. This adds no
+  wire format, cloned gate, durable cache, finality or native persistence coordinator.
+
+  Explicit view access prepares the source and its pure inventory footprint. Index/list refresh
+  preserves opened art and keeps only the independently verified Index footprint. Cold small
+  other-target packets likewise do not evict art. The slot admits at most 8 MiB encoded input,
+  NOT 8 MiB heap; automatic inventory retains its separate 8 MiB read / 256 KiB cold rails.
+  Cold targets still refuse above 256 KiB with no large automatic fallback. This is one slot,
+  not one per watch: a large cold Index beside art still pauses, as do unprepared large sources.
+  Existing native lifecycle, snapshot ordering, pacing, cancellation and remote events are reused.
+
+  New tests cover successive edits, repeated duplicates, unchanged-flush stamps, remount/context
+  changes, corruption/deletion, valid same-size Closing-wrapper replacement, write/flush failure,
+  exact warm view reuse, changed-view reconstruction and the encoded-size boundary. A real
+  two-member regression receives successive edits on >256-KiB art after populated Index Save/list
+  refreshes, and checks that both remote ingest and timeline refresh avoid full reconstruction.
+  No test was removed or loosened. The read-only adversarial review's Medium Index-refresh
+  eviction and Low equal-size-regression findings were fixed and re-reviewed clear.
+
+  The new actual Studio release probe passed: 6,939 setup ops / 4,934,432 physical bytes;
+  142,337 ms cold restore versus 192/193/184 ms for warm inventory + ingest + durable save.
+  These non-isolated observations are not command latency or maximal-state guarantees; see
+  [P1-PERFORMANCE](P1-PERFORMANCE.md). **Cold first-open and local Save reconstruction remain
+  expensive.** The probe includes real typed ingress and final restart, not just a cached view.
+
+  Verification passed: `cargo test --all --all-features` (449 app unit tests; all remaining
+  workspace/integration/doc suites), `cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml`
+  (200), `npm.cmd --prefix apps/desktop test` (1144), `cargo fmt --all -- --check`,
+  `cargo clippy --all-targets --all-features -- -D warnings`, the ambient-dependency gate through
+  Git Bash, and `git diff --check`. Focused source/receiver tests and the opt-in release probe
+  passed. Nine always-run regressions and one opt-in profiling test were added; existing ignored
+  tests are unchanged. Clippy's test-module ordering finding was corrected without changing
+  behavior. No native/UI source changed; no frontend build or screenshot was needed. Concurrent
+  desktop package/config version changes were preserved and are not part of this slice.
+
+  **Next:** reconnect retry/catch-up and keyed receipt-head discovery/Studio seed installation.
+  Gate 3 is past basic live sharing, not complete. Reuse the existing transport, prepared registry
+  page source, native custody and storage/receipt foundations. UI remains user-owned; games and
+  other deferred creative products remain paused. The older 256-KiB active-target statements
+  below describe historical cold-only service and are superseded only for this prepared source.
+
+- **Flipnote gate 3, bounded inventory-validation reuse (2026-09-09, `ee67ad2`).** The existing complete
+  scanner now memoizes pure Registry/Studio record footprints in a mount-local 64-entry LRU.
+  A hit still requires an actual bounded read/unseal, filename/scope binding and exact complete
+  authenticated-wrapper digest plus physical size. No mutable document, complete inventory,
+  write permit, authority state or plaintext is retained. Reference scans still inspect CIDs;
+  new files and staging copies still enter the complete accounting pass. Remount starts cold.
+
+  Automatic receive now permits up to 8 MiB of authenticated P1 metadata but still only 256 KiB
+  of cold validation, with the same 1024-entry/64-record rails. Unknown large records reject
+  before authentication; changed candidates over the cold rail reject before reconstruction.
+  **The active mutable target separately remains limited to 256 KiB before scan/snapshot/restore.**
+  This enables small active flipnotes beside larger unchanged histories, not accepted-size
+  active-document service. A normal Save/full scan warms metadata; Read alone only retries a
+  paused watch. Errors still pause until explicit successful access. Document/wire limits,
+  snapshot/lease ordering, events, intent durability and reference protection are unchanged.
+
+  Focused tests cover bounded LRU reuse, equal-size valid gate/receipt replacement with unchanged
+  signed history, ciphertext corruption, remount/deletion, new orphan accounting, cold refusal,
+  aggregate warm-read exhaustion, actual Studio reference enumeration and a warmed large active
+  target still refusing the separate rail. A real two-member regression starts with an unrelated
+  valid >256-KiB history: cold receive pauses, ordinary Save warms the full inventory, and the held
+  remote edit is then durably accepted without changing the unrelated history. The existing
+  release profiling harness now measures cold inventory validation and three exact warm scans.
+
+  The dense release fixture (8,002 operations; 5,122,618 physical bytes) measured 10,646 ms cold
+  inventory validation versus 11/11/11 ms warm. The byte-heavy 20-op fixture measured 33 ms cold
+  versus 11/11/12 ms warm. These are single-machine observations, not full-8-MiB, latency or
+  mutable-ingest guarantees; see [P1-PERFORMANCE](P1-PERFORMANCE.md).
+  Design and final actual-diff adversarial reviews found no remaining findings. The identified
+  Low coverage gap was fixed: a freshly authenticated changed same-size large wrapper must refuse
+  on the cold rail before inner-history validation. No existing test was loosened or removed.
+
+  Verification passed: `cargo test --all --all-features` (440 app unit tests, including seven
+  new regressions, plus all other workspace/integration/doc suites),
+  `cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml` (200),
+  `npm.cmd --prefix apps/desktop test` (1144), `cargo fmt --all -- --check`,
+  `cargo clippy --all-targets --all-features -- -D warnings`,
+  `bash scripts/check-no-ambient.sh` through Git Bash, and `git diff --check`.
+  The focused cache/receiver tests and two opt-in release probes also passed; existing ignored
+  tests are unchanged. No UI/build or native-source change was made, so no screenshot/frontend
+  production build was needed. Concurrent desktop package/config changes were left untouched.
+
+  **Next:** larger active-source reconstruction reuse, then retry/catch-up and keyed discovery.
+  Gate 3 stays open; do not duplicate the completed native receive/inbox/persistence machinery.
+  UI remains user-owned. The earlier 256-KiB whole-vault limit below is historical and superseded
+  by the warm/cold split above, not removed without replacement.
+
+- **Flipnote gate 3, bounded automatic receive and remote events (2026-09-09, `4a6c3a7`).** Ordinary native
+  Read/Create/Apply now installs checked recent-target watches; same-watch reuse preserves queued
+  packets and eviction explicitly revokes within the existing 16-watch rail. Reconciliation shares
+  the existing two-second aggregate send deadline. One coalesced boolean drives one supervised
+  native receiver per exact actor incarnation, through the same Ready/lease/four-slot/cancellation
+  path as Save. No event consumer awaits the actor. Each paced pass admits at most one packet,
+  rechecking current mount/channel/member/MLS before disk work, persisting the current server
+  snapshot before typed ingest. Only Accepted durable remote edits emit `studio-updated`.
+  Studio events retain UI/incarnation fences through emission; delayed old-actor events cannot
+  invalidate a replacement numeric server. Duplicate/quarantined/failed packets emit no edit event.
+
+  **Explicit limitation:** automatic inventory reuses the existing complete scanner with LOCAL
+  limits of 1024 visited entries, 64 records and 256 KiB aggregate authenticated P1 record bytes
+  across the whole mounted vault. Limits reject before oversized reconstruction, never admit a
+  partial inventory. Admission/source/storage/work failure pauses until successful explicit
+  Studio access; new traffic cannot restart a failed scan. `studio-receive-paused` is bridged
+  once on transition and is not a settlement fault or proof of corruption. Its UI listener remains
+  user-owned. Manual Save/document caps are unchanged. Large-vault inventory reuse, retry/catch-up
+  and newcomer discovery remain Gate 3; this slice does not close it or promise accepted-size
+  latency. No pixels are auto-fetched, receipts produced or intents retired.
+
+  Focused regressions cover real native two-member Create/PIX Apply, automatic receive/update
+  events, edit-back and restart; unchanged-true and false-to-true pacing; old-incarnation/locked
+  events and receive; same-watch queue retention, duplicate suppression, mount replacement,
+  recent-watch eviction, oversized unrelated-record refusal before authentication and a held
+  failure that only explicit access retries. Sync precheck covers valid queue preservation and
+  stale-MLS removal. The implementation extends the existing inbox/store/snapshot/lease, not
+  another P1 protocol or persistence owner. UI source and canonical mockups remain untouched.
+
+  Design review's automatic-scan amplification finding drove the lower automatic-work rail and
+  fail-closed pause, without removing any validation. Pre-I/O current context checks, pacing and
+  incarnation-fenced emission address its other findings. Actual-diff review found no remaining
+  Blocker/High/Medium; Low pacing-test precision and stale contract wording were fixed and
+  re-reviewed. Remaining focused test follow-up: exercise channel-directory removal through the
+  app adapter; the pre-I/O check exists and stale-mount/current-MLS regressions pass.
+
+  Verification passed: `cargo test --all --all-features` (433 app and 221 sync unit tests,
+  plus the other workspace integration/doc suites),
+  `cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml` (200),
+  `npm.cmd --prefix apps/desktop test` (1144), root and native `cargo fmt -- --check`,
+  `cargo clippy --all-targets --all-features -- -D warnings`, native `cargo check`,
+  `bash scripts/check-no-ambient.sh` through Git Bash, and diff checks. The final eight-test
+  native Studio module and full native suite passed again after pacing-test strengthening.
+  Existing ignored tests are unchanged. No frontend build/screenshot was needed (UI unchanged).
+
+  **Next:** safe larger-vault inventory/source reuse for this receiver, then missed-packet
+  retry/catch-up and keyed newcomer discovery. Reuse the ledger's existing paths; do not lift
+  the automatic rail before evidence supports the resulting background work.
+
+- **Flipnote gate 3, initial publication from normal Save (2026-09-08, `cafb221`).** Successful native/actor
+  Apply and Create now automatically attempt one-shot publication of their actual store-returned
+  packets. The private batch is at most two packets and leaves the worker only after complete
+  transaction success, including the final projection read. The worker returns the same sole
+  Server and native lease; the actor keeps source/persistence/UI/incarnation custody through
+  one shared two-second injected-clock send window, then drops guards before reply/event waits.
+  No duplicate save/retry pass, ciphertext outbox, new protocol or journal is introduced.
+
+  Native cancellation and the operation-slot keepalive travel with that lease. Pre-cancelled
+  work refuses; a save already running can complete but cancelled/stale replies and later sends
+  are suppressed. Send NoPeers/error/timeout/Duplicate cannot undo Save or retire intents.
+  `publication: "local"` / `provisional: true` still acknowledge only local saved state, not
+  delivery. Create's two packets are not remote atomicity/discovery; an unwatched object can
+  miss its first packet. Read is not a send trigger, and no automatic reconnect retry is added.
+
+  Eight new app regressions exercise real joined-member actor Create and PIX Apply without an
+  explicit send call, exact retry/Read behavior, no-subscriber Save, partial Create with a closed
+  Index, pre/post-save cancellation, paused-publication cancellation with retained custody, and
+  the aggregate two-packet deadline, caller drop and actor abort during publication. One native
+  regression checks cancellation and release of
+  actual native fences without saving. Existing native Save/restart tests retain their unchanged
+  local/provisional result contract. UI source and canonical mockups remain untouched.
+
+  Verification passed: `cargo test --all --all-features`, native Cargo tests (198), frontend
+  tests (1144), root and native formatting checks, root Clippy all targets/features with
+  `-D warnings`, native `cargo check`, the Git Bash ambient-dependency gate, and diff checks.
+  Actual-diff adversarial review found two Low issues (caller/actor-drop coverage and the lease
+  lifetime comment), both fixed; re-review reports no remaining Blocker/High/Medium/Low. The
+  final eight-test app module, formatting and Clippy passed again after those test/comment-only
+  fixes. Existing ignored tests are unchanged. No frontend build or screenshot was needed.
+
+  **Next:** automatic watched receive and remote-update events, then saved-op retry/catch-up and
+  joining. Reuse the existing inbox, typed store, leases, snapshot ordering and prepared registry
+  jobs. This does not close Gate 3. The reuse audit and older runtime dependencies are recorded
+  in `BACKEND-IMPLEMENTATION.md`; no confirmed duplicated completed feature was found in the
+  compared commits, but this is not a whole-history zero-rework claim.
+
+- **Flipnote gate 3, prepared registry page sources (2026-09-08, `cf7c8f4`).** The existing page adapter now
+  reuses a verified read-only source instead of replaying its entire saved history per request.
+  Begin captures authenticated bytes under current store/server custody; the opaque job rebuilds
+  off-executor without those borrows or authority keys; finish rechecks current membership,
+  runtime/mount, job generation and exact saved record under reacquired custody. Four process-wide
+  slots cover captured/queued/running/retained work through cancellation and remount. Page service
+  rereads the full authenticated record, including gate/book, so same-log receipt faults invalidate
+  old content. Cold/stale service requires explicit local preparation; it never silently rebuilds
+  or emits a wire Restart on that basis. Refresh preserves cursor MACs and frozen-prefix progress.
+  No formats, deadlines, P1 guarantees, mutation caches or UI source changed.
+
+  Six new regressions cover explicit cold preparation, continuation after append/refresh,
+  same-log receipt Fault and missing/oversized/corrupt sources, changed source during rebuild,
+  detached saves and superseded completions, and cancellation/remount/retention accounting.
+  Existing real joined-member page/seed/receive tests now explicitly prepare before serving.
+  The warm-path regression checks both explicit worker count and the old full-load entry point.
+  Required suites passed: `cargo test --all --all-features` (420 app, 160 replication, 220 sync
+  unit tests plus integration/doc suites), native Cargo tests (197), frontend tests (1144),
+  `cargo fmt --all -- --check`, Clippy all targets/features with `-D warnings`, the Git Bash
+  ambient-dependency gate, and diff checks. Existing ignored tests are unchanged. Actual-diff
+  adversarial review found two Low issues (test precision and stale roadmap wording), both fixed;
+  re-review reports no remaining Blocker/High/Medium/Low. All 14 focused page tests passed again
+  after the test-only counter fix. No native/UI source changed; no frontend build or screenshot
+  was needed.
+
+  All four isolated release probes passed. The dense 8,002-op source measured 12,658 ms for
+  explicit preparation and 42/36/45 ms for the three warm pages (previously roughly 11 seconds
+  per page). This is a 96-op sample, not complete catch-up or a worst-case latency guarantee;
+  cold rebuild and maximal-seed/projection coverage remain separate. Full numbers and caveats
+  are in `P1-PERFORMANCE.md`.
+
+  **Next remains gate 3 runtime integration:** drive these split jobs outside actor/vault locks,
+  recheck native lifecycle/snapshot custody on attachment, and connect automatic Studio exchange,
+  catch-up/discovery and remote events. This is a serving prerequisite, not automatic collaboration
+  or complete Studio checkpoint installation. Keep the existing exchange/store/receipt paths.
+
+- **Flipnote gate 3, cooperative saved-operation exchange (2026-09-08, `dda1fad`).**
+  `catcoms_app::studio_exchange` connects already-saved Index/art operations to the existing
+  encrypted gossip/one-shot transport and accounted Studio receive store. Two actual members
+  join through the invite flow, Save real PIX references, send, durably receive and reopen.
+  Bob also edits the received source through normal Save, sends back to Alice, and Alice reopens
+  Bob's attributed result. This is backend adapter evidence, not automatic desktop collaboration.
+
+  `watch_studio_epoch` derives a checked concrete source or absent epoch zero. Full logical
+  target, channel, numeric server, sync/watch incarnation and vault mount bind the handle.
+  The sync inbox keeps one watch per logical type/key, not per channel alias, and intercepts
+  both Studio tags unconditionally before legacy ingestion. Current full-member/MLS checks
+  run at enqueue and drain; typed channel/causal/cap validation and the existing source barrier
+  decide acceptance. Queued, duplicate, quarantined or failed packets earn no delivery ack.
+  `send_saved_studio_once` requires the exact own retained envelope before existing retry and
+  fresh sealing; it cannot create an unsaved edit or bypass native Save's PIX/snapshot ordering.
+  Only the existing one-shot sender dispatches; no cancellation/result retires an intent.
+
+  Limits are 16 watches, 16 copied packets of at most 256 KiB + 78 bytes, a separate Studio
+  pre-auth allowance of 50/s burst 200, and full-author/logical-document debt of 10/s burst 50
+  in at most 4096 rows. Rewatch/channel/epoch changes cannot refund debt. Existing subscription
+  reconciliation handles cancellation; unwatch revokes immediately, drop alone does not.
+  No new P1, wire, persistence, crypto or routing format, pin ledger or scheduler is introduced.
+
+  Fifteen new tests (nine app, six sync) cover real two-member Index/art exchange and restart,
+  both edit directions, exact duplicates, missing dependencies followed by retry, unsaved or
+  changed-envelope send refusal, post-save send cancellation/NoPeers, a receipt arriving after
+  queueing, channel mismatch before source creation, stale watch/mount/sync handles, packet/
+  watch/rate rails, full-author checks, old MLS refusal and current routing. Design review's
+  saved-only-send and one-logical-watch constraints are implemented. Actual-diff review found
+  no Blocker/High/Medium and two Low test gaps, both now covered by passing regressions.
+  Final docs/test re-review reports no remaining Blocker/High/Medium/Low. Verification passed:
+  `cargo test --all --all-features` (including 414 app, 160 replication and 220 sync unit tests
+  plus all integration/doc suites), `cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml`
+  (197), `npm.cmd --prefix apps/desktop test` (1144), `cargo fmt --all -- --check`,
+  `cargo clippy --all-targets --all-features -- -D warnings`, `bash scripts/check-no-ambient.sh`
+  via Git Bash, and diff whitespace checks. Existing ignored tests are unchanged; none was added
+  or loosened. No native/UI source changed, so no frontend build or screenshot was needed.
+
+  **Next task:** gate 3's bounded off-executor source ownership/reuse and runtime driving,
+  then automatic catch-up/discovery and remote events. Do not rebuild the exchange adapter.
+  Its synchronous restore/write work must not be installed inline in the network loop; the
+  existing dense-registry latency measurement remains a blocker for automatic service.
+  The caller still supplies native persistence/UI/incarnation custody across send awaits.
+  No actor/native exchange commands, remote `studio-updated` events, background retries,
+  PIX auto-fetch, Studio checkpoint installer or automatic owner receipts are added here.
+  Native Save remains local/provisional. UI remains user-owned; games remain paused.
+  Local commits only; remote destination approval remains outstanding.
+
+- **Flipnote gate 2, conservative byte-reference protection (2026-09-08).**
+  The current Index/art Save/Reopen path is now connected to actual held-blob reclamation.
+  `ServerStore::creative_pinned_cids()` opts into the existing five-family scan and derives a
+  full-group union across numeric-server aliases. It covers complete signed source history,
+  verified seed-only baselines, pending intents, and both retained and staged typed recovery.
+  Current/hidden/conflicting/over-cap/deleted and sequentially replaced pixel values stay held
+  while their evidence remains retained. No new durable format, pin journal or P1 protocol.
+
+  All same-mount persistent blob handles share a guard outside the kept-copy adapter. Source,
+  intent and both recovery writers add references before persistence; uncertain writes keep
+  conservative holds. Only a completed exclusive generation-current reference scan replaces
+  the set. Ordinary accounting scans never do. Native Studio refreshes Unknown before holding
+  a new PIX CID and reading/promoting it, so its later budget scan cannot erase the pre-hold.
+  The guard remains locked through synchronous deletion, and store drop revokes stale handles.
+  Namespace aliases cannot escape through separators; hex case aliases share full-group holds.
+
+  A bounded absence-only reserved-filename check permits empty new mounts. Restored P1 mounts
+  start Unknown; corrupt/unsupported/partial metadata, stale scans and the 65,536-reference rail
+  refuse reclamation instead of truncating. Explicit scans or Studio access can refresh; failed
+  refresh does not prevent healthy reads. Ordinary file unlisting still succeeds, but does not
+  promise freed bytes. Known unreferenced cache content still deletes. Staging cleanup and
+  explicit kept-copy release retain their separate semantics. This is physical byte-liveness,
+  not circulation expiry, a new blob quota, filesystem-tamper protection or a latency guarantee.
+
+  Eleven new regressions (eight app/store, three core), plus expanded crash-matrix and maximal
+  conflict tests, cover same-mount handles, numeric aliases, full-group isolation, restart,
+  source-only and intent-only holds, retained/staged recovery and eventual evicted-version
+  release, unknown/corrupt/partial/overflow refusal, stale scan generation and mount revocation.
+  Actual fileshare unlisting/upload cleanup exercises the guard. A fake inner deletion checks
+  that the mutex is still held at unlink, without timing-dependent threads. Sequential replacement
+  and hidden checkpoint-replacement tests prove the enumerator is not merely the visible view.
+
+  Design review approved reuse of the existing inventory/write boundaries. Actual-diff review
+  found one High (a successor's current register can hide a retained seed CID) and one Low
+  (check-through-unlink regression); both are fixed and re-reviewed. Seed holds are derived from
+  the verified seed-only projection and recomputed on restore, not trusted from persisted cache.
+  Final code re-review reports no remaining Blocker/High/Medium/Low; final documentation review
+  found only three stale descriptions, now corrected. Focused reference/crash/core tests,
+  the complete root backend suite, native full suite
+  (197), frontend full suite (1144), native Cargo check, root formatting, Clippy and ambient
+  checks have passed. Existing ignored tests are unchanged; no regression was skipped.
+
+  Full verification commands (all passed): `cargo test --all --all-features`,
+  `cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml`, `npm --prefix apps/desktop test`
+  (via `npm.cmd` on Windows), `cargo fmt --all -- --check`,
+  `cargo clippy --all-targets --all-features -- -D warnings`, `bash scripts/check-no-ambient.sh`,
+  and `cargo check --manifest-path apps/desktop/src-tauri/Cargo.toml`.
+
+  **Next task:** gate 3's two-member Index/art edit exchange and newcomer path. The one-device
+  art Save/Reopen/reference-protection milestone is implemented; wider sound/export records
+  extend these same seams in gate 6. Do not reopen the completed P1 foundations or add P2 expiry
+  enforcement. Runtime rotation/recovery actions, claims, sound/export and final UI acceptance
+  remain their named gates. No UI/native command was added; canonical UI remains user-owned.
+  The user's separate release work was committed as `c4444aa` during this slice and is untouched.
+  This work is intended for a local commit only; remote destination approval remains outstanding.
+
+- **Flipnote gate 2, actor/native local Save/Reopen (2026-09-08).**
+  `catcoms_app::studio` connects the existing accounted Index/art store to five native commands:
+  `studio_create`, `studio_list`, `studio_read`, `studio_apply` and `studio_apply_index`.
+  Actor/native regressions now create a Flipnote, publish actual canonical 192x144 PIX bytes,
+  save its real CID, restart from the command-saved server snapshot, and reopen identical
+  projection/blob bytes. This advances the same gate 2, not a new P1 design or another roadmap.
+
+  A Ready handshake queues no vault guard. After Ready, native obtains persistence/UI/store/
+  registry-incarnation guards without awaiting; contention refuses with an exact-retry instruction.
+  A finite blocking worker owns the sole live Server and mounted vault through the transaction,
+  including caller/actor cancellation. Guards drop before awaited replies/events. Worker panic
+  stops the actor instead of resuming missing/stale state. Live channel/member and full-envelope
+  checks precede mutation I/O; the result-bearing current server snapshot is saved before new
+  intent/source writes. Local frame references require exact held PIX bytes and promotion/flush.
+  This adds no automatic Studio gossip, receipts, replay, retention pins or source reuse cache.
+
+  Create writes object then Index, and can leave an unlisted object on Index refusal. Preserve
+  object/nonce/title/timestamp on retry. Existing objects require an exact retained initial
+  operation; a new nonce cannot overwrite an existing title via Create. Exact retries preserve
+  later titles/deletions. Create currently targets epoch zero for both files; rotated-index
+  creation waits for the gate 4 installer. Art Apply supports title/fps and frame insert/replace/
+  remove; unsupported sound/score/export operations still reject.
+
+  Native views retain full identities, conflicts, hidden/deleted values and cap flags. They say
+  `publication: "local"`, `provisional: true`, and carry the actual phase plus opaque physical
+  epoch id. Expiry is unrecorded/never/at, with zero preserved as a timestamp. `studio-updated`
+  forwards successful local changes, not remote edits or settlement. Every event invalidates the
+  channel Index plus its named object, because Create changes both. On a Create error the caller
+  rereads its known object id; uncertain writes emit no durable-success event. The command/result
+  contract is in INTERFACES. No TS, Svelte, fixture or canonical mockup was edited; UI wiring
+  remains user-owned and the fixture store remains in memory until that adapter is replaced.
+
+  Eleven new tests (six actor/app, five native) cover real Save/restart, missing/wrong PIX,
+  unknown channels, pre-I/O creator/envelope rejection, failed server snapshot, exact retries,
+  existing-id overwrite refusal and partial Create retry after Index capacity is freed. Lifecycle
+  tests cover each busy fence, lock/generation/incarnation changes, dropped Ready, expiry including
+  simultaneous timer/lease readiness, cancelled receivers, and actual RNG-paused disk workers
+  whose invoke or parent actor is aborted. Worker custody and durable completion are verified
+  before reopening. The existing core retry test also checks the new exact-operation getter.
+
+  Actual-diff adversarial review caught Medium issues in pre-I/O validation and Create overwrite;
+  both are fixed with regressions. Low deadline and in-flight cancellation coverage findings are
+  fixed too, and the final Low event-contract ambiguity is clarified above. Final read-only
+  review of the actual implementation/tests/docs reports no remaining Blocker/High/Medium/Low.
+
+  Verification passed:
+
+  - `cargo test --all --all-features` (including 397 app unit tests, 157 replication unit tests
+    and all workspace integration/doc tests; existing ignored tests/probes unchanged).
+  - `cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml` (197).
+  - `npm.cmd --prefix apps/desktop test` (1144).
+  - `cargo check --manifest-path apps/desktop/src-tauri/Cargo.toml`.
+  - `cargo fmt --all -- --check` and
+    `cargo fmt --manifest-path apps/desktop/src-tauri/Cargo.toml -- --check`.
+  - `cargo clippy --all-targets --all-features -- -D warnings`.
+  - `bash scripts/check-no-ambient.sh` through Git Bash.
+  - Unstaged/staged diff whitespace checks.
+
+  Focused native Studio tests also passed during iteration. No new ignored/skipped tests.
+  No frontend runtime/layout source changed, so no frontend check/build or screenshot was needed.
+
+  **Next task:** gate 2's complete creative reference enumeration and retention-path integration,
+  covering current/conflicting frames and later export/recovery records without deleting held
+  content prematurely. Save proves local bytes, not retention against subsequent reclamation.
+  All seven full gates remain open: Index/art typed support and local Save are now integrated;
+  automatic sharing/joining, rotation/recovery, claims and sound/export remain their named gates.
+  No percentage is inferred from unequal gates. No remote push pending destination approval;
+  unrelated release workflow/RELEASING changes remain outside this work.
+
+- **Flipnote gate 2, accounted vault Save/Reopen for Index/art (2026-09-08).**
+  `StudioEpoch` privately owns the typed document, signed log, gate, opening receipt and receipt
+  book. Its bounded version-1 vault snapshot contains raw seed and signed operations, not a
+  compressed Automerge save. Restart checks signatures, dependency closure, exact causal
+  mutations, seed/receipt binding and gate/log coherence. Historical removed-author edits remain
+  readable; new edits/reseals require current membership. Exact retries compare the complete
+  retained envelope before current target/cap policy, so a later deletion cannot invent another
+  operation or prevent retry. No mutable document/gate escape or new finality protocol is added.
+
+  `ServerStore::{load,edit,ingest,seal}_studio_epoch` now supplies the actual durability adapter.
+  It verifies observed source presence/absence against the ledger, preflights a new edit, saves
+  its exact sealed intent, then saves the whole source before returning prepared ciphertext.
+  Duplicate retries flush unchanged files. Uncertain writes/flushes/unwinds require reconciliation;
+  a failed second barrier retains its intent for retry without reporting success. Receipt authority
+  rejects before reconstruction; valid Closing/Fault outcomes persist with full source history.
+  These APIs do not issue receipts, install successors, settle/prune history or retire intents.
+
+  The new `.studio-epoch` vault family is keyed by numeric server/full group/type/logical id,
+  with the channel checked inside the seal rather than permitting alternate object filenames.
+  Explicit five-family scans/cleanup include Studio records and unpublished temporaries; older
+  scans/cleanup remain narrow. `EpochStudioBudget` composes existing storage/global-intent
+  budgets from one fresh scan. Mount-local generation checks reject duplicate minting, stale
+  scans, superseded wrappers and old mounts. Other raw registry/recovery/owner writes still
+  require sole-coordinator exclusion; blobs/legacy snapshots are not covered by this inventory.
+
+  Fifteen new tests (four core, eleven store) cover save/reopen/exact signed retries, both
+  durability barriers with write/flush/panic failures, malformed/aliased/oversized sealed files,
+  missing dependencies/duplicates/signatures/domain data/gates/seeds/count bounds, removed
+  authors, delayed opening equivocation, durable faults, stale scans/cleanup and byte accounting.
+  At the content ceiling exact retries still succeed, new intents refuse, and receipt sealing
+  uses protocol/settlement headroom. A real canonical 192x144 PIX staged/promoted in the vault
+  plus its saved frame CID survives reopening and rejects an undersized bounded read.
+  This is store-level evidence, not an actor/native Save acceptance test.
+
+  Actual-diff adversarial review found one Medium (authenticate receipts before disk work),
+  fixed with an invalid-signature/missing-source regression. Re-review has no remaining
+  Blocker/High/Medium/Low. Final documentation review is clear; its scan-invalidation wording
+  precision is fixed (early schema/authority rejection intentionally preserves freshness).
+
+  Verification passed:
+
+  - `cargo test -p catcoms-replication studio::epoch::` (4).
+  - `cargo test -p catcoms-app store::epoch_studio::` (11; rerun after mechanical lint cleanup).
+  - `cargo test --all --all-features` (including 157 replication unit tests and full integration/
+    doc suites; existing ignored probes unchanged). The later lint cleanup only names a private
+    tuple type and changes side-effect-only `map_err` to `inspect_err`; focused tests above
+    recheck the touched store path afterward.
+  - `cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml` (192; rerun after cleanup).
+  - `npm.cmd --prefix apps/desktop test` (1144).
+  - `cargo check -p catcoms-replication` and `cargo check -p catcoms-app` during implementation.
+  - `cargo fmt --all -- --check`, `cargo clippy --all-targets --all-features -- -D warnings`,
+    `bash scripts/check-no-ambient.sh` via Git Bash, and unstaged/staged diff whitespace checks.
+
+  No new ignored/skipped tests. No UI/native source changed, so no screenshot, frontend build
+  or extra native `cargo check` was required. Local commit only; remote destination approval
+  remains outstanding. Release workflow and RELEASING changes are excluded.
+
+  **Next task:** gate 2's actor/native create/list/read/apply and lifecycle ownership, then
+  real CID/reference/expiry plumbing. The existing native PIX publish/fetch commands already
+  work; this slice does not connect them to a Studio save or retention pass. Automatic sync,
+  discovery/settlement/recovery and sound/export remain later gates. All seven full product
+  gates remain open; the concrete advance is the owned vault adapter, not another protocol
+  redesign. UI stays user-owned, games/avatar work paused, unrelated release changes preserved.
+
+- **Flipnote Index/art checkpoint and P1 core consumer (2026-09-08).**
+  `studio::StudioTarget` now owns the typed core edit/ingest composition for Index and art:
+  canonical mutation preparation, causal validation, local 64-object/999-frame/8 MiB refusal
+  policy, and exact prospective checkpoint AND complete recovery preflight through existing
+  P1 gates. Signed membership/physical scope, operation-id dedup and atomic rollback remain
+  existing P1 responsibilities. Concurrent remote work can materialize explicit overflow;
+  trimming remains possible. Sound/score/export mutations still fail closed.
+
+  `StudioIndexProjection::checkpoint/verify_checkpoint` and the corresponding art methods
+  reuse `CheckpointSeed::build/verify` and `EncryptedDoc::from_checkpoint`. Each seed has the
+  original headers plus one immutable `_studio/seed` bytes baseline, no synthetic user ops,
+  marker map or tombstones. It preserves the actual selected values and original attribution,
+  with at most four values per field and 1024 conflict fields. Only admitted objects/playable
+  frames enter the seed. Frame insertion origins normalize to a live chain and carry
+  `FrameInsertion::checkpoint = true`; original gaps are not falsely attributed to that chain.
+  Ordinary post-seed registers override fallback values; baseline provenance ids cannot be
+  reused as new operations, and first mutable puts cannot cite the seed property's predecessor.
+  Both causal validators now support verified baseline epochs, not just epoch zero.
+
+  `StudioRecovery` specializes the existing 6 MiB recovery envelope with a complete typed
+  projection plus full supplied current-epoch operation bodies. This retains fifth-and-later
+  conflicts, all insertion/deletion authors, hidden/overflow positions and superseded bodies;
+  generic summary arrays are empty and applied ids exactly match the payload operations.
+  It validates source epoch/base-close coherence and uses the SOURCE opening receipt for
+  Rewound (zero in epoch zero), so retargeting does not change frozen-source ids or warnings.
+  Construction verifies canonical bounded content, not arbitrary provenance or receipt currency.
+  Borrowed count/value/aggregate checks precede projection clones; exact complete envelope
+  size, including bodies and metadata, is preflighted before a core change is committed.
+
+  Twelve new regression tests cover real P1 edit/checkpoint/owner verification/reopen/post-seed
+  concurrency, both delivery orders, generic encrypted-document snapshot/reopen and retry,
+  forty successive seed builds without accumulated operation history, exact raw seed hash/length
+  golden vectors, expected-hash plus typed malformed seed rejection, causal/seed predecessor
+  and source-id attacks, local cap refusal versus admitted signed concurrent overflow, complete
+  recovery metadata/body/byte bounds, public-field mutation guards, and 999 playable frames
+  with 1024 conflict fields. The maximal codec fixture uses typed nodes, not a thousands-write
+  Automerge transaction; it preserves the size assertions without claiming an inadmissible
+  multi-write change is a real edit. Existing causal and large-history tests remain in place.
+
+  Adversarial actual-diff review found two Mediums (cloning before bounds and incoherent recovery
+  source metadata); both are fixed with regressions. Source-stable Rewound semantics are explicit.
+  Re-review found no Blocker/High/Medium; its Low retirement wording drift is fixed too. No new
+  receipt, succession, catch-up, storage or finality protocol is introduced.
+
+  Final verification (all passed):
+
+  - `cargo test --all --all-features` (rerun after lint fixes; replication unit suite: 153).
+  - `cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml` (192 native tests).
+  - `npm.cmd --prefix apps/desktop test` (1144 frontend tests).
+  - `cargo fmt --all -- --check`.
+  - `cargo clippy --all-targets --all-features -- -D warnings`.
+  - `bash scripts/check-no-ambient.sh` (Git Bash on Windows).
+  - `git diff --check` and `git diff --cached --check`.
+
+  No newly ignored/skipped tests. No UI/native source changed; no screenshot, frontend build
+  or extra native `cargo check` was required. Local commit only: the prior remote-destination
+  approval remains outstanding. Unrelated release workflow and RELEASING edits are excluded.
+
+  **Boundary / next task:** this is a core consumer, NOT a durable Studio Save or completed
+  gate 1. There is no owned Studio epoch restore/save, accounted vault adapter, actor/native
+  create/list/read/apply, live publication or automatic recovery installation yet. Callers must
+  persist an intent before `edit`, then save document/log/gate before publishing; `NoChange`
+  is not durable success and exact retry needs retained-log body checking/reseal. Start gate 2's
+  art Save/Load integration with those ownership/restore seams, reusing Registry/P1 patterns.
+  Do not postpone it for sound/export or reopen the platform design. All seven full product
+  gates remain open; UI remains user-owned and game/avatar work paused.
+
+- **Flipnote gate 1, epoch-zero art/frame causal validator (2026-09-08; verified).**
+  `studio::validate_frame_change` checks insert/remove/replace frame and title/fps mutations.
+  Exact record bytes bind the full actor, canonical domain envelope and independently derived
+  left/right origins; timestamps remain bounded author assertions. Origins use the sender's
+  complete dependency-frontier projection and the first direct child, including hidden/deleted
+  insertion nodes. A receiver-only smaller collision winner or newly inserted sibling cannot
+  change a valid old placement. Existing observed IDs cannot be reused; remove/replace and an
+  explicit predecessor require nondeleted causal targets. Immutable headers/evidence, fresh
+  markers and all-and-only same-property mutable predecessors follow the Index contract.
+
+  One private historical path reuses the bounded frame materializer with keys/all values/winner
+  read at the same heads. The public current reader retains its zero-operation/zero-change
+  pristine check; private empty heads mean empty causal past, and unknown/nonempty erased heads
+  reject. There is no randomized/replayed fork, but Automerge still repeats historical clock
+  work. Bounds are not latency qualification; accepted-size profiling remains necessary before
+  production scheduling. This slice adds no performance/finality promise.
+
+  All 25 frame tests pass (11 new causal tests), including hidden-child descendants,
+  old/proper-subset frontiers, collision origins, metadata/record/identity tampering, predecessor
+  omissions/duplicates/cross-key hiding, signed ordering/concurrent deletion, restart and full
+  doc/log/gate rollback on rejection. An independent-root retry hits Automerge's duplicate actor
+  sequence rejection; a distinct fresh causal retry proves the marker conflict path. Neither is
+  confused with the accepted exact sealed-envelope retry. Actual-diff adversarial review found
+  no blocker/high/medium and one Low regression gap: a losing birth already known to the author
+  was not separately tested as the first direct child. The added test pins both delivery orders,
+  rejects omitted/descendant origins, and closes the Low on re-review. No findings remain.
+
+  Verification passed after that test was added: `cargo test --all --all-features` (including
+  all 141 replication unit tests; existing ignored probes unchanged),
+  `cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml` (192),
+  `npm.cmd --prefix apps/desktop test` (1144), `cargo fmt --all -- --check`,
+  `cargo clippy --all-targets --all-features -- -D warnings`,
+  `bash scripts/check-no-ambient.sh` via Git Bash, and `git diff --check`.
+  Focused callback tests and `cargo check -p catcoms-replication` also pass.
+
+  This remains a pure epoch-zero semantic callback with a TEST-ONLY writer/reader-preflight
+  harness. P1 must authenticate the signed actor/member/server/physical scope; prior history
+  must already be trusted. Aggregate edit/cap policy, exact typed checkpoint/recovery preflight,
+  durable intent/blob/reference plumbing and production Studio commands are still required.
+  Over-cap frames remain semantic targets so trimming is possible, not so production editing
+  can ignore the cap policy. Sound/score/export operations and checkpoint epochs refuse.
+
+  Next is typed checkpoint/recovery representation and exact aggregate preflight for the Index
+  and art path, including extending the validators against real verified seeds. Gate 1 and all
+  seven product gates remain open; no production Save/Load, UI or game/avatar work is included.
+  User release workflow/releasing-document edits remain excluded. Local commit only; remote
+  push still awaits destination approval.
+
+- **Flipnote gate 1, epoch-zero Index causal validator (2026-09-08; verified).**
+  `studio::validate_index_change` now checks the exact root mutation for an Index domain op:
+  full change-actor record binding, fresh marker, immutable headers/insertion/deletion evidence,
+  and all-and-only same-property predecessors for a mutable register. It checks targets at the
+  author's dependency frontier, including overflow and deletion evidence. Receiver-only targets
+  and predecessors cannot authorize an edit; a genuinely concurrent deletion does not reject it.
+  Same-id concurrent creations remain legal; observed-id reuse and resurrection are refused.
+
+  Ten focused tests pass, including two admitted signed authors in both delivery orders,
+  empty/partial/duplicate/foreign-property predecessors, header/marker/record tampering, causal
+  unknown targets, overflow mutation, exact sealed retry, restart and rollback of the entire
+  document/log/gate on semantic or preflight failure. The retry regression deliberately forges a
+  fresh causal change: identical Automerge puts alone create no change and return the original
+  delta, which transport dedup is meant to accept. Actual-diff review found no blocker/high/medium
+  and one Low test gap: the duplicate-predecessor case also omitted a required predecessor. It
+  now includes the complete expected set plus a duplicate, asserts serialization retains it, and
+  independently proves duplicate rejection. The focused all-features rerun passes and re-review
+  has no remaining findings.
+
+  Verification passed:
+
+  - `cargo test -p catcoms-replication studio::index::change::` (10 passed)
+  - `cargo test -p catcoms-replication --all-features studio::index::change::`
+    (10 passed after the review regression was strengthened)
+  - `cargo test --all --all-features` (app 380 passed / 8 existing ignored; replication 130;
+    sync 214; all workspace integration/doc suites passed; existing ignored tests unchanged)
+  - `cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml` (192 passed)
+  - `npm.cmd --prefix apps/desktop test` (1144 passed)
+  - `cargo check -p catcoms-replication`
+  - `cargo fmt --all -- --check`
+  - `cargo clippy --all-targets --all-features -- -D warnings`
+  - `bash scripts/check-no-ambient.sh`
+  - `git diff --check` and staged diff checks
+
+  Production code was unchanged while the full suites ran; the review strengthened a test only,
+  verified by the focused rerun above. No frontend/native source changed, so frontend static/build,
+  native `cargo check` and screenshots were not required. This slice is locally committed only;
+  destination approval for pushing remains outstanding. The user's release changes are excluded.
+
+  This is a pure semantic callback, not production admission. Tests use a TEST-ONLY writer and
+  reader-only preflight to isolate the boundary; no checkpoint-size guarantee follows. P1 must
+  independently authenticate the signed actor/member/server/physical scope and run exact typed
+  checkpoint/recovery preflight. `before` must already be accepted authenticated history, not a
+  peer snapshot. Epochs above zero refuse pending the real seed representation. Exact local retry
+  handling must resolve the retained signed envelope, not treat marker-only NoChange as equality.
+
+  Gate 1 remains open: frame causal validation and typed checkpoint/recovery encoding/preflight
+  are next. All seven product gates remain open; the tested helper count is not a percentage.
+  No UI, game/avatar, native command, live Studio write or P1 finality guarantee changed.
+
+- **Flipnote gate 1, read-only art/frame projection (2026-09-08; verified).**
+  `studio::FlipnoteFrameProjection` adds deterministic frame order, Automerge pixel/title/fps
+  register winners with all live alternatives, provenance-bearing deletions and explicit
+  999-frame / cumulative 8 MiB cap flags. All insertion records remain ordering anchors, even
+  when their frame is deleted or another insertion of the same id wins. The full frame map keeps
+  hidden/over-cap CID evidence for later recovery/reference consumers; this is not retention
+  integration. Root object/channel/epoch/dimensions are checked against every concurrent value.
+  Server provenance remains caller-supplied until the signed admission boundary is implemented.
+
+  Design review refined the sequence contract in creative section 2.9 and P1 section 4, without
+  changing P1 finality: recorded left/right origins preserve immediate sequential placement;
+  op ids break ties in the same gap, not arbitrary concurrent pairs that observed different gaps.
+  A right-origin forest avoids the confirmed generic-Kahn ordering defect (X,Y plus later C
+  before X must give C,X,Y, not Y,C,X). The walk is iterative and rejects missing/wrong-parent/
+  cyclic origins. `after:null` means prepend, matching the current fixture's code despite its
+  stale append comment; missing-predecessor Restore chooses the current last live frame before
+  preparing a new intent. No UI code changed. Origin metadata still needs causal-delta validation.
+
+  Fourteen new frame tests pass via focused runs: real 1000-frame and exact-byte boundaries,
+  concurrent same/different gaps in both delivery orders, collision/deletion anchors, replacement
+  conflicts, erased root history, strict unsupported-state rejection, metadata framing/scope,
+  valid-in-isolation anchor equivocation, deep 5000-node chains, restart and redacted diagnostics.
+  Actual-diff review's two Low findings are fixed: server-scope wording and a stronger anchor
+  equivocation regression. The optional same-parent/different-right-origin test was added too.
+  Read-only re-review reports no remaining findings. Final verification passed:
+
+  - Focused `studio::frames::` tests and the subsequent framing/concurrency/equivocation regressions
+  - `cargo test --all --all-features` (app 380 passed / 8 existing ignored; replication 120;
+    sync 214; all workspace integration/doc suites passed; other existing ignored tests unchanged)
+  - `cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml` (192 passed)
+  - `npm.cmd --prefix apps/desktop test` (1144 passed)
+  - `cargo fmt --all -- --check`
+  - `cargo clippy --all-targets --all-features -- -D warnings`
+  - `bash scripts/check-no-ambient.sh`
+  - `git diff --check` and staged diff checks
+
+  No runtime or test bytes changed after that verification. No frontend/native source changed,
+  so frontend static/build, native `cargo check` and visual screenshots were not required.
+  This slice is locally committed only; destination approval for pushing remains outstanding.
+  The user's release workflow/documentation changes are preserved and excluded.
+
+  This is an art-only reader: unsupported sound/score/export records reject, including score:null.
+  It supplies no signed delta validator, exact checkpoint/recovery encoding, actor/native command,
+  production Save/Load or playback/export capability. Timestamps are author assertions, never
+  freshness/ordering authority. Gate 1 remains open; next is signed causal admission and exact
+  checkpoint/recovery preflight for the art path. Other operation families remain unavailable
+  until their stateful support lands. Games/avatar work stays paused; UI stays user-owned.
+
+- **Flipnote gate 1, read-only StudioIndex projection (2026-09-08; verified).**
+  `studio::StudioIndexProjection` reads the channel's object list from actual Automerge state.
+  It keeps immutable insertion candidates by derived operation id, chooses the smallest for
+  a same-object collision, uses Automerge's actual mutable title/expiry winner, and retains all
+  live alternatives with full asserted author/nonce provenance. Deletions retain provenance too
+  and win over every insertion of their id. The first 64 live object ids are visible; overflow
+  and deleted objects remain explicit evidence rather than disappearing at the display cap.
+  Every concurrent header/record is checked, including hidden values. Reader limits bound
+  primitives and visible key/value bytes, separately from future signed-log/seed preflight.
+
+  Twenty focused Studio tests pass (11 new index tests). Actual-diff adversarial review found
+  one Medium: deleting all root keys made historical epoch-zero state look pristine. The reader
+  now also requires zero primitive operations and zero changes for the empty-root exception;
+  committed delete-all regressions cover headers alone and content plus markers. Re-review has
+  no remaining findings. The earlier boolean-tombstone design was changed before completion to
+  retain operation-id/full-author evidence needed by later recovery encoding.
+
+  Capacity tests use real CRDTs and a private lower-limit seam for exact/one-below byte and
+  primitive accounting, with the production 6 MiB inclusive/overflow arithmetic pinned
+  separately. The initial multi-MiB fixture run was stopped because construction was slow;
+  public reader limits are unchanged. These tests do not claim a maximal Studio checkpoint or
+  gated edit has been accepted.
+
+  Final verification passed:
+
+  - `cargo test -p catcoms-replication studio::` (20 passed)
+  - `cargo test --all --all-features` (app 380 passed / 8 existing ignored; replication 106;
+    sync 214; all workspace integration/doc suites passed; other existing ignored tests unchanged)
+  - `cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml` (192 passed)
+  - `npm.cmd --prefix apps/desktop test` (1144 passed)
+  - `cargo fmt --all -- --check`
+  - `cargo clippy --all-targets --all-features -- -D warnings`
+  - `bash scripts/check-no-ambient.sh`
+  - `git diff --check` and staged diff checks
+
+  No runtime or test bytes changed after that verification. No frontend/native source changed,
+  so frontend static/build, native `cargo check` and visual screenshots were not required.
+  This slice is locally committed only; destination approval for pushing remains outstanding.
+
+  This remains a read-only core slice. No authenticated Studio delta validator, Flipnote frame
+  projection, checkpoint/recovery encoder, actor command, native binding or UI is added.
+  Assertions in index records are not authenticated by materialization; future signed-delta
+  validation must verify authorship, causal target existence, immutable writes and predecessors.
+  Gate 1 and all seven delivery gates remain open. Next is the Flipnote frame projection, then
+  causal admission and exact checkpoint/recovery preflight; production Save/Load is still gate 2.
+  Games/avatar and UI implementation remain untouched. The release workflow/documentation
+  changes in the worktree belong to the user and are excluded from this slice.
+
+- **Flipnote gate 1, operation-schema substep (2026-09-08; verified).**
+  `catcoms_replication::studio` adds closed IndexOp/FlipnoteOp codecs, complete DomainOp size
+  and target checks, full verified-creator binding, safe integer/identifier/header bounds,
+  three-state expiry and immutable validated jam patch recipes. Twenty-four shared byte vectors
+  exercise the actual TypeScript canonical serializer and jam hash alongside Rust roundtrips.
+  The design review caught the fixture's numeric expiry mismatch; the Rust contract preserves
+  absent/null/timestamp, with no sentinel-zero reinterpretation. That fixture/view adapter is
+  explicit gate-2 work, not an implied UI change in this slice.
+
+  Nine focused Rust tests and four frontend compatibility tests pass. Actual-diff adversarial
+  review and re-review have no remaining findings: its two Low coverage gaps were fixed with
+  syntactically valid deep JSON and 18 shared patch range vectors exercised by both languages.
+  No Studio materializer, causal change validator, exact checkpoint preflight, persistence
+  adapter or production write path is added;
+  gate 1 remains open. Next is that stateful gate-1 materializer/admission work, not another P1
+  platform refactor. Games/avatar and UI implementation remain untouched.
+
+  Final verification passed (including the added review regressions):
+
+  - `cargo test -p catcoms-replication studio::` (9 passed)
+  - `node --experimental-strip-types --test apps/desktop/src/studio-wire.test.ts` (4 passed)
+  - `cargo test --all --all-features` (app 380 passed / 8 existing ignored; replication 95;
+    sync 214; workspace integration and doc suites passed)
+  - `cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml` (192 passed)
+  - `npm.cmd --prefix apps/desktop test` (1144 passed)
+  - `cargo fmt --all -- --check`
+  - `cargo clippy --all-targets --all-features -- -D warnings`
+  - `bash scripts/check-no-ambient.sh`
+  - `npm.cmd --prefix apps/desktop run check` (0 errors/warnings)
+  - `npm.cmd --prefix apps/desktop run build` (passed; large-bundle advisory remains)
+  - `git diff --check` and staged diff checks
+
+  No implementation/test bytes changed after that final verification. No native or UI source
+  changed, so separate native `cargo check` and visual screenshots were not required. This slice
+  is locally committed only; destination approval for pushing remains outstanding. The user's
+  release workflow and release documentation edits were preserved and excluded from the commit.
+
+- **Flipnote scope reset (2026-09-08).** The user paused games and asked to focus on Flipnote.
+  Game-only avatar consent/profile changes are paused; the wider Creative Suite backlog is not
+  the current completion target. `BACKEND-IMPLEMENTATION.md` now defines seven delivery gates:
+  typed documents, durable one-device Save/Load, sharing/joining, rotation/recovery, advisory
+  claims, sound/export and production acceptance/UI contract handoff. The older 25%/65%
+  estimates in historical entries below are retired, not reaffirmed current estimates.
+  Next is the missing Rust StudioIndex/Flipnote domain operations and preflight, leading to
+  a real create/save/restart/reopen test; required P1 storage/lifecycle work is included in that
+  path rather than bypassed. Automatic shared-runtime work must still solve the measured dense
+  registry request cost and snapshot/lifecycle fences. No new P1 guarantees or unrelated
+  document consumers are added. Canonical UI remains user-owned.
+
+  This update changes planning documentation only. Read-only actual-diff adversarial review
+  found no findings; `git diff --check` passed. Runtime suites were not rerun; the previous
+  code slice's verification is recorded below. `db979dd` is locally committed, not pushed;
+  destination approval remains outstanding. Unrelated release edits remain untouched.
+
+- **P1 indexed registry restoration (2026-09-08).** Restore uses Automerge's applied graph
+  metadata for Boolean dependency/duplicate checks instead of rebuilding raw predecessor changes.
+  A change whose dependencies exactly equal all current heads can use indexed current-view
+  property reads; only that path skips the semantic validator's already-proven dependency check.
+  The restore loop derives the fact locally after authentication and dependency admission.
+  Concurrent/older/proper-subset views remain historical; live edit/ingest authorization and
+  semantics are unchanged. No
+  signatures, typed semantics, predecessor/marker checks, seed/gate verification or projection
+  preflight are removed, and no format, limit, request deadline or UI changes.
+
+  Five focused regressions pass: differential seeded/unrotated branch delivery, current-head
+  proper subsets, marker-only edits, cross-property/seed-slot attacks, queued versus applied
+  lookup equivalence, and missing/re-enveloped duplicate changes rejecting before semantics.
+  Read-only actual-diff design/re-review found no remaining findings; its initial Low missing
+  proper-subset regression was added. All four release probes pass on the final production code.
+
+  The performance result is deliberately limited: byte-heavy pages measured 33–37 ms versus
+  42–48 ms at baseline, while 8,002 small operations still take about **11 seconds per page**
+  versus about 13 at baseline. The dense request-deadline problem remains unresolved; neither
+  the feature nor automatic scheduling is ready. `P1-PERFORMANCE.md` retains both tables and
+  the intermediate run's variability. Next is bounded off-executor reconstruction/source reuse
+  with exact version/authority checks, then sole vault ownership and whole-server snapshot
+  ordering. Overall estimates remain about 25% backend / 65% P1, each ±10 percentage points.
+
+  Required verification passed on the final code and regression source:
+
+  - `cargo test --all --all-features` (app 380 passed / 8 ignored: 4 existing + 4 opt-in probes;
+    replication 86; sync 214; every workspace unit, integration and doc suite passed)
+  - `cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml` (192 passed)
+  - `npm.cmd --prefix apps/desktop test` (1140 passed)
+  - `cargo fmt --all -- --check`
+  - `cargo clippy --all-targets --all-features -- -D warnings`
+  - `bash scripts/check-no-ambient.sh`
+  - `git diff --check`
+
+  The final documentation review's Low ambiguous "unchanged edit/ingest" wording is corrected
+  to unchanged authorization/semantics. No runtime or test code changed after verification;
+  only this result record followed. Frontend static/build/visual checks and separate native
+  `cargo check` were not required because neither frontend nor bridge source changed.
+  User release edits and canonical UI remain untouched. This is not backend completion.
+
+- **P1 saved-source performance evidence (2026-09-08).** Added an opt-in release harness using
+  actual signed/typed admission, accounted vault encoding, restore, provider and
+  `Server::serve_registry_page` paths. Two always-run smoke tests fully drain unrotated and real
+  receipted successor histories; four explicit ignored profiling cases exercise near-4-MiB
+  byte-heavy and small-op logs, 65 current-member roots, and a seeded full tail. Exact hashes,
+  dependencies, page caps, real capacity rejection and unchanged vault bytes are asserted. No
+  production behavior, UI, wire format or limit changes. Setup's batch save is test-only.
+
+  `P1-PERFORMANCE.md` records the commands, phase boundaries, raw results and honest memory/cache
+  limitations. The important result is 8,002 small operations / 4,194,072 signed bytes:
+  **12.8 seconds to restore and about 13 seconds per full saved-source page**, versus 29 ms for
+  a page from an already restored source. The actual valid source exceeds provider/client request
+  deadlines. Byte-heavy and seeded full tails took 42–48 ms per page; 65 roots took 16 ms. The
+  immediate next step is investigate redundant causal-history work in restoration, then bounded
+  off-executor work/source reuse with exact version/authority checks. Do not enable automatic
+  service or claim a safe runtime work budget from the existing byte/rate caps. Shared vault
+  ownership and whole-server snapshot ordering remain required afterward.
+
+  All four release profiling cases passed. Read-only actual-worktree review found no
+  blocker/high/medium or harness defect; its Low stale publication-state sentence in the threat
+  model is corrected. Required verification passed on the final test source:
+
+  - `cargo test --all --all-features` (app 380 passed / 8 ignored: 4 existing + 4 opt-in probes;
+    replication 81, sync 214; all workspace unit, integration and doc suites passed)
+  - `cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml` (192 passed)
+  - `npm.cmd --prefix apps/desktop test` (1140 passed)
+  - `cargo fmt --all -- --check`
+  - `cargo clippy --all-targets --all-features -- -D warnings`
+  - `bash scripts/check-no-ambient.sh`
+  - `git diff --check`
+
+  No code changed after these checks; only results/status documentation followed. Frontend
+  static/build/visual checks and separate native `cargo check` were not needed because neither
+  source changed. User release edits and canonical UI remain untouched. Overall estimates stay
+  about 25% backend / 65% P1, each ±10 percentage points; no integration milestone is closed here.
+
+- **P1 checked receipt publication completion (2026-09-08).**
+  Kind-21 owner-proof serving now connects an accepted local reply-channel handoff to the exact
+  accounted owner-journal completion, under the same synchronous Server/store/mount/server gate.
+  `Responder::try_respond` is additive; success is channel acceptance, not driver admission or
+  peer delivery. Hints, dropped receivers, expired requests and stale owner evidence cannot
+  mint completion authority. Sync's private non-Clone handoff rechecks runtime, MLS/full owner,
+  observed tenure, logical bucket, watch generation and request expiry before use. Existing
+  fire-and-forget reply callers retain their behavior; the legacy sync wrapper drops the token.
+
+  A completion write can fail after a peer already received the proof. The owner reports error,
+  invalidates uncertain accounting, and re-hands off exactly the same receipt after restart/rescan.
+  No response is retracted and no delivery guarantee is inferred. The actual joined fixture now
+  generates, installs, serves/completes, edits the seeded successor and rotates a second time with
+  unchanged tenure inheritance. Recovery-first retirement remains a separate mandatory barrier.
+
+  Focused checks pass: checked responder regression, twelve sync receipt-head tests, five app/store
+  head tests including before-write/after-rename completion failure and restart, and the two-rotation
+  joined fixture. Read-only actual-diff adversarial review found no remaining actionable findings.
+  Required verification passed:
+
+  - `cargo test --all --all-features` (app 378 passed / 4 existing ignored; replication 81;
+    sync 214; runtime 20; all workspace unit, integration and doc suites passed)
+  - `cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml` (192 passed)
+  - `npm.cmd --prefix apps/desktop test` (1140 passed)
+  - `cargo fmt --all -- --check`
+  - `cargo clippy --all-targets --all-features -- -D warnings` (after boxing the receipt inside
+    the private handoff to keep its enum small)
+  - `bash scripts/check-no-ambient.sh`
+  - `git diff --check`
+
+  No runtime code changed after these checks. Frontend static/build/visual checks and separate
+  native `cargo check` were not needed: neither frontend nor native bridge source changed.
+  Completion currently requires serving an eligible kind-21 query; quiet/solo owner progress
+  still needs orchestration. Automatic scheduling, durable repair, all managed document types
+  and UI integration remain open; no overall
+  completion percentage increase is claimed. The previous owner-rotation slice is committed/pushed
+  as `fd2943f`; unrelated release files and the canonical UI remain untouched.
+
+  Next lifecycle prerequisite: native `persist_captured` captures an actor snapshot before its
+  later store write. Automatic P1 owner preparation must share that numeric-server persistence
+  ordering (or an equivalent exact-incarnation write fence), so an older captured snapshot cannot
+  overwrite the newer durable MLS/tenure state after a receipt is issued. Also measure the maximal
+  registry source rebuild before assigning an aggregate work budget; current fixed memory/rate
+  caps do not establish actor latency. Neither prerequisite is enabled or solved by this slice.
+
+- **P1 explicit owner registry rotation (2026-09-08).**
+  `Server::rotate_registry_owner_step` requires the current mount/server-bound durable owner
+  snapshot permit. Under exclusive sync/store borrows it flushes the checked source, verifies
+  both inventories, derives a new eligible close/seed/receipt or resumes the exact saved choice,
+  journals close and receipt together, seals, and runs the existing recovery-first adjacent
+  installer. The private core builder rejects wrong owners, Fault/adoption, Closing new issuance,
+  terminal epochs, malformed public receipt fields and over-64-head sources without truncation.
+  Inheritance comes from the installed opening at succession and repeats the journal baseline.
+
+  The owner vault wrapper gains an explicit optional v2 extension containing the selected receipt
+  hash and one bounded close; no-extension records and inner journal v1 are unchanged. The 8,488-
+  byte physical cap stays accounted as protocol/reserve space; old readers reject new extensions.
+  Pending receipts without a close hold as `DecisionNeedsClose`, never regenerate against newer
+  heads. Re-saving/completing a matching receipt retains its close. A crash after journal save but
+  before sealing resumes identical bytes and sends later Open edits into recovery. Installed retry
+  preserves subsequent edits. Publication is explicitly pending: the current query path does not
+  mark completion, and a different decision waits for a real publication-completion driver.
+
+  Focused tests pass: five core owner-decision regressions (real 65-head cap and A-to-B-to-A
+  ownership included); three store rotation tests (post-barrier crashes, uncertain combined write,
+  legacy hold); one actual joined owner-generation/head-proof/seed-fetch/newcomer-install test;
+  sixteen owner store/inventory tests including the new extension codec; snapshot-permit callback
+  revocation coverage. Read-only actual-diff review found no blocker/high/medium or production
+  defect. Its Low coverage finding is fixed: an actual accounted prepare/completion/reload test
+  pins preservation of a newer pending close on old completion and removal of stale close
+  provenance on a different generic prepare. Static re-review has no remaining findings.
+  Required verification passed after that regression:
+
+  - `cargo test --all --all-features` (app 377 passed / 4 existing ignored; replication 81;
+    sync 212; all workspace unit, integration and doc suites passed)
+  - `cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml` (192 passed)
+  - `npm.cmd --prefix apps/desktop test` (1140 passed)
+  - `cargo fmt --all -- --check`
+  - `cargo clippy --all-targets --all-features -- -D warnings`
+  - `bash scripts/check-no-ambient.sh`
+  - `git diff --check`
+
+  No runtime code changed after these checks. Frontend static/build/visual checks and separate
+  native `cargo check` were not needed: neither frontend nor native bridge source changed.
+  Canonical UI, native bridge, and unrelated release files are untouched. No overall completion
+  increase is claimed for this explicit integration step; automatic scheduling, publication
+  completion, durable repair and all-family Studio acceptance remain open.
+
+- **P1 scoped recovery-first registry installation (2026-09-08).**
+  `Server::install_registry_seed_step` connects the private kind-21/22 selection to accounted
+  vault adoption. Runtime, MLS, full local member, current owner/tenure, superseding discovery,
+  receiver-clock expiry and physical mount/server are checked before synchronous persistence
+  under exclusive sync/store borrows. The optional-seed callback lets the full source and receipt
+  cross their own save barrier before seed availability or recovery parsing; saved Fault cannot
+  be suppressed by a withholding seed provider. Invalid inventory still fails closed.
+
+  Whole-source typed recovery is durable before atomic successor replacement. Pending eviction
+  warnings preserve their ids/deadlines across retarget and restart; acknowledgment or seven-day
+  advancement is explicit, and an expired fetch handle requires fresh discovery. Exact installed
+  retries flush the actual successor without reseeding newer edits or rewriting recovery. Adoption
+  never retires author intents. Uncertain writes require inventory reconciliation before retry.
+  Old watches and actual queued old-epoch pages cannot save into the successor; a new watch/pass
+  catches up the installed epoch through the normal kind-20 route.
+
+  Focused verification: six store tests (including seven write/flush failure points, post-rename
+  restart plus a new edit, warning retarget/restart/ack/timeout, invalid inventory, missing seed
+  and corrupt recovery); four app seed tests (including actual joined discovery/fetch/install/
+  catch-up); thirteen sync seed tests. Read-only actual-diff review found no blocker/high or
+  production defect. Its Low finding was a vacuous queued-page test; the fixture now retains a
+  real PageReady epoch-zero response and checks rejection, unchanged successor/recovery and no
+  saved-page advancement after installation. Static re-review is clear with no remaining findings.
+  Required verification passed:
+
+  - `cargo test --all --all-features` (app 371 passed / 4 existing ignored; replication 76;
+    sync 212; all workspace unit, integration and doc suites passed)
+  - `cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml` (192 passed)
+  - `npm.cmd --prefix apps/desktop test` (1140 passed)
+  - `cargo fmt --all -- --check`
+  - `cargo clippy --all-targets --all-features -- -D warnings` (after removing a test-only
+    unnecessary clone of a Copy value)
+  - `bash scripts/check-no-ambient.sh`
+  - `git diff --check`
+
+  No runtime code changed after these checks. Frontend static/build/visual checks and separate
+  native `cargo check` were not needed: neither frontend nor native bridge source changed.
+
+  **Remaining:** automatic actor/native lifecycle ownership and aggregate scheduling, all-family
+  Studio materializers/discovery/events, durable repair and complete full-quota settlement handling.
+  This is a cooperative backend transaction, not a lease or a complete product. Overall backend
+  estimate is about 25% versus about 65% for P1 (each ±10 percentage points), UI excluded. The
+  acceptance checklist remains open; canonical UI and unrelated release files are untouched.
+
+- **P1 distant-checkpoint adoption core (2026-09-08).** Registry epochs can now freeze a whole
+  source against a freshly selected distant checkpoint, including a new-owner rewind. No accepted
+  source operation is dropped. Explicit outer restart v2 embeds adoption-only receipt-book v3;
+  ordinary books and epochs keep their existing formats and strict adjacent settlement rules.
+  Restart binds the original seed, log and gate metadata, independently checks same-tenure
+  non-regression against the actual opening, and retains opening/prior-target equivocation below
+  the high-water. A successful typed Fault outcome must be saved by the future store adapter
+  before reporting installation failure, even if seed/recovery work fails.
+
+  `RegistryAdoptionPlan` verifies the exact raw seed and builds bounded Rewound recovery for
+  the whole prior version, including seed-only pointers and terminal epoch 4096. Its identity
+  excludes destination receipts, quarantine and quota-owner changes, so retargets reuse the same
+  staged warning/deadline. The stricter source fingerprint still invalidates stale plans.
+  `adopted_successor` constructs one separate seed-backed epoch, preserves receipt/repair state,
+  and retires no intents. Exact opening retries preserve newer edits. Ordinary settlement cannot
+  consume adoption state even when the selected closed epoch equals the source epoch.
+
+  Nine focused regressions pass. Read-only design/diff review identified and resolved one Medium
+  restart splice: an R0/R1 book must not select below a source opened by R10 in the same tenure.
+  The regression failed before the fix and passes afterward. Both Low findings are fixed:
+  post-seal quarantine/retarget/restart preserves recovery-warning identity, and stale interface
+  wording is corrected. Static re-review has no remaining code findings or blocker/high.
+  Required verification passed:
+
+  - `cargo test --all --all-features` (app 363 passed / 4 existing ignored; replication 76;
+    all workspace unit, integration and doc suites passed)
+  - `cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml` (192 passed)
+  - `npm.cmd --prefix apps/desktop test` (1140 passed)
+  - `cargo fmt --all -- --check`
+  - `cargo clippy --all-targets --all-features -- -D warnings`
+  - `bash scripts/check-no-ambient.sh`
+  - `git diff --check`
+
+  No code changed after these suite runs. Frontend check/build/visual checks and separate native
+  `cargo check` were not needed: neither frontend nor native bridge source changed.
+
+  **Next:** connect the scoped kind-21/22 pass to the accounted recovery-first vault transaction,
+  then normal open-epoch catch-up. This core is not a durable installation or network permit.
+  The installer must recheck mount/server/current authority/high-water/inventory, persist Fault
+  independently of recovery failure, and retain Closing across failed writes or warnings. A
+  seven-day warning can outlive the 60-second fetch handle; resumption requires fresh discovery.
+  No actor/native scheduling, UI, intent retirement on seed matches, or final UI guide is added.
+  The backend acceptance checklist remains open; no completion-percentage increase is claimed
+  for this core prerequisite. Unrelated release files remain untouched.
+
+- **P1 expected-hash registry seed fetch (2026-09-08).** Additive kind 22 now fetches the exact
+  owner-selected Automerge seed from any independently proven current-member endpoint. The
+  cooperative vault provider serves only the installed opening seed, not the latest receipt's
+  potentially unavailable successor. Closing can still serve its installed opening; Fault
+  refuses. Reads verify the complete registry inventory, including absence, and never create,
+  rewrite, prune or publish a source. The actual joined-Server test covers unavailable-before-
+  installation, then fetching the durably installed checkpoint through both network routes.
+
+  Private discovery provenance is minted only inside the fresh kind-21 response/proof check.
+  Runtime, MLS, full requester/owner, tenure and bucket supersession accompany the receipt.
+  Public mutable answer fields cannot mint a fetch pass. New authenticated owner discovery for
+  a bucket (even the same hash), any MLS transition or runtime replacement revokes older passes.
+  App passes also capture mount/server, rechecked by `registry_seed_ready`; discovery still holds
+  a shared store borrow across await, while seed fetch itself borrows no vault. There are no
+  actor/native entry points or automatic lifecycle workers for this path yet.
+
+  Four non-Clone retained passes are charged before discovery and each holds at most one 2-MiB
+  verified seed, three one-second-paced attempts and a fixed 60-second lifetime. Revocation or
+  expiry does not refund retained memory until Drop. Four independent outbound permits stay
+  charged until driver termination after cancellation. Kind 22 binds full identities, current
+  MLS, actual transports and complete query/response; its ten-second deadline is checked even
+  after a ready response or expensive validation. Raw seeds use the existing 512-byte to 1-MiB
+  padding ladder inside group AEAD. Above 1 MiB, encoded size remains visible. The 2,097,312-byte
+  response cap includes all framing and is enforced after transport buffering, before copies
+  and decryption. Exact hash/checksum, raw change shape, then typed registry validation must pass.
+
+  Eight five-second metadata-only provider requests, one per full identity, use independent
+  preauth/requester/source rails. Provider responder handoff is not delivery, and the client
+  permits do not account for provider-driver response buffers. A fetched seed is not installed
+  state, a lease, receipt advancement or permission to discard provisional edits.
+
+  Read-only design review identified the opening-vs-latest distinction, discovery provenance,
+  complete framing overhead and existing 512-byte padding floor; implementation preserves them.
+  Actual-diff review found no blocker/high or production defect. Both low findings are fixed:
+  the matching-receipt-hash/invalid-registry-schema regression and old threat-model wording.
+  Static re-review has no remaining findings. Focused coverage passes: 12 sync, one replication
+  lifecycle test, and two app tests (real joined vault/network path plus restart/lost-source).
+
+  Required verification passed; the final root run includes the added review regression:
+
+  - `cargo test --all --all-features` (app 363 passed / 4 existing ignored; replication 67;
+    workspace unit, integration and doc suites passed)
+  - `cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml` (192 passed)
+  - `npm.cmd --prefix apps/desktop test` (1140 passed)
+  - `cargo fmt --all -- --check`
+  - `cargo clippy --all-targets --all-features -- -D warnings`
+  - `bash scripts/check-no-ambient.sh`
+  - `git diff --check`
+
+  No runtime code changed after the native/frontend suite runs. No frontend static/build/visual
+  checks or separate native `cargo check` were needed for this core/sync/app-only slice.
+  UI/native source and unrelated release work are untouched.
+
+  **Next:** recovery-first newcomer installation from the scoped fetched seed, preserving
+  provisional epoch-zero edits. `with_registry_seed` is only a trusted-local synchronous borrow:
+  copied receipt/checkpoint values must not become an unchecked deferred install permit. The
+  installer still needs exact mount, local high-water/fault/inventory checks and recovery-before-
+  replacement. Automatic actor/lock scheduling, maximum-source latency, provider response-buffer
+  acceptance, durable signed repairs and the wider Creative backend checklist remain incomplete.
+  No final UI guide or 100% claim is issued for this transport prerequisite.
+
+- **P1 keyed registry receipt-head discovery (2026-09-08).** Kind 21 now answers by logical
+  bucket key, without requiring the requester's knowledge of the provider's concrete epoch.
+  The cooperative Server adapter returns provisional hints or a nonce-bound current-owner
+  selection proof; it neither installs a seed nor claims that seed is available/verified.
+  Full requester/provider identities, actual transport, current MLS and the complete query are
+  bound. Request nonces are minted internally; a non-owner relay or replayed inner proof cannot
+  become fresh owner authority. Replies remain raw records, not durable admission permits.
+
+  Explicit LOCAL preparation saves the whole-server MLS/tenure snapshot and mints an opaque
+  runtime/MLS/owner/mount/server-bound permit. Remote queries never initiate that uncapped legacy
+  serialization. Serving checks source and owner-journal inventories, rejects faults/corruption/
+  lost indexed files, and prefers pending owner decisions over published ones. Fresh proofs
+  require exact source-head/journal equality plus a current snapshot permit. Disagreement or
+  stale preparation produces hints, not an older fallback proof. Source/parent flush and journal
+  re-save precede signing. No source edit, intent retirement, pruning or mark-published occurs.
+
+  At most eight five-second requests are queued, one per full identity, with separate preauth,
+  requester and source service rails. Four outbound permits remain charged until actual transport
+  termination after cancellation. Synchronous source work rechecks the deadline before replying;
+  the client also rejects a ready response processed at/after its ten-second deadline. Logical
+  watches survive rotation but are revoked on exact watch/runtime/mount replacement.
+
+  Design review caught the remote-triggered whole-server snapshot cost and the need for exact
+  source/journal/inventory agreement; both are addressed. Actual-diff review found no production
+  defect. Its low-priority rejection-coverage gaps are fixed, and re-review is clear. Ten sync
+  tests cover canonical bounds, independent outer bindings, fresh nonces/inner replay, non-owner
+  relays, actual member removal while queued, rates, deadlines and driver-owned cancellation.
+  Four app tests cover joined-member network discovery, restart, journal lag/faults, a lost indexed
+  source and uncertain flush/reconciliation. The existing owner-journal crash tests cover its
+  reused durable rewrite primitive. UI/native source and unrelated release work remain untouched.
+
+  Required verification passed (the final workspace run includes the review's added regressions):
+
+  - `cargo test -p catcoms-sync receipt_head_ --lib` (10 passed)
+  - `cargo test -p catcoms-app registry_head_ --lib` (4 passed)
+  - `cargo test --all --all-features` (app 361 passed / 4 existing ignored, replication 66,
+    sync 199; remaining workspace unit, integration and doc suites passed)
+  - `cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml` (192 passed)
+  - `npm.cmd --prefix apps/desktop test` (1140 passed)
+  - `cargo fmt --all -- --check`
+  - `cargo clippy --all-targets --all-features -- -D warnings`
+  - `bash scripts/check-no-ambient.sh`
+  - `git diff --check`
+
+  No frontend static/build/visual checks or separate native `cargo check` were needed for this
+  Rust core/app/sync-only slice. No runtime code changed after the native/frontend suite runs.
+
+  **Next:** expected-hash seed fetch and recovery-first newcomer installation. Capture/recheck
+  runtime, MLS and discovery authority there: public `ReceiptHeadAnswer.proof: Some` is not an
+  installation permit. Automatic actor/vault lifecycle scheduling, maximum-source latency
+  measurement and durable signed repair retention/serving remain incomplete. Unknown owner
+  tenure remains the previous slice's honest availability limitation. The final UI guide is
+  still deferred until the full backend acceptance checklist is actually complete.
+
+- **P1 independently observed owner tenure (2026-09-08).** Sync now records the start of the
+  current owner's tenure from actual applied MLS transitions and saves that observation in the
+  same authenticated snapshot as the group. This distinguishes A-to-B-to-A ownership without
+  trusting a restored receipt to establish its own currency. The founding group starts known
+  at zero. Welcome joins and old snapshots start Unknown; same-owner commits preserve Unknown.
+  An Add into a recycled lowest leaf can change the owner, and is observed just like a Remove.
+
+  All production merge paths use one synchronous observation seam. The adversarial diff review
+  identified a post-merge helper-error edge: MLS can advance before later serialization fails.
+  Observation now follows the actual group before propagating either result. The regression
+  preserves the original error while proving the matching group/tenure can still be saved.
+  Re-review found no remaining implementation findings. A missed hook or panic fails closed:
+  the getter reports Unknown and a mismatched snapshot is refused.
+
+  Eight new regressions cover founding/joining, strict tail framing and partial-tail rejection,
+  legacy upgrade/restart, real staged winner/loser/applier and ordered commits, A-to-B-to-A,
+  synchronous Remove, invite/companion Add, unknown newly joined owners, and post-merge errors.
+  Two existing registry fixtures now perform their setup Add through the same observation seam;
+  their original assertions are unchanged. Required verification passed on the final code:
+
+  - `cargo test -p catcoms-sync --lib` (189 passed)
+  - `cargo test --all --all-features` (app 357 passed / 4 existing ignored, replication 66,
+    sync 189; remaining workspace unit, integration and doc suites passed)
+  - `cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml` (192 passed)
+  - `npm.cmd --prefix apps/desktop test` (1140 passed)
+  - `cargo fmt --all -- --check`
+  - `cargo clippy --all-targets --all-features -- -D warnings`
+  - `bash scripts/check-no-ambient.sh`
+  - `git diff --check`
+
+  **Limits/next:** this getter is independent local evidence, not a publication permit. The
+  receipt-head publisher still needs to flush the matching MLS snapshot and irrevocable owner
+  decision and recheck current membership, fault and tenure. Legacy or newly joined owners can
+  remain Unknown indefinitely; assigning the current epoch or copying a receipt is not a safe
+  availability fallback. Old snapshots load as Unknown; older binaries reject the new tail,
+  so this is backward-read support, not downgrade compatibility. Keyed receipt-head/expected-seed
+  discovery and runtime ownership remain next. No UI/native source changed; no static/build/
+  visual frontend check or separate native `cargo check` was needed for this sync-only slice.
+
+- **P1 durable registry receiver continuation (2026-09-08).** The cooperative receiver now
+  derives heads/seed from checked durable state and retains at most one page in each of four
+  watch-bound passes. Fetching never borrows the vault; persistence validates the entire page
+  through the existing typed gate in a detached epoch, then advances only after one accounted
+  atomic write. Bad middle operations/dependencies save none of the page; duplicate and empty
+  terminal pages still verify inventory/current Open scope and flush held bytes. An uncertain
+  rename pauses at the same page/cursor until reconciliation and explicit retry. There is no
+  durable provider cursor or receiver-authored intent, network ack, finality or currency claim.
+
+  Passes pin full requester/provider identities, exact watch/runtime and physical mount. They
+  keep a fixed ten-minute receiver-clock lifetime, one-second request/persist pacing, bounded
+  attempts and aggregate input, including duplicates. Cancellation is retryable without refunds;
+  revoked handles retain their four-slot capacity until dropped. The adversarial review found
+  an honest divergent-head restart loop and a futile stale-MLS persistence retry. Both are fixed:
+  one initial empty-head fallback retains seed/provider/charged limits, and MLS advancement
+  discards unusable pending ciphertext into RestartRequired. Re-review found no remaining
+  implementation findings. The real membership-change fixture now explicitly subscribes to
+  control traffic before expecting the third member's commit; no membership check was weakened.
+
+  Focused verification: nine receiver tests (including actual joined-member divergent branches,
+  duplicate pages, cancellation, watch/mount replacement, source sealing and MLS advancement)
+  plus three atomic batch-save/crash/restart tests passed. Existing core page tests additionally
+  pin wide-frontier fallback and verified checkpoint-seed extraction without snapshot mutation.
+  Required verification passed on the combined worktree (including the separately committed
+  file-reliability slice, which this change does not modify):
+
+  - `cargo test -p catcoms-app registry_receiver_ --lib` (9 passed)
+  - `cargo test -p catcoms-app registry_page_batch --lib` (3 passed)
+  - `cargo test --all --all-features` (app 357 passed / 4 existing ignored, replication 66,
+    sync 181; remaining workspace unit, integration and doc suites passed)
+  - `cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml` (192 passed)
+  - `npm.cmd --prefix apps/desktop test` (1140 passed)
+  - `cargo fmt --all -- --check`
+  - `cargo clippy --all-targets --all-features -- -D warnings`
+  - `bash scripts/check-no-ambient.sh`
+  - `cargo check --manifest-path apps/desktop/src-tauri/Cargo.toml`
+  - `git diff --check`
+
+  **Next:** keyed receipt-head/expected-seed discovery and runtime/coordinator ownership. The
+  adapters are intentionally cooperative, not an automatic actor/native worker. Maximum-epoch
+  source rebuild latency still needs measurement before automatic scheduling. UI is untouched;
+  [BACKEND-IMPLEMENTATION.md](BACKEND-IMPLEMENTATION.md) remains the completion checklist.
+  The next design check identified a prerequisite: sync currently tracks the current owner but
+  not the observed start of that tenure. Fresh owner head proofs must wait for durable observed
+  tenure tracking; a restored receipt's own tenure field is not independent evidence (A-B-A).
+
+- **Autonomous backend completion / P1 authenticated registry pages (2026-09-07).** The owner
+  requested continued backend implementation, periodic verified pushes, adversarial reviews,
+  and final Markdown UI integration guidelines. UI remains owner-owned; the canonical mockups
+  and unrelated release changes are untouched. [BACKEND-IMPLEMENTATION.md](BACKEND-IMPLEMENTATION.md)
+  is the acceptance checklist. P1 remains roughly **65% (+/-10 points)**: this closes another
+  network adapter, not the remaining orchestration/discovery/Studio integration.
+
+  Kind 20 now authenticates registry page requests over the actual requester transport identity.
+  `run_once` retains at most eight watched requests, one per full requester, under independent
+  preauth, requester and source-read rates. `Server::serve_registry_request_step` binds the
+  provider/watch to the same runtime, physical vault, numeric server and bucket before draining
+  the checked saved source. Client `request_registry_page` requires a pre-existing current
+  bound-member endpoint proof, caps signed replies before copying, verifies a query-bound
+  domain-separated signature, and returns unadmitted typed pages without legacy fallback.
+  Four outbound permits remain charged through actual transport termination after cancellation.
+  Neither a response handoff nor cursor completion means delivery, finality or currency.
+
+  Seven sync regressions cover canonical framing, request/response binding, key/epoch changes,
+  expiry/watch replacement, all resource rails, and delayed-driver cancellation accounting.
+  App coverage includes a genuinely joined second member fetching 32+1 saved operations, explicit
+  durable admission and vault reopen, plus provider/watch/server/mount rejection before I/O.
+  The initial mount test correctly hit the vault's single-writer lock; it now closes the old
+  mount before reopening, preserving that security invariant. Design review's retained-request
+  capacity and endpoint metadata concerns are fixed. Actual-diff review and re-review have no
+  remaining findings; the low-priority alternate-current-signer and stale-proof test gaps are fixed.
+  Maximum-epoch source-read timing is an explicit incomplete follow-up before automatic scheduling,
+  recorded in the acceptance checklist. Verification passed:
+
+  - `cargo test -p catcoms-sync registry_page_ --lib` (7 focused tests, including review regressions)
+  - `cargo test -p catcoms-app registry_page_network --lib` and the corrected adapter regression;
+    all five app page tests also passed in the full suite
+  - `cargo test --all --all-features` (app 334 passed / 4 existing ignored, sync 176, replication 66;
+    workspace integration/doc tests passed, existing ignored harness/probe tests unchanged)
+  - `cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml` (190 passed)
+  - `npm.cmd --prefix apps/desktop test` (1135 passed)
+  - `cargo fmt --all -- --check`
+  - `cargo clippy --all-targets --all-features -- -D warnings`
+  - `bash scripts/check-no-ambient.sh`
+  - `cargo check --manifest-path apps/desktop/src-tauri/Cargo.toml`
+  - `git diff --check`
+
+  **Next:** a bounded durable receiver continuation driver, then keyed receipt-head/seed discovery
+  and runtime/coordinator ownership. The network test drives receive admission explicitly; no
+  automatic actor/native page driver, Studio materializer or new UI command is claimed here.
+
+- **P1 bounded registry page serving (2026-09-07).** Rough P1 backend estimate: **65%, with
+  about +/-10 percentage points uncertainty**. This is an engineering estimate, not a count of
+  commits and not Creative Suite/UI readiness. The protocol core, checked persistence, registry
+  settlement/recovery and cooperative gossip paths exist. Automatic runtime ownership, managed
+  catch-up/discovery, remaining recovery/repair/succession integration and Studio consumers are
+  substantial unfinished work.
+
+  `Server::{begin_registry_page_provider, serve_registry_page}` now read accepted registry
+  history from the checked vault and reseal bounded pages under current MLS. An 81-byte HMAC
+  cursor binds exact provider/requester/scope, initial heads/seed, a fixed accepted-log prefix,
+  position and ten-minute monotonic lifetime. New appends do not reset or extend the prefix;
+  changed prefixes restart, byte-identical reloads can continue. Up to 32 operations and 512 KiB
+  of framed ciphertext fit per page. More than 64 independent heads can still complete from
+  an empty initial frontier without repeatedly receiving the same prefix.
+
+  Missing removed-author history reports `HistoricalAuthorizationRequired`; it is not silently
+  skipped or accepted under the provider's identity. Already-delivered cursor history does not
+  block later current-author descendants when an author is removed between pages. A rotated
+  epoch requires the requester's claimed verified seed. Claims are not possession proofs, and
+  prefix completion is not currency/finality. Runtime/mount, membership, caps, MAC and expiry
+  check before source I/O; concrete-id matching requires the captured bucket's checked load.
+  No source writes, intent retirement, subscriptions or delivery acknowledgements occur.
+
+  **Next:** authenticated request routing with aggregate source-read limits, receiver paging and
+  durable admission, then receipt-head/seed discovery and automatic coordinator/native lifecycle
+  ownership. This is a callable page-serving backend, not automatic reconnection or a new wire
+  request/response format. UI and unrelated release changes remain untouched.
+  Twelve focused regressions cover append/reload progress, current-MLS resealing, 65 independent
+  heads, exact padded byte limits, seed requirements, removed-author dependencies, cursor scope/
+  tampering/expiry, provider/mount replacement and rejection before corrupt-source reads. The
+  HMAC framing golden vector was independently reproduced with .NET HMACSHA256. Read-only
+  design/diff review and re-review have no remaining findings; the review's already-delivered
+  removed-author case and pre-I/O wording clarification are fixed. Verification passed:
+
+  - `cargo test -p catcoms-replication --lib registry_page -- --nocapture` (9 tests)
+  - `cargo test -p catcoms-app --lib registry_page -- --nocapture` (3 tests)
+  - `cargo test --all --all-features` (existing ignored harness/probe tests unchanged)
+  - `cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml` (190 tests)
+  - `cargo check --manifest-path apps/desktop/src-tauri/Cargo.toml`
+  - `npm.cmd --prefix apps/desktop test` (1,135 tests)
+  - `cargo fmt --all -- --check`
+  - `cargo clippy --all-targets --all-features -- -D warnings`
+  - `bash scripts/check-no-ambient.sh` (Git Bash), worktree/staged `git diff --check`
+
+  The final backend/native runs include the review fix. Frontend static/build/visual checks were
+  not run for this backend-only slice. HMAC/zeroize are now direct replication dependencies at
+  already-locked versions; both workspace lockfiles record the edges, with no package upgrades.
+  No UI or native bridge source changed; concurrent release work is outside this review.
+
+- **P1 opt-in registry gossip receiver (2026-09-07).** Actual network ticks now route watched
+  registry traffic into a bounded authenticated inbox, separate from generic Automerge documents.
+  The Server drain persists one packet through the existing typed gate/accounting/barrier. Tests
+  exchange an edit between two genuinely joined members using the prior replay sender and current
+  `sync_once`, then verify duplicate handling and durable state after a vault reopen. This is a
+  callable backend gossip path, not actor-owned or automatic desktop synchronization.
+
+  Watches bind sync instance, full group, physical mount, captured local server, bucket, concrete
+  epoch and fresh watch generation. Registering is synchronous; explicit flush or the next tick
+  reconciles subscriptions. Cancelled/failed subscribes and unsubscribes retain one uncertain topic
+  for cleanup and keep the retry flag armed. Rewatch/unwatch drops old queued work without resetting
+  rate debt.
+  Full current receiver/author, current MLS, canonical bucket/domain and exact watched topic are
+  checked before queueing and authority is rechecked before store I/O. The inbox has 16 compact
+  packets; pre-auth is globally 50/s burst 200, per full-author/document 10/s burst 50, with 4096
+  bounded limiter rows. The global rail can be exhausted by one sender; it does not promise fairness.
+  Queueing earns no accepted-op counter, delivery ack or finality. Failed/stale/over-cap input is
+  dropped without an ack; sender retry or future catch-up must recover it. Past/future MLS frames
+  have no managed recovery path yet. New persisted epochs require new watches.
+
+  **Next:** actor/native store and budget ownership, bounded replay/drain scheduling and lifecycle
+  cancellation; managed catch-up, registry/receipt-head/seed discovery; settlement-wide capacity
+  handling and Studio consumers. UI remains user-owned; release-workflow changes are excluded.
+  No wire or persistence format changed. The review found a cancelled-unsubscribe/rewatch race
+  (reproduced by a failing test, then fixed) and old-mount revocation being over-gated (fixed while
+  retaining exact generation checks). Read-only design/diff review and final re-review have no
+  remaining findings. Verification passed on the corrected code:
+
+  - `cargo test -p catcoms-app --lib registry_receive -- --nocapture` (3 tests)
+  - `cargo test -p catcoms-sync --lib registry_inbox -- --nocapture` (6 tests)
+  - `cargo test --all --all-features` (existing ignored harness/probe tests unchanged)
+  - `cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml` (190 tests)
+  - `npm.cmd --prefix apps/desktop test` (1,135 tests)
+  - `cargo fmt --all -- --check`
+  - `cargo clippy --all-targets --all-features -- -D warnings`
+  - `bash scripts/check-no-ambient.sh` (Git Bash) and `git diff --check`
+
+  Frontend static/build/visual checks were not run for this backend-only slice. No UI or native
+  bridge source changed. Concurrent release work is not certified by this review.
+
+- **P1 cooperative registry sender (2026-09-07).** The Server adapter now connects saved-intent
+  replay to driver-acknowledged one-shot publication. A cursor binds the exact sync instance at
+  begin, rejecting same-device/group replacement; exclusive Server/store borrows span checked
+  preparation through dispatch. The actual local full identity, MLS scope and current blinded
+  registry topic are checked before sending. No legacy document-map entry or retry outbox is used.
+  Only Submitted advances. Duplicate, refusal, cancellation and unwind preserve the saved id and
+  per-pass deadline for fresh resealing; every outcome keeps the durable intent. Cancellation
+  after driver admission remains ambiguous, not rollback or delivery proof.
+
+  **Next:** bounded live coordinator ownership/wakeups and native lifecycle cancellation, managed
+  registry receive/catch-up, receipt-head/seed discovery, settlement-wide capacity handling and
+  Studio/actor consumers. This is a cooperative backend API, not an autonomous worker or a new
+  frontend feature. No driver deadline, aggregate pass cap or gossip-size change is claimed.
+  UI remains user-owned; concurrent upload/release source and documentation are excluded.
+
+  Nine focused regressions cover exact submitted bytes/typed registry receive, transport refusals,
+  Duplicate, cancellation, lost acknowledgement, unwind, fresh resealing without reauthoring,
+  replaced sync/mount, failed storage and Closing gates, conservative holds, malformed/foreign/
+  oversized packets, current MLS/routing and redacted diagnostics. The typed receive test is not
+  live managed-ingress/newcomer coverage. Read-only design/diff review and re-review have no
+  remaining findings. The review's low test gap is fixed: rejected packets have a subscribed
+  observer and explicit error checks, proving NoPeers cannot masquerade as authorization refusal.
+  Verification passed:
+
+  - `cargo test --all --all-features` (existing ignored harness/probe tests unchanged)
+  - `cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml` (190 tests)
+  - `npm.cmd --prefix apps/desktop test` (1,135 tests)
+  - `cargo test --all --all-features --lib registry_send -- --nocapture` (final 6 tests)
+  - `cargo test --all --all-features --lib registry_publication -- --nocapture` (final 3 tests)
+  - `cargo fmt --all -- --check`
+  - `cargo clippy --all-targets --all-features -- -D warnings`
+  - `bash scripts/check-no-ambient.sh` (Git Bash) and worktree/staged `git diff --check`
+
+  Initial crate-focused checks also passed; an intermediate app rerun hit stale compiled sync
+  metadata. Crate-scoped generated-cache cleanup restored compilation; the final full suite and
+  focused reruns include all final source changes. Frontend static/build/visual checks were not
+  run for this backend-only slice. Concurrent upload/release work is not certified by this review.
+
+- **Detached file fetches, first-index convergence and local kept copies (2026-09-07).**
+  File chunk/range network waits now run in bounded tasks, with driver-level connected-only admission,
+  cancellation and transport-retirement accounting. The actor validates exact current file/MLS
+  authority again before storing a response. Independent first `ROOT/FILES` list conflicts share one
+  deterministic bounded read/mutation projection. The desktop separates cached bytes from remote
+  availability and offers explicit per-file Keep / Check and repair / Release with a separate sealed
+  1 GiB / 32-file local store, durable commit, restart verification state and exclusive directory lease.
+  See [the implementation and remaining limits](design-file-reliability.md). Remote confirmations,
+  automatic replication, holder-aware eviction, unlisted standalone export and whole-variant Keep
+  retry after a corrupt presence-ranked candidate remain follow-ups. Queued commands are interleaved;
+  legacy actor operations and all-local-copy background-sync delay are not claimed solved.
+
+  Verification on the integrated tree (2026-09-08): `cargo test --all --all-features` passed
+  1,179 tests (six existing ignored harness/probe tests); the separate Tauri suite passed 192;
+  `npm --prefix apps/desktop test` passed 1,140. Root and Tauri formatting checks, root Clippy
+  with `-D warnings`, the ambient-dependency gate, Tauri `cargo check`, frontend `check`/`build`
+  and `git diff --check` passed. Build retains the existing bundle-size advisory. Read-only
+  adversarial design/diff review and integration re-review have no blocker/high findings;
+  the limits above remain explicit follow-ups. Visual fixture inspection could not run because
+  this session exposed no browser surface; no screenshot or visual validation is claimed.
+
+- **File re-upload and encrypted manifest variants (2026-09-07).** Upload dedup now verifies a
+  complete local copy before reusing metadata or discarding staged bytes. Missing/unreadable copies
+  receive a fresh attested repair; repeat repairs reuse only the current device's verified exact
+  listing. Downloads and previews resolve up to four compatible randomized encryptions, trying all
+  local variants before network waits. Whole-file and per-chunk integrity remain enforced; media
+  caches bind the entire current variant set. Storage selects an exact-verified compatible local
+  variant instead of hiding every duplicate encryption. Regression coverage includes both upload
+  paths, remote fallback, forged ownership, bounded verification, and repaired downloads/previews
+  after a complete vault close/reopen with abandoned-upload staging cleanup.
+  Publication's complete local verification can still occupy the actor for a whole file. Differing
+  MIME or legacy chunk layouts remain explicit conflicts. The later reliability slice above resolves
+  concurrent first-list visibility and schedules chunk/range network waits outside the actor.
+  Malicious incompatible/over-four variant claims can still deny
+  resolution. Older clients keep their prior conflicting-manifest behavior until upgraded; the
+  wire and persistence encodings are unchanged. These are not claims of universal image/transfer
+  reliability.
+
+- **P1 one-shot transport prerequisite (2026-09-07).** `MeshTransport::publish_once` now waits
+  for one actual driver attempt instead of treating command enqueueing as publication. Production
+  uses a separate command that cannot enter the legacy `pending_publish` ciphertext retry queue.
+  Unsupported transports fail closed; the deterministic memory broker implements bounded immediate
+  fan-out. Existing chat publication, UI and wire/persistence formats are unchanged.
+
+  There are at most 16 queued/being-attempted compact payloads per mesh service (512 KiB each,
+  64-byte topics). Both semaphore and shared command-queue saturation return Busy without waiting.
+  Cancelled commands retain capacity until drained. The driver suppresses a dropped future only
+  when cancellation is observed before its final admission check; later races/ack loss cannot
+  retract an attempt. Normal libp2p cache/handler effects remain possible even after NoPeers or
+  QueuesFull. Submitted and Duplicate are distinct, and neither proves delivery or retires intents.
+
+  **Next:** use this seam in the cooperative replay sender with actual session/server, membership,
+  MLS epoch and Open-gate checks; then live coordinator ownership/aggregate scheduling. Registry
+  receive/catch-up, receipt-head/seed discovery, settlement-wide capacity handling and Studio/actor
+  integration still remain. The seam's 512-KiB bound is not a guarantee the current gossip size
+  configuration accepts every P1 operation; that limit remains unchanged and reports TooLarge.
+
+  Eleven focused regressions cover driver acknowledgement/classification, exact input bounds,
+  compact slice ownership, semaphore/shared-queue saturation, cancellation before and after
+  admission, shutdown, no implicit retry, unsupported fallback, memory fan-out and real libp2p
+  memory-swarm submission/reception. Read-only design and actual-diff adversarial reviews found
+  no blocker/high/medium. The low coverage suggestion is fixed: capacity is asserted inside an
+  attempt and an injected unwind releases it, reports Closed to the waiter and queues no retry.
+  The final eight net tests pass, including this test-only addition after the full suite started.
+  Verification passed:
+
+  - `cargo test -p catcoms-net publish_once -- --nocapture` (initial 7 tests), then
+    `cargo test -p catcoms-net --lib publish_once -- --nocapture` (final 8 tests)
+  - `cargo test -p catcoms-rt publish_once -- --nocapture` (3 tests)
+  - `cargo test --all --all-features` (existing ignored harness/probe tests unchanged)
+  - `cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml` (190 tests)
+  - `npm.cmd --prefix apps/desktop test` (1,135 tests)
+  - `cargo clippy --all-targets --all-features -- -D warnings` (including final rerun)
+  - `cargo fmt -p catcoms-net -p catcoms-rt -- --check`
+  - `bash scripts/check-no-ambient.sh` (Git Bash) and `git diff --check`
+
+  `cargo fmt --all -- --check` was run but reports only concurrent, unrelated upload-code
+  formatting differences. Those app/native upload and release-workflow/documentation changes
+  are excluded from this commit/review; some continued after full-suite compilation, so these
+  results do not certify the evolving unrelated work. Frontend static/build/visual checks were
+  not run for this transport-only slice; it changes no UI or native bridge source.
+
+- **P1 cooperative registry replay pass (2026-09-07).** `begin_registry_replay` snapshots only
+  the actual member's saved intent ids from a ledger checked against both inventories.
+  `step_registry_replay` attempts at most one existing checked replay, paced at 100 ms per pass
+  by the injected monotonic clock. The pass keeps at most 10,000 boxed ids (320,000 payload bytes),
+  no operation bodies or ciphertext queue. Begin captures an explicit concrete epoch id; it is
+  not a check that the source is current/Open. Every actual attempt still performs those checks.
+
+  Prepared work waits for an opaque, exact-attempt submission ticket. Duplicate/stale/cross-pass
+  acknowledgements cannot skip an edit. A failed send retries the same saved id with a fresh
+  reseal; errors/unwinds pause before cursor advancement and retain the charged deadline. Held
+  ids are visited once without removing their intents. Missing/retired ids pause, not silently
+  succeed. Completion counts snapshot traversal, including holds, never delivery/finality or
+  the current ledger being empty. Later additions/rotation require a fresh pass.
+
+  Stable physical-mount binding rejects reuse after vault reopen, independently of rotating
+  intent-budget freshness. It is NOT UI-lock or server-incarnation authorization: the store may
+  stay mounted while the UI locks. Lost tickets/abandoned prepared results recover by dropping
+  and restarting the pass; no timeout advances it. No wire or persistence format changed.
+
+  **Next:** live coordinator ownership, bounded aggregate scheduling and send-time lifecycle/gate
+  checks, actual network publication, settlement-wide capacity handling and receipt-head/seed
+  discovery, then Studio/actor consumers. This is a cooperative backend driver, not an autonomous
+  worker or an end-to-end feature. UI remains user-owned; concurrent release changes are excluded.
+
+  Nine focused pass regressions pass: own-id selection/new additions, exact/stale/cross-pass
+  acknowledgements, held-once traversal, clock boundaries/overflow, wrong mount/group/device/epoch,
+  member removal, failed post-rename writes/unwinds, lost prepared results across reopen, real
+  receipt retirement/rotation and the maximal 10,000-intent ledger. Design, actual-diff and final
+  documentation adversarial reviews have no remaining findings. The review's comment correction
+  distinguishes an abandoned Prepared result from a Held result, which advances traversal only.
+  Verification passed:
+
+  - `cargo check -p catcoms-app`
+  - `cargo test -p catcoms-app registry_pass -- --nocapture` (9 tests); the submission/ticket test
+    was rerun after adding an explicit wall-clock-jump assertion.
+  - `cargo test --all --all-features` (existing ignored harness/probe tests unchanged)
+  - `cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml` (190 tests)
+  - `npm.cmd --prefix apps/desktop test` (1,135 tests)
+  - `cargo fmt --all -- --check`
+  - `cargo clippy --all-targets --all-features -- -D warnings`
+  - `bash scripts/check-no-ambient.sh` (Git Bash) and worktree/staged `git diff --check`
+
+  Frontend static/build/visual checks were not run for this backend-only slice; no UI or bridge
+  source changed here. Concurrent release-workflow/documentation changes are not part of its review.
+
+- **P1 author-owned registry replay step (2026-09-07).** `replay_registry_intent` now takes a
+  saved intent id and captured concrete epoch id, never a replacement body/nonce. It requires
+  the actual current member to be the original author, checks both budgets and the saved Open
+  epoch, and validates/account-checks every retained/staged typed recovery slot. It reuses the
+  existing intent-then-epoch durability barriers before returning prepared ciphertext.
+
+  New authoring is held on current/recovered pointer deletion or a higher current admitted/overflow
+  hint, preserving the saved intent. Stable registry keys lack intent-origin epochs, so this is
+  deliberately conservative; two-snapshot eviction also makes absent deletion evidence best-effort,
+  not permanent protection. Exact authenticated current-log matches instead reseal the original
+  change without changing newer state, including a Tombstone saved before a failed flush. A marker
+  or same id with different body never earns that exception. No new wire/persistence format.
+
+  **Next:** bounded replay scheduling/publication, settlement-wide capacity handling, receipt-head/
+  seed discovery and live actor/Studio integration. This is one bounded store step, not automatic
+  live replay. Held edits need later explicit recovery UX; they are not deleted or marked final.
+  UI remains user-owned. Concurrent frontend/release/networking changes are excluded from this slice.
+
+  Focused verification: one core and eight store replay tests pass, including real rotation,
+  staged/retained tombstones, marker spoofing, foreign author, stale epoch, current-log retries,
+  superseded admitted/overflow hints, malformed recovery, all-family accounting and failed
+  writes/flushes/unwinds. Read-only adversarial review found no blocker/high/medium; its flush-test
+  gap and overbroad heading are fixed. Verification passed:
+
+  - `cargo check -p catcoms-app`
+  - `cargo test -p catcoms-replication registry_replay -- --nocapture` and
+    `cargo test -p catcoms-app registry_replay -- --nocapture`; the final flush matrix also passed
+    its focused run and the full root suite.
+  - `cargo test --all --all-features` (existing ignored harness/probe tests unchanged)
+  - `cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml` (190 tests)
+  - `npm.cmd --prefix apps/desktop test` (1,135 tests)
+  - `cargo fmt --all -- --check`
+  - `cargo clippy --all-targets --all-features -- -D warnings` (final rerun passed after an
+    unrelated concurrent sync lint issue was corrected; this slice did not edit that code)
+  - `cargo clippy -p catcoms-app -p catcoms-replication --all-targets --all-features --no-deps -- -D warnings`
+  - `bash scripts/check-no-ambient.sh` and `git diff --check`
+
+  These runs include the working tree's concurrent changes, not an adversarial review of them.
+  Frontend static/build/visual checks were not run for this backend-only slice; no UI or bridge
+  source changed here.
+
+- **P1 registry checkpoint installation (2026-09-07).** The store can now select a checked
+  successor under one exclusive borrow: flush the full Closing source, durably save typed recovery,
+  hold any pending eviction warning, durably retire only full-envelope-matching receipt-covered
+  intents, then atomically replace the source with its verified seed and preserved receipt book.
+  Excluded/unaccepted intents remain pending. Exact installed retries only flush the actual
+  successor, preserving newer edits, seals and intents. Local edits now require the captured
+  concrete document id; retrying an old Save cannot reauthor it after its markers are retired.
+
+  A conflicting current-owner opening receipt faults both Open and Closing successors without
+  losing their accepted content or newer high-water receipt. Fault evidence must anchor to the
+  exact opening receipt. The bounded local ReceiptBook codec uses v2 only for a delayed fault
+  below a newer high-water; ordinary v1 remains unchanged, and older readers fail closed on v2.
+  Repair-sequence state survives construction of the successor.
+
+  **Next:** automatic author-owned replay, settlement-wide capacity reservation, receipt-head/seed
+  discovery and live coordinator/actor/Studio consumers. The registry store transaction is tested,
+  not live-wired. Restore/Copy/Export and repair/rewind remain unwired. Conservative first/second
+  recovery reservations and the physical 64-MiB intent replacement cap can still hold Closing at
+  full quota; no early deletion credit or universal full-quota progress is claimed. UI remains
+  user-owned; concurrent UI/release changes are excluded from this slice.
+
+  Ten new core/store tests cover seed-only edit dependencies, repair-state preservation, delayed
+  opening equivocation in Open/Closing, v1/v2 canonicality, included/excluded/unaccepted intents,
+  stale Save and installed retries (including a newer seal), empty/corrupt recovery, exact eviction
+  acknowledgement, physical intent headroom and nine before-write/after-rename/panic cases.
+  Adversarial design, actual-diff and final documentation reviews have no remaining findings.
+  The review's version canonicality and retry close-signature checks are fixed with regressions.
+  Final checks passed: `cargo check -p catcoms-app`,
+  `cargo test -p catcoms-replication registry_checkpoint -- --nocapture` (2), focused store tests,
+  `cargo test --all --all-features`,
+  `cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml` (190),
+  `npm.cmd --prefix apps/desktop test` (1135), `cargo fmt --all -- --check`,
+  `cargo clippy --all-targets --all-features -- -D warnings`,
+  `bash scripts/check-no-ambient.sh` (Git Bash), and worktree/staged `git diff --check`.
+  Frontend static/build/visual checks were not run: this slice changes no frontend/native source.
+
+- **P1 typed registry recovery staging (2026-09-07).** `stage_registry_recovery` now recomputes
+  the exact receipt-bound plan from checked saved Closing state, validates source accounting and
+  every existing typed registry recovery slot before a nonempty save, and persists through the accounted
+  adapter. It returns saved slots/warnings, not installation authority. Source history and intents
+  remain unchanged. Empty evidence consumes no slot; third-slot retries retain the warning deadline.
+
+  `RegistryRecovery` defines a canonical, bounded local payload for full source pointers, overflow,
+  pointer-key tombstones and excluded author-bound domain operations. It validates the generic
+  wrapper, full scope, ordering/disjointness, derived ids and the exact aggregate 6-MiB cap. It does
+  not invent Studio-style random ids/authors for registry keys. The source opening close is carried
+  in recovery's base field. Snapshot identity excludes quarantine and quota-owner bookkeeping, so
+  late packets cannot manufacture extra recovery versions. Generic `RecoverySnapshot` Debug now
+  redacts content too. The generic wire/persistence envelope is unchanged; registry payload v1 is
+  specified in design-epoch-close section 10. Unknown/opaque old registry payloads fail closed.
+
+  **Next:** crash-safe successor installation, settlement-wide reservation and intent retirement;
+  then discovery and live coordinator/actor/Studio integration. Repair/rewind-specific typed records
+  and Restore/Copy/Export actions remain unwired. At the content ceiling, first/second recovery
+  snapshots can still refuse rather than crediting an unperformed source deletion. UI stays with
+  the user; no frontend/native source was changed by this slice.
+
+  Review/test targets: `registry/recovery.rs`, `registry_epoch/settlement.rs`,
+  `store/epoch_registry/recovery.rs` and their adjacent tests. Seven new core tests and five store
+  tests cover golden encoding, wrapper/scope/count/key/author rejection, payload size bounds,
+  valid overflow, malformed excluded operations, tombstone-only evidence, empty plans,
+  quarantine-stable ids, real 2-MiB source histories,
+  restart, failed saves before/after rename, stale inventory, storage refusal, invalid old slots,
+  and the bounded third-slot warning. Rotated-source coverage is also expanded. Focused tests
+  pass. Adversarial design, actual-diff and documentation reviews have no remaining actionable
+  findings; the review's overflow/domain-decoder coverage and empty-path wording findings are fixed.
+  Final verification passes: `cargo test -p catcoms-replication --lib registry_recovery` (7),
+  `cargo test -p catcoms-app registry_recovery_stage` (5), `cargo check -p catcoms-app`,
+  `cargo test --all --all-features`,
+  `cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml` (190),
+  `npm.cmd --prefix apps/desktop test` (1135), `cargo fmt --all -- --check`,
+  `cargo clippy --all-targets --all-features -- -D warnings`,
+  `bash scripts/check-no-ambient.sh` (Git Bash on Windows), and `git diff --check`.
+  Frontend static/build and visual checks were not run for this backend-only slice. Concurrent
+  UI/release changes are excluded from this slice and its commit.
+
+- **P1 receipt-bound registry settlement preparation (2026-09-07).** Rough implementation
+  estimate: **55%, with about +/-10 percentage points uncertainty**, for P1 backend work, not
+  the whole Creative Suite or end-to-end readiness. Core validation, journals, storage admission
+  and durable registry edits are implemented; settlement/recovery, discovery and live integration
+  remain substantial. UI remains user-owned and untouched.
+
+  `RegistryEpoch::prepare_settlement` and the read-only
+  `ServerStore::plan_registry_settlement` reload/check Closing state and its exact held current-owner
+  receipt, rebuild the selected dependency closure, verify the deterministic checkpoint, and
+  partition accepted operation ids into included/excluded recovery inputs. The full source
+  projection preserves overflow/tombstones. Excluded peer-authored operations retain attribution
+  but grant no replay authority. A whole-source fingerprint prevents conflating two peers with the
+  same receipt and different excluded edits. Source history, gate and durable bytes are unchanged.
+  No wire or persistence format changed; no UI, actor or transport was wired.
+
+  **Next:** typed registry recovery persistence plus crash-safe successor installation and intent
+  retirement. A plan is not an installation permit or a guarantee that recovery fits its cap:
+  that transaction must revalidate source/authority under the gate and persist recovery first.
+  Then receipt-head/seed/held-history discovery, the complete-budget coordinator, and actor/Studio
+  consumers. No source pruning or end-to-end settlement is claimed by this preparation slice.
+
+  Human/adversarial review target: `registry_epoch/settlement.rs` and its tests;
+  `store/epoch_registry.rs::plan_registry_settlement` and `tests/settlement.rs`. Seven core and one
+  store regression pass: real 2-MiB close threshold, exact successor dependencies, equal receipts
+  with differing excluded logs, malformed/missing closure, wrong seed, Fault/stale owner, removed
+  close author covered by a current receipt, peer tombstone attribution, quarantined content,
+  restart stability and corrupt vault rejection. Adversarial design, actual-diff and documentation
+  reviews report no remaining findings. The review's rotated-source coverage gap is fixed: an
+  epoch-1 plan preserves a seed-only inherited pointer, excludes late edits, survives restart and
+  produces an isolated epoch-2 seed. Final verification passes:
+  `cargo test -p catcoms-replication --lib registry_settlement` (7),
+  `cargo test -p catcoms-app registry_store_settlement_plan` (1),
+  `cargo test --all --all-features`,
+  `cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml` (190),
+  `npm.cmd --prefix apps/desktop test` (1132), `cargo fmt --all -- --check`,
+  `cargo clippy --all-targets --all-features -- -D warnings`,
+  `bash scripts/check-no-ambient.sh` (Git Bash on Windows), and `git diff --check`.
+  No frontend/native source was changed by this slice; frontend static/build checks and visual
+  validation were not run. Concurrent unrelated UI/release/documentation changes are excluded
+  from this slice and its commit.
+
+- **P1 durable local registry publication preparation (2026-09-07).**
+  `ServerStore::edit_registry_epoch` connects the existing intent and registry adapters under one
+  exclusive store borrow: canonical/type/scope/current-author validation, intent save/flush,
+  then checked edit and epoch save/flush. No ciphertext returns before both barriers. A failure
+  after the first retains the intent for retry/recovery. Markers never retire intents.
+  The caller supplies one stable nonce/envelope per logical operation; retries reseal its exact
+  retained signed change, even after newer heads or a restart. They never reauthor another delta.
+  A retained id with different body rejects before journaling, including when the log arrived
+  through inbound ingest with no local ledger. Closing/Fault refuses new local edits and retries.
+
+  `RegistryEpoch::{validate_local_edit,edit_or_reseal}` provide those bounded typed/retry checks.
+  Snapshot comparison now uses the normalized restored state before/after mutation: refreshing
+  the current quota owner alone does not force an ordinary replacement copy at the content cap.
+  Actual saved bytes remain authenticated/accounted and are flushed, not silently rewritten.
+  There is no wire/persistence format change and no UI or network integration in this slice.
+
+  **Next:** recovery-first successor installation/settlement and intent retirement; receipt-head,
+  seed and held-history serving/discovery; the complete-budget coordinator; then actor/Studio
+  integration. Local publication is now prepared durably, but the future sender must recheck
+  session/server incarnation, membership, MLS epoch and Open immediately before sending. This
+  is not an automatic replay loop, an outbox or end-to-end P1 readiness.
+
+  Human/adversarial review target: `store/epoch_registry.rs`,
+  `store/epoch_registry/tests/local.rs`, and `registry_epoch.rs` local retry helpers. Try every
+  intent/epoch write and flush boundary, a restart with newer heads, a conflicting nonce without
+  a ledger, a stale intent budget, a closed epoch, removal of the author, and owner succession
+  at the content cap. Nine new regressions (seven store tests with failure matrices, two core
+  tests) pass. `cargo test -p catcoms-app registry_` (21 tests) and
+  `cargo test -p catcoms-replication registry_local` (2 tests) pass, as do the full
+  `cargo test --all --all-features`,
+  `cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml` (190 tests), and
+  `npm.cmd --prefix apps/desktop test` (1109 tests) suites. `cargo fmt --all -- --check`,
+  `cargo clippy --all-targets --all-features -- -D warnings`,
+  `bash scripts/check-no-ambient.sh` (Git Bash on Windows), and diff checks pass.
+  Adversarial design review identified retained-body conflict and owner-refresh cap cases;
+  both are implemented and regression-tested. Actual-diff and documentation reviews report no
+  remaining actionable findings. No UI/native source was changed, so visual validation and
+  frontend static/build checks were not run. Concurrent unrelated changes are excluded from this
+  slice and its commit.
+
+- **P1 durable registry ingress and sealing (2026-09-06).** `ServerStore` now has
+  `load_registry_epoch`, `ingest_registry_epoch` and `seal_registry_epoch`, returning only
+  detached read-only `EpochRegistryState`. They reload the checked raw seed/signed log/gate/book
+  and vault-save before returning admission or a seal. There is no arbitrary-save API. Seals
+  retain all source content; late operations persist only bounded quarantine hashes, not accepted
+  edits. Retry after uncertain rename authenticates and flushes identical bytes without a copy.
+  Failed writes, flushes or writer panics grant no success and require accounting reconciliation.
+
+  `scan_epoch_storage_with_registry` / `cleanup_epoch_storage_staging_with_registry` explicitly
+  cover recovery, owner journals, intents and registry records without widening older APIs.
+  Historical inventory shares the full restart validator but returns metadata only, so it needs
+  no current owner and cannot grant editing authority. Peer-writable registry history and seed
+  bytes charge ordinary content; only exact receipt growth charges protocol. This preserves room
+  to seal and journal the owner decision when content is full. Unpublished registry attempts
+  conservatively charge content and may require explicit cleanup before a fresh budget fits.
+
+  **Remaining at this stage:** local publication preparation/resealing is now added above;
+  held-op serving and successor
+  installation and recovery-first multi-record settlement; fault/tenure orchestration;
+  receipt-head/seed discovery; the sole complete-budget coordinator and live ingress work/rate
+  limits; actor/Studio consumers. Each saved mutation currently rebuilds a bounded graph, so this
+  adapter is deliberately not automatically invoked by transport. This advances persistence,
+  not end-to-end P1 readiness. UI files remain user-owned and untouched.
+
+  Human/adversarial review target: `store/epoch_registry.rs` and its adjacent tests, the four-family
+  branches in `epoch_recovery/{inventory,cleanup}.rs`, and `registry_epoch.rs` historical inspection.
+  Try a failed write before/after rename, a failed duplicate flush, a valid receipt for missing
+  history, an indexed file disappearing, scope/inner-snapshot substitution, owner removal, a
+  content-full owner seal, and crash-orphan cleanup. Assert no accepted-op acknowledgement before
+  durability, no source retirement, no mutable authority from inventory, and exact physical pools.
+  Focused tests: 11 store regressions plus one core inspection/accounting regression pass.
+  `cargo test -p catcoms-app registry_store` and `cargo test -p catcoms-replication registry_`
+  pass. Final `cargo test --all --all-features`,
+  `cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml` (190 tests), and
+  `npm.cmd --prefix apps/desktop test` (1037 tests) pass. `cargo fmt --all -- --check`,
+  `cargo clippy --all-targets --all-features -- -D warnings`,
+  `bash scripts/check-no-ambient.sh` (Git Bash on Windows), and diff checks pass.
+  Adversarial design review corrected receipt headroom accounting; implementation review fixed
+  needless budget invalidation on expected missing history and added inner-snapshot corruption
+  coverage. Re-review reports no remaining actionable blocker/high/medium finding. No frontend
+  or native source was changed; visual validation and frontend build/static checks were not run.
+
+- **P1 registry restart coordinator (2026-09-05).** `catcoms_replication::registry_epoch::RegistryEpoch`
+  privately owns the typed registry document, gate and receipt book. Its versioned, bounded
+  restart unit carries the raw receipt-bound seed and signed log, not an independent Automerge
+  save. Restore checks scope, signatures, causal dependencies, typed changes, full gate accounting
+  and the Open/Closing/Fault receipt matrix before returning an editable object. Historical local
+  admission survives owner/member changes; fresh receipts still require current-owner/tenure
+  verification and future share exemptions refresh from the verified group.
+  Receipt admission retains the entire source log. Duplicate post-seal arrivals now reuse their
+  quarantine slot; previously they could produce a gate snapshot that its decoder rejected.
+  At this stage it was an **in-memory coordinator and restart codec**; the 2026-09-06 slice above
+  adds its inbound/sealing vault adapter, not live settlement. Intent-before-edit and
+  snapshot-before-publish ordering remain the caller's responsibility. It cannot prune, finish
+  settlement, acknowledge recovery, or select a successor in place of its source. Storage
+  inventory/accounting for this record is now implemented above; receipt/seed discovery,
+  recovery-first multi-record transactions, repair/adoption orchestration and Studio consumers remain.
+  A different new-tenure receipt during Closing fails closed without replacing the saved seal;
+  applying that rewind needs the deferred recovery worker. A checked held-op resealing/serving
+  accessor is also needed for crash-after-persist/before-publish retries before live integration.
+
+  Rough P1 implementation estimate requested by the user: **45%, with about ±10 percentage
+  points uncertainty**. This is an engineering estimate, not a usability/readiness percentage.
+  Core protocol and storage primitives are furthest along; production settlement, network joining
+  and end-to-end recovery remain substantial. UI remains owner-owned and unchanged by this slice.
+
+  Review focus for a second human/adversarial pass: `registry_epoch.rs` constructors/seal/restore,
+  `doc.rs::restore_domain_log`, and `epoch.rs::verify_restart`. Try splicing individually valid
+  saved parts, substituting a seed, omitting dependencies, replaying a post-seal operation, and
+  restoring after owner removal. The invariant is exact signed-log/gate agreement with no
+  independently trusted materialized document, and no source retirement on receipt admission.
+
+  Verification: 13 new regressions (12 `registry_epoch` tests and the receipt restart-matrix
+  test), plus all 25 `epoch_close` integration tests, pass. Final `cargo test --all --all-features`,
+  `cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml` (190 tests), and
+  `npm.cmd --prefix apps/desktop test` (1037 tests) pass. `cargo fmt --all -- --check`,
+  `cargo clippy --all-targets --all-features -- -D warnings`, `scripts/check-no-ambient.sh`
+  (Git Bash on Windows) and diff checks pass. Adversarial review
+  found and fixed fabricated fault evidence and hidden same-tenure inheritance conflicts on
+  restore; re-review reports no remaining blocker/high/medium finding. The listed integration
+  limitations remain explicit follow-ups, not completed guarantees.
+  One root-suite run timed out in the existing real-TCP
+  `join_over_a_relay_then_upgrade_to_direct_via_dcutr_over_real_tcp` test after transport dial
+  failures; `cargo test -p catcoms-sync --all-features --test tcp_dcutr_e2e` passed unchanged in
+  isolation (0.16 s), followed by a passing complete root rerun. No timeout, assertion or
+  networking code was changed by this slice.
+
+- **Creative frontend dependency audit and C0c blob seam (2026-09-05).** UI remains owner-owned.
+  `publish_pix` and `request_blob_bounded` now reach Server/actor/Tauri via `creative.rs` and
+  `creative_blobs.rs`; see the exact IPC contract in INTERFACES section 5. The Rust PIX1 validator
+  matches the frontend format; storage checks include bounded sealed reads and dedup/promotion.
+  Focused coverage includes malformed/canonical pixels, exact/over limits, corrupt cached files,
+  reopen, authenticated network refusal before storage, cancellation and stale bridge completion.
+  PIX publication fails closed on the memory fallback after a failed disk-store attachment.
+  Review fixes also persist Unix blob-directory ancestry and cover post-promotion flush/retry,
+  invalid signatures, wrong CIDs, wrong request nonces and outsider responses. Low follow-up:
+  ancestor directory syncing currently requires read access to otherwise execute-only parents;
+  a future trusted vault-root durability boundary could narrow that requirement.
+  This saves an immutable blob, **not a flipnote/frame list**; the frontend still uses its local
+  placeholder map until the owner connects it. C0c also still needs the reference enumerator,
+  profile result and consented-avatar persistence work. No UI files were changed by this slice.
+
+  | Frontend dependency | Integrated now | Remaining |
+  |---|---|---|
+  | 1. PIX publication / bounded fetch | Storage -> sync -> Server -> actor -> native commands | Frontend invocation, exact record-length/format checks at consumption |
+  | 2. Creative pins / retention | Existing wiki pins and generic retention only | `creative_pinned_cids`, concurrent-reference enumeration and retention wiring; expiry GC is not live today |
+  | 3. Studio materializers | Tags 15/16 and fail-closed generic P1 paths | Rust StudioIndex/StudioObject domain validation/projection |
+  | 4. Studio preflight | Generic projection preflight and registry implementation | 999-frame/8 MiB/4096-sfx/64-patch Studio rules |
+  | 5. Studio commands | Actor infrastructure only | list/read/apply plus index variants through native bridge |
+  | 6. Studio/settlement events | Core settlement models only | AppEvent and bridge forwarding, no real UI updates yet |
+  | 7. Newcomer discovery | Registry/checkpoint/receipt-head primitives | Keyed network requests and catch-up coordinator |
+  | 8. Draw claims | Existing jam transport only | Shared admission, full-identity signal bridge, draw channel and claims |
+  | 9. Recovery actions | Vault stage/ack/advance APIs | Settlement wiring, typed Restore/copy/export and bridge commands |
+  | 10. `.pixa` and chat doodles | Existing fileshare machinery | Export codec/validator, attachment schema and publication/reference integration |
+
+  Roadmap: unlock independent blob I/O now, then finish the P1 coordinator/transaction/discovery
+  and typed Studio integration. P1 reuses replication and vault storage; its new job is safe,
+  bounded history retirement, not image-byte editing. Tested primitives are not completed features.
+
+  Verification: 15 new regression tests; focused storage `bounded_`, sync `bounded_blob`, app
+  `pix_` and native `creative_bridge` checks passed. Final `cargo test --all --all-features`,
+  `cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml` (190 tests), and
+  `npm --prefix apps/desktop test` (1037 tests, invoked with npm.cmd on Windows) passed.
+  Root/native formatting, root clippy with `-D warnings`, native cargo check, the ambient-dependency
+  gate and diff checks passed. One intermediate native run failed the existing real-socket
+  `the_listen_port_prefers_the_seed_derived_home_port` test; isolated and full reruns passed without
+  changing it. Final adversarial re-review found no blocker/high/medium issue; the low portability
+  follow-up above remains. No frontend runtime changes or visual changes were made.
+
+- **P1 epoch-close backend work continues (2026-09-05).** Revision 5 of
   [`design-epoch-close.md`](design-epoch-close.md) is accepted. The first replication-core slice
   adds the four new stable document tags, backward-compatible v2 signed domain-operation
   envelopes, exact close validation, owner receipt/journal and peer fault state, a persisted
   server/document-bound `Open -> Closing -> Settled/Fault` gate, a vault-serializable bounded
   intent ledger, and the
   two-retained-plus-one-staged recovery transition. P1 types fail closed on the legacy edit/ingest
-  path and require a type-specific inbound change validator. This is **not end-to-end P1 yet**:
-  deterministic checkpoint materializers, settlement/storage transactions, keyed catch-up and
-  receipt-head discovery, registry projection, application events and Studio UI integration remain.
+  path and require a type-specific inbound change validator. This is **not end-to-end P1 yet**.
+  The checkpoint/registry slice now adds deterministic raw checkpoint seeds, receipt/hash/schema verification,
+  isolated checkpoint installation, seed-origin vault restore, per-edit/inbound projection
+  preflight, and the typed 256-bucket registry with stable 2048-pointer admission and tombstone
+  reclamation. Tests exercise real encrypted registry edits after checkpoint/restart, closed-head
+  projection excluding later work, malformed seeds/deltas, maximal bucket capacity and retirement.
+  Adversarial fixes add bounded raw-column parsing, inner-author roster checks, causal predecessor
+  binding, and idempotent edits after concurrent bucket creation. Legacy v1 change framing stays
+  compatible; P1 v2 rejects compressed changes before parsing.
+  The recovery-persistence slice adds scoped `ServerStore` load/stage/acknowledge/advance APIs:
+  one atomically replaced vault-sealed record retains the two versions, staged version and original
+  warning deadline. Exact completed-eviction metadata makes post-rename flush failures retryable.
+  Recovery encoding checks its aggregate 6 MiB cap before allocation. This API is not wired to
+  settlement or incoming traffic: shared storage admission, crash-orphan cleanup wiring, and server
+  removal retention remain prerequisites. The three-slot limit is logical; replacement temporarily
+  duplicates ciphertext. Recovery records currently remain after leaving, like held blobs.
+  Storage admission now has a server-bound `EpochStorageBudget` plus an accounted recovery-save
+  adapter: 1984 MiB content + 16 MiB protocol + 48 MiB settlement inside 2 GiB, full old/new/temp
+  peak accounting, document-pinned reserve, and fail-closed reservations after uncertain writes.
+  Tests cover forgotten guards, exact physical/pool reconciliation, restart and cap refusals before
+  disk writes. Recovery inventory discovery now scans canonical vault files without a registry,
+  verifies scope and physical pools, and accounts temporary siblings without reading/promoting them.
+  It holds exclusive store access across bounded steps; failures or parser panics poison the scan.
+  Unknown orphan ownership blocks per-server composition, not just the affected filename.
+  Explicit recovery-staging cleanup is now implemented: an exclusive bounded pass removes only
+  canonical unpublished siblings, preserves all logical recovery slots and legacy files, syncs
+  successful batches, then hands off to a fresh inventory without releasing the store borrow.
+  Errors/panics can leave partial removals but yield no completion or accounting refund; an empty
+  retry still runs the directory-sync step. Tests cover failure/restart/reconciliation/retry,
+  no-destination first-write orphans and hardlinks. It is not automatically run on user vaults.
+  Owner receipt decisions now have an accounted vault-sealed prepare/mark-published adapter.
+  Every mutation reloads under exclusive store access and saves before returning, including exact
+  retries after post-rename flush failures. A returning owner can replace an unfinished older-tenure
+  decision only with a strictly newer verified tenure; same-tenure choices remain irrevocable.
+  Tests cover real MLS A-to-B-to-A tenure changes, restart, failed writes, stale completion,
+  malformed scopes and shared recovery/receipt reserve ownership. This is not a live publisher:
+  the coordinator still must validate the close/seed before signing and recheck authority at send.
+  A combined `scan_epoch_storage` / `cleanup_epoch_storage_staging` now covers recovery files and
+  `.owner-receipts` journals under one exclusive store borrow. Coverage is explicit and survives
+  cleanup-to-scan handoff. Matching orphan destinations requires both namespace and digest; owner
+  bodies retain their own small cap and protocol-pool accounting. Mixed-family tests cover failed
+  writes, restart, cleanup, reconciliation and exact publication retry without touching saved choices.
+  Existing recovery-only APIs keep their scope and old type names as aliases. Neither path is
+  automatically invoked on user vaults; other managed types, server-removal lifecycle and the sole
+  production budget/coordinator still need integration.
+  Local intent preparation now has a vault-backed, append-only adapter: the local MLS device
+  supplies the author, current membership and full scope are checked, and a new intent is sealed
+  before the call succeeds. There is no intent-retirement API yet. Exact retries flush the
+  authenticated unchanged final file and parent without another copy, including after a
+  post-rename failure at the cap. Other writes still pay ordinary-content replacement peak.
+  Explicit `*_with_intents` inventory/cleanup covers all three implemented families without
+  changing either older API's coverage. A vault-wide `EpochIntentBudget` counts final ciphertext,
+  framing, unpublished siblings and replacement peak inside 64 MiB; this is conservatively
+  stricter than payload-only accounting. A private mount/generation token invalidates stale or
+  duplicate budgets before any intent write/sync/cleanup attempt. Intent temporary bytes charge
+  ordinary content, not the settlement reserve. Tests cover restart, both caps, cross-vault/group
+  rejection, uncertain writes, stale inventory, mixed-family accounting and both document limits.
+  Preparing an envelope is not type-specific validation, a live edit or replay; the coordinator
+  still must validate domain semantics, serialize all record families and retire intents only
+  with the checkpoint/recovery transaction. No new path runs automatically on user vaults.
+  Follow-up coverage: native Windows reparse/junction refusal and forced enumeration-order
+  fixtures (current tests vary creation order; attribution itself occurs only after EOF).
+  Intent review follow-ups: an already-accepted author removed through actual MLS membership,
+  and a caught panic specifically during retry-sync (outsider rejection, writer panic and sync
+  error are covered). Final adversarial review found no blocker/high/medium defect in this slice.
+  Budgets still require every managed record type; multi-record settlement,
+  complete managed-type cleanup and sole-writer wiring remain deferred. No guessed future deletion grants headroom, and
+  the low-level unaccounted save is not a production admission path.
+  Studio-specific materializers, settlement/storage transactions, keyed catch-up and receipt-head
+  discovery, application events and Studio integration remain. Catch-up integration must distinguish
+  new submissions from already-admitted history by removed authors; future Studio epoch-0 logical
+  keys must bind the server, as registry keys already do, since the signed operation envelope does
+  not separately bind a group id. The user owns UI implementation;
+  the canonical HTML/PNG references are recorded in `design-creative-suite.md`.
+  That document's section 7 now tracks backend milestones and the local/fixture UI work that can
+  proceed independently. P1 is in progress; there is no end-to-end shared Studio yet.
 
 - **Phases 0 → 10 COMPLETE. The live work is the desktop client's real-time layer;
   group voice (phases 1–3 shipped; see [§ Voice](#voice-group-calls)).**
@@ -131,11 +3606,12 @@ in [`ARCHITECTURE.md`](ARCHITECTURE.md) §1–§2; **read them; they constrain e
 | `catcoms-storage` | Content-addressed `Cid` blob stores (mem + fs); per-file encryption (`FileRef`, per-file wrap nonce); `RetentionIndex` (3-scope expiry, GC with decorrelated eviction + `HolderOracle` probe). |
 | `catcoms-net` | libp2p `MeshService` realizing `MeshTransport` (gossipsub + request/response over Noise+yamux). NAT traversal: relay-client + **circuit-relay-v2** + **DCUtR** hole-punch (`next_direct_upgrade()`), router mapping via libp2p **UPnP IGD**, actor-owned IPv4 **PCP/NAT-PMP**, and a narrow internal **PCPv6 firewall-pinhole** client for stable TCP and UDP/QUIC ports, plus an **AutoNAT v2 client** whose `AutoNatResult` is scoped to one address/server/test. PCPv6 binds an exact GUA to the default gateway and native index from the OS IPv6 route table, uses request-bound 96-bit nonces, requests five-minute leases, honors assigned lifetimes up to 24 hours, and has independent family/interface ownership and stale-worker generations. Lease timing is monotonic; response options are accepted within RFC bounds. Bounded/coalesced `PortMappingSnapshot`, `AutoNatSnapshot`, and `RelayAddressSnapshot` streams retain authoritative current state for late consumers without unbounded diagnostic queues; public mapping/manual owners are reference-counted, withdrawn routes prune evidence, and failed probe/MAP attempts retry. Relay/rendezvous swarms serve v2 dial-backs only after explicit experimental `--enable-autonat`; a first-declared pre-socket guard requires one direct public target at the request connection's exact source IP and charges peer/source-prefix/node/concurrency caps. Same-NAT port probing and metadata remain bounded residuals, so serving stays off by default. Ordinary members never serve anonymous AutoNAT. Standalone zero-knowledge infra: `build_relay_swarm`/`run_relay` and `build_rendezvous_swarm`/`run_rendezvous` (`RelayBehaviour`/`RendezvousBehaviour`). **Rendezvous client** in `MeshBehaviour`: `rendezvous_register`/`rendezvous_discover`; discovered records surface via `next_discovered()` (per-response capped), registration grants/TTLs via `next_registered()`, and neither stream auto-dials. Repair adds fail-closed connected-only request/notify verbs and an actor-revalidated direct-only peer-bound batch of at most two routes. `add_external_address()` (register without a relay), and the trust-split rendezvous-address validators `validate_operator_rendezvous_addrs()` / `validate_invite_rendezvous_addrs()` (both reject circuit / require one `/p2p/` / distinct PeerIds; the invite one additionally requires a globally routable IP literal, allowing loopback only when the whole set is loopback, while the operator one still permits a DNS name because rung 4 needs one). Address classification for the whole workspace lives in `addr` (P13). Router mapping is opt-in at the library builder and explicitly enabled by the desktop; loopback-only services never touch the gateway. `connection_limits` on every swarm. Tracing-instrumented. |
 | `catcoms-discovery` | **Pure** eclipse-resistance layer (no I/O, no ambient time/RNG). `DiscoveryPolicy` ranks discovered candidates into a bounded, Clock-paced/RNG-jittered **dial plan** (the only thing that decides what to dial): member-tag-verified → multi-rendezvous-corroborated → cache → junk-last, ≤1 root/rendezvous, roster-clamped, seq-freshness. Advisory `EclipseDetector` (D/R/S + hysteresis; never gates). Cross-session `AddressCache` (proven members, RNG-jittered eviction, BLAKE3 keyed integrity tag → tamper-detected on load; SQLCipher backing deferred). |
-| `catcoms-sync` | `ChannelSync`: replication + membership over the transport. Blinded **member-only gossip topics keyed under `ns_secret_L`** that rotate on member removal (routing label `L`), grandfathered re-subscription window. The **join handshake** transfers the **routing state** (sealed, signature-bound). Membership **commit propagation**; **missed-commit recovery** with **signed catch-up responses** (nonce+epoch anti-replay) + a **two-pool peer model**; bounded zeroized **past-epoch key window**. Discovery surface: rotation-aware/TTL-renewed rendezvous, **member PEX**, sealed address cache, endpoint-scheduled redial, pairwise path evidence, derived HyParView-like active/passive views, local CYCLON age/source diversity, two-helper SWIM-style observations, queued exact-descriptor reciprocal repair and manual bounded redial. A newer signed omission removes previous live/sealed routes; old IPs are not retained as automatic backups. Ordinary members forward only small authenticated repair controls over existing proven paths, never application traffic or anonymous probes. Voice: **`KIND_CALL_SIGNAL`** (authenticated members-only push of an *opaque* SDP/ICE payload; signed, freshness-bound, `from` = the verified signer; **not** deduped, FIFO-bounded) + `media_key`. `SyncStats`. |
-| `catcoms-app` | **Product model**; the UI-facing facade over the stack (so a GUI never touches MLS/automerge). `Server<T,R>` (found/join/open_channel/send_message/messages/members/invite), the canonical chat-message schema (`append_message`/`read_messages`), and the async **event-stream actor** (`spawn` → `ServerActor` commands + `AppEvent` stream: `ChannelUpdated{channel,change}`/`MembersChanged`/`Closed`; voice adds `MediaKey`/`SendCallSignal` commands + a `CallSignal` event). `ChannelUpdated` carries a typed `ChannelChange` (appended / re-rendered / topic / jukebox) and `channel_heads()` serves the unread projection: see [INTERFACES § 10](INTERFACES.md#10-channel-deltas--unread-state-catcoms-app--tauri-bridge--desktop). |
-| `catcoms-log` | `tracing` subscriber init plus the canonical bounded diagnostics hub/ring. Safe admission destructively minimizes runtime text/addresses/targets/names; library-actor trace tokens normalize at the RingLayer and rejoin native operation/event stages. Native event envelopes carry a non-persisted session/trace proof so the webview can return an already-normalized trace without either trusting arbitrary UI hex or computing `H(H(raw))`. Public issue reports use a separate native allowlist renderer with per-row capture mode/epoch. `init_debug(debug, dir)` writes a separately bounded **raw** `debug_log_<ts>.txt`; that file bypasses Safe minimization and may contain arbitrary tracing/console/error prose, so it must be reviewed before sharing. |
-| `apps/desktop` | **Tauri 2 + Svelte 5 desktop app** (its own cargo workspace, excluded from the root). A thin `#[tauri::command]` bridge (`src-tauri`) over the `catcoms-app` actor + a Svelte frontend; the whole product surface (rail/channels/files/status/wiki/DMs/profiles) plus the **WebRTC voice mesh** (all media-plane code is frontend). The WebView is the one manually-verified surface; `npm install && npm run tauri dev`. |
-| `bins/catcomsctl` | Dev CLI. `demo` runs the whole stack end-to-end (in-process); `serve`/`join` run it across **real OS processes over TCP** (optionally `serve --relay`); `relay` and `rendezvous` run the zero-knowledge infra nodes (`--identity <file>` persists the keypair for a **stable peer id across restarts**, so invites embedding the address keep working); `recover` drives the 6d-1b miss-and-heal path; `--debug`/`--stats`. |
+| `catcoms-sync` | `ChannelSync`: replication + membership over the transport. Blinded **member-only gossip topics keyed under `ns_secret_L`** that rotate on member removal (routing label `L`), grandfathered re-subscription window. The **join handshake** transfers the **routing state** (sealed, signature-bound). Membership **commit propagation**; **missed-commit recovery** with **signed catch-up responses** (nonce+epoch anti-replay) + a **two-pool peer model**; bounded zeroized **past-epoch key window**. Discovery surface: rotation-aware/TTL-renewed rendezvous, **member PEX**, sealed address cache, endpoint-scheduled redial, pairwise path evidence, derived HyParView-like active/passive views, local CYCLON age/source diversity, two-helper SWIM-style observations, queued exact-descriptor reciprocal repair and manual bounded redial. A newer signed omission removes previous live/sealed routes; old IPs are not retained as automatic backups. Ordinary members forward only small authenticated repair controls over existing proven paths, never application traffic or anonymous probes. Voice: **`KIND_CALL_SIGNAL`** (authenticated members-only push of an *opaque* SDP/ICE payload; signed, freshness-bound, `from` = the verified signer; **not** deduped, FIFO-bounded) + `media_key`. `SyncStats`. Document catch-up **pages by position**: `KIND_CATCHUP_SINCE` carries an optional trailing continuation and a truncated answer returns under `CATCHUP_SINCE_PAGE` with a 20-byte `CatchupCursor` (per-runtime provider stamp + `u32` position, unauthenticated by design); both wire directions are additive, so a build predating paging still decodes and is answered the old way. `MAX_CATCHUP_SINCE_HEADS` is **512**. Commit catch-up outcomes are typed (`Verified`/`Empty`/`Unanswered`/`Stranded`), so a member no reached peer can chain is detected rather than mistaken for an up-to-date one: `MembershipChainGap` + `SyncStats::commit_chain_gaps_observed` + `membership_chain_gap()`, **detectability only, with no UI surface and no repair path**. Concurrent-committer fork resolution exists and is test-gated but is **off by default** (`SyncConfig::max_committer_rank: 0`). A `DeviceId→PeerId` directory exists: `member_transport_peer()` over signed `PeerDescriptor` records fed by PEX and the sealed address cache. |
+| `catcoms-app` | **Product model**; the UI-facing facade over the stack (so a GUI never touches MLS/automerge). `Server<T,R>` (found/join/open_channel/send_message/messages/members/invite), the canonical chat-message schema (`append_message`/`read_messages`), and the async **event-stream actor** (`spawn` → `ServerActor` commands + `AppEvent` stream: `ChannelUpdated{channel,change}`/`MembersChanged`/`Closed`; voice adds `MediaKey`/`SendCallSignal` commands + a `CallSignal` event). `ChannelUpdated` carries a typed `ChannelChange` (appended / re-rendered / topic / jukebox) and `channel_heads()` serves the unread projection: see [INTERFACES § 10](INTERFACES.md#10-channel-deltas--unread-state-catcoms-app--tauri-bridge--desktop). Chat history is served natively by page rather than re-materialized whole: `Server::message_page(channel, &MessagePageQuery) -> MessagePage` plus `Server::doc_version()` as the cache key the bridge's `get_message_page` reads against; see [`design-native-paging.md`](design-native-paging.md). |
+| `catcoms-log` | `tracing` subscriber init, and the bridge from `tracing` into the diagnostics ring (`RingLayer`); `hub()` returns the process-wide `catcoms_diagnostics::DiagnosticHub`, which is where the canonical bounded hub/ring itself now lives. Safe admission destructively minimizes runtime text/addresses/targets/names; library-actor trace tokens normalize at the RingLayer and rejoin native operation/event stages. Native event envelopes carry a non-persisted session/trace proof so the webview can return an already-normalized trace without either trusting arbitrary UI hex or computing `H(H(raw))`. Public issue reports use a separate native allowlist renderer with per-row capture mode/epoch. `init_debug(debug, dir)` writes a separately bounded **raw** `debug_log_<ts>.txt`; that file bypasses Safe minimization and may contain arbitrary tracing/console/error prose, so it must be reviewed before sharing. |
+| `catcoms-diagnostics` | **One canonical record of what the application did** (workspace member; the M0–M7 rebuild driven by `docs/reviews/Mewtual_Adversarial_Debugging_Review.md`, plan of record [`design-diagnostics-suite.md`](design-diagnostics-suite.md)). Seven modules: `event` (`DiagnosticEvent`: stable code, one of 22 `Section`s, phase, correlating trace), `redact` (identifiers enter only as `SessionRef`, a keyed hash under a per-session random salt, so a peer id cannot leak however careless a call site is; literal addresses appear only under a deliberately chosen mode), `config` (`CaptureMode` `Off`/`Safe`/`Enhanced`/`Full` and per-section level move on **separate axes**, both at runtime with no restart, neither persisted; capture starts **Safe**), `ring` (one bounded chronological timeline, with counters that outlive the events they counted; sections filter it, never split it), `hub` (`DiagnosticHub` owns store, salt and clock so every subsystem names the same peer the same way), `render` (deterministic bytes, which is what makes golden tests and report hashes possible) and `export`. Rules it holds itself to: more reliable than what it observes; a disabled mode is disabled immediately; it can never block or panic a caller; every bound is explicit and every event lost to one is counted; it never reports its own failures through itself. |
+| `apps/desktop` | **Tauri 2 + Svelte 5 desktop app** (its own cargo workspace, excluded from the root). A thin `#[tauri::command]` bridge (`src-tauri`, **168** registered commands) over the `catcoms-app` actor + a Svelte frontend. The product surface is rail/channels/files/status/wiki/DMs/profiles, plus: the **WebRTC voice mesh** (media plane is frontend, now extracted out of `App.svelte` into `call-audio.ts`, `callroutes.ts`, `voice-signaling.ts`, `media-capture.ts`, `stream-audio.ts`, `streaming.ts`); the **Studio / Flipnote editor** (`Studio.svelte`, `StudioNav.svelte`, `studio-contract.ts`, `studio-state.svelte.ts`, `studio-store.ts`; UI seams in [`FLIPNOTE-UI-HOOKS.md`](FLIPNOTE-UI-HOOKS.md)); the **jam layer** (14 pure `jam-*.ts` modules: contract, wire, patch, engine, allocator, budget, channel, clicks, clock, editor, playback, publication, recorder, sheet, each with its own test file) and the **jukebox** (`jukebox.ts`); and the **debug console** (`DebugConsole.svelte`, design in [`design-debug-console.md`](design-debug-console.md)). The WebView is the one manually-verified surface; `npm install && npm run tauri dev`. |
+| `bins/catcomsctl` | Dev CLI. `demo` runs the whole stack end-to-end (in-process); `serve`/`join` run it across **real OS processes over TCP** (optionally `serve --relay`); `relay` and `rendezvous` run the zero-knowledge infra nodes (`--identity <file>` persists the keypair for a **stable peer id across restarts**, so invites embedding the address keep working); `recover` drives the 6d-1b miss-and-heal path; `version` prints the build version; `--debug`/`--stats`. |
 
 ## Build / verify ritual (run before every commit)
 
@@ -143,9 +3619,18 @@ in [`ARCHITECTURE.md`](ARCHITECTURE.md) §1–§2; **read them; they constrain e
 cargo build --all
 cargo clippy --all-targets --all-features -- -D warnings   # must be clean
 cargo fmt --all -- --check                                  # must be clean
-cargo test --all                                            # all green
+cargo test --all --all-features                             # all green; CI runs it with --all-features
 bash scripts/check-no-ambient.sh                            # ambient-dependency gate
+cargo deny check                                            # supply chain (needs cargo-deny installed)
 ```
+
+CI (`.github/workflows/ci.yml`) runs that set on Rust 1.89.0 across three jobs: the main
+job (fmt, clippy, `cargo test --all --all-features`, and the ambient gate on Linux), a
+`deny` job (`EmbarkStudios/cargo-deny-action@v2`), and a `linux-desktop` job (a
+default-deny Docker build-context audit, then `bash scripts/linux-container-test.sh
+desktop --install` with Node 22 and the Linux Tauri build libraries). Verify against the
+**full** set, not a subset, and grep the output for failures rather than trusting a
+summary line.
 
 For a change that touches the desktop app (its own cargo workspace; the root
 `--all` does **not** cover it), also run, in `apps/desktop`:
@@ -158,7 +3643,7 @@ cargo check --manifest-path src-tauri/Cargo.toml   # the bridge half
 
 PowerShell helper to sum test results (Windows dev box):
 ```pwsh
-$out = cargo test --all 2>&1 | Out-String
+$out = cargo test --all --all-features 2>&1 | Out-String
 ([regex]::Matches($out,"(\d+) passed")|%{[int]$_.Groups[1].Value}|measure -sum).Sum
 ```
 (`-match "FAILED"` is a false positive; it case-insensitively matches "0 failed".)
@@ -266,8 +3751,8 @@ TCP** (verified, incl. through a relay).
 | 8k | **chat UX polish**; messages carry a clock-stamped `ts` (canonical schema + `ChatMessage.ts`, stamped via `ChannelSync::now_ms`); UI shows HH:MM + auto-scrolls to newest | ✅ `f202530` |
 | 8l | **content-addressed blob fetch over the mesh**; `ChannelSync` holds a `BlobStore`; `KIND_BLOB_FETCH` request/response (members-only, responder-signed/bound, 16 MiB cap, **per-requester rate limit**; folded from adversarial review since blob is the strongest amplifier); `put/get/has_blob`, `request_blob(_best)`. Re-hashes served bytes vs the requested CID before storing (no cache-poisoning). Foundation for large avatars + fileshare | ✅ `e0c3c8e` |
 | 8m | **avatars over the blob layer**; the profile doc stores the avatar's `avatar_cid` (not inline bytes); `set_profile` puts the blob, `profiles()` resolves the CID against the local store, the actor proactively `fetch_missing_avatars` (always-try, since the holder-peer is often only known after the profile arrives) and re-emits. Public `Profile.avatar` (bytes) unchanged, so bridge/UI untouched | ✅ `5bc31f4` |
-| 8n | **fileshare browser**; per-server file index (`DocType::FileIndex`): `add_file`/`files`/`download_file`/`open_files`/`request_files_catchup` + `FileEntry`; actor `AddFile`/`Files`/`DownloadFile`/`CatchUpFiles` + `FilesUpdated`; bridge base64↔CID-hex; UI "Files" panel (upload/list/download). Blobs plaintext-at-rest, members-only; `seal_file` encryption-at-rest + chunked transfer deferred | ✅ `66b06ce` |
-| 8o | **cross-network founding/joining**; bind `0.0.0.0`; founder advertises a reachable address (LAN/public IP, `host:port`, or relay-circuit multiaddr) in the invite; joining dials **all** bootstrap addresses. Same-machine/LAN/port-forwarded internet all work. Pure `tcp_port`/`build_advertised` helpers unit-tested | ✅ `2ba19d3` |
+| 8n | **fileshare browser**; per-server file index (`DocType::FileIndex`): `add_file`/`files`/`download_file`/`open_files`/`request_files_catchup` + `FileEntry`; actor `AddFile`/`Files`/`FetchFileChunk`/`KeptFiles`/`CatchUpFiles` + `FilesUpdated` (there is no `DownloadFile` command; downloads go chunk by chunk); bridge base64↔CID-hex; UI "Files" panel (upload/list/download). Blobs plaintext-at-rest, members-only; `seal_file` encryption-at-rest + chunked transfer deferred | ✅ `66b06ce` |
+| 8o | **cross-network founding/joining**; bind `0.0.0.0`; founder advertises a reachable address (LAN/public IP, `host:port`, or relay-circuit multiaddr) in the invite; joining dials **all** bootstrap addresses. Same-machine/LAN/port-forwarded internet all work. The pure `build_advertised` helper (`apps/desktop/src-tauri/src/lib.rs`) is unit-tested; the `tcp_port` helper this row also named has since been removed | ✅ `2ba19d3` |
 | 8p | **multi-server**; bridge `AppState` is a `HashMap<u64, ServerEntry>` (each its own `Server`/actor); every command takes a `server` id, every event is tagged with it (`actor_of` clones the actor out so the registry lock is never held across an await); `found`/`join` return `{server, channel}` + register, `leave_server` shuts down. UI: a Discord-style server rail with per-server `ServerState` (channels/active/unread/invite/dot), active-server data loaded on switch + tagged events | ✅ `37fc6e7` |
 | 8q | **relay-circuit founding**; `found_server` gains an optional `relay` multiaddr; dials it, reserves a circuit (`listen_on(relay/p2p-circuit)`), and puts the relayed address first in the invite (mirrors `catcomsctl serve --relay`). Joiner unchanged (8o dial-all handles a relayed bootstrap). Zero-config NAT traversal with a relay node, no port-forward | ✅ `5bf3970` |
 | 8r/8s | **security-review hardening**; adversarial review of 8m–8q (no blocking findings); `fetch_missing_avatars` per-pass bounded (8r), `MemoryBlobStore` size-bounded (8s); + a desktop [User Guide](USER_GUIDE.md) | ✅ `0d0f3cf`/`173d168` |
@@ -276,7 +3761,7 @@ TCP** (verified, incl. through a relay).
 | 8v | **char-level wiki merge**; page bodies are automerge `Text` (`update_text` diff-splice); concurrent same-page edits merge char-by-char. + reworked a flaky file-convergence test to deterministic request/response catch-up (MemNetwork emits no `PeerConnected`, so gossip/peer-discovery timing was racy; the blob fetch itself is tested at the sync layer) | ✅ `1f61599` |
 | 9 | **disk persistence + encryption-at-rest**; designed in [`design-persistence.md`](design-persistence.md). **9a** key vault (passphrase-sealed `Dek`→`KeyHierarchy`) ✅ `2bbae5d`-prev, **9b** sealing blob store (encrypted at rest, plaintext-CID-addressed) ✅ `2bbae5d`, **9c** snapshottable MLS state (`snapshot_server`/`restore_server`; the pivotal slice; adversarially reviewed) ✅, **9d** doc persistence (`EncryptedDoc::snapshot`/`restore`) ✅, **9e** sync-state assembly (`ChannelSync::snapshot`/`restore`; MLS+docs+routing+ledger+commit_log+peer_records into one `Zeroizing` blob, restored onto a fresh transport; adversarially reviewed) ✅, **9f** vault-sealed `ServerStore` (`servers/<id>.bin`+`registry.bin`, atomic, wrong-passphrase-safe) + `Server::snapshot`/`restore` + actor `Snapshot` command + the desktop **passphrase gate** (`unlock` reloads each server onto a fresh transport) and **save-on-mutation**; close/reopen the app, enter the passphrase, servers + history are back (read offline) ✅, **9g** re-dial persisted peers on reload (`peer_addrs_from_snapshot` → fresh mesh bootstrap; a reloaded joiner reconnects to stable-address peers) ✅, **9h** per-file encryption: **9h-a** wired `SealingBlobStore`/`FsBlobStore` per server (files+avatars persist + sealed at rest under `blob_key`) ✅, **9h-b** stable per-group file-wrap key minted at founding + bundled into the join transfer; `seal_file`/`open_file` so files are e2e ciphertext keyed by ciphertext CID (adversarially reviewed) ✅. **Phase 9 complete.** | **✅ done (9a–9h)** |
 | 10 | **desktop UI / product overhaul** ([plan](../../.claude/plans/moonlit-puzzling-karp.md)). **10a** tabbed nav (Chat·Files·Status·Wiki·Profile) + Settings overlay + invite placement, **10b** rich-text renderer (`render.ts`: `marked` + DOMPurify; `[[links]]`/`:emoji:`/`![cid embeds]` tokens; sanitizer allows no media/raw-HTML; placeholders only), **10c** fileshare folders (`FileEntry.path`, traversal-safe) + chat drag-drop media embeds + media resolver (builds `<img/video/audio>` in code from CID-verified blobs) **+10e** status media; *adversarially reviewed, 0 security findings*, **10d** wiki overhaul (markdown render + Read/Edit + `[[links]]` nav + backlinks via `get_wiki_map` + media + in-app help), **10f** custom emoji via the `emoji/` fileshare folder (picker + `:code:` render + Settings manage), **10g** notification sounds (Web Audio chime, Settings toggle), **10h** roles/permissions (`MemberRoles` doc tag 6; owner = MLS designated committer; admin grants + role-gated `mint_invite`; Settings→Server role manager); *adversarially reviewed; enforcement is honestly documented as **policy-layer/advisory** (admin grants forgeable by a modified client; owner-signed grants + committer-side join re-check are the named follow-up)*. All 16 user UI requests delivered. | **✅ done (10a–10h)** |
-| 8… | **✅ rendezvous auto-discovery in the UI**; found registers at a zero-knowledge rendezvous; a joiner pasting that invite is discovered there and joins with **no hard-coded address** ([`design-rendezvous-ui.md`](design-rendezvous-ui.md), reviewed). **✅ chunked large-file transfer**; a file splits into chunks (each its own content-addressed blob) described by a `FileManifest`; the per-blob 16 MiB cap now bounds only a chunk (whole-file cap 256 MiB), the blob rate limit became a per-requester **bytes-budget**, and download reassembles + verifies the whole-file plaintext cid ([`design-chunked-transfer.md`](design-chunked-transfer.md), reviewed). **✅ post-join steady-state discovery**; after joining, a member periodically re-registers/discovers at the rendezvous under its rotation-aware namespaces and dials other members (re-finds the group after a restart, no fresh invite); `MeshTransport` extended (libp2p-free, default-inert verbs), a per-server bridge timer drives `AppCommand::DriveDiscovery` (real-time off the deterministic-time seam), persisted rz config ([`design-postjoin-discovery.md`](design-postjoin-discovery.md), reviewed). **✅ dedup-safe blob GC** (delete now reclaims a deleted file's orphaned chunk blobs, keeping any chunk another file references), **✅ download progress** (per-chunk `DownloadProgress` events → a UI progress bar; the whole-buffer-IPC/non-blocking-actor refactor stays deferred) **+ a Downloads tab** (per-server, newest-first list of queued/downloading/done/failed transfers + a "clear finished" action; shows the **live provider**; the signed responder that actually served each chunk, surfaced authenticated via `request_blob_best_provider` (the responder signs the request-bound, content-verified blob response, so the fingerprint is unspoofable), falling back to the uploader as the source), **+ file-browser availability** (each file is colour-coded by local availability; `●` on this device / `◐` partial _h/t_ / `○` downloadable / `○` no peers online; via a new `files_view` that counts held chunks per file + a cheap reachable-peer flag, zero network cost; refreshed on tab-open / files-updated / post-download), **+ channel viewer is now chat-only** (the channel list hides outside Chat; the roster stays), **+ live member presence** (`ChannelSync` now keeps an accurate `connected_peers` set; `PeerDisconnected` was previously dropped; surfaced as roster online dots + an "N online" count via `connected_member_fingerprints`, which matches each member by **its own** signed `peer_id` so a forged record can't steal another's presence; the availability hint's `has_peers` now uses this live set, fixing the staleness), **+ per-member presence detail** (the frontend tracks observed connect/disconnect transitions to show "Online · 5m" / "Last seen 5m ago" in the roster tooltip, member menu, and an inline last-seen; durations only for transitions actually witnessed this session, refreshed by a 60s tick), **+ DMs + friends (phase 1)**; a DM is a 2-person server flagged `is_dm` (a backward-compatible registry trailing block; the signed invite + network path are unchanged, so per-server unlinkability is preserved); a DMs circle on the rail opens a DM-home (friends/DM list + the conversation reusing the chat view), **New DM** founds a DM + surfaces its invite as a friend code, **Add friend** redeems a pasted code ([`design-dms-friends.md`](design-dms-friends.md), reviewed; no protocol/security change). **✅ phase 2: friends-list sortings**; a DMs-only `message_stats`/`dm_stats` (count + timestamps + distinct active days, no message text) drives sorting the friends list by **recent** / **most active** (msgs ÷ active days) / **reconnect** (volume × silence) / **A–Z**, with a per-DM last-message hint (reviewed). **✅ phase 3: in-band "Add friend"**; a roster action on an *online* member founds a DM and delivers its invite over the shared server via a new authenticated `KIND_DM_INVITE` request (membership+signature+freshness, like PEX; `from` = the verified signer, unforgeable; payload opaque/inert, validated only on accept; queue bounded+deduped+transient). The recipient sees a pending friend request (DMs-circle badge + a list) and accepts with one click; offline targets fall back to the friend code (reviewed: auth/no-spoof + inert-payload + DoS-bound all hold). **DMs + friends complete.** **✅ non-blocking download**; a large download no longer freezes the server actor: the bridge fetches the file **one chunk per actor command** (`file_download_plan` + `fetch_file_chunk`), so the actor returns to its loop between chunks and interleaves messages/sync; it reassembles, emits per-chunk progress, and verifies the whole-file content address bridge-side (reviewed; equivalent + integrity undiminished). **✅ eclipse `D` accuracy**; `observe_eclipse`'s reachable-devices now uses the live `connected_member_fingerprints` instead of the monotonic `member_peers`, so it stops under-warning after a node loses its peers. **✅ in-channel message search**; Ctrl+F (or the 🔍 header button) opens a search bar over the active conversation's messages; matches are highlighted, Enter/Shift+Enter (or ↑/↓) step through them scrolling each into view, with an _n / m_ counter; closes on Esc or a channel/server switch (frontend-only). **✅ advanced search**; the same bar gained a filter panel (Ctrl+Shift+F, or the "Filters (n)" toggle): **from** a member · **after**/**before** a local-day date · **has** image/video/audio/file/link (embeds classified by the fileshare index's MIME via `safeMime`, so a non-media or not-yet-indexed cid reads as a plain attachment) · **is** reply/has-replies/pinned/edited/mentions-me/from-me · **reactions** any/mine/a specific emoji; all AND-combined and usable with an *empty* query, plus a **sort** (oldest/newest/author A–Z/most reactions) that orders both the ↑/↓ stepping and a new click-to-jump result list (first 50 rendered, count disclosed). The match cursor is *clamped* rather than reset so a filter edit or an incoming message can't strand the highlight; the author/emoji pickers are lazy deriveds over the loaded messages, and the media regex only runs when a has-filter is active (frontend-only; still scoped to the loaded backlog). **✅ advanced search, round 2**; search became **server-wide**: an **In** scope (this channel / all channels / a specific one) builds a *corpus* of `{channel, index, message}` hits, fetching each non-open channel once via the existing `get_messages` into a snapshot dropped when the search closes (the open channel always reads the live `messages`, so it can't go stale). A hit in another channel is reached by clicking it or stepping onto it: `switchTo` gained a `keepSearch` flag (and is now `async`, awaiting `refresh`) so the jump lands by **message id** in the freshly-loaded channel, with the outgoing channel snapshotted first so its hits don't blink out mid-switch; *refining* a query never jumps channels, only ↑/↓ and clicks do. **From** and a new **Mentions** filter are member **typeaheads** (roster ∪ corpus authors, ↑/↓/Enter/click, emptying the box drops the filter); mentions match the `@[Name]` marker via the shared `mentionName` normalizer, so a since-renamed member matches under the name they were mentioned by. Also: **Today/7d/30d** date shortcuts, **case-sensitive** + **whole-word** match modifiers (the latter bounds on non-word-or-edge, since `\b` misbehaves on a punctuation-edged query), a **most replies** sort, and reply counts computed over the *corpus* (not just the open channel) so "has replies" and that sort stay right server-wide. Result rows carry the channel; the sorts key on timestamp rather than corpus position, since a multi-channel corpus is grouped by channel. **✅ edit + delete your own messages**; messages now carry a stable random `id` (list indices are unstable under CRDT merges); a member can edit (inline, with an "(edited)" tag) or delete its own messages via `Server::edit_message`/`delete_message` (a soft own-author gate; honest-client-only, the documented R6 residual since message content isn't authenticated). The change-detector switched from message-count to a content signature so an edit (count unchanged) refreshes everyone (reviewed: CRDT ops merge-safe, no empty/stale op). **✅ message moderation**; owner/admin can delete *any* member's message (not just their own; edit stays own-only), honest-client gated like file deletion (R6); offered in servers, not DMs. **✅ jump-to-unread**; a per-`server:channel` read mark (localStorage) renders a "New messages" divider + an "↑ New" jump button; the mark advances to the latest once seen. **✅ emoji reactions**; toggle a reaction on any message (quick-picker + right-click "React…"); chips show counts and highlight your own. Stored as flat scalar keys `"<emoji>\x1f<fp>"=true` written **directly on the message map** (no sub-object), so concurrent reactors write distinct keys that all survive a merge; no concurrent-create loss for *any* message, legacy included (5-lens adversarial review → this superseded an earlier pre-created-container design that still lost reactions on old-client-authored messages; a two-replica fork/merge convergence test pins the invariant; emoji validated at the trust boundary). The content signature folds reactions so a peer's reaction refreshes everyone. **✅ reply / threading**; reply to any message (right-click → "Reply" or the composer banner); messages carry an immutable `reply_to` parent-id (written only when it's a reply, so plain messages stay key-clean; no concurrency hazard, it's set once at creation), rendered as a clickable parent-quote that jumps to + flashes the original (degrades to "original message" if the parent isn't loaded). `Server::send_reply` threads it; `send_message` stays a 2-arg delegate (no test churn). Reviewed: sound, backward-compatible, all dangling/lifecycle paths degrade gracefully. **✅ @mentions + reply notifications**; type `@` for a member autocomplete that inserts an `@[Name]` marker (frontend-only; mentions ride in message text, no CRDT change), rendered as a highlighted chip via a new `marked` tokenizer (DOMPurify-sanitized) with a stronger self-highlight; a sidebar `@` badge marks any active-server channel with an unseen message that mentions you or replies to one of yours (scoped to the active server, where your per-server identity is known; cleared on read). Insertion + detection share a `mentionName` normalizer so odd names round-trip. Reviewed: no XSS, the mid-fetch server-switch race guarded, name-based matching is best-effort by design. **✅ custom-emoji reactions**; the reaction picker also offers the server's custom `:name:` emoji (the `emoji/` fileshare folder), and reaction chips render a custom emoji as its image (graceful `:name:` text fallback where the emoji file isn't held); backend unchanged (it already accepts any emoji string). **✅ cross-server inbox**; a dedicated rail icon (📥) opens its own screen listing every message that @-mentions you or replies to one of yours, across **all** servers/DMs, newest first, each showing who/where/when + a one-click jump (with unseen highlighting + a rail badge). Backend-driven: `Server::inbox` scans each server's channels in-process and resolves author names (per-server identity); the bridge `get_inbox` aggregates under a lock-free actor snapshot; a 1.5s-debounced reload keeps it live. The backend reuses the UI's exact `@[Name]` normalization (`normalize_mention_name`) so detection matches insertion. Reviewed: no blocking, the marker-normalization divergence + jump-to-unlisted-channel + timer-leak all fixed. **✅ reply-count thread affordance** (a "💬 N replies" chip under any message that has replies, jumping to the first) **+ distinct mention chime** (a brighter rising triad when a message mentions/replies to you, vs the two-note chime for ordinary messages; wired into both the open channel and the per-channel scan). **✅ message pinning**; owner/admin can pin/unpin any message (honest-client gated, R6); a 📌 marks pinned messages inline and a header "📌 N" opens a panel listing them with jump-to/unpin. Stored as a `pinned` flag **directly on the message map** (merge-safe like the reactions design; concurrent pins of different messages can't conflict, a pin/unpin race is clean LWW); the change-detector folds it so a peer's pin refreshes everyone; an idempotent guard avoids a redundant op. Reviewed: ship, no blocking. **✅ rich composer**; `||spoiler||` tags (a new `marked` tokenizer rendering a blacked-out span revealed on click, DOMPurify-allowlisted), a composer **formatting toolbar** (bold/italic/strike/code/spoiler that wrap the selection, + Ctrl+B/Ctrl+I), and **per-channel drafts** (in-memory: switching channels/servers preserves what you'd typed, cleared on send). **✅ message-action UX fix**; edit/picker were rendering on every legacy (empty-id) message because `editingId/reactionPickerFor === ""` matched `m.id === ""`; now gated on a truthy id, plus a Discord-style hover toolbar (react/reply/⋯-more) on each message. **✅ bug fixes (user-reported):** profile name/styling reverted on reload because `spawn` *unconditionally* re-seeded the profile from the founding display name; now seeds only when absent, so a restored profile survives (regression-tested); `saveProfile` also keeps the rail label in sync when it was still tracking your name. Inline media (status/chat embeds + custom emoji) vanished after a tab switch because the resolution `$effect` didn't track `view` (tab switch destroys+recreates the DOM with fresh, unresolved placeholders); now re-resolves on `view` change (cheap; the embed cache holds the decrypted bytes). The file-info preview no longer hangs on "Loading preview…" forever; a failed fetch now surfaces "preview unavailable". Composer: emoji button moved right, the inline formatting toolbar replaced by a Settings → Message-formatting help section (Ctrl+B/I kept). **✅ emoji/sticker size**; custom emoji can be created at a chosen size (Emoji/Medium/Large/Sticker, capped 160px), encoded as a `~<px>` suffix in the emoji's filename so it's shared with everyone (no backend change); inline `:code:` renders at that size, reactions/pickers stay small. **✅ profile cards + customisation**; clicking a member's avatar/name opens a profile card (avatar, styled name, role, a self-set **description/bio**, an Add-friend button for online members); the Profile gained `description` + `bubble` fields (CRDT, additive/backward-compatible). The **message bubble** is now customisable per member (color/gradient presets), applied to that author's messages; the value is sanitized (colors/gradients only, no CSS injection) and the description renders as escaped text. **✅ discovery record-seq surfacing** (real anti-replay freshness) **+ advisory `EclipseDetector` surfacing** (isolation banner; never gates). Remaining: AddressCache persistence · true streaming download · TTL-aware re-registration | rendezvous + chunking + post-join discovery + final polish **done**; rest planned |
+| 8… | **✅ rendezvous auto-discovery in the UI**; found registers at a zero-knowledge rendezvous; a joiner pasting that invite is discovered there and joins with **no hard-coded address** ([`design-rendezvous-ui.md`](design-rendezvous-ui.md), reviewed). **✅ chunked large-file transfer**; a file splits into chunks (each its own content-addressed blob) described by a `FileManifest`; the per-blob 16 MiB cap now bounds only a chunk (whole-file cap 256 MiB **as of this row**; `MAX_FILE_BYTES` was raised to 1 GiB on 2026-09-04 in `50d2b50`, and 256 MiB is now `DEFAULT_FILE_SIZE_LIMIT`, the per-server default an owner may lower), the blob rate limit became a per-requester **bytes-budget**, and download reassembles + verifies the whole-file plaintext cid ([`design-chunked-transfer.md`](design-chunked-transfer.md), reviewed). **✅ post-join steady-state discovery**; after joining, a member periodically re-registers/discovers at the rendezvous under its rotation-aware namespaces and dials other members (re-finds the group after a restart, no fresh invite); `MeshTransport` extended (libp2p-free, default-inert verbs), a per-server bridge timer drives `AppCommand::DriveDiscovery` (real-time off the deterministic-time seam), persisted rz config ([`design-postjoin-discovery.md`](design-postjoin-discovery.md), reviewed). **✅ dedup-safe blob GC** (delete now reclaims a deleted file's orphaned chunk blobs, keeping any chunk another file references), **✅ download progress** (per-chunk `DownloadProgress` events → a UI progress bar; the whole-buffer-IPC/non-blocking-actor refactor stays deferred) **+ a Downloads tab** (per-server, newest-first list of queued/downloading/done/failed transfers + a "clear finished" action; shows the **live provider**; the signed responder that actually served each chunk, surfaced authenticated via `request_blob_best_provider` (the responder signs the request-bound, content-verified blob response, so the fingerprint is unspoofable), falling back to the uploader as the source), **+ file-browser availability** (each file is colour-coded by local availability; `●` on this device / `◐` partial _h/t_ / `○` downloadable / `○` no peers online; via a new `files_view` that counts held chunks per file + a cheap reachable-peer flag, zero network cost; refreshed on tab-open / files-updated / post-download), **+ channel viewer is now chat-only** (the channel list hides outside Chat; the roster stays), **+ live member presence** (`ChannelSync` now keeps an accurate `connected_peers` set; `PeerDisconnected` was previously dropped; surfaced as roster online dots + an "N online" count via `connected_member_fingerprints`, which matches each member by **its own** signed `peer_id` so a forged record can't steal another's presence; the availability hint's `has_peers` now uses this live set, fixing the staleness), **+ per-member presence detail** (the frontend tracks observed connect/disconnect transitions to show "Online · 5m" / "Last seen 5m ago" in the roster tooltip, member menu, and an inline last-seen; durations only for transitions actually witnessed this session, refreshed by a 60s tick), **+ DMs + friends (phase 1)**; a DM is a 2-person server flagged `is_dm` (a backward-compatible registry trailing block; the signed invite + network path are unchanged, so per-server unlinkability is preserved); a DMs circle on the rail opens a DM-home (friends/DM list + the conversation reusing the chat view), **New DM** founds a DM + surfaces its invite as a friend code, **Add friend** redeems a pasted code ([`design-dms-friends.md`](design-dms-friends.md), reviewed; no protocol/security change). **✅ phase 2: friends-list sortings**; a DMs-only `message_stats`/`dm_stats` (count + timestamps + distinct active days, no message text) drives sorting the friends list by **recent** / **most active** (msgs ÷ active days) / **reconnect** (volume × silence) / **A–Z**, with a per-DM last-message hint (reviewed). **✅ phase 3: in-band "Add friend"**; a roster action on an *online* member founds a DM and delivers its invite over the shared server via a new authenticated `KIND_DM_INVITE` request (membership+signature+freshness, like PEX; `from` = the verified signer, unforgeable; payload opaque/inert, validated only on accept; queue bounded+deduped+transient). The recipient sees a pending friend request (DMs-circle badge + a list) and accepts with one click; offline targets fall back to the friend code (reviewed: auth/no-spoof + inert-payload + DoS-bound all hold). **DMs + friends complete.** **✅ non-blocking download**; a large download no longer freezes the server actor: the bridge fetches the file **one chunk per actor command** (`file_download_plan` + `fetch_file_chunk`), so the actor returns to its loop between chunks and interleaves messages/sync; it reassembles, emits per-chunk progress, and verifies the whole-file content address bridge-side (reviewed; equivalent + integrity undiminished). **✅ eclipse `D` accuracy**; `observe_eclipse`'s reachable-devices now uses the live `connected_member_fingerprints` instead of the monotonic `member_peers`, so it stops under-warning after a node loses its peers. **✅ in-channel message search**; Ctrl+F (or the 🔍 header button) opens a search bar over the active conversation's messages; matches are highlighted, Enter/Shift+Enter (or ↑/↓) step through them scrolling each into view, with an _n / m_ counter; closes on Esc or a channel/server switch (frontend-only). **✅ advanced search**; the same bar gained a filter panel (Ctrl+Shift+F, or the "Filters (n)" toggle): **from** a member · **after**/**before** a local-day date · **has** image/video/audio/file/link (embeds classified by the fileshare index's MIME via `safeMime`, so a non-media or not-yet-indexed cid reads as a plain attachment) · **is** reply/has-replies/pinned/edited/mentions-me/from-me · **reactions** any/mine/a specific emoji; all AND-combined and usable with an *empty* query, plus a **sort** (oldest/newest/author A–Z/most reactions) that orders both the ↑/↓ stepping and a new click-to-jump result list (first 50 rendered, count disclosed). The match cursor is *clamped* rather than reset so a filter edit or an incoming message can't strand the highlight; the author/emoji pickers are lazy deriveds over the loaded messages, and the media regex only runs when a has-filter is active (frontend-only; still scoped to the loaded backlog). **✅ advanced search, round 2**; search became **server-wide**: an **In** scope (this channel / all channels / a specific one) builds a *corpus* of `{channel, index, message}` hits, fetching each non-open channel once via the existing `get_messages` into a snapshot dropped when the search closes (the open channel always reads the live `messages`, so it can't go stale). A hit in another channel is reached by clicking it or stepping onto it: `switchTo` gained a `keepSearch` flag (and is now `async`, awaiting `refresh`) so the jump lands by **message id** in the freshly-loaded channel, with the outgoing channel snapshotted first so its hits don't blink out mid-switch; *refining* a query never jumps channels, only ↑/↓ and clicks do. **From** and a new **Mentions** filter are member **typeaheads** (roster ∪ corpus authors, ↑/↓/Enter/click, emptying the box drops the filter); mentions match the `@[Name]` marker via the shared `mentionName` normalizer, so a since-renamed member matches under the name they were mentioned by. Also: **Today/7d/30d** date shortcuts, **case-sensitive** + **whole-word** match modifiers (the latter bounds on non-word-or-edge, since `\b` misbehaves on a punctuation-edged query), a **most replies** sort, and reply counts computed over the *corpus* (not just the open channel) so "has replies" and that sort stay right server-wide. Result rows carry the channel; the sorts key on timestamp rather than corpus position, since a multi-channel corpus is grouped by channel. **✅ edit + delete your own messages**; messages now carry a stable random `id` (list indices are unstable under CRDT merges); a member can edit (inline, with an "(edited)" tag) or delete its own messages via `Server::edit_message`/`delete_message` (a soft own-author gate; honest-client-only, the documented R6 residual since message content isn't authenticated). The change-detector switched from message-count to a content signature so an edit (count unchanged) refreshes everyone (reviewed: CRDT ops merge-safe, no empty/stale op). **✅ message moderation**; owner/admin can delete *any* member's message (not just their own; edit stays own-only), honest-client gated like file deletion (R6); offered in servers, not DMs. **✅ jump-to-unread**; a per-`server:channel` read mark (localStorage) renders a "New messages" divider + an "↑ New" jump button; the mark advances to the latest once seen. **✅ emoji reactions**; toggle a reaction on any message (quick-picker + right-click "React…"); chips show counts and highlight your own. Stored as flat scalar keys `"<emoji>\x1f<fp>"=true` written **directly on the message map** (no sub-object), so concurrent reactors write distinct keys that all survive a merge; no concurrent-create loss for *any* message, legacy included (5-lens adversarial review → this superseded an earlier pre-created-container design that still lost reactions on old-client-authored messages; a two-replica fork/merge convergence test pins the invariant; emoji validated at the trust boundary). The content signature folds reactions so a peer's reaction refreshes everyone. **✅ reply / threading**; reply to any message (right-click → "Reply" or the composer banner); messages carry an immutable `reply_to` parent-id (written only when it's a reply, so plain messages stay key-clean; no concurrency hazard, it's set once at creation), rendered as a clickable parent-quote that jumps to + flashes the original (degrades to "original message" if the parent isn't loaded). `Server::send_reply` threads it; `send_message` stays a 2-arg delegate (no test churn). Reviewed: sound, backward-compatible, all dangling/lifecycle paths degrade gracefully. **✅ @mentions + reply notifications**; type `@` for a member autocomplete that inserts an `@[Name]` marker (frontend-only; mentions ride in message text, no CRDT change), rendered as a highlighted chip via a new `marked` tokenizer (DOMPurify-sanitized) with a stronger self-highlight; a sidebar `@` badge marks any active-server channel with an unseen message that mentions you or replies to one of yours (scoped to the active server, where your per-server identity is known; cleared on read). Insertion + detection share a `mentionName` normalizer so odd names round-trip. Reviewed: no XSS, the mid-fetch server-switch race guarded, name-based matching is best-effort by design. **✅ custom-emoji reactions**; the reaction picker also offers the server's custom `:name:` emoji (the `emoji/` fileshare folder), and reaction chips render a custom emoji as its image (graceful `:name:` text fallback where the emoji file isn't held); backend unchanged (it already accepts any emoji string). **✅ cross-server inbox**; a dedicated rail icon (📥) opens its own screen listing every message that @-mentions you or replies to one of yours, across **all** servers/DMs, newest first, each showing who/where/when + a one-click jump (with unseen highlighting + a rail badge). Backend-driven: `Server::inbox` scans each server's channels in-process and resolves author names (per-server identity); the bridge `get_inbox` aggregates under a lock-free actor snapshot; a 1.5s-debounced reload keeps it live. The backend reuses the UI's exact `@[Name]` normalization (`normalize_mention_name`) so detection matches insertion. Reviewed: no blocking, the marker-normalization divergence + jump-to-unlisted-channel + timer-leak all fixed. **✅ reply-count thread affordance** (a "💬 N replies" chip under any message that has replies, jumping to the first) **+ distinct mention chime** (a brighter rising triad when a message mentions/replies to you, vs the two-note chime for ordinary messages; wired into both the open channel and the per-channel scan). **✅ message pinning**; owner/admin can pin/unpin any message (honest-client gated, R6); a 📌 marks pinned messages inline and a header "📌 N" opens a panel listing them with jump-to/unpin. Stored as a `pinned` flag **directly on the message map** (merge-safe like the reactions design; concurrent pins of different messages can't conflict, a pin/unpin race is clean LWW); the change-detector folds it so a peer's pin refreshes everyone; an idempotent guard avoids a redundant op. Reviewed: ship, no blocking. **✅ rich composer**; `||spoiler||` tags (a new `marked` tokenizer rendering a blacked-out span revealed on click, DOMPurify-allowlisted), a composer **formatting toolbar** (bold/italic/strike/code/spoiler that wrap the selection, + Ctrl+B/Ctrl+I), and **per-channel drafts** (in-memory: switching channels/servers preserves what you'd typed, cleared on send). **✅ message-action UX fix**; edit/picker were rendering on every legacy (empty-id) message because `editingId/reactionPickerFor === ""` matched `m.id === ""`; now gated on a truthy id, plus a Discord-style hover toolbar (react/reply/⋯-more) on each message. **✅ bug fixes (user-reported):** profile name/styling reverted on reload because `spawn` *unconditionally* re-seeded the profile from the founding display name; now seeds only when absent, so a restored profile survives (regression-tested); `saveProfile` also keeps the rail label in sync when it was still tracking your name. Inline media (status/chat embeds + custom emoji) vanished after a tab switch because the resolution `$effect` didn't track `view` (tab switch destroys+recreates the DOM with fresh, unresolved placeholders); now re-resolves on `view` change (cheap; the embed cache holds the decrypted bytes). The file-info preview no longer hangs on "Loading preview…" forever; a failed fetch now surfaces "preview unavailable". Composer: emoji button moved right, the inline formatting toolbar replaced by a Settings → Message-formatting help section (Ctrl+B/I kept). **✅ emoji/sticker size**; custom emoji can be created at a chosen size (Emoji/Medium/Large/Sticker, capped 160px), encoded as a `~<px>` suffix in the emoji's filename so it's shared with everyone (no backend change); inline `:code:` renders at that size, reactions/pickers stay small. **✅ profile cards + customisation**; clicking a member's avatar/name opens a profile card (avatar, styled name, role, a self-set **description/bio**, an Add-friend button for online members); the Profile gained `description` + `bubble` fields (CRDT, additive/backward-compatible). The **message bubble** is now customisable per member (color/gradient presets), applied to that author's messages; the value is sanitized (colors/gradients only, no CSS injection) and the description renders as escaped text. **✅ discovery record-seq surfacing** (real anti-replay freshness) **+ advisory `EclipseDetector` surfacing** (isolation banner; never gates). Remaining: AddressCache persistence · true streaming download · TTL-aware re-registration | rendezvous + chunking + post-join discovery + final polish **done**; rest planned |
 | 10+ | roles hardening: **owner-only member removal PROTOCOL-enforced** (`request_remove` rejects a non-owner; the committer ignores any inbound remove request not from the owner; THREAT-MODEL R1 closed) + **owner/admin file deletion** (`delete_file` role-gated; reviewed); DONE. **✅ Functional admin invites (Option C, owner-serialized)**; an admin broadcasts a signed `CTRL_ADD_REQUEST`; the **owner alone** runs the MLS Add (single committer → no fork) + relays a re-signed Welcome (joiner verification unchanged); offline-queued until the owner is online ([`design-admin-invites.md`](design-admin-invites.md), reviewed, no blocking findings). **✅ Replay-proof grant revocation (THREAT-MODEL item 3)**; authoritative admin set is **owner-local** (`ChannelSync::admin_roster`, persisted); the admission gate reads it (a malicious member can't write it), the CRDT `roster` is owner-signed display-only ([`design-grant-revocation.md`](design-grant-revocation.md), reviewed). UI now lets **admins mint invites**. Remaining: file-delete protocol gate (low stakes) · sticky/transferable ownership · blob GC after delete. Do **not** enable `max_committer_rank ≥ 1`. See [`THREAT-MODEL.md`](THREAT-MODEL.md). | **✅ done** |
 | 10++ | **embed-persistence fix** + **file info pane** + **feedback button**: inline image/emoji embeds vanished after a restart/HMR; the resolve `$effect` ran before `{@html}` committed its placeholders and never re-ran; fixed with `tick()` (+ a dev-HMR `unlock` guard against duplicate actors). Clicking a file opens an **info pane** (preview · local-availability via `file_available`/`has_blob` · uploader/size/type/folder/cid · Download · owner/admin Delete). A 💬 rail button composes a bug/feature report to the clipboard (serverless, so copy-and-share). | ✅ `dd44446`, `8d9e371` |
 | 10+++ | **chat layout polish**; chat is edge-to-edge (no bordered box / distinct background, trimmed channel padding; bubbles float on the app background) and the bubble presets were re-picked dark enough for white text (+ a text-shadow on custom bubbles). Frontend-only | ✅ `43457ff` |
@@ -305,14 +3790,16 @@ TCP** (verified, incl. through a relay).
 | 11z-8 | **Discord-style settings takeover + profile banner + animated avatars + gradient creators** (mockup-approved on the "Mewtual Settings" design canvas). Both 560px overlay cards became **full-window takeovers** (`.stx`, z-40 under the titlebar; `.overlay` dialogs at z-50 still open above): sidebar of pages (mono category rules, label search filter, active = accent-dim + inset rule), one page at a time, ESC ring; Esc chain unchanged. **User pages**: My Profile (shared `profileEditor` snippet, also rendered by the Ctrl+5 surface so the two can't drift) · Devices · Vault & Lock (lock now) · Verification (own fingerprint + copy, verified-members list → Verify dialog) · Appearance (+ **chat text size** `appearance.scale` 70–140% via `--fs-msg` override on top of density, + **timestamp clock** `appearance.clock` auto/12/24 through `fmtTime`) · Server Space · Notifications · Voice & Calls · Chat & Media (formatting cheatsheet) · Keybinds (static list) · Network · Updates. **Server pages**: Overview / Livery / Members / Badges (editor extracted from the roster) / Devices / Invites (quick-invite button deep-links here via `openServerSettings(id, page)`) / Emoji / Calls & Relay (shared TURN moved out of Overview) / Leave. **Live preview rails** (`.stx-prev`) on Appearance + My Profile (theme-token minis, so they track every tweak for free) and Livery (draft-painted: aside overrides `--accent`/`--accent-hi` from `liveryDraft`). **Profile banner end-to-end**: backend `Profile.banner` by content address (`MAX_BANNER_BYTES` 256KiB, `"banner_cid"` sibling key, resolved in `profiles()`/`fetch_missing_avatars` under the same per-pass budget; `set_profile` command gained a REQUIRED base64 `banner` arg) + editor upload (640px-wide JPEG re-encode) + profile-card render. **Animated avatars**: uploads keep raw bytes for GIF/WebP under the 64KiB cap (banners 256KiB) instead of the JPEG freeze; render sites sniff mime from the base64 magic (`imgSrc`); `.avatar`/`.rail-img` gained `object-fit: cover` since originals may be non-square. **Name styles pass 2**: fonts rounded/gothic, static effects outline/retro/glitch (tokens-only shadows), and a **custom gradient creator**: two stops + angle packed into the opaque effect string `grad2-rrggbb-rrggbb-deg` (old builds see an unknown class → flat colour fallback; `.fx-grad2` clips, the image rides inline via `fxStyle`), same creator for **custom bubble gradients** (existing opaque bubble channel). NOT built from the mockup (deliberate): Security + Server Nodes pages (protocol work: need design docs + review first), notification granularity, vault re-key, keybind remapping, motion-off animated-avatar freeze. **Message-log header restyle** (owner feedback on the first cut): header rows put the AVATAR in the timestamp gutter (34px: the gutter was dead space beside the name line, so the picture grew for free) with name · linked-device tag · verified ✓ · admin badge chip · inline time (+ delivery tick) after; grouped rows keep the gutter time; avatar click opens the profile. The preview rails now render the REAL `.messages` markup via a `previewLog` snippet fed by the profile draft (header + grouped row, mention chip, bubble/flatten reflected), so previews cannot drift and update live with every knob. **Round 3** (owner feedback): the effect picker's two gradient tiles merged into ONE multi-stop creator (`grad2-` now packs **2..8 stops** + angle; the old "gradient" accent-mix effect left the picker but still renders on peers who wear it); animated effects (rainbow/wave/pulse) now freeze under `data-motion="off"` too (matching reduced-motion) and their tiles dim with a says-why title when motion is off, answering "some effects don't seem to do anything". **Livery ground tint**: two colour stops washed into Nightshade's grounds in JS (`hexMix`; floor/rail toward stop A at ~30%, panels/elev/border toward stop B) and written as plain `#rrggbb` into the EXISTING `--bg-0/--panel/--bg-elev/--border/--border-soft` allow-list entries, so every client's read-side sanitizer already accepts it: custom-tinted (pseudo-gradient across surface hierarchy) server themes with zero protocol change; the livery preview rail applies all draft colour tokens inline (8 of 16 token slots used worst-case). **Round 4**: ANIMATED name gradients: optional `-a<speed>[r]` suffix on the grad2 effect string (speed 1..10 → 12s..1.2s linear loop; `r` reverses; scroll follows the gradient's own angle): `fxStyle` repeats the first stop and scrolls one 200% tile period via `@keyframes fx-grad2-scroll`; frozen under `data-motion="off"` + reduced-motion with `!important` (the animation arrives inline). Creator gained a Scroll speed slider + direction flip; stop wells wrap (they overflowed the column at 8 stops). Ground tint SPLIT per owner ask: independent Background (floor+rail: `--bg-0`/`--border-soft`) and Sidebars (`--panel`/`--bg-elev`/`--border`) targets, each colour + 0-60% intensity slider (the mix ratio: the "opacity"), still plain-hex allow-list tokens so no protocol change. True background-image gradients/custom textures for livery surfaces REMAIN DEFERRED: one hex per token is the wire format every client sanitizes, and panels are opaque (a floor texture would barely show without a compositing rework), so that is a design-doc slice (widen livery with a validated image key like icon/cursor + translucent-surface pass), not a quick patch. **Round 5** (owner smoke test): the takeover's two zones had the app's surfaces INVERTED (nav on `--bg-0`, content on `--panel`); now nav = `--panel` and content = `--bg-0`, matching sidebar-over-floor, with preview cards on `--panel` and the mini chat/log on `--bg-0`. ESC ring floats absolutely in the zone corner instead of holding a 68px column, so preview cards run the rail's full width beneath it (rail 300px, top padding clears the ring). Livery preview now shows the WHOLE draft, not just colours: preset (the four palette rules gained a bare `[data-preset]` selector so a scoped element can wear a full palette: no value duplication), corners (`--r`/`--r-lg`), interface font (`--ui`, with `font-family` re-stated on `.stx-prev` so a scoped var reaches it), background pattern (scoped copies of the `:root`-only pattern rules, aimed at the preview's chat surfaces) and the server icon in the mini rail: all via `liveryDraftVars()` + two data-attributes. | ✅ in tree |
 | 11z-12 | **Jam polish round 3** (owner feedback). LEGACY ONLY button removed (alpha: engine's `setLegacyOnly` kept, no UI). REMAP moved out of the drawer: a gear beside KEYS/PADS opens Settings · Voice & Calls, which gained an "Instrument keys" section (same slot-then-press capture; the keydown capture branch is now standalone and armed only from Settings). **Take lead-in trim**: recorder time runs from the REC press, so waiting before playing put seconds of dead air at the front of every take: the jukebox "played" silence long enough to read as broken, and sheets opened with rows of empty bars: kept takes now trim to a 300ms pickup (old `.jamtake` files keep their recorded lead). Take deck hardening: deck presses resume a suspended synth context (gesture-time), the AUDIO-BLOCKED chip now also covers the elementless take deck, and `JUKEBOX.TAKE.FETCH_FAILED/INVALID/STARTED` diag codes make the next silent failure explain itself. Sheets: stems flip down above the middle line, faint dashed beat guides inside bars make honest off-grid placement read as rhythm (verified by headless-Edge renders of synthetic runs; pitch placement checked exact: G#4 second line, C5 third space). `mediaKind` take-detection pinned by tests (extension AND exact mime, never sniffed from JSON). 884 frontend tests, svelte-check 0/0, build clean | ✅ in tree |
 | 11z-11 | **Jam takes: sheet-music export, `.jamtake` share format, jukebox replay** (owner-feedback round 2). *Sheet export*: `jam-sheet.ts` (pure, 6 tests) quantizes a validated take to its own tempo's sixteenth grid and engraves standalone SVG: one labelled staff section per PLAYER (lanes grouped by src, so reconnects never split a player; clef by median pitch; ledger lines; durations round DOWN to plain values, no ties/dots by declared scope), drum lanes as single-line x-head staves with pad tags, player names escaped as untrusted text. Saved by new tauri command `save_jam_sheet` (registered + listed in `tauri-command-security.ts`): unlocked-session gate, name pinned to the exporter's own `mewtual-take-NN-date.svg` shape, body must be a bounded `<svg>…</svg>` document, then the existing `write_download` + reveal path, toast on the frontend. *`.jamtake`*: a take row's share button seals the take JSON into the encrypted share via the ordinary streamed upload (`addSharedFile`, mime `application/x-mewtual-jamtake`; guarded on activeServerId === callServer so it cannot silently seal into another server's share). *Jukebox replay*: `mediaKind` gained kind `take` (+ picker TAKES chip); a queued `.jamtake` passes the SAME availability/trust gates as media, is fetched whole via `download_file` (bounded by the format's 512KiB cap; the one-caller guard test in `inline-transfer.test.ts` deliberately widened to name exactly two readers), validated by `parseJamTakeJson`, cached per cid, and driven by the take scheduler from the room's transport: `jamStartTakePlayback` gained offset + deckCid deck mode, `jukePos` ages the offset on the wall clock for takes (no element clock; DJ included), pause/stale/track-change/DJ-gone all stop the deck, deafened listeners keep counting but dispatch nothing, and only the DJ advances when it runs out. Also from feedback: saved patches moved into a DOWNWARD `jam-custom` drawer behind one CUSTOM·n tile (the row stopped growing right), and three OSC-stack redesign sketches (A Tabs / B Layers / C Shapes, each with motivation + tradeoff) are on the canvas's Jam Layer page AWAITING the owner's pick. GOTCHA: the Edit tool JSON-decodes a `\u0000` escape typed into its parameters into a real NUL, so it can neither match nor write that escape: byte-level fixes go through PowerShell, and edits near that line must anchor away from it (this row itself shipped one such raw NUL before being repaired the same way). *Owner picked option B (LAYERS)*, built same pass: the osc stack renders as mixer-style layer rows (collapsed = wave glyph + one-line summary + level bar, so the BLEND reads at a glance; exactly one layer unfolds its wave buttons + st/ct/lvl knobs; per-layer x remove, dashed +layer add, min 1 max 3). NOTHING removed by the fold: envelope/filter/LFO/room-sends sections are untouched and every per-osc control lives in the open layer. **BUG FIXED en route**: the first editor's wave buttons indexed by INST_TILES order (TRI first) while the wire's `w` indexes PATCH_OSC_WAVES (sine first), so clicking TRI actually selected sine and SIN selected triangle; the layer buttons map through `jamWaveIndex` and the summary glyph through `jamOscTile`. 883 frontend tests, tauri 168, clippy clean, svelte-check 0/0, production build clean | ✅ engine + first UI pass committed `d691bea`; layers rework in tree |
-| 11z-10 | **Jam layer v2: constrained patch synth + drum pads, engine + integration** (contract: `docs/INTERFACES.md` §12; security boundary: `docs/THREAT-MODEL.md`). *Engine* (commit `d64f77e`, pure `jam-*.ts` + 8 test files, 60 tests): `jam-contract.ts` (every limit/type, single source), `jam-wire.ts` `JamFrameDecoder` (1024B pre-parse cap + all-frame bucket charged BEFORE `JSON.parse`, 200B post-parse cap for non-patch frames, sustained-abuse auto-mute), `jam-patch.ts` (one strict validator for wire/storage/import/playback; full 64-hex SHA-256 content ids), `jam-channel.ts` (opaque per-generation `JamSourceChannel` capability: handlers close over it, authority is NEVER rebuilt from a frame field), `jam-allocator.ts` (64 global/16 held voices; steals own releasing tails first, then global; NEVER a held voice: rejects instead), `jam-engine.ts` (fixed-topology WebAudio renderer: ≤3 osc + env + filter + bounded LFO + sends into receiver-owned room chorus/delay/reverb buses, master limiter, Deafen hard-gate, 30s hold watchdog, deterministic seeded drums with source-scoped chokes, full node teardown on steal), plus engine-ready-but-unwired `jam-clock.ts` (metronome/NTP-offset) and `jam-recorder.ts` (bounded group-bound takes). Drums are `t:"d"` (an old build IGNORES them; a pad as `t:"n"` would strand held MIDI notes 0-9 forever). *Integration* (App.svelte, in tree): `createPeer` mints a fresh capability + decoder per inst-channel generation and the handler closes over both; sends carry `q` sequences + optional `p` patch id with the legacy `w` always present; `t:"p"` announces (also how drums learn the sender nonce) go per-edge on open, broadcast on sound change, debounced 400ms under the receiver's 1-per-2s cap; drawer gained KEYS/PADS mode (local presentation: the wire is one event stream), LANDING/DUSK preset patches + a full EDIT fold (osc stack/env/filter/LFO/sends: every edit mints a new id), a receive-side LEGACY ONLY chip (signals nothing), pad-hit colour attribution, and flood-mute visibility (unmuting the peer forgives it). **Two long-standing bugs fixed as contract preconditions**: Deafen now hard-gates instrument rendering via `engine.setDeafened` (it previously only muted `<audio>` elements: the synth played on), and `members-changed` now reconciles `callPeers` against the server-scoped roster (`reconcileCallRoster` → `removePeer`), so a revoked member's established voice/video/inst edges die with their membership. *Metronome wired* (same pass, follow-up): drawer transport row (start = you anchor; BPM ±5 with a 300ms coalesce + the clock's own 2s revision floor honoured by self-deferring pushes; bar signature cycle 2/3/4/6/8; beat pips + bar count; SYNCED/LOCAL ONLY chip) on `jam-clock.ts`: anchor state machine + best-RTT NTP offset (`JamClockSync`) + audio-clock click planning (`plan()` from a 50ms lookahead tick, so timer throttling only gaps, never drifts). Probes go 1/s (self-limited) toward the anchor only; probe replies echo `tx` and are correlation-checked; `t:"c"` probes answered per-edge. Anchor's grid replays to late joiners on dc open (`jamMetHello`); anchor leaving stops the grid (dumb failover: anyone restarts); Deafen silences the click but the pips keep counting. The click is receiver-local synthesis outside the engine's voice budget. *Takes wired + owner-feedback round* (same pass): TAKES is a folded strip under the board (recording is loud, machinery quiet): REC arms a `JamTakeRecorder` whose consent gate rides the state heartbeat: new `PeerState.rec` (0/1 asking/2 recording) + `rc` (consent), both FRESH claims per message (absence = neither, so an old build can never be recorded: it cannot consent), fed to `setConsent` from both state paths; the take starts only when EVERY participant allows it, pauses on any membership change (`membershipChanged` from createPeer/removePeer), auto-stops at the 10-min cap, and both call surfaces render a room-wide REC/RECORD? banner with the ALLOW toggle whether or not any drawer is open. Kept takes are ephemeral by contract (die with the call); rows show duration/bpm/players and an honest "N lost" chip from sequence gaps; playback replays the validated event log through the SAME engine as synthetic per-lane sources (`take\u0000<lane>` ids, lane nonces via begin(Legacy)SourceSession, patches re-hashed + re-installed, nothing re-broadcast). Peer patch descriptors shadow-cached (same LRU depth as the engine) so recorded notes embed what the room heard. Feedback fixes: tile/head rows wrap (the register `+` could scroll off), the slider editor became drag KNOBS (up/right raises, Shift fine, wheel + arrow keys, `role="slider"`), editor grid auto-fits narrow docks, custom patches SAVE as named local tiles (12 cap, same validator, ✕ forgets), and piano/pad keys REMAP per device (click slot, press key; steals the key from its old slot; RESET; the vault melody's fixed keys are deliberately untouchable). GOTCHA fixed en route: a raw U+0000 typed into a template literal tripped the source-hygiene test and Bash-side node writes to App.svelte silently failed to stick: the byte swap needed PowerShell. 877 frontend tests, svelte-check 0/0, production build clean | ✅ engine `d64f77e` + integration in tree |
+| 11z-10 | **Jam layer v2: constrained patch synth + drum pads, engine + integration** (contract: `docs/INTERFACES.md` §12; security boundary: `docs/THREAT-MODEL.md`). *Engine* (commit `d64f77e`, pure `jam-*.ts` + 8 test files, 60 tests): `jam-contract.ts` (every limit/type, single source), `jam-wire.ts` `JamFrameDecoder` (1024B pre-parse cap + all-frame bucket charged BEFORE `JSON.parse`, 200B post-parse cap for non-patch frames, sustained-abuse auto-mute), `jam-patch.ts` (one strict validator for wire/storage/import/playback; full 64-hex SHA-256 content ids), `jam-channel.ts` (opaque per-generation `JamSourceChannel` capability: handlers close over it, authority is NEVER rebuilt from a frame field), `jam-allocator.ts` (64 global/16 held voices; steals own releasing tails first, then global; NEVER a held voice: rejects instead), `jam-engine.ts` (fixed-topology WebAudio renderer: ≤3 osc + env + filter + bounded LFO + sends into receiver-owned room chorus/delay/reverb buses, master limiter, Deafen hard-gate, 30s hold watchdog, deterministic seeded drums with source-scoped chokes, full node teardown on steal), plus engine-ready-but-unwired `jam-clock.ts` (metronome/NTP-offset) and `jam-recorder.ts` (bounded group-bound takes). Drums are `t:"d"` (an old build IGNORES them; a pad as `t:"n"` would strand held MIDI notes 0-9 forever). *Integration* (App.svelte, in tree): `createPeer` mints a fresh capability + decoder per inst-channel generation and the handler closes over both; sends carry `q` sequences + optional `p` patch id with the legacy `w` always present; `t:"p"` announces (also how drums learn the sender nonce) go per-edge on open, broadcast on sound change, debounced 400ms under the receiver's 1-per-2s cap; drawer gained KEYS/PADS mode (local presentation: the wire is one event stream), LANDING/DUSK preset patches + a full EDIT fold (osc stack/env/filter/LFO/sends: every edit mints a new id), a receive-side LEGACY ONLY chip (signals nothing), pad-hit colour attribution, and flood-mute visibility (unmuting the peer forgives it). **Two long-standing bugs fixed as contract preconditions**: Deafen now hard-gates instrument rendering via `engine.setDeafened` (it previously only muted `<audio>` elements: the synth played on), and `members-changed` now reconciles `callPeers` against the server-scoped roster (`reconcileCallRoster` → `removePeer`), so a revoked member's established voice/video/inst edges die with their membership. *Metronome wired* (same pass, follow-up): drawer transport row (start = you anchor; BPM ±5 with a 300ms coalesce + the clock's own 2s revision floor honoured by self-deferring pushes; bar signature cycle 2/3/4/6/8; beat pips + bar count; SYNCED/LOCAL ONLY chip) on `jam-clock.ts`: anchor state machine + best-RTT NTP offset (`JamClockSync`) + audio-clock click planning (`plan()` from a 50ms lookahead tick, so timer throttling only gaps, never drifts). Probes go 1/s (self-limited) toward the anchor only; probe replies echo `tx` and are correlation-checked; `t:"c"` probes answered per-edge. Anchor's grid replays to late joiners on dc open (`jamMetHello`); anchor leaving stops the grid (dumb failover: anyone restarts); Deafen silences the click but the pips keep counting. The click is receiver-local synthesis outside the engine's voice budget. *Takes wired + owner-feedback round* (same pass): TAKES is a folded strip under the board (recording is loud, machinery quiet): REC arms a `JamTakeRecorder`, pauses on any membership change (`membershipChanged` from createPeer/removePeer), auto-stops at the 10-min cap, and both call surfaces render a room-wide REC/RECORD? banner whether or not any drawer is open. **Historical, and no longer true: this row originally described a unanimous consent gate riding the state heartbeat (`PeerState.rc`, fed to a `setConsent` method), where the take started only when EVERY participant allowed it.** That was removed deliberately: a take holds the note events the jam layer already broadcasts to every ear in the room and re-synthesizes them locally, so there is no microphone and no audio, and requiring the whole call to agree treated keeping the riff that just happened as though it were a recording of the room. `setConsent` no longer exists; the recorder's only gate is `membershipMatches`, because a take's participant set is part of what it claims to be (see the header comment on `apps/desktop/src/jam-recorder.ts`). The `rc` heartbeat field and its UI affordance survive the removal: `App.svelte` still renders an arming line listing participants whose `peerMeta[fp]?.rc` is unset ("waiting for ... older builds can never consent"), which the recorder no longer waits on. Kept takes are ephemeral by contract (die with the call); rows show duration/bpm/players and an honest "N lost" chip from sequence gaps; playback replays the validated event log through the SAME engine as synthetic per-lane sources (`take\u0000<lane>` ids, lane nonces via begin(Legacy)SourceSession, patches re-hashed + re-installed, nothing re-broadcast). Peer patch descriptors shadow-cached (same LRU depth as the engine) so recorded notes embed what the room heard. Feedback fixes: tile/head rows wrap (the register `+` could scroll off), the slider editor became drag KNOBS (up/right raises, Shift fine, wheel + arrow keys, `role="slider"`), editor grid auto-fits narrow docks, custom patches SAVE as named local tiles (12 cap, same validator, ✕ forgets), and piano/pad keys REMAP per device (click slot, press key; steals the key from its old slot; RESET; the vault melody's fixed keys are deliberately untouchable). GOTCHA fixed en route: a raw U+0000 typed into a template literal tripped the source-hygiene test and Bash-side node writes to App.svelte silently failed to stick: the byte swap needed PowerShell. 877 frontend tests, svelte-check 0/0, production build clean | ✅ engine `d64f77e` + integration in tree |
 | 11z-9 | **Title-bar notification ticker + layered sound policy (frontend-local).** The ticker lane spans Forward→Minimise; stable receipt ids admit each announcement/wiki/event/notified-message once per unlocked UI session and are cleared on lock because wiki ids can name content. Message notifications fetch the stable row, enqueue a clickable server/channel/message target, and share the receipt with their audible alert so duplicate `channel-updated` events cannot ring twice. The built-in news cue is a generated three-pip square-wave phrase retuned from an operator-supplied reference (no game recording bundled). `notification-sounds.ts` centralizes device master → per-category global → per-server inherit/on/off and tone precedence for message/mention/news. Global and per-server custom audio is MIME/data-URL validated, ≤384 KiB/8s, localStorage-only, never gossiped; corrupt settings fall back safely. Server voice banners keep their own gate and use that server's effective mention tone. | ✅ in tree |
 | 12a–12c | **operations + accountable moderation.** `DocType::Moderation=14` adds group-bound signed warning snapshots, kick cases/resolutions and one-origin-per-case advisory votes; owner/admins receive a per-user lane graph above the full evidence scroll, while members receive only focused chat vote cards. Shift-range warning/delete, warned-post collapse/expand, evidence picking and owner-only MLS removal remain. R7 is explicit: signatures prove attribution/field integrity, not historical role or append-only completeness. Durable local history moves drafts/read marks into bounded vault-sealed state. Storage health verifies seals/CIDs/file keys once per server/process, caches the report, and adds deduplicated category/pin/largest-file inventory; explicit repair re-fetches through authenticated content-addressed responses and replaces the cache. Sidebar utilities now form one profile-colored bottom stack; Transfers repeats health. Designs: [`design-moderation-plane.md`](design-moderation-plane.md), [`design-operations-recovery.md`](design-operations-recovery.md). | ✅ full suites + gates passed 2026-08-20 |
 | 12d | **Backup & Recovery centre (export + secret rotation).** `create_backup` snapshots then copies the opaque sealed vault under the store lock into a fresh non-overwriting Downloads directory, refusing links/special files. UI/docs disclose offline guessing, filesystem metadata, historical-state retention and old-backup non-revocation. `change_vault_passphrase` authenticates the current secret and atomically rewraps the same DEK under a fresh salt/nonce, supporting passphrase/sigil/melody without bulk data re-encryption. Automated import remains deferred until locked staged verification/atomic-swap/rollback exists. Later ideas/gates: [`feature-implementation-tracker.md`](feature-implementation-tracker.md). | partial recovery; export + rotation verified, restore deferred |
 | 11z-13 | **Jam/native release hardening after PR #19 adversarial review.** Patch publication is causal across WebCrypto on receive and per outbound edge; wire/local-renderer/recorder use one immutable sender-paced recipe, with a 256-operation inbound bound. Unopened edges drop historical musical events and establish only the current patch, preventing a reconnect from collapsing paced history into the receiver's burst budgets; gestures queued before the first digest are local/recording-only even if an edge opens meanwhile. Recorder recipe lookup uses the engine's exact validated LRU rather than a duplicate cache. Takes validate/hash their <=64 patches once into an engine-owned archival table, cap identity strings and overdue work per pass, preserve shared-deck remote provenance, scale through receiver-owned lane gains, release unmatched held notes at end-of-log, and retain legal tails up to 8 s. Drum hashing has one active job per opaque channel generation and 32 globally, with 256/performer and 512/global pending bounds; causal backpressure preserves valid dense hits and event/choke order, while stale lanes cannot block replacements. Every completion rechecks channel/session/Deafen/audio state plus monotonic mute/Deafen generations before allocating a voice. App admission generations advance on both gate edges and local input captures its epoch before patch publication, so neither an outer queued frame nor an engine digest can revive across an on→off cycle. Local queue overflow retires old closures and engine work before fresh input. Jukebox take reads preempt stale JavaScript loads through four process-wide native cancellation registrations; any submitted lower request keeps its charge until response/failure/timeout, so at most four withholding debts exist and new loads pause at that bound. Take progress is exact call/server/token-bound. Metronome stop bypasses tempo throttling; suspended contexts create no click nodes, cancel lookahead work and catch up without a burst. Deafen gates local previews too. Instrument auto-mute retains only an exact 2/s `t:"s"` control lane so consent cannot freeze. Native close calls serialize behind a separate sticky continuity-debt latch. Sheet durations floor honestly and native export accepts only the versioned inert renderer SVG grammar (no links, scripts, handlers, foreign content or external assets). | ✅ full suites + gates passed 2026-09-03; manual two-client smoke pending |
-| 12h | **Desktop performance + IPC hardening (first slice).** Live profile message frames are rollout-gated without deleting their studio/config. Chat mounts a bounded 320-row tail with anchored paging/jumps, caches only bounded sanitized HTML, resolves rich placeholders per row, coalesces event snapshots, avoids forced bottom scroll and schedules cross-server inbox scans at idle. Feedback/Wiki Help are lazy Svelte components with feature CSS; QR codecs are dynamic chunks, reducing the measured App chunk from 881.49 kB to 709.33 kB minified. The 100-command Tauri surface has an executable review ledger; explicit lock now atomically saves UI continuity, rejects every non-bootstrap command, suppresses actor events and re-checks long downloads while native actors stay online. Full plan/audit: [`PERFORMANCE-SECURITY-HARDENING.md`](PERFORMANCE-SECURITY-HARDENING.md). Native paged history, larger Settings/operations extraction, remote-media consent and worker search remain queued. | active; first slice fully test-gated |
+| 12h | **Desktop performance + IPC hardening (first slice).** Live profile message frames are rollout-gated without deleting their studio/config. Chat mounts a bounded 320-row tail with anchored paging/jumps, caches only bounded sanitized HTML, resolves rich placeholders per row, coalesces event snapshots, avoids forced bottom scroll and schedules cross-server inbox scans at idle. Feedback/Wiki Help are lazy Svelte components with feature CSS; QR codecs are dynamic chunks, which on 2026-08-20 reduced the measured App chunk from 881.49 kB to 709.43 kB minified. That is what the slice achieved then, not the size today: the chunk has since grown back to 1,146.34 kB, and [`PERFORMANCE-SECURITY-HARDENING.md`](PERFORMANCE-SECURITY-HARDENING.md) carries the current figures. The **168-command** Tauri surface has an executable review ledger (`REVIEWED_TAURI_COMMANDS` in `apps/desktop/src/tauri-command-security.ts`, currently 168 entries against 168 `generate_handler!` registrations); note the ledger test's own history, where a regex that could not match a path-qualified registration quietly reported 154 of 168 and nothing noticed; explicit lock now atomically saves UI continuity, rejects every non-bootstrap command, suppresses actor events and re-checks long downloads while native actors stay online. Full plan/audit: [`PERFORMANCE-SECURITY-HARDENING.md`](PERFORMANCE-SECURITY-HARDENING.md). **Native paged history has since shipped** (2026-09-03, PR #20 `455dcfa`; it also absorbed the `perf-history-scaling` work, `cf608ba`, which made one materialization of a channel cheap and cached it per document version): `Server::message_page(channel, &MessagePageQuery) -> MessagePage`, keyed on `Server::doc_version()` (ops applied, so two pages at one version are slices of one list and can be stitched by index), behind the bridge command `get_message_page`. The webview now holds only the rows it shows plus a bounded margin; anchors are durable ids (`tail` / `id` / `index` / `first_reply_to`) because index arithmetic does not survive a remote row merging above a local tail. Semantics preserved exactly for the unread divider and count, read-mark advance, reply quotes and counts, pins, search and inbox/ticker jumps, delivery ticks, day dividers, grouping and optimistic send. Contract in [`design-native-paging.md`](design-native-paging.md) and INTERFACES §10. Larger Settings/operations extraction, remote-media consent and worker search remain queued. | active; first slice fully test-gated, native paging shipped |
 | 12i | **MIDI controllers in Settings → Devices; reliable hot-plug.** Web MIDI moves out of a one-shot lazy request into `midi.ts` (pure, unit-tested: parsing, pedal-aware routing, device rows, status diagnosis) plus retryable browser plumbing. Every connected input is wired rather than only the last in the map, disconnected ports are skipped, an already-granted permission reconnects at startup without prompting, and a lost device lifts the notes it was sounding. Settings → Devices gains a live controller panel: status verdict with one honest reason, device list with routed/unplugged/filtered state, per-port input routing persisted locally (matched by id then name), an always-on message monitor (velocity + channel; clock/sensing counted separately so a live-but-silent cable is distinguishable), a stuck-note release, and setup + troubleshooting help. Sustain (CC64) is honoured for the call instrument **only**: deferring note-offs on the melody lock would change the secret an identical performance encodes, and that vault has no recovery path. Velocity is parsed and displayed but not yet mapped to loudness; per-instrument receive controls remain queued. | ✅ added 2026-08-21 |
 | 12j | **Unread indicators become state, and the jukebox stops lying about playback.** From an adversarial review of `P-fixes`. `AppEvent::ChannelUpdated` grows a typed `ChannelChange` (an arrival is "a message id never seen before", not a count that grew), so a reaction, a topic edit or a jukebox add can no longer read as an unread chat message. Read marks are no longer advanced by a refresh: `unread.ts` (pure, unit-tested) owns one observation predicate (chat surface active, no takeover/call-focus over it, window focused, document visible, pinned to the newest row) and a selected-but-unobserved channel goes unread exactly like an inactive one; a failed `get_messages` no longer clears the badge it was navigating to. New `get_channel_heads(server)` rebuilds unread from durable read marks at unlock, resume and once each server's directory settles, which is the only path that survives an explicit lock or a restart; mention badges come back the same way from the inbox scan. Sender-clock timestamps are clamped to a plausible ceiling before any read decision, so one wrong clock can neither hide later messages nor stick as a permanent unread row, and the server rail/orbit/DM dots all derive from the one `unread` list. Jukebox: a `hello` is answered with the current transport immediately instead of waiting up to five seconds for the next re-announce, transport revisions are bounded (`1e308` passed `Number.isInteger` and could not be incremented past, wedging the deck), a blocked `play()` surfaces as a clickable ENABLE PLAYBACK chip instead of silence under a "SYNCED" label, a listener that cannot fetch or decode says so, and queue reads are generation-guarded and no longer turn every error into an empty queue | ✅ |
+| 12k | **Profile editor tabs + the arrival catalogue** (owner: "really cramped", sliders "look like dev art", wants PowerPoint-style arrivals; Livery tabs deliberately NOT done, frames expected to be dropped). The shared `profileEditor` snippet is one draft behind tabs **Identity** (avatar via `upload-btn`, banner, name, colour, bio) / **Name style** (studio, font, typography with pill toggles, effects, master, readability) / **Arrival**; a **Frame** tab exists only while `CHAT_MESSAGE_FRAMES_ENABLED`. `profileTab` state, `profileDirty` derived per tab against `profiles[myFp]` (gold dot on the tab, named in the sticky `.psave` bar with Discard + Save), `.profile-tab` widened 420→620px, every range in the editor wears the `.lv-range` look (`rangeFills` container action paints `--pct`, watches for sliders that unfold later). **Arrival catalogue**: `MESSAGE_FRAME_MOTIONS` 5→22 (wipe, split, blinds, checker, bars, wheel, dissolve; blackout, newsflash, swivel, flip, spiral, crawl; bounce, boomerang, slam, quake) with `messageFrameMotionTraits()` saying what the one distance slider means per motion (travel/depth/grain/amplitude/spin/none) and whether fade and the entry vector apply; the picker renders four families. **Compat**: `parseMessageFrame` now maps an UNKNOWN motion id to Still instead of rejecting the whole frame, so an older build keeps a newer peer's surface. CSS: one keyframe set per motion (0% → 25% then hold) shared by live rows (`animation-iteration-count: 0.25`, so a settled row stops being a stacking context) and the looping preview; mask reveals ride one registered `--arr-p` (initial 1: a frozen animation never hides a row); the log row and preview carry a dynamic `arrival-{id}` class instead of five `class:` directives. Fixes found on the way: arrival ids were pruned at 900ms while durations reach 1200ms (now 1500ms); `.messages` clips horizontal overflow so a fly-in cannot flash a scrollbar; effect tiles clip their own sparkles instead of spilling over the neighbour's border. Gotcha: the visual fixture zeroes every animation for determinism, so arrival screenshots need that rule removed over CDP first. **Round 2** (owner: "the arrivals don't actually work"): the own-send path was the bug. The optimistic `pending:` row is marked and animates, but the send acknowledgement's `refresh()` swaps it for the server-assigned id within a few frames, and that id was deliberately excluded from marking, so an own message never visibly animated; `refresh` now carries the mark over to new own rows while the pending mark is still live (peers' rows keep animating only on `refresh(true)`, which `channel-updated` already requests through the coalescer). Verified in the fixture by saving Newsflash, sending, and reading the acknowledged row's classes. **Identity library** (owner ask): whole-draft snapshots (avatar, banner, name + style, bio, arrival) saved under a label in `localStorage` (`catcoms.identities.v1`, ten max, base64 length caps, quota failure surfaces as a warning), tiles at the top of the Identity tab load a snapshot into the draft (Save profile still publishes), saving under an existing label replaces it. **Round 3** (owner: Newsflash "pushes the scroll bar up/down"): a row spun or scaled as a whole grows the scroller's scrollable overflow mid-flight. Moving arrivals now animate the row's CHILDREN (`li > *`: gutter and body) inside a row that clips at its own edge (`overflow: clip`); reveals, wipes and the blackout stay on the row since a mask, clip-path or filter never changes its box. Measured in the fixture: overflow beyond the viewport 101 → 158 when the 58px row lands and constant through the spin while the body's bounding box peaks at 582px. Side effect, deliberate: Glide/Slam no longer nudge the scrollbar either, and each row's motion is confined to its own band. **Round 4** (owner: centre the animation on the message's own size): `arrivalOrigin` row action measures the message (a Range over `.text` unioned with the `.author-link` box; body as fallback) with the animation momentarily switched off for the read, then writes the SAME absolute point into both children's `transform-origin` (centre, or the content's left/right/top/bottom edge for swivel/flip/crawl per `--message-arrival-origin`), so gutter and body turn as one piece around the message rather than each about its own box, and a short message spins small. Verified: both parts resolve to the text's left edge for a swivel. **Appearance** gained its own "Message arrivals" section (PLAY / STILL seg, copy says it is separate from text effects and tells nobody); the old toggle buried in Interface is gone, and the Arrival tab warns when the device has arrivals off. | ✅ in tree |
+| 12l | **The diagnostics suite (M0–M7) and the debug console.** A multi-session rebuild driven by `docs/reviews/Mewtual_Adversarial_Debugging_Review.md`; the plan of record is [`design-diagnostics-suite.md`](design-diagnostics-suite.md) and the console's visual design is [`design-debug-console.md`](design-debug-console.md). The problem was not a shortage of log lines: observations were spread across `tracing`, raw `eprintln!`, `Result<T, String>` over the bridge, forwarded console output, ignored `catch {}`, snapshots and ad hoc join logs, each with its own fields, lifetime, clock, naming and privacy rules, and none of them correlated, so "my message did not arrive" could not establish which of ten stages failed. The workspace crate `catcoms-diagnostics` is the answer (see the crate map); `catcoms-log::hub()` hands the process-wide `DiagnosticHub` to every subsystem and `RingLayer` bridges `tracing` into it. Settled decisions worth not re-litigating: the console's six sections are a **view** over 22 `Section`s (`Section::view()`), not the taxonomy; identifiers are keyed per session (`SessionRef`) rather than masked by pattern, because pattern masking already leaked a short peer id under a screen claiming to be safe to share; **capture mode and section level are separate axes**, both runtime, neither persisted, and capture starts **Safe** (a single switch forced a choice between capturing almost nothing and narrating every address, so it stayed off and nobody had a log when they needed one). Frontend surface is `DebugConsole.svelte`. State: **M0–M3 done**; **M4** reading and capture control done, findings/checks/virtualised list outstanding; **M5** route findings done, the general findings panel, checks panel, notes pad and virtualisation not started; **M6** mostly done (local Copy/Save carry native disclosure findings, public issue preparation goes through a native canonical allowlist plus validation, richer source-typed frontend references remain); **M7** (hardening, privacy property tests, performance budgets, CI gates) not started. | active; M0–M3 done, M4/M6 mostly, M7 not started |
 | 13 | Android (Tauri 2 mobile): JNI keystore, foreground service, two-tier keys | planned |
 | 14 | hardening: cover traffic, supply-chain attestation, metadata-index aging, recovery import, **security review** (deeper adversarial scenarios land here) | planned |
 
@@ -322,11 +3809,14 @@ and are replaced on leave; old patch-digest lanes cannot block replacement chann
 channel may reinstall one byte-identical recipe previously hash-verified in that peer/call epoch
 without spending another patch token/digest, while distinct recipes retain the persistent limit.
 Deafen
-destroys buffered room effects and cancels bounded, limited call cues. Local consent withdrawal
-closes recorder admission immediately, and every musical frame retains receipt-time recorder
-provenance before the App causal queue. Recorder leases bind an uninterrupted recording generation,
-so withdrawal/restart invalidates old queued/digest work; disconnect revokes that edge's consent,
-and the original take clock survives consent pause/resume. Unopened instrument edges retain no
+destroys buffered room effects and cancels bounded, limited call cues. Every musical frame retains
+receipt-time recorder provenance before the App causal queue. Recorder leases bind an uninterrupted
+recording generation (`leaseGeneration`/`acceptsLease`), so a restart or a membership pause
+invalidates old queued/digest work, and the original take clock survives pause/resume. (This
+paragraph originally described the same removed consent contract as 11z-10 above: "local consent
+withdrawal closes recorder admission immediately" and "disconnect revokes that edge's consent".
+Neither holds; the recorder gate is membership, not consent, and a disconnect reaches it as a
+membership change.) Unopened instrument edges retain no
 historical notes or drums; they announce the current patch once and start at fresh live traffic.
 Local causal overflow retires its old queue generation plus active/queued engine render work.
 Jukebox takes are rejected above 512 KiB before fetch/base64 decode and use an eight-entry LRU;
@@ -465,8 +3955,8 @@ the reciprocal control protocol is not a dual-key device↔transport ownership p
   until all chunks are present. Inline media and exports compare an exact inert MIME allow-list with
   a bounded common-container signature. SVG, mismatches and unknown formats receive a bodyless
   inline-scheme denial (not an octet-stream body the WebView may sniff), while exports disclose
-  matched/mismatched/unrecognized evidence. Inline head/chunk caches are bound to the exact unique
-  current manifest rather than the member-claimed plaintext CID. This blocks simple
+  matched/mismatched/unrecognized evidence. Inline head/chunk caches are bound to the complete
+  current compatible manifest set rather than the member-claimed plaintext CID. This blocks simple
   type disguise but is not full bitstream validation or a decoder sandbox. Full
   trust-everyone/specific automatic
   **whole-share mirroring** remains deferred until the sealing store has a disk quota, otherwise a
@@ -625,9 +4115,11 @@ routing secret `ns_secret_L`:
 ## Voice (group calls)
 
 Shipped `bd483b5` → `7492f92`; contract in [`design-voice.md`](design-voice.md)
-(design phases 1–3 are in, phase 4 is not). **All media-plane code is frontend**
-(`apps/desktop/src/App.svelte`); the Rust core only derives a key and relays opaque,
-authenticated signalling.
+(design phases 1–3 are in, phase 4 is not). **All media-plane code is frontend**; the
+Rust core only derives a key and relays opaque, authenticated signalling. It no longer
+lives in `App.svelte`: it has been extracted into `apps/desktop/src/call-audio.ts`,
+`callroutes.ts`, `voice-signaling.ts`, `media-capture.ts`, `stream-audio.ts` and
+`streaming.ts`.
 
 **How it works today**
 - **Rooms are per channel.** The channel id doubles as the call id *and* the media-key
@@ -709,13 +4201,27 @@ authenticated signalling.
   or recovery path** (lose every valid secret and the servers are unreadable; there is no escrow
   by design), and a
   corrupted/partial snapshot surfaces as a load failure rather than a repair.
-- **Network admission is single-committer-only** (only the lowest-leaf-index member
-  admits). Concurrent admits / fork resolution + cross-member single-use = 6d-2.
+- **Network admission is single-committer-only in the shipped configuration, not in the
+  code.** Concurrent committers and fork resolution are implemented and test-gated
+  (roadmap 6d-2a 2b/2c and 6d-2b 1/2 above): `SyncConfig::max_committer_rank` /
+  `stage_decision_window_ms`, the staged-contest types `PendingResolve` / `MyStaged` /
+  `StagedJoin`, and `SyncStats::forks_resolved` / `forks_lost` / `forks_too_deep`. They
+  are **off by default**: `max_committer_rank: 0` means only the designated (lowest-leaf-
+  index) member admits, which is the synchronous fast path; `>= 1` enables the staged
+  fork-resolution path (collect competing same-base commits for the contest window, adopt
+  the lowest `commit_id`, winner merges and pushes the provisional Welcome, loser aborts).
+  Cross-member single-use over a replicated ledger is the part still outstanding from 6d-2.
 - **Commit catch-up needs a peer that still holds the commit.** A member behind by
-  more than a serving peer's `max_commit_log` window can't recover via commit
-  catch-up; a full snapshot rejoin (deferred) is required; the gap is logged and a
-  bad source is excluded, but exhausting all sources surfaces only a warning (a
-  recovery *event* to the app is a follow-up).
+  more than every reached peer's `max_commit_log` window can't recover via commit
+  catch-up; a full snapshot rejoin (deferred) is required. As of `ed7f7d6` the state is
+  **typed and detected** rather than invisible: `CommitCatchupOutcome::Stranded` is
+  distinguished from an honest empty answer, `MembershipChainGap` records the best offer
+  seen at this epoch, `SyncStats::commit_chain_gaps_observed` counts it, a warning is
+  logged in **both** bands (past `max_commit_gap` nothing was logged at all before), and
+  the drain re-queues to another source instead of retiring the task. What has *not*
+  changed: **nothing surfaces it in the UI, and there is no repair path.** A client in
+  this state still looks healthy forever to its user, which is the worst outcome the
+  detectability work leaves behind; `docs/MESSAGE-FLOW.md` §11 puts surfacing it first.
 - **Catch-up auth is now nonce-bound (6e-3d-6).** Catch-up *responses* are signed by a
   current member and bound to `(group_id, requester pubkey, req_ts, **nonce**, **epoch**,
   bundle)`, and requests carry a fresh signed timestamp + per-request RNG nonce; so a

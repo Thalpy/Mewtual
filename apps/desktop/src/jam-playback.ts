@@ -1,4 +1,7 @@
-import { JAM_KIT, JAM_RELEASE_CAP_MS, JAM_TAKE_CACHE_MAX, TAKE_MAX_BYTES, TAKE_PLAYBACK_EVENTS_PER_TICK, type JamTake, type JamTakeEvent } from "./jam-contract.ts";
+import { JAM_KIT, JAM_TAKE_CACHE_MAX, JAM_VOICE_DECLICK_SECONDS, TAKE_MAX_BYTES, TAKE_PLAYBACK_EVENTS_PER_TICK, type JamTake, type JamTakeEvent } from "./jam-contract.ts";
+// The renderer owns what a release actually costs; the transport must not keep a second opinion.
+// jam-engine does not import this module, so this direction adds no cycle.
+import { effectiveReleaseSeconds } from "./jam-engine.ts";
 import { legacyJamPatch } from "./jam-patch.ts";
 
 const TAKE_BASE64_MAX_CHARS = Math.ceil(TAKE_MAX_BYTES / 3) * 4;
@@ -194,6 +197,59 @@ export function takePlaybackIsRemote(deckCid: string | null): boolean {
   return deckCid !== null;
 }
 
+/** One note that a seek must bring back, and how long it has already been held when it does. */
+export type JamTakeSeekVoice = Readonly<{
+  /** Index of the note-on in `take.events`, so its lane, patch and sequence come from the log. */
+  index: number;
+  /** Milliseconds between that note-on and the seek point; the age the voice starts at. */
+  ageMs: number;
+}>;
+
+export type JamTakeSeekPlan = Readonly<{
+  /** First event index the ordinary scheduler owns: everything at or after the seek point. */
+  next: number;
+  /** Note-ons before the seek point whose note-off has not happened yet, in log order. */
+  sounding: readonly JamTakeSeekVoice[];
+}>;
+
+/**
+ * What a take sounds like at an arbitrary offset, not just what happens after it.
+ *
+ * Starting at the first event whose `ms` reaches the offset is right for the schedule and wrong
+ * for the sound. A take holding one chord from 0 ms to 10 s, joined at 5 s, has no due event at
+ * all until the key-ups arrive, so a listener who joins the jukebox deck mid-track hears silence
+ * where a chord is sounding, and then a run of note-offs for voices that were never opened. The
+ * longer the note, the longer the silence, which is exactly backwards.
+ *
+ * So the events before the offset are folded into held state rather than skipped: for each lane,
+ * the latest note-on per pitch that no note-off has closed. Those are re-opened at playback start
+ * at the age they have already reached, so a note six seconds into a slow swell arrives at the
+ * level it should be, not at the start of its attack. Emitting them in log order preserves each
+ * lane's `q` order, which the take validator has already proved is strictly increasing, so the
+ * engine's own duplicate/gap sequencing is satisfied without any renumbering here.
+ *
+ * Drums are deliberately NOT reconstructed. A pad is a one-shot: its tail is the end of a sound
+ * whose transient has already gone, and firing a whole fresh crash because its 3-second tail
+ * happens to cross the seek point would insert an attack the take does not contain.
+ */
+export function planTakeSeek(take: JamTake, offsetMs: number): JamTakeSeekPlan {
+  const baseMs = Number.isFinite(offsetMs) ? Math.max(0, offsetMs) : 0;
+  const held = new Map<string, JamTakeSeekVoice>();
+  let next = take.events.length;
+  for (let index = 0; index < take.events.length; index += 1) {
+    const event = take.events[index];
+    if (event.ms >= baseMs) { next = index; break; }
+    if ("d" in event) continue;
+    // The engine keeps at most one held voice per (source, pitch) and closes the latest on a
+    // note-off, so the same single-slot rule decides what is still sounding here.
+    const key = `${event.lane}:${event.n}`;
+    if (event.on === 1) held.set(key, { index, ageMs: baseMs - event.ms });
+    else held.delete(key);
+  }
+  const sounding = [...held.values()].sort((a, b) => a.index - b.index);
+  return { next, sounding };
+}
+
 /** Exclusive end of one bounded overdue-event scheduler pass. */
 export function takeDueBatchEnd(
   events: readonly JamTakeEvent[],
@@ -220,8 +276,11 @@ export function takeReleaseTailMs(take: JamTake): number {
       tailMs = Math.max(tailMs, JAM_KIT[event.n]?.tailMs ?? 0);
     } else if (event.on === 1) {
       const patch = event.p === undefined ? legacyJamPatch(event.w) : take.patches[event.p];
-      if (patch) tailMs = Math.max(tailMs, Math.min(patch.e.r, JAM_RELEASE_CAP_MS));
+      if (patch) tailMs = Math.max(tailMs, effectiveReleaseSeconds(patch.e.r) * 1_000);
     }
   }
-  return tailMs;
+  // The renderer's own minimum, even for a take of nothing but zero-release notes: the transport
+  // must reserve the horizon the synth will actually use, or normal completion tears the graph
+  // down mid-fade and sounds exactly like an intentional hard cancel.
+  return take.events.length ? Math.max(tailMs, JAM_VOICE_DECLICK_SECONDS * 1_000) : tailMs;
 }

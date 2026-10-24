@@ -6,6 +6,8 @@ export interface NativeVaultLockOutcome {
 
 /** Result returned only when native close deliberately leaves the window alive or cannot destroy it. */
 export interface NativeVaultCloseOutcome extends NativeVaultLockOutcome {
+  /** A server snapshot failed. A second close retries; it never discards message history. */
+  history_error?: string | null;
   /** True when the first close paused so the user can acknowledge lost latest screen state. */
   deferred: boolean;
   /** Present when native locking completed but native window destruction failed. */
