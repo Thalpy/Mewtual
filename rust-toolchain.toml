@@ -1,4 +1,6 @@
 # Pin the toolchain for reproducible builds (supply-chain hygiene).
+# Planned: move to 1.91.0 once PR #54 (Chat-method-redesign) and PR #26 (Create-suite-2) are both
+# merged into main. See docs/PENDING-ACTIONS.md.
 [toolchain]
 channel = "1.89.0"
 components = ["rustfmt", "clippy"]
