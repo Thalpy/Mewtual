@@ -1,7 +1,7 @@
 //! Minimal PCP MAP support for IPv6 firewall pinholes.
 //!
-//! `portmapper` 0.18 is intentionally retained for IPv4 UPnP/PCP/NAT-PMP because it matches the
-//! workspace MSRV, but its public client and mapping types are fixed to `Ipv4Addr`. RFC 6887 uses
+//! `portmapper` is intentionally retained for IPv4 UPnP/PCP/NAT-PMP, but its public client and
+//! mapping types are fixed to `Ipv4Addr` (unchanged from 0.18 to 0.19). RFC 6887 uses
 //! 128-bit address fields and explicitly supports IPv6 firewalls, so this module implements only
 //! the missing IPv6 MAP subset. Keeping the packet boundary small makes it possible to validate
 //! nonce, protocol, port, address family, lease timing, and interface scoping before an address is
