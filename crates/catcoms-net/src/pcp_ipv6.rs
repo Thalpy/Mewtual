@@ -231,7 +231,7 @@ pub(crate) fn decode_response(packet: &[u8]) -> Result<DecodedResponse, PcpIpv6E
             "packet length is outside PCP bounds",
         ));
     }
-    if packet.len() % 4 != 0 {
+    if !packet.len().is_multiple_of(4) {
         return Err(PcpIpv6Error::Malformed(
             "packet length is not a multiple of four bytes",
         ));

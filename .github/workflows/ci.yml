@@ -19,7 +19,7 @@ jobs:
         os: [ubuntu-latest, windows-latest]
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@1.89.0
+      - uses: dtolnay/rust-toolchain@1.91.0
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
@@ -55,7 +55,7 @@ jobs:
           mkdir -p .claude
           printf 'must-not-enter-build-context\n' > .claude/review-secret
           docker build --target context-audit -f docker/linux-test.Dockerfile .
-      - uses: dtolnay/rust-toolchain@1.89.0
+      - uses: dtolnay/rust-toolchain@1.91.0
         with:
           components: clippy
       - uses: Swatinem/rust-cache@v2

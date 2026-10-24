@@ -34,7 +34,7 @@ jobs:
           cache-dependency-path: apps/desktop/package-lock.json
 
       - name: Install Rust
-        uses: dtolnay/rust-toolchain@1.89.0
+        uses: dtolnay/rust-toolchain@1.91.0
 
       - name: Cache Rust build
         uses: Swatinem/rust-cache@v2
@@ -154,7 +154,7 @@ jobs:
           cache-dependency-path: apps/desktop/package-lock.json
 
       - name: Install Rust
-        uses: dtolnay/rust-toolchain@1.89.0
+        uses: dtolnay/rust-toolchain@1.91.0
 
       - name: Cache Rust build
         uses: Swatinem/rust-cache@v2

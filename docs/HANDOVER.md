@@ -7147,7 +7147,7 @@ and ranks the live hazards in that path.
   hardening folded in. The whole block ends with a **memory end-to-end test**: a joiner
   discovers the inviter at a zero-knowledge rendezvous and joins with **no hard-coded
   server address**.
-- Toolchain pinned **Rust 1.89.0** (`rust-toolchain.toml`; automerge 0.10 needs it).
+- Toolchain pinned **Rust 1.91.0** (`rust-toolchain.toml`; automerge 0.10 needed 1.89).
 - 11 library crates + 1 binary (+ `apps/desktop`, its own workspace). The protocol
   layers are tested deterministically with
   N in-process nodes over an in-memory transport; the mesh is *additionally* tested

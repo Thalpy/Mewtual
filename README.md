@@ -234,7 +234,7 @@ Diagnostics use the `tracing` facade; binaries and tests install a subscriber vi
 
 ## Run the desktop app
 
-Development requires Rust 1.89, Node.js/npm, and the platform dependencies required by Tauri.
+Development requires Rust 1.91, Node.js/npm, and the platform dependencies required by Tauri.
 Windows users also need the WebView2 runtime, which is included with Windows 11.
 
 ```sh
@@ -293,7 +293,7 @@ Release builds embed the frontend inside the application. Do not distribute an e
 <details>
 <summary><strong>Windows installer (NSIS)</strong></summary>
 
-You need Rust 1.89, Node.js/npm, and the [Tauri prerequisites for
+You need Rust 1.91, Node.js/npm, and the [Tauri prerequisites for
 Windows](https://v2.tauri.app/start/prerequisites/#windows). From the repository root:
 
 ```powershell

@@ -21,7 +21,7 @@ diagnostics explain where a failed run stopped. Log output alone is not a succes
 
 ## Prerequisites
 
-- Rust 1.89.0, including `cargo`. [`rust-toolchain.toml`](../rust-toolchain.toml) pins that exact
+- Rust 1.91.0, including `cargo`. [`rust-toolchain.toml`](../rust-toolchain.toml) pins that exact
   version, so `rustup` will fetch it rather than use whatever is newer.
 - Run commands from the repository root.
 - Permit loopback TCP connections when the OS firewall prompts.

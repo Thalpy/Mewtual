@@ -25,7 +25,7 @@ MEWTUAL_TEST_UID="$(id -u)" MEWTUAL_TEST_GID="$(id -g)" \
 `--build` on both invocations is deliberate: source is copied into the image rather than mounted,
 so without it the second and every later run silently re-tests the source as it was the first time.
 
-This builds a Debian Bookworm image pinned to Rust 1.89, installs WebKitGTK/Tauri build libraries,
+This builds a Debian Bookworm image pinned to Rust 1.91, installs WebKitGTK/Tauri build libraries,
 and runs, in this order: `cargo fmt --all -- --check`, then
 `cargo clippy --all-targets --all-features -- -D warnings`, then the root Rust suite, the
 ambient-dependency gate, the frontend suite/check/build, the separate Tauri suite/check, and the
