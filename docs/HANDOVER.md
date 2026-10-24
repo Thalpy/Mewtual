@@ -1,5 +1,31 @@
 # Mewtual; Handover
 
+## SDP capacity transfer continuation (24 October; integration in progress)
+
+`ConfirmationControl` can prepare one affine successor envelope, then freeze the original
+confirmation plan and move its idle Crypto lane without freeing/recharging that position.
+Two action positions come from the original twelve protected claims. Refusal retains the
+same prepared owner; abandonment releases its unique preparation latch. Actual old inputs,
+engine candidates, handoff credits and Lowers retain their real custody. The ticket owns no
+Workflow and its retirement witness observes the original last-field publisher. Old close
+and expiry cannot close the moved lane. No raw budget, signing or RTC authority is exposed.
+
+Focused V2 tests pass416, including full ordinary capacity, actual preflight before Engine
+commit, competing close/transfer, nested slots and delayed input/Lower retirement. Strict
+all-target/all-feature catcoms-sync Clippy passes. Read-only adversarial review found no
+blocker/high/medium in this capacity-only leaf. Complete gates for this changed Root source
+will run after the coherent transition integration; earlier full results below use75e15199.
+
+This is not native Exchange adoption or a Ready protocol. Review confirmed that Source's
+retained Proof can own Workflow until signed retention expires, while BOTH pair collection
+and Resources-triggered Workflow collection close at the first confirmation deadline. Add
+one bounded native AwaitReady phase honoring both collectors, without extending original
+action/Finish deadlines or attempts. Ready needs synchronous protected admission in the
+shared message-ID namespace, independent paid Source custody, immutable agreed helpers and
+causal Offer completion; queued public admission or a transport ACK is insufficient. All
+causal Ready/native adoption, browser key transfer, SDP/ICE/RTC, multi-peer, relay and physical
+acceptance remain open. External download resume is excluded from this session.
+
 ## Automatic browser work continuation (24 October; validation in progress)
 
 Published checkpoint `8d8a58c0` contains ordinary authenticated native effects, automatic

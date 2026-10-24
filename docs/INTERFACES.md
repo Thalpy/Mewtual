@@ -1,5 +1,16 @@
 # Mewtual; Interfaces & Hooks Schema
 
+## Affine successor capacity (24 October; capacity only)
+
+`ConfirmationControl::prepare_sdp_capacity()` prepays one192KiB envelope and moves two
+unissued positions into a child of the ORIGINAL action reservation. It creates no Crypto
+position or readiness deadline. Keep that exact non-Clone owner through retries; another
+preparation refuses until abandonment. `transfer_sdp_capacity(prepared)` atomically closes
+the original Control/Workflow and moves its idle Crypto lane. Busy/pre-effect refusal returns
+the SAME preparation. The opaque ticket exposes only original confirmation retirement and
+closes an unadopted lane on Drop. It retains no Workflow or protocol/RTC authority. Native
+Exchange adoption, causal Ready and browser key transfer are still absent; UI stays off.
+
 ## Serial native work consumer (24 October; validation in progress)
 
 Broker21 adds `observeNativeWork(owner, channel, selectedKey)`. The exact accepted selected

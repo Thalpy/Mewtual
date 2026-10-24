@@ -1,5 +1,16 @@
 # Threat model; client integrity & enforcement boundaries
 
+## Successor capacity is not readiness (24 October; integration in progress)
+
+An original ConfirmationControl may extract its idle Crypto lane into an opaque affine
+ticket after separate payment. It cannot authenticate Ready, sign, compute, dispatch SDP or
+authorize RTC. Control/WorkflowState fence all old borrowers against extraction; an actual
+preflight credit or handoff refuses transfer, and old input/Lower ownership still controls
+retirement. Nested action reservations keep original pool identity through actual last Drop.
+Future adoption must validate the actual original plan, pool, group, pair/call allocations,
+epoch and causal Ready under final native authority. Equal metadata is insufficient. That
+adoption and the bounded AwaitReady deadline are not implemented by this capacity leaf.
+
 ## Automatic original-work consumption (24 October; validation in progress)
 
 Broker21's consumer requires the actual accepted key/channel and authenticated Ready. Native

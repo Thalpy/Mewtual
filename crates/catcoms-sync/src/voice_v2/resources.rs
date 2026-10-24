@@ -140,6 +140,13 @@ struct LaneBorrow {
 }
 redacted_debug!(WorkLane);
 impl WorkLane {
+    /// The caller holds its original Workflow fence across this check and extraction.
+    /// Every new borrow of that lane must enter that same fence first. This observation
+    /// alone is NOT a transfer permit and cannot be used after releasing the owner fence.
+    pub(super) fn idle_for_transfer(&self) -> bool {
+        let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        !state.closed && !state.busy
+    }
     /// Retirement releases an idle lane. An actual borrower remains charged until its last
     /// credit owner drops; a timeout or lost result-RPC cannot make this lane reusable.
     pub fn close(&self) {

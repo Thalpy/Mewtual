@@ -1,5 +1,15 @@
 # Mewtual; Architecture
 
+## Confirmation capacity extraction (24 October; integration in progress)
+
+The successor preparation splits two original protected action positions without returning
+them to the shared table. A unique weak preparation guard prevents competing envelopes and
+does not pin Workflow retirement. Under Control then WorkflowState, extraction checks the
+original lane idle, closes old adoption and takes that lane; cleanup runs outside these
+guards. Old Workflow no longer owns the moved lane. The opaque ticket retains fixed binding
+and successor payment, never Workflow. This is capacity closure only: causal Ready/native
+Exchange adoption, explicit browser key transfer and SDP/RTC authority remain open.
+
 ## Automatic browser work consumption (24 October; validation in progress)
 
 The retained Broker21 can explicitly observe an authenticated Ready channel using its actual

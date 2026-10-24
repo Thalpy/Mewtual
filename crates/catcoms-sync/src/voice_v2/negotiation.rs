@@ -14,7 +14,7 @@ use catcoms_crypto::DeviceId;
 use std::sync::{Arc, Mutex};
 
 pub const EXCHANGE_BYTES: usize = 192 * 1024;
-const METADATA_BYTES: usize = 4096;
+pub(super) const METADATA_BYTES: usize = 4096;
 const STAGES: usize = 8;
 // Maximum policy- and OfferId-bound native encoding sizes. Composition regressions must compare
 // these with actual encoded packets; changing the wire encoding requires revisiting this peak.

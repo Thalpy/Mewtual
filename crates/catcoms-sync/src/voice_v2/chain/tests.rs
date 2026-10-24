@@ -9,7 +9,7 @@ use catcoms_rt::ManualClock;
 mod handoff;
 mod progress;
 
-fn binding(seed: u8) -> Binding {
+pub(super) fn binding(seed: u8) -> Binding {
     Binding {
         scope: Scope::for_group(b"prepared chain", Some([7; 32]), 44),
         epoch: 3,
@@ -29,7 +29,7 @@ fn binding(seed: u8) -> Binding {
 }
 /// These tests isolate history/action/workflow custody; real ledger sharing is covered by
 /// packet and LocalJoin regressions. Each fixture still uses the production fixed-size pools.
-fn prepare_chain(
+pub(super) fn prepare_chain(
     resources: Arc<Resources>,
     bound: Binding,
     slots: Arc<slots::Slots>,
@@ -41,7 +41,7 @@ fn prepare_chain(
         &super::super::packets::PacketSlots::new(),
     )
 }
-fn publish(
+pub(super) fn publish(
     chain: &Arc<PreparedChain>,
     pool: &Arc<Resources>,
     slots: &Arc<slots::Slots>,

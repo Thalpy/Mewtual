@@ -23,9 +23,11 @@ mod admission;
 mod derivation;
 mod outgoing;
 mod start;
+mod transfer;
 pub(crate) use admission::ConfirmationAdmission;
 pub(super) use admission::ConfirmationConsent;
 pub(in crate::voice_v2) use start::{StartAdmission, StartCandidate};
+pub use transfer::{PreparedSdpCapacity, TransferredSdpCapacity};
 // Confirmation-only envelope. Stacking this on the existing SDP reserve is not whole-chain
 // readiness; the supported chain still needs a measured, explicit phase transfer.
 const VARIABLE_BYTES: usize = 96 * 1024;
@@ -146,7 +148,6 @@ pub struct Workflow {
     live: CallLease,
     control: Weak<PreparedChain>,
     reserve: Arc<Reservation>,
-    crypto: Arc<WorkLane>,
     packets: super::packets::ConfirmationCapacity,
     state: Mutex<WorkflowState>,
     // MUST remain last. Arc's weak strong_count reaches0 BEFORE Drop/field destruction;
@@ -226,12 +227,18 @@ impl ConfirmationControl {
 }
 struct WorkflowState {
     closed: bool,
+    // Taken affinely after freezing this phase. Old close/Drop may retire its reserve
+    // and Lower custody, but must never close a lane already owned by the SDP transition.
+    crypto: Option<Arc<WorkLane>>,
     // Close takes ONLY this phase's handle. Actual Lower credits and other live phases
     // retain the same group owner; idle inputs/history must not pin process work slots.
     lowers: Option<Arc<GroupForwardLanes>>,
     // One IPC owner for the entire chain, including distinct rows. A lost renderer reply may
     // keep this occupied while the original physical work/result/cleanup still drains.
     handoff_busy: bool,
+    // At most one affine successor can retain this plan's prepaid continuation claims.
+    // Failed/abandoned preparation clears this latch; transfer never reopens the old phase.
+    sdp_preparing: bool,
 }
 
 /// Affine capacity for application-owned native/browser handoff copies. The trusted adapter
@@ -507,12 +514,13 @@ impl PreparedChain {
                     live,
                     control: control.clone(),
                     reserve,
-                    crypto,
                     packets,
                     state: Mutex::new(WorkflowState {
                         closed: false,
+                        crypto: Some(crypto),
                         lowers: Some(lowers),
                         handoff_busy: false,
+                        sdp_preparing: false,
                     }),
                     _retirement: Some(RetirementPublisher(binding)),
                 })),
@@ -662,7 +670,11 @@ impl Workflow {
         } else if matches!(kind, ResourceKind::Crypto | ResourceKind::Retained) {
             ByteBudget::ReservedLane {
                 reservation: self.reserve.clone(),
-                lane: self.crypto.clone(),
+                lane: state
+                    .crypto
+                    .as_ref()
+                    .ok_or(VoiceError::Unauthorized)?
+                    .clone(),
             }
             .charge(resources, group, bytes, kind)?
         } else {
@@ -709,13 +721,15 @@ impl Workflow {
         }
     }
     fn close(&self) {
-        let lowers = {
+        let (lowers, crypto) = {
             let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
             state.closed = true;
-            state.lowers.take()
+            (state.lowers.take(), state.crypto.take())
         };
         self.reserve.close();
-        self.crypto.close();
+        if let Some(crypto) = crypto {
+            crypto.close();
+        }
         // Outgoing lanes belong to the original group, shared with other native phases.
         // Release this phase's handle outside its state fence. A real Lower or another live
         // phase retains the shared owner, while closed idle inputs no longer pin slots.
