@@ -9,7 +9,10 @@ publish = false
 catcoms-wire = { path = "../catcoms-wire" }
 catcoms-crypto = { path = "../catcoms-crypto" }
 thiserror.workspace = true
-openmls = "0.8"
+# 0.8.3 is the floor, not just the lockfile choice: it fixes GHSA-gc79-23g3-8g52 (0.8.2:
+# unbounded recursion decoding nested extensions aborts the process), GHSA-94v4-rg25-x625 and
+# GHSA-p276-g3f3-wwgh. Stored-state compatibility is pinned by persist/compat_tests.rs.
+openmls = "0.8.3"
 openmls_rust_crypto = "0.5"
 blake3 = "1"
 openmls_basic_credential = "0.5"
