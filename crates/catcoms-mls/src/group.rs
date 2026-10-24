@@ -606,6 +606,17 @@ impl ServerGroup {
                     .map_err(proto)?;
                 Ok(Incoming::CommitApplied { removed })
             }
+            // openmls 0.9 reports a message this client authored (or one whose encrypted sender
+            // data merely CLAIMS our leaf, which any member can write) as a successful process
+            // with no content, where 0.8 returned an error. Keep 0.8's contract: refuse it.
+            // `Incoming::Other` means "processed, nothing to apply", and the sync layer records a
+            // commit as applied on any `Ok` (`apply_commit_in_order`), so mapping these to `Other`
+            // would mark an unmerged, or forged, commit as applied while the epoch stayed put.
+            // Our own staged commit is adopted only through `merge_staged_self`.
+            ProcessedMessageContent::OwnPrivateMessage
+            | ProcessedMessageContent::OwnPendingCommit => Err(MlsError::Protocol(
+                "refused a message attributed to this device's own leaf".into(),
+            )),
             _ => Ok(Incoming::Other),
         }
     }
@@ -667,6 +678,9 @@ impl fmt::Debug for ServerGroup {
             .finish()
     }
 }
+
+#[cfg(test)]
+mod own_echo_tests;
 
 #[cfg(test)]
 mod m1_tests {

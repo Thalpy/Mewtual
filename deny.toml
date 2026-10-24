@@ -18,29 +18,6 @@ reason = "paste: unmaintained, no vulnerability, transitive, no upgrade availabl
 id = "RUSTSEC-2026-0173"
 reason = "proc-macro-error2: unmaintained, no vulnerability, transitive, no upgrade available"
 
-# The three libcrux advisories below are pinned in place by openmls_rust_crypto 0.5, which
-# requires hpke-rs ^0.6, which requires libcrux-sha3 0.0.8. The fixed 0.0.10 cannot be selected
-# without moving to the openmls 0.9 release-candidate line, which is a protocol decision rather
-# than a lint fix. Drop these ignores the moment openmls_rust_crypto 0.5.x bumps hpke-rs.
-#
-# Neither SHAKE advisory is reachable from this app: crates/catcoms-mls/src/config.rs pins the
-# single ciphersuite MLS_128_DHKEMX25519_CHACHA20POLY1305_SHA256_Ed25519 and advertises no other,
-# so the group never negotiates SHA-3/SHAKE or ML-KEM at all.
-[[advisories.ignore]]
-id = "RUSTSEC-2026-0207"
-reason = "libcrux-sha3 incremental SHAKE: unreachable, our pinned ciphersuite never uses SHAKE"
-
-[[advisories.ignore]]
-id = "RUSTSEC-2026-0208"
-reason = "libcrux-sha3 AVX2 SHAKE-256 panic: unreachable, our pinned ciphersuite never uses SHAKE"
-
-# NOTE: this one is architecture-scoped, not unreachable. It is inert on the x64 builds we ship
-# today, and becomes live the day Mewtual builds for aarch64 (Windows on ARM, Apple Silicon,
-# ARM Linux). Revisit before adding any ARM target.
-[[advisories.ignore]]
-id = "RUSTSEC-2026-0212"
-reason = "libcrux-secrets constant-time swap on aarch64: we ship x64 only; revisit for any ARM build"
-
 # hickory-proto arrives through libp2p-dns 0.44 (libp2p 0.56), which pins the 0.25 line. Both
 # advisories below sit behind that pin: drop them the moment libp2p moves to a hickory 0.26 line.
 #
