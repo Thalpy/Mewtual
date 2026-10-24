@@ -593,6 +593,164 @@ not same-user tampering with the source staging path. A crash after publication 
 can leave an external file plus private progress; the UI discloses possible duplicate re-export.
 This is not an exactly-once external receipt or a physical audio/network acceptance claim.
 
+## Journaled external export boundary (21 October; Save as and review fixes 22 October)
+
+For saves that can be journaled, this supersedes the statements above that no external path or
+offset is persisted and that resume always uses a fresh destination; the non-resumable fallback
+writer keeps those properties.
+
+- **New persisted metadata.** The destination folder path, the staging and final leaf names, the
+  partial's file identity (volume, file index or inode, birth time) and a remembered "Save as"
+  folder and name live only inside the sealed Download record under the purpose-separated metadata
+  key, and in native memory. They are redacted from Debug output and never reach renderer
+  projections (which carry only a `chosenPlace` boolean), logs, diagnostics or error strings
+  (pinned by tests).
+- **Ownership proof.** A saved path is never authority. Ownership is proven by the identity of an
+  open handle; leaf opens never follow a link or name-surrogate reparse point (a cloud placeholder,
+  WOF or dedup tag is still the same file). Writes and truncation go through the session's own
+  handle, which holds an exclusive OS lock, so a second writer is refused across mounts and
+  processes. A byte mismatch inside the durable checkpoint halts as Changed and modifies nothing.
+  The final name is never deleted, and publication is a no-replace hard link verified afterwards. A
+  final name holding our identity is recorded as saved only after its content is verified
+  read-only against the saved plan. Once a link may exist, the session never trims or writes.
+- **Automatic deletion (PR51 H1, 22 October).** Every automatic delete of an external name (Remove,
+  Save new copy, Clear of a saved row, the staging name after publication, failed-creation cleanup,
+  the link-probe name, the fallback writer's and the GIF export's staging file, a small download
+  whose write failed) deletes only the object it verified. No `unsafe` is added: the operating
+  system calls come from vetted crates (`fs_at` on Windows, `rustix` on Unix). Windows opens the
+  name with delete access and without delete sharing, without following a reparse point, verifies
+  that handle and deletes through it, so nobody can rename, replace or delete the name meanwhile
+  (guaranteed against every process); no attribute is ever changed, through a path or a handle.
+  Unix has no delete-by-inode, so the guarantee is narrower: **automatic deletion is guaranteed
+  only against processes running as other accounts.** In a folder other accounts can modify (owner
+  neither us nor root, or group- or other-writable without the sticky bit; a group-writable folder
+  counts as private only when it is ours, its group is our primary group, it has no extended POSIX
+  ACL (whose mask the group bits would then be), and the local account files prove that group has
+  no other member, user decision of 23 October; membership that cannot be proven, as with
+  directory services, systemd userdb or homed records, containers, user namespaces or on macOS,
+  stays shared; `gshadow` members, group credentials granted by privileged launchers, `pam_group`
+  (`/etc/security/group.conf`) or musl's `nscd` fallback (musl ignores `nsswitch.conf`), and
+  groups kept by existing sessions are not visible and remain a root-configured residual) and on
+  any network, FUSE or
+  unrecognized filesystem (whose
+  permissions this kernel does not decide; ACLs are not read), nothing is deleted automatically and
+  the user is told to delete the leftover, but only after a read-only check that it still holds
+  Mewtual's own file. Elsewhere the name is verified where it is (a foreign object is never moved),
+  renamed relative to a pinned folder descriptor to an unguessable random name, verified again
+  there, and unlinked only if it is still ours; otherwise it is put back without replacing
+  anything, and a put-back that fails is an error that keeps the save tracked. A process running as
+  the same account could swap that random name in the instant before the unlink, but such a process
+  can already delete the file itself. A crash in between leaves our file at a `mewtual-removing-`
+  name: a journaled save finds it later by identity, never by name; a writer without a journal has
+  no record of it. Writers without a journal verify against the in-session number of the handle
+  they still hold (without the handle only after a worker panic). A saved row whose final name is
+  not proven ours deletes nothing on Clear. Identity is still the only proof: a real identity
+  collision (possible in principle on ReFS, whose 64-bit index is not guaranteed unique) could let
+  Remove delete a foreign file.
+- **Publication (PR51 M1).** Both writers give the final name to exactly the object behind the
+  handle they verified. Linux and Android link that handle's descriptor through `/proc/self/fd`
+  into the pinned folder (no `/proc`: no journal, and the fallback writer refuses before writing).
+  The journaled session checks the pinned folder against its recorded identity; the writers without
+  a journal have none, so they first check that the staging name inside the pinned folder holds
+  their object, and a folder put at the path before publication gets nothing (the first PR51 M1
+  change allowed that; the review of the Linux CI fix caught it). A staging name swapped after that
+  check still cannot become the final name. The post-link check reads the final name through that
+  same descriptor, so a folder swapped right after a real link does not make it read as changed.
+  Windows holds a delete-denying pin on the staging name, checked to be our object, across the
+  path-based link, which also blocks renaming its folders (but not retargeting a junction among
+  its ancestors, which someone with write access to that junction could do; the save then halts,
+  as Changed or Unavailable, and is never reported saved). macOS has no link by descriptor (narrowed): the link is by
+  path, and the post-link check only guarantees that a foreign object at the final name is never
+  reported as saved; it is then left alone with the staging name. On Linux a confinement policy
+  (AppArmor, SELinux, snap, seccomp) can deny the descriptor link although `/proc` is present;
+  such a save halts at publication after writing, truthfully.
+- **Creation.** Creating a partial is path-based: every creation with a captured folder identity
+  re-reads it afterwards and removes (verified as above) and refuses a partial that landed in a
+  swapped folder; a swap and swap-back inside that window leaves at most an empty partial there,
+  because creation then requires the partial's name to hold our own handle's object and refuses
+  otherwise, even if a file was planted at our name. The recheck reads the folder identity and the
+  name through one held folder handle (Unix: a descriptor and `openat`; Windows: a directory handle
+  and fs_at's handle-relative open), so a third swap, or a junction retargeted on the way, cannot
+  pass it, and a failed check is the same refusal as a changed folder (never a quiet switch to the
+  non-resumable writer). Before that, the Windows name check was the path-based link probe alone:
+  retargeting a junction to another folder just before it let the whole plaintext be written into
+  that folder, with publication then halting and Remove unable to clean it there (the
+  coordinator's review L1). The Unix name check was lost when PR51 M3 replaced the Unix link probe
+  with `fstatfs` and was restored after Linux CI caught it. Without a captured folder identity (an
+  identity-less chosen folder, native's one-click Downloads reservation) only the path-based name
+  check stands.
+- **Filesystem support (PR51 M3, fail closed).** Unix journals only on filesystems `fstatfs`
+  identifies as local with stable identities (ext2/3/4, xfs, btrfs, f2fs, tmpfs, each only when it
+  reports birth times; APFS and HFS+ that are `MNT_LOCAL`); FAT, vfat and exFAT are refused before
+  writing; network, FUSE, overlay and unrecognized filesystems get the non-resumable writer (which
+  on a mount without hard links fails at publication and leaves the partial for the user). Windows has no vetted crate that reports
+  the filesystem name, so FAT and exFAT are refused by the link probe, network folders (a
+  `\\?\UNC\` canonical path, mapped drives included) get the non-resumable writer, and every other
+  local volume is journaled on the 64-bit file index plus birth time: verified on NTFS only, ReFS
+  unverified. The matrix is in `communication-recovery/EXTERNAL-DOWNLOAD-RESUME.md`.
+- **New exposure.** A paused or interrupted export keeps partial plaintext in the destination
+  folder as `<name>.mewtual-part` across lock and restart until it is resumed, completed, replaced
+  by Save new copy or removed. While a session is open on Windows, other programs cannot read it.
+- **Save as.** Native opens the OS dialog itself; the renderer sends only a flag and the command's
+  parameter list is pinned so no path can be added. The chosen place authorizes saves of that one
+  Download only: it stays the destination of every save of it (a later plain one-click Download
+  of the same file included) until a save begins there, a newer Save as replaces it or the record
+  is released. It is never logged (`rfd` logs only in backends this build does not compile), and
+  persists only in the sealed record. An explicit Resume of a completed copy checks a remembered
+  place read-only before spending allowance. An existing name is refused even if the dialog asked to
+  replace it. The peer-chosen suggestion is sanitized (Windows device names including `COM¹` and
+  `CONIN$`, and `%`, which the Windows dialog would expand into another path). Lock cannot close
+  an open OS dialog, so the suggested name and folder stay on screen until the user closes it
+  (the choice is then discarded); Lock does release the one-dialog turn, so a dialog that never
+  answers cannot block later Save as attempts after Lock or a server replacement. The turn ends
+  when the dialog answers; validating the picked place (which reads that folder and can stall on a
+  dead share) runs afterwards with cancellation still observed, and a stalled check keeps one of
+  four validation slots until the filesystem answers; with all four held, further Save as attempts
+  are refused until one returns (second review R2-M2). If Save new copy abandons an old partial it
+  cannot reach, the notice saying so travels with every later result of that save, failures
+  included (R2-M3). A cloud-synced or shared chosen folder (for example OneDrive Desktop or Documents)
+  uploads the partial plaintext and the probe name as they are written. A chosen folder inside the
+  app's own data or vault folder is not refused (documented, not enforced).
+- **Fences.** In-session journal transitions require the original export lease; the Resume
+  preflight's edges require a preflight observation bound to the actor lifetime, Root authority,
+  storage mount and transfer epoch, plus an exact journal CAS; all require the original native
+  invocation. Writes finishing after Lock, freeze/thaw, remount, Pause, Remove or Save new copy
+  persist nothing, and a recovered save returns its path only if still authorized after cleanup;
+  that cleanup releases the record only while it is still the one recovered (no other cleanup
+  holds the claim and the preflight's observation is current).
+  Native rechecks the invocation and lease before every plaintext write attempt and again when a
+  queued blocking step starts. A session that finds the file shorter than its verified offset
+  stops instead of zero-extending. Publication and Pause/Remove/Lock serialize on the session
+  commit guard. Remove, Keep partly saved file and Save new copy hold a process-wide claim per
+  Download that outlives a dropped invocation until its delete ends, so Keep can never promise a
+  file a pending delete may still remove; Save new copy retires every observer before deleting.
+  Plain Resume takes that claim only around its intent change, so it cannot commit while a
+  cleanup runs, and never holds it across destination reads that could hang; a Resume preflight
+  started before a cleanup has its edges refused because the cleanup invalidated its observation.
+- **Residual risks.** Filesystems without stable identities, birth times or locks (some SMB/FUSE)
+  keep the non-resumable writer, which like the journaled path does its file work on the blocking
+  pool, so a stalled share pins one blocking thread, not an async worker; FAT and exFAT are
+  refused before writing. A volume whose device
+  number changes across reboot reports Changed. The destination folder is flushed after the link
+  and before Published is recorded (PR51 M2), but flushes are best effort, so power loss can still
+  lose a just-published name on filesystems that ignore them; Transfers then checks a saved row's
+  file (read-only, bounded, fenced by session and row revision; user decision of 23 October) and
+  says when it is missing or replaced, offering an explicit Save again, and Clear keeps the
+  staging name when that is the only copy and says so. The check reads the saved folder from native
+  only; the renderer gets one of four words, never a path. A destination that
+  hangs during the guarded link can delay Lock, as the existing writer could, and every other
+  command that takes the process-wide session commit guard until the operating system gives up.
+  The post-publication media check reads the destination outside that guard and off the async
+  runtime. Remove keeps a
+  partial it cannot check tracked as Removing; every other file it leaves on disk is reported to
+  the user. Unix code is compile- and Clippy-checked for an Android target but never run on the
+  Windows development host.
+- **Retained store.** A record write refused by a full volume before its rename removes the torn
+  successor (and an empty new transfer directory, or reports the refused directory creation)
+  instead of poisoning the store; failures at or after the rename, a failed cleanup, and process
+  crashes keep the existing fail-closed behavior. The released reader refuses a store containing
+  any V2 record without changing a byte (verified with real fixtures).
+
 ## Public MLS source-catalog boundary (19 October)
 
 Connected-peer snapshots and evictable descriptor tables are not complete MLS source rosters.

@@ -79,6 +79,32 @@ fn kept_plan(
     Ok((plan, manifest))
 }
 
+/// Refusal for a "Save as" choice on a Download that already has a journal. The same text as
+/// storage's `plan_download_destination` refusal, so the user sees one message whichever check
+/// catches it first.
+const SAVE_AS_OVER_JOURNAL: &str =
+    "This file already has a partly saved copy. Choose Save new copy or Remove in Transfers first.";
+
+/// Undo a Download run whose "Save as" choice could not be written (picker review L2).
+///
+/// A record this same actor step created (`created`) is released outright: it holds no verified
+/// chunks yet, and leaving it would show an "Interrupted" row for a save that never started. An
+/// existing record is only paused, keeping its verified progress and allowance. If the release
+/// itself fails (most likely the same full or faulted vault that refused the plan write), fall
+/// back to pausing so the run never keeps the single active-run slot.
+fn abandon_unplanned<T: MeshTransport, R: CryptoRngCore>(
+    server: &mut Server<T, R>,
+    token: SavedRun,
+    created: bool,
+) {
+    if let (true, SavedRun::Download(run)) = (created, token) {
+        if server.sync.cancel_download(run.id()).is_ok() {
+            return;
+        }
+    }
+    let _ = token.pause(server);
+}
+
 fn kept_request_window(
     reference: &FileRef,
     paged: bool,
@@ -278,13 +304,15 @@ struct KeepState {
     tried: Vec<[u8; 32]>,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 enum SavedRequest {
     Keep {
         resume_existing: bool,
     },
     Download {
         resume: Option<catcoms_storage::kept::DownloadId>,
+        /// A "Save as" choice remembered in the record right after its run starts.
+        planned: Option<Arc<catcoms_storage::kept::ChosenDestination>>,
     },
 }
 
@@ -485,12 +513,18 @@ impl ReadJob {
                     let _ = reply.send(result.and_then(|lease| {
                         let lease =
                             lease.ok_or_else(|| "Download ownership changed.".to_string())?;
+                        let planned = server
+                            .sync
+                            .download_planned_destination(lease.id())
+                            .map_err(|e| e.to_string())?
+                            .map(|planned| planned.map(Arc::new));
                         Ok(DownloadReady {
                             lease,
                             manifest: keep.manifest.clone(),
                             root: self.root,
                             actor: self.actor,
                             export_custody: None,
+                            planned,
                         })
                     }));
                 }
@@ -803,11 +837,72 @@ impl FileTransfers {
         )
     }
 
+    /// Observe a saved Download for the Resume preflight (review U-M3). Captures the CURRENT actor
+    /// lifetime and Root authority, so a freeze/thaw or Root change after this call retires every
+    /// edge and recovery effect made from it. The plan comes from the sealed saved manifest; it is
+    /// used only to verify an already linked external file read-only.
+    pub(super) fn download_preflight<T: MeshTransport + 'static, R: CryptoRngCore>(
+        &self,
+        server: &mut Server<T, R>,
+        id: catcoms_storage::kept::DownloadId,
+        cancel: &RequestCancellation,
+    ) -> Result<super::DownloadPreflight, String> {
+        if cancel.is_cancelled() {
+            return Err("The download is no longer active.".into());
+        }
+        let root = server
+            .sync
+            .file_effect_authority()
+            .map_err(|e| e.to_string())?;
+        let (observation, state) = server
+            .sync
+            .download_observation(id)
+            .map_err(|e| e.to_string())?;
+        // Equivalent encrypted variants share one plaintext layout, so the first saved plan's
+        // manifest describes the file; one that does not decode simply yields no plan.
+        let plan = server
+            .sync
+            .download_saved_plans(id)
+            .ok()
+            .and_then(|plans| plans.into_iter().next())
+            .and_then(|plan| kept_plan(plan.manifest, plan.cid).ok())
+            .and_then(|(_, manifest)| {
+                catcoms_storage::kept::ExportPlan::from_manifest(&manifest).ok()
+            });
+        // A remembered choice is read-only data here; a query failure just skips the check
+        // (creation re-checks the choice anyway). Re-review 3 LOW 2: only a Completed record is
+        // about to re-verify and export. An incomplete one still has its network phase ahead,
+        // and an unplugged chosen drive or a taken name may be fine again by the time it
+        // finishes, so its Resume is never refused over the destination.
+        let completed = server.sync.downloads().ok().is_some_and(|all| {
+            all.iter().any(|download| {
+                download.id == id
+                    && download.state.phase == catcoms_storage::kept::KeepPhase::Completed
+            })
+        });
+        let planned = server
+            .sync
+            .download_planned_destination(id)
+            .ok()
+            .flatten()
+            .filter(|_| completed)
+            .map(|choice| choice.map(Arc::new));
+        Ok(super::DownloadPreflight {
+            observation,
+            state,
+            plan,
+            planned,
+            root,
+            actor: self.lifetime.subscribe(),
+        })
+    }
+
     pub(super) fn download<T: MeshTransport + 'static, R: CryptoRngCore>(
         &mut self,
         server: &mut Server<T, R>,
         raw: Vec<u8>,
         resume: Option<catcoms_storage::kept::DownloadId>,
+        planned: Option<Arc<catcoms_storage::kept::ChosenDestination>>,
         cancel: RequestCancellation,
         reply: oneshot::Sender<Result<DownloadReady, String>>,
     ) {
@@ -816,7 +911,7 @@ impl FileTransfers {
             raw,
             Some(cancel),
             ReadReply::Download(reply),
-            SavedRequest::Download { resume },
+            SavedRequest::Download { resume, planned },
         );
     }
 
@@ -867,7 +962,8 @@ impl FileTransfers {
                     .map_err(|_| "bad content address".to_string())?,
             );
             let download = matches!(request, SavedRequest::Download { .. });
-            let saved_download = if let SavedRequest::Download { resume } = request {
+            let saved_download = if let SavedRequest::Download { resume, planned } = &request {
+                let resume = *resume;
                 let found = server
                     .sync
                     .downloads()
@@ -879,6 +975,17 @@ impl FileTransfers {
                 }
                 if found.as_ref().is_some_and(|d| d.state.plan.cid != cid) {
                     return Err("Saved download changed.".into());
+                }
+                // Picker review L2: a "Save as" choice is refused while a journal exists (a
+                // chosen place never redirects an existing partial). Refuse it HERE, before
+                // `resume_download` retires the record's read epoch: otherwise a Save as from
+                // the chat would interrupt a live journaled save of the same file and only then
+                // be refused by `plan_download_destination`. Same text as that storage refusal.
+                let journaled = found
+                    .as_ref()
+                    .is_some_and(|d| !matches!(d.export, catcoms_storage::kept::ExportView::None));
+                if journaled && planned.is_some() {
+                    return Err(SAVE_AS_OVER_JOURNAL.into());
                 }
                 found
             } else {
@@ -973,6 +1080,9 @@ impl FileTransfers {
                 (plan, manifest, resolved.version, candidates)
             };
             let plan_version = plan.version;
+            // Whether this step creates the Download record (no saved record was found). Only
+            // such a record may be released outright when its Save as choice cannot be written.
+            let created = download && saved_download.is_none();
             let token = if let Some(d) = saved_download {
                 SavedRun::Download(
                     server
@@ -1004,6 +1114,24 @@ impl FileTransfers {
                         .map_err(|e| e.to_string())?,
                 )
             };
+            // Remember a "Save as" choice in the same synchronous step, before any network
+            // work: an interrupted acquisition, Pause, Lock or restart then still saves there.
+            // If that write is refused, undo the run we just started so nothing is left holding
+            // the single active-run slot (and, picker review L2, no "Interrupted" row is left
+            // for a brand-new record that never got its choice).
+            if let (
+                SavedRun::Download(run),
+                SavedRequest::Download {
+                    planned: Some(choice),
+                    ..
+                },
+            ) = (&token, &request)
+            {
+                if let Err(error) = server.sync.plan_download_destination(*run, choice) {
+                    abandon_unplanned(server, token, created);
+                    return Err(error.to_string());
+                }
+            }
             Ok::<_, String>((cid, listing, token, manifest, plan_version))
         })();
         match result {

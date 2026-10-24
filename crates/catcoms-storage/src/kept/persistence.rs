@@ -23,8 +23,17 @@ pub(super) enum WritePhase {
 /// Unlike the legacy file-flush-only storage seam, V2 allowance publication requires the
 /// directory barrier too. A failed/unsupported barrier cannot authorize a request or refund work.
 pub(super) fn directory_barrier(path: &Path) -> Result<(), StorageError> {
+    // Review U-M6: directory-only and non-blocking, so a FIFO put at a destination folder path
+    // fails at once instead of hanging the flush (which runs after the destination publication).
     #[cfg(unix)]
-    let result = fs::File::open(path).and_then(|file| file.sync_all());
+    let result = {
+        use std::os::unix::fs::OpenOptionsExt;
+        fs::OpenOptions::new()
+            .read(true)
+            .custom_flags(libc::O_DIRECTORY | libc::O_NONBLOCK)
+            .open(path)
+            .and_then(|file| file.sync_all())
+    };
     #[cfg(windows)]
     let result = {
         use std::os::windows::fs::OpenOptionsExt;
@@ -107,7 +116,26 @@ pub(super) struct Transfer<R: CryptoRngCore> {
     pub path: PathBuf,
     /// Set on any attempted publication error, including a visible-but-unflushed rename.
     /// Old in-memory state cannot continue to serve or execute as though the write rolled back.
+    /// The one exception is a disk-full failure before the rename whose torn `next` was removed:
+    /// the disk then holds exactly the previous record again (see `write_with_hook`).
     pub poisoned: bool,
+    /// Runtime only: the lease generation and weak liveness token of a native export task that
+    /// registered for this Download. Used solely for the "Saving" projection.
+    pub export_presence: Option<(crate::blob_read::ReadGuard, std::sync::Weak<()>)>,
+}
+
+/// Message for a record write refused by a full volume after its torn successor was removed.
+pub(super) const RECORD_DISK_FULL: &str =
+    "There is not enough disk space to save transfer progress. Free some space and try again.";
+
+fn disk_full(error: &std::io::Error) -> bool {
+    matches!(error.kind(), std::io::ErrorKind::StorageFull)
+}
+
+/// True only for the error `write_with_hook` returns after it removed a torn successor written
+/// to a full volume. The caller may then report "disk full" without faulting the store.
+pub(super) fn is_clean_disk_full(error: &StorageError) -> bool {
+    matches!(error, StorageError::Io(message) if message == RECORD_DISK_FULL)
 }
 
 fn read_record(path: &Path, key: &[u8; 32]) -> Result<Option<Record>, StorageError> {
@@ -252,6 +280,7 @@ impl<R: CryptoRngCore> Transfer<R> {
             store,
             path,
             poisoned: false,
+            export_presence: None,
         })
     }
     pub(super) fn create(
@@ -275,7 +304,18 @@ impl<R: CryptoRngCore> Transfer<R> {
         if path.file_name().and_then(|name| name.to_str()) != Some(record.owner().name().as_str()) {
             return Err(StorageError::Malformed);
         }
-        fs::create_dir(&path).map_err(io)?;
+        // Review L6: on a full volume the directory creation is usually the first step to fail.
+        // Nothing was created, so report the same clean disk-full outcome as a refused first
+        // record: admission fails and the store is not faulted.
+        if let Err(error) = super::external::inject(super::external::Effect::CreateDir)
+            .and_then(|()| fs::create_dir(&path))
+        {
+            return Err(if error.kind() == std::io::ErrorKind::StorageFull {
+                StorageError::Io(RECORD_DISK_FULL.into())
+            } else {
+                io(error)
+            });
+        }
         if let Some(parent) = path.parent() {
             directory_barrier(parent)?;
         }
@@ -287,9 +327,30 @@ impl<R: CryptoRngCore> Transfer<R> {
             store,
             path,
             poisoned: false,
+            export_presence: None,
         };
         // Initial publication is the same fixed pending-file transaction, with no predecessor.
-        transfer.write_with_hook(&record, &metadata_key, &mut rng.clone(), hook)?;
+        if let Err(error) = transfer.write_with_hook(&record, &metadata_key, &mut rng.clone(), hook)
+        {
+            if is_clean_disk_full(&error) {
+                // The torn `next` is already gone, so this directory is empty. Remove it too:
+                // an empty transfer directory refuses every later mount as (None, None).
+                // Only a fully clean removal keeps the disk-full error that lets the caller
+                // skip faulting the store; anything else stays a storage fault.
+                let path = transfer.path.clone();
+                drop(transfer);
+                let removed = fs::remove_dir(&path).is_ok()
+                    && path
+                        .parent()
+                        .is_none_or(|parent| directory_barrier(parent).is_ok());
+                return Err(if removed {
+                    error
+                } else {
+                    StorageError::Io("retained transfer needs a storage check".into())
+                });
+            }
+            return Err(error);
+        }
         Ok(transfer)
     }
     fn write(
@@ -307,21 +368,43 @@ impl<R: CryptoRngCore> Transfer<R> {
         rng: &mut SharedRng<R>,
         mut hook: impl FnMut(WritePhase, &Path) -> Result<(), StorageError>,
     ) -> Result<(), StorageError> {
+        // Disk-full classification is captured from the io::Error BEFORE it becomes a string,
+        // and only for the three pre-rename steps. `created` limits cleanup to a `next` this
+        // call made; a stale `next` from elsewhere is never removed here.
+        let mut created = false;
+        let mut full = false;
         let result = (|| {
             let plain = Zeroizing::new(next.encode());
             if plain.len() + 40 > next.slot_limit() {
                 return Err(StorageError::BlobSizeLimit);
             }
             let encoded = encode_sealed(&seal(key, &plain, rng)?);
-            let mut file = fs::OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .open(self.path.join(NEXT))
-                .map_err(io)?;
+            let mut file = super::external::inject(super::external::Effect::RecordCreate)
+                .and_then(|()| {
+                    fs::OpenOptions::new()
+                        .write(true)
+                        .create_new(true)
+                        .open(self.path.join(NEXT))
+                })
+                .map_err(|error| {
+                    full = disk_full(&error);
+                    io(error)
+                })?;
+            created = true;
             hook(WritePhase::Created, &self.path.join(NEXT))?;
-            file.write_all(&encoded).map_err(io)?;
+            super::external::inject(super::external::Effect::RecordWrite)
+                .and_then(|()| file.write_all(&encoded))
+                .map_err(|error| {
+                    full = disk_full(&error);
+                    io(error)
+                })?;
             hook(WritePhase::Written, &self.path.join(NEXT))?;
-            file.sync_all().map_err(io)?;
+            super::external::inject(super::external::Effect::RecordSync)
+                .and_then(|()| file.sync_all())
+                .map_err(|error| {
+                    full = disk_full(&error);
+                    io(error)
+                })?;
             drop(file);
             hook(WritePhase::FileFlushed, &self.path.join(NEXT))?;
             // std uses same-directory replacement on Windows as well. Deleting current first
@@ -332,10 +415,32 @@ impl<R: CryptoRngCore> Transfer<R> {
             hook(WritePhase::DirectoryFlushed, &self.path)
         })();
         if result.is_err() {
+            // A full volume refused the successor before its rename, the commit point. Removing
+            // the torn `next` (and flushing that removal) leaves exactly the previous record on
+            // disk, matching this unchanged in-memory state, so there is nothing to poison. Any
+            // other failure, including a failed removal, keeps the fail-closed poison path. A
+            // process crash during the write is not an error here and keeps its existing
+            // recovery: a torn `next` found at mount still refuses to choose an older record.
+            if full && self.discard_torn_next(created) {
+                return Err(StorageError::Io(RECORD_DISK_FULL.into()));
+            }
             self.poisoned = true;
             self.read_epoch.retire();
         }
         result
+    }
+    fn discard_torn_next(&self, created: bool) -> bool {
+        if created {
+            match super::external::inject(super::external::Effect::RecordDiscard)
+                .and_then(|()| fs::remove_file(self.path.join(NEXT)))
+            {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(_) => return false,
+            }
+        }
+        super::external::inject(super::external::Effect::RecordDiscardBarrier).is_ok()
+            && directory_barrier(&self.path).is_ok()
     }
     pub(super) fn publish(
         &mut self,

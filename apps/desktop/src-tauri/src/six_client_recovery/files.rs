@@ -167,7 +167,7 @@ async fn bridged_saved_copy(private: bool) {
             generation: 0,
         };
         let target = source.ready.cid();
-        let path = bounded(
+        let (path, _note) = bounded(
             "native private export streams to a fresh destination",
             stream_download_to_disk(
                 destination.path(),
@@ -241,13 +241,25 @@ impl SaveSource for PrivateExportSource<'_> {
         }
         Ok(())
     }
-    async fn publish_verified(&self, staging: &Path, final_path: &Path) -> Result<(), String> {
+    async fn publish_verified(
+        &self,
+        file: &mut private_downloads::OnPool<std::fs::File>,
+        staging: &Path,
+        final_path: &Path,
+    ) -> Result<(), String> {
         let _commit =
             keep_session::read_commit(&self.running.state, self.generation, &self.origin).await?;
         if !self.ready.is_current() {
             return Err("Download retired.".into());
         }
-        publish_staged_download(staging, final_path)
+        publish_staged_on_pool(file, staging, final_path).await
+    }
+    fn liveness(&self) -> private_downloads::Liveness {
+        let (origin, ready) = (self.origin.clone(), self.ready.clone());
+        Arc::new(move || !origin.is_cancelled() && ready.is_current())
+    }
+    fn custody(&self) -> Option<catcoms_rt::SharedRequestKeepalive> {
+        self.ready.export_custody()
     }
     fn progress(&self, _: usize, _: u64, _: u64, _: Option<String>) {}
 }

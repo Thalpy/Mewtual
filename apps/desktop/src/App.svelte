@@ -94,9 +94,9 @@
     type StoredTone, type ToneOverride,
   } from "./notification-sounds";
   import {
-    completedDownload, downloadSavedNotice, guideSavedNotice, saveGroupFile, resumeGroupFile, saveSpaceGuide,
+    completedDownload, downloadSavedNotice, guideSavedNotice, isSaveAsCancelled, saveGroupFile, resumeGroupFile, saveSpaceGuide,
   } from "./native-download";
-  import { acceptSaveProgress, checkedPrivateDownloads, privateDownloadLabel, type PrivateDownload } from "./private-downloads";
+  import { acceptSaveProgress, checkedPrivateDownloads, checkedSavedCheck, privateDownloadActions, privateDownloadChatSave, privateDownloadDetail, privateDownloadOffers, privateDownloadSaveAsIsNewCopy, type PrivateDownload, type PrivateDownloadActionKind, type SavedCheck } from "./private-downloads";
   import {
     newVaultSecretError, vaultSecretChangeNotice, type VaultSecretChangeResult,
   } from "./vault-secret-change";
@@ -3824,8 +3824,18 @@
   let hasPeers = $state(false);
   let keptFiles = $state<KeptFiles | null>(null);
   let privateDownloads = $state<PrivateDownload[]>([]);
-  let privateDownloadBusy = $state<symbol | null>(null);
+  // Second review R2-M1: the Pause/Remove/Keep (and pre-acquisition Resume) owner of each row, by
+  // download ID. Native removal can wait indefinitely on an external folder, so one row's pending
+  // mutation must never disable or refuse actions on another row; native also claims per download.
+  let privateDownloadBusy = $state<Record<string, symbol>>({});
   let privateDownloadSaves = $state<Record<string, symbol>>({});
+  // User decision, 23 October: what native's read-only check found at each Saved row's file, for
+  // the exact row revision it checked and the Transfers visit it ran in. A row only shows a result
+  // whose revision matches its own. `savedChecking` is the in-flight owner per row (not rendered);
+  // `savedCheckVisit` counts Transfers visits, so each visit checks every Saved row once again.
+  let savedChecks = $state<Record<string, { intent: string; result: SavedCheck; visit: number }>>({});
+  let savedChecking: Record<string, symbol> = {};
+  let savedCheckVisit = 0;
   let privateDownloadError = $state("");
   const fileInventoryGate = fileInventoryRequests();
   let keptTransfer = $state<{ server: number; cid: string; cancellation: string } | null>(null);
@@ -7099,8 +7109,10 @@
     keptFiles = null;
     privateDownloads = [];
     privateDownloadError = "";
-    privateDownloadBusy = null;
+    privateDownloadBusy = {};
     privateDownloadSaves = {};
+    savedChecks = {};
+    savedChecking = {};
     fileInventoryGate.invalidate();
     cancelKeptTransfer();
     wikiPinned = new Set();
@@ -7978,6 +7990,8 @@
       keptFiles = kept.status === "fulfilled" ? kept.value : null;
       privateDownloads = savedDownloads.status === "fulfilled" ? savedDownloads.value : [];
       privateDownloadError = savedDownloads.status === "fulfilled" ? "" : "Download progress could not be read. Open Transfers again to retry.";
+      // Saved rows are checked only while Transfers is shown, once per visit and revision.
+      if (view === "downloads") void checkSavedRows();
     } catch (e) {
       if (fileInventoryGate.current(request, unlockedViewCurrent(gen, server))) error = String(e);
     }
@@ -8778,6 +8792,7 @@
     }
     view = v;
     if (v === "wiki") refreshWiki();
+    if (v === "downloads") savedCheckVisit++; // each visit checks every Saved row's file again
     if (v === "files" || v === "downloads") refreshFiles(); // includes saved private progress after restart
     // The policy is read with the surface rather than with the server, because it is only ever
     // needed by the surface and a server switch already carries enough round-trips.
@@ -9655,6 +9670,7 @@
       { head: true, kind: "file", title: f.name },
       { label: "Open details", icon: "info", onSelect: () => openFileInfo(f) },
       { label: "Download", icon: "down", onSelect: () => downloadFile(f) },
+      { label: "Save as", icon: "down", onSelect: () => downloadFile(f, true) },
       { label: "Post to chat", icon: "reply", onSelect: () => appendToDraft(`![${f.name}](cid:${f.cid})`) },
       { divider: true },
       { label: "Copy address (CID)", icon: "fp", onSelect: () => copyText(f.cid) },
@@ -10049,7 +10065,10 @@
         items.push({ label: "View image", icon: "img", onSelect: () => openLightbox(el) });
       }
       items.push({ label: "Properties", icon: "info", onSelect: () => openFileRef(cid) });
-      if (embedded) items.push({ label: "Download", icon: "down", onSelect: () => downloadFile(embedded) });
+      if (embedded) {
+        items.push({ label: "Download", icon: "down", onSelect: () => downloadFile(embedded) });
+        items.push({ label: "Save as", icon: "down", onSelect: () => downloadFile(embedded, true) });
+      }
       items.push({ label: "Copy address (CID)", icon: "fp", onSelect: () => copyText(cid) });
       // An image can cover its whole message row, so keep the message actions reachable here:
       // right-clicking the picture offers the same Reply/Edit/Delete as right-clicking the text.
@@ -12029,15 +12048,26 @@
     folder = breadcrumbs.slice(0, i + 1).join("/");
   }
 
-  async function downloadFile(f: UiFile) {
+  // `saveAs`: native opens the OS "Save as" dialog itself (no path is ever sent from here). A
+  // default value, never an optional parameter: `x?: T` in a .svelte script breaks the app at load.
+  async function downloadFile(f: UiFile, saveAs = false) {
     if (activeServerId === null) return;
     const server = activeServerId;
     const key = dlKey(server, f.cid);
     if (saveInProgress(f.cid)) return;
     const existing = privateDownloads.find(row => row.cid === f.cid);
     if (existing) {
-      if (existing.status === "exhausted") { switchView("downloads"); return; }
-      await resumePrivateDownload(existing);
+      // Rows that need an explicit choice open Transfers instead. For Save as that is any row that
+      // does not offer it (running, removing, exhausted, partly saved); for a plain save, running,
+      // halted, saved, removing or exhausted rows. Decided before the row resumes: switching view
+      // once that has begun would take a fresh navigation claim (studio-exit-routes.test.ts scans
+      // this function's text, comments included).
+      const direct = saveAs
+        ? privateDownloadOffers(existing, "saveAs")
+        : privateDownloadChatSave(existing) !== "transfers";
+      if (!direct) { switchView("downloads"); return; }
+      // Save as on a known file goes through its row; native opens the dialog itself.
+      await resumePrivateDownload(existing, false, saveAs);
       return;
     }
     const gen = viewGeneration;
@@ -12066,16 +12096,21 @@
       ts: started,
     };
     try {
-      const saved = await saveGroupFile(invoke, server, f.cid, f.name, { operation });
+      const saved = await saveGroupFile(invoke, server, f.cid, f.name, { operation, saveAs });
       if (!unlockedViewCurrent(gen, server)) return;
       if (downloads[key]?.operation === operation) {
         Object.assign(downloads[key], completedDownload(downloads[key], saved, Date.now()));
       }
-      const notice = downloadSavedNotice(f.name, saved);
+      const notice = downloadSavedNotice(f.name, saved, !saveAs);
       toast(notice.text, notice.kind, notice.ms);
       refreshFiles();
     } catch (e) {
       if (!unlockedViewCurrent(gen, server)) return;
+      // Closing the dialog started nothing: drop the pending row quietly, no error.
+      if (saveAs && isSaveAsCancelled(e)) {
+        if (downloads[key]?.operation === operation) delete downloads[key];
+        return;
+      }
       error = String(e);
       if (downloads[key]?.operation === operation) {
         downloads[key].status = "failed";
@@ -12089,12 +12124,16 @@
     }
   }
 
-  async function resumePrivateDownload(row: PrivateDownload) {
+  // `saveAs` asks native to open the OS dialog for this save; on a halted or saved row it also
+  // means a new copy (the old journal is forgotten, exactly as for Save new copy).
+  async function resumePrivateDownload(row: PrivateDownload, fresh = false, saveAs = false) {
     const server = activeServerId, gen = viewGeneration;
-    if (server === null || locked || privateDownloadBusy || privateDownloadSaves[row.id] || saveInProgress(row.cid) || row.status === "receiving" || row.status === "removing") return;
+    const offer = saveAs ? "saveAs" : fresh ? "fresh" : "resume";
+    if (server === null || locked || privateDownloadBusy[row.id] || privateDownloadSaves[row.id] || saveInProgress(row.cid) || !privateDownloadOffers(row, offer)) return;
+    const newCopy = fresh || (saveAs && privateDownloadSaveAsIsNewCopy(row));
     const mutation = Symbol("private download");
     error = "";
-    privateDownloadBusy = mutation;
+    privateDownloadBusy[row.id] = mutation;
     privateDownloadSaves[row.id] = mutation;
     fileInventoryGate.invalidate();
     const operation = `save-${crypto.randomUUID()}`;
@@ -12114,13 +12153,21 @@
         networkBytesDone: 0, speed: 0, lastRateAt: started, updatedAt: started, ts: started };
       // Acquisition may wait for a member. Keep Pause/Remove available during that wait;
       // this separate token blocks only a duplicate Save of this same native owner.
-      if (privateDownloadBusy === mutation) privateDownloadBusy = null;
-      const saved = await resumeGroupFile(invoke, server, row.cid, name, row.id, row.intent, operation);
+      if (privateDownloadBusy[row.id] === mutation) delete privateDownloadBusy[row.id];
+      const saved = await resumeGroupFile(invoke, server, row.cid, name, row.id, row.intent, operation, newCopy, saveAs);
       if (!unlockedViewCurrent(gen, server)) return;
       if (downloads[key]?.operation === operation) Object.assign(downloads[key], completedDownload(downloads[key], saved, Date.now()));
-      const notice = downloadSavedNotice(name, saved);
+      // A resumed row may be saving anywhere (a remembered choice or an earlier partial), so the
+      // notice names Downloads only for a plain first save of a row that never chose a place.
+      const toDownloads = !saveAs && !row.chosenPlace && row.status === "ready" && row.savedChunks === 0;
+      const notice = downloadSavedNotice(name, saved, toDownloads);
       toast(notice.text, notice.kind, notice.ms);
     } catch (e) {
+      // Closing the dialog started nothing: drop the pending row quietly, no error.
+      if (saveAs && isSaveAsCancelled(e)) {
+        if (downloads[key]?.operation === operation) delete downloads[key];
+        return;
+      }
       if (unlockedViewCurrent(gen, server)) {
         error = String(e);
         if (downloads[key]?.operation === operation) Object.assign(downloads[key], { status: "failed", error: String(e), updatedAt: Date.now() });
@@ -12128,25 +12175,93 @@
     } finally {
       if (activeSaves[key] === operation) delete activeSaves[key];
       if (!unlockedViewCurrent(gen, server) && downloads[key]?.operation === operation) delete downloads[key];
-      if (privateDownloadBusy === mutation) privateDownloadBusy = null;
+      if (privateDownloadBusy[row.id] === mutation) delete privateDownloadBusy[row.id];
       if (privateDownloadSaves[row.id] === mutation) delete privateDownloadSaves[row.id];
       if (unlockedViewCurrent(gen, server)) await refreshFiles();
     }
   }
-  async function changePrivateDownload(row: PrivateDownload, remove: boolean) {
+  async function changePrivateDownload(row: PrivateDownload, remove: boolean, keepPartial = false) {
     const server = activeServerId, gen = viewGeneration;
-    if (server === null || locked || privateDownloadBusy) return;
+    // R2-M1: only a second action on this same row is refused while one is pending; a Remove
+    // stalled on an external folder leaves every other row's actions available.
+    if (server === null || locked || privateDownloadBusy[row.id]) return;
     const mutation = Symbol("private download intent");
-    privateDownloadBusy = mutation;
+    privateDownloadBusy[row.id] = mutation;
     fileInventoryGate.invalidate();
     try {
-      if (remove) await invoke("cancel_private_download", { server, download: row.id });
-      else await invoke("set_private_download_paused", { server, download: row.id, expectedIntent: row.intent, paused: true });
+      // Remove deletes encrypted progress and only a partly saved file native proves it created;
+      // keepPartial releases the record and leaves that file in place. Native returns a notice
+      // when a file of this save stays on disk, so a removal never silently leaves plaintext.
+      if (remove) {
+        const notice = await invoke<string | null>("cancel_private_download", { server, download: row.id, ...(keepPartial ? { keepPartial: true } : {}) });
+        if (typeof notice === "string" && notice && unlockedViewCurrent(gen, server)) toast(notice, "info", 9000);
+      } else await invoke("set_private_download_paused", { server, download: row.id, expectedIntent: row.intent, paused: true });
     } catch (e) { if (unlockedViewCurrent(gen, server)) error = String(e); }
     finally {
-      if (privateDownloadBusy === mutation) privateDownloadBusy = null;
+      if (privateDownloadBusy[row.id] === mutation) delete privateDownloadBusy[row.id];
       if (unlockedViewCurrent(gen, server)) await refreshFiles();
     }
+  }
+  // User decision, 23 October: check each Saved row's file once per Transfers visit and row
+  // revision, off the async runtime natively (bounded, read-only). An answer is kept only while
+  // the view and the row are still the ones it was asked for, so a stale answer never relabels a
+  // newer row; a failed or stale check claims nothing.
+  async function checkSavedRows(rerun = true) {
+    const server = activeServerId, gen = viewGeneration, visit = savedCheckVisit;
+    if (server === null || locked) return;
+    let dropped = false;
+    const due = privateDownloads.filter((row) => row.status === "saved" && !savedChecking[row.id] &&
+      !(savedChecks[row.id]?.intent === row.intent && savedChecks[row.id]?.visit === visit));
+    // One check at a time (decisions review M1): native runs at most two workers and waits for a
+    // free one within its bound, so a burst of rows never turns into "could not check". The whole
+    // batch is claimed up front, so an overlapping refresh never asks for the same rows again.
+    const token = Symbol("saved checks");
+    for (const row of due) savedChecking[row.id] = token;
+    try {
+      for (const row of due) {
+        if (!unlockedViewCurrent(gen, server)) return;
+        let result: SavedCheck = "unknown";
+        try {
+          result = checkedSavedCheck(await invoke<unknown>("check_saved_download",
+            { server, download: row.id, expectedIntent: row.intent }));
+        } catch {
+          // Native refused (a changed row, Lock) or the answer was unreadable: claim nothing new.
+          result = "unknown";
+        }
+        if (!unlockedViewCurrent(gen, server)) return;
+        const now = privateDownloads.find((other) => other.id === row.id);
+        if (!now || now.status !== "saved" || now.intent !== row.intent) {
+          dropped = true;
+          continue;
+        }
+        savedChecks[row.id] = { intent: row.intent, result, visit };
+      }
+    } finally {
+      for (const row of due) if (savedChecking[row.id] === token) delete savedChecking[row.id];
+    }
+    // Re-review LOW 2: a row that changed while the batch ran (its answer was dropped) was skipped
+    // by any refresh in the meantime because the batch held it; check it once more now. Only once,
+    // so a row that keeps changing cannot keep this going.
+    if (rerun && dropped && view === "downloads" && unlockedViewCurrent(gen, server)) {
+      await checkSavedRows(false);
+    }
+  }
+  /** The latest check of `row`'s file for this exact revision, or `null`. */
+  function savedCheckFor(row: PrivateDownload): SavedCheck | null {
+    const checked = savedChecks[row.id];
+    return checked && checked.intent === row.intent && row.status === "saved" ? checked.result : null;
+  }
+  function runPrivateDownloadAction(row: PrivateDownload, kind: PrivateDownloadActionKind) {
+    // Acting on a Saved row checks its file again when the list refreshes afterwards. The last
+    // answer stays on screen until then (decisions review L3): a row known to be missing never
+    // flashes back to plain "Saved".
+    const checked = savedChecks[row.id];
+    if (row.status === "saved" && checked) savedChecks[row.id] = { ...checked, visit: -1 };
+    if (kind === "resume") return resumePrivateDownload(row);
+    if (kind === "fresh") return resumePrivateDownload(row, true);
+    if (kind === "saveAs") return resumePrivateDownload(row, false, true);
+    if (kind === "pause") return changePrivateDownload(row, false);
+    return changePrivateDownload(row, true, kind === "keep");
   }
 
   // The file info pane: click a file to inspect it (preview, availability, uploader, delete).
@@ -28234,17 +28349,18 @@
             {#if privateDownloadError}<p class="muted" role="status">{privateDownloadError}</p>{/if}
             {#if privateDownloads.length}
               <h3>Saved download progress</h3>
-              <p class="muted small">If a save was interrupted, check Downloads before saving again. Saving again creates another copy.</p>
+              <p class="muted small">Resume continues a partly saved file only if it is still the file Mewtual created. Save new copy starts a separate file. Remove deletes saved progress and a partly saved file Mewtual created.</p>
               <ul class="dl-list">
                 {#each privateDownloads as saved (saved.id)}
                   <li class="dl-item">
                     <b>{filesByCid.get(saved.cid)?.name ?? `File ${saved.cid.slice(0, 12)}`}</b>
-                    <span>{privateDownloadLabel(saved)} · {saved.verifiedChunks}/{saved.totalChunks} chunks</span>
+                    <span>{privateDownloadDetail(saved, savedCheckFor(saved))}</span>
                     <div>
-                      <button disabled={!!privateDownloadBusy || !!privateDownloadSaves[saved.id] || saveInProgress(saved.cid) || saved.status === "receiving" || saved.status === "removing"}
-                        onclick={() => resumePrivateDownload(saved)}>{saved.status === "exhausted" ? "Retry download" : saved.status === "ready" ? "Save to Downloads" : "Resume download"}</button>
-                      {#if saved.status === "receiving"}<button disabled={!!privateDownloadBusy} onclick={() => changePrivateDownload(saved, false)}>Pause</button>{/if}
-                      <button class="ghost" disabled={!!privateDownloadBusy} onclick={() => changePrivateDownload(saved, true)}>Remove progress</button>
+                      {#each privateDownloadActions(saved, savedCheckFor(saved)) as action (action.kind)}
+                        <button class={action.ghost ? "ghost" : undefined}
+                          disabled={!!privateDownloadBusy[saved.id] || (action.needsIdle && (!!privateDownloadSaves[saved.id] || saveInProgress(saved.cid)))}
+                          onclick={() => runPrivateDownloadAction(saved, action.kind)}>{action.label}</button>
+                      {/each}
                     </div>
                   </li>
                 {/each}
@@ -31339,6 +31455,7 @@
           <button class="ghost small" onclick={() => lightbox && openFileRef(lightbox.cid)}>Properties</button>
           {#if lightboxFile}
             <button class="ghost small" onclick={() => lightboxFile && downloadFile(lightboxFile)}>Download</button>
+            <button class="ghost small" onclick={() => lightboxFile && downloadFile(lightboxFile, true)}>Save as</button>
           {/if}
           <span class="lightbox-div" aria-hidden="true"></span>
           <button class="ghost small" aria-label="Close" title="Close (Esc)" onclick={closeLightbox}>✕</button>
@@ -31559,6 +31676,7 @@
                 <button class="primary" disabled={!mayFetchPixa(fileInfo.size)} onclick={() => fileInfo && openPixaViewer(fileInfo)}>Open flipnote</button>
               {/if}
               <button class="primary" onclick={() => fileInfo && downloadFile(fileInfo)}>↓ Download</button>
+              <button class="ghost" onclick={() => fileInfo && downloadFile(fileInfo, true)}>Save as</button>
               {#if canSetExpiry}
                 <button class="ghost" disabled={fileInfoExpiryBusy} onclick={toggleKeepForever}>
                   {fileInfoExpiryBusy ? "Saving…" : keptForever ? "Restore 30-day expiry" : "♾ Keep forever"}

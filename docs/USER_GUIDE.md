@@ -527,6 +527,41 @@ The **Files** tab is a folder browser:
 **Custom emoji** live in the `emoji/` folder. Add one in **Server settings → Emoji & Stickers**:
 type a `code`, choose its display size and upload an image. Then anyone types `:code:` to use it.
 
+### Saving a file to your computer
+
+**Download** saves into your Downloads folder; **Save as** lets you pick the folder and name. While
+a file is being written it sits beside its final name as `<name>.mewtual-part` (or `<name>.part`),
+and only a fully verified file ever gets the real name. On most local drives an interrupted save
+(Lock, Pause, closing the app) can be **resumed** later from the Transfers list.
+
+Where it works:
+
+- **Resumable:** NTFS on Windows (ReFS also works but is not verified); ext4, xfs, btrfs, f2fs and
+  tmpfs on Linux when they record file creation times; local APFS or HFS+ drives on macOS (not
+  verified yet).
+- **Saved, but not resumable:** network folders (SMB shares, mapped drives, NFS) and other
+  filesystems Mewtual cannot identify. An interrupted save there starts again. On Linux and macOS
+  a network or FUSE folder that cannot make hard links fails only at the end of the save.
+- **Refused before anything is written:** FAT and exFAT drives (many USB sticks and SD cards),
+  because they cannot make the link Mewtual publishes a finished file with. On Linux, saving also
+  needs `/proc`, which every normal desktop has.
+- **Cloud folders** (OneDrive, Dropbox and similar) work, but the provider uploads the partly
+  saved file as it is written.
+
+Mewtual only ever deletes a partly saved file it can prove is its own. On Linux and macOS it
+deletes nothing automatically in a folder that other accounts on the computer can change, nor on a
+network or FUSE drive; it says so, and you can delete the leftover `.mewtual-part` or `.part` file
+yourself. A folder that gives your own per-user group write access (a umask of 002) still counts
+as yours on Linux when the system's account files show that nobody else is in that group and no
+access list gives anyone else write access; if that cannot be shown (for example accounts that
+come from a directory service, or Mewtual running in a container), and always on macOS, Mewtual
+treats the folder as shared.
+
+When Transfers is open, Mewtual checks each **Saved** file. If it is no longer there, or a
+different file now has its name, the row says so and offers **Save again**, which saves a new copy
+from Mewtual's private copy under a free name. If the file could not be checked (the drive is
+unplugged, for example), the row still says Saved and adds that it could not check.
+
 ### What loads by itself, and how big it may be
 
 **Server settings → File Trust** carries two separate things that both answer "what may files do

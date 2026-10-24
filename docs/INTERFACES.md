@@ -560,6 +560,136 @@ owner-specific and coalesced around actual actor progress, so a same-CID Keep ca
 Completed ciphertext is private; only native `DownloadReady`/export leases can read it. Successful
 external publication remains committed if encrypted cleanup fails, with a visible warning.
 
+## Journaled external Download export (21 October; Save as and review fixes 22 October; focused checks, full suites pending)
+
+Supersedes the "fresh destination only" export above for saves that can be journaled. Design,
+crash table and review dispositions:
+[EXTERNAL-DOWNLOAD-RESUME](communication-recovery/EXTERNAL-DOWNLOAD-RESUME.md).
+
+Renderer commands (no new command names):
+
+- `save_group_file(..., freshCopy?, saveAs?)`: `freshCopy` requires `resume` and `expectedIntent`.
+  It removes the partly saved file native can prove it created, forgets that journal under the
+  intent CAS, then saves a separate file. `saveAs` is a flag only: native opens the OS dialog
+  itself (at most one at a time, starting in Downloads or at the OS default when none resolves),
+  validates the result and remembers the choice in the sealed record; the command's parameter
+  list is pinned by a test so no path, folder or destination parameter can be added. A Save as on
+  a file whose saved record already has a journal is refused before anything is resumed.
+  Closing the dialog returns exactly "Save as was cancelled." with nothing started. A plain
+  Resume first runs a destination preflight (before any allowance is spent on re-verification);
+  it may return a verified saved result directly when the file was already published before a
+  crash. The result adds `inDownloads: true` only when the saved file sits directly in the
+  resolved Downloads folder (fresh, resumed and recovered saves alike); absence asserts nothing.
+  The renderer names Downloads only for an expected first one-click save that carries the flag,
+  so a stale renderer list or a journal at a place chosen earlier can never be announced as
+  "Downloads". Every other command's save result never carries it.
+- `cancel_private_download(server, download, keepPartial?) -> Option<String>`: with a journal,
+  removal is two-step (durable Deleting, native removal of only the proven partial, then release).
+  `keepPartial` releases the record and leaves the file. The returned notice says when a file of
+  the save stays on disk. Busy while another removal or Save new copy of the same Download is
+  running. A failed proven removal leaves the row in `removing`.
+- `get_private_downloads` rows add `savedChunks` (journal checkpoint), `chosenPlace` (boolean) and
+  the statuses `saving`, `save-interrupted`, `save-paused`, `destination-unavailable`,
+  `destination-changed` and `saved`. Rows never carry a path, file name or file identity.
+
+Rust interfaces:
+
+- `catcoms_storage::kept::ExportFile` performs every external effect (create, create_chosen,
+  probe, reopen, accept, checkpoint, prepare_publication, link, finish) on an owned value native
+  moves into `spawn_blocking`; it holds no store borrow and holds an exclusive OS lock on its file.
+  `ExportPlan` binds chunk sizes and the plaintext CID from `DownloadReady::export_plan()` (one
+  empty chunk is the empty file). `SavedCandidate::verify`, `remove_partial` (typed
+  `PartialRemoval` with notices), `partial_presence`, `flush_destination` and
+  `ChosenDestination::{validate, create_unjournaled}` are the only other external entry points.
+  Every creation with a captured folder identity re-reads it after creating its partial and
+  refuses a swapped folder; creation also requires the partial's name to hold the new partial (a
+  read-only check made with the identity recheck through one held folder handle on both
+  platforms, whose failure is the same refusal as a changed folder).
+- The non-resumable fallback writer (native `stream_download_staged`, used when a fresh save
+  cannot be journaled) also runs its staging, writes, sync, cleanup and publication link on the
+  blocking pool, and `SaveSource::liveness` is rechecked when each queued staging or write worker
+  starts. The media check of the published file runs on the pool before the session commit guard.
+  On the async side an open session (`ExportFile`, or the fallback writer's file) lives in
+  `OnPool`, so an early return or error closes it on the pool too. No destination file I/O runs
+  on an async worker in either writer.
+- `ChosenDestination::preflight` (read-only) and `DownloadPreflight::planned()` let an explicit
+  Resume check a remembered choice before re-verification; `confirm_staging_links` is the shared
+  link probe for non-journaled reservations (chosen place and one-click Downloads).
+- PR51 review (22 October): the external entry points that create, probe or remove take
+  `rng: &mut dyn catcoms_rt::CryptoRngCore` (`ExportFile::create`/`create_chosen`/`finish`/
+  `discard`, `ChosenDestination::create_unjournaled`, `confirm_staging_links`, `remove_partial`),
+  because Unix removal renames a name aside to a random name first; native passes `OsCryptoRng`.
+  `remove_partial(journal, published, rng)` deletes a Published record's staging name only once
+  its final name is proven ours; otherwise nothing is deleted and the outcome says what was seen
+  (`PartialRemoval::KeptOnlyCopy`, `SavedNameReplaced`, `SavedFileMissing`, `Unchecked` for a
+  name that cannot be checked right now). It adds `SharedFolder` (Unix: nothing deleted where
+  other accounts can or may modify the folder, network and FUSE filesystems included, and only
+  for a name verified ours); `PartialRemoval::cleared_staging()` describes whether no staging name
+  of ours can remain, and `ExportFile::finish` now returns the `PartialRemoval`; native's
+  `after_publication` keeps the Published record only for `Unchecked`/`FolderUnreachable` (or a
+  failed worker) and otherwise releases it with `notice(true)`. For writers without a journal (native's fallback writer, the GIF export,
+  `write_download`): `session_id(&File) -> SessionId` (in-session volume and file index, or device
+  and inode; never persisted, Debug redacted), `remove_if_session(folder, leaf, id, rng) ->
+  SessionRemoval` (`Removed`, `Missing`, `NotOurs`, `SharedFolder`; an error means it could not
+  check or delete), `session_at(path, id) -> SessionAt` (read-only; native says "delete it
+  yourself" only for `Ours`), `publish_unjournaled(&File, staging, final) -> io::Result<()>`,
+  which names exactly the object behind the held handle (Linux/Android: `/proc/self/fd` link;
+  Windows: delete-denying pin across the link; macOS: path link plus post-link check),
+  `flush_folder(folder)` (best effort, after the guard) and `create_folder(folder)` (Unix 0755).
+  Native `SaveSource::publish_verified` receives the staging handle (`&mut OnPool<File>`) and only
+  links; the writer settles the staging name afterwards outside the guard, and
+  `stream_download_to_disk`/`_to_chosen` return `(path, note)` so a temporary copy that had to stay
+  is reported with the saved result. `ExportPorts::flush(journal)` is the folder flush the export
+  sequence runs after the link and before Published or RecoverPublished (the Resume preflight's
+  recovery flushes too).
+- Second user review (R2-, 23 October): the renderer tracks Pause/Remove/Keep (and the
+  pre-acquisition part of Resume) per download ID (`privateDownloadBusy` is a map), so a stalled
+  Remove never disables other rows. `choose_destination` holds the one-dialog turn only while the
+  chooser runs and validates afterwards on a bounded pool (`choose_destination_with` is its test
+  seam; `VALIDATION_BUSY` when four checks are still stalled). `report_left_behind` attaches Save
+  new copy's old-partial notice to every result after the abandon, success or failure.
+  `ChoiceRefusal::NoLinks` (Unix: FAT, vfat, exFAT refused at validation). `DownloadReady::
+  export_custody()` (catcoms-app, read-only) feeds `OnPool::with_custody`, so a session closed on
+  the blocking pool keeps the export permit until the close finishes (`ExportPorts::custody`,
+  `SaveSource::custody`).
+- User decisions (23 October): new renderer command `check_saved_download(server, download,
+  expectedIntent) -> "present" | "missing" | "replaced" | "unknown"` (`account-read`, main window
+  only; read-only, bounded by two check slots and a 3 s sanctioned-clock wait that covers waiting
+  for a slot, no session commit guard while waiting; an error when the row's revision or Saved
+  journal changed, or the UI session or server entry changed (the stale-download text, or the
+  session fence's own text), which the renderer treats as "unknown"; never a path; the renderer
+  asks for one row at a time). Renderer:
+  `checkedSavedCheck`, and `privateDownloadDetail`/`privateDownloadActions` take the row's check
+  (Save again for `missing`/`replaced`, which is the existing `fresh` action). Storage:
+  `saved_presence(&ExportJournal) -> SavedPresence` (`Ours`, `Missing`, `Replaced`, `Unknown`).
+  Unix removal treats a group-writable folder as private only without an extended POSIX ACL and
+  for a user-private group proven from `/etc/passwd`, `/etc/group`, `/etc/nsswitch.conf`, the
+  systemd userdb locations and the process's user namespace (internal `group_is_private`,
+  `load_account_files`).
+  Contracts and the support matrix:
+  [EXTERNAL-DOWNLOAD-RESUME](communication-recovery/EXTERNAL-DOWNLOAD-RESUME.md#pr51-review-user-at-86664d94-design-note).
+- Remove, Keep partly saved file and Save new copy share one process-wide cleanup claim per
+  (server, Download ID); plain Resume takes it only around its intent change, never across its
+  destination preflight. Keep's presence check is best effort (bounded wait, Unknown without a
+  free slot) and never makes the release wait on the destination. `DownloadPreflight::planned()`
+  reports a remembered choice only for a Completed record.
+- `DownloadStore` adds `download_export_state`, `begin/resume/checkpoint/publish_download_export`
+  (export-lease fenced), `download_observation` plus `recover/halt_download_export` (fenced by an
+  `ExportFence`: the preflight observation or the export lease, plus an exact journal CAS),
+  `retire_download_export` and `abandon_download_export` (intent CAS), `plan_download_destination`
+  (current run) and `download_planned_destination`, and `finish_download_cleanup`.
+  `cancel_download` returns `Option<ExportState>`: `Some` means Deleting is durable and external
+  cleanup is pending. `finish_download_export` refuses a Writing journal and is a no-op once the
+  record is released.
+- `ServerActor::download_export_transition` (now also `Halt` and `RecoverPublished`),
+  `download_preflight`/`download_export_edge` (fenced by the `DownloadPreflight` observation),
+  `retire_download_export` and `acquire_download_to` (remembers a Save as choice before network
+  work) carry the original native invocation `RequestCancellation`; the actor refuses them once it
+  is cancelled. `DownloadReady::planned()` names where a fresh export goes.
+- Persistence: sealed domain `mewtual/download-transfer/v2` (V1 body plus a closed export journal
+  and an optional planned destination; amended before release, no v3). Only the edges that start
+  an export or remember a choice upgrade V1; V2-to-V1 is refused.
+
 ## Native member catalog interface (19 October)
 
 `ServerGroup::observe_member_catalog` performs trusted native O(roster) observation once per

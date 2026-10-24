@@ -1104,6 +1104,80 @@ dependency audit still fails on the pinned Tauri maintenance/quick-xml/plist adv
 root `cargo deny` does not clear that separate failure. No dependency exemption was added.
 The [acceptance ledger](communication-recovery/CHAT-FILES-VOICE-ACCEPTANCE.md) records the evidence.
 
+## External download resume and Save as (2026-10-21/24; suites and CI pass, manual acceptance open)
+
+Branch `communication-external-download` (worktree `target/communication-external-download-worktree`,
+baseline `dbb8d36b`, draft PR #51 into `chat-update-implementation`, not merged) implements resumable saves of private Downloads, to the
+user's Downloads folder or to a folder and name chosen in a native "Save as" dialog; this
+supersedes the "appending to a partly written external file is not implemented" note above for
+destinations that can be journaled. Design, crash table and every review's dispositions:
+[EXTERNAL-DOWNLOAD-RESUME](communication-recovery/EXTERNAL-DOWNLOAD-RESUME.md).
+
+- Storage: `kept/export.rs` (sealed `mewtual/download-transfer/v2` journal plus a remembered
+  "Save as" destination, typed transitions, `ExportFile` with an exclusive OS lock, read-only
+  verification before any Published, preflight observation, retire-before-delete),
+  `kept/external.rs` (handle identity with birth time via `winapi-util`, no-follow and
+  non-blocking opens via `libc` constants on Unix, name-surrogate classification, the Windows
+  publication pin, the name budget, link probe), exhaustive encoding predicates in `record.rs`,
+  disk-full record writes and admission that no longer poison (`persistence.rs`).
+- Actor: journal transitions fenced by the export lease, preflight edges fenced by a
+  `DownloadPreflight` observation (actor lifetime, Root, mount, transfer epoch), the remembered
+  choice written before network work, all carrying the original invocation (`actor.rs`,
+  `actor/file_transfers.rs`); tests in `actor/file_transfers/tests/export.rs` and `tests.rs`.
+- Native: `private_downloads.rs` runs the export sequence over `ExportPorts` in `spawn_blocking`,
+  the Resume preflight, Save new copy, two-step Remove with a process-wide cleanup claim, and the
+  `rfd` dialog behind a chooser seam; `save_group_file` in `lib.rs` orders the dialog before any
+  slot or record. No plugin, builder or `setup` change. FAT and exFAT are refused; fresh saves on
+  destinations without identity or locks keep the old writer, which now also does its file work
+  in `spawn_blocking` (as does the post-save media check), so no destination I/O runs on an async
+  worker.
+- Frontend: typed statuses and actions (including Save as and `chosenPlace`) in
+  `private-downloads.ts`, `native-download.ts`; Save as entries and the Transfers list in
+  `App.svelte`; visual fixture support.
+
+Focused checks, the picker design review and the dispositions of two reviews of `27ffa183` are in
+the design document's ledger; the actual `dbb8d36b` reader was shown to refuse real V2 fixtures
+without changing a byte. At that stage the complete suites and any Unix execution had not run;
+the current verification is in the last paragraph of this section. A post-implementation review of the
+picker found no blocker or high; its fixes and dispositions are in the design document, as are
+those of Re-review 2 (one medium, seven lows, a dialog residual; all fixed or settled). Vaults
+written by the intermediate build `27ffa183` would fault (v2 was amended with the planned
+destination), but no dogfood or installed build of `27ffa183` exists; it only ran in tests. No
+screenshot exists yet for the new rows or Save as entries.
+
+PR51 review (user, at `86664d94`): every automatic delete of an external name now deletes only the
+object it verified (Windows through the verified handle via `fs_at`; Unix by rename-aside, verify,
+`unlinkat` via `rustix`, never in folders other accounts can modify, so on Unix the guarantee holds
+only against other accounts); both writers publish exactly the object behind their open handle
+(Linux via `/proc/self/fd`, Windows under a pin, macOS path link plus post-check only); the folder
+is flushed after the link and before Published; filesystem support fails closed (matrix in the
+design document). No `unsafe` was added. Native's fallback writer, GIF export and `write_download`
+use the new `session_id`/`remove_if_session`/`publish_unjournaled`. An adversarial review of those
+changes found no blocker or high; its six mediums (published-row removal, Unix rename-before-verify,
+network/FUSE mode bits, untruthful "delete it yourself", silent leftovers after a successful save,
+user-private groups) are fixed or settled in the design document. The user's second review of
+`86664d94` (R2-M1 to R2-M3, R2-L1: a stalled Remove disabling other rows, the Save as turn held
+across validation, Save new copy's old-partial notice lost on failure, deferred closes escaping
+export capacity) is fixed; dispositions in the design document. User decisions of 23 October,
+implemented: a group-writable folder of a user-private group proven from the local account files
+counts as private (unprovable stays shared, macOS always shared), and Transfers checks each Saved
+row's file (new read-only command `check_saved_download`), saying when it is missing or replaced
+and offering Save again. Open: Unix behaviour runs only in Linux CI, macOS is not built in CI,
+ReFS is unverified, and no test pins a Remove landing between the flush and Published.
+
+Verification as of 24 October (head `83a918f4`). Hosted Linux CI caught a defect introduced by the
+path-removal fixes: on Unix a folder swap and swap-back around creation with a planted file let the
+partial's plaintext land in the swapped-in folder. It is fixed by binding the folder identity and
+the partial's name to one pinned folder handle (`bbdbdf99`, `8832aacb`), with the related
+unjournaled publication fix (`74b9dfe4`); Windows got the same held-folder check through `fs_at`
+(`bc41d52e`, `ceae7036`). tokio moved to 1.53.3 for RUSTSEC-2026-0386 (`be00b939`). Complete local
+suites pass: root 3,379 (0 failed, 24 existing ignored), native 728, frontend 2,531, `test:startup`,
+`test:flows` and `FLOW_SCENARIO=private-download`. All 28 hosted CI checks pass at `83a918f4`.
+Linux-only storage tests also pass in WSL Ubuntu (Rust 1.89 installed there for this work). Still
+manual: a real Save as dialog per OS, Pause/Lock during real writes, restart after an interrupted
+save, FAT/exFAT/SMB/ReFS/OneDrive volumes, power loss, and macOS. The acceptance ledger has the
+same summary.
+
 ## Chat history adversarial checkpoint (2026-10-20)
 
 The latest user request is to explain/test additive chat history across MLS epochs, disconnected

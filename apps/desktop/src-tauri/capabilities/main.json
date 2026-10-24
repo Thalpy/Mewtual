@@ -228,6 +228,7 @@
     "allow-set-private-download-paused",
     "allow-retry-private-download",
     "allow-cancel-private-download",
+    "allow-check-saved-download",
 
     "allow-call-media-key",
     "allow-begin-inline-download",

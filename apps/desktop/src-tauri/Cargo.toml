@@ -79,6 +79,12 @@ image = { version = "0.25", default-features = false, features = [
 png = "0.18"
 tauri-plugin-updater = "2"
 tauri-plugin-process = "2"
+# Native "Save as" dialog for group files. Only native code opens it; the webview never supplies a
+# path and is granted no dialog capability. This is the same rfd version and backend configuration
+# tauri-plugin-dialog 2.7 uses (common-controls-v6 on Windows, GTK 3 on Linux, matching Tauri's own
+# GTK), without that plugin's IPC command surface, its tauri-plugin-fs dependency or a builder
+# registration. MIT licensed. Default features are off so the xdg-portal/ashpd stack is not pulled in.
+rfd = { version = "0.16", default-features = false, features = ["common-controls-v6", "gtk3"] }
 
 [dev-dependencies]
 catcoms-crypto = { path = "../../../crates/catcoms-crypto" }

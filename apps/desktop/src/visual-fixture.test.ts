@@ -84,8 +84,27 @@ test("visual fixture fails loudly for an unsupported native dependency", () => {
   );
 });
 
+test("file fixture saves to Downloads, treats Save as as a closed dialog and refuses any path", () => {
+  assert.deepEqual(
+    visualFixtureResponse("save_group_file", { server: 1, cid: "55aa", name: "notes.md" }),
+    // The native result asserts a one-click save is in Downloads (picker re-review LOW 1b).
+    { path: "C:\\Users\\fixture\\Downloads\\notes.md", displayed: true, inDownloads: true },
+  );
+  assert.throws(
+    () => visualFixtureResponse("save_group_file", { server: 1, cid: "55aa", name: "notes.md", saveAs: true }),
+    /^Error: Save as was cancelled\.$/,
+  );
+  for (const key of ["path", "folder", "destination"]) {
+    assert.throws(
+      () => visualFixtureResponse("save_group_file", { server: 1, cid: "55aa", name: "n", [key]: "C:\\x" }),
+      /never accepts a path/,
+    );
+  }
+});
+
 test("file fixture separates cached bytes from explicitly kept copies", () => {
   assert.deepEqual(visualFixtureResponse("get_private_downloads"), []);
+  assert.equal(visualFixtureResponse("check_saved_download", { server: 1, download: "ab".repeat(32), expectedIntent: "1" }), "present");
   const health = visualFixtureResponse("get_storage_health") as { referenced_chunks: number; verified_chunks: number; categories: unknown[] };
   assert.equal(health.verified_chunks, health.referenced_chunks);
   assert.deepEqual(health.categories, []);
