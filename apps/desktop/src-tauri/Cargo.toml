@@ -59,8 +59,8 @@ catcoms-diagnostics = { path = "../../../crates/catcoms-diagnostics" }
 catcoms-log = { path = "../../../crates/catcoms-log" }
 # The router-mapping stack already pins this monitor transitively. Declare it directly because the
 # desktop owns the process-wide OS route/interface watcher used by post-join self-healing.
-netwatch = "=0.18.0"
-n0-watcher = "=1.0.0-rc.0"
+netwatch = "=0.19.3"
+n0-watcher = "=1.0.1"
 # The bridge emits its own spans now: log_ui carries what the webview saw into the same file.
 tracing = "0.1"
 # Shared images are decoded here rather than by WebView2, so a malicious-but-valid file meets a

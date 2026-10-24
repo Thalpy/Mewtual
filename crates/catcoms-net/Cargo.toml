@@ -16,9 +16,8 @@ tracing.workspace = true
 blake3 = "1"
 hex = "0.4"
 # libp2p's `upnp` behaviour speaks IGD only. PCP and NAT-PMP cover routers that expose the
-# newer/Apple-style mapping protocols instead. Pin 0.18 because it is the maintained release whose
-# declared MSRV still matches this workspace's Rust 1.89 baseline (0.19 requires Rust 1.91).
-portmapper = { version = "=0.18.0", default-features = false }
+# newer/Apple-style mapping protocols instead.
+portmapper = { version = "=0.19.3", default-features = false }
 # The bound-interface UPnP fallback. libp2p's behaviour searches from an unbound socket and the
 # OS can egress the multicast M-SEARCH out a virtual adapter (WSL vEthernet, VirtualBox host-only),
 # so a second IGD search runs bound to the default-route interface; both feed one event path,
