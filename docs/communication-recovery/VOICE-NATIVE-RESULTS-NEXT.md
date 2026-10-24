@@ -9,17 +9,19 @@ is prepaid before extraction. Independent Producer quotas, original member-row p
 and a private first-stamped/signed artifact now exist; obsolete HIGH confirmation caches
 retire after native Finish-open/old closure. Maximum signed Ready683B, declared29,015B
 capacity composition and actual owner layouts are pinned. This still issues no Ready
-Source/publication or receive/SDK/RTC authority. HANDOVER records601 focused Root passes.
+Source or SDK/RTC authority. The next receive/intent preparation leaf is recorded in HANDOVER
+with 608 focused Root passes; normal endpoint admission remains absent.
 
 The reviewed implementation order is:
 
 1. Independent Producer, private immutable unsigned/signed cache, native endpoint/helper
    origin-row payment and separate quotas are implemented. Producer retains Exchange LAST;
-   Exchange never retains Producer/cache. Published state/marker remains missing. Preserve
-   the first native monotonic deadline and stamp across every later refusal/lost reply.
-2. Install HIGH's actual bounded native receive owner before Ready publication. Keep generic
-   Exchange liveness Active-only. ReceiveInstalled permits only exact original first-Offer
-   verification/retention; an immutable Ready-publication marker must precede Offer admission.
+   Exchange never retains Producer/cache. A native intent marker exists, still unscheduled.
+   Preserve the first native monotonic deadline and stamp across every later refusal/lost reply.
+2. HIGH now has an original-slot/prepaid-byte receive preparation owner and immutable native
+   Ready intent marker. Restricted first-Offer verification is implemented; generic Exchange
+   stays inactive. Implement the actual recoverable native token/receipt admission before
+   scheduling this capability or treating the intent as an operational readiness promise.
 3. Give native Ready Source causal-Offer completion. Direct/helper transport ACKs cannot stop
    its retries. Terminal record pruning waits for actual flights and cannot reset attempts.
 4. Admit LOW Ready through a bounded peek into the original protected Workflow loan, normal
@@ -37,6 +39,44 @@ The reviewed implementation order is:
 Ready/receive/adoption stays bounded by the original Finish window. A Ready publication or
 packet header does not prove SDP decryption, RTC connection or audible media. Full current
 evidence and the open dependency audit are in HANDOVER and the communication acceptance ledger.
+
+## First-Offer admission constraints reviewed on 24 October (not implemented)
+
+Root's combined public/encrypted receipt namespace has its OWN256-entry limit. The incoming
+PacketSlot does not reserve it. Before a transmitted Ready promises full-pressure reception,
+reserve one combined receipt position while ordinary admissions respect that reservation, or
+prove that saturation cannot coexist with the paid receiver. Check this before origin debit
+and cover an actually full Root receipt table; never bypass shared immutable-ID classification.
+
+The next consumer must take the receiver's SAME slot and paid bytes into native token/event
+preparation; normal PacketLedger incoming allocation would acquire both twice and fail.
+Prepare all replay/token/OfferId/current-owner gates before EndpointOrigin's single debit.
+Its apply tail must atomically publish token/event, fixed recoverable receipt, active role and
+causal completion. Signal Ready completion through a pure marker; do not enter SourceLedger
+from Group/Policy, which would invert SourceState -> Group -> Policy ordering.
+
+Fixed admission history must own neither Exchange/large Weak nor Receiver/event/WorkLane.
+Use an exact original non-authorizing PlanBinding observation plus separately prepaid plain
+retained bytes, paid before Ready. Revisit the declared Ready peak before choosing that fee.
+Do not split a Producer/PhaseLoan-backed credit: split_retained preserves its progress custody
+and would keep Exchange/lane alive. Obtain plain reserved bytes before adding such custody.
+Old PlanBinding/confirmation liveness is closed after extraction and cannot serve as the new
+receipt's current predicate. Exact historical token identity is not another decrypt grant.
+After the original progress lane drains, history alone cannot promise ACK verification under
+permanently full ordinary Crypto capacity; that would need another explicitly paid verifier.
+
+Until authenticated browser SDP key-phase adoption exists, every SDP deadline must be capped
+at min(first-Offer native time +20s, original Finish.until, applicable packet bounds). A late
+Offer cannot silently receive20s beyond the browser's original key custody. Do not change the
+old Finish/Claim deadline. This conservative cap can be replaced only by the explicit new
+native/browser phase receipt and its separately reviewed once-bounded lifetime.
+
+Activation also needs actual cleanup, not just an atomic flag. The current pending collector
+ignores activated owners, and PacketLedger's old prune closes but retains its SDP owner.
+Native Pair/cache/receiver and exact closed ledger.sdp must be taken outside final guards on
+active expiry/revocation, while actual lower/input/SDK owners keep custody through last Drop.
+A fixed recoverable receipt remains separately bounded; it must not block serial next-peer
+registration or whole-plan Final after actual progress has drained.
 
 ## High-side affine successor continuation (24 October; unscheduled)
 

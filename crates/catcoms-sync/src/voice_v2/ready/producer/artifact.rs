@@ -29,7 +29,68 @@ pub(super) struct ArtifactState {
     signed: Option<Artifact>,
 }
 
+/// Affine artifact provenance. Only this module can construct it from the original signed
+/// cache; a native caller cannot substitute an ID/hash/deadline while installing receive.
+pub(in crate::voice_v2) struct SignedReadyStamp {
+    exchange: Arc<Exchange>,
+    id: MessageId,
+    hash: [u8; 32],
+    first_mono: u64,
+    deadline: u64,
+    issued: u64,
+    expires: u64,
+}
+impl SignedReadyStamp {
+    pub(in crate::voice_v2) fn into_marker(
+        self,
+        expected: &Arc<Exchange>,
+        live: &crate::voice_v2::CallLease,
+    ) -> Result<crate::voice_v2::negotiation::receive::ReadyPublication, VoiceError> {
+        if !Arc::ptr_eq(&self.exchange, expected) {
+            return Err(VoiceError::Scope);
+        }
+        Ok(crate::voice_v2::negotiation::receive::ReadyPublication {
+            id: self.id,
+            hash: self.hash,
+            first_mono: self.first_mono,
+            deadline: self.deadline,
+            issued: self.issued,
+            expires: self.expires,
+            live: live.clone(),
+        })
+    }
+}
+
 impl CacheCapacity {
+    pub(in crate::voice_v2) fn prepare_publication(
+        &self,
+        wall: u64,
+        mono: u64,
+    ) -> Result<crate::voice_v2::negotiation::receive::PreparedPublication, VoiceError> {
+        self.prepared_at(&self.producer.exchange, wall, mono)?;
+        let stamp = self
+            .artifact
+            .stamp
+            .as_ref()
+            .expect("prepared original stamp");
+        let artifact = self
+            .artifact
+            .signed
+            .as_ref()
+            .expect("prepared original signature");
+        self.receive
+            .as_ref()
+            .ok_or(VoiceError::Unauthorized)?
+            .prepare_publication(SignedReadyStamp {
+                exchange: self.producer.exchange.clone(),
+                id: stamp.id,
+                hash: artifact._hash,
+                first_mono: stamp.first_mono,
+                deadline: stamp.deadline,
+                issued: stamp.issued,
+                expires: stamp.expires,
+            })
+    }
     /// Native-only preparation, outside every Group/Policy/Engine guard. Even successful
     /// return retains the artifact here; no public packet/Vec/Source capability is exported.
     pub(in crate::voice_v2) fn prepare_artifact(

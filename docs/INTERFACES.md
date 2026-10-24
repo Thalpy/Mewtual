@@ -1,5 +1,26 @@
 # Mewtual; Interfaces & Hooks Schema
 
+## Native receive preparation and Ready intent (24 October; unscheduled)
+
+`LocalJoin::install_high_ready_receive` is a native Rust-only preparation API. It retains the
+same original inbox/cache/signature across final contention, then commits a fixed Ready intent
+marker under actual native Group/Policy and pure current-owner checks. Capacity is acquired
+before those guards. Only an affine SignedReadyStamp from the original signed cache can
+prepare that marker; the caller cannot choose IDs or times. Marker publication spends no
+origin packet allowance; eventual paid Source admission owns that debit.
+
+The private HighReceive prepares/retains one exact original LOW Offer using its already-held
+incoming slot and RemotePacket bytes. This is capacity custody, not native token/replay/origin,
+AEAD or RTC success. Its future caller MUST retain actual ingress-ticket scratch throughout
+canonical preparation/hash work. Unpublished abandonment destroys buffers before making the
+same slot reusable. A retained claim never rearms. All larger native/SDK effects remain absent.
+
+Runtime may select a restricted verification loan only through a bounded exact first-Offer
+peek after the marker. Normal requester/process work, signature and final admission are still
+required. It samples Clock before try-Group/Policy and returns retryable Capacity if busy.
+Maintenance does not call this API; normal Ready/SDP ingress remains fail-closed until its
+recoverable native receipt/token consumers and causal Source/LOW admission are implemented.
+
 ## Native Ready preparation (24 October; unscheduled)
 
 `prepare_high_sdp_successor` retains one independently quotaed Ready Producer/cache capacity

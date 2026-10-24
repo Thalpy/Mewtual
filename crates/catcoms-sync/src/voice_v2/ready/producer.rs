@@ -11,6 +11,7 @@ use crate::voice_v2::resources::{Credit, Resources};
 use crate::voice_v2::VoiceError;
 use std::sync::{Arc, Mutex};
 mod artifact;
+pub(in crate::voice_v2) use artifact::SignedReadyStamp;
 
 /// Occupancy, not an issuance budget. The irreversible constructor latch lives in Exchange;
 /// dropping a credit/Producer cannot authorize a new Ready identity or reset retry attempts.
@@ -46,6 +47,7 @@ impl ChargePermit<'_> {
 /// artifact cannot publish before the separate receive/authority transaction exists.
 pub(in crate::voice_v2) struct CacheCapacity {
     artifact: artifact::ArtifactState,
+    receive: Option<Arc<crate::voice_v2::negotiation::receive::HighReceive>>,
     _cache: Credit,
     // Last, independently of the credit's Loan, for future artifact-field destruction.
     producer: Arc<Producer>,
@@ -116,12 +118,37 @@ impl CacheCapacity {
         }));
         Self {
             artifact: artifact::ArtifactState::default(),
+            receive: None,
             _cache: cache,
             producer,
         }
     }
     pub(in crate::voice_v2) fn current_for(&self, exchange: &Arc<Exchange>) -> bool {
         self.producer.current_for(exchange)
+    }
+    pub(in crate::voice_v2) fn install_receive(
+        &mut self,
+        tables: &crate::voice_v2::packets::PacketSlots,
+        mono: u64,
+    ) -> Result<(), VoiceError> {
+        if self.receive.is_none() {
+            self.receive = Some(self.producer.exchange.prepare_high_receive(tables, mono)?);
+        }
+        if self
+            .receive
+            .as_ref()
+            .is_some_and(|receive| receive.current_for(&self.producer.exchange))
+        {
+            Ok(())
+        } else {
+            Err(VoiceError::Unauthorized)
+        }
+    }
+    #[cfg(test)]
+    pub(in crate::voice_v2) fn receive_for_test(
+        &self,
+    ) -> Arc<crate::voice_v2::negotiation::receive::HighReceive> {
+        self.receive.as_ref().expect("installed inbox").clone()
     }
     #[cfg(test)]
     pub(in crate::voice_v2) fn producer_for_test(&self) -> Arc<Producer> {

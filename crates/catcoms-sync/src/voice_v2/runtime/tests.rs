@@ -920,6 +920,52 @@ fn endpoint_origin_samples_time_without_holding_group_or_policy() {
 }
 
 #[test]
+fn voice_transport_verification_samples_before_native_guards_and_refuses_busy_view_without_work() {
+    let clock = Arc::new(OriginClockProbe {
+        inner: ManualClock::new(1000),
+        owners: Mutex::new(None),
+        outside: AtomicBool::new(true),
+        samples: AtomicU64::new(0),
+    });
+    let runtime = Runtime::new(clock.clone());
+    let actor = active(&runtime, 1);
+    *clock.owners.lock().unwrap() =
+        Some((Arc::downgrade(&actor.group), Arc::downgrade(&actor.gate)));
+    let before = runtime.resources().counts();
+    {
+        let _group = actor.group.state.lock().unwrap();
+        assert_eq!(
+            actor
+                .admit_transport_verification(device(2), b"bounded frame")
+                .err(),
+            Some(VoiceError::Capacity)
+        );
+    }
+    {
+        let _policy = actor.gate.policy.lock().unwrap();
+        assert_eq!(
+            actor
+                .admit_transport_verification(device(2), b"bounded frame")
+                .err(),
+            Some(VoiceError::Capacity)
+        );
+    }
+    assert_eq!(runtime.resources().counts(), before);
+    // The deliberate externally-held guards above aren't Runtime-held samples. Now check
+    // the actual successful path, including EffectiveClock's own source-clock callbacks.
+    clock.outside.store(true, Ordering::Release);
+    clock.inner.advance_ms(700);
+    let ticket = actor
+        .admit_transport_verification(device(2), b"bounded frame")
+        .unwrap();
+    assert!(clock.outside.load(Ordering::Acquire));
+    assert!(clock.samples.load(Ordering::Relaxed) > 0);
+    assert_eq!(ticket.deadline, 6700, "retry obtains its own fresh5s bound");
+    clock.inner.advance_ms(5000);
+    assert!(ticket.check(&actor, b"bounded frame").is_err());
+}
+
+#[test]
 fn endpoint_origin_contention_is_retryable_without_origin_debit_or_stale_time() {
     for policy_busy in [false, true] {
         let clock = Arc::new(ManualClock::new(1000));

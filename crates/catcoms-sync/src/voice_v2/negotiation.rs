@@ -32,6 +32,7 @@ const ENGINE_BYTES: usize = 4 * (CIPHERTEXT + MAX_AAD) + 3 * MAX_SDP_PLAINTEXT +
 const RESULT_BYTES: usize = MAX_SDP_PLAINTEXT + 1040;
 mod packet_capacity;
 mod ready_capacity;
+pub(in crate::voice_v2) mod receive;
 pub(in crate::voice_v2) use ready_capacity::PaidReadyCache;
 
 /// Native allocation purpose. Callers cannot replace one phase with another to escape the
@@ -106,6 +107,9 @@ pub struct Exchange {
     // Present only on the protected affine path. Ordinary legacy SDP does not promise
     // causal Ready. Never store a Ready producer here: that owner retains Exchange one way.
     ready: Option<super::ready::capacity::ReadyCapacity>,
+    // Observers only. Actual inbox/canonical bytes remain outside Exchange to avoid cycles.
+    ready_receive: std::sync::OnceLock<CallLease>,
+    ready_publication: receive::PublicationCell,
     // Last: every enclosing owner/reservation/slot remains paid through field destruction.
     _metadata: Credit,
     // MUST remain last. All actual successor fields/credits return before whole-plan
@@ -240,6 +244,8 @@ impl Exchange {
             activated: AtomicBool::new(false),
             successor: Some(proof),
             ready: Some(ready),
+            ready_receive: std::sync::OnceLock::new(),
+            ready_publication: std::sync::OnceLock::new(),
             _metadata: metadata,
             _successor_custody: Some(custody),
         })
@@ -375,6 +381,8 @@ impl Exchange {
             activated: AtomicBool::new(true),
             successor: None,
             ready: None,
+            ready_receive: std::sync::OnceLock::new(),
+            ready_publication: std::sync::OnceLock::new(),
             _successor_custody: None,
         }))
     }
@@ -639,8 +647,21 @@ mod tests {
             + size_of::<WorkLane>()
             + size_of::<super::super::crypto_actions::slots::ReservedSlots>()
             + 2 * size_of::<super::super::crypto_actions::slots::ReservedSlots>()
+            // Packet child reservations retain their two closed ORIGINAL parents even
+            // after old Workflow metadata drains. Count those bodies/Arc headers here too.
+            + 2 * size_of::<super::super::crypto_actions::slots::ReservedSlots>()
+            + 2 * 2 * size_of::<usize>()
             + size_of::<super::super::LeaseState>()
             + size_of::<SdpSuccessor>()
+            // The external receive graph consumes this ORIGINAL SDP metadata payment,
+            // not an unaccounted addition to Ready's2KiB cache. Canonical input buffers
+            // retain their full separate RemotePacket credit. Only one wrapper is live.
+            + size_of::<receive::HighReceive>()
+            + size_of::<Credit>()
+            + size_of::<PhaseLoan>()
+            + size_of::<super::super::LeaseState>()
+            + size_of::<receive::PreparedOffer>().max(size_of::<receive::RetainedOffer>())
+            + 4 * 2 * size_of::<usize>()
             + 2 * size_of::<DeviceId>()
             + 7 * 2 * size_of::<usize>();
         assert!(

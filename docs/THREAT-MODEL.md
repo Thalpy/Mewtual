@@ -1,5 +1,22 @@
 # Threat model; client integrity & enforcement boundaries
 
+## Prepared receive custody does not activate SDP (24 October)
+
+HIGH's bounded receive owner holds an actual original incoming slot and RemotePacket payment
+outside Exchange. Exchange stores only observers, avoiding a self-custody cycle. Preparation
+borrows that sole slot; rollback destroys old input BEFORE returning it, so concurrent callers
+cannot overlap two payloads under one payment. Retained input keeps actual capacity through
+last Drop and cannot rearm a spent claim. Original metadata limits remain unchanged.
+
+Only the original cache's affine SignedReadyStamp can prepare a Ready intent marker; final
+native current-owner/room/member/epoch checks precede its infallible publication. The marker
+is not an origin debit, endpoint admission, token, AEAD result or RTC grant. A bounded peek may
+select existing first-Offer verifier capacity, never authenticate input. Normal work budgets,
+signatures and native final admission remain mandatory. Clock callbacks run outside native
+guards; busy views refuse without waiting on an aging time sample. Generic lenders remain
+inactive and production scheduling stays off. Causal Ready Source and native token/receipt
+publication must be implemented before this intent can become a transmitted readiness promise.
+
 ## Inert Ready artifacts cannot promise receive readiness (24 October)
 
 The separate Producer's native cache/Source/Lower/Crypto capacities are quotas, not effect

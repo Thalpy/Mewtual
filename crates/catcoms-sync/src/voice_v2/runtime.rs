@@ -1215,8 +1215,21 @@ impl ActorOwner {
             return Err(VoiceError::Bounds);
         }
         self.current()?;
-        let mut state = self.group.state.lock().unwrap_or_else(|e| e.into_inner());
-        let policy = self.gate.policy.lock().unwrap_or_else(|e| e.into_inner());
+        // Clock is an injected callback. Sample before either native guard, then acquire
+        // without waiting so a busy view cannot age this admission/expiry observation.
+        let wall = self.clock.now_ms();
+        let now = self.clock.monotonic_ms();
+        self.current()?;
+        let mut state = match self.group.state.try_lock() {
+            Ok(state) => state,
+            Err(std::sync::TryLockError::Poisoned(error)) => error.into_inner(),
+            Err(std::sync::TryLockError::WouldBlock) => return Err(VoiceError::Capacity),
+        };
+        let policy = match self.gate.policy.try_lock() {
+            Ok(policy) => policy,
+            Err(std::sync::TryLockError::Poisoned(error)) => error.into_inner(),
+            Err(std::sync::TryLockError::WouldBlock) => return Err(VoiceError::Capacity),
+        };
         if state.revision != self.revision || !policy.eligible || !policy.live.is_live() {
             return Err(VoiceError::Unauthorized);
         }
@@ -1226,7 +1239,6 @@ impl ActorOwner {
             .cloned()
             .ok_or(VoiceError::Unauthorized)?;
         let epoch = state.epoch.ok_or(VoiceError::Unauthorized)?;
-        let now = self.clock.monotonic_ms();
         self.current()?;
         let bytes = VERIFICATION_BUFFERS * frame.len() + VERIFICATION_OVERHEAD;
         let current_exchange = self.resources.exchange(self.group.hash);
@@ -1235,10 +1247,22 @@ impl ActorOwner {
         } else {
             None
         };
+        let ready_receive = if retained_progress.is_none() && peeked.is_none() {
+            self.resources.exchange(self.group.hash).filter(|exchange| {
+                exchange.lends_ready_offer_verification(requester, frame, wall, now)
+            })
+        } else {
+            None
+        };
         let progress = retained_progress.unwrap_or_else(|| {
-            peeked.as_ref().map_or(
-                super::source::SourceProgress::Ordinary,
-                super::source::SourceProgress::Exchange,
+            ready_receive.as_ref().map_or_else(
+                || {
+                    peeked.as_ref().map_or(
+                        super::source::SourceProgress::Ordinary,
+                        super::source::SourceProgress::Exchange,
+                    )
+                },
+                super::source::SourceProgress::ReadyReceive,
             )
         });
         progress.require_current(&self.resources, self.group.hash)?;

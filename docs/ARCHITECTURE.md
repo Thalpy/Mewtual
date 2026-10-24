@@ -1,5 +1,23 @@
 # Mewtual; Architecture
 
+## Prepared native HIGH receive inbox (24 October; unscheduled)
+
+Pair's separately paid Ready cache now holds Arc<HighReceive>. The receiver owns the original
+incoming PacketSlot and full SDP RemotePacket credit, then Exchange LAST. Exchange retains
+only the exact receive lease and immutable Ready intent marker; it never owns the receiver,
+Producer or input. A preparation temporarily takes that SAME slot. Abandonment destroys old
+canonical buffers before returning it; retention spends it irreversibly. Neither route
+reacquires ordinary capacity. Receiver/credit/loan/lease/wrapper layouts fit existing4KiB SDP
+metadata; payloads use their original separate RemotePacket payment.
+
+SignedReadyStamp is an affine cache-produced token, preventing raw ID/hash/deadline substitution.
+Final native Group/Policy commits the intent marker after current checks; the marker has no
+packet origin debit. Later Source admission must perform that single debit. Runtime's bounded
+peek selects only exact first-Offer verification under the published marker and original
+current Finish/epoch. Generic Exchange remains inactive. Native Clock samples precede try-lock
+Group/Policy acquisition. No application scheduling, native Offer token/receipt, causal Ready
+Source, LOW adoption or browser SDP/RTC integration is supplied by this preparation leaf.
+
 ## Independent Ready producer and inert signed cache (24 October)
 
 The native Pair now retains a separate Ready Producer and a boxed cache inside its existing

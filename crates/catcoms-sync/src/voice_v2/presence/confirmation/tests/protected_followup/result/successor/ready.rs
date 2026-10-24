@@ -3,6 +3,7 @@
 use super::*;
 use rand_core::{CryptoRng, Error, RngCore};
 use std::cell::Cell;
+mod receive;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Fault {

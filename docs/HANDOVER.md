@@ -1,5 +1,39 @@
 # Mewtual; Handover
 
+## Native first-Offer inbox and Ready intent (24 October; unscheduled)
+
+HIGH can now install a paid first-Offer inbox after actual native Finish and old-Workflow
+drainage. It holds the original incoming table slot and full SDP RemotePacket allowance;
+ordinary byte/table pressure cannot steal them. Unpublished Offer preparation returns the
+same slot only AFTER its canonical buffers are destroyed. Retention spends that claim once.
+Actual retained input/verification owners delay original whole-plan cleanup through last Drop.
+The unchanged 4 KiB metadata guard includes the receiver, credit/loan/lease and input wrappers.
+
+A final native Group/Policy fence can commit one immutable Ready INTENT marker, using an
+affine token from the original signed cache. It spends no origin packet quota: eventual
+Source admission must own the sole debit. An exact bounded LOW-to-HIGH first-Offer peek may
+then select original SDP verification capacity, while normal requester/process work and
+signature checks still apply. Runtime samples injected clocks outside both native guards
+and refuses busy views without waiting. Generic Exchange/action/result lenders stay inactive.
+
+Focused Root voice: 608 pass (13.38s). Read-only review found and fixed a concurrent rollback
+window that returned the slot before destroying old input; the regression re-enters the real
+factory before return. Final coverage includes full ordinary Crypto pressure, close-before-
+publication and an actual native lock/unlock cycle. Native handoff: 306 pass (10.63s);
+native check passes (51.17s).
+Strict all-target/all-feature Sync Clippy (35.23s) and native Clippy (77s) pass.
+All ten voice_live TCP/HTTP/Node confirmation regressions pass (141.44s). Root/native
+formatting, diff and ambient gates pass. Frontend is unchanged. Full suites remain deferred
+while integration is unfinished, per the user's testing instruction. The previously disclosed
+dependency audit remains an open release gate.
+
+This is NOT live Ready transmission or endpoint admission. Application maintenance does not
+schedule the new API; generic ingress still refuses Ready/SDP. Next implement the recoverable
+first-Offer token/receipt outside Exchange and causal Ready Source, then LOW admission and
+original-parent browser SDP phase/RTC. Multi-peer, relay and physical acceptance remain open.
+The external-download branch is present at `95eaeda6`; it has not been merged into this V2 branch.
+Its own ledger records validation; that is not evidence of this branch's integration.
+
 ## Ready Producer and private signed artifact (24 October; focused integration)
 
 The native Pair now retains one boxed, separately paid Ready cache and independent Producer.

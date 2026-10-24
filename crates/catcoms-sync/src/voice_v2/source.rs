@@ -28,6 +28,8 @@ pub(crate) enum SourceProgress<'a> {
     Ordinary,
     Workflow(&'a Arc<super::chain::Workflow>),
     Exchange(&'a Arc<super::negotiation::Exchange>),
+    // Restricted HIGH first-Offer verification only; never an Active SDP action lender.
+    ReadyReceive(&'a Arc<super::negotiation::Exchange>),
 }
 impl fmt::Debug for SourceProgress<'_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -57,6 +59,12 @@ impl SourceProgress<'_> {
                 }
                 exchange.charge(stage, bytes)
             }
+            Self::ReadyReceive(exchange) => {
+                if stage != Stage::Crypto || !exchange.uses_resources(resources, group) {
+                    return Err(VoiceError::Scope);
+                }
+                exchange.charge_ready_offer_verification(bytes)
+            }
         }
     }
     /// Lookup only COMPARES the actual supplied owner. It never constructs packet authority
@@ -79,6 +87,14 @@ impl SourceProgress<'_> {
             Self::Exchange(expected) => {
                 expected.uses_resources(resources, group)
                     && expected.is_live()
+                    && resources
+                        .exchange(group)
+                        .as_ref()
+                        .is_some_and(|actual| Arc::ptr_eq(actual, expected))
+            }
+            Self::ReadyReceive(expected) => {
+                expected.uses_resources(resources, group)
+                    && expected.ready_receive_open()
                     && resources
                         .exchange(group)
                         .as_ref()

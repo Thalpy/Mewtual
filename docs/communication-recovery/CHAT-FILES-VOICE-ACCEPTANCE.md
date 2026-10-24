@@ -1,5 +1,19 @@
 # Chat, files and voice implementation evidence
 
+## Prepared HIGH receive evidence (24 October; live integration remains open)
+
+Root voice: 608 focused tests pass (13.38s), including actual native Finish/signatures, full
+ordinary byte/table pressure, same-claim abandonment/irreversible retention, wrong tuple/helper,
+invalid signatures, strict expiry/epoch/session close, actual retained-input last-drop and an
+OriginClockProbe on verification's real native guards. Review fixed input-buffer destruction
+ordering before claim return. Existing limits are unchanged. Logs: target/ready-receive-voice-v8.log.
+Native handoff: 306, native check/strict Clippy and ten voice_live TCP/HTTP/Node scenarios
+(141.44s) pass. Strict Sync Clippy, both formatting gates, diff and ambient checks pass.
+HANDOVER retains detailed evidence and earlier incomplete full-suite validation. This is
+unscheduled capacity/intent/verification;
+no Ready transport, first-Offer token/receipt, SDP/RTC or audible result is established.
+External download origin branch `95eaeda6` exists separately and remains unmerged here.
+
 ## Independent Ready Producer and inert artifact (24 October)
 
 Native Pair retains one boxed Ready cache under the original2KiB payment and an independent

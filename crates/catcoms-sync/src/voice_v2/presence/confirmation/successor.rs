@@ -50,6 +50,79 @@ impl Pair {
 }
 
 impl LocalJoin {
+    /// Install the original HIGH bounded first-Offer inbox and commit the exact immutable
+    /// Ready marker. This native-only preparation is still unscheduled: actual Source/LOW
+    /// causal admission and recoverable Offer-token publication must precede activation.
+    /// No packet is exported here and generic SDP/crypto/RTC lenders remain inactive.
+    ///
+    /// All byte/table positions are acquired before the final native fence. A refusal keeps
+    /// the SAME inbox, stamp and signature. The marker has no separate origin debit; eventual
+    /// Source admission owns the one original packet debit. `final_owner` is pure as below.
+    #[allow(clippy::too_many_arguments)]
+    pub fn install_high_ready_receive(
+        &mut self,
+        actor: &ActorOwner,
+        room: &RoomAuthority,
+        handshake: Nonce,
+        helpers: &[DeviceId],
+        signer: &dyn VoiceSigner,
+        authority: &Authority<'_>,
+        clock: &dyn Clock,
+        rng: &mut dyn CryptoRngCore,
+        final_owner: impl FnOnce(u64, u64) -> Result<(), VoiceError>,
+    ) -> Result<(), VoiceError> {
+        self.prepare_high_ready_artifact(
+            actor,
+            room,
+            handshake,
+            helpers,
+            signer,
+            authority,
+            clock,
+            rng,
+            |_, _| Ok(()),
+        )?;
+        let binding = self.chain_binding(handshake, authority);
+        let Some(Preparation::Transferred {
+            owner,
+            ready: Some(ready),
+        }) = &mut self
+            .confirmations
+            .pairs
+            .get_mut(&handshake)
+            .expect("original pair")
+            .sdp_successor
+        else {
+            return Err(VoiceError::Unauthorized);
+        };
+        let (wall, mono) = actor.preparation_time()?;
+        ready.install_receive(self.ledger.packet_slots(), mono)?;
+        let publication = ready.prepare_publication(wall, mono)?;
+        // The original Pair retains both inbox and Exchange across all error/drop paths.
+        // No credited last owner is moved into a closure destroyed beneath native guards.
+        let mut publication = Some(publication);
+        actor.with_local_origin(binding.peer, authority.context, |wall, mono, origin| {
+            final_owner(wall, mono)?;
+            if !room.lease.is_live()
+                || !owner.successor_current_at(&binding, &self.resources, mono)
+                || !origin.contains_members(owner.helpers())
+            {
+                return Err(VoiceError::Unauthorized);
+            }
+            ready.prepared_at(owner, wall, mono)?;
+            publication
+                .as_ref()
+                .expect("unpublished marker")
+                .check_at(wall, mono)?;
+            origin.publish(|| {
+                publication
+                    .take()
+                    .expect("one marker publication")
+                    .publish()
+            })
+        })
+    }
+
     /// Prepare one immutable HIGH Ready signature in native Pair custody. This deliberately
     /// exposes no SignedObject or Source activity: receive installation, exact publication
     /// and causal LOW admission are separate missing consumers. Application maintenance does
