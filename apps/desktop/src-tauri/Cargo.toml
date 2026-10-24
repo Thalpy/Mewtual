@@ -2,7 +2,7 @@
 name = "mewtual-desktop"
 version = "0.3.0-alpha.20"
 edition = "2021"
-rust-version = "1.91"
+rust-version = "1.94"
 publish = false
 description = "Mewtual desktop app (Tauri 2)"
 

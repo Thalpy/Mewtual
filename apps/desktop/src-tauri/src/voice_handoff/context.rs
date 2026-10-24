@@ -10,12 +10,14 @@ use std::sync::atomic::{AtomicBool, AtomicU64};
 use std::sync::{Arc, Mutex as StdMutex, Weak};
 use tokio::sync::Mutex;
 
-// Pinned Rust 1.91 ArcInner is repr(C), two atomic usize counters followed by T (re-audited for
-// the 1.89 -> 1.91 bump; unchanged from 1.89):
-// https://github.com/rust-lang/rust/blob/1.91.0/library/alloc/src/sync.rs#L366-L379
+// Pinned Rust 1.94 ArcInner is repr(C, align(2)), two atomic usize counters followed by T:
+// https://github.com/rust-lang/rust/blob/1.94.0/library/alloc/src/sync.rs#L377-L392
+// Re-audited for the 1.89 -> 1.91 -> 1.94 bumps. 1.91 matched 1.89 (plain repr(C)); 1.94 adds
+// `align(2)`, mirrored here. It cannot change the size on any target we build, because an
+// atomic usize is already at least 2-aligned, but the model should say what std says.
 // Model the WHOLE allocation to include alignment and tail padding (notably AtomicBool).
 // Re-audit on a toolchain/layout change; allocator metadata/slack remains outside this bound.
-#[repr(C)]
+#[repr(C, align(2))]
 struct ArcAllocation<T> {
     strong: std::sync::atomic::AtomicUsize,
     weak: std::sync::atomic::AtomicUsize,

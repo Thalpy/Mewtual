@@ -23,7 +23,7 @@ RUN test -f Cargo.toml \
 # outside this headless container's claims; see docs/LINUX-TESTING.md.
 FROM node:22-bookworm-slim AS node-runtime
 
-FROM rust:1.91-bookworm
+FROM rust:1.94-bookworm
 
 ARG MEWTUAL_TEST_UID=1000
 ARG MEWTUAL_TEST_GID=1000
