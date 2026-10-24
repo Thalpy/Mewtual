@@ -1824,10 +1824,11 @@ fn links_supported(
         };
         // Whether the path has stopped leading to the identified folder, asked only once the
         // probe failed, so that a retargeted path is reported as such rather than as a folder
-        // without links or an inconclusive probe. Without an identity nothing can say.
-        let moved = || {
-            folder_id.is_some() && !matches!(external::hold_folder(folder, folder_id), Ok(Some(_)))
-        };
+        // without links or an inconclusive probe. Without an identity nothing can say. A failed
+        // read is not evidence of a change (as for the first hold above), so only a proven other
+        // folder counts.
+        let moved =
+            || folder_id.is_some() && matches!(external::hold_folder(folder, folder_id), Ok(None));
         let source_path = folder.join(staging);
         for attempt in 0..4 {
             let probe = format!("{staging}-probe{attempt}");

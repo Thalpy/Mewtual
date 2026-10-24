@@ -743,7 +743,18 @@ fn a_path_retargeted_after_the_recheck_is_reported_as_changed() {
             ),
             "journaled: {journaled}, got {created:?}"
         );
-        assert!(holds_no_plaintext(&real), "journaled: {journaled}");
+        // Our empty partial stays in the real folder: its cleanup goes by path, which now leads
+        // to the decoy (a recorded residual; a retry of this name then reads `PartialExists`).
+        let left: Vec<_> = fs::read_dir(&real)
+            .unwrap()
+            .map(|entry| entry.unwrap())
+            .collect();
+        assert_eq!(left.len(), 1, "journaled: {journaled}");
+        assert_eq!(
+            left[0].metadata().unwrap().len(),
+            0,
+            "it holds no plaintext"
+        );
         assert_eq!(
             fs::read_dir(&decoy).unwrap().count(),
             0,
