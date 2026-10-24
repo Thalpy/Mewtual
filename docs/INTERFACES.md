@@ -1,5 +1,16 @@
 # Mewtual; Interfaces & Hooks Schema
 
+## Original native Finish evidence (24 October)
+
+`ConfirmationControl::confirmed_finish()` returns read-only `FinishEvidence` only after a
+successful application-bound Finish result. Its message ID/hash identify the native signed
+object; `transition_until()` is the first monotonic transfer-custody expiry. Evidence remains
+readable after End/expiry and grants no current action, Ready, SDP, key or RTC authority.
+Both native collectors preserve original capacity until this30-second window expires or
+original actor/session/policy/pair authority closes. Original action and Source deadlines
+are unchanged. Successor/Ready factories must check time/current authority at final admission;
+an open capacity handle or historical evidence cannot substitute for that check.
+
 ## Signed Ready wire value (24 October; admission unavailable)
 
 `Body::PairReady { header: ReadyHeader }` uses tag5. It binds original epoch, high issuer,
@@ -1088,7 +1099,7 @@ chains, four waiters/chain, two lower flights/server and four/process are retain
 lower release. Discovery coalesced onto explicit finalization survives waiter cancellation; later
 explicit callers receive a fresh exchange rather than a cached success. Admission retains one
 FIFO process acquisition per Actor across cancelled select observations.
-No local flight, signed context or request is held while queued; preparation follows the actual
+The waiting admission holds no additional local flight, signed context or request; preparation follows the actual
 grant. Empty, locally saturated or wholly lower-busy queues release unused admission, including
 assigned but unobserved grants. Actual Lower ownership remains independent. Original async sync-owner
 wrappers and released kind 2/4/12/26 grammars remain available. Commits uses the existing current-

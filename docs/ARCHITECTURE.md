@@ -1,5 +1,16 @@
 # Mewtual; Architecture
 
+## Native Finish custody window (24 October)
+
+Only successful application-bound Finish publication arms the original binding's one-shot
+Open/Await/Closed CAS and records its authenticated native signed ID/hash. Both pair and
+process collectors use that same atomic closure decision. Thirty seconds of transfer custody
+does not extend any old action/Source deadline or imply Ready, SDP, browser keys or RTC.
+Small original actor/session/policy cells revoke this custody without retaining whole actors
+or entering Group/Policy from a collector. Their complete retained graphs fit the unchanged
+fixed payment. Later successor/Ready preparation must check the original window at final
+native admission and retain its exact original owners; no such adoption is implemented yet.
+
 ## Confirmation capacity extraction (24 October; integration in progress)
 
 The successor preparation splits two original protected action positions without returning

@@ -24,6 +24,7 @@ const CHILDREN: usize = 64;
 const VERIFICATION_BUFFERS: usize = 5;
 const VERIFICATION_OVERHEAD: usize = 4096;
 mod local;
+pub(in crate::voice_v2) use local::EpochObservation;
 pub(crate) use local::LocalOrigin;
 
 /// Affine final origin transaction lent only while the original Group -> Policy locks and
@@ -95,12 +96,14 @@ impl Clock for EffectiveClock {
 struct Session {
     live: CallLease,
     active: AtomicBool,
+    observation: Arc<AtomicBool>,
 }
 impl Session {
     fn inactive() -> Arc<Self> {
         Arc::new(Self {
             live: CallLease::default(),
             active: AtomicBool::new(false),
+            observation: Arc::new(AtomicBool::new(true)),
         })
     }
     fn authorized(&self) -> bool {
@@ -138,9 +141,11 @@ struct Policy {
     indirect: bool,
     live: CallLease,
     children: Vec<CallLease>,
+    observation: Arc<AtomicBool>,
 }
 impl Policy {
     fn revoke(&mut self) {
+        self.observation.store(false, Ordering::Release);
         self.live.revoke();
         for child in &self.children {
             child.revoke();
@@ -154,6 +159,9 @@ struct ActorGate {
     session: Arc<Session>,
     registered: AtomicBool,
     installed_revision: AtomicU64,
+    // Pure observation for already-paid native transition custody. Capture is allowed only
+    // under the actual Group/Policy view; no serialized epoch can construct that witness.
+    observation: Arc<local::EpochState>,
     prepared_until: u64,
     activated: AtomicBool,
     policy: Mutex<Policy>,
@@ -161,6 +169,7 @@ struct ActorGate {
 }
 impl ActorGate {
     fn revoke(&self) {
+        self.observation.live.store(false, Ordering::Release);
         self.live.revoke();
         self.policy
             .lock()
@@ -194,6 +203,7 @@ impl Drop for Runtime {
         // the registry closes those gates; constructing another registry cannot leave old effects
         // live alongside a fresh budget. Actual lower holders still keep their old credits.
         let state = self.state.get_mut().unwrap_or_else(|e| e.into_inner());
+        state.session.observation.store(false, Ordering::Release);
         state.session.live.revoke();
         for actor in state.actors.iter().filter_map(Weak::upgrade) {
             actor.revoke();
@@ -276,6 +286,7 @@ impl Runtime {
     /// Protection tables and uncertain lower work remain charged; unlock cannot revive old gates.
     pub fn revoke_session(&self) {
         let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        state.session.observation.store(false, Ordering::Release);
         state.session.live.revoke();
         state.session = Session::inactive();
         state.actors.retain(|gate| {
@@ -350,12 +361,17 @@ impl Runtime {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .revision;
+        let credit = self.resources.charge(hash, 1024, ResourceKind::Retained)?;
         let gate = Arc::new(ActorGate {
             local,
             live: CallLease::default(),
             session: ticket.0.clone(),
             registered: AtomicBool::new(false),
             installed_revision: AtomicU64::new(0),
+            observation: Arc::new(local::EpochState {
+                epoch: AtomicU64::new(0),
+                live: AtomicBool::new(true),
+            }),
             prepared_until: self.clock.monotonic_ms().saturating_add(PREPARATION_MS),
             activated: AtomicBool::new(false),
             policy: Mutex::new(Policy {
@@ -364,8 +380,9 @@ impl Runtime {
                 indirect: false,
                 live: CallLease::default(),
                 children: Vec::new(),
+                observation: Arc::new(AtomicBool::new(true)),
             }),
-            _credit: self.resources.charge(hash, 1024, ResourceKind::Retained)?,
+            _credit: credit,
         });
         state.actors.push(Arc::downgrade(&gate));
         Ok((
@@ -598,6 +615,13 @@ impl ActorOwner {
         }
         self.revision = state.revision;
         self.gate.activated.store(true, Ordering::Release);
+        // Publish before fallible roster changes. An old transfer window must stop retaining
+        // live capacity even when an unrelated add keeps both endpoints in the new epoch.
+        // Older views are rejected above, so an old observation can never become current again.
+        self.gate
+            .observation
+            .epoch
+            .store(view.epoch, Ordering::Release);
         // Revocation precedes fallible allocation. If new membership cannot be represented, no
         // removed device remains admitted. A later re-add always gets a different Member owner.
         state.members.retain(|id, member| {
@@ -643,6 +667,7 @@ impl ActorOwner {
             policy.eligible = view.eligible;
             policy.indirect = view.indirect;
             policy.live = CallLease::default();
+            policy.observation = Arc::new(AtomicBool::new(true));
         }
         Ok(())
     }

@@ -78,6 +78,25 @@ impl LocalJoin {
             clock,
             rng,
         )?);
+        let finish = if matches!(
+            prepared.as_ref().expect("prepared transition").change,
+            PreparedConfirmation::Finish
+        ) {
+            let original = &prepared.as_ref().expect("prepared Finish").prepared;
+            let chain = self.confirmations.pairs[&original.header.handshake]
+                .chain
+                .as_ref()
+                .ok_or(VoiceError::Unauthorized)?;
+            Some((
+                chain.prepare_finish_window(actor, authority.context)?,
+                crate::voice_v2::chain::FinishIdentity {
+                    message: original.message,
+                    hash: original.hash,
+                },
+            ))
+        } else {
+            None
+        };
         let mut retirement = ConfirmationRetirement::default();
         let result = action.with_result(plaintext, claimed_tag, || {
             action.check_chain_epoch(authority.context.epoch)?;
@@ -96,16 +115,22 @@ impl LocalJoin {
                     .expect("prepared plaintext transition")
                     .prepared
                     .check_at(origin.epoch(), wall, mono)?;
-                // publish repeats the actual original session/actor atomics. There is no Clock,
-                // signer, RNG, Engine acquisition or fallible transition after that observation.
+                // Publish repeats the actual original session/actor atomics. A window CAS
+                // refusal is captured BEFORE any token/result/promotion effect; origin has no
+                // quota debit. No Clock, signer, RNG or Engine acquisition follows that CAS.
                 origin.publish(|| {
-                    terminal = Some(self.apply_confirmation_terminal(
-                        prepared.take().expect("one plaintext publication"),
-                        &mut retirement,
-                    ));
+                    terminal = Some((|| {
+                        if let Some((window, identity)) = &finish {
+                            window.publish_at(mono, *identity)?;
+                        }
+                        Ok(self.apply_confirmation_terminal(
+                            prepared.take().expect("one plaintext publication"),
+                            &mut retirement,
+                        ))
+                    })());
                 })
             })?;
-            Ok(terminal.expect("successful plaintext publication"))
+            terminal.expect("successful original origin observation")
         });
         retirement.finish(self);
         drop(prepared);

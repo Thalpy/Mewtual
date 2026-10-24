@@ -1,9 +1,45 @@
 # Mewtual; Handover
 
+## Native Finish transfer window (24 October; SDP remains unavailable)
+
+Successful application-bound low Finish sealing and high Finish opening now record the exact
+native signed message ID/hash in the original paid binding. One atomic Open/Await/Closed
+state preserves original transfer custody for30 monotonic seconds after that publication.
+Both pair and process Workflow expiry collectors claim closure through that same CAS; a stale
+old-deadline decision cannot close a winning Finish. Explicit End closes before waiting for
+Control. Exact terminal-history recovery never rearms or recalculates the window.
+
+Original action/packet/Source deadlines, attempts and generic confirmation matching remain
+unchanged. The window issues no Ready, SDP reservation, browser key transfer or RTC permission.
+Later native preparation may retry capacity within this bounded window without repeating
+Finish, consuming another token or spending a Ready attempt. Permanent pressure can prevent
+readiness; no SDP capacity was promised. Future Ready/adoption must explicitly check current
+monotonic time against the original window at final admission.
+
+Original actor/session/policy revocation uses small pure observation cells. The full retained
+cell bodies/Arc headers are included in the unchanged2KiB binding layout guard; there is no
+weak-retained ActorGate, Group, Source, Workflow or watch graph. Review caught and corrected
+that accounting gap. Current536 focused voice tests and strict Sync Clippy pass, including
+eleven new window/result regressions, full ordinary pressure, both collectors, CAS refusal before
+actual token/signature effects, lost replies, original Source expiry and actual actor/runtime
+retirement. The complete retained graph measures1,952/2,048B. Read-only re-review found no
+remaining blocker/high/medium. The final shared-collector barrier strengthening passes the
+same536 tests and strict lint; complete gates remain pending.
+
+The805ab5c7 native recovery-only run at default concurrency finished12 passed/20 failed:
+17 initial route-capture failures and3 active-download restart failures. An isolated original
+active-download regression passed12.09s. Independent six-client scenarios share several
+OS-process pools; a test-only admission turn now isolates unrelated scenarios before their
+outer timers while preserving all six clients' concurrency, production limits and deadlines.
+Successful release waits for actual actors/drivers; failed cleanup closes further admission
+and preserves its synthetic vault. Review also corrected a taken-before-closed driver marker
+and timeout diagnostics hidden by future destruction. That corrected gate's focused checks
+and the native scenario rerun remain in progress. These are not current all-green gates.
+
 ## Process maintenance admission (24 October; native recovery rerun next)
 
 Member maintenance now retains one FIFO semaphore acquisition per Actor across cancelled
-select turns. A queued actor holds no local flight, signed context, request or peer authority;
+select turns. The waiting admission holds no additional local flight, signed context, request or peer authority;
 fresh Root preparation still follows an actual grant. Empty, locally saturated or entirely
 lower-busy queues release unused grants, including assigned but unobserved ones. Actual
 Flight/Lower retirement still controls the original two/server and four/process limits.
@@ -23,7 +59,8 @@ joins/key references, handshake, original native signed Finish ID/hash and a can
 of at most two helpers. Existing tags/signing domains are unchanged. Codec/route checks
 enforce direction, bounds, current epoch/membership/policy and permitted helper identity.
 BOTH native endpoint entry points refuse Ready before public queuing; ordinary SourceActivity
-cannot send it. Native pair admission, AwaitReady and causal Source completion remain absent.
+cannot send it. Native Ready admission and causal Source completion remain absent. The native
+Finish transfer window is implemented above; it grants neither readiness nor SDP authority.
 
 Voice focus523 and strict catcoms-sync Clippy pass. Follow-up coverage passes15 matching
 tests, including maximum two-helper round-trip and normal authenticated dispatch returning
@@ -59,8 +96,8 @@ will run after the coherent transition integration; earlier full results below u
 
 This is not native Exchange adoption or a Ready protocol. Review confirmed that Source's
 retained Proof can own Workflow until signed retention expires, while BOTH pair collection
-and Resources-triggered Workflow collection close at the first confirmation deadline. Add
-one bounded native AwaitReady phase honoring both collectors, without extending original
+and Resources-triggered Workflow collection closed at the first confirmation deadline. The
+bounded native window above now honors both collectors without extending original
 action/Finish deadlines or attempts. Ready needs synchronous protected admission in the
 shared message-ID namespace, independent paid Source custody, immutable agreed helpers and
 causal Offer completion; queued public admission or a transport ACK is insufficient. All

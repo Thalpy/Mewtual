@@ -1,5 +1,21 @@
 # Threat model; client integrity & enforcement boundaries
 
+## Finish custody cannot renew protocol authority (24 October)
+
+Actual protected Finish publication records native signed ID/hash and arms one30-second
+transfer window in original fixed history. The Open/Await/Closed CAS orders both collectors
+and explicit closure against publication; a refused arm changes no token, signed packet,
+promotion or terminal result. History recovery cannot rearm. Native actor/session/policy
+revocation cells and the protected pair gate remain original allocations; their complete
+small bodies/Arc headers fit the fixed2KiB allowance. No weak actor allocation or Group/Source
+graph is retained after its own payment drops. The epoch cell changes before fallible roster
+updates, including unrelated additions that leave both endpoints present.
+
+This preserves capacity only. Every old action, packet and Source keeps its original deadline
+and attempts. No Ready/SDP/RTC authority is issued. Permanent capacity pressure may prevent
+later readiness before bounded expiry. Future Ready/adoption must explicitly check its
+original monotonic expiry and current native authority; a live capacity flag has no Clock.
+
 ## Ready codec does not admit a pair (24 October)
 
 The new high-signed Ready header authenticates metadata, including exact epoch, original

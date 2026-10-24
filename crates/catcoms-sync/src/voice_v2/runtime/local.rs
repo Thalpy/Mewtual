@@ -3,6 +3,64 @@
 //! invented here. The actual signed source submission still performs its own quota admission.
 use super::*;
 
+/// Small pure actor cell, separately allocated inside the original actor's payment. Historical
+/// observers retain this cell rather than Weak<ActorGate>: a Weak would strand that entire
+/// larger allocation after its own credit dropped. No Group, Source, key or Workflow lives here.
+pub(super) struct EpochState {
+    pub(super) epoch: AtomicU64,
+    pub(super) live: AtomicBool,
+}
+
+/// Non-authorizing original actor/session/policy observations. Their small complete Arc bodies
+/// and headers fit in the original PlanBinding payment; none contains a watch or weak Gate.
+pub(in crate::voice_v2) struct EpochObservation {
+    actor: Arc<EpochState>,
+    session: Arc<AtomicBool>,
+    policy: Arc<AtomicBool>,
+    epoch: u64,
+}
+impl EpochObservation {
+    pub(in crate::voice_v2) fn is_live(&self) -> bool {
+        self.actor.live.load(Ordering::Acquire)
+            && self.session.load(Ordering::Acquire)
+            && self.policy.load(Ordering::Acquire)
+            && self.actor.epoch.load(Ordering::Acquire) == self.epoch
+    }
+    pub(in crate::voice_v2) fn same(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.actor, &other.actor)
+            && Arc::ptr_eq(&self.session, &other.session)
+            && Arc::ptr_eq(&self.policy, &other.policy)
+            && self.epoch == other.epoch
+    }
+    /// Complete independently retained allocations, including rounded Arc headers. The
+    /// enclosing observer value itself is already included by size_of<PlanBinding>.
+    #[cfg(test)]
+    pub(in crate::voice_v2) const fn retained_graph_bytes() -> usize {
+        std::mem::size_of::<(usize, usize, EpochState)>()
+            + 2 * std::mem::size_of::<(usize, usize, AtomicBool)>()
+    }
+}
+
+impl ActorOwner {
+    /// Capture only while preparing, before Engine/final publication. Later observations use
+    /// atomics only; neither expiry collection nor a final Group/Policy closure reenters locks.
+    pub(in crate::voice_v2) fn observe_epoch(
+        &self,
+        context: &super::super::Context,
+    ) -> Result<EpochObservation, VoiceError> {
+        self.current()?;
+        let group = self.group.state.lock().unwrap_or_else(|e| e.into_inner());
+        let policy = self.gate.policy.lock().unwrap_or_else(|e| e.into_inner());
+        self.check_route_view(&group, &policy, context.local, context)?;
+        Ok(EpochObservation {
+            actor: self.gate.observation.clone(),
+            session: self.gate.session.observation.clone(),
+            policy: policy.observation.clone(),
+            epoch: context.epoch,
+        })
+    }
+}
+
 /// A provisional origin key pin grants neither a pair nor traffic quota. Failed unpublished
 /// preparation revokes it without reacquiring Group; ordinary bounded collection prunes the
 /// dead clone later. Publication transfers its one live pin to the actual Pair.

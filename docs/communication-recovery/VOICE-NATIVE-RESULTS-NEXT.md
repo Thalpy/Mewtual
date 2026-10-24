@@ -35,7 +35,7 @@ pair/direction/generation before publishing replay/token work. The current singl
 32 retained rows cannot be advertised as a supported16-peer lifecycle. Physical two-device/
 separate-network audible acceptance is still unavailable from the one desktop.
 
-### Reviewed SDP transition design (not implemented)
+### Reviewed SDP transition design (native Finish custody implemented; adoption open)
 
 The follow-up review identifies two additional prerequisites. `Source::finish` currently
 retires targeted retries on `EndpointAdmitted`; Ready instead needs an internally selected
@@ -57,15 +57,20 @@ Ready uses closed Body tag5 while preserving tags1–4 and signing domains. Bind
 protected epoch, both endpoints/joins/key references, handshake, and native signed Finish
 message ID/object hash (not the WebCrypto output fingerprint). Require high-to-low direction.
 Helper selection needs one immutable compatible canonical list, at most two members, rather
-than independent endpoint choices. The exact accepted Finish and prepaid Ready intent must
-commit atomically; signing/RNG/payment remain outside that irreversible transaction. Incoming
+than independent endpoint choices. The native accepted Finish ID/hash and one immutable
+transfer-custody window now commit atomically. This smaller boundary preserves confirmation
+under full ordinary-pool pressure without promising SDP capacity. Later native maintenance
+must prepay the actual successor and independent Ready owner before issuing any Ready;
+allocation refusal must not repeat Finish, consume another token or spend a Source attempt.
+Signing/RNG/payment remain outside the irreversible Ready transaction. Incoming
 Ready uses a shared immutable message identity namespace and exact synchronous pair admission,
 not a queued public ACK. A protected AwaitReady peek selects capacity only; normal signature,
 requester, policy/rate/freshness checks remain. These changes are not implemented by the pump.
 
 The next increment should give high a small independently prepaid Ready/control Source
-owner, prepared before irreversible Finish-open publication. Finish history and one Ready
-intent commit together; high publishes Ready only after its confirmation owners actually drain
+owner, prepared within the ORIGINAL native Finish window. Its ID/deadline and canonical
+helper choice are published once after actual capacity exists. The Ready deadline must fit
+the original window; retries cannot renew either one. High publishes Ready only after its confirmation owners actually drain
 and its exact SDP receive owner is installed. Low accepts that original signed Ready only for
 the exact Finish ID/hash, scope/current protected epoch, endpoint devices/joins/key references
 and handshake, then retires only Finish retry authority and transfers its original keys.

@@ -910,11 +910,10 @@ impl LocalJoin {
     }
     pub(super) fn collect_confirmations(&mut self, clock: &dyn Clock) {
         for (id, pair) in &mut self.confirmations.pairs {
-            if clock.monotonic_ms() >= pair.deadline || !self.lease.is_live() || !pair.pin.is_live()
-            {
-                if let Some(chain) = &pair.chain {
-                    chain.close();
-                }
+            if let Some(chain) = &pair.chain {
+                // Same arm-versus-close CAS as process Workflow collection. Keeping transfer
+                // custody alive does not change pair.deadline or any old action/source grant.
+                chain.collect_expired(clock.monotonic_ms());
             }
             if !pair.retired
                 && (!self.lease.is_live()

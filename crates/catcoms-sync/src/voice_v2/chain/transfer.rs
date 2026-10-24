@@ -167,6 +167,9 @@ impl ConfirmationControl {
         // All existing borrowers enter WorkflowState before the lane. Holding that fence
         // across idle observation, closure and take prevents an old engine preflight from
         // acquiring the lane in between. No callback/destructor/Engine entry is allowed here.
+        // This manual close path does not call PreparedChain::close below. Fence an already
+        // prepared Finish window too; phase extraction must never leave an old Open arm alive.
+        chain.binding.transition.close();
         state.closed = true;
         let lane = state.crypto.take().expect("checked original idle lane");
         control.closed = true;

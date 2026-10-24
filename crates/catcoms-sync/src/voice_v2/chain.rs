@@ -24,10 +24,13 @@ mod derivation;
 mod outgoing;
 mod start;
 mod transfer;
+mod transition;
 pub(crate) use admission::ConfirmationAdmission;
 pub(super) use admission::ConfirmationConsent;
 pub(in crate::voice_v2) use start::{StartAdmission, StartCandidate};
 pub use transfer::{PreparedSdpCapacity, TransferredSdpCapacity};
+pub use transition::FinishEvidence;
+pub(in crate::voice_v2) use transition::{FinishIdentity, PreparedFinishWindow};
 // Confirmation-only envelope. Stacking this on the existing SDP reserve is not whole-chain
 // readiness; the supported chain still needs a measured, explicit phase transfer.
 const VARIABLE_BYTES: usize = 96 * 1024;
@@ -78,12 +81,16 @@ impl Binding {
 // owner too. No reference points from this owner back into Workflow/control/actions.
 pub(super) struct PlanBinding {
     value: Binding,
+    transition: transition::FinishWindow,
     // Original fixed history already owns this paid allocation without owning Workflow.
     // Only Workflow's LAST field publisher can establish variable-capacity retirement.
     workflow_drained: AtomicBool,
     _metadata: Credit,
 }
 impl PlanBinding {
+    fn live(&self) -> bool {
+        self.value.live() && self.transition.is_live()
+    }
     // The original fixed payment already retains this exact pool. Borrow it rather than
     // adding duplicate pool owners to HistoryPlan and Workflow inside the 2KiB allowance.
     pub(super) fn resources(&self) -> &Arc<Resources> {
@@ -478,6 +485,7 @@ impl PreparedChain {
         let binding = Arc::new(PlanBinding {
             _metadata: metadata,
             value: binding,
+            transition: transition::FinishWindow::default(),
             workflow_drained: AtomicBool::new(false),
         });
         let history = Arc::new(HistoryPlan {
@@ -540,6 +548,9 @@ impl PreparedChain {
     /// End/expiry closes pending effects and returns only unused capacity. Existing engines
     /// and input readers remain charged through actual settlement/last drop, even after End.
     pub fn close(&self) {
+        // Claim irreversible closure BEFORE waiting for Control. A Finish publication can
+        // otherwise arm a new window after an expiry collector already decided to close it.
+        self.binding.transition.close();
         let (workflow, actions) = {
             let mut control = self.control.lock().unwrap_or_else(|e| e.into_inner());
             if control.closed {
@@ -712,12 +723,11 @@ impl Workflow {
         })
     }
     pub(crate) fn collect_expired(&self, mono: u64) {
-        if mono >= self.binding.deadline || !self.binding.live() || !self.live.is_live() {
-            if let Some(control) = self.control.upgrade() {
-                control.close();
-            } else {
-                self.close();
-            }
+        if let Some(control) = self.control.upgrade() {
+            control.collect_expired(mono);
+        } else {
+            self.binding.transition.close();
+            self.close();
         }
     }
     fn close(&self) {

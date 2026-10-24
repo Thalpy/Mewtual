@@ -26,6 +26,8 @@ struct PreparedSeal {
     kind: EncryptedKind,
     pair_signed: Option<SignedObject>,
     returned: Option<SignedObject>,
+    window: Option<crate::voice_v2::chain::PreparedFinishWindow>,
+    identity: crate::voice_v2::chain::FinishIdentity,
 }
 impl PreparedSeal {
     fn publish(
@@ -33,7 +35,11 @@ impl PreparedSeal {
         publication: &mut Option<crate::voice_v2::packets::PreparedSealedPublication<'_>>,
         confirmations: &mut Confirmations,
         retirement: &mut ConfirmationRetirement,
-    ) {
+        mono: u64,
+    ) -> Result<(), VoiceError> {
+        if let Some(window) = &self.window {
+            window.publish_at(mono, self.identity)?;
+        }
         publication
             .take()
             .expect("one signature publication")
@@ -48,6 +54,7 @@ impl PreparedSeal {
                     retirement,
                 );
             });
+        Ok(())
     }
 }
 
@@ -151,11 +158,31 @@ impl LocalJoin {
             message: signed.id(),
             hash: signed.hash(),
         };
+        // Compatibility result recovery and ordinary confirmation do not arm this native
+        // transition. Only the application-bound original origin may preserve transfer custody.
+        let window = if kind == EncryptedKind::ConfirmFinish {
+            origin
+                .as_ref()
+                .map(|origin| {
+                    pair.chain
+                        .as_ref()
+                        .ok_or(VoiceError::Unauthorized)?
+                        .prepare_finish_window(origin.actor, authority.context)
+                })
+                .transpose()?
+        } else {
+            None
+        };
         let mut prepared = PreparedSeal {
             handshake: flight.handshake,
             kind,
             pair_signed: Some(signed.clone()),
             returned: None,
+            window,
+            identity: crate::voice_v2::chain::FinishIdentity {
+                message: signed.id(),
+                hash: signed.hash(),
+            },
         };
         let mut terminal = Some(TerminalResult { binding, outcome });
         let mut retirement = ConfirmationRetirement::default();
@@ -163,6 +190,7 @@ impl LocalJoin {
         let result = action.with_result(ciphertext, claimed_tag, || {
             action.check_chain_epoch(authority.context.epoch)?;
             let (own_mono, own_wall) = action.pending_observation();
+            let mut publication_result = None;
             if let Some(origin) = origin {
                 origin
                     .actor
@@ -178,7 +206,12 @@ impl LocalJoin {
                             mono,
                         )?;
                         permit.publish(|| {
-                            prepared.publish(&mut publication, confirmations, &mut retirement)
+                            publication_result = Some(prepared.publish(
+                                &mut publication,
+                                confirmations,
+                                &mut retirement,
+                                mono,
+                            ));
                         })
                     })?;
             } else {
@@ -191,8 +224,10 @@ impl LocalJoin {
                     mono,
                 )?;
                 final_owner(wall, mono)?;
-                prepared.publish(&mut publication, confirmations, &mut retirement);
+                publication_result =
+                    Some(prepared.publish(&mut publication, confirmations, &mut retirement, mono));
             }
+            publication_result.expect("successful original origin observation")?;
             Ok(terminal.take().expect("one terminal publication"))
         });
         drop(publication);

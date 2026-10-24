@@ -69,6 +69,7 @@ fn fixed_metadata_allowance_covers_retained_owner_layouts() {
         + size_of::<WorkLane>()
         + 3 * size_of::<slots::Slots>()
         + 3 * size_of::<slots::ReservedSlots>()
+        + crate::voice_v2::runtime::EpochObservation::retained_graph_bytes()
         + ARC_OWNERS * 2 * size_of::<usize>();
     assert!(
         bytes <= METADATA_BYTES,

@@ -411,6 +411,7 @@ pub(super) struct ConsumedIncoming {
 /// prepares closed-result work, repeats final checks, then consumes it without a fallible tail.
 pub(super) struct ValidatedInbound {
     token: u64,
+    pub message: MessageId,
     pub header: EncryptedHeader,
     pub hash: [u8; 32],
     pub expires: u64,
@@ -1526,6 +1527,7 @@ impl PacketLedger {
         let pair = self.pair(&header.handshake, authority)?.live.clone();
         Ok(ValidatedInbound {
             token,
+            message: incoming.object.id(),
             header: header.clone(),
             hash: incoming.object.hash(),
             expires: incoming.object.expires(),
