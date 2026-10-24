@@ -13,14 +13,16 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 mod confirmation;
+mod snapshot;
 pub use confirmation::{
     ConfirmationOutput, CryptoFlight, FlightSubmission, OpenedFlight, PairReceipt, PairSelector,
-    PairSetup, ReceiveProgress,
+    PairSetup, ReceiveProgress, VoicePairConfirmation,
 };
 pub(crate) use confirmation::{
     ProtectedDerivation, ProtectedDerivationResult, ProtectedOpenedResult, ProtectedPair,
     ProtectedResponse, ProtectedSealedResult, ProtectedStart,
 };
+pub use snapshot::{PeerSnapshot, PeerSnapshotPermit, PeerSnapshotWaiter};
 
 const RECORD_BYTES: usize = 1536;
 const MAX_PENDING: usize = 32;
@@ -501,6 +503,11 @@ impl LocalJoin {
         clock: &dyn Clock,
     ) -> Result<Arc<super::negotiation::Exchange>, VoiceError> {
         self.pair_current(handshake, authority, clock)?;
+        // Protected pairs may only adopt the ORIGINAL affine confirmation capacity through
+        // the causal native successor path. Fresh reserve/lane acquisition would bypass it.
+        if self.confirmations.pairs[&handshake].protected_mode() {
+            return Err(VoiceError::Unauthorized);
+        }
         if !self.confirmations.established(handshake) {
             return Err(VoiceError::Unauthorized);
         }
@@ -566,6 +573,11 @@ impl LocalJoin {
     ) -> Result<(), VoiceError> {
         self.owned(authority)?;
         self.ledger.retire_outgoing(id, authority)
+    }
+    /// Inspect only already-published native packets, borrowing bytes from their original
+    /// payment until Source can admit its own paid copy. This iterator grants no authority.
+    pub(crate) fn published_source_packets(&self) -> impl Iterator<Item = &SignedObject> {
+        self.ledger.published_source_packets()
     }
     /// Only the actual cached outgoing ledger packet gets an encrypted source grant. Its pair
     /// lease closes on timeout/newer-pair promotion even when this local join remains active.

@@ -2,6 +2,82 @@ use super::*;
 use rand_chacha::ChaCha20Rng;
 use rand_core::SeedableRng;
 
+#[tokio::test]
+async fn native_and_physical_owners_both_delay_shutdown_in_either_drop_order() {
+    use std::future::{poll_fn, Future};
+    use std::task::Poll;
+    for native_first in [false, true] {
+        let (session, _) = session(Arc::new(Resources::default()), [3; 32]);
+        let native = session.native_hold().unwrap();
+        assert!(matches!(session.native_hold(), Err(Refused::Capacity)));
+        let physical = session.header().unwrap(); // native work cannot borrow this envelope
+        session.close_admission();
+        assert!(matches!(session.native_hold(), Err(Refused::Binding)));
+        assert!(matches!(session.header(), Err(Refused::Binding)));
+        let mut idle = Box::pin(session.wait_idle());
+        assert!(poll_fn(|cx| Poll::Ready(idle.as_mut().poll(cx).is_pending())).await);
+        if native_first {
+            drop(native);
+            assert!(poll_fn(|cx| Poll::Ready(idle.as_mut().poll(cx).is_pending())).await);
+            drop(physical);
+        } else {
+            drop(physical);
+            assert!(poll_fn(|cx| Poll::Ready(idle.as_mut().poll(cx).is_pending())).await);
+            drop(native);
+        }
+        assert!(poll_fn(|cx| Poll::Ready(idle.as_mut().poll(cx).is_ready())).await);
+        assert_eq!(session.fixture_counts(), (false, 0, 0));
+    }
+    // Closing admission first cannot be repaired by a fresh native guard on this Session.
+    let (closed, _) = session(Arc::new(Resources::default()), [3; 32]);
+    closed.close_admission();
+    assert!(matches!(closed.native_hold(), Err(Refused::Binding)));
+    closed.wait_idle().await;
+}
+
+#[tokio::test]
+async fn a_foreign_native_guard_cannot_drain_the_original_session() {
+    use std::future::{poll_fn, Future};
+    use std::task::Poll;
+    let (original, _) = session(Arc::new(Resources::default()), [3; 32]);
+    let (foreign, _) = session(Arc::new(Resources::default()), [3; 32]);
+    let hold = original.native_hold().unwrap();
+    let other = foreign.native_hold().unwrap();
+    original.close_admission();
+    let mut idle = Box::pin(original.wait_idle());
+    assert!(poll_fn(|cx| Poll::Ready(idle.as_mut().poll(cx).is_pending())).await);
+    drop(other);
+    assert!(poll_fn(|cx| Poll::Ready(idle.as_mut().poll(cx).is_pending())).await);
+    drop(hold);
+    assert!(poll_fn(|cx| Poll::Ready(idle.as_mut().poll(cx).is_ready())).await);
+}
+
+#[test]
+fn concurrent_native_acquisition_has_one_actual_owner_without_spending_a_nonce() {
+    let (session, _) = session(Arc::new(Resources::default()), [3; 32]);
+    let ready = std::sync::Barrier::new(9);
+    let held = std::sync::Barrier::new(9);
+    let winners = std::sync::atomic::AtomicUsize::new(0);
+    std::thread::scope(|scope| {
+        for _ in 0..8 {
+            scope.spawn(|| {
+                ready.wait();
+                let owner = session.native_hold();
+                if owner.is_ok() {
+                    winners.fetch_add(1, Ordering::SeqCst);
+                }
+                held.wait();
+                drop(owner);
+            });
+        }
+        ready.wait();
+        held.wait();
+    });
+    assert_eq!(winners.load(Ordering::SeqCst), 1);
+    assert_eq!(session.fixture_counts(), (false, 0, 0));
+    assert!(session.native_hold().is_ok());
+}
+
 fn session(resources: Arc<Resources>, group: [u8; 32]) -> (Arc<Session>, Keys) {
     use catcoms_rt::RngCore;
     let mut rng = ChaCha20Rng::from_seed([37; 32]);
@@ -99,6 +175,26 @@ fn paid_fixed_storage_and_original_control_lane_cover_codec_peak() {
     use hkdf::Hkdf;
     use hmac::Hmac;
     use sha2::Sha256;
+    let adapters = [
+        super::super::pending_close::layout_bytes(),
+        super::super::history::layout_bytes(),
+        super::super::finalization::layout_bytes(),
+        super::super::input::layout_bytes(),
+        super::super::admission::layout_bytes(),
+        super::super::settlement::layout_bytes(),
+        super::super::plan_final::layout_bytes(),
+        super::super::key_session::layout_bytes(),
+        super::super::transition::layout_bytes(),
+        super::super::confirmation_history::layout_bytes(),
+        super::super::confirmation_input::layout_bytes(),
+        super::super::confirmation_admission::layout_bytes(),
+        super::super::confirmation_settlement::layout_bytes(),
+        super::super::confirmation_result::layout_bytes(),
+        super::super::confirmation_begin::layout_bytes(),
+    ];
+    eprintln!(
+        "adapter graphs pending/history/final/input/admission/settlement/plan-final/transition/child-history/child-input/child-admission/child-settlement/child-result/child-begin: {adapters:?}"
+    );
     let state = std::mem::size_of::<HeaderWorker>()
         .max(std::mem::size_of::<AuthenticatedRequest>())
         .max(std::mem::size_of::<Incoming>())
@@ -117,9 +213,9 @@ fn paid_fixed_storage_and_original_control_lane_cover_codec_peak() {
         + 2 * std::mem::size_of::<usize>()
         + state
         + http::HEADER_BYTES // FULL fixed Box allocation, not merely its inline pointer
-        // Only one synchronous Control opcode owns this original physical position. Count
+        // Only one adapter owns this original physical position. Count
         // its largest complete handler graph, not a sum of mutually exclusive dispatch arms.
-        + super::super::pending_close::layout_bytes().max(super::super::history::layout_bytes()).max(super::super::finalization::layout_bytes())
+        + adapters.into_iter().max().unwrap()
         + std::mem::size_of::<Aes256Gcm>()
         + 2 * std::mem::size_of::<Hmac<Sha256>>()
         + crypto::HEADER * 4
@@ -587,7 +683,7 @@ fn constructor_second_payment_refusal_restores_credit_and_never_calls_rng() {
     let pressure = pool
         .charge(
             group,
-            256 * 1024 - CONTROL_BYTES - BOOTSTRAP_BYTES / 2,
+            catcoms_sync::voice_v2::resources::GROUP_BYTES - CONTROL_BYTES - BOOTSTRAP_BYTES / 2,
             ResourceKind::Retained,
         )
         .unwrap();

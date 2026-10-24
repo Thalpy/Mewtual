@@ -3,7 +3,7 @@
  * verifies the directional MAC and debits its original session before reading any body. Seed
  * import remains fixture-only; production construction uses the original selected key. */
 export type VoiceIpcDirection = 0 | 1;
-export type VoiceIpcOperation = 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9;
+export type VoiceIpcOperation = 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10 | 11 | 12 | 13;
 export type VoiceIpcBodyKind = 0 | 1;
 export type VoiceIpcHeader = Readonly<{
   direction: VoiceIpcDirection; operation: VoiceIpcOperation; kind: VoiceIpcBodyKind;
@@ -24,7 +24,7 @@ const refuse = (): never => { throw new VoiceIpcFrameError(); };
  * fixed control metadata; Result requests cannot substitute a control body. */
 function maximum(header: VoiceIpcHeader): number {
   if ((header.direction !== 0 && header.direction !== 1) ||
-      !Number.isInteger(header.operation) || header.operation < 1 || header.operation > 9 ||
+      !Number.isInteger(header.operation) || header.operation < 1 || header.operation > 13 ||
       (header.kind !== 0 && header.kind !== 1)) return refuse();
   if ((header.direction === 0 && header.operation === 3 && header.kind === 1) ||
       (header.direction === 1 && header.operation === 1 && header.kind === 1)) return 2064;

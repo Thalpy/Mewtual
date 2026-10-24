@@ -1,4 +1,4 @@
-//! Inactive exact original-Session terminal closure/issuance/ACK adapter. This is metadata
+//! Exact original-Session terminal closure/issuance/ACK adapter. This is metadata
 //! cleanup, not engine admission, browser drainage evidence or a normal Actor/WebView flow.
 //! Production's whitelist remains unchanged until the complete action contracts are ready.
 use super::bootstrap::Route;
@@ -71,6 +71,13 @@ fn respond_original(
         Kind::ClosePhase {
             mode: CloseMode::Retire,
         } => {
+            // A prior ordinary Return may have lost its reply while an actual copy was
+            // still alive. Visit bounded compaction BEFORE checking immutable close mode:
+            // once that copy drains, an ordinary row must be able to become local history.
+            // This never upgrades Return to Retire or supplies its missing Root witness.
+            // The Retire below still refuses, and independent channel preflight decides
+            // whether that ordinary history permits closing this original Session.
+            let _ = row.try_compact()?;
             row.close_phase(route.session().identity(), CloseMode::Retire)?;
             // No listener wait for copies/Root snapshot: one original paid driver retries
             // Pending. Do not take Work or Input here; that would wait on its own custody.

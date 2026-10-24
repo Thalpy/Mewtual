@@ -137,7 +137,7 @@ fn sdp_from(
                 sequence,
                 offer: Some(offer),
             },
-            ciphertext: vec![5; MAX_SDP_PLAINTEXT + 16],
+            ciphertext: vec![5; kind.max_plaintext() + 16],
         },
     )
     .unwrap()
@@ -168,8 +168,16 @@ fn sdp_without_prepaid_readiness_and_crossed_offer_refuse_without_nonce_or_repla
     };
     assert_eq!(reserve(&mut a, &mut rng).err(), Some(VoiceError::Capacity));
     assert_eq!(a.ledger.pairs[&HANDSHAKE].next, 0);
+    // Refuse at the ACTUAL reserve boundary, including after a reviewed copy reduction.
+    // A fixed40KiB pressure ceased to be pressure when SDP moved224→192KiB; the security
+    // contract is still refusal before nonce/replay consumption when prepayment cannot fit.
     let pressure = pool
-        .charge(a.context.scope.group, 40 * 1024, ResourceKind::Retained)
+        .charge(
+            a.context.scope.group,
+            crate::voice_v2::resources::GROUP_BYTES - super::super::negotiation::EXCHANGE_BYTES + 1
+                - pool.counts().0,
+            ResourceKind::Retained,
+        )
         .unwrap();
     assert_eq!(a.prepare_sdp(&clock).err(), Some(VoiceError::Capacity));
     assert!(a.ledger.sdp.is_none());
@@ -178,7 +186,8 @@ fn sdp_without_prepaid_readiness_and_crossed_offer_refuse_without_nonce_or_repla
     a.prepare_sdp(&clock).unwrap();
     let local = reserve(&mut a, &mut rng).unwrap();
     assert_eq!(local.sequence, 1);
-    assert_eq!(local.aad.len(), super::super::negotiation::MAX_AAD);
+    // Legacy headers retain their original canonical bytes; only round headers grow.
+    assert_eq!(local.aad.len(), 542);
     let offer = OfferId {
         issuer: a.context.local,
         message: local.id,
@@ -349,7 +358,7 @@ fn sdp_responder_pins_original_offer_only_at_successful_admission_and_allows_one
 }
 
 #[test]
-fn prepared_sdp_cannot_adopt_a_replacement_exchange_or_commit_after_final_revocation() {
+fn prepared_sdp_blocks_replacement_and_cannot_commit_after_final_revocation() {
     use std::cell::Cell;
     for replace in [false, true] {
         let mut a = Endpoint::new(1, Arc::new(Resources::default()));
@@ -369,8 +378,10 @@ fn prepared_sdp_cannot_adopt_a_replacement_exchange_or_commit_after_final_revoca
             .unwrap();
         if replace {
             owner.close();
-            let next = a.prepare_sdp(&clock).unwrap();
-            assert!(!Arc::ptr_eq(&owner, &next));
+            // Intentional stronger contract: actual prepared input and even an external
+            // closed owner prevent replacement, rather than allowing another owner and
+            // relying only on the later stale-admission check. No prepared input is lost.
+            assert_eq!(a.prepare_sdp(&clock).err(), Some(VoiceError::Capacity));
         }
         let effect = Cell::new(false);
         let result = a.ledger.commit_prepared_inbound(
@@ -386,14 +397,67 @@ fn prepared_sdp_cannot_adopt_a_replacement_exchange_or_commit_after_final_revoca
                 Ok(())
             },
         );
-        assert_eq!(result.err(), Some(VoiceError::Unauthorized));
+        // A failed replacement released only the ledger's closed SDP handle, so its
+        // capacity lookup refuses before the final authorization closure can run.
+        assert_eq!(
+            result.err(),
+            Some(if replace {
+                VoiceError::Capacity
+            } else {
+                VoiceError::Unauthorized
+            })
+        );
         assert!(!effect.get(), "no stale native origin/effect transaction");
         assert_eq!(a.ledger.serial, 0);
         assert_eq!(a.ledger.pairs[&HANDSHAKE].replay.highest, 0);
         assert!(a.ledger.incoming.is_empty());
-        let sdp = a.ledger.sdp.as_ref().unwrap();
-        assert!(sdp.role == SdpRole::Ready);
-        assert_eq!(sdp.remote, None);
+        if replace {
+            assert!(a.ledger.sdp.is_none(), "closed ledger handle was released");
+        } else {
+            let sdp = a.ledger.sdp.as_ref().unwrap();
+            assert!(sdp.role == SdpRole::Ready);
+            assert_eq!(sdp.remote, None);
+        }
+    }
+}
+
+#[test]
+fn sdp_registry_ledger_closed_entry_retries_after_actual_lower_drop_without_resetting_history() {
+    for hold_lower in [false, true] {
+        let mut a = Endpoint::new(1, Arc::new(Resources::default()));
+        let mut b = Endpoint::new(2, Arc::new(Resources::default()));
+        a.register(&b);
+        b.register(&a);
+        a.establish();
+        b.establish();
+        let clock = ManualClock::new(1000);
+        let mut rng = ChaCha20Rng::seed_from_u64(88);
+        // Populate the real allocator, replay window and retained packet maps first. A
+        // closed SDP entry may be removed, but no pair/counter/history may be reconstructed.
+        let outgoing = a.reserve(&clock, &mut rng).unwrap();
+        let remote = b.reserve(&clock, &mut rng).unwrap();
+        let signed = b.submit(&remote, &[6; 32], &clock).unwrap();
+        let incoming = a.admit(signed, &clock).unwrap();
+        let first = a.prepare_sdp(&clock).unwrap();
+        let lower = hold_lower.then(|| first.charge(Stage::Lower, 128).unwrap());
+        first.close();
+        drop(first);
+        if hold_lower {
+            assert_eq!(a.prepare_sdp(&clock).err(), Some(VoiceError::Capacity));
+            assert!(a.ledger.sdp.is_none());
+        }
+        drop(lower);
+        let next = a.prepare_sdp(&clock).unwrap();
+        assert!(Arc::ptr_eq(
+            &a.ledger.resources.exchange(a.context.scope.group).unwrap(),
+            &next
+        ));
+        assert_eq!(a.ledger.pairs[&HANDSHAKE].next, 1);
+        assert_eq!(a.ledger.pairs[&HANDSHAKE].replay.highest, 1);
+        assert_eq!(a.ledger.serial, 1);
+        assert!(a.ledger.outgoing.contains_key(&outgoing.id));
+        assert!(a.ledger.incoming.contains_key(&incoming.token));
+        assert!(next.is_live());
     }
 }
 
@@ -1741,7 +1805,11 @@ fn engine_and_packet_cache_share_credits_and_refusal_does_not_allocate_a_nonce()
     let mut f = fixture();
     let full = f
         .resources
-        .charge(f.a.context.scope.group, 256 * 1024, ResourceKind::Retained)
+        .charge(
+            f.a.context.scope.group,
+            crate::voice_v2::resources::GROUP_BYTES,
+            ResourceKind::Retained,
+        )
         .unwrap();
     assert_eq!(
         f.a.reserve(&f.clock, &mut f.rng).err(),
@@ -1892,4 +1960,90 @@ fn final_submit_and_delivery_repeat_future_time_checks_without_consuming_valid_t
     assert!(f.a.submit(&reservation, &[42; 32], &f.clock).unwrap() == signed);
     assert!(f.a.submit(&pending, &[42; 32], &f.clock).is_ok());
     assert!(f.c.commit(&incoming, &f.clock).is_ok());
+}
+
+#[test]
+fn selected_complete_sdp_mode_never_falls_back_to_ordinary_packets_after_round_close() {
+    let mut f = fixture();
+    f.a.establish();
+    f.c.establish();
+    // Give the legacy exchange a real owner first, then select the protected mode as the
+    // production confirmation preparation does. Dropping that round must not reset mode.
+    let owner = f.a.prepare_sdp(&f.clock).unwrap();
+    f.a.ledger
+        .select_complete_sdp_profile(HANDSHAKE, &authority(&f.a.context, &f.a.lease))
+        .unwrap();
+    let mut rng = ChaCha20Rng::seed_from_u64(59);
+    let round = SdpRound {
+        ready: [66; 32],
+        profile: SdpProfile::CompleteSdpV1,
+    };
+    for closed in [false, true] {
+        if closed {
+            owner.close();
+            f.a.ledger.prune(&f.clock);
+        }
+        for kind in [
+            EncryptedKind::Offer,
+            EncryptedKind::Answer,
+            EncryptedKind::Ice,
+            EncryptedKind::Bye,
+            EncryptedKind::OfferRound(round),
+            EncryptedKind::AnswerRound(round),
+        ] {
+            let next = f.a.ledger.pairs[&HANDSHAKE].next;
+            let serial = f.a.ledger.serial;
+            let bytes = f.resources.counts();
+            let slots = (f.a.ledger.outgoing.len(), f.a.ledger.incoming.len());
+            let request = ReserveRequest {
+                handshake: HANDSHAKE,
+                kind,
+                offer: if kind.is_offer() || kind == EncryptedKind::Bye {
+                    None
+                } else {
+                    Some(OfferId {
+                        issuer: f.a.context.local,
+                        message: [71; 32],
+                    })
+                },
+                ciphertext_bytes: 32,
+            };
+            assert_eq!(
+                f.a.ledger
+                    .reserve(
+                        f.a.signer.verifying_key().to_bytes(),
+                        request,
+                        &authority(&f.a.context, &f.a.lease),
+                        &f.clock,
+                        &mut rng
+                    )
+                    .err(),
+                Some(VoiceError::Unauthorized)
+            );
+            assert_eq!(f.a.ledger.pairs[&HANDSHAKE].next, next);
+            assert_eq!(f.a.ledger.serial, serial);
+            assert_eq!(f.resources.counts(), bytes);
+            assert_eq!(
+                (f.a.ledger.outgoing.len(), f.a.ledger.incoming.len()),
+                slots
+            );
+        }
+        // An otherwise authentic old ICE cannot enter through the ordinary inbound path.
+        let ice = sdp_from(
+            &f.c,
+            &f.a,
+            EncryptedKind::Ice,
+            [72; 32],
+            OfferId {
+                issuer: f.c.context.local,
+                message: [73; 32],
+            },
+            1,
+        );
+        assert_eq!(
+            f.a.admit(ice, &f.clock).err(),
+            Some(VoiceError::Unauthorized)
+        );
+        assert_eq!(f.a.ledger.pairs[&HANDSHAKE].replay.highest, 0);
+    }
 }

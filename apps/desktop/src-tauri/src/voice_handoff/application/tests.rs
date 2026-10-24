@@ -89,10 +89,16 @@ fn missing_or_deny_all_csp_refuses_without_disabling_any_policy() {
 fn capacity_refusal_does_not_open_or_advertise_a_replacement_service() {
     let state = AppState::default();
     let resources = voice_runtime(&state).resources();
-    let pressure: Vec<_> = (1..=8)
+    let groups = catcoms_sync::voice_v2::resources::PROCESS_BYTES
+        / catcoms_sync::voice_v2::resources::GROUP_BYTES;
+    let pressure: Vec<_> = (1..=groups)
         .map(|id| {
             resources
-                .charge([id; 32], 256 * 1024, ResourceKind::Retained)
+                .charge(
+                    [id as u8; 32],
+                    catcoms_sync::voice_v2::resources::GROUP_BYTES,
+                    ResourceKind::Retained,
+                )
                 .unwrap()
         })
         .collect();

@@ -6,6 +6,7 @@ use crate::voice_v2::helper::RoomAuthority;
 use crate::voice_v2::runtime::{ActorOwner, Runtime, View};
 use rand_core::RngCore;
 mod derivation;
+mod observation;
 mod result;
 
 struct ProtectedFixture {
@@ -46,7 +47,7 @@ impl Clock for OriginClock {
         self.inner.sleep(duration)
     }
 }
-fn register(runtime: &Arc<Runtime>, end: &End, peer: DeviceId) -> ActorOwner {
+fn register(runtime: &Arc<Runtime>, end: &End, peer: DeviceId, helpers: &[DeviceId]) -> ActorOwner {
     let ticket = runtime.session_ticket();
     runtime.activate_session(&ticket).unwrap();
     let (mut actor, registration) = runtime
@@ -56,7 +57,10 @@ fn register(runtime: &Arc<Runtime>, end: &End, peer: DeviceId) -> ActorOwner {
     actor
         .sync_view(View {
             epoch: end.context.epoch,
-            members: [end.context.local, peer].into(),
+            members: [end.context.local, peer]
+                .into_iter()
+                .chain(helpers.iter().copied())
+                .collect(),
             policy: end.context.scope.policy,
             eligible: true,
             indirect: true,
@@ -65,6 +69,9 @@ fn register(runtime: &Arc<Runtime>, end: &End, peer: DeviceId) -> ActorOwner {
     actor
 }
 fn fixture() -> ProtectedFixture {
+    fixture_with_members(&[])
+}
+fn fixture_with_members(helpers: &[DeviceId]) -> ProtectedFixture {
     let clock = ManualClock::new(1000);
     let origin_clock = Arc::new(OriginClock {
         inner: clock.clone(),
@@ -83,8 +90,8 @@ fn fixture() -> ProtectedFixture {
         (b, a, b_rt, a_rt)
     };
     let id = admit_pair(&mut low, &mut high, &clock, &mut rng);
-    let low_actor = register(&low_rt, &low, high.context.local);
-    let high_actor = register(&high_rt, &high, low.context.local);
+    let low_actor = register(&low_rt, &low, high.context.local, helpers);
+    let high_actor = register(&high_rt, &high, low.context.local, helpers);
     for end in [&mut low, &mut high] {
         end.join
             .prepare_crypto_chain(id, &ca(&end.context, &end.lease), &clock)
@@ -345,7 +352,7 @@ fn protected_confirmation_completes_under_full_ordinary_pool_pressure_at_both_en
     let high_full = high_pool
         .charge(
             p.f.high.context.scope.group,
-            256 * 1024 - high_pool.counts().0,
+            crate::voice_v2::resources::GROUP_BYTES - high_pool.counts().0,
             crate::voice_v2::resources::ResourceKind::Retained,
         )
         .unwrap();
@@ -375,7 +382,7 @@ fn protected_confirmation_completes_under_full_ordinary_pool_pressure_at_both_en
         p.f.pool
             .charge(
                 p.f.low.context.scope.group,
-                256 * 1024 - p.f.pool.counts().0,
+                crate::voice_v2::resources::GROUP_BYTES - p.f.pool.counts().0,
                 crate::voice_v2::resources::ResourceKind::Retained,
             )
             .unwrap();
@@ -398,7 +405,7 @@ fn protected_confirmation_completes_under_full_ordinary_pool_pressure_at_both_en
     let _high_full = high_pool
         .charge(
             p.f.high.context.scope.group,
-            256 * 1024 - high_pool.counts().0,
+            crate::voice_v2::resources::GROUP_BYTES - high_pool.counts().0,
             crate::voice_v2::resources::ResourceKind::Retained,
         )
         .unwrap();

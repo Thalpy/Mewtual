@@ -1,6 +1,7 @@
 /** Bounded private action-history decoder. Call only AFTER the retained channel authenticates
  * its original response, operation, counters and logical header. Decoding metadata grants no
- * factory, engine, receipt or RTC authority. This is not wired to production action dispatch. */
+ * factory, engine, receipt or RTC authority. Application-bound dispatch independently checks
+ * each original native row; a decoded historical reply never enables UI V2 or RTC. */
 import type { VoiceIpcActionIdentity } from "./voice-ipc-actions.ts";
 
 const ERRORS = ["malformed", "bounds", "signature", "scope", "freshness", "unauthorized",
@@ -16,10 +17,11 @@ export type VoiceIpcReceipt = Readonly<{
 export type VoiceIpcActionReply = Readonly<{ kind: "refused"; code: "closed" | "stopped" | VoiceIpcProtocolError }> |
   Readonly<{ kind: "status"; row: string; pending: VoiceIpcPending; identity: VoiceIpcActionIdentity | null;
     settled: boolean; receipt: VoiceIpcReceipt | null; acknowledged: boolean; localDrained: boolean }>;
+export type VoiceIpcFinalMode = "retire" | "retire-plan";
 export type VoiceIpcFinalReply = Extract<VoiceIpcActionReply, { kind: "refused" }> |
-  Readonly<{ kind: "final"; row: string; identity: VoiceIpcActionIdentity; mode: "retire";
+  Readonly<{ kind: "final"; row: string; identity: VoiceIpcActionIdentity; mode: VoiceIpcFinalMode;
     stage: "pending"; proof: null }> |
-  Readonly<{ kind: "final"; row: string; identity: VoiceIpcActionIdentity; mode: "retire";
+  Readonly<{ kind: "final"; row: string; identity: VoiceIpcActionIdentity; mode: VoiceIpcFinalMode;
     stage: "issued" | "acknowledged"; proof: string }>;
 const fail = (): never => { throw new Error("invalid voice action reply"); };
 
@@ -28,8 +30,9 @@ const fail = (): never => { throw new Error("invalid voice action reply"); };
  * The original paid Control driver covers these bounded objects/strings. This pure codec
  * performs no fetch, setup, provider action, ACK, retry, or cleanup on the caller's behalf. */
 export function decodeVoiceIpcFinalReply(bytes: Uint8Array, expectedRow: string,
-  expectedIdentity: VoiceIpcActionIdentity, expectedProof: string | null = null): VoiceIpcFinalReply {
-  if (!isVoiceIpcActionRow(expectedRow)) return fail();
+  expectedIdentity: VoiceIpcActionIdentity, expectedProof: string | null = null,
+  expectedMode: VoiceIpcFinalMode = "retire"): VoiceIpcFinalReply {
+  if (!isVoiceIpcActionRow(expectedRow) || (expectedMode !== "retire" && expectedMode !== "retire-plan")) return fail();
   // Validate expected metadata even for a refusal; do not accept lossy/aliased identities.
   const exactU64 = (text: unknown): text is string => typeof text === "string" &&
     /^[1-9][0-9]{0,19}$/.test(text) && BigInt(text) <= ((1n << 64n) - 1n);
@@ -42,7 +45,8 @@ export function decodeVoiceIpcFinalReply(bytes: Uint8Array, expectedRow: string,
     if (refused.kind !== "refused") return fail();
     return refused;
   }
-  if (bytes.byteLength !== 100 || bytes[0] !== 1 || bytes[1] !== 4 || bytes[66] !== 1 || bytes[67] > 2) return fail();
+  if (bytes.byteLength !== 100 || bytes[0] !== 1 || bytes[1] !== 4 ||
+      bytes[66] !== (expectedMode === "retire" ? 1 : 2) || bytes[67] > 2) return fail();
   const hex = (start: number, end: number) => {
     let result = "";
     for (let i = start; i < end; i++) result += bytes[i].toString(16).padStart(2, "0");
@@ -55,10 +59,10 @@ export function decodeVoiceIpcFinalReply(bytes: Uint8Array, expectedRow: string,
   const proof = hex(68, 100);
   if (bytes[67] === 0) {
     if (proof !== "0".repeat(64) || expectedProof !== null) return fail();
-    return Object.freeze({ kind: "final", row, identity, mode: "retire", stage: "pending", proof: null });
+    return Object.freeze({ kind: "final", row, identity, mode: expectedMode, stage: "pending", proof: null });
   }
   if (expectedProof !== null && (bytes[67] !== 2 || proof !== expectedProof)) return fail();
-  return Object.freeze({ kind: "final", row, identity, mode: "retire", stage: bytes[67] === 2 ? "acknowledged" : "issued", proof });
+  return Object.freeze({ kind: "final", row, identity, mode: expectedMode, stage: bytes[67] === 2 ? "acknowledged" : "issued", proof });
 }
 
 export function isVoiceIpcActionRow(row: unknown): row is string {

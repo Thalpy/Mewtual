@@ -136,6 +136,13 @@ pub(crate) struct Owner {
     pub lease: CallLease,
     _grant: Arc<CallGrant>,
 }
+impl Owner {
+    /// Cleanup only: the original affine allocation remains usable after synchronous End
+    /// revokes its lease. Never use this snapshot as a current grant for a new first effect.
+    pub(crate) fn cleanup_grant(&self) -> Arc<CallGrant> {
+        self._grant.clone()
+    }
+}
 
 /// A metadata-only snapshot of one accepted activation. Keeping the original parent and actor
 /// grant distinguishes a retry from an equal-scope replacement. The bridge rechecks this exact
@@ -578,6 +585,19 @@ impl Coordinator {
         }
         self.revision = self.revision.saturating_add(1);
         self.retire_owner();
+    }
+    /// Retain the SAME actual call owner before End can remove the last grant upgrade path.
+    /// The caller drops this snapshot outside Coordinator and orders cleanup on its ORIGINAL
+    /// actor. A stale id cannot capture the replacement; controller End includes its child call.
+    pub(crate) fn end_with_cleanup(&mut self, id: &str) -> Option<Owner> {
+        let matches = self
+            .controller
+            .as_ref()
+            .is_some_and(|controller| controller.id == id)
+            || self.owner.as_ref().is_some_and(|owner| owner.id == id);
+        let original = matches.then(|| self.owner.clone()).flatten();
+        self.end(id);
+        original
     }
     pub fn revoke_all(&mut self) {
         self.runtime.revoke_session();

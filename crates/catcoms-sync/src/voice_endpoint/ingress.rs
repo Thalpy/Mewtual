@@ -22,7 +22,8 @@ enum Targets {
 mod encrypted;
 #[cfg(test)]
 mod tests;
-pub(crate) use encrypted::{ConfirmationReceipt, EndpointReceipt};
+use encrypted::EncryptedReceipt;
+pub(crate) use encrypted::EndpointReceipt;
 impl Targets {
     fn live(&self) -> bool {
         match self {
@@ -96,10 +97,35 @@ pub(super) struct PublicInbox {
     packets: BTreeMap<Key, Work>,
     // Two work representations share ONE classifier and combined capacity. Never insert in
     // either map before check_identity: public control cannot reuse an encrypted admission ID.
-    encrypted: BTreeMap<Key, ConfirmationReceipt>,
+    encrypted: BTreeMap<Key, EncryptedReceipt>,
+    positions: voice_v2::negotiation::namespace::ReceiptNamespace,
     cursor: Option<Key>,
 }
 impl PublicInbox {
+    #[cfg(test)]
+    pub(crate) fn occupy_namespace_for_test(
+        &mut self,
+    ) -> Vec<voice_v2::negotiation::namespace::ReceiptPosition> {
+        // Isolate the immutable-ID count fence with unreachable test-only positions.
+        // These never authorize Source/Ready or claim256 feasible paid network admissions.
+        let mut positions = Vec::new();
+        while let Ok(position) = self.reserve_position() {
+            positions.push(position);
+        }
+        positions
+    }
+    pub(super) fn full_for_ready(&self) -> bool {
+        self.full()
+    }
+    pub(super) fn namespace(&self) -> &voice_v2::negotiation::namespace::ReceiptNamespace {
+        &self.positions
+    }
+    pub(super) fn reserve_position(
+        &mut self,
+    ) -> Result<voice_v2::negotiation::namespace::ReceiptPosition, VoiceError> {
+        self.positions
+            .reserve(self.packets.len() + self.encrypted.len(), PACKETS)
+    }
     fn check_identity(&self, object: &SignedObject) -> Result<(), VoiceError> {
         let key = (object.issuer(), object.id());
         if self
@@ -116,7 +142,8 @@ impl PublicInbox {
         Ok(())
     }
     fn full(&self) -> bool {
-        self.packets.len() + self.encrypted.len() >= PACKETS
+        self.positions
+            .full(self.packets.len() + self.encrypted.len(), PACKETS)
     }
     pub(super) fn prune(&mut self, clock: &dyn Clock) {
         let now = clock.now_ms();
@@ -146,7 +173,10 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
     ) -> Result<PublicReceipt, VoiceError> {
         // Caller has already authenticated the exact frame and final-delivery role. Never let
         // public control intake bypass encrypted replay/confirmation/negotiation ownership.
-        if matches!(envelope.object().body(), Body::Encrypted { .. }) {
+        if matches!(
+            envelope.object().body(),
+            Body::Encrypted { .. } | Body::PairReady { .. } | Body::PairReadyRound { .. }
+        ) {
             return Err(VoiceError::Unauthorized);
         }
         let clock = self.voice_v2_clock();
@@ -225,7 +255,9 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
                 }
                 Targets::Join(participant.watch.id, participant.lease.clone())
             }
-            Body::Encrypted { .. } => unreachable!(),
+            Body::Encrypted { .. } | Body::PairReady { .. } | Body::PairReadyRound { .. } => {
+                unreachable!()
+            }
         };
         if !targets.live() || room.scope != context.scope || !room.lease.is_live() {
             return Err(VoiceError::Unauthorized);
@@ -288,6 +320,10 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
     pub fn pump_voice_endpoint(&mut self) -> Result<(), VoiceError> {
         self.reconcile_voice_actor();
         self.observe_voice_directory();
+        // A published confirmation/SDP/ICE packet must not depend on a caller retaining a
+        // copied payload or explicitly queueing it. Run before public response work, whose
+        // four-item bound may return early. Source rechecks the exact original authority.
+        self.pump_voice_packet_sources()?;
         let clock = self.voice_v2_clock();
         let members: HashSet<_> = self.group.member_device_ids().into_iter().collect();
         let announcement = {
@@ -503,7 +539,9 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
                     participant.join.source_activity(&authority)?,
                 )))
             }
-            Body::Encrypted { .. } => Err(VoiceError::Unauthorized),
+            Body::Encrypted { .. } | Body::PairReady { .. } | Body::PairReadyRound { .. } => {
+                Err(VoiceError::Unauthorized)
+            }
         }
     }
     pub fn voice_watch_peers(
@@ -530,5 +568,58 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             },
             clock.as_ref(),
         )
+    }
+
+    /// Observe the participant's ORIGINAL implicit watcher. A separate explicit observer or
+    /// equal-scope grant cannot establish readiness for this participant's protected pairs.
+    /// Returned evidence owns its existing native charge; it grants no engine/RTC authority.
+    pub fn voice_participant_peers(
+        &mut self,
+        grant: &Arc<CallGrant>,
+    ) -> Result<Vec<FreshPeer>, VoiceError> {
+        self.validate_voice_call_grant(grant)?;
+        let endpoints = &mut self
+            .voice_runtime
+            .as_mut()
+            .ok_or(VoiceError::Unauthorized)?
+            .endpoints;
+        endpoints.prune();
+        let participant = endpoints
+            .participant
+            .as_ref()
+            .ok_or(VoiceError::Unauthorized)?;
+        if !std::sync::Weak::ptr_eq(&participant.grant, &Arc::downgrade(grant))
+            || !participant.lease.is_live()
+        {
+            return Err(VoiceError::Unauthorized);
+        }
+        let watch = participant.watch.clone();
+        self.voice_watch_peers(&watch)
+    }
+
+    /// Paid version for a long-lived native producer. Its original metadata owner follows
+    /// the command and completed output independently of the observing caller. A foreign
+    /// pool/scope cannot debit this Actor or convert equal public labels into call authority.
+    pub fn voice_participant_peer_snapshot(
+        &mut self,
+        grant: &Arc<CallGrant>,
+        permit: voice_v2::presence::PeerSnapshotPermit,
+    ) -> voice_v2::presence::PeerSnapshot {
+        let result = (|| {
+            let context = self.voice_v2_context(grant.scope().room)?;
+            if permit.scope() != grant.scope()
+                || context.scope != permit.scope()
+                || !self
+                    .voice_runtime
+                    .as_ref()
+                    .and_then(|voice| voice.current.as_ref())
+                    .is_some_and(|actor| actor.uses_resources(permit.resources()))
+            {
+                return Err(VoiceError::Unauthorized);
+            }
+            self.voice_participant_peers(grant)
+                .map(|peers| (context.epoch, peers))
+        })();
+        permit.complete(result)
     }
 }

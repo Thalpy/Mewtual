@@ -8,6 +8,7 @@ use voice_v2::presence::{
     ConfirmationOutput, FlightSubmission, LocalJoin, WatchAuthority, Watcher,
 };
 use voice_v2::{EncryptedKind, JoinKey};
+mod ready;
 
 struct Fixture {
     sender: Node,
@@ -18,6 +19,9 @@ struct Fixture {
     grant: Arc<CallGrant>,
     object: SignedObject,
     plaintext: Vec<u8>,
+    // Retain the real remote confirmation machine for complete Root admission scenarios.
+    remote: LocalJoin,
+    remote_lease: CallLease,
 }
 fn key(seed: u8) -> JoinKey {
     let point = hex::decode("046b17d1f2e12c4247f8bce6e563a440f277037d812deb33a0f4a13945d898c2964fe342e2fe1a7f9b8ee7eb4a7c0f9e162bce33576b315ececbb6406837bf51f5").unwrap();
@@ -34,7 +38,13 @@ async fn fixture() -> Fixture {
     fixture_in_room(1).await
 }
 async fn fixture_in_room(room: u128) -> Fixture {
-    let (mut sender, mut receiver, runtime, clock) = super::fixture().await;
+    fixture_in_room_with_clock(room, |clock| clock).await
+}
+async fn fixture_in_room_with_clock(
+    room: u128,
+    make_clock: impl FnOnce(Arc<ManualClock>) -> Arc<dyn Clock>,
+) -> Fixture {
+    let (mut sender, mut receiver, runtime, clock) = super::fixture_with_clock(make_clock).await;
     assert!(sender.device_id() < receiver.device_id());
     // The response verifier also needs its own actual native actor, not the receiver's owner.
     let sender_runtime = Runtime::new(clock.clone());
@@ -248,6 +258,8 @@ async fn fixture_in_room(room: u128) -> Fixture {
         grant,
         object,
         plaintext: flight.plaintext,
+        remote,
+        remote_lease,
     }
 }
 fn admit(f: &mut Fixture, object: SignedObject) -> Result<EndpointReceipt, VoiceError> {

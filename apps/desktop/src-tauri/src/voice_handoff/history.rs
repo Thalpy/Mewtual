@@ -18,6 +18,9 @@ pub(super) struct Response {
     incoming: Incoming,
 }
 impl Response {
+    pub(super) fn new(incoming: Incoming, result: Result<(RowId, Status), Refused>) -> Self {
+        Self { result, incoming }
+    }
     /// Build the one authenticated Control reply on the original already-spent nonce.
     /// No data Phase, new task, grant upgrade or ordinary-pool payment is admitted here.
     pub(super) fn seal(self) -> Result<CompletedReply, channel::Refused> {
@@ -94,6 +97,21 @@ fn recover_original(
         return Err(VoiceError::Malformed.into());
     }
     Ok((row.id(), status))
+}
+
+#[cfg(test)]
+pub(super) fn serialization_layout_bytes() -> usize {
+    // Complete synchronous Response::seal -> replies::status/receipt_digest call graph.
+    // Canonical bytes coexist with the retained Status and its Encoded destination; count
+    // both inline arrays conservatively. The physical reply/scratch/crypto stage is counted
+    // separately in channel's complete Control guard, never hidden in a task payment.
+    std::mem::size_of::<Response>()
+        + std::mem::size_of::<Status>()
+        + std::mem::size_of::<Encoded>()
+        + replies::STATUS_BYTES
+        + std::mem::size_of::<sha2::Sha256>()
+        + std::mem::size_of::<RowId>()
+        + 128 // digest/output/scalar/borrowed argument temporaries
 }
 
 #[cfg(test)]

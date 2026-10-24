@@ -30,7 +30,20 @@ pub(in crate::voice_handoff) struct Case {
 }
 impl Case {
     pub(in crate::voice_handoff) async fn new() -> Self {
-        let native = Fixture::new().await;
+        Self::with_engine(true).await
+    }
+    pub(in crate::voice_handoff) async fn unadmitted() -> Self {
+        Self::with_engine(false).await
+    }
+    async fn with_engine(admit: bool) -> Self {
+        Self::from_native(Fixture::new().await, admit).await
+    }
+    pub(in crate::voice_handoff) async fn unadmitted_with_clock(
+        clock: Arc<dyn catcoms_rt::Clock>,
+    ) -> Self {
+        Self::from_native(Fixture::with_voice_clock(clock).await, false).await
+    }
+    async fn from_native(native: Fixture, admit: bool) -> Self {
         let owner = native.candidate().await;
         let runtime = crate::voice_runtime(&native.state);
         let now = runtime.clock().monotonic_ms();
@@ -121,7 +134,9 @@ impl Case {
         let work = row.work().unwrap();
         let phase = work.phase().clone();
         drop(work);
-        action.admit_engine(action.engine_bytes()).unwrap();
+        if admit {
+            action.admit_engine(action.engine_bytes()).unwrap();
+        }
         let context = Context::new(&native.state);
         Self {
             native,
@@ -303,8 +318,16 @@ async fn actual_actor_rejection_retains_work_input_and_task_custody_until_collec
             Err(crate::voice_handoff::channel::Refused::Capacity)
         ));
         assert!(
-            case.route.require_open().is_ok(),
+            case.native
+                .state
+                .voice_channels
+                .require_cleanup_route(&case.route)
+                .is_ok(),
             "an uncollected actual result cannot lose its cleanup route"
+        );
+        assert!(
+            case.route.require_open().is_err(),
+            "close-first refuses subsequent effects"
         );
         assert!(response.work.is_some());
         assert_eq!(case.selected.resources().counts(), before);
@@ -350,6 +373,50 @@ async fn admitted_result_uses_only_original_task_capacity_under_full_ordinary_gr
     assert_eq!(pool.counts(), before);
     drop(response);
     drop(pressure);
+    case.retire();
+    case.native.close().await;
+}
+
+#[tokio::test]
+async fn busy_registry_refuses_before_result_handoff_and_exact_request_survives() {
+    let case = Case::new().await;
+    let bytes = case.bytes();
+    let before = case.selected.resources().counts();
+    let original = case.action.handoff_status();
+    let registry = case.native.state.servers.lock().await;
+    let response = tokio::time::timeout(
+        std::time::Duration::from_secs(15),
+        commit(&case.context, &case.route, case.frame(1, &bytes)),
+    )
+    .await
+    .expect("busy registry refuses without an Actor query or parked mounted context")
+    .unwrap();
+    assert!(matches!(
+        response.result,
+        Err(Refused::Protocol(VoiceError::Capacity))
+    ));
+    assert!(response.work.is_none() && response.payment.is_none());
+    assert!(case.action.handoff_status() == original);
+    assert!(case.row().work().is_ok());
+    assert!(case.route.session().header().is_err());
+    drop(response);
+    assert_eq!(case.selected.resources().counts(), before);
+    assert!(!case.route.session().fixture_counts().0);
+    drop(registry);
+    let response = commit(&case.context, &case.route, case.frame(2, &bytes))
+        .await
+        .unwrap();
+    // Same action/bytes now reach the actual Actor. This synthetic fixture's foreign
+    // grant is intentionally rejected there; Capacity cannot turn into a fake success.
+    assert!(matches!(
+        response.result,
+        Err(Refused::Protocol(VoiceError::Unauthorized))
+    ));
+    assert!(response.work.is_some() && response.payment.is_some());
+    assert!(case.action.handoff_status() == original);
+    drop(response);
+    assert_eq!(case.selected.resources().counts(), before);
+    assert!(!case.route.session().fixture_counts().0);
     case.retire();
     case.native.close().await;
 }

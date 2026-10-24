@@ -56,6 +56,87 @@ fn active(runtime: &Arc<Runtime>, epoch: u64) -> ActorOwner {
 }
 
 #[test]
+fn response_member_view_borrows_original_map_and_rejects_stale_scope_epoch_policy_and_session() {
+    let runtime = Runtime::new(Arc::new(ManualClock::new(1000)));
+    let mut actor = active(&runtime, 1);
+    let original = actor
+        .source_context(super::super::Scope {
+            group: [1; 32],
+            policy: Some([7; 32]),
+            room: 9,
+        })
+        .unwrap();
+    let before = runtime.resources().counts();
+    assert_eq!(
+        actor.with_current_members(&original, |member| {
+            assert!(member(device(1)) && member(device(2)) && member(device(3)));
+            assert!(!member(device(4)));
+            // The pure callback borrows the SAME map under its actual native fence.
+            assert!(actor.group.state.try_lock().is_err());
+            Ok(())
+        }),
+        Ok(())
+    );
+    assert_eq!(runtime.resources().counts(), before);
+    for altered in [
+        super::super::Context {
+            epoch: 2,
+            ..original
+        },
+        super::super::Context {
+            local: device(2),
+            ..original
+        },
+        super::super::Context {
+            scope: super::super::Scope {
+                group: [2; 32],
+                ..original.scope
+            },
+            ..original
+        },
+        super::super::Context {
+            scope: super::super::Scope {
+                policy: None,
+                ..original.scope
+            },
+            ..original
+        },
+        super::super::Context {
+            indirect: false,
+            ..original
+        },
+    ] {
+        assert_eq!(
+            actor.with_current_members(&altered, |_| -> Result<(), VoiceError> {
+                panic!("stale native view must refuse before the role callback")
+            }),
+            Err(VoiceError::Unauthorized)
+        );
+    }
+    actor.sync_view(view(2, &[1, 3])).unwrap();
+    assert_eq!(
+        actor.with_current_members(&original, |_| Ok(())),
+        Err(VoiceError::Unauthorized)
+    );
+    let current = super::super::Context {
+        epoch: 2,
+        ..original
+    };
+    assert_eq!(
+        actor.with_current_members(&current, |member| {
+            assert!(!member(device(2)) && member(device(3)));
+            Ok(())
+        }),
+        Ok(())
+    );
+    runtime.revoke_session();
+    assert_eq!(
+        actor.with_current_members(&current, |_| Ok(())),
+        Err(VoiceError::Unauthorized)
+    );
+}
+
+#[test]
 fn collection_releases_cold_locked_group_origins_without_erasing_membership_evidence() {
     let clock = Arc::new(ManualClock::new(1000));
     let runtime = Runtime::new(clock.clone());
@@ -836,6 +917,52 @@ fn endpoint_origin_samples_time_without_holding_group_or_policy() {
         clock.outside.load(Ordering::Acquire),
         "final origin admission must not call the injected Clock while Group or Policy is held"
     );
+}
+
+#[test]
+fn voice_transport_verification_samples_before_native_guards_and_refuses_busy_view_without_work() {
+    let clock = Arc::new(OriginClockProbe {
+        inner: ManualClock::new(1000),
+        owners: Mutex::new(None),
+        outside: AtomicBool::new(true),
+        samples: AtomicU64::new(0),
+    });
+    let runtime = Runtime::new(clock.clone());
+    let actor = active(&runtime, 1);
+    *clock.owners.lock().unwrap() =
+        Some((Arc::downgrade(&actor.group), Arc::downgrade(&actor.gate)));
+    let before = runtime.resources().counts();
+    {
+        let _group = actor.group.state.lock().unwrap();
+        assert_eq!(
+            actor
+                .admit_transport_verification(device(2), b"bounded frame")
+                .err(),
+            Some(VoiceError::Capacity)
+        );
+    }
+    {
+        let _policy = actor.gate.policy.lock().unwrap();
+        assert_eq!(
+            actor
+                .admit_transport_verification(device(2), b"bounded frame")
+                .err(),
+            Some(VoiceError::Capacity)
+        );
+    }
+    assert_eq!(runtime.resources().counts(), before);
+    // The deliberate externally-held guards above aren't Runtime-held samples. Now check
+    // the actual successful path, including EffectiveClock's own source-clock callbacks.
+    clock.outside.store(true, Ordering::Release);
+    clock.inner.advance_ms(700);
+    let ticket = actor
+        .admit_transport_verification(device(2), b"bounded frame")
+        .unwrap();
+    assert!(clock.outside.load(Ordering::Acquire));
+    assert!(clock.samples.load(Ordering::Relaxed) > 0);
+    assert_eq!(ticket.deadline, 6700, "retry obtains its own fresh5s bound");
+    clock.inner.advance_ms(5000);
+    assert!(ticket.check(&actor, b"bounded frame").is_err());
 }
 
 #[test]

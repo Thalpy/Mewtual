@@ -6,6 +6,11 @@ mod protected;
 mod protected_start;
 
 async fn fixture() -> (Node, Node, Arc<Runtime>, Arc<ManualClock>) {
+    fixture_with_clock(|clock| clock).await
+}
+async fn fixture_with_clock(
+    make_clock: impl FnOnce(Arc<ManualClock>) -> Arc<dyn Clock>,
+) -> (Node, Node, Arc<Runtime>, Arc<ManualClock>) {
     let (_hub, mut nodes, _) = crate::tests::build_members(2).await;
     crate::tests::converge_and_publish_test_routes(&mut nodes);
     nodes[0]
@@ -22,7 +27,7 @@ async fn fixture() -> (Node, Node, Arc<Runtime>, Arc<ManualClock>) {
     let clock = Arc::new(ManualClock::new(1000));
     sender.clock = clock.clone();
     receiver.clock = clock.clone();
-    let runtime = Runtime::new(clock.clone());
+    let runtime = Runtime::new(make_clock(clock.clone()));
     attach(&mut receiver, &runtime);
     let (ok, served) = tokio::join!(
         sender.finalize_member_connection(receiver.local_peer()),
@@ -31,6 +36,70 @@ async fn fixture() -> (Node, Node, Arc<Runtime>, Arc<ManualClock>) {
     assert!(ok.unwrap() && served.unwrap());
     // Both MemNetwork handles retain the hub; this fixture does not alter connectivity.
     (sender, receiver, runtime, clock)
+}
+
+#[tokio::test]
+async fn causal_ready_never_enters_queued_public_intake_or_produces_generic_receipt() {
+    let (mut low, high, _high_runtime, clock) = fixture().await;
+    let runtime = Runtime::new(clock);
+    attach(&mut low, &runtime);
+    let grant = low.start_voice_watch(1, CallLease::default()).unwrap();
+    for modern in [false, true] {
+        let header = voice_v2::ReadyHeader {
+            epoch: low.group.epoch(),
+            target: low.device_id(),
+            source_join: [1; 32],
+            target_join: [2; 32],
+            source_key_ref: [3; 32],
+            target_key_ref: [4; 32],
+            handshake: [5; 32],
+            finish_message: [6; 32],
+            finish_object_hash: [7; 32],
+            helpers: vec![],
+        };
+        let envelope = Envelope::Direct(
+            SignedObject::issue(
+                grant.scope(),
+                &high.device,
+                [71; 32],
+                1000,
+                16_000,
+                if modern {
+                    Body::PairReadyRound {
+                        sequence: 1,
+                        header,
+                        profile: voice_v2::SdpProfile::CompleteSdpV1,
+                    }
+                } else {
+                    Body::PairReady { header }
+                },
+            )
+            .unwrap(),
+        );
+        let context = low.voice_v2_context(grant.scope().room).unwrap();
+        assert_eq!(
+            envelope.authorize(high.device_id(), &context, |_| true),
+            Ok(voice_v2::Disposition::Deliver)
+        );
+        for public_only in [false, true] {
+            let room = low.voice_room_authority(context.scope.room).unwrap();
+            let ticket = low
+                .voice_transport_actor()
+                .unwrap()
+                .admit_transport_verification(high.device_id(), &envelope.encode())
+                .unwrap();
+            let error = if public_only {
+                low.admit_voice_endpoint_public(ticket, envelope.clone(), &context, room)
+                    .err()
+            } else {
+                low.admit_voice_endpoint(ticket, envelope.clone(), &context, room)
+                    .err()
+            };
+            assert_eq!(error, Some(VoiceError::Unauthorized));
+            let inbox = &low.voice_runtime.as_ref().unwrap().endpoints.public;
+            assert!(inbox.packets.is_empty() && inbox.encrypted.is_empty());
+        }
+    }
 }
 
 #[tokio::test]
@@ -154,7 +223,7 @@ async fn public_source_capacity_refusal_reuses_exact_native_challenge_without_ne
     let full = pool
         .charge(
             grant.scope.group,
-            256 * 1024 - baseline - 6144 - 512,
+            crate::voice_v2::resources::GROUP_BYTES - baseline - 6144 - 512,
             ResourceKind::Retained,
         )
         .unwrap();

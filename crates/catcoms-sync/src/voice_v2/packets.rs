@@ -12,6 +12,9 @@ use futures::FutureExt;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
+mod first_offer;
+#[cfg(test)]
+pub(in crate::voice_v2) use first_offer::admission_metadata_bytes;
 mod outgoing;
 mod sealed;
 pub(in crate::voice_v2) use sealed::PreparedSealedPublication;
@@ -34,7 +37,68 @@ pub(super) struct ConfirmationCapacity {
     incoming: Arc<slots::ReservedSlots>,
     outgoing: Arc<slots::ReservedSlots>,
 }
+/// One native Offer/Answer row per direction, carved from the original confirmation
+/// parents after obsolete rows return. No fresh global claim is acquired or refunded.
+pub(super) struct SdpPacketCapacity {
+    incoming: Arc<slots::ReservedSlots>,
+    outgoing: Arc<slots::ReservedSlots>,
+}
+impl SdpPacketCapacity {
+    pub(super) fn incoming_slot(&self, slots: &PacketSlots) -> Result<slots::Slot, VoiceError> {
+        self.incoming.loan(&slots.incoming)
+    }
+    pub(super) fn outgoing_slot(&self, slots: &PacketSlots) -> Result<slots::Slot, VoiceError> {
+        self.outgoing.loan(&slots.outgoing)
+    }
+    pub(super) fn close(&self) {
+        self.incoming.close();
+        self.outgoing.close();
+    }
+}
+impl Drop for SdpPacketCapacity {
+    fn drop(&mut self) {
+        self.close();
+    }
+}
+/// Slot custody is independent of payload custody. Keep the exact successor LAST even
+/// when an event/byte credit has already dropped, so parent drainage cannot precede Slot.
+pub(super) struct PacketSlot {
+    _slot: slots::Slot,
+    _exchange: Option<Arc<Exchange>>,
+}
+impl From<slots::Slot> for PacketSlot {
+    fn from(slot: slots::Slot) -> Self {
+        Self {
+            _slot: slot,
+            _exchange: None,
+        }
+    }
+}
+impl PacketSlot {
+    pub(in crate::voice_v2) fn uses_incoming(&self, tables: &PacketSlots) -> bool {
+        self._slot.uses_pool(&tables.incoming)
+    }
+    pub(super) fn successor(slot: slots::Slot, exchange: Arc<Exchange>) -> Self {
+        Self {
+            _slot: slot,
+            _exchange: Some(exchange),
+        }
+    }
+}
 impl PacketSlots {
+    #[cfg(test)]
+    pub(in crate::voice_v2) fn fill_unreserved_for_test(
+        &self,
+    ) -> (Vec<slots::Slot>, Vec<slots::Slot>) {
+        (
+            (0..RESERVATIONS)
+                .map_while(|_| self.incoming.charge(1).ok())
+                .collect(),
+            (0..RESERVATIONS)
+                .map_while(|_| self.outgoing.charge(1).ok())
+                .collect(),
+        )
+    }
     pub(super) fn new() -> Self {
         Self {
             incoming: Arc::new(slots::Slots::with_limit(RESERVATIONS)),
@@ -54,6 +118,11 @@ impl PacketSlots {
     }
 }
 impl ConfirmationCapacity {
+    pub(super) fn subreserve_sdp(&self) -> Result<SdpPacketCapacity, VoiceError> {
+        let incoming = self.incoming.subreserve(1)?;
+        let outgoing = self.outgoing.subreserve(1)?;
+        Ok(SdpPacketCapacity { incoming, outgoing })
+    }
     pub(super) fn outgoing_slot(&self, slots: &PacketSlots) -> Result<slots::Slot, VoiceError> {
         self.outgoing.loan(&slots.outgoing)
     }
@@ -66,6 +135,13 @@ impl ConfirmationCapacity {
     pub(super) fn close(&self) {
         self.incoming.close();
         self.outgoing.close();
+    }
+}
+impl Drop for ConfirmationCapacity {
+    fn drop(&mut self) {
+        // This wrapper owns closing rights, not just Arc handles. Abandonment/unwind must
+        // return unused claims even when a delayed actual Slot retains the parent allocation.
+        self.close();
     }
 }
 
@@ -126,8 +202,25 @@ struct Pair {
     status: Status,
     live: CallLease,
     confirmation_claimed: bool,
+    // Irreversible before protected capacity admission. Never clear this when a round
+    // retires: ordinary old SDP/ICE/Bye must not become fallback writers afterward.
+    sdp_profile: Option<super::SdpProfile>,
     next: u64,
     replay: Replay,
+}
+impl Pair {
+    fn check_profile(&self, kind: EncryptedKind) -> Result<(), VoiceError> {
+        let confirmation = matches!(
+            kind,
+            EncryptedKind::ConfirmHello
+                | EncryptedKind::ConfirmProof
+                | EncryptedKind::ConfirmFinish
+        );
+        if !confirmation && self.sdp_profile != kind.round().map(|round| round.profile) {
+            return Err(VoiceError::Unauthorized);
+        }
+        Ok(())
+    }
 }
 struct Outgoing {
     draft: PacketDraft,
@@ -141,10 +234,13 @@ struct Outgoing {
     // Protected output remains tied to its original chain after encryption has settled.
     // This is a revocation identity only, never Workflow progress custody.
     chain: Option<CallLease>,
+    // Exact protected producer, already retained by this packet's byte credit. Source must
+    // borrow this SAME capacity; a live chain lease alone carries no prepaid progress bytes.
+    workflow: Option<Arc<super::chain::Workflow>>,
     _credit: Credit,
-    exchange: Option<Arc<Exchange>>,
     // Native table custody, separate from retained bytes and actual transport copies.
-    _slot: slots::Slot,
+    _slot: PacketSlot,
+    exchange: Option<Arc<Exchange>>,
 }
 #[derive(Clone)]
 pub(super) enum PendingConfirmation {
@@ -168,8 +264,8 @@ struct Incoming {
     token: RevocationOwner,
     confirmation: Option<PendingConfirmation>,
     _credit: Arc<Credit>,
+    _slot: PacketSlot,
     exchange: Option<Arc<Exchange>>,
-    _slot: slots::Slot,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -237,6 +333,25 @@ pub struct InboundPacket {
     _custody: Arc<Credit>,
 }
 impl InboundPacket {
+    pub(in crate::voice_v2) fn from_first_offer(
+        token: u64,
+        issuer: DeviceId,
+        header: EncryptedHeader,
+        ciphertext: Vec<u8>,
+        aad: Vec<u8>,
+        object_hash: [u8; 32],
+        credit: Arc<Credit>,
+    ) -> Self {
+        Self {
+            token,
+            issuer,
+            header,
+            ciphertext,
+            aad,
+            object_hash,
+            _custody: credit,
+        }
+    }
     pub(crate) fn object_hash(&self) -> [u8; 32] {
         self.object_hash
     }
@@ -400,14 +515,15 @@ pub struct CommittedPacket {
 pub(super) struct ConsumedIncoming {
     _token: RevocationOwner,
     _confirmation: Option<PendingConfirmation>,
+    _slot: PacketSlot,
     _exchange: Option<Arc<Exchange>>,
-    _slot: slots::Slot,
 }
 
 /// Private synchronous transaction plan. It must not cross an await: its sole ledger owner
 /// prepares closed-result work, repeats final checks, then consumes it without a fallible tail.
 pub(super) struct ValidatedInbound {
     token: u64,
+    pub message: MessageId,
     pub header: EncryptedHeader,
     pub hash: [u8; 32],
     pub expires: u64,
@@ -455,12 +571,19 @@ pub(super) struct SourcePacketAuthority {
     pair: CallLease,
     packet: CallLease,
     chain: Option<CallLease>,
+    workflow: Option<Arc<super::chain::Workflow>>,
     clock: Arc<dyn Clock>,
     deadline: u64,
     exchange: Option<Arc<Exchange>>,
     expires: u64,
 }
 impl SourcePacketAuthority {
+    pub(super) fn obsolete_confirmation(&self) -> bool {
+        self.workflow.as_ref().is_some_and(|workflow| {
+            workflow.high_confirmation_sources_retired()
+                || workflow.low_confirmation_sources_retired()
+        })
+    }
     /// Always use this packet's actual original clock. The caller may not replace its
     /// monotonic origin with the enclosing source job's clock, even if wall time agrees.
     pub(super) fn observation_time(&self) -> (u64, u64) {
@@ -473,6 +596,10 @@ impl SourcePacketAuthority {
             && self.pair.is_live()
             && self.packet.is_live()
             && self.chain.as_ref().is_none_or(CallLease::is_live)
+            && self
+                .workflow
+                .as_ref()
+                .is_none_or(|workflow| !workflow.low_confirmation_sources_retired())
             && mono < self.deadline
             && wall < self.expires
             && self
@@ -482,6 +609,16 @@ impl SourcePacketAuthority {
     }
     pub(super) fn exchange(&self) -> Option<Arc<Exchange>> {
         self.exchange.clone()
+    }
+    pub(super) fn progress(&self) -> super::source::SourceProgress<'_> {
+        match (&self.workflow, &self.exchange) {
+            (Some(workflow), None) => super::source::SourceProgress::Workflow(workflow),
+            (None, Some(exchange)) => super::source::SourceProgress::Exchange(exchange),
+            (None, None) => super::source::SourceProgress::Ordinary,
+            // Native packet construction never combines confirmation and SDP producers.
+            // Keep this invariant explicit rather than silently selecting one payment.
+            (Some(_), Some(_)) => unreachable!("one original packet progress producer"),
+        }
     }
     /// A native action can have a shorter lifetime than its signed packet. Capture that
     /// immutable deadline in queued work so an idle endpoint cannot extend it by omitting GC.
@@ -510,6 +647,11 @@ impl SourcePacketAuthority {
                 _ => false,
             }
             && self.deadline == other.deadline
+            && match (&self.workflow, &other.workflow) {
+                (None, None) => true,
+                (Some(first), Some(second)) => Arc::ptr_eq(first, second),
+                _ => false,
+            }
             && self.expires == other.expires
             && match (&self.exchange, &other.exchange) {
                 (None, None) => true,
@@ -576,9 +718,116 @@ redacted_debug!(
 );
 
 impl PacketLedger {
+    /// Only exact committed native Ready makes LOW's old Finish obsolete. Closing the
+    /// whole chain here would also close the verifier lane before its reply can drain.
+    pub(in crate::voice_v2) fn retire_low_confirmation_cache(
+        &mut self,
+        chain: &super::chain::PreparedChain,
+    ) -> Result<(), VoiceError> {
+        let binding = chain
+            .ready_low_confirmation_binding()
+            .ok_or(VoiceError::Unauthorized)?;
+        if binding.scope != self.scope
+            || binding.local != self.local
+            || binding.local_join != self.join
+            || binding.local_key != self.key_ref
+            || !binding.call.is_same(&self.lease)
+        {
+            return Err(VoiceError::Scope);
+        }
+        self.outgoing.retain(|_, outgoing| {
+            if outgoing
+                .workflow
+                .as_ref()
+                .is_some_and(|workflow| workflow.belongs_to_plan(chain))
+            {
+                outgoing.live.revoke();
+                false
+            } else {
+                true
+            }
+        });
+        // A selected Proof was consumed at local Finish, but earlier authenticated
+        // candidates may still occupy native inboxes. They cannot progress after Ready.
+        // Only remove this exact plan's native cache; independently retained SDK/result
+        // input still owns its credit and continues to delay real Workflow drainage.
+        self.incoming.retain(|_, incoming| {
+            let Body::Encrypted { header, .. } = incoming.object.body() else {
+                return true;
+            };
+            !(incoming.confirmation.is_some()
+                && incoming.object.scope() == binding.scope
+                && incoming.object.issuer() == binding.peer
+                && header.target == binding.local
+                && header.source_join == binding.peer_join
+                && header.target_join == binding.local_join
+                && header.source_key_ref == binding.peer_key
+                && header.target_key_ref == binding.local_key
+                && header.handshake == binding.handshake
+                && header.kind == EncryptedKind::ConfirmProof)
+        });
+        Ok(())
+    }
+    /// Remove only obsolete confirmation CACHE owners for this exact native HIGH plan.
+    /// Native Finish-open proves LOW received Proof; closing/extraction already forbids
+    /// every old action. Fixed Pair counters/replay and native result/admission histories
+    /// stay untouched. Actual inputs/SDK/Source/Lower/reply owners retain their own credits.
+    /// This is never the LOW Finish retirement path, and runs outside Group/Policy guards.
+    pub(in crate::voice_v2) fn retire_high_confirmation_cache(
+        &mut self,
+        chain: &super::chain::PreparedChain,
+    ) -> Result<(), VoiceError> {
+        let binding = chain
+            .retired_high_confirmation_binding()
+            .ok_or(VoiceError::Unauthorized)?;
+        if binding.scope != self.scope
+            || binding.local != self.local
+            || binding.local_join != self.join
+            || binding.local_key != self.key_ref
+            || !binding.call.is_same(&self.lease)
+        {
+            return Err(VoiceError::Scope);
+        }
+        self.outgoing.retain(|_, outgoing| {
+            !outgoing
+                .workflow
+                .as_ref()
+                .is_some_and(|workflow| workflow.belongs_to_plan(chain))
+        });
+        self.incoming.retain(|_, incoming| {
+            let Body::Encrypted { header, .. } = incoming.object.body() else {
+                return true;
+            };
+            // LocalJoin permanently selects one protected chain before any ordinary use
+            // of this handshake. Its immutable pair binding plus these exact header fields
+            // therefore identify this plan; ordinary or unrelated incoming rows stay live.
+            // If multiple plans per handshake ever become legal, add original-plan identity
+            // to Incoming before changing that selection invariant.
+            !(incoming.confirmation.is_some()
+                && incoming.object.scope() == binding.scope
+                && incoming.object.issuer() == binding.peer
+                && header.target == binding.local
+                && header.source_join == binding.peer_join
+                && header.target_join == binding.local_join
+                && header.source_key_ref == binding.peer_key
+                && header.target_key_ref == binding.local_key
+                && header.handshake == binding.handshake
+                && matches!(
+                    header.kind,
+                    EncryptedKind::ConfirmHello
+                        | EncryptedKind::ConfirmProof
+                        | EncryptedKind::ConfirmFinish
+                ))
+        });
+        Ok(())
+    }
     #[cfg(test)]
     pub(super) fn pair_count_for_test(&self) -> usize {
         self.pairs.len()
+    }
+    #[cfg(test)]
+    pub(super) fn has_sdp_for_test(&self) -> bool {
+        self.sdp.is_some()
     }
     /// Protection is selected only before this exact pair has allocated or admitted any packet.
     /// Counters survive cache pruning, so an expired ordinary action cannot look pristine later.
@@ -589,6 +838,18 @@ impl PacketLedger {
     ) -> Result<bool, VoiceError> {
         let pair = self.pair(&handshake, authority)?;
         Ok(pair.status == Status::Confirming && pair.next == 0 && pair.replay.highest == 0)
+    }
+    pub(super) fn select_complete_sdp_profile(
+        &mut self,
+        handshake: Nonce,
+        authority: &Authority<'_>,
+    ) -> Result<(), VoiceError> {
+        self.pair(&handshake, authority)?;
+        self.pairs
+            .get_mut(&handshake)
+            .expect("same exclusive pair")
+            .sdp_profile = Some(super::SdpProfile::CompleteSdpV1);
+        Ok(())
     }
     pub fn new(
         context: &Context,
@@ -694,6 +955,10 @@ impl PacketLedger {
             pair: pair.live.clone(),
             helpers,
         };
+        // Release this ledger's closed owner before competing for a new registered phase.
+        // Actual input/Source/Lower borrowers or an external closed handle still retain the
+        // old owner and correctly refuse replacement until their real last drop.
+        drop(self.sdp.take());
         let slots = self.action_slots.reserve(2)?;
         let owner = Exchange::new_bound(self.resources.clone(), binding, slots)?;
         self.sdp = Some(SdpExchange {
@@ -720,22 +985,31 @@ impl PacketLedger {
         header: &EncryptedHeader,
         incoming: bool,
     ) -> Result<Option<Arc<Exchange>>, VoiceError> {
-        if !matches!(header.kind, EncryptedKind::Offer | EncryptedKind::Answer) {
+        if !header.kind.is_sdp() {
             return Ok(None);
         }
         let sdp = self.sdp.as_ref().ok_or(VoiceError::Capacity)?;
-        if sdp.handshake != header.handshake || !sdp.owner.is_live() {
+        if sdp.handshake != header.handshake
+            || !sdp.owner.is_live()
+            || !sdp.owner.accepts_sdp_kind(header.kind)
+        {
             return Err(VoiceError::Unauthorized);
         }
         if (incoming && sdp.remote.is_some()) || (!incoming && sdp.local.is_some()) {
             return Err(VoiceError::Capacity);
         }
         let permitted = match (incoming, header.kind, sdp.role) {
-            (_, EncryptedKind::Offer, SdpRole::Ready) => true,
-            (true, EncryptedKind::Answer, SdpRole::Initiator(offer))
-            | (false, EncryptedKind::Answer, SdpRole::Responder(offer)) => {
-                header.offer == Some(offer)
-            }
+            (_, EncryptedKind::Offer | EncryptedKind::OfferRound(_), SdpRole::Ready) => true,
+            (
+                true,
+                EncryptedKind::Answer | EncryptedKind::AnswerRound(_),
+                SdpRole::Initiator(offer),
+            )
+            | (
+                false,
+                EncryptedKind::Answer | EncryptedKind::AnswerRound(_),
+                SdpRole::Responder(offer),
+            ) => header.offer == Some(offer),
             _ => false,
         };
         if !permitted {
@@ -750,7 +1024,7 @@ impl PacketLedger {
         incoming: bool,
         mono: u64,
     ) {
-        if !matches!(header.kind, EncryptedKind::Offer | EncryptedKind::Answer) {
+        if !header.kind.is_sdp() {
             return;
         }
         let sdp = self
@@ -761,7 +1035,7 @@ impl PacketLedger {
         // first admitted SDP, so waiting before an Offer cannot shorten its fresh reply.
         sdp.retire
             .get_or_insert(mono.saturating_add(MAX_PACKET_LIFETIME_MS + CLOCK_SKEW_MS));
-        if header.kind == EncryptedKind::Offer {
+        if header.kind.is_offer() {
             let offer = header.offer.expect("validated OfferId");
             sdp.role = if incoming {
                 SdpRole::Responder(offer)
@@ -843,6 +1117,7 @@ impl PacketLedger {
                 status: Status::Confirming,
                 live,
                 confirmation_claimed: false,
+                sdp_profile: None,
                 next: 0,
                 replay: Replay::default(),
             },
@@ -906,6 +1181,7 @@ impl PacketLedger {
             status: Status::Confirming,
             live,
             confirmation_claimed: true,
+            sdp_profile: None,
             next: 0,
             replay: Replay::default(),
         }))
@@ -997,10 +1273,11 @@ impl PacketLedger {
     fn prune(&mut self, clock: &dyn Clock) {
         let now = clock.now_ms();
         let mono = clock.monotonic_ms();
-        if let Some(sdp) = &self.sdp {
-            if mono >= sdp.retire.unwrap_or(sdp.ready_until) || !sdp.owner.is_live() {
-                sdp.owner.close();
-            }
+        if self.sdp.as_ref().is_some_and(|sdp| {
+            mono >= sdp.retire.unwrap_or(sdp.ready_until) || !sdp.owner.is_live()
+        }) {
+            let sdp = self.sdp.take().expect("expired original SDP");
+            sdp.owner.close();
         }
         self.outgoing.retain(|_, outgoing| {
             mono < outgoing.retire && now <= outgoing.draft.expires.saturating_add(CLOCK_SKEW_MS)
@@ -1145,6 +1422,16 @@ impl PacketLedger {
             Ok(grant)
         }
     }
+    /// Bounded, borrowed cache inspection for the native sender. This neither signs an
+    /// object nor grants authority to send it; source_authority checks the actual owners.
+    pub(super) fn published_source_packets(&self) -> impl Iterator<Item = &SignedObject> {
+        // Never expose an inert Prepared signature to Source. Authority is obtained again
+        // from the exact original row before each admission; this iterator grants none.
+        self.outgoing
+            .values()
+            .take(RESERVATIONS)
+            .filter_map(|outgoing| outgoing.sealed.published())
+    }
     /// Exact native outgoing receipt, not a caller-supplied signature or a join-wide grant.
     /// Equality compares immutable fields without allocating canonical packet copies.
     pub(super) fn source_authority(
@@ -1182,6 +1469,7 @@ impl PacketLedger {
             pair: pair.live.clone(),
             packet: outgoing.live.clone(),
             chain: outgoing.chain.clone(),
+            workflow: outgoing.workflow.clone(),
             deadline: outgoing
                 .source_deadline
                 .min(self.sdp_deadline(outgoing.exchange.as_ref())?),
@@ -1244,6 +1532,7 @@ impl PacketLedger {
             return Err(VoiceError::Malformed);
         };
         let pair = self.pair(&header.handshake, authority)?;
+        pair.check_profile(header.kind)?;
         if object.issuer != pair.binding.peer
             || header.target != self.local
             || header.target_join != self.join
@@ -1303,20 +1592,27 @@ impl PacketLedger {
         if self.incoming.len() >= RESERVATIONS {
             return Err(VoiceError::Capacity);
         }
+        let exchange = self.sdp_owner(header, true)?;
         let slot = if let Some(workflow) = &workflow {
-            workflow.incoming_confirmation_slot(
-                &self.resources,
-                self.scope,
-                &self.lease,
-                &self.packet_slots,
-                &object,
-            )?
+            workflow
+                .incoming_confirmation_slot(
+                    &self.resources,
+                    self.scope,
+                    &self.lease,
+                    &self.packet_slots,
+                    &object,
+                )?
+                .into()
+        } else if let Some(exchange) = exchange
+            .as_ref()
+            .filter(|owner| owner.uses_successor_packet_claims())
+        {
+            exchange.incoming_sdp_slot(header, &self.packet_slots)?
         } else {
-            self.packet_slots.incoming.charge(1)?
+            self.packet_slots.incoming.charge(1)?.into()
         };
         let token = self.serial.checked_add(1).ok_or(VoiceError::Reservation)?;
         let aad = object.aad()?;
-        let exchange = self.sdp_owner(header, true)?;
         let bytes = 2 * (aad.len() + ciphertext.len()) + 256;
         let credit = Arc::new(if let Some(exchange) = &exchange {
             exchange.charge(Stage::RemotePacket, bytes)?
@@ -1496,6 +1792,7 @@ impl PacketLedger {
         let pair = self.pair(&header.handshake, authority)?.live.clone();
         Ok(ValidatedInbound {
             token,
+            message: incoming.object.id(),
             header: header.clone(),
             hash: incoming.object.hash(),
             expires: incoming.object.expires(),

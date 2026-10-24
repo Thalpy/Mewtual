@@ -8,7 +8,9 @@ use rand_chacha::ChaCha20Rng;
 use rand_core::SeedableRng;
 use std::future::poll_fn;
 
+mod peer_snapshot;
 mod results;
+mod snapshot;
 
 fn found(seed: u64) -> Server<MemNetwork, ChaCha20Rng> {
     Server::found(
@@ -64,13 +66,36 @@ async fn park(actor: &ServerActor) -> crate::durable_chat::DurableSendReady {
 
 #[tokio::test]
 async fn native_voice_actor_installs_exact_endpoint_and_coalesces_revision_observation() {
-    let (actor, mut events, task, _runtime, grant) = start().await;
+    let (actor, mut events, task, runtime, grant) = start().await;
     let drain = tokio::spawn(async move { while events.recv().await.is_some() {} });
     let mut changes = actor.voice_endpoint_changes().await.unwrap();
     actor
         .start_voice_endpoint(grant.clone(), [81; 32], point())
         .await
         .unwrap();
+    assert!(actor
+        .voice_participant_peers(grant.clone())
+        .await
+        .unwrap()
+        .is_empty());
+    let foreign = Arc::new(CallGrant::from_lease(grant.lease(), grant.scope()));
+    let permit = CryptoActionSnapshotPermit::new(&runtime.resources(), grant.scope()).unwrap();
+    let observed = actor
+        .voice_confirmation_actions(grant.clone(), permit)
+        .await
+        .unwrap();
+    assert!(observed.result().unwrap().is_empty());
+    let refused = actor
+        .voice_confirmation_actions(foreign.clone(), observed.return_permit())
+        .await
+        .unwrap();
+    assert_eq!(refused.result().err(), Some(VoiceError::Unauthorized));
+    drop(refused);
+    assert_eq!(
+        actor.voice_participant_peers(foreign.clone()).await.err(),
+        Some(VoiceEndpointError::Protocol(VoiceError::Unauthorized)),
+        "equal scope and even the same lease cannot adopt another affine participant grant"
+    );
     assert!(changes.has_changed().unwrap());
     changes.borrow_and_update();
     assert_eq!(
@@ -89,6 +114,35 @@ async fn native_voice_actor_installs_exact_endpoint_and_coalesces_revision_obser
         Some(VoiceEndpointError::Protocol(VoiceError::Unauthorized)),
         "actor commands cannot manufacture a proven pair from request metadata"
     );
+    assert!(!changes.has_changed().unwrap());
+    let missing = PairSelector {
+        peer: catcoms_crypto::DeviceId::from_bytes([9; 32]),
+        join: [9; 32],
+        key_ref: [9; 32],
+        epoch: 0,
+    };
+    assert_eq!(
+        actor
+            .voice_pair_confirmation(grant.clone(), missing, [0; 32])
+            .await,
+        Err(VoiceEndpointError::Protocol(VoiceError::Unauthorized))
+    );
+    // An abandoned read-only command must not publish a wake or manufacture pair state.
+    let (reply, lost) = oneshot::channel();
+    drop(lost);
+    actor
+        .cmd_tx
+        .send(AppCommand::VoiceEndpoint(VoiceEndpointCommand(
+            Command::PairConfirmation {
+                grant: grant.clone(),
+                selector: missing,
+                handshake: [0; 32],
+                reply,
+            },
+        )))
+        .await
+        .unwrap();
+    actor.member_count().await;
     assert!(!changes.has_changed().unwrap());
     actor
         .start_voice_endpoint(grant.clone(), [81; 32], point())
@@ -121,6 +175,10 @@ async fn native_voice_actor_installs_exact_endpoint_and_coalesces_revision_obser
     assert_eq!(
         actor.voice_endpoint_changes().await.err(),
         Some(VoiceEndpointError::Stopped)
+    );
+    assert_eq!(
+        actor.voice_pair_confirmation(grant, missing, [0; 32]).await,
+        Err(VoiceEndpointError::Stopped)
     );
 }
 
@@ -159,6 +217,78 @@ async fn native_voice_actor_rejects_foreign_and_replaced_call_allocations() {
             .err(),
         Some(VoiceEndpointError::Protocol(VoiceError::Unauthorized))
     );
+    actor.stop_and_wait().await.unwrap();
+    task.await.unwrap();
+    drain.await.unwrap();
+}
+
+#[tokio::test]
+async fn native_voice_actor_stop_survives_revocation_lost_reply_and_replacement() {
+    let (actor, mut events, task, _runtime, grant) = start().await;
+    let drain = tokio::spawn(async move { while events.recv().await.is_some() {} });
+    actor
+        .start_voice_endpoint(grant.clone(), [81; 32], point())
+        .await
+        .unwrap();
+    let foreign = Arc::new(CallGrant::from_lease(grant.lease(), grant.scope()));
+    actor.stop_voice_endpoint(foreign.clone()).await.unwrap();
+    assert!(
+        actor.voice_participant_peers(grant.clone()).await.is_ok(),
+        "equal scope and lease cannot stop the actual affine participant"
+    );
+
+    // End wins before the actor receives cleanup. Lost reply must not suppress the admitted
+    // cleanup command; the real mailbox barrier below observes its ordered completion.
+    grant.lease().revoke();
+    let (reply, lost) = oneshot::channel();
+    drop(lost);
+    actor
+        .cmd_tx
+        .send(AppCommand::VoiceEndpoint(VoiceEndpointCommand(
+            Command::Stop {
+                grant: grant.clone(),
+                reply,
+            },
+        )))
+        .await
+        .unwrap();
+    actor.member_count().await;
+    let replacement = Arc::new(
+        actor
+            .voice_call_grant(crate::channel_id("general"))
+            .await
+            .unwrap(),
+    );
+    actor
+        .start_voice_endpoint(replacement.clone(), [82; 32], point())
+        .await
+        .unwrap();
+    for _ in 0..3 {
+        actor.stop_voice_endpoint(grant.clone()).await.unwrap();
+    }
+    assert!(
+        actor
+            .voice_participant_peers(replacement.clone())
+            .await
+            .is_ok(),
+        "late old cleanup cannot remove the replacement participant"
+    );
+    actor
+        .stop_voice_endpoint(replacement.clone())
+        .await
+        .unwrap();
+    assert!(
+        !replacement.lease().is_live(),
+        "live exact stop revokes before dropping Root ownership"
+    );
+    assert_eq!(
+        actor
+            .voice_participant_peers(replacement.clone())
+            .await
+            .err(),
+        Some(VoiceEndpointError::Protocol(VoiceError::Unauthorized))
+    );
+    actor.stop_voice_endpoint(replacement).await.unwrap();
     actor.stop_and_wait().await.unwrap();
     task.await.unwrap();
     drain.await.unwrap();

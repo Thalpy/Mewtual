@@ -350,6 +350,11 @@ impl VoiceForwardFixture {
         Self::build(false).await
     }
     async fn build(seed_helper_packet: bool) -> Self {
+        Self::build_using(seed_helper_packet, None, None).await
+    }
+    // Distinct native groups may share ONE process Runtime; roots in a single group still
+    // have their own process/device. Used by real-dispatch pressure/fairness acceptance.
+    async fn build_using(seed_helper_packet: bool, source_runtime: Option<Arc<Runtime>>, recipient_runtime: Option<Arc<Runtime>>) -> Self {
         let (hub, mut nodes, ids) = crate::tests::build_members(3).await;
         crate::tests::converge_and_publish_test_routes(&mut nodes);
         nodes[0].initialize_group_policy(GroupMode::PeerToPeer).unwrap();
@@ -361,7 +366,7 @@ impl VoiceForwardFixture {
         let clock = Arc::new(ManualClock::new(1000));
         let reply_clock = Arc::new(ReplySampleClock { inner: clock.clone(), on_mono: std::sync::Mutex::new(None) });
         let helper_runtime = Runtime::new(reply_clock.clone());
-        let endpoints = vec![Runtime::new(clock.clone()), Runtime::new(clock.clone())];
+        let endpoints = vec![source_runtime.unwrap_or_else(|| Runtime::new(clock.clone())), recipient_runtime.unwrap_or_else(|| Runtime::new(clock.clone()))];
         attach(&mut source, &endpoints[0]); attach(&mut helper, &helper_runtime); attach(&mut recipient, &endpoints[1]);
         let (ok, served) = tokio::join!(source.finalize_member_connection(helper.local_peer()), helper.run_once()); assert!(ok.unwrap() && served.unwrap());
         let (ok, served) = tokio::join!(helper.finalize_member_connection(recipient.local_peer()), recipient.run_once()); assert!(ok.unwrap() && served.unwrap());
@@ -576,11 +581,14 @@ async fn voice_transport_local_driver_retirement_rejects_queued_worker_and_retai
 }
 
 fn queued_source_watch(f: &mut VoiceForwardFixture, parent: voice_v2::CallLease) -> (voice_v2::presence::Watcher, voice_v2::SignedObject, voice_v2::source::SourceActivity) {
+    queued_source_watch_seed(f, parent, 901)
+}
+fn queued_source_watch_seed(f: &mut VoiceForwardFixture, parent: voice_v2::CallLease, seed: u64) -> (voice_v2::presence::Watcher, voice_v2::SignedObject, voice_v2::source::SourceActivity) {
     use voice_v2::presence::{WatchAuthority, Watcher};
     use rand_chacha::rand_core::SeedableRng;
     let context = f._source.voice_v2_context(1).unwrap();
     let watch = f._source.voice_watch_lease(1).unwrap().with_parent(parent).unwrap();
-    let mut rng = rand_chacha::ChaCha20Rng::seed_from_u64(901);
+    let mut rng = rand_chacha::ChaCha20Rng::seed_from_u64(seed);
     let mut watcher = Watcher::new(&context, watch.clone(), f._endpoints[0].resources(), &mut rng).unwrap();
     let key = voice_v2::JoinKey::new([3; 32], hex::decode("046b17d1f2e12c4247f8bce6e563a440f277037d812deb33a0f4a13945d898c2964fe342e2fe1a7f9b8ee7eb4a7c0f9e162bce33576b315ececbb6406837bf51f5").unwrap().try_into().unwrap()).unwrap();
     let announcement = voice_v2::SignedObject::issue(context.scope, &f.recipient.device, [95; 32], 1000, 31_000,
@@ -785,10 +793,10 @@ async fn root_prepares_and_submits_prepaid_sdp_with_the_ordinary_pool_full() {
     let (_join, object) = queued_source_offer(&mut f);
     let context = f._source.voice_v2_context(1).unwrap();
     let resources = f._endpoints[0].resources();
-    let ordinary = resources.charge(context.scope.group, 256 * 1024 - resources.counts().0, ResourceKind::Retained).unwrap();
+    let ordinary = resources.charge(context.scope.group, crate::voice_v2::resources::GROUP_BYTES - resources.counts().0, ResourceKind::Retained).unwrap();
     let mut pending = f._source.prepare_voice_sources().unwrap();
     assert_eq!(pending.len(), 1, "prepaid lower work includes Root route metadata before spending an attempt");
-    assert_eq!(resources.counts().0, 256 * 1024);
+    assert_eq!(resources.counts().0, crate::voice_v2::resources::GROUP_BYTES);
     assert!(resources.charge(context.scope.group, 1, ResourceKind::Retained).is_err());
     let (_publisher, signal) = tokio::sync::watch::channel(false);
     let (completed, ()) = tokio::join!(pending.pop().unwrap().execute(signal), async {
@@ -814,7 +822,7 @@ async fn root_prepaid_sdp_routes_keep_two_actual_lowers_charged_after_cancellati
     let (_join, object) = queued_source_offer(&mut f);
     let resources = f._endpoints[0].resources();
     let group = object.scope().group;
-    let ordinary = resources.charge(group, 256 * 1024 - resources.counts().0, ResourceKind::Retained).unwrap();
+    let ordinary = resources.charge(group, crate::voice_v2::resources::GROUP_BYTES - resources.counts().0, ResourceKind::Retained).unwrap();
     let first = f._source.prepare_voice_sources().unwrap().pop().unwrap();
     f.clock.advance_ms(500);
     let second = f._source.prepare_voice_sources().unwrap().pop().unwrap();
@@ -847,7 +855,7 @@ async fn root_prepaid_sdp_routes_keep_two_actual_lowers_charged_after_cancellati
     drop(_join); // closes unused exchange headroom; actual lower phase loans remain owned
     let retained = resources.counts().0;
     drop(responders);
-    assert_eq!(source.counts(), (1, 2, 0));
+    assert_eq!(source.counts(), (0, 0, 0), "permanently ended activity is collected after both actual responders drain");
     assert!(resources.counts().0 < retained, "route metadata and both lower phase/lane charges retire with the real responders");
 }
 
@@ -875,7 +883,8 @@ async fn voice_transport_source_end_and_driver_replacement_reject_queued_or_comp
             completed
         };
         assert_eq!(f._source.complete_voice_source(completed).map_err(|failure| failure.into_error()), Err(VoiceError::Unauthorized), "scenario {scenario}");
-        assert_eq!(f._source.voice_transport_actor().unwrap().source().unwrap().counts().1, 1);
+        assert_eq!(f._source.voice_transport_actor().unwrap().source().unwrap().counts().1, if scenario < 2 { 0 } else { 1 },
+            "only native activity End permits early collection; driver churn preserves attempts");
         if scenario < 2 { assert_eq!(f._source.queue_voice_source(original, activity), Err(VoiceError::Unauthorized)); }
         drop(replacement);
     }
@@ -1012,7 +1021,7 @@ async fn voice_transport_public_queue_capacity_and_exact_retry_do_not_spend_extr
     let pool = f._endpoints[1].resources();
     let baseline = pool.counts().0;
     let verification = 5 * envelope.encode().len() + 4096;
-    let full = pool.charge(scope.group, 256 * 1024 - baseline - verification - 512, voice_v2::resources::ResourceKind::Retained).unwrap();
+    let full = pool.charge(scope.group, crate::voice_v2::resources::GROUP_BYTES - baseline - verification - 512, voice_v2::resources::ResourceKind::Retained).unwrap();
     let answer = f.recipient.receive_voice_transport(f.helper.local_peer(), &frame).unwrap();
     assert_eq!(f.helper.verify_voice_transport_response(f.recipient.local_peer(), &frame, object.hash(), &answer).unwrap(), crate::VoiceTransportStatus::Refused);
     drop(full);
@@ -1074,7 +1083,7 @@ async fn voice_transport_replaced_watcher_seeds_fresh_challenge_without_adopting
     assert!(f.recipient.voice_watch_peers(&new_watch).unwrap().is_empty(), "cached candidates grant no liveness");
     assert_eq!(ledger.complete(old.finish(None)).unwrap(), voice_v2::source::SourceOutcome::Retired);
     drop(lower);
-    assert_eq!(ledger.counts(), (2, 2, 1));
+    assert_eq!(ledger.counts(), (1, 1, 1), "old ended watcher history leaves after its actual Lower; fresh watcher keeps its own attempt");
     drop(fresh);
 }
 
@@ -1241,6 +1250,242 @@ async fn dispatched(from: &VoiceTestNode, to: &mut VoiceTestNode, frame: &[u8]) 
 fn frame_hash(frame: &[u8]) -> [u8; 32] {
     let (inner, ..) = decode_authed_request(&frame[1..]).unwrap();
     voice_v2::Envelope::decode(&inner).unwrap().object().hash()
+}
+
+#[tokio::test]
+async fn voice_ready_normal_dispatch_distinguishes_helper_custody_from_refused_endpoint() {
+    let mut f = VoiceForwardFixture::empty().await;
+    if f._source.device_id() < f.recipient.device_id() {
+        std::mem::swap(&mut f._source, &mut f.recipient);
+    }
+    for node in [&mut f._source, &mut f.helper, &mut f.recipient] {
+        node.set_voice_routing(VoiceRouting::Forwarding);
+    }
+    let context = f._source.voice_v2_context(1).unwrap();
+    let object = voice_v2::SignedObject::issue(context.scope, &f._source.device, [171; 32], 1000, 16_000,
+        voice_v2::Body::PairReady { header: voice_v2::ReadyHeader {
+            epoch: context.epoch, target: f.recipient.device_id(), source_join: [1; 32],
+            target_join: [2; 32], source_key_ref: [3; 32], target_key_ref: [4; 32],
+            handshake: [5; 32], finish_message: [6; 32], finish_object_hash: [7; 32],
+            helpers: vec![f.helper.device_id()],
+        }}).unwrap();
+    let permit = voice_v2::RoutePermit::issue(&f._source.device, &object, f.helper.device_id(), 1000, 16_000).unwrap();
+    let frame = voice_frame(&mut f._source, &voice_v2::Envelope::ToHelper { object: object.clone(), permit: permit.clone() });
+    let reply = dispatched(&f._source, &mut f.helper, &frame).await;
+    assert_eq!(f._source.verify_voice_transport_response(f.helper.local_peer(), &frame, object.hash(), &reply).unwrap(),
+        crate::VoiceTransportStatus::HelperQueued);
+    // Use the actual permitted helper role and normal final dispatch. A signed wire Ready
+    // must not become a queued PublicReceipt/EndpointAdmitted before exact pair admission.
+    let frame = voice_frame(&mut f.helper, &voice_v2::Envelope::HelperDelivery { object: object.clone(), permit });
+    let reply = dispatched(&f.helper, &mut f.recipient, &frame).await;
+    assert_eq!(f.helper.verify_voice_transport_response(f.recipient.local_peer(), &frame, object.hash(), &reply).unwrap(),
+        crate::VoiceTransportStatus::Refused);
+}
+
+/// Poll the actual detached worker against normal Root dispatch. No private ingress helper,
+/// invented endpoint receipt or wall-clock delay substitutes for a network response here.
+async fn drive_voice_flight<F: std::future::Future>(flight: F, node: &mut VoiceTestNode) -> F::Output {
+    use futures::FutureExt;
+    futures::pin_mut!(flight);
+    for _ in 0..512 {
+        if let Some(result) = flight.as_mut().now_or_never() { return result; }
+        let _ = node.run_once().now_or_never();
+        tokio::task::yield_now().await;
+    }
+    panic!("detached voice worker did not complete through normal dispatch");
+}
+
+#[tokio::test]
+async fn voice_busy_larger_group_preserves_other_group_authenticated_progress_and_cleanup() {
+    use voice_v2::resources::{ResourceKind, GROUP_BYTES, PROCESS_BYTES};
+    let clock = Arc::new(ManualClock::new(1000));
+    let shared = Runtime::new(clock.clone());
+    // One native process is A's source and B's observer, in DISTINCT MLS groups. The other
+    // real protocol endpoints keep their own processes; no group has two active local actors.
+    let mut a = VoiceForwardFixture::build_using(false, Some(shared.clone()), None).await;
+    let mut b = VoiceForwardFixture::build_using(false, None, Some(shared.clone())).await;
+    for root in [&mut a.helper, &mut a.recipient, &mut b.recipient] {
+        root.set_voice_routing(VoiceRouting::Forwarding);
+    }
+    let ga = a._source.voice_v2_context(1).unwrap().scope.group;
+    let gb = b.recipient.voice_v2_context(1).unwrap().scope.group;
+    assert_ne!(ga, gb);
+    let pool = shared.resources();
+    let used = pool.group_counts(ga).unwrap().0;
+    let padding = pool.charge(ga, GROUP_BYTES - used - 128 * 1024, ResourceKind::Retained).unwrap();
+    let occupied: Vec<_> = (0..3).map(|_| pool.charge(ga, 0, ResourceKind::Crypto).unwrap()).collect();
+    assert!(pool.group_counts(ga).unwrap().0 > GROUP_BYTES / 2,
+        "the busy group actually exceeds the previous provisional allowance");
+    let parent = voice_v2::CallLease::default();
+    let mut watchers = Vec::new();
+    let mut b_parent = voice_v2::CallLease::default();
+    let mut b_watch = b.recipient.start_voice_watch(1, b_parent.clone()).unwrap();
+    let mut sources = 0;
+    let mut received = 0;
+    let mut cleanups = 0;
+    for step in 0..24u8 {
+        if step % 3 == 0 {
+            watchers.push(queued_source_watch_seed(&mut a, parent.clone(), 901 + u64::from(step)).0);
+        }
+        for pending in a._source.prepare_voice_sources().unwrap() {
+            let (_sender, signal) = tokio::sync::watch::channel(false);
+            let completed = drive_voice_flight(pending.execute(signal), &mut a.helper).await;
+            let (status, _) = a._source.complete_voice_source(completed).unwrap();
+            assert_eq!(status, crate::VoiceTransportStatus::HelperQueued);
+            sources += 1;
+        }
+        // Normal helper ingress already scheduled its detached forwards. Drive that SAME
+        // scheduler and C's normal dispatch, rather than preparing a duplicate private job.
+        // C has no join: only its actually verified signed refusal increments the oracle.
+        tick_nodes(&mut [&mut a.helper, &mut a.recipient], 64).await;
+        let scope = b_watch.scope();
+        let now = clock.now_ms();
+        let object = voice_v2::SignedObject::issue(scope, &b.helper.device, [180 + step; 32], now, now + 30_000,
+            voice_v2::Body::Announcement { key: public_join_key(171), epoch: b.helper.group.epoch(), renewal: u64::from(step) + 1 }).unwrap();
+        let frame = voice_frame(&mut b.helper, &voice_v2::Envelope::Direct(object));
+        let reply = dispatched(&b.helper, &mut b.recipient, &frame).await;
+        assert_eq!(b.helper.verify_voice_transport_response(b.recipient.local_peer(), &frame, frame_hash(&frame), &reply).unwrap(), crate::VoiceTransportStatus::EndpointAdmitted);
+        received += 1;
+        if step % 2 == 1 {
+            b_parent.revoke();
+            assert!(!b_watch.is_live(), "B cleanup is immediate while A retains its memory/work");
+            assert!(b.recipient.validate_voice_watch(&b_watch).is_err());
+            drop(b_watch);
+            b_parent = voice_v2::CallLease::default();
+            b_watch = b.recipient.start_voice_watch(1, b_parent.clone()).unwrap();
+            // start_voice_watch performs normal native pruning. Inspect that same table:
+            // revoked authority alone would not prove retired watcher owners were collected.
+            assert_eq!(b.recipient.voice_runtime.as_ref().unwrap().endpoints.observer_count_for_test(), 1);
+            cleanups += 1;
+        }
+        assert!(pool.group_counts(ga).unwrap().0 <= GROUP_BYTES);
+        assert!(pool.group_counts(gb).unwrap().0 <= GROUP_BYTES);
+        assert!(pool.counts().0 <= PROCESS_BYTES);
+        clock.advance_ms(500);
+        a.clock.advance_ms(500);
+        b.clock.advance_ms(500);
+    }
+    let forwards = a.helper.voice_schedule.helper_refusals;
+    assert!(sources >= 20 && forwards >= 20, "sustained real source/helper work: {sources}/{forwards}");
+    assert_eq!((received, cleanups), (24, 12));
+    // The larger group allowance never multiplies the process ceiling. A retained actual
+    // last owner, rather than cancellation or a completed waiter, determines when retry fits.
+    let mut saturation = Vec::new();
+    for id in 200..255u8 {
+        let left = PROCESS_BYTES - pool.counts().0;
+        if left == 0 { break; }
+        if pool.group_counts([id; 32]).is_some() { continue; }
+        saturation.push(Arc::new(pool.charge([id; 32], left.min(GROUP_BYTES), ResourceKind::Retained).unwrap()));
+    }
+    assert_eq!(pool.counts().0, PROCESS_BYTES);
+    let before = pool.counts();
+    assert!(pool.charge(gb, 1, ResourceKind::Retained).is_err());
+    assert_eq!(pool.counts(), before, "global refusal is atomic");
+    let original = saturation.pop().unwrap();
+    let late = original.clone();
+    drop(original);
+    assert_eq!(pool.counts(), before);
+    drop(late);
+    drop(pool.charge(gb, 1, ResourceKind::Retained).unwrap());
+    parent.revoke(); b_parent.revoke();
+    drop((b_watch, watchers, padding, occupied, saturation));
+}
+
+#[tokio::test]
+async fn voice_normal_dispatch_excludes_legacy_writers_from_live_and_paused_v2_endpoints() {
+    let mut f = VoiceForwardFixture::empty().await;
+    // An explicit observer has no participating protocol to downgrade. A legacy-only peer
+    // remains interoperable until native has selected an actual V2 participant.
+    let watch = f.recipient.start_voice_watch(1, voice_v2::CallLease::default()).unwrap();
+    let legacy = |source: &mut VoiceTestNode, kind: &str| {
+        source.build_authed_request(KIND_CALL_SIGNAL,
+            format!("{{\"type\":\"{kind}\",\"session\":\"1\"}}").as_bytes()).unwrap().0
+    };
+    let frame = legacy(&mut f.helper, "hello");
+    assert!(dispatched(&f.helper, &mut f.recipient, &frame).await.is_empty());
+    assert_eq!(f.recipient.pending_call_signals.len(), 1);
+    assert_eq!(f.recipient.take_call_signals().len(), 1);
+    let queued_bye = legacy(&mut f.helper, "bye");
+    assert!(dispatched(&f.helper, &mut f.recipient, &queued_bye).await.is_empty());
+    assert_eq!(f.recipient.pending_call_signals.len(), 1);
+    let grant = Arc::new(f.recipient.voice_call_grant(1).unwrap());
+    let key = public_join_key(191);
+    f.recipient.start_voice_endpoint(grant.clone(), key.join, key.public_key).unwrap();
+    assert!(f.recipient.take_call_signals().is_empty(), "upgrade discards a prequeued legacy bye before actor delivery");
+    for mode in [VoiceRouting::Forwarding, VoiceRouting::Disabled] {
+        f.recipient.set_voice_routing(mode);
+        assert!(!f.recipient.send_call_signal(&f.helper.device_id(), b"legacy queued offer").await.unwrap(),
+            "a queued legacy send cannot escape after native protocol selection");
+        for kind in ["bye", "hello", "heartbeat", "offer", "answer", "ice"] {
+            let frame = legacy(&mut f.helper, kind);
+            assert!(dispatched(&f.helper, &mut f.recipient, &frame).await.is_empty());
+            assert!(f.recipient.pending_call_signals.is_empty(), "{mode:?} {kind} reached the legacy queue");
+            assert!(f.recipient.voice_participant_peers(&grant).is_ok(), "legacy traffic cannot replace/end V2 state");
+        }
+    }
+    f.recipient.stop_voice_endpoint(&grant);
+    assert!(!grant.lease().is_live());
+    let frame = legacy(&mut f.helper, "hello");
+    assert!(dispatched(&f.helper, &mut f.recipient, &frame).await.is_empty());
+    assert_eq!(f.recipient.pending_call_signals.len(), 1, "cleanup does not permanently disable released legacy calls");
+    assert!(watch.is_live(), "ending the participant does not stop an explicit controller observer");
+}
+
+#[tokio::test]
+async fn voice_normal_dispatch_duplicate_and_equivocation_flood_keep_original_helper_custody_bounded() {
+    let mut f = VoiceForwardFixture::empty().await;
+    f.helper.set_voice_routing(VoiceRouting::Forwarding);
+    let pool = f.helper_runtime.resources();
+    let frame = incoming_helper_frame(&mut f, 192);
+    let reply = dispatched(&f._source, &mut f.helper, &frame).await;
+    assert_eq!(f._source.verify_voice_transport_response(f.helper.local_peer(), &frame, frame_hash(&frame), &reply).unwrap(),
+        crate::VoiceTransportStatus::HelperQueued);
+    let ledger = f.helper.voice_transport_actor().unwrap().helper().unwrap();
+    let mut recovered = 0;
+    for _ in 0..128 {
+        // New outer request authentication, same original signed object/permit. A network
+        // retry cannot mint another helper packet, edge or forwarded-work identity.
+        let retry = incoming_helper_frame(&mut f, 192);
+        let reply = dispatched(&f._source, &mut f.helper, &retry).await;
+        // Flood protection may refuse or answer unavailable after the authenticated budget
+        // is spent. It must never manufacture endpoint admission or fresh helper ownership.
+        if !reply.is_empty() {
+            let status = f._source.verify_voice_transport_response(f.helper.local_peer(), &retry, frame_hash(&retry), &reply).unwrap();
+            assert!(matches!(status, crate::VoiceTransportStatus::HelperQueued | crate::VoiceTransportStatus::Refused));
+            recovered += usize::from(status == crate::VoiceTransportStatus::HelperQueued);
+        }
+        assert_eq!(ledger.counts().0, 1);
+        assert_eq!(ledger.counts().1, 1);
+        assert!(pool.counts().0 <= crate::voice_v2::resources::GROUP_BYTES);
+    }
+    assert!(recovered > 0, "an actual duplicate recovers positive custody before flood throttling");
+    let scope = f._source.voice_v2_context(1).unwrap().scope;
+    let changed = voice_v2::SignedObject::issue(scope, &f._source.device, [192; 32], 1000, 16_000,
+        voice_v2::Body::WatchChallenge { watcher: [1; 32], target: f.recipient.device_id(),
+            join: [2; 32], key_ref: [3; 32], challenge: [99; 32] }).unwrap();
+    let permit = voice_v2::RoutePermit::issue(&f._source.device, &changed, f.helper.device_id(), 1000, 16_000).unwrap();
+    let changed = voice_v2::Envelope::ToHelper { object: changed, permit };
+    // Refill the authenticated request budget while the ORIGINAL signed packet is still
+    // current. Require real inner-identity rejection rather than counting flood throttling
+    // as an equivocation test. Then prove the retained original is still recoverable.
+    f.clock.advance_ms(1000);
+    let changed_frame = voice_frame(&mut f._source, &changed);
+    let reply = dispatched(&f._source, &mut f.helper, &changed_frame).await;
+    assert_eq!(f._source.verify_voice_transport_response(f.helper.local_peer(), &changed_frame, frame_hash(&changed_frame), &reply).unwrap(),
+        crate::VoiceTransportStatus::Refused);
+    let original = incoming_helper_frame(&mut f, 192);
+    let reply = dispatched(&f._source, &mut f.helper, &original).await;
+    assert_eq!(f._source.verify_voice_transport_response(f.helper.local_peer(), &original, frame_hash(&original), &reply).unwrap(),
+        crate::VoiceTransportStatus::HelperQueued);
+    for _ in 0..32 {
+        let frame = voice_frame(&mut f._source, &changed);
+        let reply = dispatched(&f._source, &mut f.helper, &frame).await;
+        if !reply.is_empty() {
+            assert_eq!(f._source.verify_voice_transport_response(f.helper.local_peer(), &frame, frame_hash(&frame), &reply).unwrap(),
+                crate::VoiceTransportStatus::Refused);
+        }
+        assert_eq!(ledger.counts().0, 1, "equivocation cannot replace the already admitted original");
+    }
 }
 
 #[tokio::test]

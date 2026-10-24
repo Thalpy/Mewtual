@@ -1,15 +1,15 @@
-//! Process-owned registration for the disabled row-zero pilot. Reserve before either native
+//! Process-owned registration for the bounded application handoff. Reserve before either native
 //! pair/derivation factory, retain the native task independently of its invoke waiter, and attach
 //! before exposing input. No renderer descriptor can create a SelectedHandoffOwner or Action.
 //!
 //! This is deliberately a finite pilot: pending, live and drained rows share 32 positions. A
-//! live owner cannot evict old uncertain history to make space. Physical reply/control-flight
-//! prepayment, authenticated browser drainage and live dispatch are separate integration gates.
+//! live owner cannot evict old uncertain history to make space. Original physical/native
+//! prepayments and authenticated browser drainage remain independent admission/cleanup gates.
 use super::channel::{AuthenticatedRequest, BodyKind, Operation, SessionIdentity};
 use super::custody::{CloseMode, ConfirmationStatus, CopyCustody, Phase, PreparedPhase};
 use crate::voice_authority::SelectedHandoffOwner;
 use catcoms_sync::voice_v2::crypto_actions::{
-    CryptoAction, CryptoOperation, CryptoResultReceipt, CryptoResultStatus,
+    CryptoAction, CryptoHandoffStatus, CryptoOperation, CryptoResultReceipt, CryptoResultStatus,
 };
 use catcoms_sync::voice_v2::presence::{PairReceipt, PairSelector};
 use catcoms_sync::voice_v2::resources::{Credit, ResourceKind};
@@ -19,7 +19,31 @@ use std::sync::{Arc, Mutex, Weak};
 use tokio::sync::Notify;
 
 const ROWS: usize = 32;
-const ROW_BYTES: usize = 2048;
+// A counted Pending now retains an actual Root publication through local attachment
+// refusal. Pay for that additional owner and the complete native wrapper graph before
+// factory admission. The32-row,512KiB group and2MiB process ceilings are unchanged.
+const ROW_BYTES: usize = 2304;
+mod children;
+mod continuation;
+mod key_session;
+mod sdk;
+mod sdp;
+pub(super) use key_session::KeySessionReceipt;
+pub(super) use sdk::Receipt as SdkReceipt;
+pub(super) use sdp::Receipt as SdpReceipt;
+mod plan;
+mod projection;
+mod transition;
+pub(super) use children::ConfirmationPurpose;
+pub(super) use continuation::Continuation;
+use plan::Plan;
+pub(super) use projection::{WorkMetadata, WorkProjection};
+pub(super) use transition::TransitionReceipt;
+
+#[cfg(test)]
+pub(super) fn retirement_layout_bytes() -> usize {
+    plan::RETIREMENT_MEMORY_BYTES
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) struct RowId {
@@ -50,6 +74,10 @@ impl RowId {
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Purpose {
     Derive(PairSelector),
+    Confirmation {
+        parent: RowId,
+        request: ConfirmationPurpose,
+    },
 }
 /// Fixed historical evidence. It is neither permission to retry computation nor an RTC grant.
 /// Unknown rows are errors, never an assertion that an engine, phase or reply has drained.
@@ -76,6 +104,10 @@ struct Key {
     executor: [u8; 32],
     lease: CallLease,
     purpose: Purpose,
+    // Child -> original parent only. Never install the reverse strong relationship.
+    // The parent's independently paid row survives compaction and cannot be GC'd while
+    // a descendant still needs its opaque plan or historical identity.
+    parent: Option<Arc<Row>>,
 }
 impl Key {
     fn matches(&self, selected: &SelectedHandoffOwner, purpose: Purpose) -> bool {
@@ -88,6 +120,9 @@ impl Key {
 struct Pending {
     selected: Arc<SelectedHandoffOwner>,
     prepared: Option<PreparedPhase>,
+    // Stored BEFORE callback-bearing loan/plan preparation. An uncertain caller or busy
+    // previous loan must never turn this publication into another Actor factory request.
+    published: Option<Arc<CryptoAction>>,
     worker: bool,
     handed_off: bool,
 }
@@ -97,11 +132,19 @@ struct Pending {
 struct PendingRetirement {
     row: Arc<Row>,
     owners: Option<Pending>,
-    actor_handoff: bool,
 }
 impl Drop for PendingRetirement {
     fn drop(&mut self) {
-        drop(self.owners.take());
+        // The moved Pending remains the sole source of this historical flag. Keeping a
+        // second copy in the ticket needlessly enlarged every paid retirement position.
+        // Snapshot before destruction, but publish Closed only AFTER all original owners
+        // have dropped outside the native guards. No retry can mutate a Closing Pending.
+        let owners = self
+            .owners
+            .take()
+            .expect("original pending retirement owners");
+        let actor_handoff = owners.handed_off;
+        drop(owners);
         {
             let mut state = self
                 .row
@@ -110,9 +153,7 @@ impl Drop for PendingRetirement {
                 .unwrap_or_else(|error| error.into_inner());
             debug_assert!(matches!(state.body, Body::ClosingPending));
             state.body = Body::ClosedPending;
-            state.status.pending = PendingStatus::Closed {
-                actor_handoff: self.actor_handoff,
-            };
+            state.status.pending = PendingStatus::Closed { actor_handoff };
             // No engine settlement, ACK or Phase drainage is inferred from local closure.
         }
         self.row.changed.notify_waiters();
@@ -130,6 +171,7 @@ struct Live {
     selected: Arc<SelectedHandoffOwner>,
     action: Arc<CryptoAction>,
     phase: Arc<Phase>,
+    plan: Option<Plan>,
     worker: bool,
     observer: bool,
 }
@@ -138,7 +180,11 @@ enum Body {
     ClosingPending,
     ClosedPending,
     Live(Live),
-    Drained(Option<FinalDelivery>),
+    Drained(
+        Option<FinalDelivery>,
+        Option<Plan>,
+        Option<Arc<CryptoAction>>,
+    ),
 }
 struct State {
     body: Body,
@@ -151,14 +197,29 @@ struct State {
     // Monotonic native-only proof. It is independent of action/Phase drainage and cannot be
     // inferred from a browser FinalACK, timeout, lease revocation or copied selected fields.
     session_collected: bool,
+    // Fixed original role/message metadata survives input/Phase compaction. The role is
+    // claimed atomically with publication; an outgoing message may be captured later,
+    // outside native gates. End/settlement may already have removed its actual payload;
+    // failed description must still retain the known original publication.
+    child: Option<children::ChildMetadata>,
 }
 // Original-Session intent precedes local/Root close. The token retains NO Session or key.
 // Live/Drained reuse enum storage occupied by the larger Pending preparation. The SAME
-// original Phase payment covers its independent token allocation through delivery Drop.
+// original Row payment covers the full token allocation through delivery Drop, including
+// Plan-final after ordinary Return when there is no Phase left. Layout guards include it.
 struct FinalDelivery {
     session: Arc<SessionIdentity>,
+    kind: FinalKind,
     issued: Option<[u8; 32]>,
     acknowledged: bool,
+}
+/// Immutable terminal meaning. An ordinary Phase Return is never upgraded to Retire;
+/// Plan retirement instead closes its separately retained original control capability.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[repr(u8)]
+pub(super) enum FinalKind {
+    Phase = 1,
+    Plan = 2,
 }
 /// Fixed original-row final delivery metadata, separate from the 242-byte history schema.
 /// It proves neither channel collection nor SDK erasure. Only native issuance can create it.
@@ -166,21 +227,38 @@ struct FinalDelivery {
 pub(super) struct FinalReceipt {
     pub row: RowId,
     pub action: super::requests::Action,
+    pub kind: FinalKind,
     pub proof: Option<[u8; 32]>,
     pub acknowledged: bool,
 }
 impl State {
+    /// Reuse the existing mutually exclusive Pending/Live/Drained storage. These original
+    /// fixed handles survive compaction without enlarging every row's variable owner graph.
+    fn plan(&self) -> Option<&Plan> {
+        match &self.body {
+            Body::Live(live) => live.plan.as_ref(),
+            Body::Drained(_, plan, _) => plan.as_ref(),
+            _ => None,
+        }
+    }
+    fn plan_mut(&mut self) -> Option<&mut Plan> {
+        match &mut self.body {
+            Body::Live(live) => live.plan.as_mut(),
+            Body::Drained(_, plan, _) => plan.as_mut(),
+            _ => None,
+        }
+    }
     fn final_delivery(&self) -> Option<&FinalDelivery> {
         match &self.body {
             Body::Live(live) => live.final_delivery.as_ref(),
-            Body::Drained(delivery) => delivery.as_ref(),
+            Body::Drained(delivery, ..) => delivery.as_ref(),
             _ => None,
         }
     }
     fn final_delivery_mut(&mut self) -> Option<&mut FinalDelivery> {
         match &mut self.body {
             Body::Live(live) => live.final_delivery.as_mut(),
-            Body::Drained(delivery) => delivery.as_mut(),
+            Body::Drained(delivery, ..) => delivery.as_mut(),
             _ => None,
         }
     }
@@ -261,6 +339,11 @@ impl ResolvedRow {
         session: &Arc<SessionIdentity>,
         mode: CloseMode,
     ) -> Result<(), VoiceError> {
+        if self.row.key.parent.is_some() && mode == CloseMode::Retire {
+            // Sibling phases borrow the original parent plan. Only that parent may own
+            // whole-plan control or its final proof; a child can only Return its loan.
+            return Err(VoiceError::Unauthorized);
+        }
         self.reconcile()?;
         let closing = {
             let _index = self.indexed()?;
@@ -269,10 +352,10 @@ impl ResolvedRow {
             let phase = match &state.body {
                 Body::Live(live) if !live.worker && !live.observer => live.phase.clone(),
                 Body::Live(_) => return Err(VoiceError::Capacity),
-                Body::Drained(_) if mode == CloseMode::Retire => {
+                Body::Drained(..) if mode == CloseMode::Retire => {
                     state.final_phase.clone().ok_or(VoiceError::Unauthorized)?
                 }
-                Body::Drained(_)
+                Body::Drained(..)
                     if state.final_phase.is_none() && state.final_delivery().is_none() =>
                 {
                     return Ok(())
@@ -287,10 +370,13 @@ impl ResolvedRow {
                 return Err(VoiceError::Capacity);
             }
             if let Some(delivery) = state.final_delivery() {
-                if mode != CloseMode::Retire || !Arc::ptr_eq(&delivery.session, session) {
+                if mode != CloseMode::Retire
+                    || delivery.kind != FinalKind::Phase
+                    || !Arc::ptr_eq(&delivery.session, session)
+                {
                     return Err(VoiceError::Unauthorized);
                 }
-            } else if matches!(state.body, Body::Drained(_)) {
+            } else if matches!(state.body, Body::Drained(..)) {
                 return Err(VoiceError::Unauthorized);
             }
             let closing = phase.begin_close(mode)?;
@@ -304,6 +390,7 @@ impl ResolvedRow {
                 };
                 live.final_delivery = Some(FinalDelivery {
                     session: session.clone(),
+                    kind: FinalKind::Phase,
                     issued: None,
                     acknowledged: false,
                 });
@@ -336,13 +423,17 @@ impl ResolvedRow {
             version,
             input_tag: input,
         };
-        if !matches!(state.body, Body::Drained(_))
-            || state.final_phase.is_none()
+        if !matches!(state.body, Body::Drained(..))
+            || match delivery.kind {
+                FinalKind::Phase => state.final_phase.is_none(),
+                FinalKind::Plan => !state.plan().is_some_and(Plan::is_drained),
+            }
             || !Ledger::final_retirement_ready(&state)
         {
             return Ok(FinalReceipt {
                 row: row.id,
                 action,
+                kind: delivery.kind,
                 proof: None,
                 acknowledged: false,
             });
@@ -350,7 +441,9 @@ impl ResolvedRow {
         let proof = if let Some(proof) = delivery.issued {
             proof
         } else {
-            let Purpose::Derive(selector) = row.key.purpose;
+            let Purpose::Derive(selector) = row.key.purpose else {
+                return Err(VoiceError::Unauthorized);
+            };
             let mut hash = Sha256::new();
             hash.update(b"Mewtual native voice final retirement v1\0");
             hash.update(session.0);
@@ -363,7 +456,7 @@ impl ResolvedRow {
             hash.update(serial.to_be_bytes());
             hash.update(version.to_be_bytes());
             hash.update(input);
-            hash.update([1]); // terminal retirement, never ordinary return
+            hash.update([delivery.kind as u8]); // distinct immutable terminal meaning
             hash.finalize().into()
         };
         let delivery = state.final_delivery_mut().expect("checked original intent");
@@ -371,6 +464,7 @@ impl ResolvedRow {
         Ok(FinalReceipt {
             row: row.id,
             action,
+            kind: delivery.kind,
             proof: Some(proof),
             acknowledged: delivery.acknowledged,
         })
@@ -400,6 +494,7 @@ impl ResolvedRow {
                 version,
                 input_tag,
             },
+            kind: delivery.kind,
             proof: Some(proof),
             acknowledged: true,
         })
@@ -443,7 +538,7 @@ impl ResolvedRow {
         let state = row.state.lock().unwrap_or_else(|error| error.into_inner());
         Ok(match &state.body {
             Body::Live(live) => live.phase.confirmation_status(),
-            Body::Drained(_) => state
+            Body::Drained(..) => state
                 .final_phase
                 .as_ref()
                 .map_or(ConfirmationStatus::NotRequested, |phase| {
@@ -471,6 +566,15 @@ impl ResolvedRow {
     pub(crate) fn work(&self) -> Result<Work, VoiceError> {
         self.ledger.work(self.row.id)
     }
+    /// Opaque ACTUAL retirement fence for cancellation/drop-order regressions. Exposes no
+    /// mutable row state and changes no production synchronization or drop behavior.
+    #[cfg(test)]
+    pub(in crate::voice_handoff) fn fixture_hold_work_retirement(&self) -> impl Drop + '_ {
+        self.row
+            .state
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+    }
     /// Requires prior authenticated browser closure; neither this handle nor a renderer's
     /// claim of drainage can establish that protocol precondition by itself.
     pub(crate) async fn wait_compacted(&self) -> Result<Status, VoiceError> {
@@ -483,7 +587,9 @@ impl Ledger {
     /// enter until channel closure commits under that SAME mutex. Drained is monotonic;
     /// unknown rows do not assert SDK drainage, but no original action means there is no
     /// action Control path to strand. Pending and Live (even settled/ACKed) refuse closure;
-    /// final-intent Drained also requires the SAME actual Root retirement witness to be ready.
+    /// An attached parent always requires exact issued/ACKed final delivery, even if native
+    /// End already drained its Root plan. Otherwise an early close-first call could discard
+    /// the only Control route before the browser recovered that original final proof.
     pub(super) fn channel_may_close(&self, selected: &SelectedHandoffOwner) -> bool {
         let index = self.index.lock().unwrap_or_else(|error| error.into_inner());
         index.rows.iter().flatten().all(|row| {
@@ -491,9 +597,11 @@ impl Ledger {
                 return true;
             }
             let state = row.state.lock().unwrap_or_else(|error| error.into_inner());
-            matches!(state.body, Body::Drained(_) | Body::ClosedPending)
+            matches!(state.body, Body::Drained(..) | Body::ClosedPending)
                 && Self::final_retirement_ready(&state)
-                && ((state.final_phase.is_none() && state.final_delivery().is_none())
+                && ((state.final_phase.is_none()
+                    && state.final_delivery().is_none()
+                    && (row.key.parent.is_some() || state.status.action.is_none()))
                     || state
                         .final_delivery()
                         .is_some_and(|delivery| delivery.issued.is_some() && delivery.acknowledged))
@@ -502,13 +610,26 @@ impl Ledger {
 
     /// Local compaction/physical session closure cannot discard a requested final proof.
     /// Ordinary continuation and explicit ClosedPending require no invented Root witness.
-    /// Final-phase wire dispatch remains disabled until its retained cleanup driver can
-    /// recheck this snapshot: Root has no notification into Row's existing Notify.
+    /// The retained cleanup driver must recheck this snapshot: Root has no notification
+    /// into Row's existing Notify, so a prior Pending observation is not a final answer.
     fn final_retirement_ready(state: &State) -> bool {
-        state
-            .final_phase
-            .as_ref()
-            .is_none_or(|phase| phase.confirmation_status() == ConfirmationStatus::Drained)
+        state.plan().is_none_or(Plan::is_drained) && Self::root_retirement_ready(state)
+    }
+    // Independent dead-owner GC has actual physical collection and a dead original lease.
+    // It may discard an abandoned Claim, never fabricate Release/final issuance/ACK. Normal
+    // finalization MUST continue using final_retirement_ready, including its Release gate.
+    fn root_retirement_ready(state: &State) -> bool {
+        state.plan().is_none_or(Plan::root_drained)
+            && state
+                .plan()
+                .and_then(|plan| plan.transition.as_ref())
+                .and_then(|claim| claim.key.as_ref())
+                .and_then(|key| key.sdp.as_ref())
+                .is_none_or(sdp::Claim::whole_drained)
+            && state
+                .final_phase
+                .as_ref()
+                .is_none_or(|phase| phase.confirmation_status() == ConfirmationStatus::Drained)
     }
 
     /// Accept only the actual bootstrap registry's last-owner proof, after all its locks
@@ -526,7 +647,15 @@ impl Ledger {
                         collected
                             .identity()
                             .is_some_and(|identity| Arc::ptr_eq(identity, &delivery.session))
-                    }) {
+                    }) && state
+                        .plan()
+                        .and_then(|plan| plan.transition.as_ref())
+                        .is_none_or(|claim| {
+                            collected
+                                .identity()
+                                .is_some_and(|identity| Arc::ptr_eq(identity, &claim.session))
+                        })
+                    {
                         state.session_collected = true;
                     }
                 }
@@ -544,6 +673,7 @@ impl Ledger {
     /// Pending (including a possibly published Root pair), Live and final-unready rows remain
     /// untouched. A later bounded collection hook observes Root readiness without a new wake.
     pub(super) fn collect_retired(&self) {
+        self.close_retired_sdp();
         let mut removed: [Option<Arc<Row>>; ROWS] = std::array::from_fn(|_| None);
         {
             let mut index = self.index.lock().unwrap_or_else(|error| error.into_inner());
@@ -554,8 +684,8 @@ impl Ledger {
                     }
                     let state = row.state.lock().unwrap_or_else(|error| error.into_inner());
                     state.session_collected
-                        && matches!(state.body, Body::Drained(_) | Body::ClosedPending)
-                        && Self::final_retirement_ready(&state)
+                        && matches!(state.body, Body::Drained(..) | Body::ClosedPending)
+                        && Self::root_retirement_ready(&state)
                 });
                 if reclaim {
                     *retired = slot.take();
@@ -594,7 +724,7 @@ impl Ledger {
         let state = row.state.lock().unwrap_or_else(|error| error.into_inner());
         match &state.body {
             Body::Live(live) => Ok(live.phase.clone()),
-            Body::Pending(_) | Body::ClosingPending | Body::ClosedPending | Body::Drained(_) => {
+            Body::Pending(_) | Body::ClosingPending | Body::ClosedPending | Body::Drained(..) => {
                 Err(VoiceError::Capacity)
             }
         }
@@ -626,6 +756,35 @@ impl Ledger {
             row,
         })
     }
+
+    /// Native scheduler scan of original idle Derive preparation. Discovery expiry cannot
+    /// erase the need to recover an admitted publication. Copy only this exact selector;
+    /// no new epoch/proof, factory, lease upgrade, Clock or deadline is introduced here.
+    pub(super) fn pending_derivation(
+        &self,
+        selected: &SelectedHandoffOwner,
+        cursor: &mut u8,
+    ) -> Option<PairSelector> {
+        let index = self.index.lock().unwrap_or_else(|error| error.into_inner());
+        for offset in 0..ROWS {
+            let slot = (usize::from(*cursor) + offset) % ROWS;
+            let Some(row) = &index.rows[slot] else {
+                continue;
+            };
+            let Purpose::Derive(selector) = row.key.purpose else {
+                continue;
+            };
+            if !row.key.matches(selected, Purpose::Derive(selector)) {
+                continue;
+            }
+            let state = row.state.lock().unwrap_or_else(|error| error.into_inner());
+            if matches!(&state.body, Body::Pending(pending) if !pending.worker) {
+                *cursor = ((slot + 1) % ROWS) as u8;
+                return Some(selector);
+            }
+        }
+        None
+    }
     /// Resolve against the ORIGINAL native-selected owner, not the current replacement and
     /// not strings from the request. Preserve access to exact historical cleanup after End;
     /// no grant upgrade, Clock callback, resource charge or data loan occurs in this lookup.
@@ -644,15 +803,48 @@ impl Ledger {
             row,
         })
     }
+    /// Resolve the authenticated full parent identity using its actual stored Derive
+    /// purpose. SDP controls cannot supply a second selector or redirect a child row.
+    pub(super) fn resolve_sdp_parent(
+        self: &Arc<Self>,
+        selected: &SelectedHandoffOwner,
+        id: RowId,
+    ) -> Result<ResolvedRow, VoiceError> {
+        let row = self.row(id)?;
+        if row.key.parent.is_some()
+            || !matches!(row.key.purpose, Purpose::Derive(_))
+            || !row.key.matches(selected, row.key.purpose)
+        {
+            return Err(VoiceError::Unauthorized);
+        }
+        Ok(ResolvedRow {
+            ledger: self.clone(),
+            row,
+        })
+    }
     pub(crate) fn begin(
         self: &Arc<Self>,
         selected: Arc<SelectedHandoffOwner>,
         purpose: Purpose,
     ) -> Result<Begin, VoiceError> {
+        if !matches!(purpose, Purpose::Derive(_)) {
+            return Err(VoiceError::Unauthorized); // children require the original-parent fence
+        }
         if !selected.lease().is_live() {
             return Err(VoiceError::Unauthorized);
         }
         let mut index = self.index.lock().unwrap_or_else(|error| error.into_inner());
+        self.begin_indexed(selected, purpose, None, &mut index)
+    }
+    /// Index is held by the original parent reservation gate for children. Pure resource
+    /// accounting may run here; no Root/Clock call or affine destruction may be introduced.
+    fn begin_indexed(
+        self: &Arc<Self>,
+        selected: Arc<SelectedHandoffOwner>,
+        purpose: Purpose,
+        parent: Option<&Arc<Row>>,
+        index: &mut Index,
+    ) -> Result<Begin, VoiceError> {
         if let Some(row) = index
             .rows
             .iter()
@@ -701,13 +893,16 @@ impl Ledger {
                 executor: selected.executor(),
                 lease: selected.lease().clone(),
                 purpose,
+                parent: parent.cloned(),
             },
             state: Mutex::new(State {
                 final_phase: None,
                 session_collected: false,
+                child: None,
                 body: Body::Pending(Pending {
                     selected,
                     prepared: Some(prepared),
+                    published: None,
                     worker: true,
                     handed_off: false,
                 }),
@@ -788,7 +983,7 @@ impl Ledger {
                 Body::ClosingPending => return Err(VoiceError::Capacity),
                 Body::Pending(pending) if !pending.worker && state.status.action.is_none() => {}
                 Body::Pending(_) => return Err(VoiceError::Capacity),
-                Body::Live(_) | Body::Drained(_) => return Err(VoiceError::Unauthorized),
+                Body::Live(_) | Body::Drained(..) => return Err(VoiceError::Unauthorized),
             }
             state.status.pending = PendingStatus::Closing;
             let Body::Pending(pending) = std::mem::replace(&mut state.body, Body::ClosingPending)
@@ -797,11 +992,9 @@ impl Ledger {
             };
             pending
         };
-        let actor_handoff = pending.handed_off;
         Ok(ClosePending::Retire(PendingRetirement {
             row: row.clone(),
             owners: Some(pending),
-            actor_handoff,
         }))
     }
     /// Recover actual terminal/settlement metadata even after phase closure or a native
@@ -816,7 +1009,7 @@ impl Ledger {
             return self.status(id);
         };
         // Original callback-bearing Clock/history observations run outside ALL native gates.
-        let observed = observer.action().terminal_status();
+        let observed = observer.action().handoff_status();
         let status = {
             let mut state = row.state.lock().unwrap_or_else(|error| error.into_inner());
             merge_observed(&mut state.status, observed)?;
@@ -849,7 +1042,7 @@ impl Ledger {
         let row = self.row(id)?;
         if let Some(observer) = Self::observe(&row, true)? {
             observer.action().acknowledge_result(receipt)?;
-            let observed = observer.action().terminal_status();
+            let observed = observer.action().handoff_status();
             let mut state = row.state.lock().unwrap_or_else(|error| error.into_inner());
             merge_observed(&mut state.status, observed)?;
             state.status.acknowledged = true;
@@ -879,7 +1072,7 @@ impl Ledger {
         let row = self.row(id)?;
         if let Some(observer) = Self::observe(&row, true)? {
             observer.action().settle_engine();
-            let observed = observer.action().terminal_status();
+            let observed = observer.action().handoff_status();
             let mut state = row.state.lock().unwrap_or_else(|error| error.into_inner());
             merge_observed(&mut state.status, observed)?;
             let status = state.status.clone();
@@ -920,7 +1113,6 @@ impl Ledger {
             WorkOwners {
                 selected: live.selected.clone(),
                 action: live.action.clone(),
-                phase: live.phase.clone(),
                 _custody: custody,
             }
         };
@@ -944,7 +1136,7 @@ impl Ledger {
         let row = self.row(id)?;
         let retired = {
             let mut state = row.state.lock().unwrap_or_else(|error| error.into_inner());
-            if matches!(state.body, Body::Drained(_)) {
+            if matches!(state.body, Body::Drained(..)) {
                 return Ok(true);
             }
             let Body::Live(live) = &state.body else {
@@ -971,16 +1163,31 @@ impl Ledger {
             if let Some(receipt) = &mut state.status.engine.receipt {
                 receipt.retired = true; // this closed phase can never admit another first effect
             }
-            let mut retired = std::mem::replace(&mut state.body, Body::Drained(None));
+            let mut retired = std::mem::replace(&mut state.body, Body::ClosedPending);
             let Body::Live(live) = &mut retired else {
                 unreachable!("checked original Live")
             };
-            state.body = Body::Drained(live.final_delivery.take());
+            // A first response factory may run AFTER ordinary Open Return/compaction.
+            // Keep its ACTUAL settled/ACKed trigger, never reconstruct an Action from
+            // copied fields. Settlement has already released input/engine/lender; the
+            // original Root record continues to pay for this fixed historical owner.
+            let response_trigger = (row.key.parent.is_some()
+                && live.action.operation() == CryptoOperation::DecryptConfirmation
+                && state.status.engine.receipt.as_ref().is_some_and(|receipt| {
+                    receipt.outcome == catcoms_sync::voice_v2::crypto_actions::CryptoOutcome::Opened
+                }))
+            .then(|| live.action.clone());
+            state.body = Body::Drained(
+                live.final_delivery.take(),
+                live.plan.take(),
+                response_trigger,
+            );
             retired
         };
         // Native input/action/Workflow owners and affine worker grants must never destruct
-        // beneath State/Index. Compacted history retains only fixed evidence/provenance and,
-        // for final intent, the SAME paid Phase; it owns no Action/Input/Workflow.
+        // beneath State/Index. Compacted history retains fixed evidence/provenance and,
+        // for final intent, the SAME paid Phase. An accepted incoming child also retains
+        // its actual settled trigger Action, whose input/engine/lender already drained.
         drop(retired);
         row.changed.notify_waiters();
         Ok(true)
@@ -1005,7 +1212,7 @@ impl Ledger {
             let state = row.state.lock().unwrap_or_else(|error| error.into_inner());
             match &state.body {
                 Body::Live(live) => Some(live.phase.clone()),
-                Body::Drained(_) => None,
+                Body::Drained(..) => None,
                 Body::Pending(_) | Body::ClosingPending => return Err(VoiceError::Capacity),
                 Body::ClosedPending => return Ok(state.status.clone()),
             }
@@ -1050,7 +1257,7 @@ impl Registration {
     /// PairReceipt must be the exact trusted native factory reply. Neither it nor matching
     /// metadata substitutes for the actual returned Action allocation or its current authority.
     pub(crate) fn attach(
-        mut self,
+        self,
         action: Arc<CryptoAction>,
         pair: PairReceipt,
         bytes: usize,
@@ -1071,7 +1278,9 @@ impl Registration {
             pending.selected.clone()
         };
         let binding = action.protected_binding()?;
-        let Purpose::Derive(selector) = self.row.key.purpose;
+        let Purpose::Derive(selector) = self.row.key.purpose else {
+            return Err(VoiceError::Unauthorized);
+        };
         if !selected.lease().is_live()
             || action.operation() != CryptoOperation::Derive
             || !action.belongs_to(selected.binding().scope, selected.lease())
@@ -1088,7 +1297,7 @@ impl Registration {
         {
             return Err(VoiceError::Unauthorized);
         }
-        let prepared = {
+        {
             let mut state = self
                 .row
                 .state
@@ -1097,10 +1306,82 @@ impl Registration {
             let Body::Pending(pending) = &mut state.body else {
                 return Err(VoiceError::Unauthorized);
             };
+            if let Some(original) = &pending.published {
+                if !Arc::ptr_eq(original, &action) {
+                    return Err(VoiceError::RetryMismatch);
+                }
+            } else {
+                pending.published = Some(action.clone());
+            }
+        }
+        // The counted row now owns the actual publication before ANY Clock-bearing plan
+        // capture or loan attempt. Losing this caller can only leave that original Pending.
+        self.attach_published(bytes)
+    }
+    /// A stored publication is historical ownership, never permission to run another
+    /// factory. First-effect/current-selection fences still belong to the outer adapter.
+    pub(crate) fn has_publication(&self) -> Result<bool, VoiceError> {
+        let state = self.row.state.lock().unwrap_or_else(|e| e.into_inner());
+        match &state.body {
+            Body::Pending(pending) => Ok(pending.published.is_some()),
+            _ => Err(VoiceError::Unauthorized),
+        }
+    }
+    /// Attach the SAME stored action, without another Actor request, nonce or metadata
+    /// charge. A prior local refusal leaves its original fixed preparation in the row.
+    pub(crate) fn attach_published(mut self, bytes: usize) -> Result<RowId, VoiceError> {
+        let (selected, action) = {
+            let state = self.row.state.lock().unwrap_or_else(|e| e.into_inner());
+            let Body::Pending(pending) = &state.body else {
+                return Err(VoiceError::Unauthorized);
+            };
+            (
+                pending.selected.clone(),
+                pending
+                    .published
+                    .as_ref()
+                    .ok_or(VoiceError::Unauthorized)?
+                    .clone(),
+            )
+        };
+        if !selected.lease().is_live() {
+            return Err(VoiceError::Unauthorized);
+        }
+        // Capture from the actual pending Root Action BEFORE its first engine/Return.
+        // The callback-bearing observation runs outside all native gates. Refusal retains
+        // the actual Action in Pending, including when End wins in that Clock callback.
+        let plan = if self.row.key.parent.is_some() {
+            self.require_child_action(&action)?;
+            self.describe_child(&action)?;
+            None
+        } else {
+            Some(Plan::capture(&action)?)
+        };
+        let prepared = {
+            let mut state = self.row.state.lock().unwrap_or_else(|e| e.into_inner());
+            let Body::Pending(pending) = &mut state.body else {
+                return Err(VoiceError::Unauthorized);
+            };
             pending.prepared.take().ok_or(VoiceError::Capacity)?
         };
         // Includes original Clock observation. It MUST run outside native registry gates.
-        let phase = prepared.bind(&action, bytes)?;
+        let phase = match prepared.try_bind(&action, bytes) {
+            Ok(phase) => phase,
+            Err((error, prepared)) => {
+                // Registration's worker excludes close/retry while the preparation leaves
+                // State. Restore it before returning; its actual destruction is never run
+                // below a native guard. No ambiguous network/engine attempt is refunded.
+                {
+                    let mut state = self.row.state.lock().unwrap_or_else(|e| e.into_inner());
+                    let Body::Pending(pending) = &mut state.body else {
+                        unreachable!("registration owns this Pending worker");
+                    };
+                    debug_assert!(pending.prepared.is_none());
+                    pending.prepared = Some(prepared);
+                }
+                return Err(error);
+            }
+        };
         let retired = {
             let mut state = self
                 .row
@@ -1118,6 +1399,7 @@ impl Registration {
                     selected,
                     action,
                     phase,
+                    plan,
                     worker: false,
                     observer: false,
                     final_delivery: None,
@@ -1169,7 +1451,7 @@ impl Drop for Registration {
 struct WorkOwners {
     selected: Arc<SelectedHandoffOwner>,
     action: Arc<CryptoAction>,
-    phase: Arc<Phase>,
+    // This actual contribution also retains the SAME Phase; no duplicate Arc is needed.
     // Actual objects drop before the final phase contribution.
     _custody: CopyCustody,
 }
@@ -1178,11 +1460,14 @@ pub(crate) struct Work {
     owners: Option<WorkOwners>,
 }
 impl Work {
+    pub(super) fn id(&self) -> RowId {
+        self.row.id
+    }
     pub(crate) fn action(&self) -> &Arc<CryptoAction> {
         &self.owners.as_ref().expect("live work").action
     }
     pub(crate) fn phase(&self) -> &Arc<Phase> {
-        &self.owners.as_ref().expect("live work").phase
+        self.owners.as_ref().expect("live work")._custody.phase()
     }
     pub(crate) fn selected(&self) -> &SelectedHandoffOwner {
         &self.owners.as_ref().expect("live work").selected
@@ -1190,7 +1475,7 @@ impl Work {
     /// Observe the actual Root action OUTSIDE State/Index; never accept serialized terminal
     /// claims. The single worker prevents stale observations from overwriting newer history.
     pub(crate) fn refresh(&self) -> Result<Status, VoiceError> {
-        let observed = self.action().terminal_status();
+        let observed = self.action().handoff_status();
         let mut state = self
             .row
             .state
@@ -1217,8 +1502,8 @@ impl Work {
 }
 /// Concurrent metadata observations can finish out of order. Preserve immutable terminal
 /// identity and monotonic settlement/retirement; an older empty snapshot cannot erase proof.
-fn merge_observed(status: &mut Status, observed: CryptoResultStatus) -> Result<(), VoiceError> {
-    if let Some(receipt) = observed.receipt {
+fn merge_observed(status: &mut Status, observed: CryptoHandoffStatus) -> Result<(), VoiceError> {
+    if let Some(receipt) = observed.engine.receipt {
         if let Some(old) = &mut status.engine.receipt {
             if !old.same_transition(&receipt) {
                 return Err(VoiceError::RetryMismatch);
@@ -1228,13 +1513,27 @@ fn merge_observed(status: &mut Status, observed: CryptoResultStatus) -> Result<(
             status.engine.receipt = Some(receipt);
         }
     }
-    status.engine.settled |= observed.settled;
+    status.engine.settled |= observed.engine.settled;
+    // Root reports this actual Engine bit under the SAME fence as its terminal identity.
+    // Retired/settled/missing input are never substitutes, and stale snapshots cannot erase it.
+    status.acknowledged |= observed.acknowledged;
     Ok(())
 }
 struct Observation {
     row: Arc<Row>,
     action: Option<Arc<CryptoAction>>,
     notify: bool,
+}
+/// Fixed synchronous reconciliation graph, independently of an async worker's inline
+/// frame. Native Row/Root records already pay their persistent cached state; callers must
+/// also pay this actual observer, Root snapshot and transient merge/returned status copies.
+/// No variable input/provider buffer or callback can be hidden behind this fixed inventory.
+pub(super) fn reconciliation_layout_bytes() -> usize {
+    std::mem::size_of::<Observation>()
+        + std::mem::size_of::<CryptoHandoffStatus>()
+        + 2 * std::mem::size_of::<Status>()
+        + std::mem::size_of::<CryptoResultReceipt>()
+        + 128 // nested guards/scalar/borrowed arguments; no SDK or variable allocation
 }
 impl Drop for Observation {
     fn drop(&mut self) {
@@ -1273,10 +1572,9 @@ impl Drop for Work {
         let WorkOwners {
             selected,
             action,
-            phase,
             _custody: custody,
         } = self.owners.take().expect("one original worker");
-        drop((selected, action, phase));
+        drop((selected, action));
         {
             let mut state = self
                 .row

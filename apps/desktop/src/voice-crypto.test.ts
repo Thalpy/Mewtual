@@ -329,3 +329,24 @@ test("a fresh module's owner works with the retained broker without refunding ol
   assert.equal(broker.counts().active, 0);
   assert.equal(broker.counts().bytes, 0);
 });
+
+
+test("HMR rejects the complete Broker22 API and preserves its unresolved pool until actual cleanup", async () => {
+  const f = fixture(), host = {}, gate = deferred<number>();
+  const old = windowVoiceCryptoBroker(f.admission, host, subtle);
+  const running = old.run(f.owner, "derive", 64, () => gate.promise);
+  await Promise.resolve(); await Promise.resolve();
+  // Broker22 exposed the same public methods. A sparse fake object would also fail the
+  // method checks and could miss an accidentally unchanged retained version entirely.
+  Object.defineProperty(old, "version", { value: 22 });
+  let retries = 0; const retry = old.retrySelectedJoinKeys.bind(old);
+  old.retrySelectedJoinKeys = () => { retries++; retry(); };
+  assert.throws(() => windowVoiceCryptoBroker(f.admission, host, subtle), /reload required/);
+  assert.equal(retries, 0, "refusal cannot wake or start the old native setup/action drivers");
+  assert.equal(f.admitted.length, 1); assert.equal(f.settled.length, 0);
+  assert.equal((host as Record<symbol, unknown>)[Symbol.for("mewtual.voice.crypto-broker.v2")], old);
+  assert.equal(old.counts().active, 1); assert.equal(old.counts().bytes, 64);
+  f.retire(); gate.resolve(1); await assert.rejects(running);
+  await new Promise<void>(resolve => setImmediate(resolve));
+  assert.equal(old.counts().active, 0); assert.equal(old.counts().bytes, 0);
+});

@@ -6,24 +6,37 @@
 //! Offer must be refused before positive admission; this contract does not solve glare. The
 //! phase quotas count retained terminal records and actual lower/engine/result owners too.
 
-use super::resources::{ByteBudget, Credit, Reservation, ResourceKind, Resources, WorkLane};
+use super::resources::{
+    ByteBudget, Credit, GroupForwardLanes, Reservation, ResourceKind, Resources, WorkLane,
+};
 use super::{CallLease, EncryptedKind, Scope, VoiceError, MAX_SDP_PLAINTEXT, ROUTE_METADATA_BYTES};
 use catcoms_crypto::DeviceId;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
-pub const EXCHANGE_BYTES: usize = 224 * 1024;
-const METADATA_BYTES: usize = 4096;
+pub const EXCHANGE_BYTES: usize = 192 * 1024;
+pub(super) const METADATA_BYTES: usize = 4096;
 const STAGES: usize = 8;
 // Maximum policy- and OfferId-bound native encoding sizes. Composition regressions must compare
 // these with actual encoded packets; changing the wire encoding requires revisiting this peak.
 const CIPHERTEXT: usize = MAX_SDP_PLAINTEXT + 16;
-pub const MAX_AAD: usize = 542;
-const PACKET_BYTES: usize = 2 * CIPHERTEXT + 1340;
-const SOURCE_BYTES: usize = CIPHERTEXT + 2154;
-const LOWER_BYTES: usize = 4 * CIPHERTEXT + 8616 + ROUTE_METADATA_BYTES;
+pub const MAX_AAD: usize = 579;
+const PACKET_BYTES: usize = 2 * CIPHERTEXT + 1414;
+// Canonical signed object plus Source's existing512-byte wire/identity allowance. Source
+// metadata adds1024; Lower borrows that original object rather than cloning its ciphertext.
+const SOURCE_WIRE_BYTES: usize = CIPHERTEXT + 1167;
+const SOURCE_BYTES: usize = SOURCE_WIRE_BYTES + 1024;
+const LOWER_BYTES: usize = 2 * SOURCE_WIRE_BYTES + 4096 + ROUTE_METADATA_BYTES;
 const ACTION_BYTES: usize = CIPHERTEXT + MAX_AAD + 1536;
 const ENGINE_BYTES: usize = 4 * (CIPHERTEXT + MAX_AAD) + 3 * MAX_SDP_PLAINTEXT + 2048;
 const RESULT_BYTES: usize = MAX_SDP_PLAINTEXT + 1040;
+pub(crate) mod admission;
+mod low_ready;
+pub(crate) mod namespace;
+mod packet_capacity;
+mod ready_capacity;
+pub(in crate::voice_v2) mod receive;
+pub(in crate::voice_v2) use ready_capacity::PaidReadyCache;
 
 /// Native allocation purpose. Callers cannot replace one phase with another to escape the
 /// record limits: each consuming factory selects its own stage, independently of IPC input.
@@ -57,6 +70,14 @@ impl Stage {
 }
 struct State {
     closed: bool,
+    // One original Ready producer. Actual occupancy may drain, but issuance never rearms.
+    ready_producer_issued: bool,
+    // The original parents may initially have no unused positions. Once obsolete cache
+    // rows return them, carve exactly1+1 children, then close surplus originals outside State.
+    packet_parents: Option<super::packets::ConfirmationCapacity>,
+    packet_claims: Option<super::packets::SdpPacketCapacity>,
+    // Retired outside the phase fence; actual Lower borrowers keep original group custody.
+    lower_lanes: Option<Arc<GroupForwardLanes>>,
     used: [usize; STAGES],
     // Issuance is irreversible at publication. Actual input occupancy can drain without
     // permitting a second seal/open identity to steal the opposite direction's reserved row.
@@ -78,12 +99,31 @@ pub struct Exchange {
     group: [u8; 32],
     reserve: Arc<Reservation>,
     lane: Arc<WorkLane>,
-    lower_lanes: [Arc<WorkLane>; 2],
     state: Mutex<State>,
     binding: Option<Binding>,
     live: CallLease,
-    _metadata: Credit,
     action_slots: Arc<super::crypto_actions::slots::ReservedSlots>,
+    // Pure observation: charge/action paths already hold State and must not lock it again.
+    // Protected HIGH activates only after exact first-Offer token/event/history publication.
+    activated: AtomicBool,
+    // First admission fixes a bounded native deadline, capped by original key custody.
+    active_until: std::sync::atomic::AtomicU64,
+    successor: Option<super::chain::SuccessorProof>,
+    // Present only on the protected affine path. Ordinary legacy SDP does not promise
+    // causal Ready. Never store a Ready producer here: that owner retains Exchange one way.
+    ready: Option<super::ready::capacity::ReadyCapacity>,
+    // Observers only. Actual inbox/canonical bytes remain outside Exchange to avoid cycles.
+    ready_receive: std::sync::OnceLock<CallLease>,
+    ready_publication: receive::PublicationCell,
+    // One-way fixed receipt observation. Receipt owns NO Exchange/Workflow/progress credit.
+    // It selects only exact Ready ACK recovery while generic SDP lenders remain inactive.
+    low_ready: Option<Arc<super::ready::admission::ReadyAdmission>>,
+    // Last: every enclosing owner/reservation/slot remains paid through field destruction.
+    _metadata: Credit,
+    // MUST remain last. All actual successor fields/credits return before whole-plan
+    // drainage publishes. Future Ready Source/Lower/ACK owners must retain this Exchange
+    // (one way, no cycle) or a separately counted lifetime owner through their real Drop.
+    _successor_custody: Option<super::chain::SuccessorCustody>,
 }
 struct PhaseLoan {
     exchange: Arc<Exchange>,
@@ -140,6 +180,136 @@ impl Drop for PhaseLoan {
     }
 }
 impl Exchange {
+    #[cfg(test)]
+    pub(in crate::voice_v2) fn ready_prepaid_for_test(&self) -> bool {
+        self.ready.is_some()
+    }
+    #[cfg(test)]
+    pub(in crate::voice_v2) fn capacity_identities_for_test(&self) -> [usize; 4] {
+        let state = self.state.lock().unwrap();
+        [
+            Arc::as_ptr(&self.reserve) as usize,
+            Arc::as_ptr(&self.lane) as usize,
+            Arc::as_ptr(&self.action_slots) as usize,
+            Arc::as_ptr(state.lower_lanes.as_ref().unwrap()) as usize,
+        ]
+    }
+    /// Consume only the original affine ticket. No replacement lane, reservation or action
+    /// position is acquired, even briefly. The high-side native holder retains this inert
+    /// owner before any fallible registration/final fence, and never installs it in sdp yet.
+    pub(in crate::voice_v2) fn from_transferred(
+        ticket: super::chain::TransferredSdpCapacity,
+        helpers: Vec<DeviceId>,
+    ) -> Arc<Self> {
+        Self::from_transferred_inner(ticket, helpers, None)
+    }
+    pub(in crate::voice_v2) fn from_low_transferred(
+        ticket: super::chain::TransferredSdpCapacity,
+        receipt: Arc<super::ready::admission::ReadyAdmission>,
+    ) -> Arc<Self> {
+        let helpers = receipt.helpers().collect();
+        Self::from_transferred_inner(ticket, helpers, Some(receipt))
+    }
+    fn from_transferred_inner(
+        ticket: super::chain::TransferredSdpCapacity,
+        helpers: Vec<DeviceId>,
+        low_ready: Option<Arc<super::ready::admission::ReadyAdmission>>,
+    ) -> Arc<Self> {
+        let super::chain::TransferredParts {
+            // Bind FIRST for reverse local-drop order during constructor unwinding.
+            // Normal construction moves it to Exchange's LAST field unchanged.
+            custody,
+            resources,
+            reserve,
+            lowers,
+            slots,
+            ready,
+            packets,
+            proof,
+            lane,
+            metadata,
+        } = ticket.into_parts();
+        let original = proof.binding();
+        let binding = Binding {
+            scope: original.scope,
+            local: original.local,
+            join: original.local_join,
+            key_ref: original.local_key,
+            peer: super::packets::PairBinding {
+                peer: original.peer,
+                join: original.peer_join,
+                key_ref: original.peer_key,
+                handshake: original.handshake,
+            },
+            call: original.call.clone(),
+            pair: original.pair.clone(),
+            helpers,
+        };
+        Arc::new(Self {
+            group: binding.scope.group,
+            resources,
+            reserve,
+            lane,
+            state: Mutex::new(State {
+                closed: false,
+                ready_producer_issued: false,
+                packet_parents: Some(packets),
+                packet_claims: None,
+                lower_lanes: Some(lowers),
+                used: [0; STAGES],
+                action_preparing: [false; 2],
+                action_issued: [false; 2],
+            }),
+            binding: Some(binding),
+            live: CallLease::default(),
+            action_slots: slots,
+            activated: AtomicBool::new(false),
+            active_until: std::sync::atomic::AtomicU64::new(0),
+            successor: Some(proof),
+            ready: Some(ready),
+            ready_receive: std::sync::OnceLock::new(),
+            ready_publication: std::sync::OnceLock::new(),
+            low_ready,
+            _metadata: metadata,
+            _successor_custody: Some(custody),
+        })
+    }
+    pub(in crate::voice_v2) fn successor_current_at(
+        &self,
+        binding: &super::chain::Binding,
+        resources: &Arc<Resources>,
+        mono: u64,
+    ) -> bool {
+        self.live.is_live()
+            && self
+                .successor
+                .as_ref()
+                .is_some_and(|proof| proof.matches(binding, resources) && proof.current_at(mono))
+    }
+    /// Quiet Pair housekeeping must call this even if registry publication was refused.
+    /// There is deliberately no route from this observation to activation or SDP authority.
+    pub(in crate::voice_v2) fn collect_pending_successor(&self, mono: u64) -> bool {
+        let active = self.activated.load(Ordering::Acquire);
+        let expired = self.successor.as_ref().is_some_and(|proof| {
+            if active {
+                !proof.live() || mono >= self.active_until.load(Ordering::Acquire)
+            } else {
+                !proof.current_at(mono)
+                    || self
+                        .low_ready
+                        .as_ref()
+                        .is_some_and(|receipt| mono >= receipt.deadline())
+            }
+        });
+        if expired || !self.live.is_live() {
+            self.close();
+            return true;
+        }
+        false
+    }
+    pub(crate) fn uses_registry(&self, resources: &Resources, group: [u8; 32]) -> bool {
+        std::ptr::eq(Arc::as_ptr(&self.resources), resources) && self.group == group
+    }
     pub(crate) fn allows_helper(&self, helper: DeviceId) -> bool {
         self.binding
             .as_ref()
@@ -149,6 +319,11 @@ impl Exchange {
         self.binding
             .as_ref()
             .is_some_and(|binding| binding.helpers == helpers)
+    }
+    pub(in crate::voice_v2) fn helpers(&self) -> &[DeviceId] {
+        self.binding
+            .as_ref()
+            .map_or(&[], |binding| &binding.helpers)
     }
     pub(crate) fn uses_resources(&self, resources: &Arc<Resources>, group: [u8; 32]) -> bool {
         Arc::ptr_eq(&self.resources, resources) && self.group == group
@@ -178,7 +353,7 @@ impl Exchange {
     ) -> Result<Arc<Self>, VoiceError> {
         let group = binding.scope.group;
         let exchange = Self::new_inner(resources.clone(), group, Some(binding), slots)?;
-        resources.register_exchange(group, &exchange);
+        resources.register_exchange(group, &exchange)?;
         Ok(exchange)
     }
     /// The caller must reach a native readiness boundary before requesting this capacity.
@@ -208,10 +383,7 @@ impl Exchange {
     ) -> Result<Arc<Self>, VoiceError> {
         let reserve = resources.reserve(group, EXCHANGE_BYTES)?;
         let lane = resources.reserve_crypto_lane(group)?;
-        let lower_lanes = [
-            resources.reserve_forward_lane(group)?,
-            resources.reserve_forward_lane(group)?,
-        ];
+        let lower_lanes = resources.group_forward_lanes(group)?;
         let metadata = ByteBudget::Reserved(reserve.clone()).charge(
             &resources,
             group,
@@ -223,9 +395,12 @@ impl Exchange {
             group,
             reserve,
             lane,
-            lower_lanes,
             state: Mutex::new(State {
                 closed: false,
+                ready_producer_issued: false,
+                packet_parents: None,
+                packet_claims: None,
+                lower_lanes: Some(lower_lanes),
                 used: [0; STAGES],
                 action_preparing: [false; 2],
                 action_issued: [false; 2],
@@ -234,6 +409,14 @@ impl Exchange {
             live: CallLease::default(),
             _metadata: metadata,
             action_slots,
+            activated: AtomicBool::new(true),
+            active_until: std::sync::atomic::AtomicU64::new(0),
+            successor: None,
+            ready: None,
+            ready_receive: std::sync::OnceLock::new(),
+            ready_publication: std::sync::OnceLock::new(),
+            low_ready: None,
+            _successor_custody: None,
         }))
     }
     pub(crate) fn action_slot(
@@ -246,7 +429,9 @@ impl Exchange {
         self.action_slots.loan(expected)
     }
     pub(crate) fn is_live(&self) -> bool {
-        self.live.is_live()
+        self.activated.load(Ordering::Acquire)
+            && self.live.is_live()
+            && self.successor.as_ref().is_none_or(|proof| proof.live())
             && self
                 .binding
                 .as_ref()
@@ -285,7 +470,8 @@ impl Exchange {
             && header.source_key_ref == binding.peer.key_ref
             && header.target_key_ref == binding.key_ref
             && header.handshake == binding.peer.handshake
-            && matches!(header.kind, EncryptedKind::Offer | EncryptedKind::Answer)
+            && header.kind.is_sdp()
+            && self.accepts_sdp_kind(header.kind)
             && ((peek.envelope_kind == 1 && requester == peek.issuer)
                 || (peek.envelope_kind == 3 && binding.helpers.contains(&requester)))
     }
@@ -315,18 +501,11 @@ impl Exchange {
             return Err(VoiceError::Capacity);
         }
         let credit = if kind == ResourceKind::Forward {
-            let mut found = Err(VoiceError::Capacity);
-            for lane in &self.lower_lanes {
-                found = ByteBudget::ReservedLane {
-                    reservation: self.reserve.clone(),
-                    lane: lane.clone(),
-                }
-                .charge(&self.resources, self.group, bytes, kind);
-                if !matches!(found, Err(VoiceError::Capacity)) {
-                    break;
-                }
-            }
-            found?
+            state
+                .lower_lanes
+                .as_ref()
+                .ok_or(VoiceError::Unauthorized)?
+                .charge(&self.resources, self.group, &self.reserve, bytes)?
         } else {
             ByteBudget::ReservedLane {
                 reservation: self.reserve.clone(),
@@ -404,23 +583,64 @@ impl Exchange {
     /// Retire effects separately through their actual protocol leases. This releases unused
     /// capacity only. Actual stage credits keep both this owner and their retired lane alive.
     pub(crate) fn close(&self) {
-        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
-        if state.closed {
-            return;
-        }
-        state.closed = true;
+        let (lower_lanes, packet_parents, packet_claims) = {
+            let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+            if state.closed {
+                return;
+            }
+            state.closed = true;
+            (
+                state.lower_lanes.take(),
+                state.packet_parents.take(),
+                state.packet_claims.take(),
+            )
+        };
         self.live.revoke();
         self.reserve.close();
+        if let Some(ready) = &self.ready {
+            ready.close();
+        }
         self.action_slots.close();
         self.lane.close();
-        for lane in &self.lower_lanes {
-            lane.close();
+        if let Some(parents) = packet_parents {
+            parents.close();
         }
+        if let Some(claims) = packet_claims {
+            claims.close();
+        }
+        // Never close another phase's capacity. Dropping this handle outside State releases
+        // idle slots only when no live phase or actual Lower retains the original owner.
+        drop(lower_lanes);
+    }
+}
+
+/// Observation of one ORIGINAL inert native SDP successor. This exports no Exchange, budget,
+/// activation method, packet factory, key or RTC authority. Retention still owns real capacity.
+pub struct SdpSuccessor {
+    pub(in crate::voice_v2) owner: Arc<Exchange>,
+}
+redacted_debug!(SdpSuccessor);
+impl SdpSuccessor {
+    pub fn confirmation_drained(&self) -> bool {
+        self.owner
+            .successor
+            .as_ref()
+            .is_some_and(|proof| proof.drained())
+    }
+    /// First immutable native Finish window; observing it never grants current authority.
+    pub fn transition_until(&self) -> u64 {
+        self.owner
+            .successor
+            .as_ref()
+            .and_then(|proof| proof.until())
+            .expect("native successor follows original Finish")
     }
 }
 impl Drop for Exchange {
     fn drop(&mut self) {
+        let original = self as *const Self;
         self.close();
+        self.resources.unregister_exchange(self.group, original);
     }
 }
 
@@ -450,12 +670,95 @@ impl SdpResult {
 #[cfg(test)]
 mod tests {
     use super::*;
+    mod registry;
+    #[test]
+    fn successor_retained_rust_graph_fits_original_metadata_allowance() {
+        use std::mem::size_of;
+        // Structural growth guard for our owners, not allocator slack/Tokio watch heap/RSS.
+        // Original PlanBinding and shared GroupForwardLanes have separate retained payments.
+        let bytes = size_of::<Exchange>()
+            + size_of::<Reservation>()
+            + size_of::<WorkLane>()
+            + size_of::<super::super::crypto_actions::slots::ReservedSlots>()
+            + 2 * size_of::<super::super::crypto_actions::slots::ReservedSlots>()
+            // Packet child reservations retain their two closed ORIGINAL parents even
+            // after old Workflow metadata drains. Count those bodies/Arc headers here too.
+            + 2 * size_of::<super::super::crypto_actions::slots::ReservedSlots>()
+            + 2 * 2 * size_of::<usize>()
+            + size_of::<super::super::LeaseState>()
+            + size_of::<SdpSuccessor>()
+            // The external receive graph consumes this ORIGINAL SDP metadata payment,
+            // not an unaccounted addition to Ready's2KiB cache. Canonical input buffers
+            // retain their full separate RemotePacket credit. Only one wrapper is live.
+            + size_of::<receive::HighReceive>()
+            + size_of::<Credit>()
+            + size_of::<PhaseLoan>()
+            + size_of::<super::super::LeaseState>()
+            + super::super::packets::admission_metadata_bytes()
+                .max(size_of::<receive::RetainedOffer>())
+            + 4 * 2 * size_of::<usize>()
+            + 2 * size_of::<DeviceId>()
+            + 7 * 2 * size_of::<usize>();
+        assert!(
+            bytes < METADATA_BYTES,
+            "successor native owner graph grew to {bytes}"
+        );
+    }
+    #[test]
+    fn four_closed_exchanges_release_idle_slots_while_the_last_real_lower_stays_charged() {
+        let pool = Arc::new(Resources::default());
+        let phases: Vec<_> = (1..=4)
+            .map(|group| Exchange::new(pool.clone(), [group; 32]).unwrap())
+            .collect();
+        assert_eq!(
+            pool.charge([5; 32], 1, ResourceKind::Forward).err(),
+            Some(VoiceError::Capacity)
+        );
+        let late = Arc::new(phases[0].charge(Stage::Lower, 1).unwrap());
+        for phase in &phases {
+            phase.close();
+        }
+        let mut work: Vec<_> = (0..4)
+            .map(|_| pool.charge([5; 32], 1, ResourceKind::Forward).unwrap())
+            .collect();
+        for _ in 0..2 {
+            work.push(pool.charge([6; 32], 1, ResourceKind::Forward).unwrap());
+        }
+        assert_eq!(
+            pool.charge([6; 32], 1, ResourceKind::Forward).err(),
+            Some(VoiceError::Capacity)
+        );
+        let last = late.clone();
+        drop(late);
+        assert!(pool.charge([6; 32], 1, ResourceKind::Forward).is_err());
+        drop(last);
+        for _ in 0..2 {
+            work.push(pool.charge([6; 32], 1, ResourceKind::Forward).unwrap());
+        }
+        drop((work, phases));
+        assert_eq!(pool.counts(), (0, 0));
+    }
     #[test]
     fn declared_maximum_exchange_fits_with_two_actual_lowers_and_retained_action_inputs() {
+        let declared = METADATA_BYTES
+            + 2 * PACKET_BYTES
+            + SOURCE_BYTES
+            + 2 * LOWER_BYTES
+            + 2 * ACTION_BYTES
+            + ENGINE_BYTES
+            + RESULT_BYTES;
+        assert_eq!(declared, 188_521);
+        assert!(declared <= EXCHANGE_BYTES);
         let resources = Arc::new(Resources::default());
         let exchange = Exchange::new(resources.clone(), [1; 32]).unwrap();
         let ordinary = resources
-            .charge([1; 32], 32 * 1024, ResourceKind::Retained)
+            .charge(
+                [1; 32],
+                crate::voice_v2::resources::GROUP_BYTES
+                    - EXCHANGE_BYTES
+                    - super::super::resources::GROUP_FORWARD_METADATA_BYTES,
+                ResourceKind::Retained,
+            )
             .unwrap();
         let outgoing = exchange.charge(Stage::LocalPacket, PACKET_BYTES).unwrap();
         let (encrypt_history, encrypt_input, encrypt_issue) = exchange
@@ -485,7 +788,10 @@ mod tests {
         let engine = Arc::new(exchange.charge(Stage::Crypto, ENGINE_BYTES).unwrap());
         let result = SdpResult::new(&exchange, &vec![b'a'; MAX_SDP_PLAINTEXT]).unwrap();
         assert_eq!(result.bytes().len(), MAX_SDP_PLAINTEXT);
-        assert_eq!(resources.counts(), (256 * 1024, 1));
+        assert_eq!(
+            resources.counts(),
+            (crate::voice_v2::resources::GROUP_BYTES, 1)
+        );
         exchange.close();
         assert!(exchange.charge(Stage::Crypto, 1).is_err());
         assert_eq!(
@@ -510,7 +816,12 @@ mod tests {
         ));
         let bytes = resources.counts().0;
         drop(held);
-        assert_eq!(resources.counts().0, bytes - LOWER_BYTES);
+        // The last actual Lower also retires the independently funded shared group owner;
+        // closed Exchange handles intentionally retain neither idle slots nor that payment.
+        assert_eq!(
+            resources.counts().0,
+            bytes - LOWER_BYTES - super::super::resources::GROUP_FORWARD_METADATA_BYTES
+        );
         drop((exchange, ordinary));
         assert_eq!(resources.counts(), (0, 0));
     }

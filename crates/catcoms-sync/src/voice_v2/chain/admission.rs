@@ -18,6 +18,33 @@ pub(in crate::voice_v2) struct ConfirmationConsent {
 }
 use crate::voice_v2::{Body, EncryptedKind, SignedObject, CLOCK_SKEW_MS};
 
+// Keep confirmation history independent of payload-bearing SDP variants. This receipt can
+// contain only these three roles; retaining the complete encrypted-kind enum would charge
+// every confirmation row for an unrelated SDP round and exceed its original fixed payment.
+#[derive(Clone, Copy)]
+enum ConfirmationRole {
+    Hello,
+    Proof,
+    Finish,
+}
+impl ConfirmationRole {
+    fn from_kind(kind: EncryptedKind) -> Result<Self, VoiceError> {
+        match kind {
+            EncryptedKind::ConfirmHello => Ok(Self::Hello),
+            EncryptedKind::ConfirmProof => Ok(Self::Proof),
+            EncryptedKind::ConfirmFinish => Ok(Self::Finish),
+            _ => Err(VoiceError::Unauthorized),
+        }
+    }
+    fn kind(self) -> EncryptedKind {
+        match self {
+            Self::Hello => EncryptedKind::ConfirmHello,
+            Self::Proof => EncryptedKind::ConfirmProof,
+            Self::Finish => EncryptedKind::ConfirmFinish,
+        }
+    }
+}
+
 /// Opaque identity of one admitted candidate under the original native call/pair/chain.
 /// Repeating its packet recovers admission history, never another decrypt or confirmation grant.
 pub(crate) struct ConfirmationAdmission {
@@ -28,7 +55,7 @@ pub(crate) struct ConfirmationAdmission {
     pub(crate) hash: [u8; 32],
     pub(crate) sequence: u64,
     pub(crate) token: u64,
-    pub(in crate::voice_v2) kind: EncryptedKind,
+    kind: ConfirmationRole,
     candidate: u8,
     expires: u64,
     deadline: u64,
@@ -57,6 +84,9 @@ pub(super) const ADMISSION_RECORD_BYTES: usize = (std::mem::size_of::<Confirmati
     & !31;
 
 impl ConfirmationAdmission {
+    pub(in crate::voice_v2) fn kind(&self) -> EncryptedKind {
+        self.kind.kind()
+    }
     pub(crate) fn same_call(&self, call: &CallLease) -> bool {
         self.binding.call.is_same(call)
     }
@@ -247,7 +277,7 @@ impl PreparedChain {
             hash: object.hash(),
             sequence: header.sequence,
             token,
-            kind: header.kind,
+            kind: ConfirmationRole::from_kind(header.kind)?,
             candidate: lane as u8,
             expires: object.expires().saturating_add(CLOCK_SKEW_MS),
             deadline: self.binding.deadline,
@@ -291,7 +321,11 @@ impl Workflow {
         {
             return Err(VoiceError::Unauthorized);
         }
-        self.packets.confirmation_incoming_slot(slots)
+        state
+            .packets
+            .as_ref()
+            .ok_or(VoiceError::Unauthorized)?
+            .confirmation_incoming_slot(slots)
     }
 }
 
@@ -312,14 +346,14 @@ impl RowIssue {
             Err(std::sync::TryLockError::WouldBlock) => return Err(VoiceError::Capacity),
         };
         let lane = usize::from(receipt.candidate());
-        let column = column(self.plan.binding.low, receipt.kind)?;
+        let column = column(self.plan.binding.low, receipt.kind.kind())?;
         if lane >= 3
             || self.row != column + lane * 3
             || self.key != Key::Decrypt(receipt.token)
             || state.closed
             || (state.active_row != self.row as u8 || state.serial != self.ticket)
             || state
-                .incoming_at(self.plan.binding.low, receipt.kind, lane)?
+                .incoming_at(self.plan.binding.low, receipt.kind.kind(), lane)?
                 .is_some()
             || !Arc::ptr_eq(&receipt.binding, &self.plan.binding)
             || !receipt.authorized_at(origin.epoch(), wall, mono)

@@ -152,6 +152,7 @@ impl PacketLedger {
             return Err(VoiceError::Unauthorized);
         }
         let pair = self.pair(&request.handshake, authority)?;
+        pair.check_profile(request.kind)?;
         let confirmation = matches!(
             request.kind,
             EncryptedKind::ConfirmHello
@@ -166,7 +167,17 @@ impl PacketLedger {
         }
         // Preserve ordinary refusal before RNG. A protected row instead loans the actual
         // matching workflow position after its native header has been formed below.
-        let ordinary_slot = if workflow.is_none() {
+        let successor_sdp = request.kind.is_sdp()
+            && self
+                .sdp
+                .as_ref()
+                .is_some_and(|sdp| sdp.owner.uses_successor_packet_claims());
+        if request.kind.round().is_some() && !successor_sdp {
+            // New mode never borrows an ordinary table/byte position if its exact
+            // original successor has not been registered; wait for native preparation.
+            return Err(VoiceError::Unauthorized);
+        }
+        let ordinary_slot = if workflow.is_none() && !successor_sdp {
             Some(self.packet_slots.outgoing.charge(1)?)
         } else {
             None
@@ -184,7 +195,7 @@ impl PacketLedger {
         if self.outgoing.contains_key(&id) {
             return Err(VoiceError::Reservation);
         }
-        let offer = if request.kind == EncryptedKind::Offer {
+        let offer = if request.kind.is_offer() {
             if request.offer.is_some() {
                 return Err(VoiceError::Malformed);
             }
@@ -207,6 +218,7 @@ impl PacketLedger {
             sequence,
             offer,
         };
+        let exchange = self.sdp_owner(&header, false)?;
         let (slot, confirmation_deadline, chain) = if let Some(workflow) = &workflow {
             let (slot, deadline, chain) = workflow.outgoing_confirmation_slot(
                 &self.resources,
@@ -216,9 +228,18 @@ impl PacketLedger {
                 &self.packet_slots,
                 &header,
             )?;
-            (slot, deadline, Some(chain))
+            (slot.into(), deadline, Some(chain))
+        } else if successor_sdp {
+            (
+                exchange
+                    .as_ref()
+                    .ok_or(VoiceError::Unauthorized)?
+                    .outgoing_sdp_slot(&header, &self.packet_slots)?,
+                u64::MAX,
+                None,
+            )
         } else {
-            (ordinary_slot.expect("ordinary slot"), u64::MAX, None)
+            (ordinary_slot.expect("ordinary slot").into(), u64::MAX, None)
         };
         let issued = clock.now_ms();
         let expires = issued
@@ -226,7 +247,6 @@ impl PacketLedger {
             .ok_or(VoiceError::Freshness)?;
         let draft = PacketDraft::new(self.scope, public_key, id, issued, expires, header)?;
         let aad = draft.aad();
-        let exchange = self.sdp_owner(&draft.header, false)?;
         let deadline = self.sdp_deadline(exchange.as_ref())?;
         // Same byte formula for every lane. Workflow loans retain their actual variable owner;
         // permanent result/history rows are paid separately by the protected producer's fixed row.
@@ -259,6 +279,7 @@ impl PacketLedger {
                 live: CallLease::default(),
                 crypto: RevocationOwner::default(),
                 chain: chain.clone(),
+                workflow,
                 _credit: credit,
                 exchange: exchange.clone(),
                 _slot: slot,

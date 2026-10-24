@@ -591,7 +591,7 @@ fn affine_protected_outgoing_uses_actual_reserved_packet_and_bytes_under_ordinar
         .resources
         .charge(
             f.a.context.scope.group,
-            256 * 1024 - baseline,
+            crate::voice_v2::resources::GROUP_BYTES - baseline,
             ResourceKind::Retained,
         )
         .unwrap();

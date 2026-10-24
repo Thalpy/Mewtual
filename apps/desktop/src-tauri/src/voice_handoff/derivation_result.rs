@@ -1,6 +1,6 @@
-//! Inactive typed executor for the row-zero result. It owns the actual authenticated request
+//! Typed executor for the original Derive result. It owns the actual authenticated request
 //! through actor publication and completed-output collection, including after socket loss.
-//! This effect executor is not exposed by the listener: ingress serves only Status and read-only history.
+//! The application-bound authenticated listener routes only its exact v1 Result grammar here.
 use super::bootstrap::Route;
 use super::channel::{Incoming, Operation};
 use super::context::Context;
@@ -8,7 +8,6 @@ use super::custody::CopyCustody;
 use super::factory::Refused;
 use super::ledger::{Purpose, RowId, Status, Work};
 use super::requests::{Kind, Request};
-use crate::check_voice_binding_in;
 use catcoms_app::ServerActor;
 use catcoms_sync::voice_v2::{CallGrant, VoiceError};
 use sha2::{Digest, Sha256};
@@ -137,37 +136,31 @@ async fn prepare(
     if !output.is_empty() || tag != <[u8; 32]>::from(Sha256::digest([])) {
         return Err(Refused::Protocol(VoiceError::RetryMismatch));
     }
-    let context = context.upgrade().ok_or(Refused::Closed)?;
-    let original = context.ledger.resolve(
-        route.selected(),
-        Purpose::Derive(request.selector),
-        RowId::from_logical(incoming.logical())?,
-    )?;
-    let status = original.reconcile()?;
-    if status.action != Some((identity.serial, identity.version, identity.input_tag)) {
-        return Err(Refused::Protocol(VoiceError::Unauthorized));
-    }
-    if let Some(receipt) = &status.engine.receipt {
-        if receipt.output_tag != tag {
-            return Err(Refused::Protocol(VoiceError::RetryMismatch));
+    let original = {
+        let live = context.upgrade().ok_or(Refused::Closed)?;
+        let original = live.ledger.resolve(
+            route.selected(),
+            Purpose::Derive(request.selector),
+            RowId::from_logical(incoming.logical())?,
+        )?;
+        let status = original.reconcile()?;
+        if status.action != Some((identity.serial, identity.version, identity.input_tag)) {
+            return Err(Refused::Protocol(VoiceError::Unauthorized));
         }
-        // History resolves without upgrading the old grant or current UI authorization.
-        // This supplies no keys, readiness in a replacement browser, or fresh RTC authority.
-        return Ok(Prepared::Historical(status));
-    }
+        if let Some(receipt) = &status.engine.receipt {
+            if receipt.output_tag != tag {
+                return Err(Refused::Protocol(VoiceError::RetryMismatch));
+            }
+            // History resolves without upgrading the old grant or current UI authorization.
+            // This supplies no keys, readiness in a replacement browser, or fresh RTC authority.
+            return Ok(Prepared::Historical(status));
+        }
+        original
+    };
     let selected = route.selected();
-    {
-        let authority = context
-            .authority
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
-        super::factory::require_current_selection(context.gate(), &authority, selected)?;
-        route.require_open().map_err(|_| Refused::Closed)?;
-    }
-    check_voice_binding_in(&context.servers, selected.binding())
-        .await
-        .map_err(|_| Refused::Closed)?;
-    let commit = context.commit.clone().lock_owned().await;
+    let commit = super::factory::preflight_binding(context, route).await?;
+    let commit = commit.lock_owned().await;
+    let context = context.upgrade().ok_or(Refused::Closed)?;
     context
         .gate()
         .require_unlocked()

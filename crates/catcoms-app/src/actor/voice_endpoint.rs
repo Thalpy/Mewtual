@@ -2,8 +2,12 @@
 //! mailbox. Root owns protocol state and authorizes every first effect in its serialized turn.
 //! Plaintext stays with its actual native owner; no Tauri command, byte IPC or live dispatch.
 use super::*;
-use catcoms_sync::voice_v2::crypto_actions::{CryptoAction, CryptoResultReceipt};
-use catcoms_sync::voice_v2::presence::{FreshPeer, PairReceipt, PairSelector};
+use catcoms_sync::voice_v2::crypto_actions::{
+    CryptoAction, CryptoActionSnapshot, CryptoActionSnapshotPermit, CryptoResultReceipt,
+};
+use catcoms_sync::voice_v2::presence::{
+    FreshPeer, PairReceipt, PairSelector, PeerSnapshot, PeerSnapshotPermit, VoicePairConfirmation,
+};
 use catcoms_sync::voice_v2::{CallGrant, CallLease, Nonce, VoiceError};
 use catcoms_sync::VoiceWatchGrant;
 
@@ -48,6 +52,23 @@ impl VoiceEndpointCommand {
 }
 
 enum Command {
+    Stop {
+        grant: Arc<CallGrant>,
+        reply: Reply<()>,
+    },
+    Routing {
+        routing: catcoms_sync::VoiceRouting,
+        reply: Reply<()>,
+    },
+    ParticipantPeers {
+        grant: Arc<CallGrant>,
+        reply: Reply<Vec<FreshPeer>>,
+    },
+    ParticipantPeerSnapshot {
+        grant: Arc<CallGrant>,
+        permit: PeerSnapshotPermit,
+        reply: Reply<PeerSnapshot>,
+    },
     Start {
         grant: Arc<CallGrant>,
         join: Nonce,
@@ -66,10 +87,43 @@ enum Command {
     Changes {
         reply: Reply<tokio::sync::watch::Receiver<u64>>,
     },
+    ConfirmationActions {
+        grant: Arc<CallGrant>,
+        permit: CryptoActionSnapshotPermit,
+        reply: Reply<CryptoActionSnapshot>,
+    },
     Pair {
         grant: Arc<CallGrant>,
         selector: PairSelector,
         reply: Reply<PairReceipt>,
+    },
+    PairConfirmation {
+        grant: Arc<CallGrant>,
+        selector: PairSelector,
+        handshake: Nonce,
+        reply: Reply<VoicePairConfirmation>,
+    },
+    HighReady {
+        grant: Arc<CallGrant>,
+        handshake: Nonce,
+        // Fixed mailbox ownership: a native caller cannot retain an arbitrary helper Vec.
+        helpers: [Option<DeviceId>; 2],
+        reply: Reply<bool>,
+    },
+    QueueReady {
+        grant: Arc<CallGrant>,
+        handshake: Nonce,
+        reply: Reply<bool>,
+    },
+    PrepayLowSdp {
+        grant: Arc<CallGrant>,
+        handshake: Nonce,
+        reply: Reply<()>,
+    },
+    LowSdp {
+        grant: Arc<CallGrant>,
+        handshake: Nonce,
+        reply: Reply<bool>,
     },
     Derive {
         grant: Arc<CallGrant>,
@@ -110,6 +164,34 @@ impl Command {
         // the actual action; terminal metadata survives for exact result recovery. A lost Watch
         // reply instead drops its affine grant and closes precisely that abandoned observer.
         match self {
+            Self::Stop { grant, reply } => {
+                // An admitted cleanup must run even if its reply is lost. Unlike a factory,
+                // this only retires the SAME original allocation and cannot create authority.
+                server.sync.stop_voice_endpoint(&grant);
+                let _ = reply.send(Ok(()));
+            }
+            Self::Routing { routing, reply } => {
+                if !reply.is_closed() {
+                    server.sync.set_voice_routing(routing);
+                    let _ = reply.send(Ok(()));
+                }
+            }
+            Self::ParticipantPeers { grant, reply } => {
+                if !reply.is_closed() {
+                    let _ = reply.send(server.sync.voice_participant_peers(&grant));
+                }
+            }
+            Self::ParticipantPeerSnapshot {
+                grant,
+                permit,
+                reply,
+            } => {
+                if !reply.is_closed() {
+                    let _ = reply.send(Ok(server
+                        .sync
+                        .voice_participant_peer_snapshot(&grant, permit)));
+                }
+            }
             Self::Start {
                 grant,
                 join,
@@ -143,6 +225,15 @@ impl Command {
                 }
                 let _ = reply.send(server.sync.voice_endpoint_changes());
             }
+            Self::ConfirmationActions {
+                grant,
+                permit,
+                reply,
+            } => {
+                if !reply.is_closed() {
+                    let _ = reply.send(Ok(server.sync.voice_confirmation_actions(&grant, permit)));
+                }
+            }
             Self::Pair {
                 grant,
                 selector,
@@ -152,6 +243,73 @@ impl Command {
                     return;
                 }
                 let _ = reply.send(server.sync.prepare_voice_pair(&grant, selector));
+            }
+            Self::PairConfirmation {
+                grant,
+                selector,
+                handshake,
+                reply,
+            } => {
+                if !reply.is_closed() {
+                    let _ = reply.send(
+                        server
+                            .sync
+                            .voice_pair_confirmation(&grant, selector, handshake),
+                    );
+                }
+            }
+            Self::HighReady {
+                grant,
+                handshake,
+                helpers,
+                reply,
+            } => {
+                if !reply.is_closed() {
+                    let result = match helpers {
+                        [None, None] => {
+                            server.sync.prepare_voice_high_ready(&grant, handshake, &[])
+                        }
+                        [Some(a), None] => {
+                            server
+                                .sync
+                                .prepare_voice_high_ready(&grant, handshake, &[a])
+                        }
+                        [Some(a), Some(b)] => {
+                            server
+                                .sync
+                                .prepare_voice_high_ready(&grant, handshake, &[a, b])
+                        }
+                        [None, Some(_)] => Err(VoiceError::Malformed),
+                    };
+                    let _ = reply.send(result);
+                }
+            }
+            Self::QueueReady {
+                grant,
+                handshake,
+                reply,
+            } => {
+                if !reply.is_closed() {
+                    let _ = reply.send(server.sync.queue_voice_high_ready(&grant, handshake));
+                }
+            }
+            Self::PrepayLowSdp {
+                grant,
+                handshake,
+                reply,
+            } => {
+                if !reply.is_closed() {
+                    let _ = reply.send(server.sync.prepay_voice_low_sdp(&grant, handshake));
+                }
+            }
+            Self::LowSdp {
+                grant,
+                handshake,
+                reply,
+            } => {
+                if !reply.is_closed() {
+                    let _ = reply.send(server.sync.prepare_voice_low_sdp(&grant, handshake));
+                }
             }
             Self::Derive {
                 grant,
@@ -241,6 +399,53 @@ impl Command {
 }
 
 impl ServerActor {
+    /// Retire only the actual native call allocation. Safe after lease revocation and across
+    /// lost replies; retrying an old stop cannot stop a newer endpoint in the same room.
+    pub async fn stop_voice_endpoint(
+        &self,
+        grant: Arc<CallGrant>,
+    ) -> Result<(), VoiceEndpointError> {
+        self.voice_endpoint_request(|reply| Command::Stop { grant, reply })
+            .await
+    }
+
+    /// Trusted native rollout control only, never renderer data. The Root keeps Disabled as
+    /// its default and the switch can only narrow authenticated group policy. Exact repeats
+    /// are idempotent; a transition involving Direct revokes the old runtime policy lease.
+    pub async fn set_voice_routing(
+        &self,
+        routing: catcoms_sync::VoiceRouting,
+    ) -> Result<(), VoiceEndpointError> {
+        self.voice_endpoint_request(|reply| Command::Routing { routing, reply })
+            .await
+    }
+
+    /// Fresh evidence from the actual participant's implicit watcher, bound to the original
+    /// affine CallGrant allocation. No synthetic watcher or cached PairReceipt is substituted.
+    pub async fn voice_participant_peers(
+        &self,
+        grant: Arc<CallGrant>,
+    ) -> Result<Vec<FreshPeer>, VoiceEndpointError> {
+        self.voice_endpoint_request(|reply| Command::ParticipantPeers { grant, reply })
+            .await
+    }
+
+    /// Observe proven peers with original bounded RPC/output custody. Cancellation drops
+    /// only this receiver; the same permit remains with an admitted command or late reply.
+    /// No browser metadata, pair factory, engine permit or native deadline is created here.
+    pub async fn voice_participant_peer_snapshot(
+        &self,
+        grant: Arc<CallGrant>,
+        permit: PeerSnapshotPermit,
+    ) -> Result<PeerSnapshot, VoiceEndpointError> {
+        let _waiter = permit.rpc_waiter().map_err(VoiceEndpointError::Protocol)?;
+        self.voice_endpoint_request(|reply| Command::ParticipantPeerSnapshot {
+            grant,
+            permit,
+            reply,
+        })
+        .await
+    }
     /// Select the actual implicit watch's proven peer using immutable remote join/key identity.
     /// Lost replies retry this same selector; a peer rejoin cannot silently change the request.
     pub async fn prepare_voice_pair(
@@ -255,6 +460,85 @@ impl ServerActor {
         })
         .await
     }
+    /// Fixed local confirmation observation for the original grant, selector and handshake.
+    /// Mailbox loss is uncertain metadata, never proof of establishment or a reason to create
+    /// a replacement pair. Re-query the same identity; later SDP admission remains independent.
+    pub async fn voice_pair_confirmation(
+        &self,
+        grant: Arc<CallGrant>,
+        selector: PairSelector,
+        handshake: Nonce,
+    ) -> Result<VoicePairConfirmation, VoiceEndpointError> {
+        self.voice_endpoint_request(|reply| Command::PairConfirmation {
+            grant,
+            selector,
+            handshake,
+            reply,
+        })
+        .await
+    }
+
+    /// Prepare the original native HIGH receiver/Ready. No renderer packet, signer or
+    /// clock enters this command. Retry only this same grant/handshake/helper choice.
+    pub async fn prepare_voice_high_ready(
+        &self,
+        grant: Arc<CallGrant>,
+        handshake: Nonce,
+        helpers: [Option<DeviceId>; 2],
+    ) -> Result<bool, VoiceEndpointError> {
+        self.voice_endpoint_request(|reply| Command::HighReady {
+            grant,
+            handshake,
+            helpers,
+            reply,
+        })
+        .await
+    }
+    /// Queue that exact prepared Ready. A lost reply recovers its original Source record,
+    /// not another identity, origin debit or three-attempt allowance.
+    pub async fn queue_voice_high_ready(
+        &self,
+        grant: Arc<CallGrant>,
+        handshake: Nonce,
+    ) -> Result<bool, VoiceEndpointError> {
+        self.voice_endpoint_request(|reply| Command::QueueReady {
+            grant,
+            handshake,
+            reply,
+        })
+        .await
+    }
+    /// Prepay original LOW capacity/endpoint records after native Finish. This alone does
+    /// not accept Ready, stop Finish, adopt browser keys or authorize any SDP/RTC work.
+    pub async fn prepay_voice_low_sdp(
+        &self,
+        grant: Arc<CallGrant>,
+        handshake: Nonce,
+    ) -> Result<(), VoiceEndpointError> {
+        self.voice_endpoint_request(|reply| Command::PrepayLowSdp {
+            grant,
+            handshake,
+            reply,
+        })
+        .await
+    }
+    /// Advance only actual native LOW Ready. `true` observes old Workflow drainage;
+    /// `false` retains the same extracted owner while real old work still drains.
+    /// Neither result grants SDP/browser/RTC activation. Capacity/Stopped retry the SAME
+    /// owners; they never justify replacing the original preparation or old key Claim.
+    pub async fn prepare_voice_low_sdp(
+        &self,
+        grant: Arc<CallGrant>,
+        handshake: Nonce,
+    ) -> Result<bool, VoiceEndpointError> {
+        self.voice_endpoint_request(|reply| Command::LowSdp {
+            grant,
+            handshake,
+            reply,
+        })
+        .await
+    }
+
     async fn voice_endpoint_request<T: Send + 'static>(
         &self,
         build: impl FnOnce(Reply<T>) -> Command + Send,
@@ -323,6 +607,26 @@ impl ServerActor {
     ) -> Result<tokio::sync::watch::Receiver<u64>, VoiceEndpointError> {
         self.voice_endpoint_request(|reply| Command::Changes { reply })
             .await
+    }
+
+    /// Original pending actions from the exact native participant. The affine prepaid owner
+    /// transfers into the command and then its actual output, including a Root refusal. Caller
+    /// cancellation cannot release the32-handle snapshot/oneshot payment ahead of collection.
+    /// This rotates observation, never consumes tokens, admits engines or reconstructs keys.
+    pub async fn voice_confirmation_actions(
+        &self,
+        grant: Arc<CallGrant>,
+        permit: CryptoActionSnapshotPermit,
+    ) -> Result<CryptoActionSnapshot, VoiceEndpointError> {
+        // Must precede oneshot allocation: stop can destroy the queued command while this
+        // actual receiver remains unpolled; cancellation can destroy this waiter first.
+        let _waiter = permit.rpc_waiter().map_err(VoiceEndpointError::Protocol)?;
+        self.voice_endpoint_request(|reply| Command::ConfirmationActions {
+            grant,
+            permit,
+            reply,
+        })
+        .await
     }
 
     /// Recover the original native derivation row; neither a handshake ID nor a cached receipt

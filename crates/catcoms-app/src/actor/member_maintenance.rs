@@ -19,6 +19,8 @@ const MAX_WAITERS: usize = 4;
 // decoder additionally uses transcript/bundle/record scratch; this is not a total-memory cap.
 const LOCAL_FLIGHTS: usize = 2;
 const PROCESS_FLIGHTS: usize = 4;
+mod admission;
+use admission::Admission;
 
 struct Capacity {
     slots: Arc<Semaphore>,
@@ -114,6 +116,9 @@ pub(super) struct Maintenance {
     chains: HashMap<PeerId, Chain>,
     queue: VecDeque<PeerId>,
     jobs: JoinSet<Completion>,
+    // One fixed FIFO position, not a task or another per-peer queue. No local slot or
+    // transport authority is captured until this owner receives a real process grant.
+    admission: Admission,
 }
 impl Maintenance {
     pub(super) fn new() -> Self {
@@ -128,6 +133,7 @@ impl Maintenance {
             chains: HashMap::new(),
             queue: VecDeque::new(),
             jobs: JoinSet::new(),
+            admission: Admission::default(),
         }
     }
     fn enqueue(&mut self, peer: PeerId, discovery: bool, waiter: Option<Waiter>) {
@@ -204,7 +210,7 @@ impl Maintenance {
         }
     }
 
-    fn reserve(&self, peer: Arc<PeerCustody>) -> Option<Arc<Flight>> {
+    fn reserve(&mut self, peer: Arc<PeerCustody>) -> Option<Arc<Flight>> {
         if peer
             .flight
             .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
@@ -212,12 +218,21 @@ impl Maintenance {
         {
             return None;
         }
-        let Ok(local) = self.local.clone().try_acquire_owned() else {
+        if self.local.available_permits() == 0 {
+            peer.flight.store(false, Ordering::Release);
+            self.admission.clear(&self.capacity);
+            return None;
+        }
+        let Some(process) = self.admission.try_take(&self.capacity) else {
             peer.flight.store(false, Ordering::Release);
             return None;
         };
-        let Ok(process) = self.capacity.slots.clone().try_acquire_owned() else {
+        let Ok(local) = self.local.clone().try_acquire_owned() else {
+            // Only this Actor acquires local permits; an actual lower can only return one.
+            // Still handle local closure/refusal without retaining an unstarted global grant.
             peer.flight.store(false, Ordering::Release);
+            drop(process);
+            self.capacity.signal();
             return None;
         };
         Some(Arc::new(Flight {
@@ -234,6 +249,11 @@ impl Maintenance {
         &mut self,
         server: &mut Server<T, R>,
     ) {
+        if self.queue.is_empty() || self.local.available_permits() == 0 {
+            self.admission.clear(&self.capacity);
+            return;
+        }
+        let mut eligible = false;
         for _ in 0..MAX_CHAINS {
             let Some(&peer) = self.queue.front() else {
                 break;
@@ -245,6 +265,7 @@ impl Maintenance {
                 self.queue.rotate_left(1);
                 continue;
             }
+            eligible = true;
             let Some(flight) = self.reserve(custody) else {
                 break;
             };
@@ -288,9 +309,15 @@ impl Maintenance {
                 }
             }
         }
+        // Do not hoard an assigned-but-unobserved process grant behind lower-only peers,
+        // a now-empty queue or two actual local flights. Their real retirement wakes us.
+        if !eligible || self.queue.is_empty() || self.local.available_permits() == 0 {
+            self.admission.clear(&self.capacity);
+        }
     }
     pub(super) async fn next(&mut self) -> Event {
         tokio::select! {
+            _ = self.admission.wait_ready() => Event::Wake,
             changed = async { if self.queue.is_empty() { std::future::pending().await } else { self.changed.changed().await } } => { let _ = changed; Event::Wake },
             result = async { if self.jobs.is_empty() { std::future::pending().await } else { self.jobs.join_next().await } } => {
                 match result { Some(Ok(completion)) => Event::Completed(Box::new(completion)), Some(Err(_)) => Event::Panicked, None => Event::Wake }
@@ -404,6 +431,7 @@ impl Maintenance {
 #[cfg(test)]
 mod tests {
     use super::*;
+    mod fairness;
     use catcoms_mls::MlsDevice;
     use catcoms_rt::{Hub, ManualClock, MemNetwork};
     use rand_chacha::ChaCha20Rng;

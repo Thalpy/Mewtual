@@ -7,7 +7,9 @@ use super::runtime::{ActorOwner, EffectAuthority};
 use super::*;
 use catcoms_rt::{Clock, PeerId, RequestAuthority, SharedRequestKeepalive};
 use futures::FutureExt;
+use std::borrow::Cow;
 use std::collections::{BTreeMap, BTreeSet};
+use std::fmt;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
@@ -17,6 +19,128 @@ const ATTEMPTS: u8 = 3;
 /// Eligibility delay only; shared byte/flight capacity and actual lower custody may delay it.
 const HEDGE_MS: u64 = 500;
 type Key = (DeviceId, MessageId);
+mod activity;
+use activity::PacketActivity;
+
+/// Borrowed capacity provenance from one immutable native packet. This is deliberately
+/// narrower than ByteBudget: public ingress cannot supply a reservation or select a Workflow.
+/// Root's retained ACK view carries this together with the SAME packet and cached hash.
+#[derive(Clone, Copy)]
+pub(crate) enum SourceProgress<'a> {
+    Ordinary,
+    Workflow(&'a Arc<super::chain::Workflow>),
+    Exchange(&'a Arc<super::negotiation::Exchange>),
+    // Restricted HIGH first-Offer verification only; never an Active SDP action lender.
+    ReadyReceive(&'a Arc<super::negotiation::Exchange>),
+    // Exact LOW Ready retry verification after its original Workflow lane was moved.
+    LowReadyRetry(&'a Arc<super::negotiation::Exchange>),
+    Ready(&'a super::ready::source_authority::ReadySourceAuthority),
+}
+impl fmt::Debug for SourceProgress<'_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("SourceProgress { .. }")
+    }
+}
+impl SourceProgress<'_> {
+    /// Only Ready adds another original time source to the existing capacity lookup.
+    /// Runtime samples it before Group/Policy and supplies the frozen sample below.
+    pub(crate) fn observation_time(self) -> Option<(u64, u64)> {
+        match self {
+            Self::Ready(ready) => Some(ready.observation_time()),
+            _ => None,
+        }
+    }
+    pub(crate) fn charge(
+        self,
+        resources: &Arc<Resources>,
+        group: [u8; 32],
+        bytes: usize,
+        stage: super::negotiation::Stage,
+    ) -> Result<Credit, VoiceError> {
+        use super::negotiation::Stage;
+        if !matches!(stage, Stage::Crypto | Stage::Source | Stage::Lower) {
+            return Err(VoiceError::Scope);
+        }
+        match self {
+            Self::Ordinary => resources.charge(group, bytes, stage.resource_kind()),
+            Self::Workflow(workflow) => {
+                workflow.charge(resources, group, bytes, stage.resource_kind())
+            }
+            Self::Exchange(exchange) => {
+                if !exchange.uses_resources(resources, group) {
+                    return Err(VoiceError::Scope);
+                }
+                exchange.charge(stage, bytes)
+            }
+            Self::ReadyReceive(exchange) => {
+                if stage != Stage::Crypto || !exchange.uses_resources(resources, group) {
+                    return Err(VoiceError::Scope);
+                }
+                exchange.charge_ready_offer_verification(bytes)
+            }
+            Self::Ready(ready) => ready.charge(resources, group, stage, bytes),
+            Self::LowReadyRetry(exchange) => {
+                if stage != Stage::Crypto || !exchange.uses_resources(resources, group) {
+                    return Err(VoiceError::Scope);
+                }
+                exchange.charge_low_ready_retry_verification(bytes)
+            }
+        }
+    }
+    /// Lookup only COMPARES the actual supplied owner. It never constructs packet authority
+    /// or replaces a refused/retired owner with current ordinary or another phase's capacity.
+    pub(crate) fn require_current(
+        self,
+        resources: &Arc<Resources>,
+        group: [u8; 32],
+        sampled: Option<(u64, u64)>,
+    ) -> Result<(), VoiceError> {
+        let current = match self {
+            Self::Ordinary => true,
+            Self::Workflow(expected) => {
+                expected.uses_resources(resources, group)
+                    && expected.is_live()
+                    && resources
+                        .workflow(group)
+                        .as_ref()
+                        .is_some_and(|actual| Arc::ptr_eq(actual, expected))
+            }
+            Self::Exchange(expected) => {
+                expected.uses_resources(resources, group)
+                    && expected.is_live()
+                    && resources
+                        .exchange(group)
+                        .as_ref()
+                        .is_some_and(|actual| Arc::ptr_eq(actual, expected))
+            }
+            Self::ReadyReceive(expected) => {
+                expected.uses_resources(resources, group)
+                    && expected.ready_receive_open()
+                    && resources
+                        .exchange(group)
+                        .as_ref()
+                        .is_some_and(|actual| Arc::ptr_eq(actual, expected))
+            }
+            Self::Ready(ready) => {
+                let (wall, mono) = sampled.ok_or(VoiceError::Unauthorized)?;
+                return ready.require_current_at(resources, group, wall, mono);
+            }
+            Self::LowReadyRetry(expected) => {
+                expected.uses_resources(resources, group)
+                    && expected.low_ready_retry_open()
+                    && resources
+                        .exchange(group)
+                        .as_ref()
+                        .is_some_and(|actual| Arc::ptr_eq(actual, expected))
+            }
+        };
+        if current {
+            Ok(())
+        } else {
+            Err(VoiceError::Unauthorized)
+        }
+    }
+}
 
 #[derive(Clone, PartialEq, Eq)]
 enum Incarnation {
@@ -57,13 +181,56 @@ pub struct SourceActivity {
     local: DeviceId,
     lease: ActivityLease,
     incarnation: Incarnation,
-    packet: Option<super::packets::SourcePacketAuthority>,
+    packet: Option<PacketActivity>,
 }
 impl SourceActivity {
-    fn exchange(&self) -> Option<Arc<super::negotiation::Exchange>> {
+    pub(super) fn ready(&self) -> Option<&super::ready::source_authority::ReadySourceAuthority> {
+        match &self.packet {
+            Some(PacketActivity::Ready(ready)) => Some(ready),
+            _ => None,
+        }
+    }
+    /// Pure original Ready check under Group/Policy; its clock MUST be sampled beforehand.
+    pub(super) fn check_ready_at(
+        &self,
+        object: &SignedObject,
+        wall: u64,
+        mono: u64,
+    ) -> Result<(), VoiceError> {
+        let Some(ready) = self.ready() else {
+            return Err(VoiceError::Unauthorized);
+        };
+        let (
+            Incarnation::Joined(key),
+            ActivityLease::Joined(call),
+            Body::PairReadyRound {
+                sequence: 1,
+                header,
+                profile: super::SdpProfile::CompleteSdpV1,
+            },
+        ) = (&self.incarnation, &self.lease, object.body())
+        else {
+            return Err(VoiceError::Unauthorized);
+        };
+        if self.scope != object.scope()
+            || self.local != object.issuer()
+            || !call.is_live()
+            || key.join != header.source_join
+            || key.key_ref != header.source_key_ref
+            || !ready.is_call(call)
+            || !ready.check_at(object, wall, mono)
+        {
+            return Err(VoiceError::Unauthorized);
+        }
+        Ok(())
+    }
+    fn progress(&self) -> SourceProgress<'_> {
         self.packet
             .as_ref()
-            .and_then(super::packets::SourcePacketAuthority::exchange)
+            .map_or(SourceProgress::Ordinary, PacketActivity::progress)
+    }
+    fn exchange(&self) -> Option<Arc<super::negotiation::Exchange>> {
+        self.packet.as_ref().and_then(PacketActivity::exchange)
     }
     pub(super) fn joined(scope: Scope, local: DeviceId, key: JoinKey, lease: CallLease) -> Self {
         Self {
@@ -95,18 +262,26 @@ impl SourceActivity {
             }
     }
     pub(super) fn with_packet(mut self, packet: super::packets::SourcePacketAuthority) -> Self {
-        self.packet = Some(packet);
+        self.packet = Some(PacketActivity::Encrypted(packet));
+        self
+    }
+    pub(in crate::voice_v2) fn with_ready(
+        mut self,
+        ready: super::ready::source_authority::ReadySourceAuthority,
+    ) -> Self {
+        self.packet = Some(PacketActivity::Ready(ready));
         self
     }
     fn is_live(&self) -> bool {
-        self.lease.is_live()
-            && self
-                .packet
-                .as_ref()
-                .is_none_or(RequestAuthority::authorized)
+        self.lease.is_live() && self.packet.as_ref().is_none_or(PacketActivity::authorized)
     }
     fn observation_time(&self) -> Option<(u64, u64)> {
         self.packet.as_ref().map(|packet| packet.observation_time())
+    }
+    fn obsolete_confirmation(&self) -> bool {
+        self.packet
+            .as_ref()
+            .is_some_and(PacketActivity::obsolete_confirmation)
     }
     fn is_live_at(&self, packet_time: Option<(u64, u64)>) -> bool {
         self.lease.is_live()
@@ -141,6 +316,13 @@ impl SourceActivity {
                             ActivityLease::Joined(lease) => packet.check(object, lease),
                             ActivityLease::Watching(_) => false,
                         })
+            }
+            (Incarnation::Joined(_), Body::PairReady { .. } | Body::PairReadyRound { .. }) => {
+                let Some(ready) = self.ready() else {
+                    return Err(VoiceError::Unauthorized);
+                };
+                let (wall, mono) = ready.observation_time();
+                self.check_ready_at(object, wall, mono).is_ok()
             }
             (Incarnation::Watching(nonce), Body::WatchChallenge { watcher, .. }) => {
                 nonce == watcher
@@ -294,8 +476,8 @@ redacted_debug!(
 );
 
 impl SourceJob {
-    pub(crate) fn exchange(&self) -> Option<Arc<super::negotiation::Exchange>> {
-        self.flight.packet.activity.exchange()
+    pub(crate) fn progress(&self) -> SourceProgress<'_> {
+        self.flight.packet.activity.progress()
     }
     pub fn peer(&self) -> PeerId {
         self.peer
@@ -349,9 +531,24 @@ impl SourceLedger {
         let now = self.clock.now_ms();
         let mono = self.clock.monotonic_ms();
         state.packets.retain(|_, packet| {
-            now <= packet.object.expires().saturating_add(CLOCK_SKEW_MS)
-                || mono < packet.deadline
-                || packet.active.load(Ordering::Acquire) != 0
+            // SourceState also fences new Flight publication. Actual Lower owners always
+            // retain custody; a permanently ended native join/watch needs no idle retry
+            // record until signed expiry. Otherwise preserve the original call's attempts;
+            // generic room/pair/authority loss is not permission to recreate a retry record.
+            // Extra terminal cases are HIGH's native Finish-open plus old-plan closure,
+            // and LOW's exact authenticated native Ready. LOW local Finish/Established
+            // alone is insufficient. Fixed original phase history prevents re-admission, while
+            // actual flights/Lower/ACK owners remain charged by the first branch below.
+            // Map removal is not drainage proof: external activities/authorities may still
+            // retain the original Workflow/Packet and its actual credit after this removal.
+            packet.active.load(Ordering::Acquire) != 0
+                || (packet.activity.lease.is_live()
+                    && !packet.activity.obsolete_confirmation()
+                    // Ready may retire only after irreversible native completion/closure or
+                    // strict expiry. Exhausted-but-live records keep their spent allowance.
+                    && (packet.activity.ready().is_none() || packet.activity.is_live())
+                    && (now <= packet.object.expires().saturating_add(CLOCK_SKEW_MS)
+                        || mono < packet.deadline))
         });
         state.cursors.retain(|_, cursor| {
             now <= cursor.expires.saturating_add(CLOCK_SKEW_MS) || mono < cursor.deadline
@@ -366,6 +563,28 @@ impl SourceLedger {
         activity: SourceActivity,
         room: RoomAuthority,
     ) -> Result<bool, VoiceError> {
+        self.admit_packet(actor, Cow::Owned(object), activity, room)
+    }
+    /// Native cache-to-Source transfer. The caller borrows its actual published packet;
+    /// Source pays canonical scratch and its retained copy BEFORE cloning any payload.
+    /// An exact cached retry does not clone, re-sign, renew its deadline or reset attempts.
+    /// This is not public ingress: the original LocalJoin/Watcher activity is still required.
+    pub(crate) fn admit_borrowed(
+        &self,
+        actor: &ActorOwner,
+        object: &SignedObject,
+        activity: SourceActivity,
+        room: RoomAuthority,
+    ) -> Result<bool, VoiceError> {
+        self.admit_packet(actor, Cow::Borrowed(object), activity, room)
+    }
+    fn admit_packet(
+        &self,
+        actor: &ActorOwner,
+        object: Cow<'_, SignedObject>,
+        activity: SourceActivity,
+        room: RoomAuthority,
+    ) -> Result<bool, VoiceError> {
         self.current(actor)?;
         actor.authorize_source(&object, &activity, &room, false)?;
         let key = (object.issuer(), object.id());
@@ -374,7 +593,7 @@ impl SourceLedger {
         if let Some(packet) = state.packets.get(&key) {
             // Both objects are immutable verified native values. Structural equality checks
             // the exact signed bytes without allocating another pair of canonical encodings.
-            if packet.object != object {
+            if packet.object != *object {
                 return Err(VoiceError::RetryMismatch);
             }
             if !packet.activity.same(&activity)
@@ -394,15 +613,21 @@ impl SourceLedger {
         };
         // Native PacketLedger already owns cache/event bytes. Reserve additional canonical
         // scratch before hash/encode; a cached exact retry above needs neither allocation.
-        let scratch_bytes = 2 * (body_bytes + 1024) + 4096;
-        let exchange = activity.exchange();
-        let _scratch = if let Some(exchange) = &exchange {
-            exchange.charge(super::negotiation::Stage::Crypto, scratch_bytes)?
+        let scratch_bytes = if activity.ready().is_some() {
+            3 * super::ready::capacity::MAX_WIRE + 4096
         } else {
-            self.resources
-                .charge(self.group, scratch_bytes, ResourceKind::Crypto)?
+            2 * (body_bytes + 1024) + 4096
         };
-        let hash = object.hash();
+        let progress = activity.progress();
+        let _scratch = progress.charge(
+            &self.resources,
+            self.group,
+            scratch_bytes,
+            super::negotiation::Stage::Crypto,
+        )?;
+        let hash = activity
+            .ready()
+            .map_or_else(|| object.hash(), |ready| ready.hash());
         let now = self.clock.now_ms();
         let mono = self.clock.monotonic_ms();
         let remaining = object
@@ -412,14 +637,26 @@ impl SourceLedger {
         if remaining == 0 || remaining > MAX_REMOTE_DELEGATION_REMAINING_MS {
             return Err(VoiceError::Freshness);
         }
-        let deadline = mono.saturating_add(remaining);
+        let ready_remaining = activity.ready().map(|ready| {
+            let (_, native_mono) = ready.observation_time();
+            ready.deadline().saturating_sub(native_mono)
+        });
+        // Ready was stamped in its ORIGINAL native clock. Convert only remaining duration
+        // into this ledger's domain; absolute monotonic origins need not be equal.
+        let deadline =
+            mono.saturating_add(ready_remaining.map_or(remaining, |left| left.min(remaining)));
         let bytes = object.encode().len() + 512;
-        let credit = if let Some(exchange) = &exchange {
-            exchange.charge(super::negotiation::Stage::Source, bytes + 1024)?
+        let source_metadata = if activity.ready().is_some() {
+            super::ready::capacity::SOURCE_METADATA
         } else {
-            self.resources
-                .charge(self.group, bytes + 1024, ResourceKind::Retained)?
+            1024
         };
+        let credit = progress.charge(
+            &self.resources,
+            self.group,
+            bytes + source_metadata,
+            super::negotiation::Stage::Source,
+        )?;
         let cursor_key = (object.issuer(), object.scope().room);
         let cursor_credit = if matches!(object.body(), Body::Announcement { .. })
             && !state.cursors.contains_key(&cursor_key)
@@ -439,6 +676,10 @@ impl SourceLedger {
             object.body().target().unwrap_or(object.issuer()),
             object.expires(),
         )?;
+        // Owned callers already paid their input copy at their boundary. The native pump
+        // borrows its original cache, so only this paid point creates Source's own copy.
+        // Allocation remains before the final origin debit and before infallible publication.
+        let object = object.into_owned();
         // All fallible persistent reservations precede the original-issuer transaction. Every
         // subsequent map publication is infallible; no rejected packet spends origin quota.
         actor.authorize_source(&object, &activity, &room, true)?;
@@ -633,15 +874,33 @@ impl SourceLedger {
                 Err(VoiceError::Capacity) => continue,
                 Err(error) => return Err(error),
             };
+            // A successful network submission can return an ACK while the ordinary pool is
+            // full. Prepare its immediate responder's normal rate/origin row BEFORE spending
+            // the attempt; a previously unseen helper must not strand an admitted completion
+            // on a later bookkeeping allocation. This grants/resets no traffic allowance.
+            let stamp = self.clock.monotonic_ms();
+            match actor.with_limits(|limits| {
+                limits.prepare_exchange_members(&[hop.device()], &self.resources, stamp)
+            }) {
+                Ok(()) => {}
+                Err(VoiceError::Capacity) => continue,
+                Err(error) => return Err(error),
+            }
             // Root framing and route authority share this same affine lower credit. Reserving
             // route metadata here avoids a fallible ordinary allocation after attempt debit.
-            let bytes = 4 * packet.bytes + 4096 + ROUTE_METADATA_BYTES;
-            let budget = if let Some(exchange) = packet.activity.exchange() {
-                exchange.charge(super::negotiation::Stage::Lower, bytes)
-            } else {
-                self.resources
-                    .charge(self.group, bytes, ResourceKind::Forward)
-            };
+            // Original ciphertext remains in Packet's independently paid Source record.
+            // Root borrows that object, and its exact-capacity encoders retain at most two
+            // large buffers (inner+transcript, inner+frame, or Root+driver frame). The private
+            // retained ACK view reuses this SAME packet's cached hash, so its small verifier
+            // cannot hide two additional SDP encodings. Fixed wrapper/permit/route payments
+            // remain unchanged, and the actual driver still retains this whole credit.
+            let bytes = 2 * packet.bytes + 4096 + ROUTE_METADATA_BYTES;
+            let budget = packet.activity.progress().charge(
+                &self.resources,
+                self.group,
+                bytes,
+                super::negotiation::Stage::Lower,
+            );
             let credit = match budget {
                 Ok(credit) => credit,
                 Err(VoiceError::Capacity) => continue,
@@ -721,8 +980,12 @@ impl SourceLedger {
                 if recipient != target {
                     return Err(VoiceError::Unauthorized);
                 }
-                status.confirmed = true;
-                return Ok(SourceOutcome::EndpointAdmitted);
+                if packet.activity.ready().is_none() {
+                    status.confirmed = true;
+                    return Ok(SourceOutcome::EndpointAdmitted);
+                }
+                // A Ready ACK is delivery metadata only. LOW may still have lost its native
+                // reply or not reached Offer preparation; retain the SAME retry allowance.
             }
             // A room broadcast's direct ACK proves this one recipient only. It never prevents
             // remaining source submissions or claims whole-room convergence.
@@ -774,3 +1037,28 @@ impl SourceLedger {
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod ready_layout {
+    use super::*;
+    #[test]
+    fn ready_source_complete_retained_graph_fits_its_original_stage_payment() {
+        use std::mem::size_of;
+        // Packet includes SourceActivity/inline authority, RoomAuthority and both Set
+        // wrappers ONCE. Their paid backing owners are retained, never reallocated here.
+        // Source map has Arc values;1024 covers its complete small leaf (11 Key/Arc slots),
+        // and512 each covers the one-direct/two-helper set leaves at their full capacity.
+        let graph = size_of::<Packet>()
+            + 2 * size_of::<usize>()
+            + size_of::<EffectAuthority>()
+            + 2 * size_of::<usize>()
+            + 2 * size_of::<DeviceId>()
+            + size_of::<Key>()
+            + size_of::<Arc<Packet>>()
+            + 1024
+            + 2 * 512;
+        assert!(
+            graph <= super::super::ready::capacity::SOURCE,
+            "Ready Source graph: {graph}"
+        );
+    }
+}

@@ -9,10 +9,11 @@ use catcoms_rt::{
 
 const ORDINARY_TRACE_LIMIT: usize = 192;
 const PHASE_TRACE_LIMIT: usize = 16;
+mod catchup_trace;
 
 #[test]
 fn ordinary_trace_bounds_phase_and_request_history_with_explicit_truncation() {
-    let scenario = Scenario::new(false);
+    let scenario = Scenario::observations(false);
     for _ in 0..PHASE_TRACE_LIMIT + 3 {
         scenario.rules.begin_phase(&"λ".repeat(200));
     }
@@ -48,7 +49,7 @@ fn ordinary_trace_bounds_phase_and_request_history_with_explicit_truncation() {
 
 #[test]
 fn ordinary_trace_distinguishes_lost_waiter_from_a_returned_transport_error() {
-    let scenario = Scenario::new(false);
+    let scenario = Scenario::observations(false);
     let observation = scenario
         .rules
         .observe_ordinary(0, scenario.rules.peers[1], 19);
@@ -83,7 +84,7 @@ fn ordinary_trace_retains_only_byte_count_after_a_reply_then_outer_waiter_is_los
             self.0.store(true, Ordering::Release);
         }
     }
-    let scenario = Scenario::new(false);
+    let scenario = Scenario::observations(false);
     let dropped = Arc::new(AtomicBool::new(false));
     let answer = Ok(Bytes::from_owner(Payload(dropped.clone(), [9; 4])));
     let observation = scenario
@@ -120,6 +121,8 @@ pub(super) struct OrdinaryRequest {
     from: usize,
     to: usize,
     kind: u8,
+    catchup: Option<catchup_trace::CatchupMetadata>,
+    raw_reply_marker: Option<u8>,
     began: u64,
     lower_completed: Option<(u64, OrdinaryOutcome)>,
     observer_completed: Option<u64>,
@@ -133,6 +136,8 @@ impl std::fmt::Debug for OrdinaryRequest {
             .field("from_client", &(self.from + 1))
             .field("to_client", &(self.to + 1))
             .field("kind", &self.kind)
+            .field("catchup_wire", &self.catchup)
+            .field("raw_unverified_reply_marker", &self.raw_reply_marker)
             .field("began_mono_ms", &self.began)
             .field(
                 "lower_elapsed_and_outcome",
@@ -164,7 +169,25 @@ struct OrdinaryObservation {
     completed: bool,
 }
 impl OrdinaryObservation {
+    fn request(&self, bytes: &[u8]) {
+        let metadata = catchup_trace::request(bytes);
+        if let Some(row) = self
+            .rules
+            .trace
+            .lock()
+            .unwrap()
+            .ordinary
+            .iter_mut()
+            .find(|row| row.id == self.id)
+        {
+            row.catchup = metadata;
+        }
+    }
     fn lower(&self, answer: &Result<Bytes, TransportError>) {
+        let raw_marker = answer
+            .as_ref()
+            .ok()
+            .and_then(|bytes| catchup_trace::raw_reply_marker(bytes));
         let outcome = match answer {
             Ok(bytes) => OrdinaryOutcome::Reply(bytes.len()),
             Err(TransportError::Unreachable(_)) => OrdinaryOutcome::Unreachable,
@@ -185,6 +208,9 @@ impl OrdinaryObservation {
             .find(|row| row.id == self.id)
         {
             row.lower_completed = Some((now, outcome));
+            if row.kind == 19 {
+                row.raw_reply_marker = raw_marker;
+            }
         }
     }
     fn complete(mut self) {
@@ -224,7 +250,7 @@ impl Drop for OrdinaryObservation {
 
 #[test]
 fn ordinary_trace_drop_preserves_an_original_failure_after_trace_poisoning() {
-    let scenario = Scenario::new(false);
+    let scenario = Scenario::observations(false);
     let observation = scenario
         .rules
         .observe_ordinary(0, scenario.rules.peers[1], 19);
@@ -353,6 +379,8 @@ impl NetworkRules {
             from,
             to,
             kind,
+            catchup: None,
+            raw_reply_marker: None,
             began: now,
             lower_completed: None,
             observer_completed: None,
@@ -504,6 +532,7 @@ impl MeshTransport for Transport {
         let observation =
             self.rules
                 .observe_ordinary(self.index, peer, data.first().copied().unwrap_or(0));
+        observation.request(&data);
         let answer = self.inner.request(peer, proto, data).await;
         observation.lower(&answer);
         let answer = self.completed(peer, answer).await;
@@ -735,7 +764,7 @@ impl MeshTransport for Transport {
 /// after the helper authenticates the probe and the requester authenticates its exact result.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn automatic_recovery_notifications_reach_authenticated_tcp_endpoints() {
-    let mut scenario = Scenario::new(false);
+    let mut scenario = Scenario::new(false, isolate().await);
     // Only these three devices are members. Closing three members of a six-member group would
     // leave authenticated offline targets/helper witnesses in the ordinary recovery schedule,
     // which does not establish receipt through the specific adapter path asserted below.

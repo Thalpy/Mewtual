@@ -25,6 +25,10 @@ export default defineConfig({
   server: {
     port: 1420,
     strictPort: true,
+    // Start the large App transform while the browser loads the startup and fixture modules.
+    // Vite only caches transformed source here; main.ts still installs fixture mocks before
+    // evaluating App. Keep the normal readiness marker and startup bounds authoritative.
+    warmup: { clientFiles: ["./src/App.svelte"] },
     // Tauri owns native-source rebuilds. Watching this tree also follows a shared Cargo
     // target junction, traversing build artifacts and reacting to every native test/build.
     // Refuse it before traversal; frontend sources and their HMR stay observed normally.

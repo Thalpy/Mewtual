@@ -224,8 +224,12 @@ async fn admitted_factory_holds_channel_collection_behind_actual_actor_completio
         Err(crate::voice_handoff::channel::Refused::Capacity)
     ));
     assert!(
-        route.require_open().is_ok(),
+        f.state.voice_channels.require_cleanup_route(&route).is_ok(),
         "actual publication completed, but its uncertain purpose still needs Control cleanup"
+    );
+    assert!(
+        route.require_open().is_err(),
+        "publication preceded the permanent close-first fence"
     );
     assert!(f
         .state
@@ -372,7 +376,7 @@ async fn registration_payment_refusal_before_handoff_calls_no_actor_and_removes_
     let pressure = pool
         .charge(
             selected.binding().scope.group,
-            256 * 1024 - pool.counts().0 + 4096 - 4096 - 1024,
+            catcoms_sync::voice_v2::resources::GROUP_BYTES - pool.counts().0 + 4096 - 4096 - 1024,
             ResourceKind::Retained,
         )
         .unwrap();

@@ -4,7 +4,7 @@ use super::*;
 
 /// Project original sealed routes and actor liveness without exposing network seeds/addresses.
 /// Each independent probe has its own bound so diagnostics cannot strand a failed fixture.
-async fn bridge_diagnostic(scenario: &Scenario, bridge: usize) -> Vec<String> {
+pub(super) async fn bridge_diagnostic(scenario: &Scenario, bridge: usize) -> Vec<String> {
     async fn observe<F: Future>(future: F) -> Option<F::Output> {
         tokio::select! {
             value = future => Some(value),
@@ -46,7 +46,10 @@ async fn bridge_diagnostic(scenario: &Scenario, bridge: usize) -> Vec<String> {
 
 /// Both exact peer/listener pairs need standing member-mesh consent; one saved direction,
 /// duplicates or an obsolete listener cannot establish this replacement-bridge prerequisite.
-fn has_saved_bridge_endpoints(net: &ServerNet, expected: &[(PeerId, String); 2]) -> bool {
+pub(super) fn has_saved_bridge_endpoints(
+    net: &ServerNet,
+    expected: &[(PeerId, String); 2],
+) -> bool {
     net.reconnect_policy == ReconnectPolicy::MemberMesh
         && expected.iter().all(|(peer, address)| {
             net.reconnect_routes
@@ -282,7 +285,7 @@ async fn observe_legacy_gap(scenario: &Scenario, bridge: usize) {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn legacy_voice_signals_have_no_member_bridge_fallback_on_tcp() {
-    let mut scenario = Scenario::new(false);
+    let mut scenario = Scenario::new(false, isolate().await);
     scenario.admit().await;
     let original_endpoints = wait_for_saved_bridge_endpoints(&scenario).await;
     // Native fixture blocks endpoint 1--2 in the actual swarm throughout admission/restart.

@@ -378,7 +378,7 @@ fn protected_low_start_and_engine_progress_use_reserved_capacity_with_full_ordin
         .pool
         .charge(
             f.low.context.scope.group,
-            256 * 1024 - before,
+            crate::voice_v2::resources::GROUP_BYTES - before,
             crate::voice_v2::resources::ResourceKind::Retained,
         )
         .unwrap();

@@ -24,6 +24,8 @@ const CHILDREN: usize = 64;
 const VERIFICATION_BUFFERS: usize = 5;
 const VERIFICATION_OVERHEAD: usize = 4096;
 mod local;
+mod ready_source;
+pub(in crate::voice_v2) use local::EpochObservation;
 pub(crate) use local::LocalOrigin;
 
 /// Affine final origin transaction lent only while the original Group -> Policy locks and
@@ -95,12 +97,14 @@ impl Clock for EffectiveClock {
 struct Session {
     live: CallLease,
     active: AtomicBool,
+    observation: Arc<AtomicBool>,
 }
 impl Session {
     fn inactive() -> Arc<Self> {
         Arc::new(Self {
             live: CallLease::default(),
             active: AtomicBool::new(false),
+            observation: Arc::new(AtomicBool::new(true)),
         })
     }
     fn authorized(&self) -> bool {
@@ -138,9 +142,11 @@ struct Policy {
     indirect: bool,
     live: CallLease,
     children: Vec<CallLease>,
+    observation: Arc<AtomicBool>,
 }
 impl Policy {
     fn revoke(&mut self) {
+        self.observation.store(false, Ordering::Release);
         self.live.revoke();
         for child in &self.children {
             child.revoke();
@@ -154,6 +160,9 @@ struct ActorGate {
     session: Arc<Session>,
     registered: AtomicBool,
     installed_revision: AtomicU64,
+    // Pure observation for already-paid native transition custody. Capture is allowed only
+    // under the actual Group/Policy view; no serialized epoch can construct that witness.
+    observation: Arc<local::EpochState>,
     prepared_until: u64,
     activated: AtomicBool,
     policy: Mutex<Policy>,
@@ -161,6 +170,7 @@ struct ActorGate {
 }
 impl ActorGate {
     fn revoke(&self) {
+        self.observation.live.store(false, Ordering::Release);
         self.live.revoke();
         self.policy
             .lock()
@@ -194,6 +204,7 @@ impl Drop for Runtime {
         // the registry closes those gates; constructing another registry cannot leave old effects
         // live alongside a fresh budget. Actual lower holders still keep their old credits.
         let state = self.state.get_mut().unwrap_or_else(|e| e.into_inner());
+        state.session.observation.store(false, Ordering::Release);
         state.session.live.revoke();
         for actor in state.actors.iter().filter_map(Weak::upgrade) {
             actor.revoke();
@@ -276,6 +287,7 @@ impl Runtime {
     /// Protection tables and uncertain lower work remain charged; unlock cannot revive old gates.
     pub fn revoke_session(&self) {
         let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        state.session.observation.store(false, Ordering::Release);
         state.session.live.revoke();
         state.session = Session::inactive();
         state.actors.retain(|gate| {
@@ -350,12 +362,17 @@ impl Runtime {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .revision;
+        let credit = self.resources.charge(hash, 1024, ResourceKind::Retained)?;
         let gate = Arc::new(ActorGate {
             local,
             live: CallLease::default(),
             session: ticket.0.clone(),
             registered: AtomicBool::new(false),
             installed_revision: AtomicU64::new(0),
+            observation: Arc::new(local::EpochState {
+                epoch: AtomicU64::new(0),
+                live: AtomicBool::new(true),
+            }),
             prepared_until: self.clock.monotonic_ms().saturating_add(PREPARATION_MS),
             activated: AtomicBool::new(false),
             policy: Mutex::new(Policy {
@@ -364,8 +381,9 @@ impl Runtime {
                 indirect: false,
                 live: CallLease::default(),
                 children: Vec::new(),
+                observation: Arc::new(AtomicBool::new(true)),
             }),
-            _credit: self.resources.charge(hash, 1024, ResourceKind::Retained)?,
+            _credit: credit,
         });
         state.actors.push(Arc::downgrade(&gate));
         Ok((
@@ -528,6 +546,22 @@ pub struct View {
 redacted_debug!(View);
 impl ActorOwner {
     #[cfg(test)]
+    pub(crate) fn lock_probe_for_test(&self) -> Arc<dyn Fn() -> bool + Send + Sync> {
+        let group = Arc::downgrade(&self.group);
+        let actor = Arc::downgrade(&self.gate);
+        Arc::new(move || {
+            let Some(group) = group.upgrade() else {
+                return false;
+            };
+            let Some(actor) = actor.upgrade() else {
+                return false;
+            };
+            let group_free = group.state.try_lock().is_ok();
+            let policy_free = actor.policy.try_lock().is_ok();
+            group_free && policy_free
+        })
+    }
+    #[cfg(test)]
     pub(crate) fn with_held_policy_for_test<T>(&self, check: impl FnOnce() -> T) -> T {
         // A separate fixture thread holds the actual Policy mutex. The caller under test must
         // refuse at try_lock, without imposing a lock order on its own executing thread.
@@ -598,6 +632,13 @@ impl ActorOwner {
         }
         self.revision = state.revision;
         self.gate.activated.store(true, Ordering::Release);
+        // Publish before fallible roster changes. An old transfer window must stop retaining
+        // live capacity even when an unrelated add keeps both endpoints in the new epoch.
+        // Older views are rejected above, so an old observation can never become current again.
+        self.gate
+            .observation
+            .epoch
+            .store(view.epoch, Ordering::Release);
         // Revocation precedes fallible allocation. If new membership cannot be represented, no
         // removed device remains admitted. A later re-add always gets a different Member owner.
         state.members.retain(|id, member| {
@@ -643,6 +684,7 @@ impl ActorOwner {
             policy.eligible = view.eligible;
             policy.indirect = view.indirect;
             policy.live = CallLease::default();
+            policy.observation = Arc::new(AtomicBool::new(true));
         }
         Ok(())
     }
@@ -660,6 +702,22 @@ impl ActorOwner {
     pub fn source(&self) -> Result<Arc<super::source::SourceLedger>, VoiceError> {
         self.current()?;
         Ok(self.group.source.clone())
+    }
+    /// Borrow the already-paid exact native membership map for a small pure role check.
+    /// This avoids a second roster Vec/HashSet on the retained ACK path. The closure MUST
+    /// be bounded and synchronous: no Clock, effect or re-entry into native owners. Any
+    /// canonical hashing scratch must already be prepaid by the public verification ticket;
+    /// the private same-job ACK path needs none. Authenticate signatures/sample time first.
+    pub(crate) fn with_current_members<T>(
+        &self,
+        context: &super::Context,
+        check: impl FnOnce(&dyn Fn(DeviceId) -> bool) -> Result<T, VoiceError>,
+    ) -> Result<T, VoiceError> {
+        self.current()?;
+        let state = self.group.state.lock().unwrap_or_else(|e| e.into_inner());
+        let policy = self.gate.policy.lock().unwrap_or_else(|e| e.into_inner());
+        self.check_route_view(&state, &policy, context.local, context)?;
+        check(&|id| state.members.contains_key(&id))
     }
     pub(crate) fn source_context(&self, scope: super::Scope) -> Result<super::Context, VoiceError> {
         self.current()?;
@@ -706,6 +764,9 @@ impl ActorOwner {
         room: &super::helper::RoomAuthority,
         commit: bool,
     ) -> Result<(), VoiceError> {
+        if activity.ready().is_some() {
+            return self.authorize_ready_source(object, activity, room, commit);
+        }
         self.current()?;
         let mut state = self.group.state.lock().unwrap_or_else(|e| e.into_inner());
         let policy = self.gate.policy.lock().unwrap_or_else(|e| e.into_inner());
@@ -1056,6 +1117,49 @@ pub(crate) struct IngressTicket {
 }
 redacted_debug!(IngressTicket);
 impl IngressTicket {
+    /// Final response verification has no incoming driver admission callback. Sample before
+    /// nonblocking native guards, then use only immutable bindings/atomic gates. This must
+    /// remain separate from bound incoming-request commit, which also checks that driver.
+    pub(crate) fn check_response(
+        &self,
+        actor: &ActorOwner,
+        frame: &[u8],
+    ) -> Result<(), VoiceError> {
+        if self.original_request.is_some() {
+            return Err(VoiceError::Unauthorized);
+        }
+        actor.current()?;
+        let hash = *blake3::hash(frame).as_bytes();
+        let now = actor.clock.monotonic_ms();
+        let state = match actor.group.state.try_lock() {
+            Ok(state) => state,
+            Err(std::sync::TryLockError::Poisoned(error)) => error.into_inner(),
+            Err(std::sync::TryLockError::WouldBlock) => return Err(VoiceError::Capacity),
+        };
+        let policy = match actor.gate.policy.try_lock() {
+            Ok(policy) => policy,
+            Err(std::sync::TryLockError::Poisoned(error)) => error.into_inner(),
+            Err(std::sync::TryLockError::WouldBlock) => return Err(VoiceError::Capacity),
+        };
+        if !Arc::ptr_eq(&self.actor, &actor.gate)
+            || state.revision != actor.revision
+            || state.epoch != Some(self.epoch)
+            || !state
+                .members
+                .get(&self.requester)
+                .is_some_and(|current| Arc::ptr_eq(current, &self.member))
+            || !self.member.live.is_live()
+            || !policy.live.is_same(&self.policy)
+            || !self.policy.is_live()
+            || !policy.eligible
+            || now >= self.deadline
+            || frame.len() != self.bytes
+            || hash != self.hash
+        {
+            return Err(VoiceError::Unauthorized);
+        }
+        actor.current()
+    }
     /// Observe the original requester/actor/session/policy and absolute verification deadline
     /// through an eventual reply send. This is not endpoint admission or byte custody; native
     /// additionally captures an exact RouteGate for epoch/proof/descriptor/connection changes.
@@ -1159,23 +1263,38 @@ impl ActorOwner {
         requester: DeviceId,
         frame: &[u8],
     ) -> Result<IngressTicket, VoiceError> {
-        self.admit_transport_verification_in_exchange(requester, frame, None, false)
+        self.admit_transport_verification_in_progress(requester, frame, None, false)
     }
-    /// Only an actual native source completion supplies `retained_exchange`; an untrusted
-    /// envelope can select capacity solely through the bounded binding peek below.
-    pub(crate) fn admit_transport_verification_in_exchange(
+    /// Only a SAME-job native retained envelope supplies progress. An untrusted envelope
+    /// can select an existing SDP loan through the bounded peek, never a confirmation owner.
+    pub(crate) fn admit_transport_verification_in_progress(
         &self,
         requester: DeviceId,
         frame: &[u8],
-        retained_exchange: Option<&Arc<super::negotiation::Exchange>>,
+        retained_progress: Option<super::source::SourceProgress<'_>>,
         trusted_completion: bool,
     ) -> Result<IngressTicket, VoiceError> {
         if frame.is_empty() || frame.len() > super::MAX_ENVELOPE {
             return Err(VoiceError::Bounds);
         }
         self.current()?;
-        let mut state = self.group.state.lock().unwrap_or_else(|e| e.into_inner());
-        let policy = self.gate.policy.lock().unwrap_or_else(|e| e.into_inner());
+        // Clock is an injected callback. Sample before either native guard, then acquire
+        // without waiting so a busy view cannot age this admission/expiry observation.
+        let wall = self.clock.now_ms();
+        let now = self.clock.monotonic_ms();
+        let progress_time =
+            retained_progress.and_then(super::source::SourceProgress::observation_time);
+        self.current()?;
+        let mut state = match self.group.state.try_lock() {
+            Ok(state) => state,
+            Err(std::sync::TryLockError::Poisoned(error)) => error.into_inner(),
+            Err(std::sync::TryLockError::WouldBlock) => return Err(VoiceError::Capacity),
+        };
+        let policy = match self.gate.policy.try_lock() {
+            Ok(policy) => policy,
+            Err(std::sync::TryLockError::Poisoned(error)) => error.into_inner(),
+            Err(std::sync::TryLockError::WouldBlock) => return Err(VoiceError::Capacity),
+        };
         if state.revision != self.revision || !policy.eligible || !policy.live.is_live() {
             return Err(VoiceError::Unauthorized);
         }
@@ -1185,30 +1304,69 @@ impl ActorOwner {
             .cloned()
             .ok_or(VoiceError::Unauthorized)?;
         let epoch = state.epoch.ok_or(VoiceError::Unauthorized)?;
-        let now = self.clock.monotonic_ms();
         self.current()?;
         let bytes = VERIFICATION_BUFFERS * frame.len() + VERIFICATION_OVERHEAD;
         let current_exchange = self.resources.exchange(self.group.hash);
-        let progress = if let Some(expected) = retained_exchange {
-            if !current_exchange
-                .as_ref()
-                .is_some_and(|current| Arc::ptr_eq(current, expected))
-                || !expected.uses_resources(&self.resources, self.group.hash)
-                || !expected.is_live()
-            {
-                return Err(VoiceError::Unauthorized);
-            }
-            Some(expected.clone())
-        } else {
+        let peeked = if retained_progress.is_none() {
             current_exchange.filter(|exchange| exchange.lends_verification(requester, frame))
+        } else {
+            None
         };
-        let allocate = || {
-            if let Some(exchange) = &progress {
-                exchange.charge(super::negotiation::Stage::Crypto, bytes)
-            } else {
+        let ready_receive = if retained_progress.is_none() && peeked.is_none() {
+            self.resources.exchange(self.group.hash).filter(|exchange| {
+                exchange.lends_ready_offer_verification(requester, frame, wall, now)
+            })
+        } else {
+            None
+        };
+        let low_ready =
+            if retained_progress.is_none() && peeked.is_none() && ready_receive.is_none() {
                 self.resources
-                    .charge(self.group.hash, bytes, ResourceKind::Crypto)
-            }
+                    .workflow(self.group.hash)
+                    .filter(|workflow| workflow.lends_low_ready_verification(requester, frame, now))
+            } else {
+                None
+            };
+        let low_ready_retry = if retained_progress.is_none()
+            && peeked.is_none()
+            && ready_receive.is_none()
+            && low_ready.is_none()
+        {
+            self.resources.exchange(self.group.hash).filter(|exchange| {
+                exchange.lends_low_ready_retry_verification(requester, frame, wall, now)
+            })
+        } else {
+            None
+        };
+        let progress = retained_progress.unwrap_or_else(|| {
+            ready_receive.as_ref().map_or_else(
+                || {
+                    peeked.as_ref().map_or_else(
+                        || {
+                            low_ready.as_ref().map_or_else(
+                                || {
+                                    low_ready_retry.as_ref().map_or(
+                                        super::source::SourceProgress::Ordinary,
+                                        super::source::SourceProgress::LowReadyRetry,
+                                    )
+                                },
+                                super::source::SourceProgress::Workflow,
+                            )
+                        },
+                        super::source::SourceProgress::Exchange,
+                    )
+                },
+                super::source::SourceProgress::ReadyReceive,
+            )
+        });
+        progress.require_current(&self.resources, self.group.hash, progress_time)?;
+        let allocate = || {
+            progress.charge(
+                &self.resources,
+                self.group.hash,
+                bytes,
+                super::negotiation::Stage::Crypto,
+            )
         };
         // A retained affine completion has already paid for its immutable request and lower
         // custody. Polling its own busy lane must not spend requester/process tokens repeatedly.

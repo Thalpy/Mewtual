@@ -493,6 +493,11 @@ struct AppState {
     /// writes did not even serialize against each other. Here they do, and the incarnation check
     /// inside the lock then decides which of them is still entitled to write.
     persist_locks: StdMutex<HashMap<u64, Arc<Mutex<()>>>>,
+    /// Order reconnect claims -> sealed merge -> live installation separately from ordinary
+    /// snapshot persistence. Numeric-id lifetime also serializes departing/replaced entries;
+    /// the final registry check still decides which incarnation may write. Never substitute
+    /// persist_locks here: capture itself seals a snapshot through that other lock.
+    reconnect_persist_locks: StdMutex<HashMap<u64, Arc<Mutex<()>>>>,
     store: Arc<Mutex<Option<ServerStore>>>,
     /// Whether a freshly-mounted frontend may restore the already-unlocked UI session. This stays
     /// true across F5/HMR, but an explicit Ctrl+L clears it so a reload cannot bypass the lock.
@@ -11077,13 +11082,39 @@ async fn activate_voice_owner(
 /// Exact revocation is available during lock/destruction. It never refunds unsettled crypto.
 #[tauri::command]
 async fn end_voice_owner(state: State<'_, AppState>, owner: String) -> Result<(), String> {
-    state
+    end_voice_owner_inner(&state, &owner).await;
+    Ok(())
+}
+
+/// Logical revocation is synchronous; actual Root participant cleanup uses the original
+/// affine grant even after End. Never look up a replacement by room or serialized join id.
+/// This does not settle outstanding SDK/transport owners: authenticated channel cleanup
+/// retains those original payments and waits on its independent retirement witness.
+async fn end_voice_owner_inner(state: &AppState, owner: &str) {
+    let original = state
         .voice_authority
         .lock()
         .unwrap_or_else(|e| e.into_inner())
-        .end(&owner);
+        .end_with_cleanup(owner);
+    if let Some(original) = original {
+        let actor = {
+            let servers = state.servers.lock().await;
+            servers
+                .get(&original.binding.server)
+                .filter(|entry| {
+                    entry.instance == original.binding.instance
+                        && entry.group_id == original.binding.group
+                })
+                .map(|entry| entry.actor.clone())
+        };
+        if let Some(actor) = actor {
+            // Once admitted, the actor applies Stop even if this reply is lost. Cancellation
+            // before mailbox admission is not completion; no code treats it as drainage.
+            // A stopped/removed original actor has no replacement participant to operate on.
+            let _ = actor.stop_voice_endpoint(original.cleanup_grant()).await;
+        }
+    }
     state.voice_channels.collect_retired(&state.voice_handoff);
-    Ok(())
 }
 
 async fn admit_voice_crypto_inner(
@@ -18049,6 +18080,7 @@ pub fn run() {
             voice_join_key::publish_voice_join_key,
             voice_join_key::settle_voice_join_key,
             voice_handoff::commands::setup_voice_channel,
+            voice_handoff::commands::read_voice_channel_work,
             voice_handoff::commands::settle_voice_channel_setup,
             voice_handoff::commands::collect_voice_channel,
             default_route_address,

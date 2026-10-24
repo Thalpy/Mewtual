@@ -517,6 +517,36 @@ fn stale_activation_and_end_cannot_retire_a_replacement_call() {
 }
 
 #[test]
+fn end_cleanup_retains_only_original_grant_for_owner_or_controller_and_never_replacement() {
+    for through_controller in [false, true] {
+        let mut c = Coordinator::default();
+        let controller = controller(&mut c);
+        let id = call(&mut c, &controller, 1, 1);
+        let original = c.owner(&id).unwrap().cleanup_grant();
+        let ended = c
+            .end_with_cleanup(if through_controller { &controller } else { &id })
+            .unwrap();
+        assert!(Arc::ptr_eq(&ended.cleanup_grant(), &original));
+        assert!(!original.lease().is_live());
+        assert!(c.owner(&id).is_none());
+        assert!(
+            c.end_with_cleanup(&id).is_none(),
+            "a retry cannot manufacture another cleanup allocation"
+        );
+        if !through_controller {
+            let replacement_id = call(&mut c, &controller, 1, 2);
+            let replacement = c.owner(&replacement_id).unwrap();
+            assert!(c.end_with_cleanup(&id).is_none());
+            assert!(replacement.lease.is_live());
+            assert!(!Arc::ptr_eq(
+                &replacement.cleanup_grant(),
+                &ended.cleanup_grant()
+            ));
+        }
+    }
+}
+
+#[test]
 fn ending_current_call_preserves_controller_and_explicit_watch_parent() {
     use catcoms_sync::voice_v2::WatchLease;
     let mut c = Coordinator::default();

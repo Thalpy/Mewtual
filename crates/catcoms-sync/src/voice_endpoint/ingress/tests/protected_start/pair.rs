@@ -2,6 +2,7 @@
 use super::*;
 use voice_v2::presence::PairSelector;
 use voice_v2::resources::ResourceKind;
+mod confirmation;
 
 #[derive(Default)]
 struct Probe {
@@ -201,14 +202,17 @@ async fn root_pair_recovers_original_receipt_under_full_pressure_without_resetti
         .resources()
         .charge(
             grant.scope().group,
-            256 * 1024 - used,
+            crate::voice_v2::resources::GROUP_BYTES - used,
             ResourceKind::Retained,
         )
         .unwrap();
     for _ in 0..12 {
         assert_eq!(root.prepare_voice_pair(&grant, request).unwrap(), first);
         assert_eq!(state(&root), (1, 1, 1));
-        assert_eq!(runtime.resources().counts().0, 256 * 1024);
+        assert_eq!(
+            runtime.resources().counts().0,
+            crate::voice_v2::resources::GROUP_BYTES
+        );
         assert!(
             !changes.has_changed().unwrap(),
             "exact recovery cannot self-wake its driver"
@@ -298,7 +302,7 @@ async fn root_pair_local_capacity_refusal_publishes_neither_table_nor_serial() {
         .resources()
         .charge(
             grant.scope().group,
-            256 * 1024 - used,
+            crate::voice_v2::resources::GROUP_BYTES - used,
             ResourceKind::Retained,
         )
         .unwrap();
@@ -307,7 +311,10 @@ async fn root_pair_local_capacity_refusal_publishes_neither_table_nor_serial() {
         Some(VoiceError::Capacity)
     );
     assert_eq!(state(&root), (0, 0, 0));
-    assert_eq!(runtime.resources().counts().0, 256 * 1024);
+    assert_eq!(
+        runtime.resources().counts().0,
+        crate::voice_v2::resources::GROUP_BYTES
+    );
     drop(held);
     assert!(root.prepare_voice_pair(&grant, request).is_ok());
     assert_eq!(state(&root), (1, 1, 1));
@@ -378,7 +385,7 @@ async fn root_pair_newly_proved_rejoin_cannot_substitute_an_uncertain_original_r
         .resources()
         .charge(
             grant.scope().group,
-            256 * 1024 - used,
+            crate::voice_v2::resources::GROUP_BYTES - used,
             ResourceKind::Retained,
         )
         .unwrap();
@@ -573,7 +580,9 @@ async fn root_pair_final_native_contention_revokes_unpublished_pin_and_preserves
             0,
             "an unpublished refusal leaves no live origin pin"
         );
-        assert_eq!(runtime.resources().counts(), before);
+        // Preparation now prepays the local source row too. A later publication refusal
+        // leaves that normal2KiB/60s row paid, with no traffic debit or live pin leaked.
+        assert_eq!(runtime.resources().counts(), (before.0 + 2048, before.1));
         let first = root.prepare_voice_pair(&grant, request).unwrap();
         assert_eq!(state(&root), (1, 1, 1));
         assert_eq!(pins(), 1);

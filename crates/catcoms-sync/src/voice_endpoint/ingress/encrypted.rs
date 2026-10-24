@@ -2,6 +2,27 @@
 //! Live kind28 dispatch remains disabled while SDP transfer and production IPC are incomplete.
 use super::*;
 use voice_v2::chain::ConfirmationAdmission;
+use voice_v2::negotiation::admission::FirstOfferAdmission;
+use voice_v2::ReadyAdmission;
+
+#[cfg(test)]
+mod layout_tests {
+    use super::*;
+    #[test]
+    fn protected_identity_shared_node_allowance_includes_keys_values_and_internal_edges() {
+        use std::mem::size_of;
+        // Rust's B=6 BTree nodes hold11 keys/values and up to12 child edges. The32-byte
+        // header allowance exceeds parent/index/length metadata and alignment. This is a
+        // structural growth guard, excluding allocator overhead; per-record fees jointly
+        // cover shared nodes. Never describe a512B per-record allowance as a whole node.
+        let bytes =
+            32 + 11 * (size_of::<Key>() + size_of::<EncryptedReceipt>()) + 12 * size_of::<usize>();
+        assert!(
+            bytes <= 1024,
+            "shared protected identity node grew to {bytes}"
+        );
+    }
+}
 
 struct ProtectedPacket {
     admission: Arc<ConfirmationAdmission>,
@@ -16,26 +37,65 @@ impl ConfirmationReceipt {
         self.0.admission.hash
     }
 }
+#[derive(Clone)]
+pub(super) enum EncryptedReceipt {
+    Confirmation(ConfirmationReceipt),
+    FirstOffer(Arc<FirstOfferAdmission>),
+    Ready(Arc<ReadyAdmission>),
+}
+impl EncryptedReceipt {
+    pub(super) fn retain(&self) -> bool {
+        match self {
+            Self::Confirmation(receipt) => receipt.retain(),
+            Self::FirstOffer(receipt) => {
+                receipt.retains_identity() || Arc::strong_count(receipt) > 1
+            }
+            Self::Ready(receipt) => receipt.retains_identity() || Arc::strong_count(receipt) > 1,
+        }
+    }
+    pub(super) fn object_hash(&self) -> [u8; 32] {
+        match self {
+            Self::Confirmation(receipt) => receipt.object_hash(),
+            Self::FirstOffer(receipt) => receipt.hash,
+            Self::Ready(receipt) => receipt.hash,
+        }
+    }
+    fn same_call(&self, call: &CallLease) -> bool {
+        match self {
+            Self::Confirmation(receipt) => receipt.0.admission.same_call(call),
+            Self::FirstOffer(receipt) => receipt.same_call(call),
+            Self::Ready(receipt) => receipt.same_call(call),
+        }
+    }
+}
 pub(crate) enum EndpointReceipt {
     Public(PublicReceipt),
     Confirmation(ConfirmationReceipt),
+    FirstOffer(Arc<FirstOfferAdmission>),
+    Ready(Arc<ReadyAdmission>),
 }
 impl EndpointReceipt {
     pub(crate) fn authorized(&self) -> bool {
         match self {
             Self::Public(receipt) => receipt.authorized(),
             Self::Confirmation(receipt) => receipt.0.admission.authorized(),
+            Self::FirstOffer(receipt) => receipt.authorized(),
+            Self::Ready(receipt) => receipt.authorized(),
         }
     }
     pub(crate) fn object_hash(&self) -> [u8; 32] {
         match self {
             Self::Public(receipt) => receipt.object_hash(),
             Self::Confirmation(receipt) => receipt.object_hash(),
+            Self::FirstOffer(receipt) => receipt.hash,
+            Self::Ready(receipt) => receipt.hash,
         }
     }
     pub(crate) fn authorized_at(&self, wall: u64, mono: u64) -> bool {
         match self {
             Self::Public(receipt) => receipt.authorized_at(wall, mono),
+            Self::FirstOffer(receipt) => receipt.authorized_at(wall, mono),
+            Self::Ready(receipt) => receipt.authorized_at(wall, mono),
             // Epoch currency is ALSO required from the original Root reply route. This fixed
             // metadata cannot inspect or recreate Root; direct recovery repeats current Context.
             Self::Confirmation(receipt) => {
@@ -50,6 +110,8 @@ impl EndpointReceipt {
         match self {
             Self::Public(receipt) => receipt.revoked().await,
             Self::Confirmation(receipt) => receipt.0.admission.revoked().await,
+            Self::FirstOffer(receipt) => receipt.revoked().await,
+            Self::Ready(receipt) => receipt.revoked().await,
         }
     }
 }
@@ -62,7 +124,12 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         context: &Context,
         room: RoomAuthority,
     ) -> Result<EndpointReceipt, VoiceError> {
-        if !matches!(envelope.object().body(), Body::Encrypted { .. }) {
+        // Ready shares fixed identity history with encrypted input, but is never generic
+        // public queue admission: its original native LOW pair must accept causally.
+        if !matches!(
+            envelope.object().body(),
+            Body::Encrypted { .. } | Body::PairReady { .. } | Body::PairReadyRound { .. }
+        ) {
             return self
                 .admit_voice_endpoint_public(ticket, envelope, context, room)
                 .map(EndpointReceipt::Public);
@@ -86,17 +153,22 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         voice.endpoints.public.check_identity(envelope.object())?;
         let key = (envelope.object().issuer(), envelope.object().id());
         let existing = voice.endpoints.public.encrypted.get(&key).cloned();
-        if existing.is_none() && voice.endpoints.public.full() {
-            return Err(VoiceError::Capacity);
-        }
         let participant = voice
             .endpoints
             .participant
             .as_mut()
             .ok_or(VoiceError::Unauthorized)?;
+        // Only the exact original native Ready round can spend its prepaid namespace
+        // position. A delayed legacy/wrong-round offer gets no full-table exemption.
+        let reserved_offer = participant
+            .join
+            .has_ready_offer_position(envelope.object(), voice.endpoints.public.namespace());
+        if existing.is_none() && voice.endpoints.public.full() && !reserved_offer {
+            return Err(VoiceError::Capacity);
+        }
         if existing
             .as_ref()
-            .is_some_and(|receipt| !receipt.0.admission.same_call(&participant.lease))
+            .is_some_and(|receipt| !receipt.same_call(&participant.lease))
         {
             return Err(VoiceError::Unauthorized);
         }
@@ -119,6 +191,81 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             lease: &participant.lease,
             member: &|id| members.contains(&id),
         };
+        let final_owner = |_, _| {
+            if parent.strong_count() > 0
+                && call.is_live()
+                && watch.is_live()
+                && room.lease.is_live()
+            {
+                Ok(())
+            } else {
+                Err(VoiceError::Unauthorized)
+            }
+        };
+        if matches!(
+            envelope.object().body(),
+            Body::PairReady { .. } | Body::PairReadyRound { .. }
+        ) {
+            let admission = participant.join.admit_protected_ready(
+                actor,
+                &ticket,
+                &envelope,
+                &room,
+                &authority,
+                final_owner,
+            )?;
+            if let Some(existing) = existing {
+                let EncryptedReceipt::Ready(existing) = existing else {
+                    return Err(VoiceError::RetryMismatch);
+                };
+                if !Arc::ptr_eq(&existing, &admission) {
+                    return Err(VoiceError::RetryMismatch);
+                }
+                return Ok(EndpointReceipt::Ready(existing));
+            }
+            assert!(voice
+                .endpoints
+                .public
+                .encrypted
+                .insert(key, EncryptedReceipt::Ready(admission.clone()))
+                .is_none());
+            voice.endpoints.changed();
+            return Ok(EndpointReceipt::Ready(admission));
+        }
+        if matches!(envelope.object().body(), Body::Encrypted { header, .. } if header.kind.is_offer())
+        {
+            let admission = participant.join.admit_protected_first_offer(
+                actor,
+                &ticket,
+                &envelope,
+                &room,
+                &authority,
+                clock,
+                final_owner,
+            )?;
+            if let Some(existing) = existing {
+                let EncryptedReceipt::FirstOffer(existing) = existing else {
+                    return Err(VoiceError::RetryMismatch);
+                };
+                if !Arc::ptr_eq(&existing, &admission) {
+                    return Err(VoiceError::RetryMismatch);
+                }
+                return Ok(EndpointReceipt::FirstOffer(existing));
+            }
+            assert!(voice
+                .endpoints
+                .public
+                .encrypted
+                .insert(key, EncryptedReceipt::FirstOffer(admission.clone()))
+                .is_none());
+            voice.endpoints.changed();
+            return Ok(EndpointReceipt::FirstOffer(admission));
+        }
+        let existing = match existing {
+            Some(EncryptedReceipt::Confirmation(receipt)) => Some(receipt),
+            None => None,
+            _ => return Err(VoiceError::RetryMismatch),
+        };
         let admission = participant.join.admit_protected_confirmation(
             actor,
             &ticket,
@@ -126,17 +273,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             &room,
             &authority,
             clock,
-            |_, _| {
-                if parent.strong_count() > 0
-                    && call.is_live()
-                    && watch.is_live()
-                    && room.lease.is_live()
-                {
-                    Ok(())
-                } else {
-                    Err(VoiceError::Unauthorized)
-                }
-            },
+            final_owner,
         )?;
         if let Some(existing) = existing {
             if !Arc::ptr_eq(&existing.0.admission, &admission) {
@@ -152,7 +289,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
                 .endpoints
                 .public
                 .encrypted
-                .insert(key, receipt.clone())
+                .insert(key, EncryptedReceipt::Confirmation(receipt.clone()))
                 .is_none(),
             "native endpoint identity uniqueness"
         );

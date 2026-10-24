@@ -1,6 +1,6 @@
-//! Disabled encrypted framing and one prepaid physical position. This is not a listener,
-//! stock-IPC copy proof, browser-close proof, native action adapter or live driver. Its child
-//! bootstrap module is an internal ECDH candidate, without a renderer/IO consumer yet.
+//! Encrypted framing and prepaid native/physical positions for the application handoff.
+//! Framing alone supplies no stock-IPC copy proof, browser-close proof or RTC grant. Its
+//! bootstrap owns the exact ECDH channel used by the authenticated service and browser broker.
 //! A MAC identifies this local channel only; every Root effect still needs its actual owner.
 use super::custody::{Buffer, Phase};
 use super::http;
@@ -25,7 +25,9 @@ pub(super) const CONTROL_BYTES: usize = 12 * 1024;
 // Browser-owned fixed control metadata, SDK input/output views, one request and one BYOB
 // response are separate from the native header/body/reply envelope. Both share the original
 // serial Crypto lane, but these bytes coexist across the local HTTP boundary.
-pub(super) const BROWSER_CONTROL_BYTES: usize = 8 * 1024;
+// Existing8KiB encrypted control plus16KiB metadata read/cleanup custody. Both are prepaid
+// before setup ACK can enable independent producers; End/full-pool pressure needs no grant.
+pub(super) const BROWSER_CONTROL_BYTES: usize = 24 * 1024;
 pub(super) const BOOTSTRAP_BYTES: usize = 2048;
 const CONTROL_CIPHER: usize = 256 + 16;
 
@@ -44,6 +46,9 @@ struct Counters {
     // Process shutdown closes admission permanently. An old Route cannot reopen this Session.
     closed: bool,
     busy: bool,
+    // One independently funded native producer may coexist with the browser position.
+    // This is drain custody only, never a browser Header or action/engine permission.
+    native_busy: bool,
     request_floor: u64,
     response_sequence: u64,
 }
@@ -67,9 +72,36 @@ pub(super) struct Session {
     // Prepaid from existing ordinary Crypto limits, independently of setup/data work.
     // Terminal browser control cannot depend on a fresh slot when other work fills the pool.
     control_lane: Arc<WorkLane>,
+    // Negative-only interoperability seam. It cannot authenticate/admit anything and
+    // is absent from shipping Sessions; the actual adapter must produce the refusal.
+    #[cfg(test)]
+    input_pressure: AtomicBool,
+    // Observation only: an exact physical Result reached its actual post-preflight UI wait.
+    // Monotonic request sequences prevent a previous attempt from satisfying a new barrier.
+    #[cfg(test)]
+    result_preflight_sequence: std::sync::atomic::AtomicU64,
 }
 pub(super) struct SessionIdentity(pub(super) [u8; 32]);
 impl Session {
+    #[cfg(test)]
+    pub(super) fn fixture_arm_input_pressure(&self) {
+        assert!(
+            !self.input_pressure.swap(true, Ordering::AcqRel),
+            "one original Input pressure observation at a time"
+        );
+    }
+    #[cfg(test)]
+    pub(super) fn fixture_take_input_pressure(&self) -> bool {
+        self.input_pressure.swap(false, Ordering::AcqRel)
+    }
+    #[cfg(test)]
+    pub(super) fn fixture_input_pressure_pending(&self) -> bool {
+        self.input_pressure.load(Ordering::Acquire)
+    }
+    #[cfg(test)]
+    pub(super) fn fixture_result_preflight_sequence(&self) -> u64 {
+        self.result_preflight_sequence.load(Ordering::Acquire)
+    }
     pub(super) fn identity(&self) -> &Arc<SessionIdentity> {
         &self.identity
     }
@@ -127,6 +159,7 @@ impl Session {
             counters: Mutex::new(Counters {
                 closed: false,
                 busy: false,
+                native_busy: false,
                 request_floor: 0,
                 response_sequence: 0,
             }),
@@ -135,6 +168,8 @@ impl Session {
             _bootstrap: bootstrap,
             _browser_control: browser_control,
             control_lane,
+            input_pressure: AtomicBool::new(false),
+            result_preflight_sequence: std::sync::atomic::AtomicU64::new(0),
         }))
     }
     /// Own the paid scratch BEFORE reading unauthenticated HTTP. A single position continues
@@ -161,9 +196,27 @@ impl Session {
         })
     }
 
+    /// Own one native producer position on this actual Session. The caller must pay its
+    /// complete native task/preparation/output BEFORE constructing or awaiting that work;
+    /// the browser's Control envelope may already be occupied. This private affine guard
+    /// neither authenticates a frame nor creates a physical request/response nonce.
+    pub(super) fn native_hold(self: &Arc<Self>) -> Result<NativeHold, Refused> {
+        let mut counters = self.counters.lock().unwrap_or_else(|e| e.into_inner());
+        if counters.closed {
+            return Err(Refused::Binding);
+        }
+        if counters.native_busy {
+            return Err(Refused::Capacity);
+        }
+        counters.native_busy = true;
+        Ok(NativeHold {
+            session: self.clone(),
+        })
+    }
+
     /// Irreversible process-shutdown fence, independent of call lease revocation. Hold the
-    /// counter mutex so an old Route's header either acquired the original position before
-    /// this fence (and must be collected), or is refused without debiting a sequence.
+    /// counter mutex so an old Route's physical/native acquisition either precedes this
+    /// fence (and must be collected), or refuses without debiting a sequence.
     pub(super) fn close_admission(&self) {
         self.counters
             .lock()
@@ -172,8 +225,8 @@ impl Session {
     }
 
     /// The service has ONE shutdown collector. Register its wake before inspecting busy,
-    /// avoiding a lost last-drop notification. This waits for actual header/reply AND detached
-    /// worker/completion ownership; timeout, socket loss and lease End are never substitutes.
+    /// avoiding a lost last-drop notification. This waits for actual header/reply AND native
+    /// producer/worker/completion ownership; timeout, socket loss and End are not substitutes.
     /// The original control payment includes this Notify and its one in-place waiter.
     pub(super) async fn wait_idle(&self) {
         loop {
@@ -186,12 +239,47 @@ impl Session {
                     .lock()
                     .unwrap_or_else(|error| error.into_inner());
                 debug_assert!(counters.closed);
-                if !counters.busy {
+                if !counters.busy && !counters.native_busy {
                     return;
                 }
             }
             notified.await;
         }
+    }
+    /// Test-only observation of one original position while preserving this Session for a
+    /// later exact history query. Production shutdown still requires close_admission first;
+    /// this fixture observer grants neither admission nor authority and never clears busy.
+    #[cfg(test)]
+    pub(in crate::voice_handoff) async fn fixture_wait_physical_idle(&self) {
+        loop {
+            let notified = self.idle.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            if !self.counters.lock().unwrap_or_else(|e| e.into_inner()).busy {
+                return;
+            }
+            notified.await;
+        }
+    }
+}
+
+/// Private non-Clone native drain position. Retain the canonical Route separately too:
+/// its actual Row must remain discoverable by shutdown/GC while this guard owns its Session.
+/// Payment, work, grants and commit must drop BEFORE this last field publishes native idle.
+pub(super) struct NativeHold {
+    session: Arc<Session>,
+}
+impl Drop for NativeHold {
+    fn drop(&mut self) {
+        let mut counters = self
+            .session
+            .counters
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        debug_assert!(counters.native_busy);
+        counters.native_busy = false;
+        drop(counters);
+        self.session.idle.notify_waiters();
     }
 }
 impl Drop for Session {
@@ -364,6 +452,11 @@ pub(super) struct AuthenticatedRequest {
     worker: HeaderWorker,
 }
 impl AuthenticatedRequest {
+    /// Authenticated ciphertext length, including the AEAD tag. A dispatcher may reject an
+    /// impossible fixed grammar before Phase lookup/allocation or irreversible counter debit.
+    pub(super) fn length(&self) -> usize {
+        self.request.length()
+    }
     pub(super) fn logical(&self) -> [u8; 16] {
         self.request.logical()
     }
@@ -491,6 +584,17 @@ pub(super) struct Incoming {
     worker: HeaderWorker,
 }
 impl Incoming {
+    /// Read-only test observation from the real prepared worker. This changes no authority,
+    /// counters, capacity or scheduling and cannot be selected by HTTP or ordinary IPC.
+    #[cfg(test)]
+    pub(super) fn fixture_mark_result_ui_wait(&self) {
+        assert!(self.body.plain_bytes.is_some() && self.operation() == Operation::Result);
+        self.worker
+            .position
+            .session
+            .result_preflight_sequence
+            .store(self.request.sequence(), Ordering::Release);
+    }
     /// Native allocation binding, not a copied slot/session label. A successfully opened
     /// request from another Session cannot authorize work through this Route.
     pub(super) fn belongs_to(&self, session: &Arc<Session>) -> bool {
@@ -556,6 +660,16 @@ impl Incoming {
         phase: &Arc<Phase>,
         range: Range<usize>,
     ) -> Result<catcoms_app::VoiceConfirmationBody, Refused> {
+        self.result_body_with_publication(phase, range, None)
+    }
+    /// Publication custody moves with the actual buffer, rather than staying solely in a
+    /// cancellable worker. All local failures still restore the original opened body.
+    pub(super) fn result_body_with_publication(
+        &mut self,
+        phase: &Arc<Phase>,
+        range: Range<usize>,
+        publication: Option<Arc<super::custody::PublicationCustody>>,
+    ) -> Result<catcoms_app::VoiceConfirmationBody, Refused> {
         let plain = self.body.plain_bytes.ok_or(Refused::Body)?;
         if self.request.operation() != Operation::Result
             || !matches!(self.body.storage, Storage::Data(_))
@@ -578,7 +692,7 @@ impl Incoming {
         self.body.cipher_bytes = 16;
         self.body.plain_bytes = Some(0);
         self.filled = 16;
-        match phase.result_body(buffer, range) {
+        match phase.result_body_with_publication(buffer, range, publication) {
             Ok(body) => Ok(body),
             Err((error, buffer)) => {
                 self.body.storage = Storage::Data(buffer);
@@ -630,6 +744,7 @@ impl Incoming {
         )?;
         Ok(PreparedReply {
             body,
+            input: None,
             request,
             response,
             worker,
@@ -638,11 +753,25 @@ impl Incoming {
 }
 pub(super) struct PreparedReply {
     body: Body,
+    input: Option<ReplyInput>,
     request: Header,
     response: Header,
     worker: HeaderWorker,
 }
 impl PreparedReply {
+    /// Transfer actual native input/row custody, not a descriptor. Keep it through sealing,
+    /// socket writing and completed-output collection; a lost browser reply cannot free it.
+    pub(super) fn retain_input(
+        mut self,
+        input: super::custody::InputCustody,
+        work: super::ledger::Work,
+    ) -> Self {
+        self.input = Some(ReplyInput {
+            _input: input,
+            _work: work,
+        });
+        self
+    }
     pub(super) fn plain_mut(&mut self) -> &mut [u8] {
         let bytes = self.body.cipher_bytes - 16;
         &mut self.body.cipher_mut()[..bytes]
@@ -662,6 +791,7 @@ impl PreparedReply {
             .response_admission(&self.response, &self.request);
         Ok(CompletedReply {
             body: self.body,
+            _input: self.input,
             admission,
             worker: self.worker,
         })
@@ -671,8 +801,14 @@ impl PreparedReply {
 /// readiness or dropping the caller's wait is not collection and cannot free this position.
 pub(super) struct CompletedReply {
     body: Body,
+    // Actual buffers/input/Work drain BEFORE the last physical HeaderWorker clears busy.
+    _input: Option<ReplyInput>,
     admission: [u8; crypto::ADMISSION],
     worker: HeaderWorker,
+}
+struct ReplyInput {
+    _input: super::custody::InputCustody,
+    _work: super::ledger::Work,
 }
 impl CompletedReply {
     pub(super) fn admission(&self) -> &[u8; crypto::ADMISSION] {

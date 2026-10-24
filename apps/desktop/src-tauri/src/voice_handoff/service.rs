@@ -1,4 +1,5 @@
-//! Setup status and original-history-only local handoff IO, owned by the application host.
+//! Authenticated local handoff IO, owned by the application host. With its original native
+//! Context it dispatches typed crypto actions; a context-free service handles Status only.
 //! A confirmed channel is not a call grant, room proof, action admission or browser-drain proof.
 use super::bootstrap::{Registry, Route};
 use super::channel::{BodyKind, CompletedReply, Incoming, Operation};
@@ -15,14 +16,14 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::oneshot;
 
-// Current concrete task/owner/weak-retained allocation peak is19,984 bytes in Windows native
-// debug tests after retaining one fixed scratch allocation across stages (previously32,256).
-// Keep the existing32KiB payment before bind; wiring action dispatch must remeasure this peak.
+// Keep the existing32KiB payment before bind. Admission and tests measure the complete
+// concrete task/owner/weak-retained graph, including dispatch and concurrent maintenance.
 // This reduces available bytes within the SAME 2 MiB process cap, never increasing that cap
 // or any group/engine limit. Other layouts still refuse if their actual peak cannot fit.
 // Both runtime admission and the regression below measure the actual nested future.
 const INFRASTRUCTURE_BYTES: usize = 32 * 1024;
-// Pinned Tokio task/oneshot/Arc overhead and one boxed production Clock sleep. This is not a
+// Pinned Tokio task/oneshot/Arc overhead and two boxed production Clock sleeps (one socket
+// deadline plus the independent maintenance cadence). This is not a
 // claim about arbitrary Clock providers, OS socket buffers, thread stacks or allocator RSS.
 const TASK_AND_HANDLE_BYTES: usize = 2048;
 const CONNECTION_MS: u64 = 5_000;
@@ -169,6 +170,10 @@ fn worker_layout<F>(future: &F) -> usize {
         + 2 * std::mem::size_of::<usize>() // managed Host's Arc control block
         + TASK_AND_HANDLE_BYTES
         + Context::retained_layout_bytes()
+        // Synchronous header admission temporarily coexists with the complete asynchronous
+        // dispatcher future in production too, including Phase lookup's upgraded Context.
+        + dispatch::admission_layout_bytes()
+        + maintenance::turn_layout_bytes()
 }
 
 /// Keep infrastructure in ONE state with known field order even when the future is aborted.
@@ -221,12 +226,31 @@ impl Drop for RunningServer {
 }
 impl ServerState {
     async fn run(self, mut stop: oneshot::Receiver<()>) -> Completion {
+        let io_failed = {
+            let io = self.run_io(&mut stop);
+            let maintenance =
+                maintenance::run(self.context.as_ref(), &self.registry, self.clock.as_ref());
+            tokio::pin!(io, maintenance);
+            tokio::select! {
+                result = &mut io => result,
+                _ = &mut maintenance => true, // The maintenance loop has no normal completion.
+            }
+        }; // Stop further maintenance admission before draining actual native positions.
+        drop(self.listener);
+        self.registry.stop_and_wait_for_physical().await;
+        Completion {
+            _credit: self.credit.clone(),
+            io_failed,
+        }
+    }
+
+    async fn run_io(&self, stop: &mut oneshot::Receiver<()>) -> bool {
         let io_failed = loop {
             #[cfg(test)]
             self.phase.store(1, std::sync::atomic::Ordering::Release);
             let accepted = tokio::select! {
                 biased;
-                _ = &mut stop => break false,
+                _ = &mut *stop => break false,
                 accepted = self.listener.accept() => accepted,
             };
             let Ok((stream, _)) = accepted else {
@@ -244,22 +268,21 @@ impl ServerState {
             let mut connection = Connection::new(stream);
             tokio::select! {
                 biased;
-                _ = &mut stop => break false,
+                _ = &mut *stop => break false,
                 _ = expire_at(self.clock.as_ref(), deadline) => {},
                 _ = connection.serve(&self.registry, self.port, self.origin, self.clock.as_ref(), deadline, self.context.as_ref()) => {},
             }
             // Connection fields destroy the stream before any admitted Session/reply owner.
+            drop(connection);
+            // One continuously-ready local sender must still yield a poll boundary to the
+            // independent maintenance cadence and other tasks after its bounded connection.
+            tokio::task::yield_now().await;
         };
         // Stop accepting sockets first, then fence first effects and collect the ORIGINAL
         // positions retained by detached action workers/completions. The SDK/actors remain
         // available until Host::finish observes this actual task completion. Socket expiry
         // merely dropped Connection; it did not join an admitted actor request.
-        drop(self.listener);
-        self.registry.stop_and_wait_for_physical().await;
-        Completion {
-            _credit: self.credit.clone(),
-            io_failed,
-        }
+        io_failed
     }
 }
 
@@ -348,16 +371,14 @@ impl<S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin> Connection<S> {
                 .set_filled(self.filled)
                 .map_err(|_| Refused::Header)?;
             current(clock, deadline)?;
-            self.incoming = Some(
+            let incoming = if let Some(context) = context {
+                dispatch::admit(worker, port, origin.value(), route, context)?
+            } else {
                 worker
-                    .admit_service_control(
-                        port,
-                        origin.value(),
-                        route.session_id(),
-                        context.is_some(),
-                    )
-                    .map_err(|_| Refused::Header)?,
-            );
+                    .admit_service_control(port, origin.value(), route.session_id(), false)
+                    .map_err(|_| Refused::Header)?
+            };
+            self.incoming = Some(incoming);
             let incoming = self.incoming.as_mut().ok_or(Refused::Body)?;
             while !incoming.remaining_mut().is_empty() {
                 current(clock, deadline)?;
@@ -376,36 +397,13 @@ impl<S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin> Connection<S> {
             // can never become a second request because this connection is always closed.
             current(clock, deadline)?;
             incoming.open().map_err(|_| Refused::Body)?;
-            self.reply = Some(match incoming.operation() {
-                Operation::Status => {
-                    let plain = incoming.plain().map_err(|_| Refused::Body)?;
-                    if plain.len() != 49
-                        || plain[0] != 1
-                        || plain[1..17] != route.session_id()
-                        || plain[17..49] != route.hash()
-                    {
-                        return Err(Refused::Body);
-                    }
-                    // ONLY the existing Status9 setup protocol acknowledges constructor/SDK
-                    // drainage. A historical Begin must not invent or advance that evidence.
-                    route.acknowledge_setup().map_err(|_| Refused::Body)?;
-                    let snapshot = route.snapshot();
-                    let incoming = self.incoming.take().ok_or(Refused::Body)?;
-                    let mut prepared = incoming
-                        .reply(BodyKind::Control, 3, None)
-                        .map_err(|_| Refused::Body)?;
-                    prepared.plain_mut().copy_from_slice(&snapshot);
-                    prepared.seal().map_err(|_| Refused::Body)?
-                }
-                Operation::BeginDerive => {
-                    let context = context.ok_or(Refused::Binding)?;
-                    let incoming = self.incoming.take().ok_or(Refused::Body)?;
-                    super::history::recover(context, route, incoming)
-                        .seal()
-                        .map_err(|_| Refused::Body)?
-                }
-                _ => return Err(Refused::Binding), // fail closed if the whitelist ever drifts
-            });
+            let incoming = self.incoming.take().ok_or(Refused::Body)?;
+            let reply = if let Some(context) = context {
+                dispatch::respond(context, route, incoming).await?
+            } else {
+                status(route, incoming)?
+            };
+            self.reply = Some(reply);
             let reply = self.reply.as_ref().ok_or(Refused::Body)?;
             self.output.reply(origin, reply.body().len())?;
         }
@@ -432,6 +430,37 @@ impl<S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin> Connection<S> {
         self.stream.shutdown().await.map_err(|_| Refused::Io)?;
         Ok(())
     }
+}
+
+mod dispatch;
+mod maintenance;
+
+/// The shipping setup acknowledgement, also exercised by the actual native/TCP fixture.
+/// Only this exact original authenticated Session may acknowledge its setup SDK drainage;
+/// an action/history reply or equal-label foreign Session cannot advance that evidence.
+pub(super) fn status(route: &Route, incoming: Incoming) -> Result<CompletedReply, Refused> {
+    if !incoming.belongs_to(route.session())
+        || incoming.operation() != Operation::Status
+        || incoming.kind() != BodyKind::Control
+        || incoming.logical() != route.session_id()
+    {
+        return Err(Refused::Binding);
+    }
+    let plain = incoming.plain().map_err(|_| Refused::Body)?;
+    if plain.len() != 49
+        || plain[0] != 1
+        || plain[1..17] != route.session_id()
+        || plain[17..49] != route.hash()
+    {
+        return Err(Refused::Body);
+    }
+    route.acknowledge_setup().map_err(|_| Refused::Body)?;
+    let snapshot = route.snapshot();
+    let mut prepared = incoming
+        .reply(BodyKind::Control, 3, None)
+        .map_err(|_| Refused::Body)?;
+    prepared.plain_mut().copy_from_slice(&snapshot);
+    prepared.seal().map_err(|_| Refused::Body)
 }
 
 /// Fixed response headers only; no attacker-controlled String or header map is constructed.

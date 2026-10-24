@@ -7,6 +7,7 @@ use catcoms_crypto::DeviceKeypair;
 use catcoms_sync::voice_v2::runtime::Runtime;
 use catcoms_sync::voice_v2::{key_reference, Scope};
 
+mod children;
 mod finalization;
 mod pending;
 mod retirement;
@@ -115,6 +116,9 @@ fn complete_records_index_handles_and_one_worker_fit_existing_fixed_payments() {
     // wrappers, index slot, temporary Status response and Arc allocation counters here.
     let bytes = std::mem::size_of::<Row>()
         + 2 * std::mem::size_of::<usize>()
+        // Plan-final after Return retains identity with NO Phase. Its full original
+        // allocation must remain paid through late Row/history handles and physical GC.
+        + std::mem::size_of::<SessionIdentity>() + 2 * std::mem::size_of::<usize>()
         + std::mem::size_of::<CallGrant>()
         + 2 * std::mem::size_of::<usize>()
         + std::mem::size_of::<Option<Arc<Row>>>()
@@ -122,7 +126,9 @@ fn complete_records_index_handles_and_one_worker_fit_existing_fixed_payments() {
         + std::mem::size_of::<Work>()
         + std::mem::size_of::<ResolvedRow>()
         + std::mem::size_of::<Observation>()
-        + std::mem::size_of::<PendingRetirement>()
+        // Pending preparation and a fully compacted plan can never close concurrently on
+        // the SAME row. Cover the larger actual closure ticket in this paid position.
+        + std::mem::size_of::<PendingRetirement>().max(plan::RETIREMENT_MEMORY_BYTES).max(std::mem::size_of::<sdp::Preparation>())
         + std::mem::size_of::<ClosePending>()
         + std::mem::size_of::<Option<Arc<Row>>>() // fixed collector's one removed-slot owner
         + std::mem::size_of_val(&waiter)
@@ -705,7 +711,7 @@ fn settled_close_and_worker_loss_without_refresh_recovers_without_a_new_data_loa
 }
 
 #[test]
-fn lost_ack_latch_is_recoverable_after_phase_closure_without_input_or_progress_owners() {
+fn lost_native_ack_latch_recovers_actual_root_ack_without_a_new_data_loan() {
     let (coordinator, selected, selector) = selection();
     let ledger = Arc::new(Ledger::default());
     let registration = ticket(&ledger, selected.clone(), selector);
@@ -721,18 +727,27 @@ fn lost_ack_latch_is_recoverable_after_phase_closure_without_input_or_progress_o
         &mut join,
         &action,
     );
+    assert!(!ledger.status(id).unwrap().acknowledged);
     action.acknowledge_result(&receipt).unwrap(); // crash between actual ACK and native latch
+    assert!(action.handoff_status().acknowledged);
+    assert!(
+        !ledger.status(id).unwrap().acknowledged,
+        "native cache is still stale"
+    );
+    assert!(ledger.reconcile(id).unwrap().acknowledged);
     let phase = work.phase().clone();
     ledger.settle(id).unwrap();
     phase.close();
     drop(work);
     assert!(phase.is_drained());
-    assert!(!ledger.compact(id).unwrap());
+    // An exact actual Root ACK is sufficient even when the earlier native ACK reply/latch
+    // was lost. No renderer assertion, receipt presence or settlement inferred that fact.
+    assert!(ledger.compact(id).unwrap());
     let mut wrong = receipt.clone();
     wrong.output_tag[0] ^= 1;
     assert_eq!(
         ledger.acknowledge(id, &wrong),
-        Err(VoiceError::RetryMismatch)
+        Err(VoiceError::Unauthorized)
     );
     ledger.acknowledge(id, &receipt).unwrap();
     assert!(ledger.compact(id).unwrap());
@@ -762,9 +777,12 @@ fn reordered_metadata_observations_cannot_erase_rejected_history_or_settlement()
     };
     merge_observed(
         &mut status,
-        CryptoResultStatus {
-            settled: false,
-            receipt: None,
+        CryptoHandoffStatus {
+            engine: CryptoResultStatus {
+                settled: false,
+                receipt: None,
+            },
+            acknowledged: false,
         },
     )
     .unwrap();
@@ -772,22 +790,29 @@ fn reordered_metadata_observations_cannot_erase_rejected_history_or_settlement()
     older.retired = false;
     merge_observed(
         &mut status,
-        CryptoResultStatus {
-            settled: false,
-            receipt: Some(older),
+        CryptoHandoffStatus {
+            engine: CryptoResultStatus {
+                settled: false,
+                receipt: Some(older),
+            },
+            acknowledged: false,
         },
     )
     .unwrap();
     assert!(status.engine.settled);
+    assert!(status.acknowledged);
     assert_eq!(status.engine.receipt, Some(receipt.clone()));
     let mut changed = receipt;
     changed.outcome = CryptoOutcome::Derived;
     assert_eq!(
         merge_observed(
             &mut status,
-            CryptoResultStatus {
-                settled: true,
-                receipt: Some(changed)
+            CryptoHandoffStatus {
+                engine: CryptoResultStatus {
+                    settled: true,
+                    receipt: Some(changed),
+                },
+                acknowledged: true,
             }
         ),
         Err(VoiceError::RetryMismatch)
@@ -898,6 +923,7 @@ fn every_original_key_component_is_required_even_when_other_identity_components_
         executor: selected.executor(),
         lease: selected.lease().clone(),
         purpose,
+        parent: None,
     };
     assert!(key.matches(&selected, purpose));
     key.grant = foreign.grant_identity();
@@ -981,7 +1007,7 @@ fn original_purpose_lookup_under_full_pressure_rejects_foreign_identity_and_ever
     let _pressure = pool
         .charge(
             selected.binding().scope.group,
-            256 * 1024 - pool.counts().0,
+            catcoms_sync::voice_v2::resources::GROUP_BYTES - pool.counts().0,
             ResourceKind::Retained,
         )
         .unwrap();

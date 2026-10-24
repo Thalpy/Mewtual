@@ -1,5 +1,44 @@
 # Voice signalling v2 decision
 
+## Initial RTC profile decision (24 October; implementation still open)
+
+The first supported native-authorized RTC profile will gather initial ICE into one complete
+encrypted Offer and one complete encrypted Answer. This fits the existing bounded Exchange
+without adding an independent candidate stream/history allowance. Regular ICE carries
+candidates in SDP; trickling is an extension, not a requirement for initial connectivity.
+See [ICE SDP procedures](https://www.rfc-editor.org/rfc/rfc8839.html) and
+[Trickle ICE](https://www.rfc-editor.org/rfc/rfc8838.html). This is a reviewed implementation
+decision, not evidence that production RTC or this profile is already implemented.
+
+Native must pin the supported profile before pair/phase admission and refuse incompatible
+or missing mode evidence without legacy/trickle fallback. Do not silently change existing
+canonical bytes. The capability/version boundary still needs implementation and mixed-version
+tests. For this profile, separate kind-Ice signalling must be rejected before token, replay,
+action or original-quota publication; the browser must neither submit nor buffer/apply it.
+The ICE agent's own STUN/connectivity traffic remains necessary.
+
+Before any SDK mutation, native admits/pays the exact PC/generation's GatherOffer/GatherAnswer
+owner on the original parent/keys/counter domain. Gathering consumes that same phase deadline,
+not a new window. Register the gathering listener before checking completion, await actual
+`iceGatheringState === "complete"`, then read/freeze `pc.localDescription.sdp` once. The SDP
+can change as candidates arrive; the object returned before gathering is not the final
+description. See [WebRTC localDescription](https://www.w3.org/TR/webrtc/#dom-rtcpeerconnection-localdescription).
+Only then may native mint the actual packet reservation/action/nonce. Lost replies/Capacity
+reuse those exact frozen bytes and identity. Refuse descriptions exceeding8192 UTF-8 bytes;
+do not truncate candidates or silently increase the bound.
+
+Fix the initial audio/data-channel layout before gathering, including instrument/jam/drawing
+traffic. Track replacement without renegotiation can preserve it; adding media sections cannot
+reuse this one-exchange budget. Existing App candidate filtering/PCP callbacks do not filter a
+full SDP automatically, so route policy must explicitly cover this snapshot. Timeout is not
+SDK/PC drainage proof. End/replacement retains actual owners until completion/closure.
+
+Signalling helper B->D replacement should preserve working RTC and immutable packet retries.
+Actual ICE/media-allocation failure may require a fresh authenticated incarnation, whose
+bounded replacement and drainage are also still unimplemented. This does not establish media
+relay, multi-peer composition, forced-TURN WebView results or physical audio/network acceptance.
+The broader trickle/glare design below is future work beyond this first supported profile.
+
 18 October 2026. Reviewed design; crypto, codecs and native packet/resource ownership are in
 implementation. **The live V2 protocol is not enabled or accepted.** Forwarding stays
 disabled until this contract, its implementation and compatibility tests pass review. Existing
@@ -54,6 +93,13 @@ its own separate legacy session; current V2 peers refuse it. Mixed-version fixtu
 refusal rather than count it as interoperability.
 
 ## Canonical objects and endpoint keys
+
+24 October wire continuation: closed object tag5 is high-to-low `PairReady`, binding the
+protected epoch, both endpoints/joins/key references, handshake, native signed Finish ID/hash
+and at most two canonical agreed helper identities. Tags1–4 and signing domains remain
+unchanged. Current helpers enforce this list and current epoch/member/policy checks. Native
+endpoints still refuse the body until synchronous exact pair admission exists; helper custody
+or a transport ACK is never causal readiness. AwaitReady, native adoption and RTC remain open.
 
 Use the repository's injective fixed-width/bounded-length codec. Decoders consume all bytes,
 reject unknown versions/kinds/suites and enforce bounds before allocation or crypto. A stable
@@ -295,7 +341,11 @@ stop forwarding before the longer original announcement's replay protection expi
 ### Narrow SDP capacity contract (PR 48 revision)
 
 Before the first local SDP nonce or incoming positive admission, the confirmed native LocalJoin
-must prepay a 224 KiB exchange owner from the existing 256 KiB group / 2 MiB process pool.
+must prepay a 192 KiB exchange owner from the revised512KiB native group / unchanged2MiB
+native process pool. This local declared-memory policy does not change signatures, wire
+formats, nonce/replay history, existing work limits or actual-last-owner retirement. One
+group may now occupy one quarter rather than one eighth of that process pool. The browser's
+separate256KiB group ledger is unchanged; native policy is not proof of browser composition.
 Ordinary endpoint and at most two fixed helper origin records are retained first, without
 spending or resetting traffic buckets. The same owner reserves one Crypto work lane, two
 Forward lanes and two continuation slots from the existing combined 32-action limit. Capacity
@@ -309,16 +359,31 @@ members; direct-only scopes cannot prepare helpers. Actual lower custody can blo
 hedge but cannot consume protected reply capacity. Readiness expires after 30 seconds; the first
 SDP begins an immutable 20-second work window. Exact retries cannot extend either deadline.
 
-At the 8 KiB plaintext ceiling, the declared simultaneous peak is 225,318 bytes: local packet,
-Source and two lower holders (112,038), remote packet, decrypt record and serialized engine/
+At the 8 KiB plaintext ceiling, the declared simultaneous peak is 187,966 bytes: local packet,
+Source and two lower holders (74,686), remote packet, decrypt record and serialized engine/
 verification scratch (89,666), retained encrypt record (10,286), native result (9,232), and
-workflow metadata (4,096). These fit the 229,376-byte reserve without refunding actual work.
+workflow metadata (4,096). These fit the196,608-byte reserve without refunding actual work.
 All phase quotas count retained terminal records. Closing releases unused headroom only;
 actual bytes, engine/forward lanes and continuation slots remain charged until custody ends.
 Maximum native packet/Source/reply and pressured composition regressions pin this arithmetic.
 Each lower holder includes 512 bytes for Root's route/authority metadata, reserved before an
 attempt is spent. The route retains that same actual flight credit through cancellation and
 completion; Root requires no additional ordinary-pool allocation to submit prepaid SDP work.
+
+The copy reduction preserves both actual Lower lanes and inbound verification. Source work
+borrows its original immutable packet instead of retaining another ciphertext clone. Canonical
+signed-object/envelope parents allocate exact final backing capacity only after their children
+finish; the outer request is encoded directly into its final frame. Source preparation and
+transport therefore retain at most two large buffers per Lower, with unchanged fixed wrapper/
+route payments. A private original-job completion view reuses that immutable packet's cached
+hash; its small ACK verifier cannot hide additional full-SDP canonical hashes. Public ACK and
+incoming verification still decode and hash independently. Compatibility/capacity tests compare
+the previous canonical bytes and actual backing capacities across boundary and maximum sizes.
+
+This Root-only composition does not pay the separately retained native channel, bootstrap,
+confirmation history, browser phase or RTC owners. Readiness must still prove their complete
+composition, including discovery/old lower custody; a smaller Root reserve alone is not desktop
+activation or evidence that16 live pairs fit the provisional group ceiling.
 
 This is enforced native capacity infrastructure, not completed SDP crypto-action factories,
 browser-copy custody or RTC result delivery. Those integrations, exact historical receipts and
@@ -327,8 +392,8 @@ The native coordinator must also establish compatible fixed helper selections be
 or refuse readiness/delivery honestly; one endpoint's selection is not the other's authority.
 
 Initial defensive ceilings, not latency SLOs: 16 participants/pairs per local call; 8 pending pair
-handshakes; 32 packet reservations; 48 KiB complete inner envelope, 8 KiB SDP, 2 KiB ICE; 256 KiB
-queued per group and 2 MiB process-wide; 4 helper final recipients per announcement and 2 candidate
+handshakes; 32 packet reservations; 48 KiB complete inner envelope, 8 KiB SDP, 2 KiB ICE;512KiB
+declared native work per group and2MiB process-wide; 4 helper final recipients per announcement and 2 candidate
 helpers per targeted packet; 3 total route submissions within a 15-second packet expiry. Presence
 delegations last at most 30 seconds; verified liveness at most 15 seconds from challenge creation.
 Accept at most 5 seconds wall-clock skew, without extending local monotonic challenge lifetime.

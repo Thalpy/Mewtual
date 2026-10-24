@@ -34,6 +34,9 @@ struct Row {
 }
 struct State {
     pending: bool,
+    // Close-first cleanup must fence producers before checking for outstanding actions.
+    // Keep Control routing independently available until those actual owners drain.
+    effects_closed: bool,
     closed: bool,
     session: Option<Arc<Session>>,
     public: Option<Arc<SetupOutput>>,
@@ -107,6 +110,38 @@ pub(super) struct MetadataProjection {
     row: Arc<Row>,
 }
 impl MetadataProjection {
+    /// Original registry allocation, including after End. This is historical provenance,
+    /// not a live grant upgrade or permission to construct replacement work.
+    pub(super) fn selected(&self) -> &SelectedHandoffOwner {
+        &self.row.selected
+    }
+
+    /// Conservative complete original Row/preparation/output inventory plus ONE serial
+    /// metadata reply. General allocator, framework copies after handoff and OS overhead
+    /// are outside this application-owner bound. Refuse rather than raise its8KiB payment.
+    pub(super) fn require_reply_memory(&self, reply_bytes: usize) -> Result<(), Refused> {
+        let arc_words = 2 * std::mem::size_of::<usize>();
+        let retained = std::mem::size_of::<Row>()
+            + std::mem::size_of::<SessionIdentity>()
+            + arc_words * 2
+            + std::mem::size_of::<Ticket>()
+            + std::mem::size_of::<SetupOutput>()
+            + std::mem::size_of::<Credit>()
+            + arc_words * 2
+            + std::mem::size_of::<Arc<Session>>()
+            + std::mem::size_of::<Begin>()
+            + std::mem::size_of::<Status>()
+            + std::mem::size_of::<PublicProjection>()
+            + std::mem::size_of::<MetadataProjection>();
+        let bytes = retained.checked_add(reply_bytes).ok_or(Refused::Capacity)?;
+        #[cfg(test)]
+        eprintln!("native work metadata row/reply inventory {bytes}/{ROW_BYTES}");
+        if bytes > ROW_BYTES {
+            return Err(Refused::Capacity);
+        }
+        Ok(())
+    }
+
     pub(super) fn transcript(&self, output: Arc<SetupOutput>) -> Result<PublicProjection, Refused> {
         if !Arc::ptr_eq(&self.row._credit, &output._credit) {
             return Err(Refused::Binding);
@@ -143,10 +178,70 @@ struct Ticket {
 }
 
 impl Registry {
-    /// Original immutable provenance for cleanup preflight, including after End. This grants
-    /// no effect authority and does not reinstall a retired Session. The caller must retain
-    /// the SAME UI commit through ledger preflight and final closure so an admitted factory
-    /// cannot appear in between. Never hold this registry guard while consulting the ledger.
+    /// Cleanup-only routing under the caller's ORIGINAL UI commit. End/lock may revoke the
+    /// call lease while its authenticated Control session still has final delivery work.
+    /// Do not reuse first-effect require_open here, and do not weaken it for factories.
+    /// Release both registry guards before touching Ledger or retiring any Root owner.
+    /// Native producer preflight also uses this pure provenance check before creating its
+    /// task. That use grants no effect authority: final live-Route/selection/UI/grant checks
+    /// remain mandatory after its asynchronous preparation.
+    pub(super) fn require_cleanup_route(&self, route: &Route) -> Result<(), Refused> {
+        let held = self.index.lock().unwrap_or_else(|error| error.into_inner());
+        if self.stopping.load(Ordering::Acquire)
+            || !held.as_ref().is_some_and(|index| {
+                index
+                    .rows
+                    .iter()
+                    .flatten()
+                    .any(|row| Arc::ptr_eq(row, &route.row))
+            })
+        {
+            return Err(Refused::Binding);
+        }
+        let state = route
+            .row
+            .state
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        if state.closed
+            || state.pending
+            || !state
+                .session
+                .as_ref()
+                .is_some_and(|session| Arc::ptr_eq(session, &route.session))
+            || !state
+                .public
+                .as_ref()
+                .is_some_and(|public| Arc::ptr_eq(public, &route.public))
+        {
+            return Err(Refused::Binding);
+        }
+        Ok(())
+    }
+    /// Irreversibly stop first effects on the exact original channel BEFORE checking its
+    /// outstanding ledger work. A Capacity refusal must not let maintenance keep creating
+    /// unseen children while cleanup scans. Control routing stays open for actual cleanup.
+    /// Caller holds the SAME UI commit as final publication; release these registry guards
+    /// before consulting the ledger or destroying any Root owner.
+    fn close_effects(&self, owner: &str, executor: [u8; 32]) -> Option<Arc<SelectedHandoffOwner>> {
+        self.index
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .as_ref()?
+            .rows
+            .iter()
+            .flatten()
+            .find(|row| row.selected.id() == owner && row.selected.executor() == executor)
+            .map(|row| {
+                row.state
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner())
+                    .effects_closed = true;
+                row.selected.clone()
+            })
+    }
+
+    #[cfg(test)]
     fn original_selected(
         &self,
         owner: &str,
@@ -304,6 +399,7 @@ impl Registry {
             slot: (slot + 1) as u8,
             state: Mutex::new(State {
                 pending: true,
+                effects_closed: false,
                 closed: false,
                 session: None,
                 public: None,
@@ -388,6 +484,7 @@ impl Registry {
             slot: (slot + 1) as u8,
             state: Mutex::new(State {
                 pending: false,
+                effects_closed: true,
                 closed: true,
                 session: None,
                 public: None,
@@ -465,7 +562,7 @@ impl Registry {
     }
 
     /// Process shutdown only: close every existing first-effect fence before collecting any
-    /// physical position. No channel may be created after this Index-ordered transition.
+    /// physical/native position. No channel may be created after this Index-ordered transition.
     /// The service is the sole caller/collector, after its connection future has dropped.
     ///
     /// Unlike ordinary channel collection, this deliberately terminates Control routing:
@@ -485,7 +582,9 @@ impl Registry {
             }
         }
         // One paid Session/waiter at a time; no heap registry, detached waiter or 64-owner
-        // snapshot. Retired Sessions can have no Row references while a reply/worker still
+        // snapshot. Native producer tasks retain the canonical Route as well as their
+        // independently paid native Session hold; wait_idle collects both ownership kinds.
+        // Retired Sessions can have no Row references while a reply/worker still
         // owns them, so consult the original weak witness as well as live State.session.
         for slot in 0..ROWS {
             let session = {
@@ -513,12 +612,28 @@ impl Registry {
 }
 /// Native-only immutable control routing. Retain the actual row, Session and paid public
 /// output across IO; copied session IDs alone cannot create this owner or authorize actions.
+#[derive(Clone)]
 pub(super) struct Route {
     row: Arc<Row>,
     session: Arc<Session>,
     public: Arc<SetupOutput>,
 }
 impl Route {
+    /// Start automatic native work only after the original authenticated setup ACK has
+    /// retired browser setup custody. A bound socket/Ready projection alone is insufficient;
+    /// starting the15s pair budget during a stalled WebView bootstrap would strand it.
+    pub(super) fn native_ready(&self) -> bool {
+        let state = self
+            .row
+            .state
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        !state.closed
+            && !state.effects_closed
+            && !state.pending
+            && state.browser_setup.is_none()
+            && self.row.selected.lease().is_live()
+    }
     /// Only this immutable native row supplies selection. Request labels are lookup hints,
     /// never a substitute for the allocation which owns this Session and its payments.
     pub(super) fn selected(&self) -> &Arc<SelectedHandoffOwner> {
@@ -528,15 +643,52 @@ impl Route {
     /// otherwise a retained Route could start actor work after trusted channel collection.
     /// Coordinator -> Row is the existing lock order. This grants no Root authorization.
     pub(super) fn require_open(&self) -> Result<(), Refused> {
+        self.with_open(|| ())
+    }
+    /// Keep the original route fence held through a synchronous native first effect. The
+    /// callback must not await, sample Clock, reacquire Coordinator/Row, or destroy owners
+    /// whose Drop can call Root. Existing lock order is UI commit -> Coordinator -> Row.
+    pub(super) fn with_open<T>(&self, commit: impl FnOnce() -> T) -> Result<T, Refused> {
         let state = self
             .row
             .state
             .lock()
             .unwrap_or_else(|error| error.into_inner());
-        if state.closed || state.pending || !self.row.selected.lease().is_live() {
+        if state.closed
+            || state.effects_closed
+            || state.pending
+            || !self.row.selected.lease().is_live()
+        {
             return Err(Refused::Binding);
         }
-        Ok(())
+        let result = commit();
+        drop(state);
+        Ok(result)
+    }
+    /// Final engine admission has sampled Root's original Clock. Preserve UI -> Coordinator
+    /// -> Row ordering but refuse contention here; waiting would reuse a stale deadline.
+    pub(super) fn try_with_open<T>(
+        &self,
+        commit: impl FnOnce() -> Result<T, catcoms_sync::voice_v2::VoiceError>,
+    ) -> Result<T, catcoms_sync::voice_v2::VoiceError> {
+        use catcoms_sync::voice_v2::VoiceError;
+        let state = match self.row.state.try_lock() {
+            Ok(state) => state,
+            Err(std::sync::TryLockError::Poisoned(error)) => error.into_inner(),
+            Err(std::sync::TryLockError::WouldBlock) => return Err(VoiceError::Capacity),
+        };
+        if state.closed
+            || state.effects_closed
+            || state.pending
+            || !self.row.selected.lease().is_live()
+        {
+            return Err(VoiceError::Unauthorized);
+        }
+        commit()
+    }
+    #[cfg(test)]
+    pub(super) fn fixture_lock_route(&self) -> impl Drop + '_ {
+        self.row.state.lock().unwrap()
     }
     pub(super) fn session(&self) -> &Arc<Session> {
         &self.session
@@ -564,7 +716,7 @@ impl Route {
             .state
             .lock()
             .unwrap_or_else(|error| error.into_inner());
-        let closed = state.closed || !self.row.selected.lease().is_live();
+        let closed = state.closed || state.effects_closed || !self.row.selected.lease().is_live();
         [1, if closed { 2 } else { 1 }, u8::from(!state.pending)]
     }
 }
@@ -621,7 +773,7 @@ impl Row {
     }
     fn status(&self) -> Status {
         let state = self.state.lock().unwrap_or_else(|error| error.into_inner());
-        if state.closed || !self.selected.lease().is_live() {
+        if state.closed || state.effects_closed || !self.selected.lease().is_live() {
             Status::Closed {
                 native_setup_drained: !state.pending,
             }
@@ -640,15 +792,15 @@ impl Ticket {
         // The registry owns Pending before this first possible callback. Taking the sole
         // preparation is irreversible: an error/panic cannot create another scalar on retry.
         let prepared = self.prepared.take().ok_or(Refused::Binding)?;
-        if self
+        let state = self
             .row
             .state
             .lock()
-            .unwrap_or_else(|error| error.into_inner())
-            .closed
-        {
+            .unwrap_or_else(|error| error.into_inner());
+        if state.closed || state.effects_closed {
             return Err(Refused::Binding);
         }
+        drop(state);
         prepared.compute(rng)
     }
     /// Caller holds Coordinator from its final original-generation/selected-Arc check through
@@ -662,7 +814,11 @@ impl Ticket {
             .state
             .lock()
             .unwrap_or_else(|error| error.into_inner());
-        if state.closed || !state.pending || !self.row.selected.lease().is_live() {
+        if state.closed
+            || state.effects_closed
+            || !state.pending
+            || !self.row.selected.lease().is_live()
+        {
             return Err(Refused::Binding);
         }
         let (session, public, setup) = output.take().ok_or(Refused::Binding)?;
@@ -797,9 +953,9 @@ async fn finish(
     closure: Closure,
 ) -> Result<Status, Refused> {
     let _commit = state.ui_session_commit.clone().lock_owned().await;
-    if let Some(original) = state.voice_channels.original_selected(owner, executor) {
-        // Both setup-failure cleanup and final channel collection permanently close Control
-        // routing. Keep it available until every original action is compacted; otherwise
+    if let Some(original) = state.voice_channels.close_effects(owner, executor) {
+        // Both setup-failure cleanup and final channel collection stop first effects now,
+        // then close Control routing only when every original action is compacted; otherwise
         // ACK/settlement/phase closure could become unreachable. All factory admissions use
         // this SAME UI commit, so a new Pending row cannot race the pure preflight below.
         // No Registry/Coordinator guard overlaps the ledger check or original-owner drop.
@@ -871,4 +1027,4 @@ fn require_selected(
 #[cfg(test)]
 mod tests;
 #[cfg(test)]
-pub(super) use tests::installed as fixture_installed;
+pub(super) use tests::{installed as fixture_installed, retire as fixture_retire};

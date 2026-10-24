@@ -1,13 +1,121 @@
 //! Native low-side start under the actual current Root call and directory. This seam deliberately
 //! exposes no serialized payload or engine permit; native/browser custody is a separate boundary.
 use super::*;
-use voice_v2::crypto_actions::{CryptoAction, CryptoResultReceipt};
+use voice_v2::crypto_actions::{
+    CryptoAction, CryptoActionSnapshot, CryptoActionSnapshotPermit, CryptoResultReceipt,
+};
 use voice_v2::packets::Authority;
 use voice_v2::presence::{
     ProtectedOpenedResult, ProtectedResponse, ProtectedSealedResult, ProtectedStart,
 };
 
 impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
+    /// Bounded, non-dequeueing native observation of this exact participant's pending
+    /// crypto actions. The four returned original Arcs grant no engine/RTC authority;
+    /// callers must transfer its affine prepaid snapshot owner into the actor request and
+    /// register each actual action under its original native parent before exposing input.
+    /// The internal32-row snapshot rotates fairly without renewing work or attempts.
+    pub fn voice_confirmation_actions(
+        &mut self,
+        grant: &Arc<CallGrant>,
+        permit: CryptoActionSnapshotPermit,
+    ) -> CryptoActionSnapshot {
+        let result = (|| {
+            self.validate_voice_call_grant(grant)?;
+            let context = self.voice_v2_context(grant.scope().room)?;
+            let voice = self
+                .voice_runtime
+                .as_mut()
+                .ok_or(VoiceError::Unauthorized)?;
+            voice.endpoints.prune();
+            let actor = voice.current.as_ref().ok_or(VoiceError::Unauthorized)?;
+            if permit.scope() != context.scope || !actor.uses_resources(permit.resources()) {
+                return Err(VoiceError::Unauthorized);
+            }
+            let participant = voice
+                .endpoints
+                .participant
+                .as_mut()
+                .ok_or(VoiceError::Unauthorized)?;
+            if !std::sync::Weak::ptr_eq(&participant.grant, &Arc::downgrade(grant))
+                || participant.watch.scope != context.scope
+                || !participant.watch.is_live()
+            {
+                return Err(VoiceError::Unauthorized);
+            }
+            let authority = Authority {
+                context: &context,
+                lease: &participant.lease,
+                // Borrow the already-paid Actor map; no second full roster is allocated.
+                member: &|id| {
+                    actor
+                        .with_current_members(&context, |member| Ok(member(id)))
+                        .unwrap_or(false)
+                },
+            };
+            participant.join.pull_crypto_actions(&authority)
+        })();
+        permit.complete(result)
+    }
+    /// Transfer published encrypted packets from the ORIGINAL native participant cache into
+    /// Source. No renderer, copied SignedObject or fresh factory selects the retry identity.
+    /// Scan the bounded32-row table without payload copies; admit at most four NEW packets
+    /// per pass. At most32 failed preparations are also possible, each bounded by the packet
+    /// ceiling. Cached rows cost metadata checks only, and a busy/retired row cannot starve
+    /// a later live row. Refusal retains the original packet, deadline and Source allowance.
+    pub(super) fn pump_voice_packet_sources(&mut self) -> Result<usize, VoiceError> {
+        // An ended participant must not prevent a separate live observer from reaching the
+        // public discovery pass. Revocation is final; prune does not adopt any old packet.
+        if let Some(voice) = &mut self.voice_runtime {
+            voice.endpoints.prune();
+        }
+        let clock = self.voice_v2_clock();
+        let Some(voice) = self.voice_runtime.as_ref() else {
+            return Ok(0);
+        };
+        let Some(participant) = voice.endpoints.participant.as_ref() else {
+            return Ok(0);
+        };
+        if participant.grant.strong_count() == 0 || !participant.watch.is_live() {
+            return Err(VoiceError::Unauthorized);
+        }
+        let actor = voice.current.as_ref().ok_or(VoiceError::Unauthorized)?;
+        // The outer endpoint pass has reconciled MLS and observed the directory. Borrow
+        // those already-paid native owners here rather than building another full roster
+        // or re-running reconciliation for each retained packet under byte pressure.
+        let context = actor.source_context(participant.watch.scope)?;
+        let room = voice.directory.authority(context.scope)?;
+        let source = actor.source()?;
+        let authority = Authority {
+            context: &context,
+            lease: &participant.lease,
+            // Only this pure predicate holds Group/Policy. Release both before activity
+            // construction samples Clock or Source admission re-enters the same owners.
+            member: &|id| {
+                actor
+                    .with_current_members(&context, |member| Ok(member(id)))
+                    .unwrap_or(false)
+            },
+        };
+        let mut admitted = 0;
+        for object in participant.join.published_source_packets() {
+            let result = participant
+                .join
+                .source_packet_activity(object, &authority, clock.clone())
+                .and_then(|activity| source.admit_borrowed(actor, object, activity, room.clone()));
+            match result {
+                Ok(false) => {
+                    admitted += 1;
+                    if admitted == 4 {
+                        break;
+                    }
+                }
+                Ok(true) => {} // Exact existing Source record, never a renewed allowance.
+                Err(error) => tracing::trace!(%error, "native voice packet queue refused"),
+            }
+        }
+        Ok(admitted)
+    }
     /// Publish the original registered seal result once. Signing produces an inert private
     /// artifact before admission; local contention retains it for an exact retry without a
     /// second signature. The receipt grants no source send, browser handle or RTC authority.

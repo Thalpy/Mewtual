@@ -5,7 +5,7 @@
 use catcoms_app::{VoiceConfirmationBody, VOICE_CONFIRMATION_BODY_METADATA_BYTES};
 use catcoms_sync::voice_v2::crypto_actions::{
     ConfirmationRetirement, CryptoAction, CryptoInput, CryptoInputLease, HandoffLoan,
-    ProtectedCryptoBinding,
+    ProtectedCryptoPlan,
 };
 use catcoms_sync::voice_v2::resources::{Credit, ResourceKind, Resources};
 use catcoms_sync::voice_v2::{CallLease, Scope, VoiceError};
@@ -56,16 +56,36 @@ impl PreparedPhase {
         action: &CryptoAction,
         bytes: usize,
     ) -> Result<Arc<Phase>, VoiceError> {
+        self.try_bind(action, bytes).map_err(|(error, _)| error)
+    }
+    /// Preserve the original fixed preparation after a proven local refusal. A native
+    /// factory may already have published its Action, so attachment pressure must not lose
+    /// that Action or require fresh metadata payment on its next exact retry. This returns
+    /// the SAME preparation; it refunds no engine, nonce, attempt or transport handoff.
+    // A local refusal returns the SAME already-paid preparation inline. Boxing its error
+    // would add a fallible, separately owned allocation while ordinary capacity is full.
+    #[allow(clippy::result_large_err)]
+    pub(crate) fn try_bind(
+        self,
+        action: &CryptoAction,
+        bytes: usize,
+    ) -> Result<Arc<Phase>, (VoiceError, Self)> {
         if !action.belongs_to(self.scope, &self.call) || !action.uses_resources(&self.resources) {
-            return Err(VoiceError::Unauthorized);
+            return Err((VoiceError::Unauthorized, self));
         }
-        let binding = action.protected_binding()?;
-        let loan = action.borrow_handoff(bytes)?;
+        let plan = match action.protected_plan() {
+            Ok(plan) => plan,
+            Err(error) => return Err((error, self)),
+        };
+        let loan = match action.borrow_handoff(bytes) {
+            Ok(loan) => loan,
+            Err(error) => return Err((error, self)),
+        };
         Ok(Arc::new(Phase {
             resources: self.resources,
             scope: self.scope,
             call: self.call,
-            binding,
+            plan,
             capacity: bytes,
             state: Mutex::new(State {
                 stage: Stage::Open,
@@ -123,7 +143,9 @@ pub(crate) struct Phase {
     resources: Arc<Resources>,
     scope: Scope,
     call: CallLease,
-    binding: ProtectedCryptoBinding,
+    // Root's SAME independently paid fixed identity, never an Action/Workflow/input owner.
+    // It cannot retain a dead Action allocation after that Action's record credit drops.
+    plan: ProtectedCryptoPlan,
     capacity: usize,
     state: Mutex<State>,
     drained: AtomicBool,
@@ -175,7 +197,50 @@ impl Buffer {
 struct ResultOwner {
     buffer: Buffer,
     range: Range<usize>,
+    // The ACTUAL queued command/completed reply must retain publication ordering even if
+    // the submitting task is torn down. Drop the bytes before the shared commit/position,
+    // and keep the metadata payment alive through both owners' destruction.
+    _publication: Option<Arc<PublicationCustody>>,
     _metadata: CopyCustody,
+}
+
+/// Native lifecycle custody only, never effect authority. The worker and the actor's actual
+/// byte owner share this one paid allocation. Worker cancellation cannot let lock or channel
+/// shutdown overtake an already queued publication on an independently running actor.
+pub(super) struct PublicationCustody {
+    // A detached Result worker must stay paid even when native preparation refuses before
+    // UI admission. Only its unique pre-publication owner may install the actual commit;
+    // clones given to Actor bytes always contain Some and cannot manufacture admission.
+    commit: Option<tokio::sync::OwnedMutexGuard<()>>,
+    _physical: super::channel::PhysicalHold,
+    // Last: pays the shared allocation and detached operation even after its worker dies.
+    _payment: CopyCustody,
+}
+impl PublicationCustody {
+    pub(super) fn new(
+        commit: tokio::sync::OwnedMutexGuard<()>,
+        physical: super::channel::PhysicalHold,
+        payment: CopyCustody,
+    ) -> Self {
+        let mut custody = Self::preparing(physical, payment);
+        custody.admit(commit);
+        custody
+    }
+    /// Lifecycle payment before asynchronous native preparation, not effect authority.
+    /// Keep this SAME allocation in every detached worker/completed refusal too.
+    pub(super) fn preparing(physical: super::channel::PhysicalHold, payment: CopyCustody) -> Self {
+        Self {
+            commit: None,
+            _physical: physical,
+            _payment: payment,
+        }
+    }
+    /// The caller must have unique ownership before lending any clone to Actor/body work.
+    /// Root still checks the original action, call, epoch, token and deadline in its turn.
+    pub(super) fn admit(&mut self, commit: tokio::sync::OwnedMutexGuard<()>) {
+        assert!(self.commit.is_none(), "one original publication admission");
+        self.commit = Some(commit);
+    }
 }
 impl AsRef<[u8]> for ResultOwner {
     fn as_ref(&self) -> &[u8] {
@@ -190,6 +255,12 @@ impl Drop for Buffer {
     }
 }
 impl CopyCustody {
+    /// Borrow the SAME paid phase already retained by this actual copy contribution. Native
+    /// Work needs no redundant strong Phase handle; this owner survives until after its
+    /// worker flag is cleared and the last-copy drainage notification can be observed.
+    pub(super) fn phase(&self) -> &Arc<Phase> {
+        &self.phase
+    }
     /// Provider output must have been prepaid before invoking that provider. Reject an
     /// unexpectedly larger backing allocation without ever handing it to another worker.
     pub(crate) fn adopt(self, mut bytes: Vec<u8>) -> Result<Buffer, VoiceError> {
@@ -214,6 +285,17 @@ impl Phase {
         buffer: Buffer,
         range: Range<usize>,
     ) -> Result<VoiceConfirmationBody, (VoiceError, Buffer)> {
+        self.result_body_with_publication(buffer, range, None)
+    }
+    /// As above, retaining the original admitted UI commit and physical position with the
+    /// same result bytes through the actor command and its completed/uncollected output.
+    /// The caller prepays the one PublicationCustody allocation in its task contribution.
+    pub(super) fn result_body_with_publication(
+        self: &Arc<Self>,
+        buffer: Buffer,
+        range: Range<usize>,
+        publication: Option<Arc<PublicationCustody>>,
+    ) -> Result<VoiceConfirmationBody, (VoiceError, Buffer)> {
         if !Arc::ptr_eq(&buffer._custody.phase, self)
             || range.start > range.end
             || range.end > buffer.bytes().len()
@@ -228,6 +310,7 @@ impl Phase {
         let owner = ResultOwner {
             buffer,
             range,
+            _publication: publication,
             _metadata: metadata,
         };
         // Constructor layout/length bounds are established above and by the concrete guard
@@ -263,15 +346,16 @@ impl Phase {
         self: &Arc<Self>,
         action: &CryptoAction,
     ) -> Result<InputCustody, VoiceError> {
-        if !action.belongs_to(self.scope, &self.call)
+        if !self.plan.contains(action)
+            || !action.belongs_to(self.scope, &self.call)
             || !action.uses_resources(&self.resources)
-            || action.protected_binding()? != self.binding
         {
             return Err(VoiceError::Unauthorized);
         }
-        // Metadata equality is copy-capacity bookkeeping only. The registry independently
-        // resolves the actual Root-produced row before calling this method. Native input
-        // already owns its own paid payload, but still contributes to phase drainage.
+        // The original native row still has to resolve this EXACT child's allocation before
+        // calling; same-plan provenance only permits sharing the original capacity, never an
+        // engine/effect or adoption of an unregistered action. Native input already owns its
+        // own paid payload, but its lease independently contributes to phase drainage.
         let custody = self.copy(0)?;
         let input = action.input()?;
         Ok(InputCustody {
@@ -447,6 +531,35 @@ mod tests {
     }
 
     #[test]
+    fn same_metadata_from_an_independent_actual_plan_cannot_borrow_the_original_phase() {
+        let (coordinator, selected, _selector) = super::super::ledger::tests::selection();
+        let (_join, action, _pair) =
+            super::super::ledger::tests::actual_action(&coordinator, &selected);
+        let phase = PreparedPhase::new(
+            selected.resources(),
+            selected.binding().scope,
+            selected.lease().clone(),
+        )
+        .unwrap()
+        .bind(&action, 16 * 1024)
+        .unwrap();
+        // PacketLedger deliberately forbids constructing a second ledger under one actual
+        // call lease. Use an independent original grant/pool; its deterministic projection
+        // still equals the original, while Root provenance and capacity remain independent.
+        let (foreign_coordinator, foreign_selected, _) = super::super::ledger::tests::selection();
+        let (_foreign_join, foreign, _foreign_pair) =
+            super::super::ledger::tests::actual_action(&foreign_coordinator, &foreign_selected);
+        assert_eq!(action.protected_binding(), foreign.protected_binding());
+        assert!(!foreign.belongs_to(selected.binding().scope, selected.lease()));
+        assert!(!foreign.uses_resources(&selected.resources()));
+        assert!(!foreign.same_protected_plan(&action));
+        let before = selected.resources().counts();
+        assert_eq!(phase.input(&foreign).err(), Some(VoiceError::Unauthorized));
+        assert_eq!(selected.resources().counts(), before);
+        assert!(phase.input(&action).is_ok());
+    }
+
+    #[test]
     fn full_buffer_wrappers_fit_and_return_their_exact_copy_contributions() {
         let (_coordinator, _join, _action, phase) = phase_fixture();
         // Include real Vec headers even for zero-sized buffers: payload capacity alone is
@@ -508,7 +621,7 @@ mod tests {
         let pressure = pool
             .charge(
                 action.protected_binding().unwrap().scope.group,
-                256 * 1024 - pool.counts().0,
+                catcoms_sync::voice_v2::resources::GROUP_BYTES - pool.counts().0,
                 ResourceKind::Retained,
             )
             .unwrap();
@@ -570,7 +683,7 @@ mod tests {
         let pressure = pool
             .charge(
                 action.protected_binding().unwrap().scope.group,
-                256 * 1024 - pool.counts().0,
+                catcoms_sync::voice_v2::resources::GROUP_BYTES - pool.counts().0,
                 ResourceKind::Retained,
             )
             .unwrap();
@@ -645,6 +758,92 @@ mod tests {
         drop(buffer);
         let layout = std::alloc::Layout::new::<ResultOwner>();
         assert!(layout.size() <= 128 && layout.align() <= 64);
+    }
+
+    #[tokio::test]
+    async fn actual_queued_actor_body_keeps_commit_position_and_payment_after_submitter_loss() {
+        use super::super::derivation_result::tests::Case;
+        use super::super::factory::tests::park;
+        // The real Actor deliberately rejects this synthetic pair. That is independent of
+        // the lifecycle under test: the ACTUAL command/body must retain custody while queued,
+        // after the RPC future is dropped, and in a completed but uncollected output.
+        for mode in 0..3 {
+            let lose_waiter = mode != 0;
+            let case = Case::new().await;
+            let work = case.row().work().unwrap();
+            let phase = work.phase().clone();
+            let mut incoming = case.frame(1, &case.bytes());
+            let physical = incoming.hold_position().unwrap();
+            let publication = Arc::new(PublicationCustody::new(
+                case.native
+                    .state
+                    .ui_session_commit
+                    .clone()
+                    .lock_owned()
+                    .await,
+                physical,
+                phase.copy(8 * 1024).unwrap(),
+            ));
+            let body = incoming
+                .result_body_with_publication(&phase, 0..16, Some(publication.clone()))
+                .unwrap();
+            let parked = park(&case.native.actor).await;
+            if mode == 2 {
+                // Stop is ahead of the result in the real mailbox but held at the SAME
+                // Actor barrier. Its receiver teardown must drop the queued body's guards.
+                case.native.actor.shutdown().await;
+            }
+            let mut rpc = Box::pin(case.native.actor.submit_voice_confirmation_result(
+                case.selected.grant().unwrap(),
+                case.action.clone(),
+                &body,
+                [7; 32],
+            ));
+            assert!(
+                poll_once(rpc.as_mut()).await.is_pending(),
+                "actual command enqueued behind barrier"
+            );
+            drop((incoming, publication, work));
+            assert!(case.native.state.ui_session_commit.try_lock().is_err());
+            assert!(case.route.session().header().is_err());
+            let mut idle = Box::pin(case.route.session().fixture_wait_physical_idle());
+            assert!(poll_once(idle.as_mut()).await.is_pending());
+            assert!(
+                phase.copy(8 * 1024).is_err(),
+                "queued body retains the task contribution"
+            );
+            if lose_waiter {
+                drop(rpc);
+                drop(body); // only the ACTUAL queued command now owns these guards
+                assert!(case.native.state.ui_session_commit.try_lock().is_err());
+                assert!(case.route.session().header().is_err());
+                assert!(poll_once(idle.as_mut()).await.is_pending());
+                drop(parked);
+                case.native.actor.member_count().await; // FIFO barrier after the queued turn
+            } else {
+                drop(parked);
+                let completed = rpc.await.unwrap();
+                assert!(
+                    completed.result().is_err(),
+                    "synthetic grant is never live authority"
+                );
+                drop(body);
+                assert!(case.native.state.ui_session_commit.try_lock().is_err());
+                assert!(case.route.session().header().is_err());
+                assert!(poll_once(idle.as_mut()).await.is_pending());
+                assert!(
+                    phase.copy(8 * 1024).is_err(),
+                    "uncollected output still pays custody"
+                );
+                drop(completed);
+            }
+            assert!(case.native.state.ui_session_commit.try_lock().is_ok());
+            assert_eq!(case.route.session().fixture_counts(), (false, 1, 1));
+            idle.await;
+            assert!(phase.copy(8 * 1024).is_ok());
+            case.retire();
+            case.native.close().await;
+        }
     }
 
     #[test]
@@ -738,7 +937,7 @@ mod tests {
         let pressure = pool
             .charge(
                 action.protected_binding().unwrap().scope.group,
-                256 * 1024 - original.0,
+                catcoms_sync::voice_v2::resources::GROUP_BYTES - original.0,
                 ResourceKind::Retained,
             )
             .unwrap();
@@ -824,7 +1023,11 @@ mod tests {
         let pool = Arc::new(Resources::default());
         let scope = Scope::for_group(b"native phase metadata", Some([3; 32]), 77);
         let pressure = pool
-            .charge(scope.group, 256 * 1024, ResourceKind::Retained)
+            .charge(
+                scope.group,
+                catcoms_sync::voice_v2::resources::GROUP_BYTES,
+                ResourceKind::Retained,
+            )
             .unwrap();
         let before = pool.counts();
         assert_eq!(

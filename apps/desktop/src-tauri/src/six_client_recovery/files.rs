@@ -24,7 +24,7 @@ async fn private_download_bridges_without_becoming_a_source_and_exports_after_so
 /// contracts. Test the actual native attachment on both sides rather than assuming a trait
 /// forwarding wrapper preserves private Download support.
 async fn bridged_saved_copy(private: bool) {
-    let mut scenario = Scenario::new(false);
+    let mut scenario = Scenario::new(false, isolate().await);
     scenario.admit_prefix_with_files(3, true).await;
     // A=1 and C=2 are forbidden at the actual libp2p behaviour, throughout admission and read.
     // B=0 is a server member, with no file or call UI opened and no ciphertext copy.
@@ -281,7 +281,7 @@ async fn active_private_download_recovers_when_b_returns_after_the_first_reconne
 /// invocation is still active. Reopening B must recover that same intent; a new Resume call
 /// would hide the exact production stranding bug this scenario is meant to exercise.
 async fn active_bridge_restart(private: bool, later_return: bool) {
-    let mut scenario = Scenario::new(false);
+    let mut scenario = Scenario::new(false, isolate().await);
     scenario.admit_prefix_with_files(3, true).await;
     // Consume the ordinary startup discovery pass before the restart. Depending on incidental
     // setup speed let the old test pass by borrowing its first tick; recovery must also work
@@ -506,7 +506,7 @@ async fn saved_pause(
     }
 }
 async fn interrupted_saved_bridge(private: bool) {
-    let mut scenario = Scenario::new(false);
+    let mut scenario = Scenario::new(false, isolate().await);
     scenario.admit_prefix_with_files(6, true).await;
     scenario.close(&[4, 5]).await;
     let bytes: Vec<_> = (0..150_000).map(|i| (i % 239) as u8).collect();

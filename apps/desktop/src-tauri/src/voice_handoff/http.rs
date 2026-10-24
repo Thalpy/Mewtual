@@ -1,4 +1,4 @@
-//! Borrowed HTTP intake for the disabled, single-flight encrypted handoff pilot. This parser
+//! Borrowed HTTP intake for the single-flight encrypted application handoff. This parser
 //! never lowercases/copies attacker-controlled names or constructs a header map. Its caller
 //! must own a paid header worker BEFORE allocating/filling the fixed scratch buffer.
 //! Parsing is not authentication: verify the admission MAC before allocating/decrypting body.

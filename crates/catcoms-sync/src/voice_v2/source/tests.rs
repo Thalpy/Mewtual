@@ -26,6 +26,61 @@ struct Fixture {
 }
 
 #[test]
+fn borrowed_native_packet_refuses_before_copy_and_exact_retry_keeps_original_source_budget() {
+    let f = Fixture::new(true);
+    let object = f.targeted(183, 32);
+    let activity = f.packet_activity(&object).unwrap();
+    let pool = f.runtime.resources();
+    let fill = pool
+        .charge(
+            f.context.scope.group,
+            super::super::resources::GROUP_BYTES - pool.counts().0,
+            ResourceKind::Retained,
+        )
+        .unwrap();
+    let full = pool.counts();
+    assert_eq!(
+        f.source
+            .admit_borrowed(&f.actor, &object, activity.clone(), f.room.clone()),
+        Err(VoiceError::Capacity)
+    );
+    assert_eq!(f.source.counts(), (0, 0, 0));
+    assert_eq!(pool.counts(), full);
+    drop(fill);
+    assert_eq!(
+        f.source
+            .admit_borrowed(&f.actor, &object, activity.clone(), f.room.clone()),
+        Ok(false)
+    );
+    let job = f.jobs(&[3]).pop().unwrap();
+    let fill = pool
+        .charge(
+            f.context.scope.group,
+            super::super::resources::GROUP_BYTES - pool.counts().0,
+            ResourceKind::Retained,
+        )
+        .unwrap();
+    let full = pool.counts();
+    for _ in 0..8 {
+        assert_eq!(
+            f.source
+                .admit_borrowed(&f.actor, &object, activity.clone(), f.room.clone()),
+            Ok(true)
+        );
+    }
+    assert_eq!(f.source.counts(), (1, 1, 1));
+    assert_eq!(pool.counts(), full);
+    f.lease.revoke();
+    assert_eq!(
+        f.source
+            .admit_borrowed(&f.actor, &object, activity, f.room.clone()),
+        Err(VoiceError::Unauthorized),
+        "native End fences cached retries before any success"
+    );
+    drop((job, fill));
+}
+
+#[test]
 fn exact_cached_source_retry_survives_forward_wall_correction_without_new_work() {
     let f = Fixture::new(true);
     let object = f.targeted(22, 32);
@@ -66,6 +121,164 @@ fn collection_preserves_actual_source_custody_until_lower_completion_after_lock(
     f.runtime.collect_expired();
     assert_eq!(f.source.counts(), (0, 0, 0));
     assert!(f.runtime.resources().counts().0 < after);
+}
+
+#[test]
+fn ended_native_activity_collects_without_expiry_but_never_refunds_a_late_lower_or_reuses_old_activity(
+) {
+    for collect_first in [false, true] {
+        let mut f = Fixture::new(true);
+        let object = f.targeted(177, 32);
+        let activity = f.packet_activity(&object).unwrap();
+        f.admit(object.clone()).unwrap();
+        let job = f.jobs(&[3]).pop().unwrap();
+        let late = job.keepalive();
+        f.lease.revoke();
+        assert_eq!(
+            f.source.complete(job.finish(None)).unwrap(),
+            SourceOutcome::Retired
+        );
+        if collect_first {
+            f.runtime.collect_expired();
+            assert_eq!(f.source.counts(), (1, 1, 1));
+        }
+        drop(late);
+        f.runtime.collect_expired();
+        assert_eq!(
+            f.clock.monotonic_ms(),
+            1000,
+            "no signed-expiry wait after permanent native End"
+        );
+        assert_eq!(f.source.counts(), (0, 0, 0));
+        assert_eq!(
+            f.source.admit(&f.actor, object, activity, f.room.clone()),
+            Err(VoiceError::Unauthorized)
+        );
+        // A real fresh LocalJoin/activity uses a different serialized incarnation. Native
+        // production activation issues its nonce; reusing an old incarnation is unsupported.
+        f.lease = f.actor.child_lease().unwrap();
+        f.join.replace(
+            LocalJoin::new(&f.context, key(12), f.lease.clone(), f.runtime.resources()).unwrap(),
+        );
+        assert!(!f.admit(f.targeted(178, 32)).unwrap());
+        assert_eq!(f.source.counts(), (1, 0, 0));
+    }
+}
+
+#[test]
+fn map_collection_does_not_claim_an_authority_only_retained_packet_has_drained() {
+    let f = Fixture::new(true);
+    f.admit(f.targeted(179, 32)).unwrap();
+    let job = f.jobs(&[3]).pop().unwrap();
+    let authority = job.authority(); // actual Packet owner, independently of active Flight
+    f.lease.revoke();
+    f.source.complete(job.finish(None)).unwrap();
+    let before = f.runtime.resources().counts();
+    assert_eq!(f.source.counts(), (0, 0, 0));
+    assert_eq!(
+        f.runtime.resources().counts(),
+        before,
+        "map removal cannot refund the authority's real packet"
+    );
+    assert!(!authority.authorized());
+    drop(authority);
+    assert!(f.runtime.resources().counts().0 < before.0);
+}
+
+#[test]
+fn retiring_a_packet_inside_a_live_call_preserves_original_source_attempt_history() {
+    let f = Fixture::new(true);
+    let object = f.targeted(180, 32);
+    f.admit(object.clone()).unwrap();
+    let job = f.jobs(&[3]).pop().unwrap();
+    f.join
+        .borrow()
+        .retire_outgoing(
+            object.id(),
+            &Authority {
+                context: &f.context,
+                lease: &f.lease,
+                member: &|_| true,
+            },
+        )
+        .unwrap();
+    assert!(f.lease.is_live());
+    assert_eq!(
+        f.source.complete(job.finish(None)).unwrap(),
+        SourceOutcome::Retired
+    );
+    for _ in 0..3 {
+        f.runtime.collect_expired();
+        assert_eq!(
+            f.source.counts(),
+            (1, 1, 0),
+            "pair/packet/chain completion is not native activity End"
+        );
+    }
+}
+
+#[test]
+fn unseen_helper_ack_row_pressure_refuses_before_any_source_attempt_and_retries_original_packet() {
+    let f = Fixture::new(true);
+    let object = f.targeted(181, 32);
+    f.admit(object.clone()).unwrap();
+    let pool = f.runtime.resources();
+    let pressure = pool
+        .charge(
+            f.context.scope.group,
+            crate::voice_v2::resources::GROUP_BYTES
+                - pool.group_counts(f.context.scope.group).unwrap().0,
+            ResourceKind::Retained,
+        )
+        .unwrap();
+    let before = pool.counts();
+    assert!(f.jobs(&[2]).is_empty());
+    assert_eq!(f.source.counts(), (1, 0, 0));
+    assert_eq!(pool.counts(), before);
+    drop(pressure);
+    assert!(f.admit(object).unwrap());
+    let job = f
+        .jobs(&[2])
+        .pop()
+        .expect("same original packet after real capacity returns");
+    assert_eq!(job.hop(), SourceHop::Helper(id(2)));
+    assert_eq!(f.source.counts(), (1, 1, 1));
+}
+
+#[test]
+fn isolated_helper_origin_slot_refusal_leaves_lower_capacity_available_and_attempt_unspent() {
+    let f = Fixture::new(true);
+    let object = f.targeted(182, 32);
+    f.admit(object.clone()).unwrap(); // one actual local issuer Origin row
+    let pool = f.runtime.resources();
+    let mut slots: Vec<_> = (0..63)
+        .map(|_| {
+            pool.charge(f.context.scope.group, 1, ResourceKind::Origin)
+                .unwrap()
+        })
+        .collect();
+    assert!(pool
+        .charge(f.context.scope.group, 1, ResourceKind::Origin)
+        .is_err());
+    let before = pool.counts();
+    // Only the prospective ACK responder's Origin position is exhausted: actual Lower
+    // bytes/Forward capacity are demonstrably available, so the refusal is unambiguous.
+    let lower_probe = pool
+        .charge(f.context.scope.group, 32 * 1024, ResourceKind::Forward)
+        .unwrap();
+    drop(lower_probe);
+    assert!(f.jobs(&[2]).is_empty());
+    assert_eq!(f.source.counts(), (1, 0, 0));
+    assert_eq!(pool.counts(), before);
+    drop(slots.pop()); // one actual unrelated Origin owner returns its position
+    assert!(f.admit(object.clone()).unwrap());
+    let job = f
+        .jobs(&[2])
+        .pop()
+        .expect("same source after real Origin position returns");
+    assert_eq!(job.object(), &object);
+    assert_eq!(job.hop(), SourceHop::Helper(id(2)));
+    assert_eq!(f.source.counts(), (1, 1, 1));
 }
 impl Fixture {
     fn new(indirect: bool) -> Self {
@@ -925,7 +1138,7 @@ fn maximum_offer_cache_and_successful_lower_custody_allow_maximum_answer_verific
             f.source.counts(),
             (1, 1, usize::from(delayed_lower_retirement))
         );
-        assert!(f.runtime.resources().counts().0 <= 256 * 1024);
+        assert!(f.runtime.resources().counts().0 <= crate::voice_v2::resources::GROUP_BYTES);
         // This is the current packet/verification composition, not an SDP engine/result or
         // crossed-Offer progress claim. Those owners must join a prepaid exchange before V2.
         drop((incoming, ticket, actual_verifier, actual_lower));
@@ -939,7 +1152,10 @@ async fn closing_sdp_exchange_wakes_actual_source_cancellation_without_refunding
         .unwrap();
     let job = f.jobs(&[2]).pop().unwrap();
     let actual_lower = job.keepalive();
-    let owner = job.exchange().unwrap();
+    let owner = match job.progress() {
+        SourceProgress::Exchange(owner) => owner.clone(),
+        _ => panic!("actual SDP packet must retain its original Exchange"),
+    };
     let authority = job.authority();
     let mut revoked = Box::pin(authority.revoked());
     assert!(futures::poll!(&mut revoked).is_pending());
@@ -976,7 +1192,10 @@ fn maximum_sdp_reply_and_declared_engine_result_fit_with_two_lowers_under_unrela
     let answer = f.maximum_answer(&offer);
     f.admit(offer).unwrap();
     let first = f.jobs(&[2, 4]).pop().unwrap();
-    let owner = first.exchange().unwrap();
+    let owner = match first.progress() {
+        SourceProgress::Exchange(owner) => owner.clone(),
+        _ => panic!("actual SDP packet must retain its original Exchange"),
+    };
     let lower1 = first.keepalive();
     drop(first);
     f.clock.advance_ms(HEDGE_MS);
@@ -997,7 +1216,7 @@ fn maximum_sdp_reply_and_declared_engine_result_fit_with_two_lowers_under_unrela
     let ordinary = resources
         .charge(
             group,
-            256 * 1024 - resources.counts().0,
+            crate::voice_v2::resources::GROUP_BYTES - resources.counts().0,
             ResourceKind::Retained,
         )
         .unwrap();
@@ -1065,7 +1284,10 @@ fn maximum_sdp_reply_and_declared_engine_result_fit_with_two_lowers_under_unrela
         .charge(&resources, group, 61_624, ResourceKind::Crypto)
         .unwrap();
     let result = owner.retain_result(&vec![b'a'; MAX_SDP_PLAINTEXT]).unwrap();
-    assert_eq!(resources.counts(), (256 * 1024, 4));
+    assert_eq!(
+        resources.counts(),
+        (crate::voice_v2::resources::GROUP_BYTES, 4)
+    );
     f.clock.advance_ms(HEDGE_MS);
     assert!(f.jobs(&[2, 4]).is_empty());
     assert_eq!(
@@ -1169,6 +1391,13 @@ fn source_max_ice_payload_retained_b_capacity_refusal_does_not_burn_d_attempt() 
     let packet = f.targeted(24, EncryptedKind::Ice.max_plaintext() + 16);
     // The real native outgoing ledger reservation remains charged alongside SourceLedger.
     f.admit(packet).unwrap();
+    // Isolate Lower pressure: both candidate responders already own their ordinary ACK rows.
+    // The separate unseen-helper regression covers refusing that setup without an attempt.
+    f.actor
+        .with_limits(|limits| {
+            limits.prepare_exchange_members(&[id(2), id(4)], &f.runtime.resources(), 1000)
+        })
+        .unwrap();
     let first = f.jobs(&[2, 4]).pop().unwrap();
     let lower = first.keepalive();
     drop(first);
@@ -1180,7 +1409,7 @@ fn source_max_ice_payload_retained_b_capacity_refusal_does_not_burn_d_attempt() 
         .resources()
         .charge(
             f.context.scope.group,
-            256 * 1024 - current - 10,
+            crate::voice_v2::resources::GROUP_BYTES - current - 10,
             ResourceKind::Retained,
         )
         .unwrap();
@@ -1205,7 +1434,7 @@ fn source_refused_capacity_spends_no_original_quota_and_room_revocation_stops_ac
         .resources()
         .charge(
             f.context.scope.group,
-            256 * 1024 - current - 10,
+            crate::voice_v2::resources::GROUP_BYTES - current - 10,
             ResourceKind::Retained,
         )
         .unwrap();
@@ -1235,7 +1464,7 @@ fn source_refused_capacity_spends_no_original_quota_and_room_revocation_stops_ac
     assert!(f.runtime.resources().counts().0 < before.0);
 }
 #[test]
-fn source_actor_replacement_keeps_protected_packet_and_attempt_count() {
+fn source_actor_replacement_keeps_actual_lower_until_ended_activity_drains() {
     let f = Fixture::new(true);
     f.admit(f.targeted(25, 48)).unwrap();
     let job = f.jobs(&[2, 4]).pop().unwrap();
@@ -1257,13 +1486,21 @@ fn source_actor_replacement_keeps_protected_packet_and_attempt_count() {
     .unwrap();
     assert!(Arc::ptr_eq(&next.source().unwrap(), &f.source));
     assert_eq!(f.source.counts(), (1, 1, 1));
+    assert!(
+        !f.lease.is_live(),
+        "replacement permanently ended this original native activity"
+    );
     assert!(f
         .source
         .take_ready(&next, &routes(&[2, 4]))
         .unwrap()
         .is_empty());
     drop(lower);
-    assert_eq!(f.source.counts(), (1, 1, 0));
+    assert_eq!(
+        f.source.counts(),
+        (0, 0, 0),
+        "ended idle history is collected without expiry wait"
+    );
 }
 
 #[test]

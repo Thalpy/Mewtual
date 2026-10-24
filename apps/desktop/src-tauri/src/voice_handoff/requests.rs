@@ -9,6 +9,87 @@ use catcoms_sync::voice_v2::crypto_actions::{CryptoOutcome, CryptoResultReceipt}
 use catcoms_sync::voice_v2::presence::PairSelector;
 use catcoms_sync::voice_v2::VoiceError;
 use sha2::{Digest, Sha256};
+pub(super) mod key_session;
+pub(super) mod sdk;
+pub(super) mod sdp;
+pub(super) mod transition;
+
+/// Header-only necessary conditions for the closed v1 parent / v2 confirmation grammars.
+/// Call only AFTER authenticating the immutable Header, BEFORE allocating Data or debiting
+/// either directional counter. These are not sufficient conditions: AEAD and the exact
+/// versioned decoder still validate every field and original native purpose afterward.
+///
+/// Prefix sizes are the v1 selector (105 bytes), or selector + parent + purpose tag with
+/// Start(None), Incoming(role), Respond(row), or Start(predecessor). The encrypted version
+/// cannot be known here, so lengths are the union, never a decoder fallback. Keep this table
+/// pinned to both shared native/browser vector sets when introducing a new grammar.
+pub(super) fn wire_shape(
+    operation: Operation,
+    kind: super::channel::BodyKind,
+    logical: [u8; 16],
+    cipher_bytes: usize,
+    session: [u8; 16],
+) -> bool {
+    use super::channel::BodyKind;
+    const PREFIXES: [usize; 5] = [105, 122, 123, 138, 154];
+    let Some(plain_bytes) = cipher_bytes.checked_sub(16) else {
+        return false;
+    };
+    if operation == Operation::Status {
+        return kind == BodyKind::Control && logical == session && plain_bytes == 49;
+    }
+    if operation == Operation::BeginDerive {
+        return kind == BodyKind::Control
+            && logical == [0; 16]
+            && PREFIXES.iter().any(|prefix| plain_bytes == prefix + 1);
+    }
+    if super::ledger::RowId::from_logical(logical).is_err()
+        || kind
+            != if operation == Operation::Result {
+                BodyKind::Data
+            } else {
+                BodyKind::Control
+            }
+    {
+        return false;
+    }
+    if operation == Operation::SdkCustody {
+        return plain_bytes == sdk::ADMIT_BYTES || plain_bytes == sdk::RELEASE_BYTES;
+    }
+    if operation == Operation::SdpPhase {
+        return plain_bytes == sdp::PREPARE_BYTES || plain_bytes == sdp::RELEASE_BYTES;
+    }
+    if operation == Operation::KeySession {
+        return plain_bytes == key_session::ADOPT_BYTES
+            || plain_bytes == key_session::RELEASE_BYTES;
+    }
+    if operation == Operation::ChainTransition {
+        return plain_bytes == transition::CLAIM_BYTES || plain_bytes == transition::RELEASE_BYTES;
+    }
+    if operation == Operation::FinalAck {
+        return plain_bytes == 105 + 32; // Only the original v1 parent owns final ACK.
+    }
+    PREFIXES.iter().any(|prefix| {
+        let Some(suffix) = plain_bytes.checked_sub(*prefix) else {
+            return false;
+        };
+        match operation {
+            Operation::Input => suffix == 0,
+            Operation::Admit => suffix == 48 + 4,
+            Operation::Result => (48 + 32 + 2..=48 + 32 + 2 + 528).contains(&suffix),
+            Operation::ReceiptAck => suffix == 48 + 32,
+            Operation::Settle => suffix == 48,
+            Operation::ClosePhase => suffix == 1,
+            Operation::BeginDerive
+            | Operation::FinalAck
+            | Operation::Status
+            | Operation::ChainTransition
+            | Operation::KeySession
+            | Operation::SdpPhase
+            | Operation::SdkCustody => false,
+        }
+    })
+}
 
 /// Exact identity of the original native action, in addition to full purpose and RowId.
 /// A copied identity is a lookup hint only, never a fresh engine or publication permit.
@@ -44,6 +125,9 @@ pub(super) enum Kind<'a> {
     ClosePhase {
         mode: CloseMode,
     },
+    /// Separate whole-plan intent after ordinary action Returns. This cannot relabel an
+    /// earlier Phase closure, and requires the original native UI-commit admission.
+    ClosePlan,
     FinalAck {
         proof: [u8; 32],
     },
@@ -68,59 +152,76 @@ impl<'a> Request<'a> {
             key_ref: cursor.take()?,
             epoch: u64::from_be_bytes(cursor.take()?),
         };
-        let kind = match operation {
-            Operation::BeginDerive => Kind::Begin {
-                retry: match cursor.take::<1>()? {
-                    [0] => false,
-                    [1] => true,
-                    _ => return Err(VoiceError::Malformed),
-                },
-            },
-            Operation::Input => Kind::Input,
-            Operation::Admit => Kind::Admit {
-                action: cursor.action()?,
-                engine_bytes: u32::from_be_bytes(cursor.take()?),
-            },
-            Operation::Result => {
-                let action = cursor.action()?;
-                let tag = cursor.take()?;
-                let length = usize::from(u16::from_be_bytes(cursor.take()?));
-                if length > 528 || cursor.0.len() != length {
-                    return Err(VoiceError::Bounds);
-                }
-                let output = cursor.0;
-                cursor.0 = &[];
-                Kind::Result {
-                    action,
-                    tag,
-                    output,
-                }
-            }
-            Operation::ReceiptAck => Kind::ReceiptAck {
-                action: cursor.action()?,
-                digest: cursor.take()?,
-            },
-            Operation::Settle => Kind::Settle {
-                action: cursor.action()?,
-            },
-            Operation::ClosePhase => Kind::ClosePhase {
-                mode: match cursor.take::<1>()? {
-                    [0] => CloseMode::Return,
-                    [1] => CloseMode::Retire,
-                    _ => return Err(VoiceError::Malformed),
-                },
-            },
-            Operation::FinalAck => Kind::FinalAck {
-                proof: cursor.take()?,
-            },
-            Operation::Status => return Err(VoiceError::Malformed),
-        };
-        if !cursor.0.is_empty() {
-            return Err(VoiceError::Malformed);
-        }
+        let kind = decode_kind(operation, cursor.0)?;
         Ok(Self { selector, kind })
     }
 }
+/// Shared closed operation suffix. The v2 child grammar owns its separate prefix/type;
+/// reusing this borrowing parser never constructs a v1 body or enlarges v1 Request.
+fn decode_kind(operation: Operation, bytes: &[u8]) -> Result<Kind<'_>, VoiceError> {
+    let mut cursor = Cursor(bytes);
+    let kind = match operation {
+        Operation::BeginDerive => Kind::Begin {
+            retry: match cursor.take::<1>()? {
+                [0] => false,
+                [1] => true,
+                _ => return Err(VoiceError::Malformed),
+            },
+        },
+        Operation::Input => Kind::Input,
+        Operation::Admit => Kind::Admit {
+            action: cursor.action()?,
+            engine_bytes: u32::from_be_bytes(cursor.take()?),
+        },
+        Operation::Result => {
+            let action = cursor.action()?;
+            let tag = cursor.take()?;
+            let length = usize::from(u16::from_be_bytes(cursor.take()?));
+            if length > 528 || cursor.0.len() != length {
+                return Err(VoiceError::Bounds);
+            }
+            let output = cursor.0;
+            cursor.0 = &[];
+            Kind::Result {
+                action,
+                tag,
+                output,
+            }
+        }
+        Operation::ReceiptAck => Kind::ReceiptAck {
+            action: cursor.action()?,
+            digest: cursor.take()?,
+        },
+        Operation::Settle => Kind::Settle {
+            action: cursor.action()?,
+        },
+        Operation::ClosePhase => match cursor.take::<1>()? {
+            [0] => Kind::ClosePhase {
+                mode: CloseMode::Return,
+            },
+            [1] => Kind::ClosePhase {
+                mode: CloseMode::Retire,
+            },
+            [2] => Kind::ClosePlan,
+            _ => return Err(VoiceError::Malformed),
+        },
+        Operation::FinalAck => Kind::FinalAck {
+            proof: cursor.take()?,
+        },
+        Operation::Status
+        | Operation::ChainTransition
+        | Operation::KeySession
+        | Operation::SdpPhase
+        | Operation::SdkCustody => return Err(VoiceError::Malformed),
+    };
+    if !cursor.0.is_empty() {
+        return Err(VoiceError::Malformed);
+    }
+    Ok(kind)
+}
+
+pub(super) mod confirmation;
+
 struct Cursor<'a>(&'a [u8]);
 impl Cursor<'_> {
     fn take<const N: usize>(&mut self) -> Result<[u8; N], VoiceError> {

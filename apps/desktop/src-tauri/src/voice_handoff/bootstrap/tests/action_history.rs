@@ -8,6 +8,74 @@ use crate::voice_handoff::ledger::{Begin as ActionBegin, Ledger, Purpose, RowId}
 use catcoms_sync::voice_v2::presence::PairSelector;
 use catcoms_sync::voice_v2::VoiceError;
 
+#[test]
+fn collected_child_history_pins_its_original_parent_until_actual_last_handle_collection() {
+    use crate::voice_handoff::{custody::CloseMode, ledger::ConfirmationPurpose};
+    let (mut coordinator, selected, selector) = selection();
+    let ledger = Arc::new(Ledger::default());
+    let registry = Registry::default();
+    let (output, route) = installed(&registry, selected.clone());
+    let ActionBegin::Factory(registration) = ledger
+        .begin(selected.clone(), Purpose::Derive(selector))
+        .unwrap()
+    else {
+        panic!("original parent factory")
+    };
+    let (join, action, pair) = actual_action(&coordinator, &selected);
+    let parent_id = registration
+        .attach(action.clone(), pair, 16 * 1024)
+        .unwrap();
+    let parent = ledger
+        .resolve(&selected, Purpose::Derive(selector), parent_id)
+        .unwrap();
+    action.settle_engine();
+    parent
+        .close_phase(route.session().identity(), CloseMode::Return)
+        .unwrap();
+    assert!(parent.try_compact().unwrap());
+    // No provider ran: the child is deliberately uncertain local history, not a claim of
+    // successful protocol confirmation. Its real strong parent edge is what this test pins.
+    let request = ConfirmationPurpose::Start(None);
+    let purpose = Purpose::Confirmation {
+        parent: parent_id,
+        request,
+    };
+    let (ActionBegin::Factory(registration), _) = ledger
+        .begin_child(selected.clone(), &parent, request)
+        .unwrap()
+    else {
+        panic!("original child factory")
+    };
+    let child_id = registration.id();
+    registration.mark_handoff().unwrap();
+    drop(registration);
+    let child = ledger.resolve(&selected, purpose, child_id).unwrap();
+    child.close_pending().unwrap();
+    coordinator.end(selected.id());
+    drop((join, action));
+    assert!(parent.retire_plan().unwrap());
+    retire(&registry, &selected);
+    drop((output, route, parent));
+    registry.collect_retired(&ledger); // Actual registry proof; no manufactured GC flags.
+    assert!(ledger.lookup_original(&selected, purpose).is_some());
+    assert!(
+        ledger
+            .lookup_original(&selected, Purpose::Derive(selector))
+            .is_some(),
+        "a held child must retain its same original parent after physical channel collection"
+    );
+    drop(child);
+    registry.collect_retired(&ledger);
+    assert!(ledger.lookup_original(&selected, purpose).is_none());
+    // Child destruction occurs outside Index; its parent edge was still real during that
+    // pass. A subsequent bounded pass can now collect the original parent without a cycle.
+    registry.collect_retired(&ledger);
+    assert!(ledger
+        .lookup_original(&selected, Purpose::Derive(selector))
+        .is_none());
+    assert!(ledger.resolve(&selected, purpose, child_id).is_err());
+}
+
 #[tokio::test]
 async fn unacknowledged_final_gc_requires_matching_physical_identity_and_late_metadata_drainage() {
     use crate::voice_handoff::custody::CloseMode;
@@ -180,7 +248,7 @@ pub(in crate::voice_handoff) fn installed(
     (output, route)
 }
 
-fn retire(registry: &Registry, selected: &SelectedHandoffOwner) {
+pub(in crate::voice_handoff) fn retire(registry: &Registry, selected: &SelectedHandoffOwner) {
     let row = registry
         .close_row(selected.id(), selected.executor(), None)
         .unwrap();
@@ -218,6 +286,9 @@ async fn drained(
     phase.close();
     drop(work);
     assert!(row.wait_compacted().await.unwrap().drained);
+    // This helper promises a fully collectable plan. Ordinary Return alone no longer
+    // establishes that: retire the actual original plan through its retained native owner.
+    assert!(row.retire_plan().unwrap());
     (id, phase, join)
 }
 
@@ -375,6 +446,11 @@ async fn witness_before_ack_settlement_and_phase_drain_remains_pending_until_act
     assert!(!row.status().unwrap().drained);
     drop(buffer);
     assert!(row.wait_compacted().await.unwrap().drained);
+    assert!(
+        !ledger.channel_may_close(&selected),
+        "local Return is not the Root last-owner witness"
+    );
+    assert!(row.retire_plan().unwrap());
     registry.collect_retired(&ledger);
     assert!(
         row.reconcile().unwrap().drained,
@@ -471,8 +547,27 @@ async fn both_explicit_close_variants_preserve_control_while_original_factory_is
             settle_setup(&f.state, selected.id(), selected.executor()).await
         };
         assert!(matches!(result, Err(Refused::Capacity)));
-        assert!(route.require_open().is_ok());
-        assert_eq!(route.snapshot(), [1, 1, 1]);
+        assert!(
+            route.require_open().is_err(),
+            "close-first fences new effects even on Capacity"
+        );
+        assert!(!route.native_ready());
+        assert!(f.state.voice_channels.require_cleanup_route(&route).is_ok());
+        assert_eq!(route.snapshot(), [1, 2, 1]);
+        assert!(
+            matches!(
+                ensure(
+                    &f.state,
+                    selected.id(),
+                    selected.executor(),
+                    &mut Rng::new()
+                )
+                .await
+                .unwrap(),
+                Status::Closed { .. }
+            ),
+            "setup retry cannot revive the original producer"
+        );
         assert_eq!(selected.resources().counts(), counts);
         drop(registration); // demonstrably unstarted: no actor publication ever occurred
         collect_channel(&f.state, selected.id(), selected.executor())
@@ -539,8 +634,9 @@ async fn both_explicit_close_variants_keep_control_until_compacted_final_root_pr
                 settle_setup(&f.state, selected.id(), selected.executor()).await
             };
             assert!(matches!(result, Err(Refused::Capacity)));
-            assert!(route.require_open().is_ok());
-            assert_eq!(route.snapshot(), original_slots);
+            assert!(route.require_open().is_err());
+            assert!(f.state.voice_channels.require_cleanup_route(&route).is_ok());
+            assert_eq!(route.snapshot(), [original_slots[0], 2, original_slots[2]]);
             assert_eq!(selected.resources().counts(), counts);
             assert_eq!(
                 row.confirmation_status().unwrap(),
@@ -562,7 +658,8 @@ async fn both_explicit_close_variants_keep_control_until_compacted_final_root_pr
                 matches!(result, Err(Refused::Capacity)),
                 "unACKed final stage {stage}"
             );
-            assert!(route.require_open().is_ok());
+            assert!(route.require_open().is_err());
+            assert!(f.state.voice_channels.require_cleanup_route(&route).is_ok());
             let issued = row.issue_final(route.session().identity()).unwrap();
             assert!(issued.proof.is_some() && !issued.acknowledged);
         }
@@ -606,8 +703,12 @@ async fn action_and_channel_collection_need_no_fresh_capacity_under_full_pool_pr
             break;
         }
         pressure.push(
-            pool.charge([value; 32], left.min(256 * 1024), ResourceKind::Retained)
-                .unwrap(),
+            pool.charge(
+                [value; 32],
+                left.min(catcoms_sync::voice_v2::resources::GROUP_BYTES),
+                ResourceKind::Retained,
+            )
+            .unwrap(),
         );
     }
     assert_eq!(pool.counts().0, 2 * 1024 * 1024);

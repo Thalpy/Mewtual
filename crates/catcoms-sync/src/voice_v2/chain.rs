@@ -9,21 +9,42 @@
 //! progress occupied; an idle old handle cannot. Neither owner may store an action strongly.
 
 use super::crypto_actions::{slots, CryptoAction, Key};
-use super::resources::{ByteBudget, Credit, Reservation, ResourceKind, Resources, WorkLane};
+use super::resources::{
+    ByteBudget, Credit, GroupForwardLanes, Reservation, ResourceKind, Resources, WorkLane,
+};
 use super::{CallLease, DeviceId, Nonce, Scope, VoiceError};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, Weak};
 
 pub(super) const ROW_BYTES: usize = 1536;
+// LOW Ready uses no action position. Its plain history fee also covers a conservative
+// complete shared-map node allowance, including internal edges. Two unused byte rows
+// remain after ten confirmation rows; the two SDP slots get record bytes from Exchange.
+pub(in crate::voice_v2) const LOW_READY_RECEIPT_BYTES: usize = ROW_BYTES + 64;
 const ROWS: usize = 12;
 const NO_ROW: u8 = u8::MAX;
 mod admission;
 mod derivation;
+mod established;
+/// Separately prepaid native SDP storage; no SDK or protocol permission by itself.
+pub mod sdp_handoff;
+pub use established::EstablishedKeyCustody;
+mod lifecycle;
 mod outgoing;
+mod ready;
 mod start;
+mod transfer;
+mod transition;
 pub(crate) use admission::ConfirmationAdmission;
 pub(super) use admission::ConfirmationConsent;
+pub use lifecycle::PlanRetirement;
+pub(in crate::voice_v2) use lifecycle::SuccessorCustody;
 pub(in crate::voice_v2) use start::{StartAdmission, StartCandidate};
+pub(in crate::voice_v2) use transfer::{OriginalPlanObservation, SuccessorProof, TransferredParts};
+pub use transfer::{PreparedSdpCapacity, TransferredSdpCapacity};
+pub(in crate::voice_v2) use transition::AWAIT_READY_MS;
+pub use transition::{ConfirmationCustody, FinishEvidence};
+pub(in crate::voice_v2) use transition::{FinishIdentity, PreparedFinishWindow};
 // Confirmation-only envelope. Stacking this on the existing SDP reserve is not whole-chain
 // readiness; the supported chain still needs a measured, explicit phase transfer.
 const VARIABLE_BYTES: usize = 96 * 1024;
@@ -74,15 +95,25 @@ impl Binding {
 // owner too. No reference points from this owner back into Workflow/control/actions.
 pub(super) struct PlanBinding {
     value: Binding,
+    transition: transition::FinishWindow,
     // Original fixed history already owns this paid allocation without owning Workflow.
     // Only Workflow's LAST field publisher can establish variable-capacity retirement.
     workflow_drained: AtomicBool,
+    // Distinct from old-Workflow retirement: a prepared/ticket/Exchange can survive it.
+    successor_closed: AtomicBool,
+    successor_busy: AtomicBool,
+    // Set only by exact authenticated LOW Ready publication. Local Finish/ACK/Established
+    // never imply remote readiness. This stops old Source work without closing Await.
+    low_ready: AtomicBool,
     _metadata: Credit,
 }
 impl PlanBinding {
+    fn live(&self) -> bool {
+        self.value.live() && self.transition.is_live()
+    }
     // The original fixed payment already retains this exact pool. Borrow it rather than
     // adding duplicate pool owners to HistoryPlan and Workflow inside the 2KiB allowance.
-    fn resources(&self) -> &Arc<Resources> {
+    pub(super) fn resources(&self) -> &Arc<Resources> {
         self._metadata.resources()
     }
 }
@@ -144,9 +175,6 @@ pub struct Workflow {
     live: CallLease,
     control: Weak<PreparedChain>,
     reserve: Arc<Reservation>,
-    crypto: Arc<WorkLane>,
-    lowers: [Arc<WorkLane>; 2],
-    packets: super::packets::ConfirmationCapacity,
     state: Mutex<WorkflowState>,
     // MUST remain last. Arc's weak strong_count reaches0 BEFORE Drop/field destruction;
     // neither that count nor Workflow::close proves its actual capacity fields returned.
@@ -186,11 +214,60 @@ impl ConfirmationRetirement {
     }
 }
 redacted_debug!(ConfirmationRetirement);
+
+/// Native-only authority to close one ORIGINAL confirmation plan between handoff phases.
+/// Unlike a HandoffLoan this owns no variable capacity, input or engine. In particular, an
+/// ordinary loan Return followed by End must not leave native cleanup dependent on a future
+/// child action being published. Capture this capability before returning the first loan.
+///
+/// The weak control allocation remains covered by the SAME fixed PlanBinding payment, which
+/// outlives it by field order. No handshake lookup, current grant or replacement plan is used.
+pub struct ConfirmationControl {
+    control: Weak<PreparedChain>,
+    binding: Arc<PlanBinding>,
+}
+redacted_debug!(ConfirmationControl);
+impl ConfirmationControl {
+    /// Observe only this plan's actual variable-capacity retirement. This samples no Clock,
+    /// takes no lock and grants no current authority. Weak control loss alone never sets it.
+    pub fn is_drained(&self) -> bool {
+        self.binding.workflow_drained.load(Ordering::Acquire)
+    }
+    /// Permanently close the exact captured plan and retain its original last-field observer.
+    /// Call outside Engine/Group/Policy/native registry locks; closing retires unstarted
+    /// actions. This proves closure only: actual input/lower/SDK owners must still drain.
+    /// Browser keys and RTC readiness are separate and this grants no SDP authority.
+    pub fn retire(self) -> ConfirmationRetirement {
+        let retirement = ConfirmationRetirement {
+            binding: self.binding.clone(),
+        };
+        if let Some(control) = self.control.upgrade() {
+            control.close();
+        }
+        // If the exact control has already reached strong-zero, PreparedChain::Drop closes
+        // it. Do not infer completion from weak-zero: the SAME Workflow publisher below may
+        // still be pending, and the returned observer remains false until it actually runs.
+        drop(self);
+        retirement
+    }
+}
 struct WorkflowState {
     closed: bool,
+    // Closing rights move with the lane. Actual old packet rows may occupy every original
+    // claim; returning them after extraction must feed the SAME successor reservation.
+    packets: Option<super::packets::ConfirmationCapacity>,
+    // Taken affinely after freezing this phase. Old close/Drop may retire its reserve
+    // and Lower custody, but must never close a lane already owned by the SDP transition.
+    crypto: Option<Arc<WorkLane>>,
+    // Close takes ONLY this phase's handle. Actual Lower credits and other live phases
+    // retain the same group owner; idle inputs/history must not pin process work slots.
+    lowers: Option<Arc<GroupForwardLanes>>,
     // One IPC owner for the entire chain, including distinct rows. A lost renderer reply may
     // keep this occupied while the original physical work/result/cleanup still drains.
     handoff_busy: bool,
+    // At most one affine successor can retain this plan's prepaid continuation claims.
+    // Failed/abandoned preparation clears this latch; transfer never reopens the old phase.
+    sdp_preparing: bool,
 }
 
 /// Affine capacity for application-owned native/browser handoff copies. The trusted adapter
@@ -287,6 +364,12 @@ pub(super) struct RowIssue {
     unpublished: bool,
 }
 impl RowIssue {
+    /// Native publication carries this original role position into the immutable action.
+    /// It is not a renderer-provided slot and remains meaningful after payload compaction.
+    pub(super) fn row_index(&self) -> u8 {
+        u8::try_from(self.row).expect("protected history has twelve fixed rows")
+    }
+
     pub(super) fn validate(
         &self,
         resources: &Arc<Resources>,
@@ -424,7 +507,11 @@ impl PreparedChain {
         let binding = Arc::new(PlanBinding {
             _metadata: metadata,
             value: binding,
+            transition: transition::FinishWindow::default(),
             workflow_drained: AtomicBool::new(false),
+            successor_closed: AtomicBool::new(false),
+            successor_busy: AtomicBool::new(false),
+            low_ready: AtomicBool::new(false),
         });
         let history = Arc::new(HistoryPlan {
             binding: binding.clone(),
@@ -447,10 +534,7 @@ impl PreparedChain {
         });
         let reserve = resources.reserve(binding.scope.group, VARIABLE_BYTES)?;
         let crypto = resources.reserve_crypto_lane(binding.scope.group)?;
-        let lowers = [
-            resources.reserve_forward_lane(binding.scope.group)?,
-            resources.reserve_forward_lane(binding.scope.group)?,
-        ];
+        let lowers = resources.group_forward_lanes(binding.scope.group)?;
         let chain = Arc::new_cyclic(|control| Self {
             binding: binding.clone(),
             live: live.clone(),
@@ -463,12 +547,13 @@ impl PreparedChain {
                     live,
                     control: control.clone(),
                     reserve,
-                    crypto,
-                    lowers,
-                    packets,
                     state: Mutex::new(WorkflowState {
                         closed: false,
+                        packets: Some(packets),
+                        crypto: Some(crypto),
+                        lowers: Some(lowers),
                         handoff_busy: false,
+                        sdp_preparing: false,
                     }),
                     _retirement: Some(RetirementPublisher(binding)),
                 })),
@@ -488,6 +573,9 @@ impl PreparedChain {
     /// End/expiry closes pending effects and returns only unused capacity. Existing engines
     /// and input readers remain charged through actual settlement/last drop, even after End.
     pub fn close(&self) {
+        // Claim irreversible closure BEFORE waiting for Control. A Finish publication can
+        // otherwise arm a new window after an expiry collector already decided to close it.
+        self.binding.transition.close();
         let (workflow, actions) = {
             let mut control = self.control.lock().unwrap_or_else(|e| e.into_inner());
             if control.closed {
@@ -566,6 +654,19 @@ impl Drop for PreparedChain {
     }
 }
 impl Workflow {
+    pub(crate) fn uses_resources(&self, resources: &Arc<Resources>, group: [u8; 32]) -> bool {
+        Arc::ptr_eq(resources, self.binding.resources()) && group == self.binding.scope.group
+    }
+    pub(crate) fn is_live(&self) -> bool {
+        let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        !state.closed && self.live.is_live() && self.binding.live()
+    }
+    pub(super) fn confirmation_control(&self) -> ConfirmationControl {
+        ConfirmationControl {
+            control: self.control.clone(),
+            binding: self.binding.clone(),
+        }
+    }
     pub(crate) fn charge(
         self: &Arc<Self>,
         resources: &Arc<Resources>,
@@ -582,7 +683,7 @@ impl Workflow {
         if state.closed || !self.live.is_live() || !self.binding.live() {
             return Err(VoiceError::Unauthorized);
         }
-        let credit = self.charge_locked(resources, group, bytes, kind)?;
+        let credit = self.charge_locked(&state, resources, group, bytes, kind)?;
         drop(state);
         Ok(credit.with_custody(self.clone()))
     }
@@ -590,28 +691,26 @@ impl Workflow {
     // charge() recursively while holding that fence (notably from handoff admission).
     fn charge_locked(
         &self,
+        state: &WorkflowState,
         resources: &Arc<Resources>,
         group: [u8; 32],
         bytes: usize,
         kind: ResourceKind,
     ) -> Result<Credit, VoiceError> {
         let credit = if kind == ResourceKind::Forward {
-            let mut result = Err(VoiceError::Capacity);
-            for lane in &self.lowers {
-                result = ByteBudget::ReservedLane {
-                    reservation: self.reserve.clone(),
-                    lane: lane.clone(),
-                }
-                .charge(resources, group, bytes, kind);
-                if !matches!(result, Err(VoiceError::Capacity)) {
-                    break;
-                }
-            }
-            result?
+            state
+                .lowers
+                .as_ref()
+                .ok_or(VoiceError::Unauthorized)?
+                .charge(resources, group, &self.reserve, bytes)?
         } else if matches!(kind, ResourceKind::Crypto | ResourceKind::Retained) {
             ByteBudget::ReservedLane {
                 reservation: self.reserve.clone(),
-                lane: self.crypto.clone(),
+                lane: state
+                    .crypto
+                    .as_ref()
+                    .ok_or(VoiceError::Unauthorized)?
+                    .clone(),
             }
             .charge(resources, group, bytes, kind)?
         } else {
@@ -634,6 +733,7 @@ impl Workflow {
             return Err(VoiceError::Capacity);
         }
         let credit = self.charge_locked(
+            &state,
             self.binding.resources(),
             self.binding.scope.group,
             bytes,
@@ -648,27 +748,43 @@ impl Workflow {
         })
     }
     pub(crate) fn collect_expired(&self, mono: u64) {
-        if mono >= self.binding.deadline || !self.binding.live() || !self.live.is_live() {
-            if let Some(control) = self.control.upgrade() {
-                control.close();
-            } else {
-                self.close();
-            }
+        if let Some(control) = self.control.upgrade() {
+            control.collect_expired(mono);
+        } else {
+            self.binding.transition.close();
+            self.close();
         }
     }
     fn close(&self) {
-        self.state.lock().unwrap_or_else(|e| e.into_inner()).closed = true;
+        let (lowers, crypto, packets) = {
+            let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+            state.closed = true;
+            (
+                state.lowers.take(),
+                state.crypto.take(),
+                state.packets.take(),
+            )
+        };
         self.reserve.close();
-        self.crypto.close();
-        for lane in &self.lowers {
-            lane.close();
+        if let Some(crypto) = crypto {
+            crypto.close();
         }
-        self.packets.close();
+        // Outgoing lanes belong to the original group, shared with other native phases.
+        // Release this phase's handle outside its state fence. A real Lower or another live
+        // phase retains the shared owner, while closed idle inputs no longer pin slots.
+        drop(lowers);
+        if let Some(packets) = packets {
+            packets.close();
+        }
     }
 }
 impl Drop for Workflow {
     fn drop(&mut self) {
+        let original = self as *const Self;
         self.close();
+        self.binding
+            .resources()
+            .unregister_workflow(self.binding.scope.group, original);
     }
 }
 

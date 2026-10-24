@@ -32,6 +32,15 @@ The dated evidence in the acceptance ledger takes precedence over older coverage
 
 ## Quiet receipts and sole-owner responsiveness (19 October)
 
+24 October reconnect continuation: event, cadence and shutdown captures now serialize their
+claims observation, latest sealed-route merge and live-route command enqueue per numeric
+server ID. They use a dedicated lock after snapshot persistence, then recheck local policy.
+This prevents an earlier incomplete descriptor snapshot deleting a newly saved bridge route,
+or a late old command replacing the newer vector. The Actor processes those enqueued commands
+in order; actual dials retain all current membership/descriptor/endpoint checks. Cold Noise
+acceptance establishes route use, not application catch-up or an authenticated chat exchange.
+Current validation/failure boundaries are in HANDOVER.
+
 A genuinely new bound member endpoint requests one coalesced reconciliation pass for documents
 already open at authentication. This is independent of the restore's first-source latch: its
 connection may have arrived before it was authorized as a source. The async owner drains that
@@ -42,8 +51,11 @@ The 30-second owned fallback, original response waits, source cooldowns and curs
 
 Serving a current authenticated `KIND_CATCHUP_SINCE` request can also expose a reverse gap: its
 bounded frontier names changes this already-open document does not hold. One best-effort reverse
-read is admitted per document/full member per 30 seconds, under a 256-entry table. Known ancestors
-cause no wake; unknown hashes are hints, never evidence that valid operations exist. An unexpired
+read is admitted per document/full member per30seconds without verified progress, under a256-entry
+table. A fully accepted signed incremental response importing new original operations re-arms only
+that same document/authenticated responder. This lets successive bubble acquisitions reopen a
+completed search without waiting for a timer. Empty/duplicate/cursor-only replies, local edits,
+other-source imports and rejected tails cannot refill that allowance. Known ancestors cause no wake; unknown hashes are hints, never evidence that valid operations exist. An unexpired
 full table refuses hints while normal serving continues. A full recovery queue likewise retains
 existing work and falls back to periodic reconciliation; prompt saturated admission is not claimed.
 Only that requester's previous completeness answer is forgotten. A pending older response retains
@@ -200,7 +212,9 @@ This is the path that matters for micelles. Gossip only carries live edits; it r
 Quiet connected discovery first requests missed MLS commits at its current epoch using the
 existing kind2 exchange. This exposes a lost removal broadcast before future chat is required to
 reveal the gap. Preparation and detached waiting use the same bounded maintenance scheduler as
-PEX/finalization; only the originating Root validates and applies the signed reply. Empty/failed
+PEX/finalization; only the originating Root validates and applies the signed reply. Process
+admission preserves one FIFO turn per Actor across cancelled select observations;
+queued work holds no signed context and samples it only after an actual grant. Empty/failed
 probes continue ordinary discovery. Applied epochs publish member and role updates even when
 remove+add leaves the count unchanged, and request ordinary sealed snapshot persistence. A
 1024-record work cap is separate from the released 16 MiB byte cap; default logs hold 256.

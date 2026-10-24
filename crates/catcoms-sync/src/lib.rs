@@ -1276,7 +1276,15 @@ fn catchup_auth_transcript(
     req_epoch: u64,
     requester_peer: Option<&PeerId>,
 ) -> Vec<u8> {
-    let mut e = Encoder::new();
+    // Five length prefixes, kind, timestamp/epoch and the fixed nonce, plus optional peer.
+    // Avoid growing a full inner SDP again merely to append its small authentication fields.
+    let capacity = 54
+        + CATCHUP_AUTH_DOMAIN.len()
+        + group_id.len()
+        + inner.len()
+        + requester_pubkey.len()
+        + requester_peer.map_or(0, |peer| 4 + peer.as_bytes().len());
+    let mut e = Encoder::with_capacity(capacity);
     e.put_str(CATCHUP_AUTH_DOMAIN).expect("label fits");
     e.put_bytes(group_id).expect("group id fits");
     e.put_u16(kind as u16);
@@ -1644,13 +1652,61 @@ fn encode_authed_request(
     signature: &[u8; 64],
 ) -> Vec<u8> {
     let mut e = Encoder::new();
+    put_authed_request(
+        &mut e,
+        inner,
+        requester_pubkey,
+        timestamp_ms,
+        nonce,
+        req_epoch,
+        signature,
+    );
+    e.finish()
+}
+
+/// Same canonical request, including its leading kind, written into ONE final allocation.
+/// This is a trusted framing primitive, not admission/authentication. Native V2 source work
+/// uses it to avoid a second full-SDP temporary while retaining both actual hedge flights.
+fn encode_authed_request_frame(
+    kind: u8,
+    inner: &[u8],
+    requester_pubkey: &[u8],
+    timestamp_ms: u64,
+    nonce: &[u8; 16],
+    req_epoch: u64,
+    signature: &[u8; 64],
+) -> Vec<u8> {
+    // Five length prefixes, two u64 values, nonce and signature:112 bytes plus pubkey/inner.
+    // Trusted bounded callers supply the fields; wire prefix checks remain in Encoder.
+    let mut e = Encoder::with_capacity(113 + requester_pubkey.len() + inner.len());
+    e.put_u8(kind);
+    put_authed_request(
+        &mut e,
+        inner,
+        requester_pubkey,
+        timestamp_ms,
+        nonce,
+        req_epoch,
+        signature,
+    );
+    e.finish()
+}
+
+fn put_authed_request(
+    e: &mut Encoder,
+    inner: &[u8],
+    requester_pubkey: &[u8],
+    timestamp_ms: u64,
+    nonce: &[u8; 16],
+    req_epoch: u64,
+    signature: &[u8; 64],
+) {
     e.put_bytes(inner).expect("inner fits");
     e.put_bytes(requester_pubkey).expect("pubkey fits");
     e.put_u64(timestamp_ms);
     e.put_bytes(nonce).expect("16 fits");
     e.put_u64(req_epoch);
     e.put_bytes(signature).expect("64 fits");
-    e.finish()
 }
 
 /// A parsed authenticated request: `(inner body, requester pubkey, timestamp, nonce,
@@ -9477,6 +9533,12 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         target: &DeviceId,
         payload: &[u8],
     ) -> Result<bool, SyncError> {
+        // Recheck native protocol selection, including commands queued before a V2 start.
+        // kind8 is opaque and cannot distinguish authenticated V2 companion traffic; all
+        // legacy call signalling for this server is excluded until its V2 participant ends.
+        if self.has_live_v2_participant() {
+            return Ok(false);
+        }
         let Some(peer) = self.peer_for_device(target) else {
             return Ok(false);
         };
@@ -9496,6 +9558,13 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         else {
             return;
         };
+        // An upgraded endpoint never consumes the legacy protocol, even if V2 routing is
+        // paused. Legacy payloads cannot name its exact native join/OfferId, so passing a
+        // delayed bye/offer/ICE into the old queue would create a downgrade writer. This is
+        // independent of the App's matching exclusion fence and grants helpers no call state.
+        if self.has_live_v2_participant() {
+            return;
+        }
         if payload.is_empty() {
             return;
         }
@@ -12434,6 +12503,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
                 // proved, and gave a modified peer a way around the non-progress bound by simply
                 // saying "done" instead of "more".
                 if applied > 0 {
+                    self.note_verified_frontier_progress(doc_type, doc_id, responder);
                     // It gave us something and says that is all it has. The search starts again
                     // from the new version.
                     self.clear_sources_checked(doc_type, doc_id);
@@ -12539,6 +12609,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
                 // controls here, so believing it forever is not: a round that moves nothing is
                 // counted, and an unbroken run of them sends the next request somewhere else.
                 if applied > 0 {
+                    self.note_verified_frontier_progress(doc_type, doc_id, responder);
                     self.clear_catchup_stall(peer, doc_type, doc_id);
                     // Remembered only when the round actually moved us, and never refreshed by a
                     // round that did not. A claim is authority to keep a document open against
@@ -16169,6 +16240,46 @@ mod tests {
     use rand_core::{RngCore, SeedableRng};
 
     #[test]
+    fn voice_single_allocation_outer_frame_preserves_the_previous_canonical_request() {
+        for length in [0, 1, 1024, voice_v2::MAX_ENVELOPE] {
+            let inner = vec![0x37; length];
+            let framed = encode_authed_request_frame(
+                28,
+                &inner,
+                &[3; 32],
+                u64::MAX,
+                &[4; 16],
+                u64::MAX - 1,
+                &[5; 64],
+            );
+            let mut previous = vec![28];
+            previous.extend(encode_authed_request(
+                &inner,
+                &[3; 32],
+                u64::MAX,
+                &[4; 16],
+                u64::MAX - 1,
+                &[5; 64],
+            ));
+            assert_eq!(framed, previous);
+            assert_eq!(framed.len(), 145 + length);
+            assert_eq!(
+                framed.capacity(),
+                framed.len(),
+                "no second frame-sized backing allocation"
+            );
+            let (decoded, key, time, nonce, epoch, signature) =
+                decode_authed_request(&framed[1..]).unwrap();
+            assert_eq!(decoded, inner);
+            assert_eq!(key, [3; 32]);
+            assert_eq!(
+                (time, nonce, epoch, signature),
+                (u64::MAX, [4; 16], u64::MAX - 1, [5; 64])
+            );
+        }
+    }
+
+    #[test]
     fn post_commit_dial_failure_keeps_local_policy_charged_without_attempt_success() {
         let mut policy = DiscoveryPolicy::with_config(PolicyConfig {
             dial_budget: 1,
@@ -18997,7 +19108,7 @@ mod tests {
     /// Tests that want to put particular bytes in front of a requester still have to be a member
     /// to be listened to, which is the point of the signature. What stays forgeable here is the
     /// content: the marker and the bundle are whatever the test chooses.
-    fn signed_catchup_answer(
+    pub(super) fn signed_catchup_answer(
         server: &mut Member,
         from: PeerId,
         data: &[u8],

@@ -29,6 +29,7 @@ type Store = Mutex<Option<ServerStore>>;
 
 /// Stored in the original paid IO state, before its infrastructure credit in drop order.
 /// Never clone into an unaccounted task or hold an upgraded context in the process host.
+#[derive(Clone)]
 pub(super) struct Context {
     servers: Weak<Servers>,
     store: Weak<Store>,
@@ -39,6 +40,7 @@ pub(super) struct Context {
     commit: Weak<Mutex<()>>,
     authority: Weak<StdMutex<Coordinator>>,
     ledger: Weak<Ledger>,
+    channels: Weak<super::bootstrap::Registry>,
 }
 /// Inline in one bounded native operation. It has no AppHandle/AppState, serialized authority,
 /// replacement actor, cached open flag or alternate mutex. Drop outside native guards before
@@ -53,6 +55,7 @@ pub(super) struct LiveContext {
     pub(super) commit: Arc<Mutex<()>>,
     pub(super) authority: Arc<StdMutex<Coordinator>>,
     pub(super) ledger: Arc<Ledger>,
+    pub(super) channels: Arc<super::bootstrap::Registry>,
 }
 impl Context {
     pub(super) fn new(state: &AppState) -> Self {
@@ -66,6 +69,7 @@ impl Context {
             commit: Arc::downgrade(&state.ui_session_commit),
             authority: Arc::downgrade(&state.voice_authority),
             ledger: Arc::downgrade(&state.voice_handoff),
+            channels: Arc::downgrade(&state.voice_channels),
         }
     }
     /// All-or-nothing before any protocol or resource effect. Partial upgrades are locals:
@@ -81,10 +85,11 @@ impl Context {
             commit: self.commit.upgrade()?,
             authority: self.authority.upgrade()?,
             ledger: self.ledger.upgrade()?,
+            channels: self.channels.upgrade()?,
         })
     }
     /// Weak references keep the original Arc allocations (not their dropped heap contents)
-    /// alive after native state destruction. Include those nine inline values/control blocks,
+    /// alive after native state destruction. Include those ten inline values/control blocks,
     /// plus one upgraded wrapper/borrowed gate, in the unchanged process IO envelope. Existing
     /// app-owned maps/store heaps while live are not duplicated or newly paid by this context.
     pub(super) fn retained_layout_bytes() -> usize {
@@ -96,11 +101,25 @@ impl Context {
             + allocation_bytes::<Mutex<()>>()
             + allocation_bytes::<StdMutex<Coordinator>>()
             + allocation_bytes::<Ledger>()
+            + allocation_bytes::<super::bootstrap::Registry>()
             + std::mem::size_of::<LiveContext>()
             + std::mem::size_of::<UiSessionGate<'_>>()
     }
 }
 impl LiveContext {
+    /// Observe the actual mount without suspending before engine admission. This is only
+    /// a preflight: callers repeat original generation/authority checks at the final fence.
+    /// Keep resumable -> store ordering; local contention spends no effect authority.
+    pub(super) fn try_unlocked(&self) -> Result<bool, catcoms_sync::voice_v2::VoiceError> {
+        use catcoms_sync::voice_v2::VoiceError;
+        let resumable = self
+            .resumable
+            .try_lock()
+            .map_err(|_| VoiceError::Capacity)?;
+        let store = self.store.try_lock().map_err(|_| VoiceError::Capacity)?;
+        Ok(*resumable && store.is_some())
+    }
+
     pub(super) fn gate(&self) -> UiSessionGate<'_> {
         UiSessionGate {
             resumable: &self.resumable,

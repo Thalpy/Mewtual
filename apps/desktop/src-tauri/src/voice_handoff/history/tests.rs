@@ -271,7 +271,7 @@ async fn lost_begin_reply_recovers_same_original_pending_under_full_group_pressu
     let pressure = pool
         .charge(
             case.selected.binding().scope.group,
-            256 * 1024 - pool.counts().0,
+            catcoms_sync::voice_v2::resources::GROUP_BYTES - pool.counts().0,
             ResourceKind::Retained,
         )
         .unwrap();

@@ -35,7 +35,11 @@ fn compacted_final_history_retains_original_proof_until_actual_root_input_drops(
     let pool = selected.resources();
     let group = selected.binding().scope.group;
     let pressure = pool
-        .charge(group, 256 * 1024 - pool.counts().0, ResourceKind::Retained)
+        .charge(
+            group,
+            catcoms_sync::voice_v2::resources::GROUP_BYTES - pool.counts().0,
+            ResourceKind::Retained,
+        )
         .unwrap();
     let full = pool.counts();
     assert!(ledger.compact(id).unwrap());
@@ -140,7 +144,10 @@ fn ordinary_compaction_drops_phase_and_never_invents_final_retirement() {
         row.confirmation_status().unwrap(),
         ConfirmationStatus::NotRequested
     );
-    assert!(ledger.channel_may_close(&selected));
+    assert!(
+        !ledger.channel_may_close(&selected),
+        "ordinary Return is not whole-plan retirement"
+    );
     assert!(row.row.state.lock().unwrap().final_phase.is_none());
     drop((phase, action, join));
     assert!(
@@ -150,6 +157,68 @@ fn ordinary_compaction_drops_phase_and_never_invents_final_retirement() {
     assert_eq!(
         row.confirmation_status().unwrap(),
         ConfirmationStatus::NotRequested
+    );
+    assert!(
+        !ledger.channel_may_close(&selected),
+        "actual LocalJoin drop retires Root, but original final delivery still needs Control"
+    );
+}
+
+#[test]
+fn original_plan_anchor_survives_compaction_and_cleanup_between_children_waits_for_real_input() {
+    let (coordinator, selected, selector) = selection();
+    let ledger = Arc::new(Ledger::default());
+    let (join, action, pair) = actual_action(&coordinator, &selected);
+    let root_input = action.input().unwrap();
+    let id = ticket(&ledger, selected.clone(), selector)
+        .attach(action.clone(), pair, 16 * 1024)
+        .unwrap();
+    let row = ledger
+        .resolve(&selected, Purpose::Derive(selector), id)
+        .unwrap();
+    assert!(row.contains_plan_action(&action).unwrap());
+    assert_eq!(
+        row.retire_plan(),
+        Err(VoiceError::Capacity),
+        "unsettled work cannot close the plan"
+    );
+    let work = row.work().unwrap();
+    action.settle_engine();
+    work.phase().close(); // immutable ordinary Return, with NO successor child
+    drop(work);
+    assert!(ledger.compact(id).unwrap());
+    assert!(
+        row.contains_plan_action(&action).unwrap(),
+        "same opaque plan remains after parent compaction"
+    );
+    assert!(
+        !row.retire_plan().unwrap(),
+        "real extra Root input outlives native local compaction"
+    );
+    assert!(
+        !row.contains_plan_action(&action).unwrap(),
+        "new child adoption is frozen before close"
+    );
+    assert!(!ledger.channel_may_close(&selected));
+    drop((join, action));
+    assert!(
+        !row.retire_plan().unwrap(),
+        "lost caller recovers the SAME pending retirement"
+    );
+    drop(root_input);
+    assert!(row.retire_plan().unwrap());
+    assert!(
+        row.retire_plan().unwrap(),
+        "repeated cleanup never captures a replacement"
+    );
+    assert!(
+        !ledger.channel_may_close(&selected),
+        "Root drainage leaves final delivery outstanding"
+    );
+    assert_eq!(
+        row.confirmation_status().unwrap(),
+        ConfirmationStatus::NotRequested,
+        "whole-plan close never relabels the action Phase Return as Retire"
     );
 }
 

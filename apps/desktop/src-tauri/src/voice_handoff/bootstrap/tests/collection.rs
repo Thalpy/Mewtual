@@ -250,7 +250,11 @@ async fn final_collection_uses_original_capacity_under_full_process_and_crypto_p
     }
     let group_bytes = resources.counts().0 - INDEX_BYTES;
     let mut pressure = vec![resources
-        .charge(group, 256 * 1024 - group_bytes, ResourceKind::Retained)
+        .charge(
+            group,
+            catcoms_sync::voice_v2::resources::GROUP_BYTES - group_bytes,
+            ResourceKind::Retained,
+        )
         .unwrap()];
     for value in 97..=104 {
         let left = 2 * 1024 * 1024 - resources.counts().0;
@@ -259,7 +263,11 @@ async fn final_collection_uses_original_capacity_under_full_process_and_crypto_p
         }
         pressure.push(
             resources
-                .charge([value; 32], left.min(256 * 1024), ResourceKind::Retained)
+                .charge(
+                    [value; 32],
+                    left.min(catcoms_sync::voice_v2::resources::GROUP_BYTES),
+                    ResourceKind::Retained,
+                )
                 .unwrap(),
         );
     }
@@ -409,7 +417,11 @@ async fn late_last_owner_drop_is_collected_before_controller_admission_under_ful
         }
         pressure.push(
             resources
-                .charge([value; 32], left.min(256 * 1024), ResourceKind::Retained)
+                .charge(
+                    [value; 32],
+                    left.min(catcoms_sync::voice_v2::resources::GROUP_BYTES),
+                    ResourceKind::Retained,
+                )
                 .unwrap(),
         );
     }

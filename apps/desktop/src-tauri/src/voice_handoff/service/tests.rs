@@ -82,6 +82,291 @@ struct Client {
     hash: [u8; 32],
 }
 
+/// A signed old request can be delayed BEFORE physical admission. Keep fixture-owned wire
+/// separate from Incoming: constructing two live Incoming values would bypass the exact
+/// single-position boundary these ordering regressions are intended to exercise.
+#[tokio::test]
+async fn higher_child_history_and_plan_final_fence_a_delayed_unadmitted_begin() {
+    use super::super::custody::CloseMode;
+    use super::super::derivation_result::tests::Case;
+    use super::super::ledger::ConfirmationPurpose;
+    use super::super::{confirmation_begin, confirmation_history, plan_final};
+    let case = Case::unadmitted().await;
+    case.action.settle_engine();
+    let parent = case.row();
+    parent
+        .close_phase(case.route.session().identity(), CloseMode::Return)
+        .unwrap();
+    assert!(parent.try_compact().unwrap());
+    let mut selector = vec![1];
+    selector.extend_from_slice(case.selector.peer.as_bytes());
+    selector.extend_from_slice(&case.selector.join);
+    selector.extend_from_slice(&case.selector.key_ref);
+    selector.extend_from_slice(&case.selector.epoch.to_be_bytes());
+    let mut begin = selector.clone();
+    begin[0] = 2;
+    begin.extend_from_slice(&case.id.logical());
+    begin.extend_from_slice(&[0, 1]);
+    let client = Client::new(case.public.public());
+    let (_, admission, cipher) = client.packet(1, 8, 0, [0; 16], &begin);
+    let delayed = wire(41891, &admission, &cipher); // NOT admitted; no physical/native work exists
+    let mut lookup = begin.clone();
+    *lookup.last_mut().unwrap() = 0;
+    let incoming = opened_frame(&case.public, &case.route, (2, 8, 0, [0; 16]), &lookup, None);
+    let reply = confirmation_history::recover(&case.context, &case.route, incoming)
+        .seal()
+        .unwrap();
+    assert_eq!(
+        opened_reply(&case.public, (2, 8, 0, [0; 16]), &lookup, &reply),
+        [1, 3, 5]
+    );
+    drop(reply);
+    let mut final_body = selector;
+    final_body.push(2);
+    let boundary = case
+        .native
+        .state
+        .ui_session_commit
+        .clone()
+        .lock_owned()
+        .await;
+    let incoming = opened_frame(
+        &case.public,
+        &case.route,
+        (3, 6, 0, case.id.logical()),
+        &final_body,
+        None,
+    );
+    let mut finalizing = Box::pin(plan_final::apply(&case.context, &case.route, incoming));
+    assert!(
+        std::future::poll_fn(|cx| Poll::Ready(finalizing.as_mut().poll(cx).is_pending())).await
+    );
+    drop(boundary);
+    let reply = bounded(finalizing).await.unwrap();
+    let issued = opened_reply(
+        &case.public,
+        (3, 6, 0, case.id.logical()),
+        &final_body,
+        &reply,
+    );
+    assert_eq!(&issued[..2], &[1, 4]);
+    assert_eq!(&issued[66..68], &[2, 1]);
+    drop(reply);
+    let mut acknowledgement = final_body[..105].to_vec();
+    acknowledgement.extend_from_slice(&issued[68..100]);
+    let incoming = opened_frame(
+        &case.public,
+        &case.route,
+        (4, 7, 0, case.id.logical()),
+        &acknowledgement,
+        None,
+    );
+    let reply = super::super::finalization::respond(&case.context, &case.route, incoming)
+        .seal()
+        .unwrap();
+    let acknowledged = opened_reply(
+        &case.public,
+        (4, 7, 0, case.id.logical()),
+        &acknowledgement,
+        &reply,
+    );
+    assert_eq!(&acknowledged[66..68], &[2, 2]);
+    drop(reply);
+    let counters = case.route.session().fixture_counts();
+    let charged = case.selected.resources().counts();
+    let mut worker = case.route.session().header().unwrap();
+    worker.scratch_mut()[..delayed.len()].copy_from_slice(&delayed);
+    worker.set_filled(delayed.len()).unwrap();
+    assert!(matches!(
+        worker
+            .authenticate(41891, Origin::PackagedHttp.value())
+            .unwrap()
+            .admit(None),
+        Err(super::super::channel::Refused::Replay)
+    ));
+    assert_eq!(
+        case.route.session().fixture_counts(),
+        counters,
+        "rejected old wire spends no new counter"
+    );
+    assert_eq!(case.selected.resources().counts(), charged);
+    assert!(case
+        .native
+        .state
+        .voice_handoff
+        .lookup_child(
+            &case.selected,
+            &parent,
+            ConfirmationPurpose::Start(None),
+            None
+        )
+        .is_err());
+    // A new, correctly sequenced request passes the replay floor but cannot adopt a child
+    // into the atomically frozen original plan. Keep the selected lease live throughout.
+    assert!(case.selected.lease().is_live());
+    let incoming = opened_frame(&case.public, &case.route, (5, 8, 0, [0; 16]), &begin, None);
+    let reply = bounded(confirmation_begin::begin(
+        &case.context,
+        &case.route,
+        incoming,
+    ))
+    .await
+    .unwrap();
+    let refused = opened_reply(&case.public, (5, 8, 0, [0; 16]), &begin, &reply);
+    assert_eq!(
+        refused,
+        [1, 3, 7],
+        "the actual parent freeze refuses capacity, without revoking the live join"
+    );
+    drop(reply);
+    case.native.close().await;
+}
+
+#[tokio::test]
+async fn admitted_begin_worker_keeps_physical_ownership_ahead_of_newer_history() {
+    use super::super::custody::CloseMode;
+    use super::super::derivation_result::tests::Case;
+    use super::super::ledger::ConfirmationPurpose;
+    use super::super::{confirmation_begin, confirmation_history, plan_final};
+    let case = Case::unadmitted().await;
+    case.action.settle_engine();
+    let parent = case.row();
+    parent
+        .close_phase(case.route.session().identity(), CloseMode::Return)
+        .unwrap();
+    assert!(parent.try_compact().unwrap());
+    let mut selector = vec![1];
+    selector.extend_from_slice(case.selector.peer.as_bytes());
+    selector.extend_from_slice(&case.selector.join);
+    selector.extend_from_slice(&case.selector.key_ref);
+    selector.extend_from_slice(&case.selector.epoch.to_be_bytes());
+    let mut begin = selector.clone();
+    begin[0] = 2;
+    begin.extend_from_slice(&case.id.logical());
+    begin.extend_from_slice(&[0, 1]);
+    let boundary = case
+        .native
+        .state
+        .ui_session_commit
+        .clone()
+        .lock_owned()
+        .await;
+    let commit_owners = Arc::strong_count(&case.native.state.ui_session_commit);
+    let store_owners = Arc::strong_count(&case.native.state.store);
+    let incoming = opened_frame(&case.public, &case.route, (1, 8, 0, [0; 16]), &begin, None);
+    let mut creating = Box::pin(confirmation_begin::begin(
+        &case.context,
+        &case.route,
+        incoming,
+    ));
+    assert!(std::future::poll_fn(|cx| Poll::Ready(creating.as_mut().poll(cx).is_pending())).await);
+    drop(creating); // actual socket caller loss; the admitted worker still owns its request
+    until(|| {
+        Arc::strong_count(&case.native.state.ui_session_commit) > commit_owners
+            && Arc::strong_count(&case.native.state.store) == store_owners
+    })
+    .await;
+    let counters = case.route.session().fixture_counts();
+    assert!(matches!(
+        case.route.session().header(),
+        Err(super::super::channel::Refused::Capacity)
+    ));
+    assert_eq!(
+        case.route.session().fixture_counts(),
+        counters,
+        "newer work cannot pass an admitted old physical owner"
+    );
+    drop(boundary);
+    bounded(case.route.session().fixture_wait_physical_idle()).await;
+    let mut lookup = begin.clone();
+    *lookup.last_mut().unwrap() = 0;
+    let incoming = opened_frame(&case.public, &case.route, (2, 8, 0, [0; 16]), &lookup, None);
+    let reply = confirmation_history::recover(&case.context, &case.route, incoming)
+        .seal()
+        .unwrap();
+    let observed = opened_reply(&case.public, (2, 8, 0, [0; 16]), &lookup, &reply);
+    // The synthetic fixture is not the Actor's authenticated MLS pair. Its real rejection
+    // leaves an actual OPEN handed-off Pending record, never a fabricated successful action.
+    assert_eq!(&observed[..2], &[1, 0]);
+    assert_eq!(observed[18], 1);
+    assert_eq!(observed[19], 0);
+    let child = case
+        .native
+        .state
+        .voice_handoff
+        .lookup_child(
+            &case.selected,
+            &parent,
+            ConfirmationPurpose::Start(None),
+            None,
+        )
+        .unwrap();
+    assert_eq!(&observed[2..18], &child.id().logical());
+    drop(reply);
+    let mut returning = begin;
+    *returning.last_mut().unwrap() = 0;
+    let incoming = opened_frame(
+        &case.public,
+        &case.route,
+        (3, 6, 0, child.id().logical()),
+        &returning,
+        None,
+    );
+    let reply = super::super::confirmation_settlement::apply(&case.context, &case.route, incoming)
+        .seal()
+        .unwrap();
+    let closed = opened_reply(
+        &case.public,
+        (3, 6, 0, child.id().logical()),
+        &returning,
+        &reply,
+    );
+    assert_eq!(closed[18], 4);
+    drop(reply);
+    let mut final_body = selector;
+    final_body.push(2);
+    let incoming = opened_frame(
+        &case.public,
+        &case.route,
+        (4, 6, 0, case.id.logical()),
+        &final_body,
+        None,
+    );
+    let reply = bounded(plan_final::apply(&case.context, &case.route, incoming))
+        .await
+        .unwrap();
+    let issued = opened_reply(
+        &case.public,
+        (4, 6, 0, case.id.logical()),
+        &final_body,
+        &reply,
+    );
+    assert_eq!(&issued[..2], &[1, 4]);
+    assert_eq!(&issued[66..68], &[2, 1]);
+    drop(reply);
+    let mut acknowledgement = final_body[..105].to_vec();
+    acknowledgement.extend_from_slice(&issued[68..100]);
+    let incoming = opened_frame(
+        &case.public,
+        &case.route,
+        (5, 7, 0, case.id.logical()),
+        &acknowledgement,
+        None,
+    );
+    let reply = super::super::finalization::respond(&case.context, &case.route, incoming)
+        .seal()
+        .unwrap();
+    let acknowledged = opened_reply(
+        &case.public,
+        (5, 7, 0, case.id.logical()),
+        &acknowledgement,
+        &reply,
+    );
+    assert_eq!(&acknowledged[66..68], &[2, 2]);
+    drop(reply);
+    case.native.close().await;
+}
+
 /// Actual native bootstrap + independent client MAC/AEAD for sibling executor regressions.
 /// Fixture allocations are not application custody evidence; returned Incoming is the real
 /// original Session owner and has already passed header authentication and body opening.
@@ -112,6 +397,15 @@ pub(in crate::voice_handoff) fn opened_reply(
     request_plaintext: &[u8],
     reply: &super::super::channel::CompletedReply,
 ) -> Vec<u8> {
+    opened_reply_kind(public, header, request_plaintext, reply, 0)
+}
+pub(in crate::voice_handoff) fn opened_reply_kind(
+    public: &SetupOutput,
+    header: (u64, u8, u8, [u8; 16]),
+    request_plaintext: &[u8],
+    reply: &super::super::channel::CompletedReply,
+    response_kind: u8,
+) -> Vec<u8> {
     let client = Client::new(public.public());
     let (request, _, _) = client.packet(header.0, header.1, header.2, header.3, request_plaintext);
     let admission = hex::decode(reply.admission()).unwrap();
@@ -123,7 +417,7 @@ pub(in crate::voice_handoff) fn opened_reply(
     );
     assert_ne!(u64::from_be_bytes(response[8..16].try_into().unwrap()), 0);
     assert_eq!(&response[16..32], &header.3);
-    assert_eq!(&response[36..40], &[0; 4]); // Control kind + canonical reserved bytes
+    assert_eq!(&response[36..40], &[response_kind, 0, 0, 0]);
     let mut body = reply.body().to_vec();
     assert_eq!(
         u32::from_be_bytes(response[32..36].try_into().unwrap()) as usize,
@@ -254,6 +548,16 @@ impl Client {
     /// Exact bounded HTTP/Control reply for the newly exposed historical read. This client
     /// independently authenticates the original request binding before returning plaintext.
     fn history_response(&self, bytes: &[u8], request: &[u8; 40]) -> Vec<u8> {
+        assert_eq!(request[6], 8);
+        assert_eq!(&request[16..32], &[0; 16]);
+        let body = self.action_response(bytes, request, 0);
+        assert!([3, super::super::replies::STATUS_BYTES].contains(&body.len()));
+        body
+    }
+    /// Independent response verification for the production action service. The caller
+    /// requires the actual response class; returning Control instead of Data is never a
+    /// successful input pull. Bind the MAC to the exact original request header first.
+    fn action_response(&self, bytes: &[u8], request: &[u8; 40], kind: u8) -> Vec<u8> {
         let end = bytes.windows(4).position(|x| x == b"\r\n\r\n").unwrap() + 4;
         let text = std::str::from_utf8(&bytes[..end]).unwrap();
         assert!(text.starts_with("HTTP/1.1 200 OK\r\n"));
@@ -262,12 +566,12 @@ impl Client {
         let response = &decoded[..40];
         assert_eq!(
             &response[..8],
-            &[b'M', b'W', b'V', b'H', 1, 1, 8, self.slot]
+            &[b'M', b'W', b'V', b'H', 1, 1, request[6], self.slot]
         );
-        assert_eq!(&response[16..32], &[0; 16]);
-        assert_eq!(&response[36..40], &[0; 4]);
+        assert_eq!(&response[16..32], &request[16..32]);
+        assert_eq!(&response[36..40], &[kind, 0, 0, 0]);
         let cipher_bytes = u32::from_be_bytes(response[32..36].try_into().unwrap()) as usize;
-        assert!([3 + 16, super::super::replies::STATUS_BYTES + 16].contains(&cipher_bytes));
+        assert!((16..=16 * 1024).contains(&cipher_bytes));
         assert!(text.contains(&format!("Content-Length: {}\r\n", cipher_bytes + 144)));
         let aad = [response, request.as_slice()].concat();
         let mut mac =
@@ -331,12 +635,21 @@ async fn exchange(port: u16, wire: &[u8], eof: bool) -> Vec<u8> {
             stream.shutdown().await.unwrap();
         }
         let mut received = Vec::new();
-        if let Err(error) = (&mut stream).take(1024).read_to_end(&mut received).await {
+        // Status/history fit1KiB; production Input carries an actual prepaid Data body.
+        // Bound the test reader to the full supported reply envelope, then fail on excess
+        // instead of truncating a legitimate Data reply before checking its MAC/AEAD.
+        let maximum = RESPONSE_HEAD_BYTES + 144 + 16 * 1024;
+        if let Err(error) = (&mut stream)
+            .take(maximum as u64 + 1)
+            .read_to_end(&mut received)
+            .await
+        {
             assert!(matches!(
                 error.kind(),
                 std::io::ErrorKind::ConnectionReset | std::io::ErrorKind::ConnectionAborted
             ));
         }
+        assert!(received.len() <= maximum, "oversized native HTTP reply");
         received
     })
     .await
@@ -515,7 +828,7 @@ async fn real_tcp_original_history_is_read_only_under_full_capacity_and_after_en
 }
 
 #[tokio::test]
-async fn real_tcp_history_whitelist_refuses_other_actions_and_bad_headers_before_counter_debit() {
+async fn real_tcp_dispatch_refuses_impossible_action_headers_before_counter_debit() {
     use super::super::factory::tests::selection;
     let f = Fixture::new().await;
     let (_, selected, selector) = selection(&f).await;
@@ -574,6 +887,179 @@ async fn real_tcp_history_whitelist_refuses_other_actions_and_bad_headers_before
     );
     assert_eq!(route.session().fixture_counts(), (false, 1, 1));
     drop(running.finish().await.unwrap());
+    f.close().await;
+}
+
+#[tokio::test]
+async fn production_tcp_input_uses_original_phase_and_lock_keeps_only_cleanup_available() {
+    use super::super::derivation_result::tests::Case;
+    use catcoms_sync::voice_v2::resources::{ResourceKind, GROUP_BYTES};
+    let case = Case::unadmitted().await;
+    let client = Client::new(case.public.public());
+    let bound = BoundServer::bind_application(
+        case.native.state.voice_channels.clone(),
+        crate::voice_runtime(&case.native.state),
+        Origin::PackagedHttp,
+        case.context.clone(),
+    )
+    .unwrap();
+    let port = bound.port();
+    let running = bound.start().unwrap();
+    // A correctly authenticated Data header with another canonical row still cannot look
+    // up this Phase, allocate a body or spend a counter. MAC success is not row authority.
+    let mut foreign = case.id.logical();
+    foreign[15] ^= 0x40;
+    let (_, admission, cipher) = client.packet(1, 3, 1, foreign, &case.bytes());
+    assert!(exchange(port, &wire(port, &admission, &cipher), false)
+        .await
+        .is_empty());
+    assert_eq!(case.route.session().fixture_counts(), (false, 0, 0));
+
+    let pool = case.selected.resources();
+    let group = case.selected.binding().scope.group;
+    let pressure = pool
+        .charge(
+            group,
+            GROUP_BYTES - pool.group_counts(group).unwrap().0,
+            ResourceKind::Retained,
+        )
+        .unwrap();
+    let before = pool.counts();
+    let input = case.bytes()[..105].to_vec();
+    let (request, admission, cipher) = client.packet(1, 1, 0, case.id.logical(), &input);
+    let response = exchange(port, &wire(port, &admission, &cipher), false).await;
+    let plain = client.action_response(&response, &request, 1);
+    assert_eq!(&plain[..2], &[1, 5]);
+    assert_eq!(&plain[2..18], &case.id.logical());
+    assert!(plain.len() > super::super::input::FIXED_BYTES);
+    assert_eq!(
+        pool.counts(),
+        before,
+        "Data borrows its original Phase, never ordinary bytes"
+    );
+    assert_eq!(case.route.session().fixture_counts(), (false, 1, 1));
+    drop(pressure);
+
+    crate::end_voice_owner_inner(&case.native.state, case.selected.id()).await;
+    crate::lock_session_inner(&case.native.state, None)
+        .await
+        .unwrap();
+    let (request, admission, cipher) = client.packet(2, 1, 0, case.id.logical(), &input);
+    let response = exchange(port, &wire(port, &admission, &cipher), false).await;
+    assert_eq!(
+        client.action_response(&response, &request, 0),
+        // End/lock closes this original native selection before an Input can reach
+        // the action engine. This is the adapter's Closed result, not an engine refusal.
+        super::super::replies::refused(super::super::factory::Refused::Closed)
+    );
+    assert!(case.action.terminal_status().receipt.is_none());
+
+    // Exact old-Session Settle/Return is cleanup, so lock must not strand it. Even an
+    // unstarted engine must first be settled; End alone is not that physical barrier.
+    // Neither operation creates an engine, receipt or grant. Plan retirement is separate.
+    let settling = case.bytes()[..153].to_vec();
+    let (request, admission, cipher) = client.packet(3, 5, 0, case.id.logical(), &settling);
+    let response = exchange(port, &wire(port, &admission, &cipher), false).await;
+    let plain = client.action_response(&response, &request, 0);
+    assert_eq!(plain.len(), super::super::replies::STATUS_BYTES);
+    assert_eq!(
+        plain[68], 1,
+        "actual original action settlement, no receipt needed"
+    );
+    let mut returning = input;
+    returning.push(0);
+    let (request, admission, cipher) = client.packet(4, 6, 0, case.id.logical(), &returning);
+    let response = exchange(port, &wire(port, &admission, &cipher), false).await;
+    let plain = client.action_response(&response, &request, 0);
+    assert_eq!(plain.len(), super::super::replies::STATUS_BYTES);
+    assert_eq!(&plain[..2], &[1, 0]);
+    drop(running.finish().await.unwrap());
+    // Return is immutable. Retire the retained original plan through its separate control;
+    // the fixture's generic retire() helper would incorrectly try to relabel this Phase.
+    assert!(case.row().retire_plan().unwrap());
+    case.native.close().await;
+}
+
+#[tokio::test]
+async fn production_tcp_return_closes_unseen_native_parent_after_actor_refusal_and_end() {
+    use super::super::factory::native::produce_derivation;
+    use super::super::factory::tests::{channel_route, selection};
+    use super::super::ledger::{PendingStatus, Purpose};
+    let f = Fixture::new().await;
+    let context = super::super::context::Context::new(&f.state);
+    let (_, selected, selector) = selection(&f).await;
+    let route = channel_route(&f, &selected).await;
+    let Status::Ready(public) = ensure(
+        &f.state,
+        selected.id(),
+        selected.executor(),
+        &mut ChaCha20Rng::seed_from_u64(83),
+    )
+    .await
+    .unwrap() else {
+        panic!("original channel ready")
+    };
+    let client = Client::new(public.public());
+    let bound = BoundServer::bind_application(
+        f.state.voice_channels.clone(),
+        crate::voice_runtime(&f.state),
+        Origin::PackagedHttp,
+        context.clone(),
+    )
+    .unwrap();
+    let port = bound.port();
+    let output = bounded(produce_derivation(&context, &route, selector).unwrap())
+        .await
+        .unwrap();
+    assert!(matches!(
+        output.result(),
+        Err(super::super::factory::Refused::Protocol(
+            catcoms_sync::voice_v2::VoiceError::Unauthorized
+        ))
+    ));
+    let running = bound.start().unwrap();
+    let row = f
+        .state
+        .voice_handoff
+        .lookup_original(&selected, Purpose::Derive(selector))
+        .unwrap();
+    assert!(matches!(row.status().unwrap().pending, PendingStatus::Open));
+    let mut returning = history_body(selector, 0);
+    // The browser never received this parent's descriptor before native refusal/End.
+    crate::end_voice_owner_inner(&f.state, selected.id()).await;
+    crate::lock_session_inner(&f.state, None).await.unwrap();
+    for sequence in 1..=2 {
+        let (request, admission, cipher) =
+            client.packet(sequence, 6, 0, row.id().logical(), &returning);
+        let response = exchange(port, &wire(port, &admission, &cipher), false).await;
+        let plain = client.action_response(&response, &request, 0);
+        assert_eq!(
+            plain,
+            super::super::replies::status(row.id(), &row.status().unwrap()).unwrap()
+        );
+        let status = row.status().unwrap();
+        assert!(matches!(
+            status.pending,
+            PendingStatus::Closed {
+                actor_handoff: true
+            }
+        ));
+        assert!(status.action.is_none() && status.engine.receipt.is_none());
+        assert!(!status.engine.settled && !status.acknowledged && !status.drained);
+    }
+    returning[105] = 1; // A historical Begin(true) cannot restart this closed parent.
+    let (request, admission, cipher) = client.packet(3, 8, 0, [0; 16], &returning);
+    let response = exchange(port, &wire(port, &admission, &cipher), false).await;
+    assert_eq!(
+        client.history_response(&response, &request),
+        super::super::replies::refused(catcoms_sync::voice_v2::VoiceError::Unauthorized.into())
+    );
+    // Local closure never refunds the completed producer's actual output/Route/native
+    // position. Application shutdown must collect that real owner before reporting done.
+    let mut finish = Box::pin(running.finish());
+    assert!(std::future::poll_fn(|cx| Poll::Ready(finish.as_mut().poll(cx).is_pending())).await);
+    drop(output);
+    drop(bounded(finish).await.unwrap());
     f.close().await;
 }
 
@@ -704,7 +1190,11 @@ async fn prepaid_status_makes_progress_with_every_crypto_slot_and_process_byte_o
     // then the other bounded test groups, without increasing any configured limit.
     let group_used = resources.counts().0 - 4096 - INFRASTRUCTURE_BYTES;
     let mut pressure = vec![resources
-        .charge(group, 256 * 1024 - group_used, ResourceKind::Retained)
+        .charge(
+            group,
+            catcoms_sync::voice_v2::resources::GROUP_BYTES - group_used,
+            ResourceKind::Retained,
+        )
         .unwrap()];
     for value in 97..=104 {
         let left = 2 * 1024 * 1024 - resources.counts().0;
@@ -713,7 +1203,11 @@ async fn prepaid_status_makes_progress_with_every_crypto_slot_and_process_byte_o
         }
         pressure.push(
             resources
-                .charge([value; 32], left.min(256 * 1024), ResourceKind::Retained)
+                .charge(
+                    [value; 32],
+                    left.min(catcoms_sync::voice_v2::resources::GROUP_BYTES),
+                    ResourceKind::Retained,
+                )
                 .unwrap(),
         );
     }
@@ -1369,6 +1863,9 @@ async fn cancellation_while_writing_header_prefix_body_or_shutdown_closes_stream
 
 #[tokio::test]
 async fn fixed_runner_future_and_output_fit_the_prepaid_infrastructure_peak() {
+    // SystemClock boxes exactly the pinned Tokio Sleep pointee; both socket deadline and
+    // maintenance can be live. Inline trait-object handles are already in the full future.
+    assert!(1024 + 2 * std::mem::size_of::<tokio::time::Sleep>() <= TASK_AND_HANDLE_BYTES);
     let (registry, runtime) = empty(Arc::new(ManualClock::new(1000)));
     let bound = BoundServer::bind(registry, runtime, Origin::PackagedHttp).unwrap();
     let (_stop, cancelled) = oneshot::channel();

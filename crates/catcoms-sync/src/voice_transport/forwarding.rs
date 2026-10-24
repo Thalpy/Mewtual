@@ -118,16 +118,53 @@ enum Work {
         ledger: Arc<HelperLedger>,
     },
     Source {
+        // Packet ciphertext remains in the original SourceJob. Only this immutable fixed
+        // delegation is new; never clone a full SDP merely to remember its transport role.
+        // Drop this Box BEFORE job's possibly sole Lower payment, including a preparation
+        // refusal before RouteGate has captured another keepalive owner.
+        permit: Option<Box<voice_v2::RoutePermit>>,
         job: SourceJob,
         ledger: Arc<SourceLedger>,
-        envelope: Box<Envelope>,
     },
 }
+
+/// Private provenance-bound ACK view. Only Work below constructs it from the SAME actual
+/// immutable ledger job, so completion verification may reuse the already-computed hash.
+/// A public ACK verifier or untrusted frame cannot pair a copied hash with another object.
+pub(super) struct RetainedEnvelope<'a> {
+    envelope: voice_v2::EnvelopeRef<'a>,
+    hash: [u8; 32],
+    progress: voice_v2::source::SourceProgress<'a>,
+}
+impl RetainedEnvelope<'_> {
+    pub(super) fn progress(&self) -> voice_v2::source::SourceProgress<'_> {
+        self.progress
+    }
+    pub(super) fn object(&self) -> &voice_v2::SignedObject {
+        self.envelope.object()
+    }
+    pub(super) fn hash(&self) -> [u8; 32] {
+        self.hash
+    }
+    pub(super) fn authorize(
+        &self,
+        requester: DeviceId,
+        context: &voice_v2::Context,
+        member: impl Fn(DeviceId) -> bool,
+    ) -> Result<voice_v2::Disposition, VoiceError> {
+        self.envelope
+            .authorize_retained(requester, context, member, self.hash)
+    }
+}
 impl Work {
-    fn exchange(&self) -> Option<Arc<voice_v2::negotiation::Exchange>> {
-        match self {
-            Self::Source { job, .. } => job.exchange(),
-            Self::Helper { .. } => None,
+    fn retained(&self) -> RetainedEnvelope<'_> {
+        RetainedEnvelope {
+            envelope: self.envelope(),
+            hash: self.object_hash(),
+            progress: match self {
+                Self::Source { job, .. } => job.progress(),
+                Self::Helper { .. } => voice_v2::source::SourceProgress::Ordinary,
+            },
         }
     }
     fn peer(&self) -> PeerId {
@@ -142,10 +179,20 @@ impl Work {
             Self::Source { job, .. } => job.hop().device(),
         }
     }
-    fn envelope(&self) -> &Envelope {
+    fn envelope(&self) -> voice_v2::EnvelopeRef<'_> {
         match self {
-            Self::Helper { job, .. } => job.envelope(),
-            Self::Source { envelope, .. } => envelope,
+            Self::Helper { job, .. } => job.envelope().as_ref(),
+            Self::Source {
+                job, permit: None, ..
+            } => voice_v2::EnvelopeRef::Direct(job.object()),
+            Self::Source {
+                job,
+                permit: Some(permit),
+                ..
+            } => voice_v2::EnvelopeRef::ToHelper {
+                object: job.object(),
+                permit,
+            },
         }
     }
     fn object_hash(&self) -> [u8; 32] {
@@ -258,6 +305,12 @@ impl fmt::Debug for CompletedVoiceSource {
     }
 }
 impl<T: MeshTransport> PendingVoiceSource<T> {
+    #[cfg(test)]
+    pub(crate) fn keepalive_for_test(&self) -> SharedRequestKeepalive {
+        // Observe the SAME actual prepared flight, as a retained transport cancellation or
+        // completed output does. Never fabricate a separate credit or retirement witness.
+        self.0.job.keepalive()
+    }
     pub fn peer(&self) -> PeerId {
         self.0.peer()
     }
@@ -474,8 +527,8 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         )?;
         let mut pending = Vec::new();
         for job in jobs {
-            let envelope = match job.hop() {
-                SourceHop::Direct(_) => Envelope::Direct(job.object().clone()),
+            let permit = match job.hop() {
+                SourceHop::Direct(_) => None,
                 SourceHop::Helper(helper) => {
                     let now = self.voice_v2_clock().now_ms();
                     // Delegation never extends the original lifetime, even for a later hedge.
@@ -492,16 +545,13 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
                     ) else {
                         continue;
                     };
-                    Envelope::ToHelper {
-                        object: job.object().clone(),
-                        permit,
-                    }
+                    Some(Box::new(permit))
                 }
             };
             if let Ok(prepared) = self.prepare_voice_request(Work::Source {
                 job,
                 ledger: source.clone(),
-                envelope: Box::new(envelope),
+                permit,
             }) {
                 pending.push(PendingVoiceSource(prepared));
             }
@@ -589,15 +639,17 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             .sign(&transcript)
             .map_err(|_| VoiceError::Signature)?;
         drop(transcript);
-        let mut frame = vec![KIND];
-        frame.extend(encode_authed_request(
+        // Encode directly into the final frame. Building an encoded body and then extending
+        // a second frame would retain an avoidable complete SDP copy at this boundary.
+        let frame = encode_authed_request_frame(
+            KIND,
             &inner,
             &key,
             auth.ts,
             &auth.nonce,
             auth.epoch,
             &signature,
-        ));
+        );
         if !authority.authorized() {
             return Err(VoiceError::Unauthorized);
         }
@@ -655,15 +707,13 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
                     .map_err(VoiceCompletionFailure::terminal)?,
             )
             .map_err(VoiceCompletionFailure::terminal)?;
-        let progress = completed.job.exchange();
         let status = if let Ok(response) = &completed.response {
             match self.verify_voice_response(
                 completed.job.peer(),
                 &completed.request,
                 completed.job.object_hash(),
                 response,
-                Some(completed.job.envelope()),
-                progress.as_ref(),
+                Some(completed.job.retained()),
             ) {
                 Ok(status) => Some(status),
                 Err(error @ (VoiceError::Capacity | VoiceError::RateLimited)) => {

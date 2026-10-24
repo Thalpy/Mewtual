@@ -56,9 +56,14 @@ pub mod limits;
 pub mod negotiation;
 pub mod packets;
 pub mod presence;
+mod ready;
+pub(crate) use ready::admission::ReadyAdmission;
+pub use ready::ReadyHeader;
 pub mod resources;
 pub mod runtime;
+mod sdp_profile;
 pub mod source;
+pub use sdp_profile::{SdpProfile, SdpRound};
 
 /// Field-level custody: moving other fields out of a record still retires this exact pending
 /// operation on consume, replacement or cache collection. Never move it into historical receipts.
@@ -434,9 +439,40 @@ pub enum EncryptedKind {
     Answer = 5,
     Ice = 6,
     Bye = 7,
+    /// Explicit complete-SDP forms. Kinds1-7 retain their exact original bytes.
+    OfferRound(SdpRound) = 8,
+    AnswerRound(SdpRound) = 9,
 }
 impl EncryptedKind {
-    fn get(value: u8) -> Result<Self, VoiceError> {
+    pub(crate) fn tag(self) -> u8 {
+        match self {
+            Self::ConfirmHello => 1,
+            Self::ConfirmProof => 2,
+            Self::ConfirmFinish => 3,
+            Self::Offer => 4,
+            Self::Answer => 5,
+            Self::Ice => 6,
+            Self::Bye => 7,
+            Self::OfferRound(_) => 8,
+            Self::AnswerRound(_) => 9,
+        }
+    }
+    pub(crate) fn is_offer(self) -> bool {
+        matches!(self, Self::Offer | Self::OfferRound(_))
+    }
+    pub(crate) fn is_answer(self) -> bool {
+        matches!(self, Self::Answer | Self::AnswerRound(_))
+    }
+    pub(crate) fn is_sdp(self) -> bool {
+        self.is_offer() || self.is_answer()
+    }
+    pub(crate) fn round(self) -> Option<SdpRound> {
+        match self {
+            Self::OfferRound(round) | Self::AnswerRound(round) => Some(round),
+            _ => None,
+        }
+    }
+    fn get(value: u8, d: &mut Decoder<'_>) -> Result<Self, VoiceError> {
         match value {
             1 => Ok(Self::ConfirmHello),
             2 => Ok(Self::ConfirmProof),
@@ -445,12 +481,16 @@ impl EncryptedKind {
             5 => Ok(Self::Answer),
             6 => Ok(Self::Ice),
             7 => Ok(Self::Bye),
+            8 => Ok(Self::OfferRound(SdpRound::get(d)?)),
+            9 => Ok(Self::AnswerRound(SdpRound::get(d)?)),
             _ => Err(VoiceError::Malformed),
         }
     }
     fn max_plaintext(self) -> usize {
         match self {
-            Self::Offer | Self::Answer => MAX_SDP_PLAINTEXT,
+            Self::Offer | Self::Answer | Self::OfferRound(_) | Self::AnswerRound(_) => {
+                MAX_SDP_PLAINTEXT
+            }
             Self::Ice => 2 * 1024,
             Self::Bye => 128,
             _ => 512,
@@ -482,11 +522,16 @@ impl EncryptedHeader {
         e.put_u8(SUITE);
         fixed(e, &self.handshake);
         e.put_u8(u8::from(self.low_to_high));
-        e.put_u8(self.kind as u8);
+        e.put_u8(self.kind.tag());
         e.put_u64(self.sequence);
         e.put_u8(u8::from(self.offer.is_some()));
         if let Some(offer) = self.offer {
             offer.put(e);
+        }
+        // Only the new kinds carry a round suffix. Never append an option flag to old
+        // signed/AAD encodings: their exact canonical grammar remains unchanged.
+        if let Some(round) = self.kind.round() {
+            round.put(e);
         }
     }
     fn get(d: &mut Decoder<'_>) -> Result<Self, VoiceError> {
@@ -500,13 +545,14 @@ impl EncryptedHeader {
         }
         let handshake = array(d)?;
         let low_to_high = boolean(d)?;
-        let kind = EncryptedKind::get(d.get_u8()?)?;
+        let kind_tag = d.get_u8()?;
         let sequence = d.get_u64()?;
         let offer = match d.get_u8()? {
             0 => None,
             1 => Some(OfferId::get(d)?),
             _ => return Err(VoiceError::Malformed),
         };
+        let kind = EncryptedKind::get(kind_tag, d)?;
         Ok(Self {
             source_join,
             target,
@@ -532,6 +578,16 @@ impl EncryptedHeader {
                 Ok(())
             }
             (EncryptedKind::Answer, Some(offer)) if offer.issuer == self.target => Ok(()),
+            (EncryptedKind::OfferRound(_), Some(offer))
+                if self.low_to_high && offer.issuer == issuer && offer.message == id =>
+            {
+                Ok(())
+            }
+            (EncryptedKind::AnswerRound(_), Some(offer))
+                if !self.low_to_high && offer.issuer == self.target =>
+            {
+                Ok(())
+            }
             (EncryptedKind::Ice, Some(offer))
                 if offer.issuer == issuer || offer.issuer == self.target =>
             {
@@ -575,6 +631,19 @@ pub enum Body {
         header: EncryptedHeader,
         ciphertext: Vec<u8>,
     },
+    /// Signed causal readiness metadata. Codec/route validity is not exact native pair
+    /// admission, and this public control can never supply SDP plaintext or RTC authority.
+    PairReady { header: ReadyHeader },
+    /// Authenticated closed mode evidence; old tag5 remains a distinct unsupported form
+    /// at protected endpoint admission. Helpers may relay either without upgrading it.
+    PairReadyRound {
+        header: ReadyHeader,
+        /// Positive native HIGH round counter, independent of wall time and message ID.
+        /// Current one-shot endpoint factories issue/admit1 only; this field alone does
+        /// not authorize replacement, renewed attempts, or disposal of a busy round.
+        sequence: u64,
+        profile: SdpProfile,
+    },
 }
 impl Body {
     fn kind(&self) -> u8 {
@@ -583,6 +652,8 @@ impl Body {
             Self::WatchChallenge { .. } => 2,
             Self::JoinProof { .. } => 3,
             Self::Encrypted { .. } => 4,
+            Self::PairReady { .. } => 5,
+            Self::PairReadyRound { .. } => 6,
         }
     }
     pub fn target(&self) -> Option<DeviceId> {
@@ -591,6 +662,7 @@ impl Body {
             Self::WatchChallenge { target, .. } => Some(*target),
             Self::JoinProof { watcher, .. } => Some(*watcher),
             Self::Encrypted { header, .. } => Some(header.target),
+            Self::PairReady { header } | Self::PairReadyRound { header, .. } => Some(header.target),
         }
     }
     fn put_header(&self, e: &mut Encoder) {
@@ -633,6 +705,16 @@ impl Body {
                 fixed(e, challenge_id);
             }
             Self::Encrypted { header, .. } => header.put(e),
+            Self::PairReady { header } => header.put(e),
+            Self::PairReadyRound {
+                header,
+                sequence,
+                profile,
+            } => {
+                header.put(e);
+                e.put_u64(*sequence);
+                profile.put(e);
+            }
         }
     }
     fn get(kind: u8, d: &mut Decoder<'_>) -> Result<Self, VoiceError> {
@@ -668,6 +750,14 @@ impl Body {
                     ciphertext: bytes.to_vec(),
                 }
             }
+            5 => Self::PairReady {
+                header: ReadyHeader::get(d)?,
+            },
+            6 => Self::PairReadyRound {
+                header: ReadyHeader::get(d)?,
+                sequence: d.get_u64()?,
+                profile: SdpProfile::get(d)?,
+            },
             _ => return Err(VoiceError::Malformed),
         })
     }
@@ -750,6 +840,9 @@ impl SignedObject {
         if self.body.target() == Some(self.issuer) {
             return Err(VoiceError::Malformed);
         }
+        if matches!(&self.body, Body::PairReadyRound { sequence: 0, .. }) {
+            return Err(VoiceError::Malformed);
+        }
         match &self.body {
             Body::Announcement { key, renewal, .. } => {
                 key.validate()?;
@@ -762,6 +855,9 @@ impl SignedObject {
                 if ciphertext.len() < 16 || ciphertext.len() > header.kind.max_plaintext() + 16 {
                     return Err(VoiceError::Bounds);
                 }
+            }
+            Body::PairReady { header } | Body::PairReadyRound { header, .. } => {
+                header.validate(self.issuer, self.scope)?
             }
             _ => {}
         }
@@ -801,8 +897,11 @@ impl SignedObject {
         }
     }
     pub fn encode(&self) -> Vec<u8> {
-        let mut e = Encoder::new();
-        fixed(&mut e, &self.unsigned());
+        // Finish the child BEFORE allocating its parent. Appending the small signature to
+        // an already full growing Vec otherwise doubles a maximum SDP backing allocation.
+        let unsigned = self.unsigned();
+        let mut e = Encoder::with_capacity(unsigned.len() + 4 + 4 + self.signature.len());
+        fixed(&mut e, &unsigned);
         fixed(&mut e, &self.signature);
         e.finish()
     }
@@ -1061,6 +1160,11 @@ impl RoutePermit {
         Ok(())
     }
     fn matches(&self, object: &SignedObject) -> Result<(), VoiceError> {
+        self.matches_hash(object, object.hash())
+    }
+    /// The caller either computes the hash above or supplies the original immutable job's
+    /// cached hash through the private retained-completion path. Never use a wire claim.
+    fn matches_hash(&self, object: &SignedObject, hash: [u8; 32]) -> Result<(), VoiceError> {
         self.validate()?;
         let expected = object
             .body
@@ -1069,7 +1173,7 @@ impl RoutePermit {
         if self.scope != object.scope
             || self.issuer != object.issuer
             || self.public_key != object.public_key
-            || self.packet != object.hash()
+            || self.packet != hash
             || self.final_scope != expected
             || self.expires > object.expires
             || self.issued < object.issued
@@ -1151,6 +1255,22 @@ pub enum Envelope {
         permit: RoutePermit,
     },
 }
+/// Borrow an already-owned immutable packet instead of cloning its ciphertext merely to
+/// select a transport role. This crate-only view has no independent lifetime or authority;
+/// deferred source work keeps the actual SourceJob/packet and its original payment alive.
+/// Owning and borrowed roles share the SAME canonical encoder and authorization checks.
+#[derive(Clone, Copy)]
+pub(crate) enum EnvelopeRef<'a> {
+    Direct(&'a SignedObject),
+    ToHelper {
+        object: &'a SignedObject,
+        permit: &'a RoutePermit,
+    },
+    HelperDelivery {
+        object: &'a SignedObject,
+        permit: &'a RoutePermit,
+    },
+}
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Disposition {
     Deliver,
@@ -1163,6 +1283,15 @@ struct UnverifiedEncrypted {
     scope: Scope,
     issuer: DeviceId,
     header: EncryptedHeader,
+}
+struct UnverifiedReady {
+    sequence: u64,
+    envelope_kind: u8,
+    scope: Scope,
+    issuer: DeviceId,
+    message: MessageId,
+    hash: [u8; 32],
+    header: ready::ReadyPeek,
 }
 
 /// Snapshot only for synchronous validation. Deferred effects must acquire fresh native/actor
@@ -1208,6 +1337,76 @@ impl<T: catcoms_rt::MeshTransport, R: catcoms_rt::CryptoRngCore> crate::ChannelS
     }
 }
 impl Envelope {
+    /// This parser borrows every wire field and never allocates a helper Vec. It selects
+    /// capacity only; even an exact header must still pass normal authentication/admission.
+    fn peek_ready(bytes: &[u8]) -> Result<UnverifiedReady, VoiceError> {
+        if bytes.len() > MAX_ENVELOPE {
+            return Err(VoiceError::Bounds);
+        }
+        let mut outer = Decoder::new(bytes);
+        if outer.get_u8()? != VERSION {
+            return Err(VoiceError::Malformed);
+        }
+        let envelope_kind = outer.get_u8()?;
+        if !matches!(envelope_kind, 1..=3) {
+            return Err(VoiceError::Malformed);
+        }
+        let object = outer.get_bytes()?;
+        if envelope_kind != 1 && outer.get_bytes()?.len() > 1024 {
+            return Err(VoiceError::Bounds);
+        }
+        outer.finish()?;
+        let mut signed = Decoder::new(object);
+        let unsigned = signed.get_bytes()?;
+        let _: [u8; 64] = array(&mut signed)?;
+        signed.finish()?;
+        let mut d = Decoder::new(unsigned);
+        if d.get_str()? != OBJECT_DOMAIN || d.get_u8()? != VERSION || d.get_u8()? != 6 {
+            return Err(VoiceError::Malformed);
+        }
+        let scope = Scope::get(&mut d)?;
+        let issuer = DeviceId::from_bytes(array(&mut d)?);
+        let _: [u8; 32] = array(&mut d)?;
+        let message = array(&mut d)?;
+        d.get_u64()?;
+        d.get_u64()?;
+        let header = ready::ReadyPeek::get(&mut d)?;
+        let sequence = d.get_u64()?;
+        if sequence == 0 {
+            return Err(VoiceError::Malformed);
+        }
+        let _profile = SdpProfile::get(&mut d)?; // only closed CompleteSdpV1 can select this loan
+        d.finish()?;
+        if issuer <= header.target
+            || (scope.policy.is_none() && header.helpers[0].is_some())
+            || header
+                .helpers
+                .iter()
+                .flatten()
+                .any(|helper| *helper == issuer || *helper == header.target)
+            || matches!(header.helpers, [Some(a), Some(b)] if a >= b)
+        {
+            return Err(VoiceError::Malformed);
+        }
+        Ok(UnverifiedReady {
+            sequence,
+            envelope_kind,
+            scope,
+            issuer,
+            message,
+            hash: *blake3::hash(object).as_bytes(),
+            header,
+        })
+    }
+    pub(crate) fn as_ref(&self) -> EnvelopeRef<'_> {
+        match self {
+            Self::Direct(object) => EnvelopeRef::Direct(object),
+            Self::ToHelper { object, permit } => EnvelopeRef::ToHelper { object, permit },
+            Self::HelperDelivery { object, permit } => {
+                EnvelopeRef::HelperDelivery { object, permit }
+            }
+        }
+    }
     fn peek_encrypted(bytes: &[u8]) -> Result<UnverifiedEncrypted, VoiceError> {
         if bytes.len() > MAX_ENVELOPE {
             return Err(VoiceError::Bounds);
@@ -1260,19 +1459,7 @@ impl Envelope {
         }
     }
     pub fn encode(&self) -> Vec<u8> {
-        let mut e = Encoder::new();
-        e.put_u8(VERSION);
-        let (kind, object, permit) = match self {
-            Self::Direct(object) => (1, object, None),
-            Self::ToHelper { object, permit } => (2, object, Some(permit)),
-            Self::HelperDelivery { object, permit } => (3, object, Some(permit)),
-        };
-        e.put_u8(kind);
-        fixed(&mut e, &object.encode());
-        if let Some(permit) = permit {
-            fixed(&mut e, &permit.encode());
-        }
-        e.finish()
+        self.as_ref().encode()
     }
     /// Charge the authenticated immediate requester's cheap work budget BEFORE calling decode.
     /// Decoding verifies original signatures but does not admit replay or authorize delivery.
@@ -1312,6 +1499,69 @@ impl Envelope {
         context: &Context,
         member: impl Fn(DeviceId) -> bool,
     ) -> Result<Disposition, VoiceError> {
+        self.as_ref().authorize(requester, context, member)
+    }
+}
+
+impl EnvelopeRef<'_> {
+    pub(crate) fn object(&self) -> &SignedObject {
+        match self {
+            Self::Direct(object)
+            | Self::ToHelper { object, .. }
+            | Self::HelperDelivery { object, .. } => object,
+        }
+    }
+
+    pub(crate) fn encode(&self) -> Vec<u8> {
+        let (kind, object, permit) = match self {
+            Self::Direct(object) => (1, object, None),
+            Self::ToHelper { object, permit } => (2, object, Some(permit)),
+            Self::HelperDelivery { object, permit } => (3, object, Some(permit)),
+        };
+        // Each child completes before the large parent exists. Exactly reserve the final
+        // frame so appending a small permit cannot double a complete SDP allocation.
+        let object = object.encode();
+        let permit = permit.map(|permit| permit.encode());
+        let bytes = 2 + 4 + object.len() + permit.as_ref().map_or(0, |permit| 4 + permit.len());
+        let mut e = Encoder::with_capacity(bytes);
+        e.put_u8(VERSION);
+        e.put_u8(kind);
+        fixed(&mut e, &object);
+        if let Some(permit) = permit {
+            fixed(&mut e, &permit);
+        }
+        e.finish()
+    }
+
+    pub(crate) fn authorize(
+        &self,
+        requester: DeviceId,
+        context: &Context,
+        member: impl Fn(DeviceId) -> bool,
+    ) -> Result<Disposition, VoiceError> {
+        self.authorize_inner(requester, context, member, None)
+    }
+
+    /// Only native transport's private RetainedEnvelope calls this: it binds BOTH this view
+    /// and the cached hash to the same original immutable SourceJob/ForwardJob allocation.
+    /// Ingress and public ACK verification must use `authorize`, computing their own hash.
+    pub(crate) fn authorize_retained(
+        &self,
+        requester: DeviceId,
+        context: &Context,
+        member: impl Fn(DeviceId) -> bool,
+        hash: [u8; 32],
+    ) -> Result<Disposition, VoiceError> {
+        self.authorize_inner(requester, context, member, Some(hash))
+    }
+
+    fn authorize_inner(
+        &self,
+        requester: DeviceId,
+        context: &Context,
+        member: impl Fn(DeviceId) -> bool,
+        cached_hash: Option<[u8; 32]>,
+    ) -> Result<Disposition, VoiceError> {
         let object = self.object();
         if object.scope != context.scope {
             return Err(VoiceError::Scope);
@@ -1327,6 +1577,16 @@ impl Envelope {
         }
         if matches!(object.body, Body::Announcement { epoch, .. } if epoch > context.epoch) {
             return Err(VoiceError::Freshness);
+        }
+        if let Body::PairReady { header } | Body::PairReadyRound { header, .. } = &object.body {
+            // Ready protects an exact original epoch, unlike renewable discovery. Verify
+            // every named helper now; native pair admission repeats this at final commit.
+            if header.epoch != context.epoch
+                || (!header.helpers.is_empty() && !context.indirect)
+                || header.helpers.iter().any(|helper| !member(*helper))
+            {
+                return Err(VoiceError::Unauthorized);
+            }
         }
         match self {
             Self::Direct(_) => {
@@ -1344,7 +1604,15 @@ impl Envelope {
                 if !context.indirect || context.scope.policy.is_none() || !member(permit.helper) {
                     return Err(VoiceError::Unauthorized);
                 }
-                permit.matches(object)?;
+                if matches!(&object.body, Body::PairReady { header } | Body::PairReadyRound { header, .. } if !header.helpers.contains(&permit.helper))
+                {
+                    return Err(VoiceError::Unauthorized);
+                }
+                if let Some(hash) = cached_hash {
+                    permit.matches_hash(object, hash)?;
+                } else {
+                    permit.matches(object)?;
+                }
                 freshness(permit.issued, permit.expires, context.now)?;
                 match self {
                     Self::ToHelper { .. }

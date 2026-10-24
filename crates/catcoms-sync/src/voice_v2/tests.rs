@@ -6,13 +6,13 @@ fn device(seed: u8) -> DeviceKeypair {
 fn scope() -> Scope {
     Scope::for_group(b"exact MLS group", Some([8; 32]), 123)
 }
-fn key(join: u8) -> JoinKey {
+pub(super) fn key(join: u8) -> JoinKey {
     // SEC2 P-256 generator, a valid uncompressed point. Point validation in the endpoint uses
     // WebCrypto, independently of this native structural/signature codec.
     let bytes = hex::decode("046b17d1f2e12c4247f8bce6e563a440f277037d812deb33a0f4a13945d898c2964fe342e2fe1a7f9b8ee7eb4a7c0f9e162bce33576b315ececbb6406837bf51f5").unwrap();
     JoinKey::new([join; 32], bytes.try_into().unwrap()).unwrap()
 }
-fn announcement(signer: &DeviceKeypair, join: u8) -> SignedObject {
+pub(super) fn announcement(signer: &DeviceKeypair, join: u8) -> SignedObject {
     SignedObject::issue(
         scope(),
         signer,
@@ -70,6 +70,127 @@ fn roundtrip(value: &SignedObject) {
     assert!(SignedObject::decode(&value.encode()).unwrap() == *value);
     let encoded = Envelope::Direct(value.clone()).encode();
     assert!(Envelope::decode(&encoded).unwrap().object() == value);
+}
+
+#[test]
+fn borrowed_transport_roles_preserve_canonical_maximum_sdp_bytes_and_authorization() {
+    let a = device(1);
+    let b = device(2);
+    let c = device(3);
+    let template = encrypted(&a, c.device_id());
+    let Body::Encrypted { header, .. } = template.body().clone() else {
+        unreachable!()
+    };
+    for plaintext_bytes in [
+        0,
+        1,
+        255,
+        256,
+        511,
+        512,
+        1023,
+        1024,
+        8191,
+        MAX_SDP_PLAINTEXT,
+    ] {
+        let packet = SignedObject::issue(
+            scope(),
+            &a,
+            template.id(),
+            1000,
+            16_000,
+            Body::Encrypted {
+                header: header.clone(),
+                ciphertext: vec![77; plaintext_bytes + 16],
+            },
+        )
+        .unwrap();
+        let signed = packet.encode();
+        assert_eq!(signed.capacity(), signed.len());
+        let mut prior_signed = Encoder::new();
+        prior_signed.put_bytes(&packet.unsigned()).unwrap();
+        prior_signed.put_bytes(&packet.signature).unwrap();
+        assert_eq!(signed, prior_signed.finish());
+        assert!(packet.unsigned().capacity() <= plaintext_bytes + 2048);
+        let permit = RoutePermit::issue(&a, &packet, b.device_id(), 1000, 16_000).unwrap();
+        for (kind, borrowed, requester, receiver, expected) in [
+            (
+                1,
+                EnvelopeRef::Direct(&packet),
+                a.device_id(),
+                c.device_id(),
+                Disposition::Deliver,
+            ),
+            (
+                2,
+                EnvelopeRef::ToHelper {
+                    object: &packet,
+                    permit: &permit,
+                },
+                a.device_id(),
+                b.device_id(),
+                Disposition::Forward(FinalScope::Endpoint(c.device_id())),
+            ),
+            (
+                3,
+                EnvelopeRef::HelperDelivery {
+                    object: &packet,
+                    permit: &permit,
+                },
+                b.device_id(),
+                c.device_id(),
+                Disposition::Deliver,
+            ),
+        ] {
+            // Independent construction of the previous canonical outer grammar. Sharing native
+            // storage must not alter any signed bytes or introduce an optional transport role.
+            let mut prior = Encoder::new();
+            prior.put_u8(VERSION);
+            prior.put_u8(kind);
+            prior.put_bytes(&packet.encode()).unwrap();
+            if kind != 1 {
+                prior.put_bytes(&permit.encode()).unwrap();
+            }
+            let encoded = borrowed.encode();
+            assert_eq!(
+                encoded.capacity(),
+                encoded.len(),
+                "permit append must not double backing storage"
+            );
+            assert_eq!(encoded, prior.finish());
+            let decoded = Envelope::decode(&encoded).unwrap();
+            assert_eq!(decoded.encode(), encoded);
+            assert!(
+                std::ptr::eq(borrowed.object(), &packet),
+                "no packet/ciphertext clone"
+            );
+            assert!(
+                borrowed
+                    .authorize(requester, &context(receiver), |_| true)
+                    .unwrap()
+                    == expected
+            );
+            assert!(
+                decoded
+                    .authorize(requester, &context(receiver), |_| true)
+                    .unwrap()
+                    == expected
+            );
+            assert!(borrowed
+                .authorize(receiver, &context(receiver), |_| true)
+                .is_err());
+            let wrong_scope = Context {
+                scope: Scope::for_group(b"other", Some([8; 32]), 123),
+                ..context(receiver)
+            };
+            assert!(borrowed
+                .authorize(requester, &wrong_scope, |_| true)
+                .is_err());
+            assert!(borrowed
+                .authorize(requester, &context(receiver), |id| id != c.device_id())
+                .is_err());
+        }
+    }
 }
 
 fn controls(a: &DeviceKeypair, c: &DeviceKeypair) -> [SignedObject; 2] {

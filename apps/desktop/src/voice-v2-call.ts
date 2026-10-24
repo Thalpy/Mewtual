@@ -14,8 +14,8 @@
 // - keep signalling progress, native submission and media connectivity as separate facts;
 // - never fall back to the legacy protocol, whatever fails.
 //
-// ACTIVATION IS INCOMPLETE. No native command implements VoiceV2Native yet: the handoff channel
-// is status-only and native SDP phase factories do not exist. `voiceV2Activation()` therefore
+// ACTIVATION IS INCOMPLETE. The encrypted handoff supports native Derive/confirmation and
+// cleanup, but no complete VoiceV2Native adapter or native SDP phase factory exists. `voiceV2Activation()` therefore
 // reports unavailable and App.svelte keeps every call on legacy signalling. The contract tests in
 // voice-v2-call.test.ts pin the behaviour a native adapter must support before that changes.
 
@@ -113,7 +113,8 @@ export interface VoiceV2Native {
   /** Long-poll or immediate: may resolve with no items. Repeating `after` repeats the items. */
   events(lease: string, after: string): Promise<VoiceV2Batch>;
   submit(lease: string, action: VoiceV2Action): Promise<VoiceV2SubmitResult>;
-  /** Idempotent. Native sends its own V2 bye naming this exact join and revokes the lease. */
+  /** Idempotently revoke this exact join. A V2 bye is best effort; remote receipt is never
+   * required for local End. Lost replies repeat original cleanup, never a fresh join. */
   end(lease: string): Promise<void>;
 }
 

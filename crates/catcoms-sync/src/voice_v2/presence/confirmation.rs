@@ -19,14 +19,17 @@ const MAX_CONFIRMING: usize = 8;
 const PAIR_BYTES: usize = 6144;
 const CONFIRM_DOMAIN: &str = "mewtual/voice/key-confirm/v2";
 mod derivation;
+mod first_offer;
 mod pair;
 mod protected;
+mod ready;
 mod response;
 mod result;
 mod start;
+mod successor;
 pub(crate) use derivation::{ProtectedDerivation, ProtectedDerivationResult};
 pub(crate) use pair::ProtectedPair;
-pub use pair::{PairReceipt, PairSelector};
+pub use pair::{PairReceipt, PairSelector, VoicePairConfirmation};
 pub(crate) use response::ProtectedResponse;
 pub(crate) use result::{ProtectedOpenedResult, ProtectedSealedResult};
 pub(crate) use start::ProtectedStart;
@@ -65,6 +68,15 @@ pub(super) struct Pair {
     // Mode selection precedes capacity acquisition and never rolls back on local pressure.
     // An ordinary action issued before selection cannot be adopted; a fresh pair is required.
     protected_epoch: Option<u64>,
+    // Inert native successor custody stays outside PacketLedger.sdp. Quiet collection and
+    // actual Pair destruction cover this owner even when registry installation is refused.
+    sdp_successor: Option<successor::Preparation>,
+    // Fixed history must not hold an Exchange/receiver/input. The actual event is separate
+    // progress custody and is collected with its original successor on expiry/revocation.
+    first_offer: Option<Arc<crate::voice_v2::negotiation::admission::FirstOfferAdmission>>,
+    // One fixed LOW admission, independent of the live successor. No progress backedge.
+    ready_admission: Option<Arc<crate::voice_v2::ready::admission::ReadyAdmission>>,
+    sdp_input: Option<Box<InboundPacket>>,
     _credit: Credit,
 }
 struct Action {
@@ -82,6 +94,10 @@ impl Drop for Pair {
         if let Some(chain) = &self.chain {
             chain.close();
         }
+        if let Some(preparation) = &self.sdp_successor {
+            preparation.close();
+        }
+        drop(self.sdp_successor.take());
     }
 }
 impl Confirmations {
@@ -179,7 +195,7 @@ fn plaintext(kind: EncryptedKind, handshake: Nonce, low: Nonce, high: Option<Non
     let mut e = Encoder::new();
     e.put_str(CONFIRM_DOMAIN).expect("constant");
     e.put_u8(VERSION);
-    e.put_u8(kind as u8);
+    e.put_u8(kind.tag());
     fixed(&mut e, &handshake);
     fixed(&mut e, &low);
     if let Some(high) = high {
@@ -198,7 +214,7 @@ fn decode(
     let mut d = Decoder::new(bytes);
     if d.get_str()? != CONFIRM_DOMAIN
         || d.get_u8()? != VERSION
-        || d.get_u8()? != kind as u8
+        || d.get_u8()? != kind.tag()
         || array::<32>(&mut d)? != handshake
     {
         return Err(VoiceError::Malformed);
@@ -320,6 +336,10 @@ impl ConfirmationRetirement {
     fn finish(self, join: &mut LocalJoin) {
         // Called only after the current Engine/result fence has returned. A different
         // action's engine/payload locks and credit destruction must never nest inside that fence.
+        // Keep retirement synchronous within this actual LocalJoin borrow. Its original
+        // chain/history payment anchors separated confirmation table slots until drop(self).
+        // Moving ConsumedIncoming into a detached task would need its own fixed-plan anchor;
+        // successor packet slots already retain their exact Exchange independently.
         if let Some(crypto) = &self.crypto {
             crypto.retire_if_unstarted();
         }
@@ -411,6 +431,8 @@ impl LocalJoin {
             }
             // No fallback to ordinary factories after a valid selection, even if any of the
             // following capacity reservations refuse. An exact protected retry may continue.
+            self.ledger
+                .select_complete_sdp_profile(handshake, authority)?;
             self.confirmations
                 .pairs
                 .get_mut(&handshake)
@@ -910,11 +932,14 @@ impl LocalJoin {
     }
     pub(super) fn collect_confirmations(&mut self, clock: &dyn Clock) {
         for (id, pair) in &mut self.confirmations.pairs {
-            if clock.monotonic_ms() >= pair.deadline || !self.lease.is_live() || !pair.pin.is_live()
-            {
-                if let Some(chain) = &pair.chain {
-                    chain.close();
-                }
+            if let Some(chain) = &pair.chain {
+                // Same arm-versus-close CAS as process Workflow collection. Keeping transfer
+                // custody alive does not change pair.deadline or any old action/source grant.
+                chain.collect_expired(clock.monotonic_ms());
+            }
+            successor::collect(&mut pair.sdp_successor, clock.monotonic_ms());
+            if pair.sdp_successor.is_none() {
+                drop(pair.sdp_input.take());
             }
             if !pair.retired
                 && (!self.lease.is_live()
@@ -1022,6 +1047,10 @@ impl LocalJoin {
                 retired: false,
                 chain: None,
                 protected_epoch: None,
+                sdp_successor: None,
+                first_offer: None,
+                ready_admission: None,
+                sdp_input: None,
                 _credit: credit,
             },
         );

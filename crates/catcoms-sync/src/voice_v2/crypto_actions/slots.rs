@@ -65,6 +65,30 @@ impl Slots {
     }
 }
 impl ReservedSlots {
+    /// Move already-prepaid positions into a child reservation without freeing/recharging
+    /// the shared table. The caller must fund the child wrapper before calling this.
+    /// Unpublished abandonment returns to this exact parent; parent closure releases only
+    /// positions nobody still owns. There is no parent -> child reference or lock edge.
+    pub(crate) fn subreserve(self: &Arc<Self>, count: usize) -> Result<Arc<Self>, VoiceError> {
+        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        if count == 0 || state.closed || state.available < count {
+            return Err(VoiceError::Capacity);
+        }
+        state.available -= count;
+        drop(state);
+        Ok(Arc::new(Self {
+            pool: self.pool.clone(),
+            state: Mutex::new(State {
+                credit: Slot {
+                    pool: self.pool.clone(),
+                    count,
+                    reserve: Some(self.clone()),
+                },
+                available: count,
+                closed: false,
+            }),
+        }))
+    }
     pub(crate) fn loan(self: &Arc<Self>, expected: &Arc<Slots>) -> Result<Slot, VoiceError> {
         if !Arc::ptr_eq(expected, &self.pool) {
             return Err(VoiceError::Scope);
@@ -99,13 +123,19 @@ impl ReservedSlots {
     }
 }
 impl Slot {
+    pub(crate) fn uses_pool(&self, expected: &Arc<Slots>) -> bool {
+        Arc::ptr_eq(&self.pool, expected)
+    }
     fn release(&mut self, count: usize) {
-        assert!(
-            self.reserve.is_none() && count <= self.count,
-            "native table backing slot"
-        );
+        assert!(count <= self.count, "native table backing slot");
         self.count -= count;
-        *self.pool.used.lock().unwrap_or_else(|e| e.into_inner()) -= count;
+        if let Some(parent) = &self.reserve {
+            // Child -> parent only. Parent never enters a child's mutex, so closure and
+            // last actual loan return preserve the existing reservation -> pool order.
+            parent.returned(count);
+        } else {
+            *self.pool.used.lock().unwrap_or_else(|e| e.into_inner()) -= count;
+        }
     }
 }
 impl Drop for Slot {
@@ -123,6 +153,68 @@ impl Drop for Slot {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn closing_child_first_returns_only_unused_positions_to_still_live_parent() {
+        let pool = Arc::new(Slots::with_limit(2));
+        let original = pool.reserve(2).unwrap();
+        let child = original.subreserve(2).unwrap();
+        let actual = child.loan(&pool).unwrap();
+        child.close();
+        assert!(pool.charge(1).is_err());
+        let returned = original.loan(&pool).unwrap();
+        assert!(original.loan(&pool).is_err());
+        original.close();
+        assert!(pool.charge(1).is_err());
+        drop(actual);
+        let ordinary = pool.charge(1).unwrap();
+        assert!(pool.charge(1).is_err());
+        drop((original, child, returned, ordinary));
+        assert_eq!(*pool.used.lock().unwrap(), 0);
+    }
+    #[test]
+    fn nested_subreservations_never_free_protected_positions_before_last_actual_loan() {
+        let pool = Arc::new(Slots::with_limit(4));
+        let original = pool.reserve(4).unwrap();
+        let child = original.subreserve(3).unwrap();
+        let grandchild = child.subreserve(2).unwrap();
+        assert!(pool.charge(1).is_err());
+        let first = grandchild.loan(&pool).unwrap();
+        let second = grandchild.loan(&pool).unwrap();
+        original.close(); // one unused original position becomes ordinary
+        let ordinary = pool.charge(1).unwrap();
+        child.close(); // its one unused position returns through the CLOSED original
+        let next = pool.charge(1).unwrap();
+        grandchild.close();
+        assert!(pool.charge(1).is_err());
+        drop((original, child, grandchild));
+        assert!(pool.charge(1).is_err());
+        drop(first);
+        let reclaimed = pool.charge(1).unwrap();
+        assert!(pool.charge(1).is_err());
+        drop((second, ordinary, next, reclaimed));
+        assert_eq!(*pool.used.lock().unwrap(), 0);
+    }
+    #[test]
+    fn abandoned_child_returns_to_exact_parent_without_reset_or_foreign_pool_adoption() {
+        let pool = Arc::new(Slots::with_limit(2));
+        let original = pool.reserve(2).unwrap();
+        assert_eq!(original.subreserve(0).err(), Some(VoiceError::Capacity));
+        let child = original.subreserve(2).unwrap();
+        assert_eq!(original.subreserve(1).err(), Some(VoiceError::Capacity));
+        assert_eq!(
+            child.loan(&Arc::new(Slots::with_limit(2))).err(),
+            Some(VoiceError::Scope)
+        );
+        drop(child);
+        assert!(pool.charge(1).is_err());
+        let first = original.loan(&pool).unwrap();
+        let second = original.loan(&pool).unwrap();
+        assert!(original.loan(&pool).is_err());
+        original.close();
+        assert_eq!(original.subreserve(1).err(), Some(VoiceError::Capacity));
+        drop((first, second, original));
+        assert_eq!(*pool.used.lock().unwrap(), 0);
+    }
     #[test]
     fn prepaid_continuations_survive_ordinary_pressure_and_actual_terminal_record_retirement() {
         let pool = Arc::new(Slots::default());

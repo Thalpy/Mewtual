@@ -44,6 +44,15 @@ pub struct CryptoResultStatus {
     pub receipt: Option<CryptoResultReceipt>,
 }
 
+/// Atomic native-custody observation of the original action fence. A receipt or retired
+/// authority is not an acknowledgement: only successful `acknowledge_result` sets this bit.
+/// This projection grants no fresh work and does not prove browser/SDK/physical drainage.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CryptoHandoffStatus {
+    pub engine: CryptoResultStatus,
+    pub acknowledged: bool,
+}
+
 pub(super) struct RecordedResult {
     output_tag: [u8; 32],
     result: TerminalResult,
@@ -65,8 +74,12 @@ pub(crate) struct TerminalResult {
 
 impl RecordedResult {
     fn receipt(&self, action: &CryptoAction) -> CryptoResultReceipt {
-        let binding = &self.result.binding;
         let (monotonic, wall) = action.authority.history_time();
+        self.receipt_at(action, monotonic, wall)
+    }
+
+    fn receipt_at(&self, action: &CryptoAction, monotonic: u64, wall: u64) -> CryptoResultReceipt {
+        let binding = &self.result.binding;
         CryptoResultReceipt {
             action: action.serial,
             input_tag: action.input_tag,
@@ -117,13 +130,25 @@ impl CryptoAction {
     /// Reading settlement and history under one fence lets that adapter collect only genuinely
     /// drained, acknowledged history without racing a first terminal publication.
     pub fn terminal_status(&self) -> CryptoResultStatus {
+        self.handoff_status().engine
+    }
+
+    /// Observe actual ACK and terminal/settlement under ONE Engine fence. Sample callback-
+    /// bearing clocks before that fence, so a trusted native adapter can observe outside its
+    /// own locks without a reentrant Clock acquiring an already-held Engine. Retirement is
+    /// merely a timestamped observation; neither it nor this method restores pending authority.
+    pub fn handoff_status(&self) -> CryptoHandoffStatus {
+        let (monotonic, wall) = self.authority.history_time();
         let engine = self.engine.lock().unwrap_or_else(|e| e.into_inner());
-        CryptoResultStatus {
-            settled: engine.settled && !engine.preparing,
-            receipt: engine
-                .terminal
-                .as_ref()
-                .map(|recorded| recorded.receipt(self)),
+        CryptoHandoffStatus {
+            engine: CryptoResultStatus {
+                settled: engine.settled && !engine.preparing,
+                receipt: engine
+                    .terminal
+                    .as_ref()
+                    .map(|recorded| recorded.receipt_at(self, monotonic, wall)),
+            },
+            acknowledged: engine.acknowledged,
         }
     }
 

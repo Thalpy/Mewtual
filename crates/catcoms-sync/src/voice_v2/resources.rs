@@ -6,10 +6,21 @@ use super::VoiceError;
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
-const PROCESS_BYTES: usize = 2 * 1024 * 1024;
-const GROUP_BYTES: usize = 256 * 1024;
+/// Aggregate declared native memory across ALL groups and process infrastructure. A local
+/// group policy revision never grants another process pool or increases this hard ceiling.
+pub const PROCESS_BYTES: usize = 2 * 1024 * 1024;
+/// Declared native group capacity. Actual authenticated discovery, retained transport work,
+/// channel/setup custody and the SDP phase must compose; the earlier provisional256KiB
+/// budget could refuse an ordinary two-endpoint call before SDP. One group may now occupy
+/// at most one quarter of the UNCHANGED2MiB process pool. Work/issuer/record/peer ceilings and
+/// actual-last-owner refunds remain separate, unchanged enforcement boundaries.
+pub const GROUP_BYTES: usize = 512 * 1024;
 const GROUP_RECORDS: usize = 1024;
 const SLOT_KINDS: usize = 8;
+mod group_lanes;
+pub(crate) use group_lanes::GroupForwardLanes;
+#[cfg(test)]
+pub(super) use group_lanes::GROUP_FORWARD_METADATA_BYTES;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum ResourceKind {
@@ -44,6 +55,7 @@ struct Counts {
     slots: [usize; SLOT_KINDS],
     exchange: std::sync::Weak<super::negotiation::Exchange>,
     workflow: std::sync::Weak<super::chain::Workflow>,
+    outgoing_lanes: std::sync::Weak<GroupForwardLanes>,
 }
 #[derive(Default)]
 struct State {
@@ -119,9 +131,22 @@ struct LaneState {
     busy: bool,
     closed: bool,
 }
-struct LaneBorrow(Arc<WorkLane>);
+struct LaneBorrow {
+    lane: Arc<WorkLane>,
+    // An actual Lower, including ordinary helper/public work borrowing an idle shared
+    // lane, keeps the ORIGINAL group owner/payment alive. Lane ownership alone would let
+    // its weak index expire and a replacement factory reserve another two slots.
+    group: Option<Arc<GroupForwardLanes>>,
+}
 redacted_debug!(WorkLane);
 impl WorkLane {
+    /// The caller holds its original Workflow fence across this check and extraction.
+    /// Every new borrow of that lane must enter that same fence first. This observation
+    /// alone is NOT a transfer permit and cannot be used after releasing the owner fence.
+    pub(super) fn idle_for_transfer(&self) -> bool {
+        let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        !state.closed && !state.busy
+    }
     /// Retirement releases an idle lane. An actual borrower remains charged until its last
     /// credit owner drops; a timeout or lost result-RPC cannot make this lane reusable.
     pub fn close(&self) {
@@ -144,12 +169,15 @@ impl WorkLane {
             return Err(VoiceError::Capacity);
         }
         state.busy = true;
-        Ok(LaneBorrow(self.clone()))
+        Ok(LaneBorrow {
+            lane: self.clone(),
+            group: None,
+        })
     }
 }
 impl Drop for LaneBorrow {
     fn drop(&mut self) {
-        let mut state = self.0.state.lock().unwrap_or_else(|e| e.into_inner());
+        let mut state = self.lane.state.lock().unwrap_or_else(|e| e.into_inner());
         assert!(state.busy, "one actual work lane borrower");
         state.busy = false;
         if state.closed {
@@ -250,6 +278,10 @@ impl ByteBudget {
 }
 
 impl Resources {
+    #[cfg(test)]
+    pub(super) fn lock_capacity_for_test(&self) -> impl Drop + '_ {
+        self.state.lock().unwrap()
+    }
     /// Prepay fixed native process infrastructure without allocating a group or a work slot.
     ///
     /// Zero, overflow and capacity refusal leave all counters unchanged. There is no early
@@ -307,19 +339,90 @@ impl Resources {
             workflow.collect_expired(mono);
         }
     }
+    /// Compare a supplied actual packet producer with the current original owner. Upgrade
+    /// under Pool, then return the strong owner outside it; never export an unpaid dead Weak.
+    pub(crate) fn workflow(&self, group: [u8; 32]) -> Option<Arc<super::chain::Workflow>> {
+        let workflow = {
+            let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+            state
+                .groups
+                .get(&group)
+                .and_then(|counts| counts.workflow.upgrade())
+        };
+        workflow
+    }
     pub(crate) fn register_exchange(
         &self,
         group: [u8; 32],
         exchange: &Arc<super::negotiation::Exchange>,
+    ) -> Result<(), VoiceError> {
+        if !exchange.uses_registry(self, group) {
+            return Err(VoiceError::Scope);
+        }
+        let candidate = Arc::downgrade(exchange);
+        let retired = {
+            let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+            let counts = state
+                .groups
+                .get_mut(&group)
+                .expect("prepaid exchange group");
+            if counts.exchange.strong_count() != 0 {
+                return if counts.exchange.ptr_eq(&candidate) {
+                    Ok(())
+                } else {
+                    Err(VoiceError::Capacity)
+                };
+            }
+            // Inert, closed and actual Lower-owned candidates still count as retained owners.
+            // Only strong-zero may be replaced. Never upgrade/drop an owner under Pool.
+            std::mem::replace(&mut counts.exchange, candidate)
+        };
+        drop(retired);
+        Ok(())
+    }
+    /// Remove only this exact last owner's index BEFORE its final metadata payment drops.
+    /// An unrelated retained group credit can keep Counts alive; a dead Weak would otherwise
+    /// strand the entire Arc allocation after the owner body released its own charge.
+    pub(crate) fn unregister_exchange(
+        &self,
+        group: [u8; 32],
+        owner: *const super::negotiation::Exchange,
     ) {
-        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
-        // The prepaid backing/metadata keeps this group present. A Weak capacity index neither
-        // prolongs a call nor resets its limits, and disappears with the bounded group record.
-        state
-            .groups
-            .get_mut(&group)
-            .expect("prepaid exchange group")
-            .exchange = Arc::downgrade(exchange);
+        let retired = {
+            let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+            state.groups.get_mut(&group).and_then(|counts| {
+                std::ptr::eq(counts.exchange.as_ptr(), owner)
+                    .then(|| std::mem::take(&mut counts.exchange))
+            })
+        };
+        drop(retired);
+    }
+    pub(crate) fn unregister_workflow(
+        &self,
+        group: [u8; 32],
+        owner: *const super::chain::Workflow,
+    ) {
+        let retired = {
+            let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+            state.groups.get_mut(&group).and_then(|counts| {
+                std::ptr::eq(counts.workflow.as_ptr(), owner)
+                    .then(|| std::mem::take(&mut counts.workflow))
+            })
+        };
+        drop(retired);
+    }
+    #[cfg(test)]
+    pub(in crate::voice_v2) fn retained_phase_indices_for_test(
+        &self,
+        group: [u8; 32],
+    ) -> (bool, bool) {
+        let state = self.state.lock().unwrap();
+        state.groups.get(&group).map_or((false, false), |counts| {
+            (
+                !counts.workflow.ptr_eq(&std::sync::Weak::new()),
+                !counts.exchange.ptr_eq(&std::sync::Weak::new()),
+            )
+        })
     }
     pub(crate) fn exchange(&self, group: [u8; 32]) -> Option<Arc<super::negotiation::Exchange>> {
         self.state
@@ -336,7 +439,17 @@ impl Resources {
         bytes: usize,
         kind: ResourceKind,
     ) -> Result<Credit, VoiceError> {
-        self.charge_inner(group, bytes, kind, false)
+        match self.charge_inner(group, bytes, kind, false) {
+            Err(VoiceError::Capacity) if kind == ResourceKind::Forward && bytes != 0 => {
+                // Public/helper work may borrow this group's idle native outgoing capacity.
+                // This does not mint another slot or relax byte/group/process limits. The
+                // scheduler still decides fair order; real old requests keep their owner.
+                self.existing_group_forward_lanes(group)
+                    .ok_or(VoiceError::Capacity)?
+                    .charge_ordinary(self, group, bytes)
+            }
+            result => result,
+        }
     }
     fn charge_inner(
         self: &Arc<Self>,
@@ -439,9 +552,24 @@ impl Resources {
         let state = self.state.lock().unwrap_or_else(|error| error.into_inner());
         (state.total.bytes, state.total.slots[0])
     }
+    /// Snapshot for trusted native composition diagnostics: original group's bytes/Crypto
+    /// positions, excluding process-only infrastructure. Missing means no charged group at
+    /// this observation, never a drained action or permission to reserve observed headroom.
+    /// Actual charge/admission must still repeat its atomic checks under this pool's fence.
+    pub fn group_counts(&self, group: [u8; 32]) -> Option<(usize, usize)> {
+        let state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+        state
+            .groups
+            .get(&group)
+            .map(|counts| (counts.bytes, counts.slots[0]))
+    }
 }
 
 impl Reservation {
+    #[cfg(test)]
+    pub(super) fn lock_capacity_for_test(&self) -> impl Drop + '_ {
+        self.state.lock().unwrap()
+    }
     /// Permanently stop lending and release only the unused capacity. Outstanding copy, engine
     /// and lower-work owners retain their own bytes/slots until actual settlement. This is a
     /// capacity operation, never evidence that a call/action/workflow has safely completed.
@@ -625,6 +753,23 @@ impl Drop for Credit {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn group_composition_snapshot_excludes_process_and_other_group_payments() {
+        let pool = Arc::new(Resources::default());
+        let process = pool.charge_process_retained(4096).unwrap();
+        assert_eq!(pool.group_counts([1; 32]), None);
+        let first = pool.charge([1; 32], 2048, ResourceKind::Crypto).unwrap();
+        let other = pool.charge([2; 32], 512, ResourceKind::Retained).unwrap();
+        assert_eq!(pool.group_counts([1; 32]), Some((2048, 1)));
+        assert_eq!(pool.group_counts([2; 32]), Some((512, 0)));
+        assert_eq!(pool.counts(), (6656, 1));
+        drop(first);
+        assert_eq!(pool.group_counts([1; 32]), None);
+        assert_eq!(pool.group_counts([2; 32]), Some((512, 0)));
+        drop((other, process));
+        assert_eq!(pool.counts(), (0, 0));
+    }
 
     #[test]
     fn process_retained_bounds_and_refusal_are_atomic_without_group_or_slot_records() {
@@ -932,14 +1077,14 @@ mod tests {
         reserve.close();
         lane.close();
         lane.close();
-        assert_eq!(pool.counts(), (32 * 1024 + 61_624, 4));
+        assert_eq!(pool.counts(), (GROUP_BYTES - 224 * 1024 + 61_624, 4));
         assert!(budget
             .charge(&pool, group, 1, ResourceKind::Crypto)
             .is_err());
         drop((budget, reserve, lane));
         assert_eq!(pool.counts().1, 4, "actual engine keeps its retired lane");
         drop(engine);
-        assert_eq!(pool.counts(), (32 * 1024, 3));
+        assert_eq!(pool.counts(), (GROUP_BYTES - 224 * 1024, 3));
         drop((ordinary_bytes, ordinary_slots));
         assert_eq!(pool.counts(), (0, 0));
     }
@@ -1036,8 +1181,8 @@ mod tests {
     #[test]
     fn close_releases_exact_capacity_at_the_process_limit() {
         let pool = Arc::new(Resources::default());
-        let reserves: Vec<_> = (0..8)
-            .map(|group| pool.reserve([group; 32], GROUP_BYTES).unwrap())
+        let reserves: Vec<_> = (0..PROCESS_BYTES / GROUP_BYTES)
+            .map(|group| pool.reserve([group as u8; 32], GROUP_BYTES).unwrap())
             .collect();
         let held = reserves[0]
             .charge([0; 32], 512, ResourceKind::Crypto)
@@ -1268,9 +1413,9 @@ mod tests {
         let pool = Arc::new(Resources::default());
         let another = pool.clone();
         let mut held = Vec::new();
-        for group in 0..8 {
+        for group in 0..PROCESS_BYTES / GROUP_BYTES {
             held.push(
-                pool.charge([group; 32], GROUP_BYTES, ResourceKind::Retained)
+                pool.charge([group as u8; 32], GROUP_BYTES, ResourceKind::Retained)
                     .unwrap(),
             );
         }

@@ -439,7 +439,11 @@ async fn endpoint_lost_last_native_call_owner_revokes_queued_source_without_a_ro
     assert!(endpoints.participant.is_none() && endpoints.observers.is_empty());
     let retained = runtime.resources().counts().0;
     drop(lower);
-    assert_eq!(ledger.counts(), (1, 1, 0));
+    assert_eq!(
+        ledger.counts(),
+        (0, 0, 0),
+        "ended source history collects only after actual Lower drainage"
+    );
     assert!(
         runtime.resources().counts().0 < retained,
         "lower charge releases only on its own final drop"

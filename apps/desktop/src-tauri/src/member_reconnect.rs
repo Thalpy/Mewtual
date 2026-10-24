@@ -80,7 +80,17 @@ pub(super) async fn persist(
     actor: &ServerActor,
     evidence: Vec<AuthenticatedDialRoute>,
 ) -> Result<CaptureOutcome, String> {
-    persist_with_proofs(state, server, instance, actor, evidence, true).await
+    persist_with_proofs(
+        state,
+        server,
+        instance,
+        actor,
+        evidence,
+        true,
+        #[cfg(test)]
+        None,
+    )
+    .await
 }
 
 /// Orderly close must not initiate a network exchange. Save existing proof and retry correlation;
@@ -92,16 +102,44 @@ pub(super) async fn capture_before_shutdown(
     actor: &ServerActor,
     evidence: Vec<AuthenticatedDialRoute>,
 ) -> Result<CaptureOutcome, String> {
-    persist_with_proofs(state, server, instance, actor, evidence, false).await
+    persist_with_proofs(
+        state,
+        server,
+        instance,
+        actor,
+        evidence,
+        false,
+        #[cfg(test)]
+        None,
+    )
+    .await
 }
 
-async fn persist_with_proofs(
+/// Negative-only test barriers around the actual production transaction. No supplied claims,
+/// route proof, membership decision or persisted result can be substituted by these observers.
+#[cfg(test)]
+#[derive(Default)]
+pub(super) struct CaptureHooks {
+    pub before_lock: Option<tokio::sync::oneshot::Sender<()>>,
+    pub after_lock: Option<tokio::sync::oneshot::Sender<()>>,
+    pub after_claims: Option<(
+        tokio::sync::oneshot::Sender<()>,
+        tokio::sync::oneshot::Receiver<()>,
+    )>,
+    pub before_install: Option<(
+        tokio::sync::oneshot::Sender<()>,
+        tokio::sync::oneshot::Receiver<()>,
+    )>,
+}
+
+pub(super) async fn persist_with_proofs(
     state: &AppState,
     server: u64,
     instance: u64,
     actor: &ServerActor,
     evidence: Vec<AuthenticatedDialRoute>,
     acquire_proofs: bool,
+    #[cfg(test)] mut hooks: Option<CaptureHooks>,
 ) -> Result<CaptureOutcome, String> {
     if actor.group_mode().await? != catcoms_app::GroupMode::PeerToPeer {
         return Ok(CaptureOutcome::NotApplicable);
@@ -208,8 +246,29 @@ async fn persist_with_proofs(
     {
         return Err("member reconnect authority could not finish saving".into());
     }
+    #[cfg(test)]
+    if let Some(notify) = hooks.as_mut().and_then(|hooks| hooks.before_lock.take()) {
+        let _ = notify.send(());
+    }
+    // Event capture, cadence and shutdown can arrive together. Sample claims only AFTER
+    // acquiring this dedicated transaction lock, then retain it through the live install.
+    // Otherwise an older snapshot can delete a route saved by a newer capture, or its late
+    // live installation can overwrite the newer route vector after both disk writes finish.
+    // Snapshot persistence above uses a DIFFERENT lock and must finish before this guard.
+    let capture_lock = state
+        .reconnect_persist_locks
+        .lock()
+        .unwrap_or_else(|error| error.into_inner())
+        .entry(server)
+        .or_default()
+        .clone();
+    let _capture = capture_lock.lock().await;
+    #[cfg(test)]
+    if let Some(notify) = hooks.as_mut().and_then(|hooks| hooks.after_lock.take()) {
+        let _ = notify.send(());
+    }
     if !actor.member_mesh_allowed().await? {
-        // Removal can race the first permission read or finalization. The core also checks
+        // Removal can race the first permission read, finalization or queued capture. The core also checks
         // active local membership at each actual dial, including after this final query.
         actor
             .set_local_reconnect_routes(Vec::new())
@@ -224,6 +283,11 @@ async fn persist_with_proofs(
             .into_iter()
             .filter_map(|route| route.peer_id.map(PeerId::new)),
     );
+    #[cfg(test)]
+    if let Some((reached, resume)) = hooks.as_mut().and_then(|hooks| hooks.after_claims.take()) {
+        let _ = reached.send(());
+        let _ = resume.await;
+    }
     let guard = state.store.lock().await;
     let store = guard
         .as_ref()
@@ -301,6 +365,11 @@ async fn persist_with_proofs(
         .collect();
     drop(registry);
     drop(guard);
+    #[cfg(test)]
+    if let Some((reached, resume)) = hooks.as_mut().and_then(|hooks| hooks.before_install.take()) {
+        let _ = reached.send(());
+        let _ = resume.await;
+    }
     actor
         .set_local_reconnect_routes(routes)
         .await

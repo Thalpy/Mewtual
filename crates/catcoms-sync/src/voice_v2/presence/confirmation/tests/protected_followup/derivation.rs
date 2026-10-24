@@ -47,6 +47,64 @@ fn commit_checked(
 }
 
 #[test]
+fn protected_child_identity_uses_actual_plan_and_original_published_role() {
+    let mut p = fixture();
+    let mut other = fixture();
+    let derive = prepare_checked(&mut p.f.low, &p.low, p.f.id, &p.f.clock, |_, _| Ok(())).unwrap();
+    let foreign = prepare_checked(
+        &mut other.f.low,
+        &other.low,
+        other.f.id,
+        &other.f.clock,
+        |_, _| Ok(()),
+    )
+    .unwrap();
+    // Independently created fixtures deliberately project exactly equal copied metadata.
+    // Neither that projection nor the equal role number may join their native custody.
+    assert_eq!(derive.protected_binding(), foreign.protected_binding());
+    assert_eq!(derive.protected_row(), Ok(0));
+    assert_eq!(foreign.protected_row(), Ok(0));
+    assert!(!derive.same_protected_plan(&foreign));
+    assert!(!foreign.same_protected_plan(&derive));
+    assert!(derive.same_protected_plan(&derive));
+    let original_plan = derive.protected_plan().unwrap();
+    assert!(original_plan.contains(&derive));
+    assert!(!original_plan.contains(&foreign));
+
+    derive.admit_engine(derive.engine_bytes()).unwrap();
+    let receipt = commit_checked(&mut p.f.low, &p.low, &derive, &p.f.clock, |_, _| Ok(())).unwrap();
+    derive.settle_engine();
+    derive.acknowledge_result(&receipt).unwrap();
+    let hello = start(&mut p, None);
+    assert_eq!(hello.protected_row(), Ok(1));
+    assert!(hello.same_protected_plan(&derive));
+    assert!(original_plan.contains(&hello));
+    assert!(derive.same_protected_plan(&hello));
+    assert!(!hello.same_protected_plan(&foreign));
+    let _ = seal(&mut p.f.low, &hello, &p.f.clock);
+    assert!(derive.input().is_err());
+    assert!(hello.input().is_err());
+    p.f.low.join.confirmations.pairs[&p.f.id]
+        .chain
+        .as_ref()
+        .unwrap()
+        .close();
+    assert_eq!(derive.protected_row(), Ok(0));
+    assert_eq!(hello.protected_row(), Ok(1));
+    assert!(hello.same_protected_plan(&derive));
+    assert!(!hello.same_protected_plan(&foreign));
+    assert!(!hello.is_pending(), "identity is never renewed authority");
+    let pool = p.f.pool.clone();
+    drop((derive, hello, p));
+    // The custodian retains ONLY Root's already-paid fixed plan identity. It cannot keep
+    // Workflow, input, engine or dropped CryptoAction allocations alive after their credits.
+    assert_eq!(pool.counts(), (2048, 0));
+    assert!(!original_plan.contains(&foreign));
+    drop(original_plan);
+    assert_eq!(pool.counts(), (0, 0));
+}
+
+#[test]
 fn protected_derivation_recovers_the_same_row_before_and_after_ack_for_both_roles() {
     let mut p = fixture();
     let low_id = p.f.low.context.local;
@@ -143,7 +201,7 @@ fn protected_derivation_and_result_progress_with_full_ordinary_bytes() {
         p.f.pool
             .charge(
                 p.f.low.context.scope.group,
-                256 * 1024 - p.f.pool.counts().0,
+                crate::voice_v2::resources::GROUP_BYTES - p.f.pool.counts().0,
                 ResourceKind::Retained,
             )
             .unwrap();

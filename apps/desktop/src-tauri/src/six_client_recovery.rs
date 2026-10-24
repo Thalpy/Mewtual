@@ -11,12 +11,35 @@ use std::collections::{BTreeMap, BTreeSet};
 mod chat_bubbles;
 mod chat_matrix;
 mod files;
+mod isolation;
 mod runtime;
 mod signed_history;
 mod transport;
 mod voice;
+mod voice_live;
 use runtime::{mount, network, register, Running};
 use transport::{forbidden, NetworkRules, Trace, Transport};
+
+/// Each scenario models separate desktops inside ONE test process. Independent scenarios
+/// must not accidentally compete for that process's maintenance/file/helper pools. The six
+/// clients WITHIN one scenario still run concurrently with unchanged production limits.
+struct FixtureAdmission {
+    capacity: Arc<tokio::sync::Semaphore>,
+    _permit: tokio::sync::OwnedSemaphorePermit,
+}
+async fn isolate() -> FixtureAdmission {
+    static CAPACITY: std::sync::OnceLock<Arc<tokio::sync::Semaphore>> = std::sync::OnceLock::new();
+    let capacity = CAPACITY
+        .get_or_init(|| Arc::new(tokio::sync::Semaphore::new(1)))
+        .clone();
+    let permit = capacity.clone().acquire_owned().await.expect(
+        "an earlier recovery fixture failed before actual actor/driver shutdown; inspect its failure first"
+    );
+    FixtureAdmission {
+        capacity,
+        _permit: permit,
+    }
+}
 
 /// Two independent oracles: the product projection and the exact original signed-operation
 /// union. Rendered equality alone cannot detect a helper re-authoring or dropping signed history.
@@ -54,6 +77,31 @@ async fn bounded<F: Future>(label: &str, future: F) -> F::Output {
     }
 }
 
+/// Keep ownership outside select's branches: on timeout, unwind starts before the unfinished
+/// Scenario drops. Otherwise its strict teardown assertion would hide the original timeout.
+async fn scenario_bounded<F: Future>(
+    future: F,
+    timeout: impl Future<Output = ()>,
+    failure: &str,
+) -> F::Output {
+    tokio::pin!(future);
+    tokio::select! {
+        result = &mut future => result,
+        _ = timeout => panic!("{failure}"),
+    }
+}
+
+async fn close_driver(driver: &mut Option<watch::Receiver<MeshObservationSnapshot>>) {
+    // Keep the pending marker indexed across cancellation/timeout. Only observed closure
+    // allows release, even if Running already completed its own actor/save barrier.
+    bounded("TCP transport shutdown", async {
+        let receiver = driver.as_mut().expect("original driver lifetime");
+        while receiver.changed().await.is_ok() {}
+    })
+    .await;
+    driver.take();
+}
+
 // Automatic recovery can start just after an empty exchange and just after a cadence tick.
 // Account for the released source cooldown, worst-case discovery interval/start spread and
 // four bounded transport stages. Command responsiveness keeps its independent 30-second bound.
@@ -86,6 +134,20 @@ struct Client {
     generation: u64,
     running: Option<Running>,
     driver: Option<watch::Receiver<MeshObservationSnapshot>>,
+    // Transport::new spawns the real driver before it can return a receiver. Cancellation
+    // in that interval is unfinished custody, including on the first client/reopen.
+    driver_starting: bool,
+}
+impl Drop for Client {
+    fn drop(&mut self) {
+        if self.driver_starting || self.running.is_some() || self.driver.is_some() {
+            // A failed fixture aborts tasks but cannot claim they synchronously drained.
+            // Preserve its vault until those actual owners disappear rather than deleting
+            // storage ahead of their asynchronous shutdown and obscuring the original error.
+            // This preserves the failed vault for later inspection/explicit cleanup.
+            self.root.disable_cleanup(true);
+        }
+    }
 }
 
 struct Scenario {
@@ -94,10 +156,32 @@ struct Scenario {
     clock: SystemClock,
     reverse: bool,
     token: u128,
+    // Last: successful scenarios have awaited every actor and driver before returning the
+    // isolation turn. Failure closes admission instead of starting another contaminated run.
+    admission: Option<FixtureAdmission>,
+}
+impl Drop for Scenario {
+    fn drop(&mut self) {
+        if let Some(admission) = &self.admission {
+            if self.clients.iter().any(|client| {
+                client.driver_starting || client.running.is_some() || client.driver.is_some()
+            }) {
+                admission.capacity.close();
+                assert!(std::thread::panicking(), "recovery fixture must await all actual actors/drivers before releasing admission");
+            }
+        }
+    }
 }
 
 impl Scenario {
-    fn new(reverse: bool) -> Self {
+    fn new(reverse: bool, admission: FixtureAdmission) -> Self {
+        Self::build(reverse, Some(admission))
+    }
+    /// Trace-only tests create no actor/driver; admit_prefix refuses this unstarted owner.
+    fn observations(reverse: bool) -> Self {
+        Self::build(reverse, None)
+    }
+    fn build(reverse: bool, admission: Option<FixtureAdmission>) -> Self {
         // Opt-in structured diagnostics keep the normal fixture quiet while making a failed
         // stage reproducible without changing its schedule or manufacturing recovery work.
         if std::env::var_os("RUST_LOG").is_some() {
@@ -114,6 +198,7 @@ impl Scenario {
                     generation: 0,
                     running: None,
                     driver: None,
+                    driver_starting: false,
                 }
             })
             .collect();
@@ -144,6 +229,7 @@ impl Scenario {
             clock,
             reverse,
             token: 0,
+            admission,
         }
     }
 
@@ -172,13 +258,19 @@ impl Scenario {
     }
 
     async fn admit_prefix_with_files(&mut self, count: usize, files: bool) {
+        assert!(
+            self.admission.is_some(),
+            "real clients require isolated fixture admission"
+        );
         assert!(matches!(count, 3 | 6));
         for index in 0..count {
             let state = mount(self.clients[index].root.path()).await;
+            self.clients[index].driver_starting = true;
             let transport =
                 Transport::new(index, &mut self.clients[index].net, self.rules.clone()).await;
             let mesh = transport.handle();
             self.clients[index].driver = Some(transport.driver_lifetime().await);
+            self.clients[index].driver_starting = false;
             let mut server = if index == 0 {
                 Server::found(
                     transport,
@@ -370,9 +462,11 @@ impl Scenario {
                 .unwrap()
                 .load_server(1)
                 .unwrap();
+            self.clients[index].driver_starting = true;
             let transport = Transport::new(index, &mut net, self.rules.clone()).await;
             let mesh = transport.handle();
             self.clients[index].driver = Some(transport.driver_lifetime().await);
+            self.clients[index].driver_starting = false;
             let record = ServerRecord {
                 id: 1,
                 display_name: format!("client {}", index + 1),
@@ -441,11 +535,9 @@ impl Scenario {
             // This existing watch receiver carries no command sender. Closure proves the real
             // driver dropped its swarm; unlike a plain socket bind probe it does not mistake
             // TIME_WAIT for a live product listener on platforms with different reuse flags.
-            let mut driver = self.clients[*index].driver.take().unwrap();
-            bounded("TCP transport shutdown", async {
-                while driver.changed().await.is_ok() {}
-            })
-            .await;
+            // Keep the actual pending receiver indexed until shutdown is OBSERVED. A timeout
+            // must not make Scenario::Drop mistake a taken-but-still-live driver for closure.
+            close_driver(&mut self.clients[*index].driver).await;
         }
     }
 
@@ -643,8 +735,8 @@ impl Scenario {
     }
 }
 
-async fn six_client_scenario(hostile: bool) {
-    let mut scenario = Scenario::new(hostile);
+async fn six_client_scenario(hostile: bool, admission: FixtureAdmission) {
+    let mut scenario = Scenario::new(hostile, admission);
     scenario.admit().await;
     scenario.rules.drop_gossip.store(hostile, Ordering::Release);
     let mut common = History::new();
@@ -813,16 +905,22 @@ async fn six_client_scenario(hostile: bool) {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn six_client_native_restart_and_partition_recovery() {
-    tokio::select! {
-        _ = six_client_scenario(false) => {},
-        _ = SystemClock.sleep(Duration::from_secs(600)) => panic!("six-client baseline exceeded its total bound"),
-    }
+    let admission = isolate().await;
+    scenario_bounded(
+        six_client_scenario(false, admission),
+        SystemClock.sleep(Duration::from_secs(600)),
+        "six-client baseline exceeded its total bound",
+    )
+    .await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn six_client_native_reversed_reopen_gossip_loss_and_command_load() {
-    tokio::select! {
-        _ = six_client_scenario(true) => {},
-        _ = SystemClock.sleep(Duration::from_secs(600)) => panic!("six-client hostile variant exceeded its total bound"),
-    }
+    let admission = isolate().await;
+    scenario_bounded(
+        six_client_scenario(true, admission),
+        SystemClock.sleep(Duration::from_secs(600)),
+        "six-client hostile variant exceeded its total bound",
+    )
+    .await;
 }

@@ -367,8 +367,12 @@ async fn pending_close_uses_original_control_capacity_with_all_process_bytes_occ
             break;
         }
         pressure.push(
-            pool.charge([value; 32], left.min(256 * 1024), ResourceKind::Retained)
-                .unwrap(),
+            pool.charge(
+                [value; 32],
+                left.min(catcoms_sync::voice_v2::resources::GROUP_BYTES),
+                ResourceKind::Retained,
+            )
+            .unwrap(),
         );
     }
     assert_eq!(pool.counts().0, 2 * 1024 * 1024);

@@ -4,7 +4,7 @@ use crate::{register_ui_lock_request, require_unlocked_session, voice_runtime};
 use std::future::{poll_fn, Future};
 use std::task::Poll;
 
-fn strong_counts(state: &AppState) -> [usize; 9] {
+fn strong_counts(state: &AppState) -> [usize; 10] {
     [
         Arc::strong_count(&state.servers),
         Arc::strong_count(&state.store),
@@ -15,6 +15,7 @@ fn strong_counts(state: &AppState) -> [usize; 9] {
         Arc::strong_count(&state.ui_session_commit),
         Arc::strong_count(&state.voice_authority),
         Arc::strong_count(&state.voice_handoff),
+        Arc::strong_count(&state.voice_channels),
     ]
 }
 
@@ -42,7 +43,7 @@ fn each_missing_original_owner_refuses_and_releases_all_partial_upgrades() {
     let before = strong_counts(&state);
     let pool = voice_runtime(&state).resources();
     let counts = pool.counts();
-    for field in 0..9 {
+    for field in 0..10 {
         let mut context = Context::new(&state);
         match field {
             0 => context.servers = Weak::new(),
@@ -54,6 +55,7 @@ fn each_missing_original_owner_refuses_and_releases_all_partial_upgrades() {
             6 => context.commit = Weak::new(),
             7 => context.authority = Weak::new(),
             8 => context.ledger = Weak::new(),
+            9 => context.channels = Weak::new(),
             _ => unreachable!(),
         }
         assert!(context.upgrade().is_none(), "missing field {field}");
@@ -89,6 +91,7 @@ async fn upgraded_context_uses_the_actual_mutexes_atomics_and_store_for_both_gat
     assert!(Arc::ptr_eq(&live.commit, &f.state.ui_session_commit));
     assert!(Arc::ptr_eq(&live.authority, &f.state.voice_authority));
     assert!(Arc::ptr_eq(&live.ledger, &f.state.voice_handoff));
+    assert!(Arc::ptr_eq(&live.channels, &f.state.voice_channels));
     assert!(live.gate().require_unlocked().await.is_ok());
     assert!(require_unlocked_session(&f.state).await.is_ok());
     let mounted = f.state.store.lock().await.take();
