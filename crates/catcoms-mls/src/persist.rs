@@ -1,7 +1,8 @@
 //! Snapshot + restore a server's MLS state for disk persistence (Phase 9c).
 //!
-//! openmls 0.8 has **no group-snapshot API**: the group + the signature keypair live in the
-//! provider's `MemoryStorage`. So [`snapshot_server`] serializes that whole storage (plus
+//! openmls (0.8 and 0.9 alike) has **no group-snapshot API**: the group + the signature keypair
+//! live in the provider's `MemoryStorage`. That map's JSON is the persisted format, so an openmls
+//! upgrade must keep reading maps written by the previous version (`compat_tests` pins 0.8.1). So [`snapshot_server`] serializes that whole storage (plus
 //! the signer public key + the group id) into one blob, and [`restore_server`] populates a
 //! fresh provider's storage with it and reloads the device + group via `MlsGroup::load`.
 //!

@@ -67,8 +67,11 @@ fn an_own_staged_commit_echoed_back_is_refused_and_stays_pending() {
     );
 }
 
+/// Not a test of the own-leaf guard: once our commit is merged, its echo belongs to a past epoch
+/// and openmls refuses it at the epoch/secret lookup before the guard is reached. It pins that the
+/// late echo stays an error with no state change, whichever layer refuses it.
 #[test]
-fn an_own_merged_commit_echoed_back_is_refused() {
+fn an_own_commit_echoed_after_merge_is_refused_as_a_past_epoch_message() {
     let (alice, mut group, _bob, _bob_group) = group_of_two();
     let carol = MlsDevice::generate().unwrap();
     let out = group

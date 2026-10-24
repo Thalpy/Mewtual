@@ -422,6 +422,36 @@ async fn malformed_curve_point_fails_before_rng_and_leaves_closed_counted_fence(
 }
 
 #[tokio::test]
+async fn compressed_point_prefixes_are_refused_at_publication_before_any_bootstrap() {
+    // p256 would decode a compressed (0x02/0x03) point; the voice codec requires exactly the
+    // 65-byte uncompressed form. The only difference from the published `point()` used by every
+    // other test here is the prefix byte, so the refusal is the prefix check.
+    for prefix in [2u8, 3] {
+        let f = Fixture::new().await;
+        let owner = f.candidate().await;
+        crate::activate_voice_owner_inner(&f.state, owner.clone())
+            .await
+            .unwrap();
+        let executor = hex::encode([9; 32]);
+        let admission = crate::voice_join_key::admit_inner(&f.state, &owner, &executor)
+            .await
+            .unwrap();
+        let mut compressed = point();
+        compressed[0] = prefix;
+        assert!(crate::voice_join_key::publish_inner(
+            &f.state,
+            &owner,
+            &executor,
+            &admission.permit,
+            compressed
+        )
+        .await
+        .is_err());
+        f.close().await;
+    }
+}
+
+#[tokio::test]
 async fn unwinding_rng_closes_original_ticket_and_retires_crypto_before_drained_status() {
     let f = Fixture::new().await;
     let (owner, selected) = select(&f, point()).await;

@@ -652,7 +652,11 @@ impl ServerGroup {
             | ProcessedMessageContent::OwnPendingCommit => Err(MlsError::Protocol(
                 "refused a message attributed to this device's own leaf".into(),
             )),
-            _ => Ok(Incoming::Other),
+            // Named, not `_`: an openmls upgrade that adds a variant must fail to compile here
+            // rather than silently become "processed, nothing to apply" (that is how the two
+            // variants above would have slipped through).
+            ProcessedMessageContent::ProposalMessage(_)
+            | ProcessedMessageContent::ExternalJoinProposalMessage(_) => Ok(Incoming::Other),
         }
     }
 

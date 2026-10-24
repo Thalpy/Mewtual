@@ -52,7 +52,9 @@ jobs:
         uses: EmbarkStudios/cargo-deny-action@v2
         with:
           manifest-path: apps/desktop/src-tauri/Cargo.toml
-          arguments: --config=deny.toml
+          # Setting `arguments` replaces the action's default `--all-features`; keep it, since
+          # release builds enable `custom-protocol`.
+          arguments: --all-features --config=deny.toml
           command: check
           command-arguments: bans
 

@@ -16,14 +16,19 @@ patterns=(
   'thread_rng'
   'OsRng'
   # rand_core 0.10 / crypto-common 0.2 spell OS randomness differently: `SysRng`, direct
-  # `getrandom::` calls, and `Generate::generate()` (which uses SysRng). The native p256 0.14
-  # bootstrap must keep using `generate_from_rng` with the injected seam. A bare `::generate()`
-  # would also match `MlsDevice::generate()`, so only the secret-key types are named.
+  # `getrandom::` calls, and the argument-less `Generate` constructors (which use SysRng; the
+  # feature that enables them is on in both workspaces through openmls 0.9's ml-dsa). The native
+  # p256 0.14 bootstrap must keep using `generate_from_rng` with the injected seam. A bare
+  # `::generate()` would also match `MlsDevice::generate()`, so the secret-key types, the trait
+  # path, the fully qualified form and the fallible variant are named instead.
   'SysRng'
   'getrandom::'
   'EphemeralSecret::generate()'
   'NonZeroScalar::generate()'
   'SecretKey::generate()'
+  'Generate::generate'
+  'Generate>::'
+  'try_generate()'
 )
 
 # Files/dirs allowed to use the primitives above (the seam implementations).
