@@ -1104,10 +1104,10 @@ dependency audit still fails on the pinned Tauri maintenance/quick-xml/plist adv
 root `cargo deny` does not clear that separate failure. No dependency exemption was added.
 The [acceptance ledger](communication-recovery/CHAT-FILES-VOICE-ACCEPTANCE.md) records the evidence.
 
-## External download resume and Save as (2026-10-21/22, focused checks; full suites pending)
+## External download resume and Save as (2026-10-21/24; suites and CI pass, manual acceptance open)
 
 Branch `communication-external-download` (worktree `target/communication-external-download-worktree`,
-baseline `dbb8d36b`, not pushed or merged) implements resumable saves of private Downloads, to the
+baseline `dbb8d36b`, draft PR #51 into `chat-update-implementation`, not merged) implements resumable saves of private Downloads, to the
 user's Downloads folder or to a folder and name chosen in a native "Save as" dialog; this
 supersedes the "appending to a partly written external file is not implemented" note above for
 destinations that can be journaled. Design, crash table and every review's dispositions:
@@ -1137,10 +1137,8 @@ destinations that can be journaled. Design, crash table and every review's dispo
 
 Focused checks, the picker design review and the dispositions of two reviews of `27ffa183` are in
 the design document's ledger; the actual `dbb8d36b` reader was shown to refuse real V2 fixtures
-without changing a byte. Not yet run: complete root/native/frontend suites, `npm run build`,
-`test:startup`, `test:flows` (including the opt-in `FLOW_SCENARIO=private-download`), a real dialog
-on each OS, physical FAT/SMB/ReFS/OneDrive/portal checks, and any Unix execution (the storage
-crate compiles and passes Clippy for `x86_64-linux-android`). A post-implementation review of the
+without changing a byte. At that stage the complete suites and any Unix execution had not run;
+the current verification is in the last paragraph of this section. A post-implementation review of the
 picker found no blocker or high; its fixes and dispositions are in the design document, as are
 those of Re-review 2 (one medium, seven lows, a dialog residual; all fixed or settled). Vaults
 written by the intermediate build `27ffa183` would fault (v2 was amended with the planned
@@ -1166,6 +1164,19 @@ counts as private (unprovable stays shared, macOS always shared), and Transfers 
 row's file (new read-only command `check_saved_download`), saying when it is missing or replaced
 and offering Save again. Open: Unix behaviour runs only in Linux CI, macOS is not built in CI,
 ReFS is unverified, and no test pins a Remove landing between the flush and Published.
+
+Verification as of 24 October (head `83a918f4`). Hosted Linux CI caught a defect introduced by the
+path-removal fixes: on Unix a folder swap and swap-back around creation with a planted file let the
+partial's plaintext land in the swapped-in folder. It is fixed by binding the folder identity and
+the partial's name to one pinned folder handle (`bbdbdf99`, `8832aacb`), with the related
+unjournaled publication fix (`74b9dfe4`); Windows got the same held-folder check through `fs_at`
+(`bc41d52e`, `ceae7036`). tokio moved to 1.53.3 for RUSTSEC-2026-0386 (`be00b939`). Complete local
+suites pass: root 3,379 (0 failed, 24 existing ignored), native 728, frontend 2,531, `test:startup`,
+`test:flows` and `FLOW_SCENARIO=private-download`. All 28 hosted CI checks pass at `83a918f4`.
+Linux-only storage tests also pass in WSL Ubuntu (Rust 1.89 installed there for this work). Still
+manual: a real Save as dialog per OS, Pause/Lock during real writes, restart after an interrupted
+save, FAT/exFAT/SMB/ReFS/OneDrive volumes, power loss, and macOS. The acceptance ledger has the
+same summary.
 
 ## Chat history adversarial checkpoint (2026-10-20)
 
