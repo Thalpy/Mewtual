@@ -1021,19 +1021,40 @@ async fn project_and_admit(
     let route = state.voice_channels.route(public.public().slot).unwrap();
     let prefix = confirmation_prefix(parent.id(), purpose, selector);
     let context = context::Context::new(state);
-    let header = (
-        route.session().fixture_counts().1 + 1,
-        1,
-        0,
-        row.id().logical(),
-    );
-    let reply = confirmation_input::pull(
-        &context,
-        &route,
-        opened_frame(&public, &route, header, &prefix, None),
-    )
+    let clock = crate::voice_runtime(state).clock();
+    let (header, reply) = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let header = (
+                route.session().fixture_counts().1 + 1,
+                1,
+                0,
+                row.id().logical(),
+            );
+            let reply = confirmation_input::pull(
+                &context,
+                &route,
+                opened_frame(&public, &route, header, &prefix, None),
+            )
+            .await
+            .unwrap();
+            let admission = hex::decode(reply.admission()).unwrap();
+            if admission[36] == 1 {
+                break (header, reply);
+            }
+            // The live mesh's nonblocking selection fence can return Capacity before
+            // Input acquires any Work. Authenticate that exact refusal before retrying
+            // this SAME input. A Control reply is not an uncollected Data owner; other
+            // refusals remain failures, and the original Root deadline is never renewed.
+            assert_eq!(
+                opened_reply(&public, header, &prefix, &reply),
+                replies::refused(factory::Refused::Protocol(VoiceError::Capacity))
+            );
+            drop(reply);
+            clock.sleep(Duration::from_millis(10)).await;
+        }
+    })
     .await
-    .unwrap();
+    .expect("original confirmation Input stayed busy");
     assert!(
         row.work().is_err(),
         "uncollected Data reply owns its actual Work/input"
@@ -1556,7 +1577,11 @@ async fn confirmation_round_trip_inner(
             high_state,
             high,
             high_parent,
-            super::transition::Cleanup::Live,
+            if matches!(mode, ConfirmationMode::Orphan) {
+                super::transition::Cleanup::SdkAdmissionRace
+            } else {
+                super::transition::Cleanup::Live
+            },
         )
         .await;
         super::transition::custody_cycle(

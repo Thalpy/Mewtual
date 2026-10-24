@@ -1,5 +1,60 @@
 # Next voice milestone: native result recovery
 
+## Independent SDK custody (24 October; operational RTC remains open)
+
+Native opcode13/version6 now records a separately released SDK obligation under the original
+Session/parent action/key receipt/storage proof. The one candidate is paid before allocation;
+final admission repeats UI -> Coordinator -> Route -> try-Index/row. Storage state3 still means
+storage drainage only. Normal finalization AND dead-owner GC require the independent SDK
+obligation to release. KeyRelease, old expiry, End and physical HTTP collection cannot release it.
+The installed fixed record retains a paid Root observer, with no Row/Phase/Session backedge.
+An allocated-but-unadmitted candidate blocks whole drainage until its actual destructor runs.
+
+Browser24 prepays a separate64KiB subtree after its actual old96KiB variable envelope drained
+and original KeyClaim is Current. The pending intent precedes its first storage/admission RPC;
+lost replies recover the same immutable identity. The retained channel joins actual admission
+WebCrypto/IO finally outside its shared IPC lane, then releases SDK custody, storage, keys and
+the old Claim before Final. close() now includes the execution/activity finally and subtree
+return. ABI24 rejects even a fully shaped funded23 broker without waking or replacing its pool.
+prepareNativeSdpHandoff(): Promise<void> joins an attempted/coalesced custody flight; a busy
+channel can defer it. It establishes neither funded storage nor PC/SDP/RTC permission.
+
+These changes do not start an RTC SDK call. The future RTC consumer must count its own actual
+promise/listener/string/buffer drainage independently of the old confirmation signal and
+native storage state. Browser old-work drainage does not prove native core192KiB+Ready32KiB
+composition. That native progression must precede operational use of this64KiB sidecar.
+A destroyed WebView has no original-realm destruction proof wired to SDK custody yet: physical
+HTTP collection is insufficient, so abandoned fixed custody can remain bounded until process
+exit. Host shutdown joins physical workers, not an impossible new request from a dead realm.
+No live V2 activation, operational Ready, SDP/RTC effect grant, repeated-round/multi-peer
+composition, member media relay or combined/physical audio acceptance is claimed.
+
+## Next operational Ready implementation: reviewed constraints (24 October)
+
+A UI commit guard alone cannot order Ready publication against native KeyRelease: that cleanup
+uses Index/row independently while an admitted worker may await the Actor. Expose a pure
+EstablishedKeyCustody close_successor_effects operation over the SAME PlanBinding's existing
+irreversible successor_closed bit; exact native KeyRelease must set it before key.released.
+Do not clear busy flags, refund reserves, change old deadlines or assert SDK/Lower drainage.
+Existing successor/Ready publication, final Source admission, LOW admission and SDP observers
+already consult that bit. Actual old confirmation Workflow is separate, and the bit alone
+has no immediate wake. Regression tests must close at Actor final publication, final Source
+Clock observation and with a real Source/Lower retained, plus LOW and SDK cleanup orderings.
+
+Select bounded helper candidates INSIDE Root from ChannelSync::voice_bound_routes, excluding
+local and paired endpoints. This is the current proven member/Noise connection set, including
+an unjoined bridge; diagnostic self-asserted fingerprints, discovery/PEX and participant-only
+snapshots are insufficient. Freeze the chosen helpers with the original intent on retry.
+These routes do not advertise CompleteSdpV1 compatibility yet; do not describe authenticated
+connected candidates as a negotiated compatible version. Mixed-version helper selection still
+needs explicit evidence/capability handling.
+
+Do not append another slow maintenance stage and assume finite eligibility: the existing
+64-channel/four-stage/250ms rotation can take64s per stage, beyond the original30s Finish
+window. Latch urgent Ready work at actual native KeyClaim adoption, using the existing paid
+native position, and retain fair bounded fallback selection. Long-lived key custody does not
+renew finite Ready eligibility. Fresh long-lived rounds remain a distinct implementation.
+
 ## SDP handoff storage admission (24 October; integration remains open)
 
 The original native KeyClaim now admits a separately paid 64KiB SDP storage phase through
@@ -22,8 +77,8 @@ Funded storage is not Ready, an SDP action, SDK/PC admission or RTC delivery per
 Before operational use, extract/prepay the core 192 KiB + Ready 32 KiB and drain actual old 96 KiB
 work BEFORE acquiring this 64 KiB sidecar. Paying the sidecar first can prevent the 224 KiB
 preparation needed to return old progress. The current storage tests do not establish that
-whole composition. Browser 64 KiB SDK storage, independent SDK drainage in normal AND orphan
-cleanup, typed SDP seal/open/private delivery, complete ICE/RTC, repeated rounds/compaction,
+whole composition. Browser SDK custody and independent normal/orphan release gates are implemented above;
+actual SDK work drainage, typed SDP seal/open/private delivery, complete ICE/RTC, repeated rounds/compaction,
 multi-peer scheduling, member relay and combined acceptance still need implementation.
 Physical two-device/network acceptance remains unavailable with the single desktop.
 

@@ -1,5 +1,16 @@
 # Mewtual; Architecture
 
+## Separate native/browser SDK custody (24 October)
+
+Native opcode13 adds a fixed, independently released SDK obligation under the original
+Session/KeyClaim/storage phase. Its actual preparation and installed record gate both normal
+finalization and orphan GC; storage closure/KeyRelease/HTTP collection cannot substitute.
+Browser24 prepays a new64KiB subtree, publishes its pending intent before RPC, joins its actual
+admission flight outside the shared IPC lane, and releases SDK/storage before original keys
+and Final. ABI24 refuses retained23 without a replacement pool. close() includes lane/activity
+finally. This is custody only; native core composition and actual SDP/RTC effects remain open.
+INTERFACES records the closed13/version6 grammar; HANDOVER records the boundaries.
+
 ## Native SDP storage (24 October; operational consumers pending)
 
 EstablishedKeyCustody now prepares a separate 64KiB storage phase from its actual Root

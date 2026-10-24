@@ -68,6 +68,7 @@ async fn exchange(
 
 pub(super) enum Cleanup {
     Live,
+    SdkAdmissionRace,
     Ended,
     Orphan,
 }
@@ -77,7 +78,7 @@ pub(super) async fn custody_cycle(
     parent: &ledger::ResolvedRow,
     cleanup: Cleanup,
 ) {
-    let end_before_recovery = !matches!(cleanup, Cleanup::Live);
+    let end_before_recovery = !matches!(cleanup, Cleanup::Live | Cleanup::SdkAdmissionRace);
     let bootstrap::Status::Ready(public) = bootstrap::ensure(
         state,
         selected.id(),
@@ -130,13 +131,14 @@ pub(super) async fn custody_cycle(
     assert!(u32::from_be_bytes(first[178..182].try_into().unwrap()) > 0);
     let receipt: [u8; 32] = first[182..214].try_into().unwrap();
     let key_proof = super::key_session::adopt(state, &public, &route, parent, receipt).await;
-    super::sdp::exercise(
+    let sdk = super::sdp::exercise(
         state,
         &public,
         &route,
         parent,
         key_proof,
-        !end_before_recovery,
+        !matches!(cleanup, Cleanup::Ended),
+        matches!(cleanup, Cleanup::SdkAdmissionRace),
     )
     .await;
     assert!(
@@ -162,6 +164,9 @@ pub(super) async fn custody_cycle(
     };
     let handshake = parent.confirmation_handshake().unwrap();
     super::key_session::foreign_refuses(parent, &foreign_route, receipt, key_proof);
+    if let Some(sdk) = &sdk {
+        super::sdk::foreign_refuses(parent, &foreign_route, sdk);
+    }
     let mono = clock.monotonic_ms();
     assert!(matches!(
         parent.recover_transition(foreign_route.session().identity(), action, handshake, mono),
@@ -245,6 +250,9 @@ pub(super) async fn custody_cycle(
                 .is_some(),
             "actual retained ResolvedRow still prevents orphan collection"
         );
+        if let Some(sdk) = sdk {
+            super::sdk::release_after_physical_collection(parent, sdk);
+        }
         return;
     }
     let mut wrong = receipt;
@@ -278,6 +286,9 @@ pub(super) async fn custody_cycle(
         ));
         super::key_session::release(state, &public, &route, parent, receipt, key_proof, false)
             .await;
+    }
+    if let Some(sdk) = &sdk {
+        super::sdk::release_after_key_release(state, &public, &route, parent, sdk).await;
     }
     let closed = exchange(state, &public, &route, parent, &claim).await;
     assert_eq!(&closed[..2], &[3, 3], "released Claim can never reopen");

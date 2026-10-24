@@ -18,7 +18,8 @@ function integer(value: string): bigint {
 function fixed(value: string, length: number): string {
   if (typeof value !== "string" || value.length !== 2 * length || !/^[0-9a-f]+$/.test(value)) return refuse(); return value;
 }
-function validate(value: VoiceSdpPhaseIdentity): void {
+/** Validate fixed lookup metadata only; this does not grant native or SDK authority. */
+export function validateVoiceSdpIdentity(value: VoiceSdpPhaseIdentity): void {
   fixed(value.parentRow, 16);
   if (BigInt("0x" + value.parentRow.slice(0, 16)) >= 32n || BigInt("0x" + value.parentRow.slice(16)) === 0n) return refuse();
   integer(value.identity.action); integer(value.identity.version); integer(value.sequence);
@@ -31,7 +32,7 @@ const hex = (bytes: Uint8Array): string => Array.from(bytes, byte => byte.toStri
 /** Exactly one paid Control body; full header RowId selects the native stored purpose.
  * Positive sequence encoding is lossless. Current native admission accepts only1. */
 export function encodeVoiceSdpPhase(value: VoiceSdpPhaseRequest): Readonly<{ operation: 12; kind: 0; logical: string; body: Uint8Array<ArrayBuffer> }> {
-  validate(value);
+  validateVoiceSdpIdentity(value);
   if (value.request.kind !== "prepare" && value.request.kind !== "release") return refuse();
   const proof = value.request.kind === "release" ? fixed(value.request.proof, 32) : null;
   const body = new Uint8Array(proof === null ? 122 : 154), view = new DataView(body.buffer);
@@ -41,7 +42,7 @@ export function encodeVoiceSdpPhase(value: VoiceSdpPhaseRequest): Readonly<{ ope
   return Object.freeze({ operation: 12, kind: 0, logical: value.parentRow, body });
 }
 export function decodeVoiceSdpPhase(bytes: Uint8Array, expected: VoiceSdpPhaseIdentity): VoiceSdpPhaseReceipt {
-  validate(expected);
+  validateVoiceSdpIdentity(expected);
   if (!(bytes instanceof Uint8Array) || bytes.length !== 170 || bytes[0] !== 5 || bytes[1] > 3) return refuse();
   const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
   if (hex(bytes.subarray(2, 18)) !== expected.parentRow || view.getBigUint64(18).toString() !== expected.identity.action ||

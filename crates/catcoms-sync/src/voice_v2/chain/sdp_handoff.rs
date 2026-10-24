@@ -13,6 +13,11 @@ use zeroize::Zeroize;
 /// belongs to this native phase. Browser-held buffers have a separate browser payment.
 pub const BYTES: usize = 64 * 1024;
 const METADATA: usize = 4096;
+/// Fixed native SDK-custody wrapper/preparation graph paid by the same metadata anchor.
+/// Only one candidate may be prepared per original native Session/phase; the adapter's
+/// measured graph must include both that candidate and its affine preparation wrapper.
+/// This allowance grants no SDK/RTC authority and does not increase the64KiB envelope.
+pub const NATIVE_SDK_METADATA_BYTES: usize = 512;
 // Actual Buffer/Copy/Credit graph plus128B caller bookkeeping is264B on the
 // supported layout. Round its payment to32B; keep the whole64KiB envelope unchanged.
 const COPY_METADATA: usize = 288;
@@ -358,7 +363,7 @@ mod tests {
             + size_of::<EffectOwner>() + 2 * size_of::<usize>()
             // Actual independent effect-lease/watch and conservative complete map node.
             // The original call/pool already have their own payments.
-            + 256 + 512;
+            + 256 + 512 + NATIVE_SDK_METADATA_BYTES;
         assert!(fixed <= METADATA, "SDP fixed graph {fixed}");
         let copy = size_of::<Buffer>() + 128;
         assert!(copy <= COPY_METADATA, "SDP copy graph {copy}");

@@ -1,5 +1,16 @@
 # Chat, files and voice implementation evidence
 
+## SDK custody continuation (24 October; not live voice acceptance)
+
+Native13/version6 and browser24 now retain independent SDK custody through lost replies,
+End, native storage drainage and key release. Native orphan GC checks this distinct obligation;
+its regression separates actual storage drainage from an allocated SDK candidate's Drop.
+Browser tests use actual WebCrypto/framing/IO with a mocked native lifecycle. They cover lost
+storage/SDK admission, held SDK admission over End, lost SDK Release, ordered release and a
+fully shaped funded23 HMR refusal. No RTC SDK call is executed by this increment. Native core
+composition, operational Ready, typed SDP/RTC grants, repeated-round/multi-peer scheduling,
+member media relay and combined/physical acceptance remain open. Only one desktop is available.
+
 ## 24 October: original-key SDP storage checkpoint
 
 Opcode12/version5 now admits and recovers a native64KiB storage phase on the exact original

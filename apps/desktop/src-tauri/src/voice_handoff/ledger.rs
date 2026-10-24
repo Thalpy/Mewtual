@@ -26,8 +26,10 @@ const ROW_BYTES: usize = 2304;
 mod children;
 mod continuation;
 mod key_session;
+mod sdk;
 mod sdp;
 pub(super) use key_session::KeySessionReceipt;
+pub(super) use sdk::Receipt as SdkReceipt;
 pub(super) use sdp::Receipt as SdpReceipt;
 mod plan;
 mod projection;
@@ -623,7 +625,7 @@ impl Ledger {
                 .and_then(|plan| plan.transition.as_ref())
                 .and_then(|claim| claim.key.as_ref())
                 .and_then(|key| key.sdp.as_ref())
-                .is_none_or(sdp::Claim::is_drained)
+                .is_none_or(sdp::Claim::whole_drained)
             && state
                 .final_phase
                 .as_ref()

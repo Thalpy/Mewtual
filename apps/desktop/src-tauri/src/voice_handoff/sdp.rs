@@ -29,7 +29,7 @@ pub(super) async fn apply(
     }
     reply.seal()
 }
-fn current<T>(
+pub(super) fn current<T>(
     context: &Context,
     route: &Route,
     apply: impl FnOnce(&super::transition::Admission<'_>) -> Result<T, VoiceError>,

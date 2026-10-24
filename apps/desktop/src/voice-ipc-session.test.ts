@@ -1,3 +1,5 @@
+import { encodeVoiceSdpPhase } from "./voice-ipc-sdp.ts";
+import { encodeVoiceSdkCustody } from "./voice-ipc-sdk.ts";
 import { encodeVoiceKeySession } from "./voice-ipc-key-session.ts";
 import assert from "node:assert/strict";
 import test, { type TestContext } from "node:test";
@@ -334,7 +336,7 @@ async function framedDerivation(f: Awaited<ReturnType<typeof fixture>>) {
   };
   f.cleanup(() => { finalPending = false; loseIssuance = false; loseFinalAck = false; settleHold?.release(); returnHold?.release(); f.native.settleSetup = nativeSettle; });
   f.actions(async (header, opened) => {
-    if (header.operation === 10 || header.operation === 11) {
+    if (header.operation >= 10 && header.operation <= 13) {
       assert.ok(transitionResponder, "unexpected custody operation");
       return transitionResponder(header, opened);
     }
@@ -562,21 +564,68 @@ function custodyReplies(f: Awaited<ReturnType<typeof fixture>>, child: Awaited<R
   let releaseHold: ReturnType<typeof gate> | null = null;
   let keyAdoptions = 0, keyReleases = 0, keyAdopted = false, keyReleased = false, loseAdoption = false;
   let keyHold: ReturnType<typeof gate> | null = null, endOnKeyReply = false;
+  const storageProof = hash(100), sdkProof = hash(101);
+  let storagePrepared = false, storageReleased = false, sdkAdmitted = false, sdkReleased = false;
+  let storagePrepares = 0, storageReleases = 0, sdkAdmissions = 0, sdkReleases = 0;
+  let loseStorage = false, loseSdk = false, loseSdkRelease = false;
+  let sdkHold: ReturnType<typeof gate> | null = null;
+  const effectOrder: string[] = [];
   const keyProof = hash(99);
   const proof = hash(96);
-  f.cleanup(() => { releaseHold?.release(); keyHold?.release(); });
+  f.cleanup(() => { releaseHold?.release(); keyHold?.release(); sdkHold?.release(); });
   child.parent.beforeFinal(() => {
     assert.ok(!claimed || released, "parent final cannot overtake native Release");
     assert.ok(!keyAdopted || keyReleased, "parent final cannot overtake separate native key Release");
+    assert.ok(!storagePrepared || storageReleased, "Final cannot overtake storage Release");
+    assert.ok(!sdkAdmitted || sdkReleased, "Final cannot overtake SDK Release");
   });
   child.parent.transitionReplies(async (header, opened) => {
+    const base = { parentRow: child.parent.row, identity: child.parent.identity, handshake: child.parent.binding.handshake, key: keyProof, sequence: "1" };
+    const prefix = () => [Buffer.from(base.parentRow, "hex"), integer(BigInt(base.identity.action), 8), integer(BigInt(base.identity.version), 8),
+      Buffer.from(base.identity.inputTag, "hex"), Buffer.from(base.handshake, "hex"), Buffer.from(base.key, "hex"), integer(1n, 8)];
+    if (header.operation === 12) {
+      assert.ok(keyAdopted && !keyReleased, "storage cleanup precedes KeyRelease");
+      const releasing = opened[121] === 1;
+      assert.deepEqual(opened, encodeVoiceSdpPhase({ ...base, request: releasing ? { kind: "release", proof: storageProof } : { kind: "prepare" } }).body);
+      if (releasing) {
+        assert.ok(!sdkAdmitted || sdkReleased, "storage Release cannot stand in for SDK drainage");
+        storageReleases++; storageReleased = true; effectOrder.push("storage-release");
+      } else {
+        storagePrepares++;
+        if (!storagePrepared && !f.owner.isCurrent()) return { kind: 0, body: new Uint8Array([1, 3, 5]) };
+        storagePrepared = true; effectOrder.push("storage-prepare");
+        if (loseStorage) { loseStorage = false; throw new Error("native storage reply lost"); }
+      }
+      return { kind: 0, body: Buffer.concat([Buffer.from([5, storageReleased ? 3 : f.owner.isCurrent() ? 1 : 2]), ...prefix(), Buffer.from(storageProof, "hex")]) };
+    }
+    if (header.operation === 13) {
+      assert.ok(storagePrepared && !storageReleased, "original storage remains until SDK Release");
+      const releasing = opened[153] === 1;
+      assert.deepEqual(opened, encodeVoiceSdkCustody({ ...base, storage: storageProof,
+        request: releasing ? { kind: "release", generation: "1", proof: sdkProof } : { kind: "admit" } }).body);
+      if (releasing) {
+        sdkReleases++; assert.ok(sdkAdmitted); sdkReleased = true; effectOrder.push("sdk-release");
+        if (loseSdkRelease) { loseSdkRelease = false; throw new Error("native SDK Release reply lost"); }
+      } else {
+        sdkAdmissions++;
+        if (!sdkAdmitted && !f.owner.isCurrent()) return { kind: 0, body: new Uint8Array([1, 3, 5]) };
+        sdkAdmitted = true; effectOrder.push("sdk-admit");
+        if (sdkHold) await sdkHold.promise;
+        if (loseSdk) { loseSdk = false; throw new Error("native SDK Admit reply lost"); }
+      }
+      return { kind: 0, body: Buffer.concat([Buffer.from([6, sdkReleased ? 3 : f.owner.isCurrent() ? 1 : 2]), ...prefix(),
+        Buffer.from(storageProof, "hex"), integer(1n, 8), Buffer.from(sdkProof, "hex")]) };
+    }
     if (header.operation === 11) {
       const releasing = opened[185] === 1;
       assert.deepEqual(opened, encodeVoiceKeySession({ parentRow: child.parent.row, purpose: historyPurpose,
         identity: child.parent.identity, handshake: child.parent.binding.handshake, claim: proof,
         request: releasing ? { kind: "release", receipt: keyProof } : { kind: "adopt" } }).body);
       assert.ok(claimed, "existing original native Claim is required");
-      if (releasing) { keyReleases++; assert.ok(keyAdopted); keyReleased = true; }
+      if (releasing) {
+        assert.ok(!storagePrepared || storageReleased); assert.ok(!sdkAdmitted || sdkReleased);
+        keyReleases++; assert.ok(keyAdopted); keyReleased = true; effectOrder.push("key-release");
+      }
       else {
         keyAdoptions++; keyAdopted = true;
         if (keyHold) await keyHold.promise;
@@ -620,6 +669,10 @@ function custodyReplies(f: Awaited<ReturnType<typeof fixture>>, child: Awaited<R
     keyCounts: () => ({ adoptions: keyAdoptions, releases: keyReleases, adopted: keyAdopted, released: keyReleased }),
     loseAdoption() { loseAdoption = true; }, holdAdoption() { keyHold = gate(); return keyHold; },
     endOnKeyReply() { endOnKeyReply = true; },
+    effectCounts: () => ({ storagePrepares, storageReleases, sdkAdmissions, sdkReleases }),
+    effectOrder: () => [...effectOrder],
+    loseStorage() { loseStorage = true; }, loseSdk() { loseSdk = true; }, loseSdkRelease() { loseSdkRelease = true; },
+    holdSdk() { sdkHold = gate(); return sdkHold; },
   };
 }
 
@@ -1799,7 +1852,7 @@ test("absolute IO deadline aborts stale-port fetch but retains custody until act
   assert.equal((await channel.status()).kind, "ready"); assert.deepEqual(f.counts().tx, [2n]);
 });
 
-for (const version of [7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 22]) test(`HMR refuses v${version} retained pool rather than creating a second channel allocator`, () => {
+for (const version of [7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 22, 23]) test(`HMR refuses v${version} retained pool rather than creating a second channel allocator`, () => {
   const host = { [Symbol.for("mewtual.voice.crypto-broker.v2")]: { version } };
   const native = { async admit() { return ""; }, async settle() {}, async commitInbound() {} };
   assert.throws(() => windowVoiceCryptoBroker(native, host, real), /reload required/);
@@ -2047,6 +2100,18 @@ test("Derive intake and terminal Control payload graphs fit their separate origi
   assert.ok(keyControl <= 8 * 1024, `key Control graph ${keyControl}/8192`);
   const transitionControl = transitionBuffers + descriptor + transitionDecoded + wrappers + ordinaryReturn;
   assert.ok(transitionControl <= 8 * 1024, `custody Control graph ${transitionControl}/8192`);
+  // Opcode13 has the largest new SDK/storage Control request/reply. Its transient decoded
+  // identity graph is explicit; its RETAINED phase/flight below has a separate64KiB payment.
+  const sdkBuffers = 2 * (194 + 16) + 2 * (210 + 16) + 144 + 288 + 4 * 40 + 2 * 32 + 2 * 12 + 1;
+  const sdkDecoded = 2 * (8 + 32 + 20 + 20 + 64 + 64 + 64 + 20 + 64 + 20 + 64) + 512;
+  assert.ok(sdkDecoded <= decoded, `SDK custody transient graph ${sdkDecoded}/${decoded}`);
+  const sdkControl = sdkBuffers + descriptor + sdkDecoded + wrappers + ordinaryReturn;
+  assert.ok(sdkControl <= 8 * 1024, `SDK custody Control graph ${sdkControl}/8192`);
+  const sdkCompactStrings = 2 * (7 + 64 + 8 + 20 + 64);
+  const sdkPhase = sdkCompactStrings + 512 + 512 + 512 + 128;
+  assert.ok(sdkPhase <= 4096, `independently prepaid SDP phase/flight graph ${sdkPhase}/4096`);
+  // This fixed subtree is part of the new64KiB, never the nearly-full old chain8KiB.
+  // Future SDK/SDP/UTF16/crypto owners still need a complete coexistence inventory.
 });
 
 test("nine child descriptors and serial Data adoption fit unchanged chain envelopes", () => {
@@ -2419,4 +2484,68 @@ test("End during authenticated Current key reply cannot revive keys and still re
   assert.equal(child.ready.derivation.pair(), null);
   assert.equal(custody.keyCounts().releases, 1); assert.equal(custody.counts().releases, 1);
   assert.equal(child.parent.finalCounts().finalAcknowledged, true);
+});
+
+
+async function establishedSdpFixture(t: TestContext) {
+  const f = await fixture(t), child = await framedConfirmation(f, true), custody = custodyReplies(f, child);
+  await child.derive(); await child.handle().attempt();
+  await until(() => custody.keyCounts().adopted && f.broker.counts().active === 0);
+  const prepare = () => f.broker.prepareNativeSdpHandoff(f.owner, child.channel, child.ready.chain);
+  return { f, child, custody, prepare };
+}
+
+test("browser SDP subtree is paid once before admission and uses independent SDK/storage releases", async t => {
+  const { f, child, custody, prepare } = await establishedSdpFixture(t);
+  const before = f.broker.counts().bytes;
+  await prepare(); assert.equal(f.broker.counts().bytes, before + 64 * 1024);
+  await prepare(); assert.deepEqual(custody.effectCounts(), { storagePrepares: 1, storageReleases: 0, sdkAdmissions: 1, sdkReleases: 0 });
+  f.owner.retire(); await child.channel.close();
+  assert.deepEqual(custody.effectOrder(), ["storage-prepare", "sdk-admit", "sdk-release", "storage-release", "key-release"]);
+  assert.equal(f.broker.counts().bytes, 0);
+});
+
+for (const lost of ["storage", "sdk"] as const) test(`lost ${lost} admission retains original paid intent and recovers after End`, async t => {
+  const { f, child, custody, prepare } = await establishedSdpFixture(t);
+  const before = f.broker.counts().bytes;
+  if (lost === "storage") custody.loseStorage(); else custody.loseSdk();
+  await prepare(); assert.equal(f.broker.counts().bytes, before + 64 * 1024);
+  f.owner.retire(); await child.channel.close();
+  assert.deepEqual(custody.effectCounts(), { storagePrepares: lost === "storage" ? 2 : 1, storageReleases: 1,
+    sdkAdmissions: lost === "sdk" ? 2 : 0, sdkReleases: lost === "sdk" ? 1 : 0 });
+  assert.equal(f.broker.counts().bytes, 0);
+});
+
+test("End cannot refund held SDK admission IO or release native custody before its actual finally", async t => {
+  const { f, child, custody, prepare } = await establishedSdpFixture(t);
+  const hold = custody.holdSdk(), pending = prepare();
+  await until(() => custody.effectCounts().sdkAdmissions === 1);
+  const payment = f.broker.counts().bytes; let closed = false;
+  f.owner.retire(); const closing = child.channel.close().then(() => { closed = true; });
+  await new Promise<void>(yes => setImmediate(yes));
+  assert.equal(closed, false); assert.equal(f.broker.counts().bytes, payment);
+  assert.equal(custody.effectCounts().sdkReleases, 0); assert.equal(f.counts().collections, 0);
+  hold.release(); await pending; await closing;
+  assert.equal(custody.effectCounts().sdkReleases, 1); assert.equal(f.broker.counts().bytes, 0);
+});
+
+test("lost SDK Release preserves payment and exact proof before storage/key release", async t => {
+  const { f, child, custody, prepare } = await establishedSdpFixture(t);
+  await prepare(); custody.loseSdkRelease();
+  f.owner.retire(); const closing = child.channel.close();
+  await until(() => custody.effectCounts().sdkReleases === 1 && f.timers().delays.includes(1000));
+  assert.equal(custody.effectCounts().storageReleases, 0); assert.equal(custody.keyCounts().releases, 0);
+  assert.ok(f.broker.counts().bytes >= 64 * 1024);
+  f.advance(1000); await closing;
+  assert.equal(custody.effectCounts().sdkReleases, 2); assert.equal(f.broker.counts().bytes, 0);
+});
+
+test("HMR refuses fully shaped funded broker23 without waking or replacing its outstanding pool", async t => {
+  const { f, child, prepare } = await establishedSdpFixture(t); await prepare();
+  const previous = Object.create(f.broker); Object.defineProperty(previous, "version", { value: 23 });
+  let wakes = 0; previous.retrySelectedJoinKeys = () => { wakes++; };
+  const key = Symbol.for("mewtual.voice.crypto-broker.v2"), host = { [key]: previous }, bytes = f.broker.counts().bytes;
+  assert.throws(() => windowVoiceCryptoBroker({ async admit() { return ""; }, async settle() {}, async commitInbound() {} }, host, real), /reload required/);
+  assert.equal(host[key], previous); assert.equal(wakes, 0); assert.equal(f.broker.counts().bytes, bytes);
+  f.owner.retire(); await child.channel.close();
 });

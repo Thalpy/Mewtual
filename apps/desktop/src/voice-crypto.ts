@@ -13,6 +13,9 @@ import { decodeVoiceIpcConfirmationInput } from "./voice-ipc-confirmation-input.
 import { decodeVoiceTransition, encodeVoiceTransition, type VoiceTransitionRequest } from "./voice-ipc-transition.ts";
 import { decodeVoiceKeySession, encodeVoiceKeySession, type VoiceKeySessionRequest } from "./voice-ipc-key-session.ts";
 import { VoiceKeyCustody } from "./voice-key-custody.ts";
+import { VoiceSdpSdkCustody, VOICE_SDP_SDK_BYTES } from "./voice-sdp-sdk-custody.ts";
+import { decodeVoiceSdpPhase, encodeVoiceSdpPhase, type VoiceSdpPhaseRequest } from "./voice-ipc-sdp.ts";
+import { decodeVoiceSdkCustody, encodeVoiceSdkCustody, type VoiceSdkRequest } from "./voice-ipc-sdk.ts";
 import { decodeVoiceWorkSnapshot, type VoiceWorkDescriptor } from "./voice-ipc-work.ts";
 import { NativeWorkPump, type VoiceNativeWorkObserver } from "./voice-ipc-pump.ts";
 import { decodeVoiceIpcActionReply, decodeVoiceIpcFinalReply, isVoiceIpcActionRow, type VoiceIpcActionReply } from "./voice-ipc-replies.ts";
@@ -263,6 +266,7 @@ type BrowserChain = {
   channel: RetainedIpcChannel | null; drained: Signal<void>;
   // Same keys/payment; no effect, admission, SDP or RTC authority lives in this metadata.
   custody: VoiceKeyCustody | null;
+  sdp: VoiceSdpSdkCustody | null;
 };
 type ConfirmationIntake = {
   chain: BrowserChain; purpose: VoiceIpcConfirmationPurpose; row: string | null; identity: VoiceIpcActionIdentity | null;
@@ -430,7 +434,7 @@ function context(label: string, transcript: Uint8Array): Uint8Array<ArrayBuffer>
  * unsettled work. Revoking an owner never frees a running promise; only its real settlement does.
  * A derive pipeline uses one permit for sequential import/ECDH/HKDF work, never parallel calls. */
 export class VoiceCryptoBroker {
-  readonly version = 23;
+  readonly version = 24;
   readonly subtle: SubtleCrypto;
   private readonly native: VoiceCryptoAdmission;
   private active = 0;
@@ -449,7 +453,7 @@ export class VoiceCryptoBroker {
   private ipcActive = 0;
   private readonly chains = new WeakMap<VoiceCryptoChain, BrowserChain>();
   private readonly chainStamps = new Map<VoiceCryptoOwner, Map<string, BrowserChain>>();
-  private readonly progress = new Map<string, BrowserChain | ChainIntake>();
+  private readonly progress = new Map<string, BrowserChain | ChainIntake | VoiceSdpSdkCustody>();
   private readonly intakes = new Map<VoiceCryptoOwner, Map<string, ChainIntake>>();
   private reservedRows = 0;
   private protectedPositions = 0;
@@ -604,6 +608,14 @@ export class VoiceCryptoBroker {
         // reference. Owner End alone cannot release these still-retained fixed objects.
         if (!chain.owner.isCurrent()) this.releaseChainHistory(chain);
       },
+      sdpUnlinked: (chain, phase) => {
+        // Runs AFTER the execution lane's actual finally. Neither End nor native storage
+        // state3 refunds an outstanding RPC/WebCrypto/RTC promise or its retained graph.
+        if (chain.sdp !== phase || !phase.nativeReleased) throw new Error("voice SDK custody remains unresolved");
+        chain.sdp = null;
+        if (this.progress.get(owner.group) === phase) this.progress.delete(owner.group);
+        this.refund(owner, VOICE_SDP_SDK_BYTES);
+      },
       finishInput: chain => this.retainFinishCustody(chain),
       transitionUpdated: chain => { this.drainChain(chain); if (this.chainCurrent(chain)) this.armChain(chain); },
     });
@@ -636,6 +648,28 @@ export class VoiceCryptoBroker {
       throw new Error("original native derivation required");
     }
     return channel.finishDerivation(chain);
+  }
+
+  /** Prepay one browser SDK/storage subtree for the exact established native chain.
+   * This creates release obligations only: no PC, SDP computation or RTC effect is exposed.
+   * Promise<void> joins an attempted/coalesced flight, not funded storage or RTC readiness;
+   * a busy channel may defer the attempt. Exact subsequent calls recover the same intent.
+   * Browser old-envelope drainage does NOT prove native core224KiB/Workflow drainage;
+   * the production round scheduler must establish that separately before using this leaf. */
+  prepareNativeSdpHandoff(owner: VoiceCryptoOwner, handle: VoiceIpcChannel, plan: VoiceCryptoChain): Promise<void> {
+    const channel = this.ipcChannels.get(owner.token), chain = this.chains.get(plan);
+    if (!channel || channel.handle !== handle || !channel.owns(owner) || !chain || chain.owner !== owner || chain.channel !== channel) {
+      throw new Error("original native SDP chain required");
+    }
+    if (chain.sdp) return channel.startSdp(chain);
+    current(owner);
+    if (!this.chainCurrent(chain) || chain.variable || chain.running || chain.continuation?.running ||
+        chain.custody?.keyReceipt?.state !== "current" || this.progress.has(owner.group)) throw new Error("established drained voice chain required");
+    this.charge(owner, VOICE_SDP_SDK_BYTES);
+    // No callback/await between payment and publication. Unknown replies retain this SAME
+    // intent; remounts cannot allocate a second subtree or another admission flight.
+    const phase = new VoiceSdpSdkCustody(); chain.sdp = phase; this.progress.set(owner.group, phase);
+    return channel.startSdp(chain);
   }
 
   /** Start one retained serial consumer after the original channel's authenticated Ready.
@@ -925,7 +959,7 @@ export class VoiceCryptoBroker {
       variable: true, fixedBytes: fixed, record: null, unsubscribe: () => {}, handle: null!, timer: null,
       records: new Map(), queue: [], retainedBytes: 130 + setup.transcript.length, enginePeak: 0,
       continuation: null, confirmations: new Map(),
-      channel, drained: signal<void>(), custody: null,
+      channel, drained: signal<void>(), custody: null, sdp: null,
     };
     chain.handle = Object.freeze({ close: () => this.closeChain(chain), isCurrent: () => this.chainCurrent(chain) });
     if (intake) { intake.transferred = true; intake.rows = 0; intake.fixedBytes = 0; intake.variable = false; }
@@ -976,7 +1010,7 @@ export class VoiceCryptoBroker {
   }
   private closeChain(chain: BrowserChain): void {
     if (chain.closed) return;
-    chain.closed = true; chain.custody?.closeKeys();
+    chain.closed = true; chain.custody?.closeKeys(); chain.sdp?.close();
     if (chain.timer !== null) { clearTimeout(chain.timer); chain.timer = null; }
     const rows = chain.reservedRows;
     this.reservedRows -= rows; chain.reservedRows = 0;
@@ -1730,6 +1764,7 @@ type IpcCustody = Readonly<{
   unlinked(chain: BrowserChain): void;
   finishInput(chain: BrowserChain): void;
   transitionUpdated(chain: BrowserChain): void;
+  sdpUnlinked(chain: BrowserChain, phase: VoiceSdpSdkCustody): void;
 }>;
 function ipcBytes(hex: string): Uint8Array<ArrayBuffer> {
   const bytes = new Uint8Array(hex.length / 2);
@@ -1761,6 +1796,7 @@ class RetainedIpcChannel {
   private terminalAction: Readonly<Pick<ChainIntake, "purpose" | "row" | "identity">> | null = null;
   private derivationReturn: Promise<void> | null = null;
   private transitionFlight: Promise<void> | null = null;
+  private sdpFlight: Promise<void> | null = null;
   private derivationReturned = false;
   // One current metadata cleanup intent survives lost history/final replies, plus at most
   // one waiting parent below. Never retain a32-row queue or reconstruct browser keys.
@@ -2243,6 +2279,78 @@ class RetainedIpcChannel {
         });
     } finally { encoded.body.fill(0); }
   }
+  /** A single retained admission flight; it returns void and retains no SDK data result.
+   * Never run a future RTC promise while owning SharedIpcExecution: its native result and
+   * release calls need that SAME lane. Only these bounded Control RPCs run inside it. */
+  startSdp(chain: BrowserChain): Promise<void> {
+    if (this.sdpFlight) return this.sdpFlight;
+    const phase = chain.sdp;
+    if (this.linked !== chain || !phase || phase.closed || chain.closed || !this.live() ||
+        this.actionBusy || this.request || this.historyRequest || this.driving) return Promise.resolve();
+    this.actionBusy = true; this.beginActivity();
+    const pending = Promise.resolve().then(() => this.execution.run(async () => {
+      if (phase.closed || chain.closed || !this.live()) return;
+      if (phase.needsStorageRecovery || phase.storage?.state === "preparing") await this.sdpRpc(chain, { kind: "prepare" });
+      if (phase.closed || chain.closed || !this.live() || phase.storage?.state !== "funded") return;
+      phase.beginSdk();
+      if (phase.needsSdkRecovery) await this.sdkRpc(chain, { kind: "admit" });
+    })).catch(() => { /* Keep the exact paid intent for recovery; no effect was granted. */ })
+      .finally(() => { this.sdpFlight = null; this.actionBusy = false; this.endActivity(); this.collect(); });
+    this.sdpFlight = pending; return pending;
+  }
+  private sdpIdentity(chain: BrowserChain) {
+    const original = this.terminalAction, key = chain.custody?.keyReceipt;
+    if (this.linked !== chain || !chain.sdp || !original || !key || !this.keys || !this.bootstrap) throw new Error("original SDP custody required");
+    return { parentRow: original.row, identity: original.identity, handshake: chain.binding.handshake, key: key.receipt, sequence: "1" };
+  }
+  /** Caller holds the original physical lane. After End, Prepare is exact recovery only;
+   * native independently refuses first admission. No retry manufactures another identity. */
+  private async sdpRpc(chain: BrowserChain, request: VoiceSdpPhaseRequest["request"]): Promise<void> {
+    const phase = chain.sdp!, expected = this.sdpIdentity(chain), encoded = encodeVoiceSdpPhase({ ...expected, request });
+    try {
+      await this.framed(encoded.operation, encoded.kind, encoded.logical, encoded.body, true,
+        (kind, length) => kind === 0 && (length === 19 || length === 186), opened => {
+          if (opened.length === 3) {
+            const refusal = decodeVoiceIpcActionReply(opened, expected.parentRow);
+            if (refusal.kind !== "refused" || request.kind === "release" || refusal.code === "capacity" || refusal.code === "stopped" || refusal.code === "closed") throw new Error("native SDP storage unresolved");
+            phase.refuseStorage(); // Independent original Final still gates cleanup.
+          } else {
+            const receipt = decodeVoiceSdpPhase(opened, expected);
+            if (request.kind === "release" && (receipt.state !== "drained" || receipt.proof !== request.proof)) throw new Error("native SDP release unresolved");
+            phase.observeStorage(receipt);
+          }
+        });
+    } finally { encoded.body.fill(0); }
+  }
+  private async sdkRpc(chain: BrowserChain, request: VoiceSdkRequest["request"]): Promise<void> {
+    const phase = chain.sdp!, storage = phase.storage;
+    if (!storage) throw new Error("native SDP storage required");
+    const expected = { ...this.sdpIdentity(chain), storage: storage.proof }, encoded = encodeVoiceSdkCustody({ ...expected, request });
+    try {
+      await this.framed(encoded.operation, encoded.kind, encoded.logical, encoded.body, true,
+        (kind, length) => kind === 0 && (length === 19 || length === 226), opened => {
+          if (opened.length === 3) {
+            const refusal = decodeVoiceIpcActionReply(opened, expected.parentRow);
+            if (refusal.kind !== "refused" || request.kind === "release" || refusal.code === "capacity" || refusal.code === "stopped" || refusal.code === "closed") throw new Error("native SDK custody unresolved");
+            phase.refuseSdk();
+          } else {
+            const receipt = decodeVoiceSdkCustody(opened, expected);
+            if (request.kind === "release" && (receipt.state !== "released" || receipt.proof !== request.proof || receipt.generation !== request.generation)) throw new Error("native SDK release unresolved");
+            phase.observeSdk(receipt);
+          }
+        });
+    } finally { encoded.body.fill(0); }
+  }
+  /** Only after actual local admission/SDK/IO finally; this method already owns the lane. */
+  private async cleanupSdp(chain: BrowserChain): Promise<void> {
+    const phase = chain.sdp; if (!phase) return;
+    phase.close();
+    if (phase.needsStorageRecovery) await this.sdpRpc(chain, { kind: "prepare" });
+    if (phase.needsSdkRecovery) await this.sdkRpc(chain, { kind: "admit" });
+    if (phase.needsSdkRelease) await this.sdkRpc(chain, { kind: "release", generation: phase.sdk!.generation, proof: phase.sdk!.proof });
+    if (phase.needsStorageRelease) await this.sdpRpc(chain, { kind: "release", proof: phase.storage!.proof });
+    if (!phase.nativeReleased) throw new Error("native SDK cleanup unresolved");
+  }
   wakeToken(): object { return this.wakeIdentity; }
   async waitWake(observed: object): Promise<void> {
     if (this.wakeIdentity !== observed) return;
@@ -2383,13 +2491,21 @@ class RetainedIpcChannel {
           try { await this.derivationReturn; } catch { /* exact final cleanup resolves uncertainty */ }
         }
         if (this.transitionFlight) await this.transitionFlight;
+        // Independent of old96KiB drainage. Join the actual SDK/IO admission finally
+        // OUTSIDE the lane that its exact recovery/release calls require.
+        if (this.sdpFlight) await this.sdpFlight;
+        const sdkChain = this.linked, sdkPhase = sdkChain?.sdp;
         await this.execution.run(() => this.cleanup());
+        if (sdkChain && sdkPhase) this.custody.sdpUnlinked(sdkChain, sdkPhase);
       }
       if (this.terminal) outcome = this.terminal;
       this.request?.resolve(outcome); this.request = null;
       history?.result.resolve(historical);
       if (this.historyRequest === history) this.historyRequest = null;
       this.driving = false; this.endActivity(); this.collect();
+      // close() includes the original lane's finally and independent SDK-subtree return.
+      // Resolving from cleanup() itself exposed a microtask gap before those owners drained.
+      if (this.drained) this.completion.resolve();
     }
   }
   private async setup(): Promise<boolean> {
@@ -2560,6 +2676,7 @@ class RetainedIpcChannel {
           const chain = this.linked, custody = chain.custody!;
           if (custody.needsClaim) await this.transitionRpc(chain, { kind: "claim" });
           if (custody.needsKeyRecovery) await this.keySessionRpc(chain, { kind: "adopt" });
+          await this.cleanupSdp(chain);
           if (custody.needsKeyRelease) await this.keySessionRpc(chain, { kind: "release", receipt: custody.keyReceipt!.receipt });
           if (custody.needsRelease) await this.transitionRpc(chain, { kind: "release", receipt: custody.receipt!.receipt });
         }
@@ -2591,7 +2708,7 @@ class RetainedIpcChannel {
     this.linked = null;
     this.terminalAction = null;
     if (linked) this.custody.unlinked(linked);
-    this.custody.setupDrained(); this.custody.closed(); this.completion.resolve();
+    this.custody.setupDrained(); this.custody.closed();
   }
 
   /** Runs inside the original serial lane AFTER all locally known SDK/IO has drained.
@@ -2792,7 +2909,7 @@ export function windowVoiceCryptoBroker(
   const host = window as Record<symbol, unknown>;
   const previous = host[BROKER] as VoiceCryptoBroker | undefined;
   if (previous) {
-    if (previous.version !== 23 || typeof previous.observeNativeWork !== "function" || typeof previous.returnNativeDerivation !== "function" || typeof previous.nativeConfirmationFromChannel !== "function" || typeof previous.nativeDerivationFromChannel !== "function" || typeof previous.recoverChannelHistory !== "function" || typeof previous.prepareChainFromChannel !== "function" || typeof previous.nativeChannel !== "function" || typeof previous.run !== "function" || typeof previous.selectJoinKey !== "function" || typeof previous.retrySelectedJoinKeys !== "function" ||
+    if (previous.version !== 24 || typeof previous.prepareNativeSdpHandoff !== "function" || typeof previous.observeNativeWork !== "function" || typeof previous.returnNativeDerivation !== "function" || typeof previous.nativeConfirmationFromChannel !== "function" || typeof previous.nativeDerivationFromChannel !== "function" || typeof previous.recoverChannelHistory !== "function" || typeof previous.prepareChainFromChannel !== "function" || typeof previous.nativeChannel !== "function" || typeof previous.run !== "function" || typeof previous.selectJoinKey !== "function" || typeof previous.retrySelectedJoinKeys !== "function" ||
         typeof previous.registerProtectedConfirmation !== "function" ||
         typeof previous.registerProtectedDerivation !== "function" || typeof previous.registerConfirmation !== "function" || typeof previous.createPair !== "function") {
       throw new Error("voice crypto broker version changed; reload required");

@@ -1,5 +1,27 @@
 # Mewtual; Interfaces & Hooks Schema
 
+## Native SDK custody opcode13 (24 October; no RTC permission)
+
+Control request version6 is: original parent action serial/version(u64 BE each), inputTag32,
+handshake32, KeyClaim proof32, positive round sequence(u64 BE), storage proof32, kind byte.
+Admit kind0 ends there (154B); Release kind1 appends original SDK generation(u64 BE) and
+SDK proof32 (194B). Header names the full original parent RowId; no renderer selector is used.
+Current native admission accepts round1 and issues SDK custody generation1. That generation
+identifies the release obligation; it is NOT an RTC peer generation or an effect permit.
+
+Reply210B: version6, state byte, parent RowId16, original action serial/version/tag, handshake32,
+key proof32, round sequence u64, storage proof32, SDK generation u64, SDK proof32. States1/2/3
+mean Held/Closing/Released. Held records custody only. Exact recovery precedes current admission
+checks; Release requires the same actual Session/base/storage/generation/proof even after End.
+Native/browser shared vectors are voice_handoff/requests/sdk-vectors.json. Existing Data2048B
+and Control12KiB limits remain unchanged. The fixed SDK wrapper has an explicit512B allowance
+inside native storage metadata; no native/group envelope increases.
+
+Browser24 prepareNativeSdpHandoff joins an attempted/coalesced custody-only flight and exposes
+no SDP plaintext, callback or PC constructor. It prepays64KiB before publishing the pending
+intent, uses the original channel/counters, and releases SDK before storage/key/Claim/Final.
+Full native core composition and effect/RTC authorization remain separate unfinished boundaries.
+
 ## Native SDP storage control (24 October; no SDK/RTC permission)
 
 Authenticated opcode 12 uses Control only and full original parent RowId in its Header.

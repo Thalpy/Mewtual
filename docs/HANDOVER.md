@@ -1,5 +1,34 @@
 # Mewtual; Handover
 
+## Independent SDK custody (24 October; operational RTC remains open)
+
+Native opcode13/version6 now records a separately released SDK obligation under the original
+Session/parent action/key receipt/storage proof. The one candidate is paid before allocation;
+final admission repeats UI -> Coordinator -> Route -> try-Index/row. Storage state3 still means
+storage drainage only. Normal finalization AND dead-owner GC require the independent SDK
+obligation to release. KeyRelease, old expiry, End and physical HTTP collection cannot release it.
+The installed fixed record retains a paid Root observer, with no Row/Phase/Session backedge.
+An allocated-but-unadmitted candidate blocks whole drainage until its actual destructor runs.
+
+Browser24 prepays a separate64KiB subtree after its actual old96KiB variable envelope drained
+and original KeyClaim is Current. The pending intent precedes its first storage/admission RPC;
+lost replies recover the same immutable identity. The retained channel joins actual admission
+WebCrypto/IO finally outside its shared IPC lane, then releases SDK custody, storage, keys and
+the old Claim before Final. close() now includes the execution/activity finally and subtree
+return. ABI24 rejects even a fully shaped funded23 broker without waking or replacing its pool.
+prepareNativeSdpHandoff(): Promise<void> joins an attempted/coalesced custody flight; a busy
+channel can defer it. It establishes neither funded storage nor PC/SDP/RTC permission.
+
+These changes do not start an RTC SDK call. The future RTC consumer must count its own actual
+promise/listener/string/buffer drainage independently of the old confirmation signal and
+native storage state. Browser old-work drainage does not prove native core192KiB+Ready32KiB
+composition. That native progression must precede operational use of this64KiB sidecar.
+A destroyed WebView has no original-realm destruction proof wired to SDK custody yet: physical
+HTTP collection is insufficient, so abandoned fixed custody can remain bounded until process
+exit. Host shutdown joins physical workers, not an impossible new request from a dead realm.
+No live V2 activation, operational Ready, SDP/RTC effect grant, repeated-round/multi-peer
+composition, member media relay or combined/physical audio acceptance is claimed.
+
 ## SDP handoff storage admission (24 October; integration remains open)
 
 The original native KeyClaim now admits a separately paid 64KiB SDP storage phase through
@@ -22,8 +51,8 @@ Funded storage is not Ready, an SDP action, SDK/PC admission or RTC delivery per
 Before operational use, extract/prepay the core 192 KiB + Ready 32 KiB and drain actual old 96 KiB
 work BEFORE acquiring this 64 KiB sidecar. Paying the sidecar first can prevent the 224 KiB
 preparation needed to return old progress. The current storage tests do not establish that
-whole composition. Browser 64 KiB SDK storage, independent SDK drainage in normal AND orphan
-cleanup, typed SDP seal/open/private delivery, complete ICE/RTC, repeated rounds/compaction,
+whole composition. Browser SDK custody and independent normal/orphan release gates are implemented above;
+actual SDK work drainage, typed SDP seal/open/private delivery, complete ICE/RTC, repeated rounds/compaction,
 multi-peer scheduling, member relay and combined acceptance still need implementation.
 Physical two-device/network acceptance remains unavailable with the single desktop.
 

@@ -28,7 +28,11 @@ impl Claim {
     pub(super) fn all_released(&self) -> bool {
         self.released
             && self.key.as_ref().is_none_or(|key| {
-                key.released && key.sdp.as_ref().is_none_or(super::sdp::Claim::is_drained)
+                key.released
+                    && key
+                        .sdp
+                        .as_ref()
+                        .is_none_or(super::sdp::Claim::whole_drained)
             })
     }
     fn key_snapshot(

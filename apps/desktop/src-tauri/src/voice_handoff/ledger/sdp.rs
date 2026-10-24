@@ -10,11 +10,13 @@ use catcoms_sync::voice_v2::chain::{
 use sha2::{Digest, Sha256};
 
 pub(super) struct Claim {
-    sequence: u64,
-    proof: [u8; 32],
-    closed: bool,
+    pub(super) sequence: u64,
+    pub(super) proof: [u8; 32],
+    pub(super) closed: bool,
     worker: bool,
-    phase: Option<Arc<Phase>>,
+    pub(super) phase: Option<Arc<Phase>>,
+    pub(super) sdk_preparing: bool,
+    pub(super) sdk: Option<Arc<super::sdk::Claim>>,
 }
 /// Move only OUT of native guards. Actual notifications/reserve retirement run on Drop,
 /// including abandonment/unwind immediately after the irreversible close publication.
@@ -25,13 +27,21 @@ impl Drop for CloseTicket {
     }
 }
 impl Claim {
-    pub(super) fn is_drained(&self) -> bool {
+    pub(super) fn storage_drained(&self) -> bool {
         !self.worker
             && self.phase.as_ref().is_none_or(|phase| {
                 phase
                     .try_status()
                     .is_ok_and(|status| status == PhaseStatus::Drained)
             })
+    }
+    /// Storage state3 remains independent of browser SDK completion. Native finalization
+    /// and orphan GC require this stronger predicate; physical HTTP collection is not SDK
+    /// drainage and cannot release this distinct installed obligation.
+    pub(super) fn whole_drained(&self) -> bool {
+        self.storage_drained()
+            && !self.sdk_preparing
+            && self.sdk.as_ref().is_none_or(|sdk| sdk.released())
     }
     pub(super) fn request_close(&mut self) -> Option<CloseTicket> {
         self.closed = true;
@@ -42,7 +52,7 @@ impl Claim {
     }
     fn state(&self, original_current: bool) -> u8 {
         if self.closed || !original_current {
-            if self.is_drained() {
+            if self.storage_drained() {
                 3
             } else {
                 2
@@ -68,7 +78,7 @@ pub(in crate::voice_handoff) struct Receipt {
     pub proof: [u8; 32],
     pub state: u8,
 }
-fn claim<'a>(
+pub(super) fn claim<'a>(
     row: &ResolvedRow,
     state: &'a State,
     session: &Arc<SessionIdentity>,
@@ -210,6 +220,8 @@ impl ResolvedRow {
                 closed: false,
                 worker: false,
                 phase: None,
+                sdk_preparing: false,
+                sdk: None,
             });
         }
         key.sdp.as_mut().unwrap().worker = true;
@@ -365,6 +377,21 @@ impl ResolvedRow {
             .and_then(|key| key.sdp.as_ref())
             .and_then(|sdp| sdp.phase.clone())
     }
+    pub(in crate::voice_handoff) fn sdp_test_whole_drained(&self) -> bool {
+        let _index = self.transition_index().unwrap();
+        let state = self.row.state.lock().unwrap();
+        state
+            .plan()
+            .and_then(|plan| plan.transition.as_ref())
+            .and_then(|claim| claim.key.as_ref())
+            .and_then(|key| key.sdp.as_ref())
+            .is_none_or(Claim::whole_drained)
+    }
+    pub(in crate::voice_handoff) fn sdk_test_orphan_gate(&self) -> bool {
+        let _index = self.transition_index().unwrap();
+        let state = self.row.state.lock().unwrap();
+        Ledger::root_retirement_ready(&state)
+    }
     pub(in crate::voice_handoff) fn sdp_test_drained(&self) -> bool {
         let _index = self.transition_index().unwrap();
         let state = self.row.state.lock().unwrap();
@@ -373,6 +400,6 @@ impl ResolvedRow {
             .and_then(|plan| plan.transition.as_ref())
             .and_then(|claim| claim.key.as_ref())
             .and_then(|key| key.sdp.as_ref())
-            .is_none_or(Claim::is_drained)
+            .is_none_or(Claim::storage_drained)
     }
 }

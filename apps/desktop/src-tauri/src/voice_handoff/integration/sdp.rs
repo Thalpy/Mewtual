@@ -48,7 +48,8 @@ pub(super) async fn exercise(
     parent: &ledger::ResolvedRow,
     key: [u8; 32],
     attach: bool,
-) {
+    sdk_race: bool,
+) -> Option<super::sdk::Token> {
     let prepare = body(parent, key, None);
     let request = requests::sdp::Request::decode(parent.id().logical(), &prepare).unwrap();
     let capacity = replies::refused(factory::Refused::Protocol(VoiceError::Capacity));
@@ -85,7 +86,19 @@ pub(super) async fn exercise(
         );
         let proof = first[138..170].try_into().unwrap();
         let phase = parent.sdp_test_phase().unwrap();
-        let copy = phase.copy(8192).unwrap().adopt(vec![17; 8192]).unwrap();
+        let mut copy = Some(phase.copy(8192).unwrap().adopt(vec![17; 8192]).unwrap());
+        let sdk = if sdk_race {
+            // Isolate SDK preparation custody: no native copy may mask a missing
+            // sdk_preparing term in whole_drained during the candidate unwind test.
+            drop(copy.take());
+            super::sdk::close_preparation_then_unwind(
+                state, public, route, parent, &prepare, proof,
+            )
+            .await;
+            None
+        } else {
+            Some(super::sdk::start(state, public, route, parent, &prepare, proof).await)
+        };
         let observer = phase.effect();
         assert!(std::panic::catch_unwind(std::panic::AssertUnwindSafe(
             || parent.sdp_test_release_unwind(route.session().identity(), &request, proof)
@@ -102,20 +115,26 @@ pub(super) async fn exercise(
             &body(parent, key, Some(proof)),
         )
         .await;
-        assert_eq!(&closing[..2], &[5, 2]);
+        assert_eq!(&closing[..2], &[5, if copy.is_some() { 2 } else { 3 }]);
         assert!(!observer.is_live());
-        assert!(!parent.sdp_test_drained());
-        assert_eq!(
-            copy.bytes()[0],
-            17,
-            "release cannot destroy a live native owner"
-        );
+        if let Some(copy) = &copy {
+            assert!(!parent.sdp_test_drained());
+            assert_eq!(
+                copy.bytes()[0],
+                17,
+                "release cannot destroy a live native owner"
+            );
+        } else {
+            assert!(parent.sdp_test_drained());
+        }
         drop(copy);
         assert!(parent.sdp_test_drained());
         let closed = exchange(state, public, route, parent, &prepare).await;
         assert_eq!(&closed[..2], &[5, 3]);
         assert_eq!(&closed[138..170], &proof);
         assert!(phase.arm().is_err());
+        assert_eq!(parent.sdp_test_whole_drained(), sdk.is_none());
+        sdk
     } else {
         let context = context::Context::new(state);
         factory::preflight_binding(&context, route).await.unwrap();
@@ -166,5 +185,6 @@ pub(super) async fn exercise(
         let closed = exchange(state, public, route, parent, &prepare).await;
         assert_eq!(&closed[..2], &[5, 3]);
         assert_eq!(&closed[138..170], &proof);
+        None
     }
 }

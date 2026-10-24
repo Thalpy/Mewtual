@@ -30,6 +30,7 @@ impl<'a> Request<'a> {
                 | Operation::ChainTransition
                 | Operation::KeySession
                 | Operation::SdpPhase
+                | Operation::SdkCustody
         ) || body_kind
             != if operation == Operation::Result {
                 BodyKind::Data

@@ -1,5 +1,22 @@
 # Threat model; client integrity & enforcement boundaries
 
+## SDK custody cannot be erased by storage or transport cleanup (24 October)
+
+Native SDK admission resolves the actual original Session/KeyClaim/storage proof and records
+one paid inert candidate before final UI/selection/route admission. An unpublished candidate
+blocks whole drainage until Drop. An installed obligation requires its exact SDK generation/
+proof Release. Physical HTTP collection, KeyRelease, old expiry and storage state3 cannot
+assert SDK drainage, including through orphan GC. Fixed custody retains neither Row nor
+Phase/Session/crypto lane, so process shutdown need not await a dead WebView's impossible RPC.
+No original-realm destruction proof is wired; abandoned fixed custody may remain until exit.
+
+Browser24 installs its separately paid64KiB pending intent before RPC, preserves uncertain
+identity across End/reload, and joins actual admission WebCrypto/IO finally outside the shared
+lane before native SDK/storage/key release. A late Held cannot reopen local effects. SDK
+custody is not an RTC grant; no generic callback/PC/SDP use is exposed. Application graph
+inventory excludes opaque SDK/GC/OS heaps. Actual RTC/string/engine coexistence, native core
+composition and live V2 remain unimplemented and must not be inferred from these releases.
+
 ## Native SDP storage authority and cleanup (24 October)
 
 Equal peer/epoch labels cannot construct SDP storage custody: Root requires the actual
@@ -13,7 +30,8 @@ while a worker is still preparing. CloseTicket performs notifications/reserve re
 native guards on normal return and unwind; quiet collection resumes closed intents. Real copies
 remain charged until destruction. Before SDK admission, independent browser-SDK obligations
 must gate normal finalization AND orphan GC: HTTP Session collection is not proof that a live
-RTC promise drained. That SDK enforcement and full SDP/RTC path remain unimplemented.
+RTC promise drained. Opcode13 now enforces independent custody as described above;
+actual RTC promise/effect integration remains unimplemented.
 
 ## Authenticated SDP round/profile isolation (24 October)
 
