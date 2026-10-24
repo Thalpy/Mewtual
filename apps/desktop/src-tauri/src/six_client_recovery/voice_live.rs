@@ -9,20 +9,32 @@ use catcoms_sync::voice_v2::{Body, CallGrant};
 /// proves a single-pair Node/native cycle; it does not establish WebView policy or live RTC.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn native_webcrypto_confirmation_uses_real_http_and_blocked_tcp_member_bridge() {
-    native_webcrypto_cycle(false, false).await;
+    native_webcrypto_cycle(false, false, false).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn native_webcrypto_end_closes_automatic_work_before_first_browser_input() {
-    native_webcrypto_cycle(true, false).await;
+    native_webcrypto_cycle(true, false, false).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn native_and_browser_automatically_confirm_over_blocked_tcp_member_bridge() {
-    native_webcrypto_cycle(false, true).await;
+    native_webcrypto_cycle(false, true, false).await;
 }
 
-async fn native_webcrypto_cycle(end_before_input: bool, automatic_browser: bool) {
+/// Native Ready now traverses normal dispatch after both original browser/confirmation
+/// Returns. No Ready frame, receipt or private Pair state is injected by this scenario.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn native_ready_is_admitted_over_blocked_tcp_member_bridge_after_browser_confirmation_returns(
+) {
+    native_webcrypto_cycle(false, true, true).await;
+}
+
+async fn native_webcrypto_cycle(
+    end_before_input: bool,
+    automatic_browser: bool,
+    exercise_ready: bool,
+) {
     use crate::voice_handoff::integration::webcrypto::{catch_fixture, Endpoint, Failure};
     async fn observation(
         actor: &catcoms_app::ServerActor,
@@ -152,6 +164,122 @@ async fn native_webcrypto_cycle(end_before_input: bool, automatic_browser: bool)
                 )
             );
             assert_eq!([a_state, c_state], [VoicePairConfirmation::Established; 2]);
+            if exercise_ready {
+                use catcoms_app::VoiceEndpointError;
+                use catcoms_sync::voice_v2::VoiceError;
+                let (low_index, low_grant, high_index, high_grant, handshake) =
+                    if scenario.clients[1].identity.as_ref().unwrap().1
+                        < scenario.clients[2].identity.as_ref().unwrap().1
+                    {
+                        (1, &ag, 2, &cg, ap.confirmation_handshake().unwrap())
+                    } else {
+                        (2, &cg, 1, &ag, cp.confirmation_handshake().unwrap())
+                    };
+                let clock = crate::voice_runtime(&scenario.online(low_index).state).clock();
+                let bridge = scenario.clients[0].identity.as_ref().unwrap().1;
+                bounded("original LOW capacity before native Ready", async {
+                    loop {
+                        match scenario
+                            .online(low_index)
+                            .actor
+                            .prepay_voice_low_sdp(low_grant.clone(), handshake)
+                            .await
+                        {
+                            Ok(()) => break,
+                            Err(VoiceEndpointError::Protocol(VoiceError::Capacity)) => {
+                                clock.sleep(std::time::Duration::from_millis(20)).await
+                            }
+                            other => panic!("original LOW capacity refused: {other:?}"),
+                        }
+                    }
+                })
+                .await;
+                assert_eq!(
+                    scenario
+                        .online(low_index)
+                        .actor
+                        .prepare_voice_low_sdp(low_grant.clone(), handshake)
+                        .await,
+                    Err(VoiceEndpointError::Protocol(VoiceError::Unauthorized)),
+                    "local native/browser Finish alone must not admit remote Ready"
+                );
+                bounded("same original HIGH receive and Ready preparation", async {
+                    loop {
+                        match scenario
+                            .online(high_index)
+                            .actor
+                            .prepare_voice_high_ready(
+                                high_grant.clone(),
+                                handshake,
+                                [Some(bridge), None],
+                            )
+                            .await
+                        {
+                            Ok(true) => break,
+                            Err(VoiceEndpointError::Protocol(VoiceError::Capacity)) => {
+                                clock.sleep(std::time::Duration::from_millis(20)).await
+                            }
+                            other => panic!("original HIGH readiness refused: {other:?}"),
+                        }
+                    }
+                })
+                .await;
+                assert!(!scenario
+                    .online(high_index)
+                    .actor
+                    .queue_voice_high_ready(high_grant.clone(), handshake)
+                    .await
+                    .unwrap());
+                assert!(
+                    scenario
+                        .online(high_index)
+                        .actor
+                        .queue_voice_high_ready(high_grant.clone(), handshake)
+                        .await
+                        .unwrap(),
+                    "same queued identity is recoverable, without another Source allowance"
+                );
+                bounded(
+                    "actual native Ready delivered over permitted member bridge",
+                    async {
+                        loop {
+                            match scenario
+                                .online(low_index)
+                                .actor
+                                .prepare_voice_low_sdp(low_grant.clone(), handshake)
+                                .await
+                            {
+                                Ok(true) => break,
+                                Ok(false)
+                                | Err(VoiceEndpointError::Protocol(
+                                    VoiceError::Capacity | VoiceError::Unauthorized,
+                                )) => {
+                                    // Every observation still uses the SAME affine call/pair. A
+                                    // stale owner/epoch must fail its independent exact observation.
+                                assert!(low_grant.lease().is_live());
+                                let selector=if low_index==1 {discovered[0].1} else {discovered[1].1};
+                                assert_eq!(observation(&scenario.online(low_index).actor,clock.as_ref(),low_grant,selector,handshake).await,
+                                    VoicePairConfirmation::Established);
+                                    clock.sleep(std::time::Duration::from_millis(20)).await;
+                                }
+                                other => panic!("native LOW Ready progression refused: {other:?}"),
+                            }
+                        }
+                    },
+                )
+                .await;
+                assert!(
+                    scenario
+                        .online(high_index)
+                        .actor
+                        .queue_voice_high_ready(high_grant.clone(), handshake)
+                        .await
+                        .unwrap(),
+                    "LOW native Ready admission/drain does not complete HIGH Source before its native first Offer"
+                );
+                // No browser SDP adoption or RTC action was requested; true above observes
+                // original Workflow drainage following actual native Ready, not audio.
+            }
             scenario.rules.assert_graph();
             return;
         }

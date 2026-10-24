@@ -1,5 +1,33 @@
 # Chat, files and voice implementation evidence
 
+## Actor Ready delivery through a blocked TCP bridge (24 October; focused integration)
+
+The bounded application actor now exposes the four existing native Ready/capacity controls.
+Helper selection occupies a fixed two-element mailbox array. Commands retain the original
+CallGrant and recover the same Root-owned preparation after lost replies; a closed reply
+before execution creates no work. These APIs do not accept renderer packets or clocks.
+
+The new `native_ready_is_admitted_over_blocked_tcp_member_bridge_after_browser_confirmation_returns`
+scenario passes (15.28s). Both endpoints use the actual automatic Node WebCrypto consumer,
+authenticated native HTTP channel and real TCP confirmation. A-C transport is forbidden; B is
+a permitted member with no call join or endpoint controller. Explicit actor HIGH prepare/queue
+then delivers Ready through B. LOW's actual native Ready admission and old Workflow drainage
+succeed without injecting a Ready packet, receipt or pair state. The polling loop checks the
+same live grant and exact original established pair. LOW preparation refuses before Ready;
+LOW admission alone does not complete HIGH Source before a causal first Offer. This last
+assertion is not independent observation of the transport ACK path.
+
+Focused checks pass: all11 native voice_live scenarios (146.36s),38 application voice tests
+(0.44s) plus the public API compile test, and strict application Clippy (36.42s). Complete
+suites remain deferred during unfinished integration. Native check (31.35s), strict native
+Clippy (45.80s), formatting, diff and ambient checks also pass.
+
+Read-only review found no blocker/high/medium. Optional wrapper-specific rejection tests for
+sparse helper arrays, foreign grants and pre-execution closed replies remain a low test gap;
+shared Root/actor enforcement already covers the underlying ownership checks. Application
+automatic Ready progression and browser key-session/SDP/RTC consumers remain unfinished.
+This is transport/native evidence, not packaged WebView or audible/physical acceptance.
+
 ## LOW Ready acceptance evidence (24 October; focused checks)
 
 The actual protected LOW and Root intake now accept exact original Ready, retain a fixed plain

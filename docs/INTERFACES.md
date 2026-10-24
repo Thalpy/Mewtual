@@ -1,5 +1,15 @@
 # Mewtual; Interfaces & Hooks Schema
 
+## Application actor Ready controls (24 October)
+
+`ServerActor` exposes the existing native `prepare_voice_high_ready`, `queue_voice_high_ready`,
+`prepay_voice_low_sdp` and `prepare_voice_low_sdp` through its bounded endpoint mailbox. HIGH
+helpers use `[Option<DeviceId>; 2]`; a sparse `[None, Some(_)]` is malformed. Every command
+retains the exact original CallGrant. Retryable/lost replies recover existing Root custody;
+no renderer packet, signer, clock or new attempt allowance is accepted. A pre-execution closed
+reply skips work. LOW's boolean still observes actual old Workflow drainage only. Automatic
+application Ready scheduling, browser key adoption and SDP/RTC authority are separate consumers.
+
 ## LOW Ready native admission and capacity APIs (24 October)
 
 Ready has a dedicated Root intake branch; it cannot obtain a generic public receipt. Exact

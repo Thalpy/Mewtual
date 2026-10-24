@@ -103,6 +103,28 @@ enum Command {
         handshake: Nonce,
         reply: Reply<VoicePairConfirmation>,
     },
+    HighReady {
+        grant: Arc<CallGrant>,
+        handshake: Nonce,
+        // Fixed mailbox ownership: a native caller cannot retain an arbitrary helper Vec.
+        helpers: [Option<DeviceId>; 2],
+        reply: Reply<bool>,
+    },
+    QueueReady {
+        grant: Arc<CallGrant>,
+        handshake: Nonce,
+        reply: Reply<bool>,
+    },
+    PrepayLowSdp {
+        grant: Arc<CallGrant>,
+        handshake: Nonce,
+        reply: Reply<()>,
+    },
+    LowSdp {
+        grant: Arc<CallGrant>,
+        handshake: Nonce,
+        reply: Reply<bool>,
+    },
     Derive {
         grant: Arc<CallGrant>,
         handshake: Nonce,
@@ -234,6 +256,59 @@ impl Command {
                             .sync
                             .voice_pair_confirmation(&grant, selector, handshake),
                     );
+                }
+            }
+            Self::HighReady {
+                grant,
+                handshake,
+                helpers,
+                reply,
+            } => {
+                if !reply.is_closed() {
+                    let result = match helpers {
+                        [None, None] => {
+                            server.sync.prepare_voice_high_ready(&grant, handshake, &[])
+                        }
+                        [Some(a), None] => {
+                            server
+                                .sync
+                                .prepare_voice_high_ready(&grant, handshake, &[a])
+                        }
+                        [Some(a), Some(b)] => {
+                            server
+                                .sync
+                                .prepare_voice_high_ready(&grant, handshake, &[a, b])
+                        }
+                        [None, Some(_)] => Err(VoiceError::Malformed),
+                    };
+                    let _ = reply.send(result);
+                }
+            }
+            Self::QueueReady {
+                grant,
+                handshake,
+                reply,
+            } => {
+                if !reply.is_closed() {
+                    let _ = reply.send(server.sync.queue_voice_high_ready(&grant, handshake));
+                }
+            }
+            Self::PrepayLowSdp {
+                grant,
+                handshake,
+                reply,
+            } => {
+                if !reply.is_closed() {
+                    let _ = reply.send(server.sync.prepay_voice_low_sdp(&grant, handshake));
+                }
+            }
+            Self::LowSdp {
+                grant,
+                handshake,
+                reply,
+            } => {
+                if !reply.is_closed() {
+                    let _ = reply.send(server.sync.prepare_voice_low_sdp(&grant, handshake));
                 }
             }
             Self::Derive {
@@ -397,6 +472,67 @@ impl ServerActor {
         self.voice_endpoint_request(|reply| Command::PairConfirmation {
             grant,
             selector,
+            handshake,
+            reply,
+        })
+        .await
+    }
+
+    /// Prepare the original native HIGH receiver/Ready. No renderer packet, signer or
+    /// clock enters this command. Retry only this same grant/handshake/helper choice.
+    pub async fn prepare_voice_high_ready(
+        &self,
+        grant: Arc<CallGrant>,
+        handshake: Nonce,
+        helpers: [Option<DeviceId>; 2],
+    ) -> Result<bool, VoiceEndpointError> {
+        self.voice_endpoint_request(|reply| Command::HighReady {
+            grant,
+            handshake,
+            helpers,
+            reply,
+        })
+        .await
+    }
+    /// Queue that exact prepared Ready. A lost reply recovers its original Source record,
+    /// not another identity, origin debit or three-attempt allowance.
+    pub async fn queue_voice_high_ready(
+        &self,
+        grant: Arc<CallGrant>,
+        handshake: Nonce,
+    ) -> Result<bool, VoiceEndpointError> {
+        self.voice_endpoint_request(|reply| Command::QueueReady {
+            grant,
+            handshake,
+            reply,
+        })
+        .await
+    }
+    /// Prepay original LOW capacity/endpoint records after native Finish. This alone does
+    /// not accept Ready, stop Finish, adopt browser keys or authorize any SDP/RTC work.
+    pub async fn prepay_voice_low_sdp(
+        &self,
+        grant: Arc<CallGrant>,
+        handshake: Nonce,
+    ) -> Result<(), VoiceEndpointError> {
+        self.voice_endpoint_request(|reply| Command::PrepayLowSdp {
+            grant,
+            handshake,
+            reply,
+        })
+        .await
+    }
+    /// Advance only actual native LOW Ready. `true` observes old Workflow drainage;
+    /// `false` retains the same extracted owner while real old work still drains.
+    /// Neither result grants SDP/browser/RTC activation. Capacity/Stopped retry the SAME
+    /// owners; they never justify replacing the original preparation or old key Claim.
+    pub async fn prepare_voice_low_sdp(
+        &self,
+        grant: Arc<CallGrant>,
+        handshake: Nonce,
+    ) -> Result<bool, VoiceEndpointError> {
+        self.voice_endpoint_request(|reply| Command::LowSdp {
+            grant,
             handshake,
             reply,
         })
