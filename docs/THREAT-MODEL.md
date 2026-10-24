@@ -1,5 +1,22 @@
 # Threat model; client integrity & enforcement boundaries
 
+## Historical work metadata IPC (24 October; inactive integration)
+
+The new main-only read returns public original-channel work metadata, including historical
+peer/join identifiers, after End/lock so an owning browser can discover unseen Pending.
+It requires the canonical registry's retained owner/executor allocation; equal labels in a
+replacement/foreign grant cannot select its ledger rows. No secret, Input/result bytes,
+SDP, key, live grant or native admission is returned. Approval/other windows lack capability.
+
+One serial projection shares the original setup payment. Full bounded reply/serialization
+inventory must fit8KiB; the JSON allocation cannot grow beyond2,304B. Holding a reply retains
+only its actual paid native Row/parent and channel Row, not the process Ledger/index or
+unrelated work. Main-window framework copies after body handoff remain outside that bound.
+No factories, timers, roster scans, Actor awaits or new execution allowance are admitted.
+An empty scan cannot prove an in-flight producer absent; Pending is not attached and local
+ClosedPending is not Root/SDK drainage. Decoder hints cannot create incoming work or RTC.
+Automatic production delivery/cleanup and native SDP authorization remain separate gaps.
+
 ## Native confirmation observations (23 October; inactive integration)
 
 Pair status cannot be supplied by the renderer or reconstructed by running a pair factory.

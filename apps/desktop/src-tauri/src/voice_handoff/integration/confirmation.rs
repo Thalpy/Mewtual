@@ -82,18 +82,91 @@ async fn begin_frame(
         panic!("original channel")
     };
     let route = state.voice_channels.route(public.public().slot).unwrap();
+    begin_frame_on_route(state, &public, &route, parent, purpose).await
+}
+
+/// Reuse the actual original channel after setup. Contention fixtures must not call
+/// bootstrap while holding the server map: bootstrap legitimately waits for that map.
+/// Only the exact framed Begin below exercises its deliberately nonblocking preflight.
+async fn begin_frame_on_route(
+    state: &AppState,
+    public: &bootstrap::SetupOutput,
+    route: &bootstrap::Route,
+    parent: &ledger::ResolvedRow,
+    purpose: ledger::ConfirmationPurpose,
+) -> Vec<u8> {
     let selector = parent.confirmation_selector().unwrap();
     let mut body = confirmation_prefix(parent.id(), purpose, selector);
     body.push(1); // exact original factory/attachment retry, never a replacement purpose
     let header = (route.session().fixture_counts().1 + 1, 8, 0, [0; 16]);
     let reply = confirmation_begin::begin(
         &context::Context::new(state),
-        &route,
-        opened_frame(&public, &route, header, &body, None),
+        route,
+        opened_frame(public, route, header, &body, None),
     )
     .await
     .unwrap();
-    opened_reply(&public, header, &body, &reply)
+    opened_reply(public, header, &body, &reply)
+}
+
+/// Known lost-input publications must reach the exact permanent refusal even when local
+/// preflight is temporarily busy. Capacity is an observation to retry, never a passing
+/// negative result or evidence that the rotating incoming snapshot was consulted.
+async fn known_attachment_refusals(
+    state: &AppState,
+    selected: &SelectedHandoffOwner,
+    parent: &ledger::ResolvedRow,
+    purpose: ledger::ConfirmationPurpose,
+    child: &ledger::ResolvedRow,
+) {
+    let status = child.status().unwrap();
+    assert!(status.action.is_none() && child.has_pending_publication().unwrap());
+    let bootstrap::Status::Ready(public) = bootstrap::ensure(
+        state,
+        selected.id(),
+        selected.executor(),
+        &mut catcoms_rt::OsCryptoRng,
+    )
+    .await
+    .unwrap() else {
+        panic!("same original channel")
+    };
+    let route = state.voice_channels.route(public.public().slot).unwrap();
+    let clock = crate::voice_runtime(state).clock();
+    // One fixed harness bound covers forced contention and both required final refusals.
+    // It never changes the original Root pair/action deadline, purpose or Action allocation.
+    tokio::time::timeout(Duration::from_secs(15), async {
+        let busy = state.servers.lock().await;
+        assert_eq!(
+            begin_frame_on_route(state, &public, &route, parent, purpose).await,
+            replies::refused(factory::Refused::Protocol(VoiceError::Capacity)),
+            "actual local preflight contention must not reach attachment"
+        );
+        assert!(child.status().unwrap() == status);
+        assert!(child.has_pending_publication().unwrap());
+        drop(busy);
+        for _ in 0..2 {
+            loop {
+                let bytes = begin_frame_on_route(state, &public, &route, parent, purpose).await;
+                assert!(child.status().unwrap() == status);
+                assert!(child.has_pending_publication().unwrap());
+                if bytes == replies::refused(factory::Refused::Protocol(VoiceError::Capacity)) {
+                    // The actual framed reply/physical owner is collected before sleeping.
+                    // A broken empty-snapshot fallback stays Capacity and exhausts the bound.
+                    clock.sleep(Duration::from_millis(25)).await;
+                    continue;
+                }
+                assert_eq!(
+                    bytes,
+                    replies::refused(factory::Refused::Protocol(VoiceError::Unauthorized)),
+                    "known action attachment refusal, not missing snapshot Capacity"
+                );
+                break;
+            }
+        }
+    })
+    .await
+    .expect("original known attachment did not recover from local preflight contention");
 }
 
 /// Two real native registrations compete for the SAME actual Root Hello. Exercise both
@@ -220,11 +293,7 @@ pub(crate) async fn confirmation_alias_claims(
             Err(VoiceError::Unauthorized)
         ));
         drop(_commit); // framed cleanup/bootstrap uses the same original UI boundary
-        assert_eq!(
-            begin_frame(state, selected, parent, valid_request).await,
-            replies::refused(factory::Refused::Protocol(VoiceError::Unauthorized)),
-            "known publication retry never calls another factory"
-        );
+        known_attachment_refusals(state, selected, parent, valid_request, &child).await;
         cleanup_child(
             state,
             selected,
@@ -1259,33 +1328,41 @@ pub(crate) async fn confirmation_known_incoming_retry(
     drop(permit);
     action.settle_engine(); // permanent loss before any native Phase/Input exposure
     let route = route(high_state, high).await;
-    assert!(matches!(
-        factory::ensure_incoming_row(
-            &context::Context::new(high_state),
-            &route,
-            high_parent,
-            action,
-            factory::tests::physical(&route)
-        )
-        .await,
-        Err(factory::Refused::Protocol(VoiceError::Unauthorized))
-    ));
+    let clock = crate::voice_runtime(high_state).clock();
+    tokio::time::timeout(Duration::from_secs(15), async {
+        loop {
+            // Hold the SAME actual settled Root Action across every proven local refusal.
+            // No rotating snapshot, new token, replacement factory action or attempt refund.
+            match factory::ensure_incoming_row(
+                &context::Context::new(high_state),
+                &route,
+                high_parent,
+                action.clone(),
+                factory::tests::physical(&route),
+            )
+            .await
+            {
+                Err(factory::Refused::Protocol(VoiceError::Unauthorized)) => break,
+                Err(factory::Refused::Protocol(VoiceError::Capacity)) => {
+                    assert!(
+                        action.input().is_err(),
+                        "settled original input must stay lost"
+                    );
+                    clock.sleep(Duration::from_millis(25)).await;
+                }
+                other => panic!("expected original settled-input attachment refusal: {other:?}"),
+            }
+        }
+    })
+    .await
+    .expect("original incoming attachment did not recover from local preflight contention");
     let purpose = ledger::ConfirmationPurpose::Incoming(1);
     let child = high_state
         .voice_handoff
         .lookup_child(high, high_parent, purpose, None)
         .unwrap();
     assert!(child.has_pending_publication().unwrap());
-    let status = child.status().unwrap();
-    assert!(status.action.is_none());
-    for _ in 0..2 {
-        assert_eq!(
-            begin_frame(high_state, high, high_parent, purpose).await,
-            replies::refused(factory::Refused::Protocol(VoiceError::Unauthorized)),
-            "known action attachment refusal, not missing snapshot Capacity"
-        );
-        assert!(child.status().unwrap() == status);
-    }
+    known_attachment_refusals(high_state, high, high_parent, purpose, &child).await;
     cleanup_child(
         high_state,
         high,

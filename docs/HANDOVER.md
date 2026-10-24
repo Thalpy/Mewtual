@@ -1,5 +1,93 @@
 # Mewtual; Handover
 
+## Pair observation and work metadata (24 October; validated)
+
+Runtime `2f35c49b` adds the original-grant native Confirming/Established query through the
+bounded Actor. Six focused protocol regressions pass (5.73s); all seven real blocked-TCP
+voice scenarios pass (64.05s). The actual Node/WebCrypto cycle independently observes
+low Established/high Confirming while receiver Finish open is held, then both Established.
+Original Finish retry custody remains intact. That query checkpoint's complete frontend
+passes2,638 (103.28s); the combined metadata continuation passes2,642 below.
+Complete Root validation now passes3,320 tests, zero failures and24 existing ignored across
+59 result summaries on that frozen query checkout. The metadata continuation has byte-
+identical Root crates, manifests, lockfile, scripts and build inputs; it needs no duplicate
+Root run. These are integration results, not a production-call readiness claim.
+
+The separate `target/communication-native-work-metadata-worktree` adds a main-only
+`read_voice_channel_work(owner, executor, fromSlot)` and strict browser metadata decoder.
+It scans at most32 retained rows and projects one original row, its complete purpose/parent,
+optional action tuple and Pending/Closing/ClosedPending/attached state. A slot is a scan
+hint, not a replay cursor; repeat a scan to observe Pending becoming attached on the same
+RowId. Empty neither proves no admitted producer nor authorizes channel/Root/SDK cleanup.
+
+The canonical channel registry supplies the original selection, including after End/lock.
+One serial MetadataProjection shares its existing8KiB payment/exclusion with setup replies.
+A runtime inventory includes the original row/preparation/output, actual String capacities,
+one-row snapshot copies, fixed2,304B JSON and serializer scratch; no pool/limit is raised.
+The reply retains only the exact ledger Row/parent, not the process Ledger/index. No grant
+upgrade, Work/Phase/Input, Actor await, Clock/RNG, factory or deadline renewal occurs here.
+Framework/WebView copies after body handoff remain outside this application-owner bound.
+
+Read-only review found and corrected whole-ledger retention and impossible decoder references.
+The first native command focus compiled and ran one pass/two failures (0.37s). Both failures
+were fixtures dropping a proven-unstarted Registration before expecting it in a snapshot;
+they now explicitly mark synthetic handoff uncertainty, without claiming Actor publication.
+The child-after-compaction fixture has the same correction. The measured row/reply inventory
+was7,014–7,016B/8KiB for those original selections; admission checks actual String capacities
+and refuses any larger graph rather than increasing the budget. Broader native verification,
+including actual Host/App teardown/last-reply payment assertions, now passes all292 tests
+(34.54s). The intervening291-pass/one-failure run (33.98s) had a stale false handoff flag
+assertion after its fixture was changed to uncertain handoff; it now requires true, preserving
+Root uncertainty after local closure. No production behavior or acceptance rule was relaxed.
+New decoder/security focus passes13 tests; the complete frontend passes2,642 (77.89s),
+Svelte has zero errors/warnings, the production frontend builds, all ten Edge flows pass
+and strict Node script checking passes. The initial native check found a Tauri blanket-
+implementation conflict: WorkReply cannot implement both Serialize and custom IpcResponse.
+A private borrowed Snapshot now uses only the capped writer; native check (1m03s) and strict
+all-target/all-feature native Clippy (1m46s) pass. Strict Root Clippy passes (3m34s).
+The Node fixture now obtains its Derive descriptor through the same native metadata handler
+and shipped decoder. The updated seven-case TCP run passed six/failed one (98.89s), including
+a pass for that actual Node/WebCrypto scenario. The known-incoming permanent-input-loss test
+expected immediate Unauthorized but received authenticated Capacity; its original refusal site
+was not recorded. The test now forces actual server-map preflight Capacity, collects the reply,
+then retries only authenticated Capacity under one15s bound before requiring two exact
+Unauthorized results with unchanged original child status/publication. The adjacent initial
+attachment keeps its same actual Action, and the alias lost-input fixture uses the same rule.
+No timeout, Root deadline, attempt allowance or production admission was expanded. This proves
+the corrected local contention contract; it does not diagnose the earlier unrecorded refusal.
+All seven corrected TCP cases now pass (88.73s). Read-only final review finds no remaining
+blocker/high/medium. Native application build passes (3m46s), and the actual startup gate
+passes (5.67s), reusing the existing dev server on1420 and closing its own window afterward.
+The full native executables were prepared (1m59s). Complete native validation passes779 tests:
+774 library (837.91s) and five command-policy, zero failures/ignored. Complete frontend passes
+2,642, zero failures/skips. Root/native formatting, strict Clippy, ambient-dependency and diff
+checks pass; the Root dependency audit passes with its existing advisory-not-detected warnings.
+No dependency or limit was changed by this metadata continuation.
+
+Reproduction commands for the complete gates (all passed):
+
+- `cargo test --all --all-features --no-fail-fast -j 2 -- --test-threads=4`
+  in the frozen `communication-native-webcrypto-worktree`, log `target/pair-confirmation-root-full.log`.
+- `cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml --no-fail-fast -j 2 -- --test-threads=4`
+  in `communication-native-work-metadata-worktree`, log `target/work-metadata-native-full.log`.
+- `npm --prefix apps/desktop test`, plus `run check`, `run build`, `run test:flows` and
+  `run test:startup`; current logs are `target/work-metadata-{frontend-full,frontend-check-final,frontend-build,frontend-flows,native-startup}.log`.
+- `cargo fmt --all -- --check`, native workspace formatting, Root/native
+  `cargo clippy --all-targets --all-features -- -D warnings`, native `cargo check`/`cargo build`,
+  `scripts/check-no-ambient.sh` through Git Bash, `cargo deny check`, and standalone Node-script
+  TypeScript checking with `--strict`.
+
+The Root catch-up cost regression passed after10,000 signed operations (907.27s), transferring
+only the missing change. The exhaustive Root storage block and this regression explain most
+of the full-run duration. Full native execution started only after compilation finished and
+the remaining Root process used under30MiB; no second full run of either workspace was started.
+
+This does not implement an automatic production broker/pump, incoming-action hints,
+VoiceV2Native event history, unseen-Pending cleanup orchestration, SDP/ICE/RTC or member
+media relay. Shipping byte effects and V2 activation stay disabled. Combined/multi-peer and
+packaged WebView acceptance remain open; one desktop cannot prove two-network audio.
+External download resume remains with its separate owner and is untouched here.
+
 ## Native/Node WebCrypto interoperability (23 October; validated runtime afcbee27)
 
 `target/communication-native-webcrypto-worktree` builds on published `bfe8439e`; its current

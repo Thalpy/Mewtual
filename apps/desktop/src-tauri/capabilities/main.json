@@ -212,6 +212,7 @@
     "allow-settle-voice-crypto",
     "allow-settle-voice-join-key",
     "allow-setup-voice-channel",
+    "allow-read-voice-channel-work",
     "allow-settle-voice-channel-setup",
     "allow-collect-voice-channel",
     "allow-unmap-call-port",

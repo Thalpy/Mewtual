@@ -1,5 +1,46 @@
 # Chat, files and voice implementation evidence
 
+## Pair observation and existing work metadata (24 October; validated)
+
+`2f35c49b` passes six new focused native pair-query regressions and seven real blocked-TCP
+voice scenarios (64.05s), including independent native observations during held receiver
+Finish open and after actual confirmation. That query checkpoint's frontend passes2,638.
+Complete Root now passes3,320, zero failures and24 existing ignored across59 summaries on
+the frozen source. Root inputs in the metadata continuation are byte-identical.
+
+The separate work-metadata continuation adds main-only bounded original-row observation
+after End/lock, serial original bootstrap payment, fixed2,304B JSON and a strict decoder.
+It preserves preparation states and full original purpose; slot scans are not event cursors.
+The reply retains actual paid Rows rather than the process ledger. Its Node fixture now
+uses that native handler/decoder for Derive metadata. Browser/security13 focus, complete
+frontend2,642 (77.89s), Svelte zero errors/warnings, production frontend build, all ten Edge
+flows and standalone Node TypeScript pass. The first native check found a conflicting
+Serialize/custom IpcResponse implementation; the borrowed Snapshot correction retains the
+capped writer. Native command focus compiled: one pass/two failures (0.37s), both due to
+unstarted fixture reservations being correctly removed before snapshot. Explicit synthetic
+handoff marks correct the fixtures; the child projection fixture is corrected likewise.
+The observed original row/reply inventory is7,014–7,016B/8KiB, with actual-capacity admission
+checks retained. Corrected native handoff focus passes292 (34.54s), including actual Host/App
+teardown and last-reply payment return. An intervening291-pass/one-failure run (33.98s)
+retained a false handoff expectation after marking fixture handoff; the assertion now requires
+true rather than losing Root uncertainty. The updated TCP run passes six/failed one (98.89s),
+including actual Node/WebCrypto success using the native metadata handler/decoder. The known-
+incoming permanent-input-loss case received authenticated Capacity where immediate
+Unauthorized was expected; its original refusal site remains unrecorded. The corrected fixture
+forces real preflight contention, collects each reply and retries only authenticated Capacity
+under one15s bound. It still requires two exact Unauthorized replies with unchanged original
+publication/status; initial attachment retains the same actual Action. The alias loss fixture
+uses the same rule. All seven corrected TCP cases pass (88.73s). Native check (1m03s), strict
+native Clippy (1m46s) and strict Root Clippy (3m34s) pass. Final read-only review finds no
+blocker/high/medium. Native application build (3m46s) and actual startup (5.67s) pass. Complete
+Root/native complete suites pass:3,320 Root (24 existing ignored),779 native (774 library in
+837.91s plus five command-policy), zero failures. Complete frontend2,642, native check/build/
+startup, Root/native strict Clippy/formatting, ambient/dependency audit, strict Node TypeScript
+and all ten browser flows pass. HANDOVER records exact commands/logs and earlier failures.
+These gates do not imply production V2 or physical acceptance.
+Automatic production work delivery/cleanup, SDP/ICE/RTC, multi-peer composition, media relay,
+combined and two-device/network audio acceptance remain open. Download resume is separate.
+
 ## Native/Node WebCrypto interoperability (23 October; runtime afcbee27)
 
 The isolated draft on bfe8439e now passes the actual single-pair TCP scenario with A-C

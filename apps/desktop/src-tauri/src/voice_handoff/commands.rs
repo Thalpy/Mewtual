@@ -96,6 +96,9 @@ impl tauri::ipc::IpcResponse for SetupReply {
 struct JsonBuffer {
     bytes: Vec<u8>,
 }
+
+mod work;
+pub(super) use work::{read_inner as read_work_inner, WorkReply};
 impl Write for JsonBuffer {
     fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
         if bytes.len() > PUBLIC_REPLY_BYTES - self.bytes.len() {
@@ -164,6 +167,19 @@ pub(crate) async fn setup_voice_channel(
 ) -> Result<SetupReply, String> {
     crate::require_unlocked_session(&state).await?;
     setup_inner(&state, &host, owner, executor, &mut OsCryptoRng).await
+}
+
+/// Public historical metadata only, on the main-window ACL. Exact old channel provenance
+/// remains usable while locked so a browser can find and clean up an unseen native Pending.
+/// No live grant, factory, payload, engine or asserted drainage is returned by this read.
+#[tauri::command]
+pub(crate) fn read_voice_channel_work(
+    state: State<'_, AppState>,
+    owner: String,
+    executor: String,
+    from_slot: u8,
+) -> Result<WorkReply, String> {
+    read_work_inner(&state, owner, executor, from_slot)
 }
 
 fn drained(result: Result<Status, Refused>) -> Result<(), String> {

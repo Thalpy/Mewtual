@@ -3,6 +3,50 @@
 use super::*;
 
 #[test]
+fn existing_work_projection_keeps_full_child_purpose_after_actual_parent_return_and_compaction() {
+    let (mut coordinator, selected, selector) = selection();
+    let ledger = Arc::new(Ledger::default());
+    let (_join, _action, parent) = returned_parent(&ledger, &coordinator, &selected, selector);
+    let request = ConfirmationPurpose::Incoming(1);
+    let (Begin::Factory(child), _) = ledger
+        .begin_child(selected.clone(), &parent, request)
+        .unwrap()
+    else {
+        panic!("native child Pending")
+    };
+    let id = child.id();
+    child.mark_handoff().unwrap(); // Fixture handoff uncertainty, not Actor publication.
+    drop(child); // An unseen native reservation, not an invented incoming Action.
+    let first = ledger.project_work(&selected, 0).unwrap();
+    assert_eq!(first.metadata.as_ref().unwrap().row, parent.id());
+    let projected = ledger.project_work(&selected, first.next_slot).unwrap();
+    let metadata = projected.metadata.as_ref().unwrap();
+    assert_eq!(metadata.row, id);
+    assert!(
+        metadata.purpose
+            == Purpose::Confirmation {
+                parent: parent.id(),
+                request
+            }
+    );
+    assert_eq!(metadata.parent_selector, Some(selector));
+    assert!(metadata.pending == PendingStatus::Open && metadata.action.is_none());
+    drop(parent);
+    coordinator.end(selected.id());
+    let after_end = ledger.project_work(&selected, first.next_slot).unwrap();
+    assert_eq!(after_end.metadata.as_ref().unwrap().row, id);
+    assert_eq!(
+        after_end.metadata.as_ref().unwrap().parent_selector,
+        Some(selector)
+    );
+    assert!(ledger
+        .project_work(&selected, projected.next_slot)
+        .unwrap()
+        .metadata
+        .is_none());
+}
+
+#[test]
 fn known_retry_cannot_reserve_or_rearm_an_uncertain_child_without_actual_publication() {
     let (coordinator, selected, selector) = selection();
     let ledger = Arc::new(Ledger::default());

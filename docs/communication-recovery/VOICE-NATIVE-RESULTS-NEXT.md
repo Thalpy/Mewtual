@@ -1,5 +1,30 @@
 # Next voice milestone: native result recovery
 
+## Existing work projection continuation (24 October; validated inactive integration)
+
+`read_voice_channel_work` and `voice-ipc-work.ts` now implement a bounded metadata-only
+snapshot seam for existing native rows. Canonical original registry provenance, a serial
+paid projection, full original purpose/parent, fixed JSON and one exact Row/parent lifetime
+are enforced. Pending/Closing/ClosedPending/attached stay distinct after End/lock; slot hints
+require rescanning and are not VoiceV2Native event cursors. Empty never proves no producer.
+Read-only review corrected process-ledger retention and impossible decoder references.
+Browser/security13 focus, complete frontend2,642/check/build/ten flows and strict Node
+TypeScript pass. Native handoff focus passes292; corrected TCP passes all seven (88.73s),
+including actual Node/WebCrypto and forced local preflight contention before two mandatory
+exact known-publication refusals. HANDOVER preserves the earlier6/1 run and unrecorded
+original Capacity site. Complete Root3,320 (24 existing ignored), native779 and frontend2,642
+pass, zero failures. Native check/build/startup, Root/native strict Clippy/formatting, dependency
+and ambient gates, strict Node TypeScript and all ten browser flows pass. HANDOVER records
+exact commands/logs and measurements; shipping effects and V2 activation remain disabled.
+
+The Node fixture now reads its Derive descriptor through this native handler and actual
+decoder; it no longer receives row/action identity from the orchestration step. Production
+orchestration still must create work independently, account for bounded incoming-action
+snapshot hints, coalesce browser pulls under original channel custody, and clean up unseen
+Pending only after admitted native production actually drains. Then finish event replay,
+SDP/ICE factories/RTC, Finish-to-SDP transfer and supported multi-peer composition. Shipping
+effect dispatch/activation remain off. HANDOVER contains exact validation scopes and limits.
+
 ## Native/Node interoperability continuation (23 October)
 
 Runtime afcbee27 on bfe8439e now passes a genuine native/Node single-pair cycle: separate actual
@@ -1329,11 +1354,12 @@ V2 RTC continuations need the exact native call, remote join/key, pair generatio
 dispatch generation before and after each await. These are software enablement requirements,
 independent of the separate physical audio/network acceptance that one desktop cannot provide.
 
-The current 9,232-byte SdpResult phase owns one native Vec. It does not account for native IPC
-serialization, browser quarantine or RTC UTF-16 strings. The narrow simultaneous native peak
-leaves only 4,058 spare bytes in its 229,376-byte reserve, including the later route-metadata
-correction, so adding those copies alongside an
-unchanged engine loan is not justified.
+The earlier SDP design measured a9,232-byte SdpResult owning one native Vec and only4,058
+spare bytes in a229,376-byte exchange reserve after the route-metadata correction. Those
+figures describe that earlier design, not the current192KiB Exchange declaration recorded
+above. Neither measurement accounts for native IPC serialization, browser quarantine or RTC
+UTF-16 strings. Adding those copies alongside an unchanged engine loan still needs a new
+complete peak and explicit copy ownership.
 
 Prefer receipt-only commit replies. The browser already has its computed plaintext; retain it
 under the surviving action record instead of copying it native-to-browser again. After actual
@@ -1383,9 +1409,12 @@ No action or engine grant may escape preparation. With no actually proven FreshP
 without admission; if reordering needs a ciphertext candidate inbox, bound it separately and
 release the verification slot before waiting for proof. A raw header cannot create a pair.
 
-Measure the complete peak before choosing reservation bytes. Adding a separate confirmation
-reserve alongside the existing224KiB SDP reserve can exceed the256KiB group bound. Return only
-unused capacity during an explicit phase transition; retain protective history, actual lower
+Measure the complete peak before choosing reservation bytes. The earlier224KiB SDP reserve
+and256KiB native group premise are historical: the current Exchange declares192KiB and the
+native ceiling is512KiB per group/2MiB per process. The independent browser ceiling remains
+256KiB. These larger native limits do not establish combined confirmation/SDP/browser/RTC or
+multi-peer admission. Return only unused capacity during an explicit phase transition;
+retain protective history, actual lower
 copies and unsettled engine/IPC owners. Full native/browser/UTF-16 copy handoff still needs its
 own measured phases. These are design requirements, not implemented readiness guarantees.
 

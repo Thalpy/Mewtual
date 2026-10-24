@@ -11,6 +11,7 @@ import {
   type VoiceSelectedKeyAdmission, type VoiceSelectedKeyPublication, type VoiceIpcSetupReply,
 } from "../src/voice-crypto.ts";
 import type { VoiceIpcPurpose, VoiceIpcActionIdentity, VoiceIpcConfirmationPurpose } from "../src/voice-ipc-actions.ts";
+import { decodeVoiceWorkSnapshot } from "../src/voice-ipc-work.ts";
 
 const MAX_FRAME = 4096;
 const scratch = Buffer.alloc(MAX_FRAME + 4);
@@ -18,6 +19,7 @@ let used = 0, stepRunning = false;
 let callback: { resolve(value: unknown): void; reject(reason: Error): void } | null = null;
 let broker: VoiceCryptoBroker, owner: VoiceCryptoOwner, key: VoiceJoinKeyHandle;
 let channel: VoiceIpcChannel, chain: VoiceCryptoChain;
+let channelExecutor: string | null = null;
 let parent: Readonly<{ purpose: VoiceIpcPurpose; row: string; identity: VoiceIpcActionIdentity }>;
 let availability: ReturnType<typeof setInterval> | null = null;
 // Fixture-only bounded stage trace. No keys, Input, Result or ciphertext is copied/logged.
@@ -53,8 +55,8 @@ function send(value: unknown): void {
   const head = Buffer.alloc(4); head.writeUInt32BE(body.length);
   process.stdout.write(head); process.stdout.write(body);
 }
-type Method = "admitKey" | "publishKey" | "settleKey" | "setup" | "settleSetup" | "collectChannel";
-async function rpc<T>(method: Method, args: Record<string, string>): Promise<T> {
+type Method = "admitKey" | "publishKey" | "settleKey" | "setup" | "settleSetup" | "collectChannel" | "readWork";
+async function rpc<T>(method: Method, args: Record<string, string | number>): Promise<T> {
   assert.equal(callback, null, "only one native metadata call may be outstanding");
   const answer = new Promise<unknown>((resolve, reject) => { callback = { resolve, reject }; });
   send({ tag: "call", method, args });
@@ -69,7 +71,11 @@ const selectedNative: VoiceSelectedKeyNative = Object.freeze({
   settle: (owner: string, executor: string) => rpc<void>("settleKey", { owner, executor }),
 });
 const native: VoiceIpcNative = Object.freeze({
-  setup: (owner: string, executor: string) => rpc<VoiceIpcSetupReply>("setup", { owner, executor }),
+  setup: (owner: string, executor: string) => {
+    if (channelExecutor === null) channelExecutor = executor;
+    else assert.equal(executor, channelExecutor, "one original native channel selection");
+    return rpc<VoiceIpcSetupReply>("setup", { owner, executor });
+  },
   settleSetup: (owner: string, executor: string) => rpc<void>("settleSetup", { owner, executor }),
   collectChannel: (owner: string, executor: string) => rpc<void>("collectChannel", { owner, executor }),
 });
@@ -90,7 +96,7 @@ async function idle(): Promise<void> {
 }
 type Step =
   | { tag: "step"; name: "prepare"; owner: string; group: string }
-  | { tag: "step"; name: "derive"; purpose: VoiceIpcPurpose; row: string; identity: VoiceIpcActionIdentity }
+  | { tag: "step"; name: "derive"; purpose: VoiceIpcPurpose }
   | { tag: "step"; name: "child"; request: VoiceIpcConfirmationPurpose["request"] }
   | { tag: "step"; name: "close" | "wedge" };
 async function step(value: Step): Promise<unknown> {
@@ -126,7 +132,14 @@ async function step(value: Step): Promise<unknown> {
     }
     case "derive": {
       assert.equal(parent, undefined, "one original pair per test endpoint");
-      parent = Object.freeze({ purpose: value.purpose, row: value.row, identity: value.identity });
+      assert.notEqual(channelExecutor, null);
+      const work = decodeVoiceWorkSnapshot(await rpc("readWork", { owner: owner.token, executor: channelExecutor!, fromSlot: 0 }),
+        owner.token, channelExecutor!, 0).work;
+      assert.ok(work && work.state === "attached" && work.purpose.kind === "derive", "actual native parent must be attached");
+      if (!work || work.state !== "attached" || work.purpose.kind !== "derive") throw new Error("original native work unavailable");
+      const { kind: _kind, ...purpose } = work.purpose;
+      assert.deepEqual(purpose, value.purpose, "public selection cannot substitute another native purpose");
+      parent = Object.freeze({ purpose, row: work.row, identity: work.identity });
       const intake = broker.nativeDerivationFromChannel(owner, channel, key, parent.purpose, parent.row, parent.identity);
       const initialRefusals = capacityRefusals;
       let before = capacityRefusals;

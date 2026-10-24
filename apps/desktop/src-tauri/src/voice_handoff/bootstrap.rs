@@ -107,6 +107,38 @@ pub(super) struct MetadataProjection {
     row: Arc<Row>,
 }
 impl MetadataProjection {
+    /// Original registry allocation, including after End. This is historical provenance,
+    /// not a live grant upgrade or permission to construct replacement work.
+    pub(super) fn selected(&self) -> &SelectedHandoffOwner {
+        &self.row.selected
+    }
+
+    /// Conservative complete original Row/preparation/output inventory plus ONE serial
+    /// metadata reply. General allocator, framework copies after handoff and OS overhead
+    /// are outside this application-owner bound. Refuse rather than raise its8KiB payment.
+    pub(super) fn require_reply_memory(&self, reply_bytes: usize) -> Result<(), Refused> {
+        let arc_words = 2 * std::mem::size_of::<usize>();
+        let retained = std::mem::size_of::<Row>()
+            + std::mem::size_of::<SessionIdentity>()
+            + arc_words * 2
+            + std::mem::size_of::<Ticket>()
+            + std::mem::size_of::<SetupOutput>()
+            + std::mem::size_of::<Credit>()
+            + arc_words * 2
+            + std::mem::size_of::<Arc<Session>>()
+            + std::mem::size_of::<Begin>()
+            + std::mem::size_of::<Status>()
+            + std::mem::size_of::<PublicProjection>()
+            + std::mem::size_of::<MetadataProjection>();
+        let bytes = retained.checked_add(reply_bytes).ok_or(Refused::Capacity)?;
+        #[cfg(test)]
+        eprintln!("native work metadata row/reply inventory {bytes}/{ROW_BYTES}");
+        if bytes > ROW_BYTES {
+            return Err(Refused::Capacity);
+        }
+        Ok(())
+    }
+
     pub(super) fn transcript(&self, output: Arc<SetupOutput>) -> Result<PublicProjection, Refused> {
         if !Arc::ptr_eq(&self.row._credit, &output._credit) {
             return Err(Refused::Binding);

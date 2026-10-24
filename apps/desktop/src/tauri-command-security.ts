@@ -35,6 +35,9 @@ export const TAURI_COMMAND_GROUPS = {
       // It accepts no drain flag, private bytes or replacement generation; setup still gates
       // the unlocked session and native selected owner before RNG or channel admission.
       "setup_voice_channel", "settle_voice_channel_setup", "collect_voice_channel",
+      // Read existing original-channel work metadata after End/lock so unseen Pending can
+      // be cleaned up. It cannot admit work, fetch payloads or assert actual drainage.
+      "read_voice_channel_work",
       // CAS lifecycle and bounded engine admission, independent of optional router grants.
       // Selected-key admission recovers its original permit until settlement; publication
       // installs only that accepted owner's frozen public point through the actual actor.

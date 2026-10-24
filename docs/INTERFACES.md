@@ -1,5 +1,30 @@
 # Mewtual; Interfaces & Hooks Schema
 
+## Existing native work snapshots (24 October; inactive integration)
+
+Main-window `read_voice_channel_work(owner, executor, fromSlot)` accepts canonical original
+owner/executor and a numeric0..32 slot. It returns one fixed public `snapshot` containing
+`nextSlot` and nullable `work`. Work has original RowId, full native purpose (including the
+strong original parent's selector for a child), distinct preparation state and optional
+action/version/inputTag. RowIds and all u64s retain canonical hex/decimal-string forms.
+Attached means an action identity was registered, including after ordinary compaction;
+it does not assert a live Phase or fresh Input. Current state needs authenticated history.
+`voice-ipc-work.ts` validates the closed shape and exact request selection, slot relation,
+state/action consistency and impossible self/parent/trigger references. Metadata never
+authenticates an action or replaces native Input/admission/result/cleanup receipts.
+
+This is synchronous existing-history observation, deliberately available after End/lock on
+the original main-window capability. Registry provenance and its paid serial projection
+precede the bounded32-slot ledger scan; no lazy owner factory, live-grant upgrade, Actor
+request, payload or new work is involved. The same8KiB original bootstrap row funds either
+setup or work serialization into one hard-capped2,304B JSON body. Exact projected Row/parent
+owners remain paid until serialization; the reply does not retain the process ledger/index.
+
+`nextSlot` is a scan hint, not `VoiceV2Native.events(lease, after)`. Pending may become attached
+without changing RowId, so callers must rescan. Empty is not absence or drainage evidence;
+cleanup must first drain admitted production, then recover/close actual Pending or attached
+rows before channel settlement. That production broker/cleanup driver remains unimplemented.
+
 ## Native pair confirmation observation (23 October; inactive integration)
 
 `ChannelSync::voice_pair_confirmation(&Arc<CallGrant>, PairSelector, handshake)` and the

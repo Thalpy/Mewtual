@@ -1,5 +1,16 @@
 # Mewtual; Architecture
 
+## Read-only existing work projection (24 October; inactive integration)
+
+Native work discovery is a synchronous bounded scan, separate from producers and the future
+VoiceV2Native event stream. The canonical channel registry loans its original selected owner
+and one serial metadata projection before a32-slot ledger scan returns at most one exact row.
+Full purpose/parent and Pending/attached metadata use a fixed JSON writer, sharing setup's
+existing8KiB payment and exclusion. The reply retains the paid Row/parent, not Arc<Ledger>.
+Clock, Actor, payload, grant upgrade and factory paths are absent. End/lock leave this exact
+history readable for cleanup. Slot hints and revision wakes are neither replayable cursors
+nor absence/drainage evidence. HANDOVER records validation and unimplemented orchestration.
+
 ## Native pair observation (23 October; inactive integration)
 
 The bounded Actor exposes a fixed Confirming/Established query backed by the existing

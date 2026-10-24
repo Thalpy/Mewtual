@@ -42,6 +42,7 @@ enum Method {
     Setup,
     SettleSetup,
     CollectChannel,
+    ReadWork,
 }
 #[derive(Deserialize, Clone, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
@@ -50,6 +51,8 @@ struct Metadata {
     executor: String,
     permit: Option<String>,
     point: Option<String>,
+    #[serde(rename = "fromSlot")]
+    from_slot: Option<u8>,
 }
 
 struct Callbacks {
@@ -260,7 +263,7 @@ impl Endpoint {
             .voice_handoff
             .resolve(&selected, ledger::Purpose::Derive(selector), id)
             .unwrap();
-        let (action, version, input_tag) = row.status().unwrap().action.unwrap();
+        assert!(row.status().unwrap().action.is_some());
         assert!(
             row.status().unwrap().engine.receipt.is_none(),
             "genuine uncommitted native Derive"
@@ -268,11 +271,12 @@ impl Endpoint {
         // The fixture can only make the next authenticated Input fail locally; it cannot
         // synthesize a receipt or renew this original parent/action's authority.
         route.session().fixture_arm_input_pressure();
-        let answer = self.step(json!({"tag":"step", "name":"derive",
-            "purpose": {"peer":selector.peer.to_string(), "join":hex::encode(selector.join),
-                "keyRef":hex::encode(selector.key_ref), "epoch":selector.epoch.to_string()},
-            "row":hex::encode(id.logical()), "identity":{"action":action.to_string(), "version":version.to_string(), "inputTag":hex::encode(input_tag)},
-        })).await;
+        let answer = self
+            .step(json!({"tag":"step", "name":"derive",
+                "purpose": {"peer":selector.peer.to_string(), "join":hex::encode(selector.join),
+                    "keyRef":hex::encode(selector.key_ref), "epoch":selector.epoch.to_string()},
+            }))
+            .await;
         assert_eq!(answer, json!({"kind":"accepted"}));
         assert!(!route.session().fixture_input_pressure_pending());
         assert!(matches!(
@@ -585,6 +589,7 @@ struct MetadataReply {
     value: Value,
     executor: Option<[u8; 32]>,
     _projection: Option<commands::SetupReply>,
+    _work_projection: Option<commands::WorkReply>,
 }
 async fn metadata(
     state: &AppState,
@@ -599,11 +604,15 @@ async fn metadata(
     if !matches!(method, Method::PublishKey) && (args.permit.is_some() || args.point.is_some()) {
         return Err(());
     }
+    if !matches!(method, Method::ReadWork) && args.from_slot.is_some() {
+        return Err(());
+    }
     let executor = hex::decode(&args.executor)
         .map_err(|_| ())?
         .try_into()
         .map_err(|_| ())?;
     let mut projection = None;
+    let mut work_projection = None;
     let mut published = None;
     let value = match method {
         Method::AdmitKey => serde_json::to_value(
@@ -656,6 +665,19 @@ async fn metadata(
                 .map_err(|_| ())?;
             Value::Null
         }
+        Method::ReadWork => {
+            let reply = commands::read_work_inner(
+                state,
+                owner.to_string(),
+                args.executor,
+                args.from_slot.ok_or(())?,
+            )
+            .map_err(|_| ())?;
+            let value =
+                serde_json::from_str(&reply.fixture_json().map_err(|_| ())?).map_err(|_| ())?;
+            work_projection = Some(reply);
+            value
+        }
         Method::CollectChannel => {
             commands::collect_inner(state, owner, &args.executor)
                 .await
@@ -667,6 +689,7 @@ async fn metadata(
         value,
         executor: published,
         _projection: projection,
+        _work_projection: work_projection,
     })
 }
 

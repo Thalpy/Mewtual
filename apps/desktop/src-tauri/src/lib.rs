@@ -18075,6 +18075,7 @@ pub fn run() {
             voice_join_key::publish_voice_join_key,
             voice_join_key::settle_voice_join_key,
             voice_handoff::commands::setup_voice_channel,
+            voice_handoff::commands::read_voice_channel_work,
             voice_handoff::commands::settle_voice_channel_setup,
             voice_handoff::commands::collect_voice_channel,
             default_route_address,

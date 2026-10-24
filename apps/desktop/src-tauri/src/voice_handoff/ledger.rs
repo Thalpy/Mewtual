@@ -25,8 +25,10 @@ const ROWS: usize = 32;
 const ROW_BYTES: usize = 2304;
 mod children;
 mod plan;
+mod projection;
 pub(super) use children::ConfirmationPurpose;
 use plan::Plan;
+pub(super) use projection::{WorkMetadata, WorkProjection};
 
 #[cfg(test)]
 pub(super) fn retirement_layout_bytes() -> usize {
