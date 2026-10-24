@@ -88,10 +88,13 @@ approximate.
 only add a source of truth that can disagree after a crash.
 
 **The index must be readable, or nothing is evicted.** The planner receives the index as a result,
-not a possibly empty list. It pauses when the index document is not open, its projection fails
-(more than 256 conflicting `ROOT/FILES` values), or the raw row count exceeds the 256-row cap
-(`raw_file_index_row_count`), because then honest rows may be invisible. The same applies to the
-profile document, whose avatar and banner references protect unlisted blobs.
+not a possibly empty list. It pauses entirely when the index document is not open or its
+projection fails (more than 256 conflicting `ROOT/FILES` values). When the raw row count exceeds
+the 256-row cap (`raw_file_index_row_count`; a hostile write or an honest partition merge can do
+this), rows past the cap are invisible, so **class 1 is skipped** but class 2 still runs: a
+hidden row's chunks are never offered in class 2, so dropping visible files stays safe. An
+unreadable profile document likewise skips class 1 only, because its references only protect
+unlisted blobs. One member therefore cannot switch off everyone's limit.
 
 **Mount scan.** `attach_blob_store` opens the primary cache, scans `blobs/<group>/` on a blocking
 worker (CID-named regular files and their lengths), recovers leftover temporary files (section 9),
@@ -105,9 +108,13 @@ stays off for that mount.
 
 **Order of eviction**, run only while usage is over the limit and stopping when it is not:
 
-0. **Completed Keep duplicates** (owner decision 5): a cache chunk that a completed Keep copy holds
-   is dropped on every pass, over the limit or not, unless another pin holds it. Reads, serving and
-   Storage health fall back to the Keep copy through the composite store.
+0. **Completed Keep duplicates** (owner decision 5): a cache chunk of a completed Keep copy's
+   committed plan is dropped on every pass, over the limit or not, unless another pin holds it,
+   but only when that copy passed its full check in this mount (`KeptFile.checked`), is not
+   poisoned and is bound. After a restart a Keep copy is unchecked, so its cache duplicate stays
+   until a check succeeds: a damaged Keep chunk is never left without the copy repair would read.
+   The actor re-checks these conditions before each batch. Reads, serving and Storage health fall
+   back to the Keep copy through the composite store.
 1. **Unclaimed blobs**: CIDs in the mount set that no live listing names, no profile names as an
    avatar or banner, and no pin set holds. Mostly chunks of listings someone else deleted (the
    delete-time GC runs only on the deleting device) and superseded profile images. They go first,
@@ -174,7 +181,14 @@ in the desktop bridge runs it on a blocking worker under the store lock:
 An actor asks when a pass would delete and its store reports protection unknown. The actor reads
 known or unknown and the group's protected set through a new `BlobStore::protected_cids()`
 (`None` = unknown), which `ProtectedBlobs` answers from its shared state. Durable writes that make
-protection unknown again are followed by a new request, still bounded by the 60-second rate.
+protection unknown again are followed by a new request, still bounded by the 60-second rate. A
+scan that fails backs off (doubling, up to 30 minutes) instead of retrying every minute, and the
+footer says cleanup is paused because Studio references could not be checked.
+
+Studio's own save path promotes through its own handle and takes its hold after promoting; a frame
+published in an earlier mount and saved after a restart can therefore be class 1 in between. That
+gives the existing "publish the frame first" refusal, not data loss, and relies on `publish_pix`
+running on the actor handle.
 
 ### 4. When eviction runs, and concurrency
 
@@ -227,8 +241,11 @@ through the composite store.
 - **Leaving soon** = the listed files the planner would drop if the next **10% of the limit**
   arrived: walk classes 1 and 2, skipping pins, until `usage + 10% of limit - freed <= limit`, and
   count the distinct listed files touched. Unclaimed blobs count toward the bytes, not the number.
-- **Nearly full** = usage at or above **90%** of the limit; with no unclaimed blobs the count turns
+- **Nearly full** = usage above **90%** of the limit; with no unclaimed blobs the count turns
   non-zero exactly when the bar turns amber.
+- Housekeeping, including class 0, runs only on the persistent primary cache, after a complete
+  mount scan and once a limit is known (saved or migrated); No limit still runs class 0. The
+  in-memory fallback store keeps its own FIFO budget.
 - **Over** = usage above the limit: while pins hold it there, or between a write and the next pass.
   One large write can jump straight past 90%, so the warning comes before the cache is full in the
   usual case, not in every case.
@@ -249,10 +266,13 @@ through the composite store.
   clear of the Transfers button PR #51 is changing. `CACHE`, a slim bar (`role="progressbar"`) and
   the percentage; amber at 90% with a "N leaving soon" chip; red over the limit; "held by pinned
   files" or "cleanup paused" when those apply; "CACHE 3.2 GB" with no bar for No limit. Title text
-  such as "2.8 GB of 5 GB used on this device. The oldest files leave first. Kept files, your
-  uploads, Studio work and files in use stay." Clicking opens the Storage page. Hidden when no server
-  is selected. Data: `get_cache_status` on server switch and a native `cache-status` event, at most
-  once a second. No animation.
+  such as "2.8 GB of 5 GB used on this device. The oldest files leave first. Kept files, files you
+  shared from this device, Studio work and files in use stay." (Legacy unsigned uploads are not
+  covered; the guide says so.) Clicking opens the Storage page. Hidden when no server is selected.
+  Data: `get_cache_status` on server switch and a native `cache-status` event, at most once a
+  second. No animation.
+- **Remove from Keep**: once a checked Keep copy has replaced the cache duplicate, releasing the
+  Keep copy deletes the device's last local copy; the release confirmation says so.
 
 ### 9. Crash-safe writes
 
@@ -301,27 +321,39 @@ decision.
 
 ### 12. Leave cleanup
 
-`leave_server` keeps today's order: stop the actor, drain persistence, remove the registry row,
-`remove_server` (which now also deletes `.storage`), persist the registry. Then:
+`leave_server` keeps today's order (stop the actor, drain persistence, remove the registry row,
+`remove_server`, persist the registry) with two additions: the `leaving` marker is written in
+`blobs/<group>/` (and flushed) **before** `remove_server`, and cleanup runs only if the registry
+persist succeeded. `remove_server` now also deletes `.storage`. Then:
 
-1. Write a plain `leaving` marker in `blobs/<group>/` and flush it. Its presence in a namespace
-   whose group no running server uses is the only trigger for resumed cleanup.
-2. Under the store lock: run the Studio scan (`creative_pinned_cids`) and open a blob handle. If the
-   scan fails, delete nothing from the cache and keep the marker. Release the store lock.
-3. Without the store lock, delete every cache file through `ProtectedBlobs::delete` in batches,
-   checking between batches that the unlocked session is still current. Studio pins stay.
+1. **Claim the group.** An in-process cleanup claim per group lives in the bridge state from here
+   to the end. Found, join and blob-store attach for that group wait for the claim; the resume
+   sweep checks claims and running servers under the same lock. So no live server can attach the
+   namespace while it is being emptied.
+2. Under the store lock: run the Studio scan (`creative_pinned_cids`), open a cache-only handle
+   (the protected primary without the Keep store, so it does not take the `kept/` lease) and
+   enumerate the CIDs to delete. If the scan fails, delete nothing from the cache and keep the
+   marker. Release the store lock.
+3. Without the store lock, delete exactly the enumerated CIDs through `ProtectedBlobs::delete` in
+   batches, checking between batches that the unlocked session is still current. Studio pins stay.
 4. Remove `staging/` and `incoming/`, then delete `kept/` wholesale: take its lease, remove every
    entry except the lease file without following links, release the lease, remove the lease file
    and the directory. No per-record release and no device binding are needed, so this also works
    on resume. Exported files outside the vault are untouched.
 5. Remove the marker only when every delete succeeded, then the namespace if it is empty.
-   Studio-pinned blobs keep it, without the marker.
+   Studio-pinned blobs keep it, without the marker. Release the claim.
 6. Return `{freed_bytes, kept_bytes, failed}`; the UI shows a toast such as "Left Lantern Room.
    Freed 1.2 GB on this device." and names any kept or failed amount.
 
 **Resume**: after unlock, once every registry server has restored, each namespace with a marker
-whose group no running server uses is cleaned the same way. A rejoined group removes the marker and
-keeps the cache. If any registry server failed to restore, the sweep waits.
+whose group no running server uses is cleaned the same way, under a claim. If a registry server
+failed to restore, the sweep waits and logs which one.
+
+**Rejoin over a marker.** Attaching a group whose namespace still carries a marker first finishes
+the non-cache steps (removes `staging/`, `incoming/` and `kept/`), keeps the cache (it is the same
+group's content-addressed data), removes the marker, and only then opens the Keep store. A
+half-deleted `kept/` can therefore never fault the rejoined server's Keep, and Keep copies the user
+confirmed deleting are not resurrected.
 
 **Confirmation** (owner decision 4): every Leave entry point (the rail menu and the settings page)
 asks first, naming the Keep copies and unfinished Downloads it will permanently delete. Caches of
