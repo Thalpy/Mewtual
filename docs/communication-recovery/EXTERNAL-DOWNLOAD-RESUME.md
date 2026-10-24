@@ -1388,6 +1388,17 @@ Adversarial review of `bbdbdf99` and dispositions (no blocker or high finding):
 | Re-review of `74b9dfe4`, LOW-1 and LOW-2 | Recorded below (a planted hard link also passes the publication check); the `NotFound` message now adds that the partial may still be in a folder that was moved or renamed. |
 | Residuals (no fix): a hard link to our partial planted at the staging name passes the name check, and one placed in a swapped-in folder passes the publication check of the writers without a journal (other accounts are stopped by `protected_hardlinks`, and the journal's single-link check catches it while writing); native's Downloads fallback has no folder identity check; a umask that removes the owner's read bit would make the read-only name check refuse | Recorded. (On Windows a swap and swap-back with nothing planted used to report `NoLinks`; since L1 below it is `FolderChanged` when the folder identity was captured. The identity-less path, through `confirm_staging_links`, still reports `NoLinks`: nothing there can tell a changed folder.) |
 
+Linux CI at `b3f918af` then failed one native test,
+`a_fallback_save_never_publishes_a_file_swapped_in_at_its_staging_name`: its Linux branch still
+expected PR51 M1's behavior, where the descriptor link completed a fallback save whose staging name
+had been swapped during the transfer. Since `74b9dfe4` that swap happens before the staging check
+inside the pinned folder, so Linux refuses as Windows does (only a swap after that check still
+publishes our own file, as the storage test `an_unjournaled_save_publishes_only_its_own_open_file`
+pins). The native test now expects, on both, the whole message "a different file appeared at the
+save's name" (no path, nothing to delete), no final name, the swapped-in file untouched and our
+moved file left where it is. A sweep of the native crate's other Unix-gated code found only the
+`xdg-open` launchers and two shared-folder tests, which none of these changes affect.
+
 ## Coordinator review of `516ab8d0..b3f918af`: dispositions
 
 No blocker, high or medium. Three LOWs, all fixed:
