@@ -1,9 +1,8 @@
 # Cache housekeeping
 
-Status: design proposed on 24 October 2026, waiting for the owner to answer the questions at the
-end (default limit, "leaving soon" rule and three smaller points). Implementation and the diff
-review are still to come. This PR is stacked on PR #51
-(`communication-external-download`). The saved-files list PR is stacked on this one.
+Status: design agreed on 24 October 2026 (owner answers and design-review fixes folded in);
+implementation in progress. This PR is stacked on PR #51 (`communication-external-download`). The
+saved-files list PR is stacked on this one.
 
 ## Why
 
@@ -24,32 +23,36 @@ A review of how files are stored found five problems in the encrypted blob cache
 
 ## Owner decisions
 
-- **Display the file we have.** A file held locally and verified is shown from disk and never
-  fetched again. Files are addressed by a hash of their encrypted bytes, so a fetch can only return
-  identical bytes; a changed file would be a new listing with a new address. Only missing or
-  corrupt chunks are fetched.
-- **Saved files propagate.** When a file is saved out of the app, its verified chunks also go into
-  the shared cache. The device can then serve them to other members, as it already does for files
-  it has viewed.
-- **Crash-safe writes.** Cache chunks are written to a temporary name, synced, then renamed. A chunk
-  counts as held only after it has been verified.
-- **Leaving a server cleans up.** Leaving removes that server's cached and Keep files and reports
-  the space freed. It never removes anything Studio still references.
-- **A per-server cache limit, set by the user for each server.** When the limit is reached, newer
-  files take priority and the oldest files are dropped first, ordered by the file's listing time,
-  not by when it was last viewed. Never evicted:
-  - files pinned with Keep;
-  - files Studio references;
-  - files being displayed or transferred right now;
-  - in-flight Downloads;
-  - files the saved-files list relies on, if any, as agreed in that PR.
-- **Footer warning.** The status bar shows, for the currently selected server, a bar of how much of
-  its cache limit is used, and an alert with the number of files "leaving soon", meaning the files
-  next in line to be dropped. Users are warned before the cache is full.
-- **Truthful docs.** The guide and the storage crate's docs must match what the code does. Expiry
-  stays a displayed date unless a later decision changes that.
+First round:
 
-## Proposed design
+- **Display the file we have.** A file held locally and verified is shown from disk and never
+  fetched again. Only missing or corrupt chunks are fetched.
+- **Saved files propagate.** When a file is saved out of the app, its verified chunks also go into
+  the shared cache, so the device can serve them to members as it does for files it has viewed.
+- **Crash-safe writes.** Temporary name, sync, rename. A chunk counts as held only once verified.
+- **Leaving a server cleans up** its cached and Keep files, reports the space freed, and never
+  removes anything Studio still references.
+- **A per-server cache limit.** When it is reached, newer files take priority and the oldest are
+  dropped first, ordered by listing time, not last viewed. Never evicted: Keep, Studio references,
+  files in use right now, in-flight Downloads, and whatever the saved-files list PR agrees.
+- **Footer warning** for the selected server: a bar of the limit used and a count of files "leaving
+  soon", shown before the cache is full.
+- **Truthful docs.** Expiry stays a displayed date.
+
+Second round (answers to the design questions):
+
+1. **Defaults confirmed.** On by default at 5 GiB per server, settable from 1 GiB to 1 TiB or No
+   limit. An existing cache starts at `max(5 GiB, usage / 0.8)` so the upgrade drops nothing.
+   Leaving soon = the files the next 10% of the limit would push out; the bar turns amber at 90%.
+2. **Never evict this device's own uploads**, so the original source survives.
+3. **"Keep forever" becomes "Never expires".** It is a server-wide listing flag, not a cache pin.
+   Keep stays the per-device pin.
+4. **Leaving asks for confirmation** that names the Keep copies and unfinished Downloads it will
+   permanently delete, at every Leave entry point.
+5. **Drop the cache's duplicate of a file with a completed Keep copy.** Reads fall back to the Keep
+   chunks; Storage health and Repair must not treat those chunks as missing.
+
+## Design
 
 **Display the file we have** needs no new mechanism. Every read already tries the local copy first
 (`get_blob` in the read job, the held check in `request_blob_tracked_cancellable`, and the Keep
@@ -59,328 +62,301 @@ regression test pins it: a held, valid chunk is displayed with no network reques
 ### Terms
 
 - **Cache**: the sealed files directly inside `blobs/<group>/`, each named by its ciphertext CID.
-  `kept/` (Keep and private Downloads), `staging/` (unpublished uploads) and the new `incoming/`
-  (writes in progress) are not cache.
+  `kept/` (Keep and private Downloads), `staging/` (unpublished uploads) and `incoming/` (writes in
+  progress) are not cache.
 - **Usage**: the sum of the cache files' on-disk lengths (sealed bytes, about plaintext plus 40),
-  measured from directory metadata. Nothing is decrypted to measure it.
+  from directory metadata. Nothing is decrypted to measure it.
 - **File**: one plaintext CID listed in the server's file index. Its chunks are the ciphertext CIDs
-  of every live manifest variant listed for that plaintext CID.
-- **Listing order**: a row's position in the replicated file index. Rows are appended at the end
-  (`write_file_entry`), conflicting first lists are projected in stable object order
-  (`file_index_lists`), and the whole index is capped at 256 rows. A file listed more than once
-  (an upload deduplicated under a new name or folder) takes its newest row's position.
+  of every live manifest variant listed for it.
+- **Listing position**: a row's position in the replicated file index. Rows are appended at the end
+  (`write_file_entry`); conflicting first lists are projected in stable object order
+  (`file_index_lists`); the index is capped at 256 rows. **A chunk's position is the newest
+  position of any live row naming it**, and a file's position is the newest of its chunks. So a
+  hostile old row naming a newer file's chunks cannot drag that file out early, and relisting moves
+  a file forward, as a new share should.
 
-### 1. Listing time and eviction order
+### 1. Listing order, the mount scan and eviction order
 
-**Listing time is the listing order.** The index is append-only in the order files are shared,
-identical on every device, and needs no clock. Rows carry no timestamp today, and a new claimed
-timestamp would be member-supplied: a far-future value would make a member's files outlive every
-honest file. Position cannot be pushed forward that way. A member able to delete and re-insert
-rows at the CRDT level could move a file to the front, making it leave sooner everywhere, but that
-member can already unlist files outright, so this adds no new power.
+**Listing time is listing position.** Rows carry no timestamp, and a claimed one would be
+member-supplied: a far-future value would let a member's files outlive every honest file. Position
+needs no clock and is the same on every device. A member who can rewrite rows at the CRDT level can
+reorder files or unlist them outright; position adds no power beyond that. Rows appended on both
+sides of a partition land in the earlier-sorting list, so order across such a merge is only
+approximate.
 
-**No persisted listing index, so nothing to migrate in format.** The planner reads listing order
-from the replicated index each pass (256 rows, at most 128 chunks each). Keeping a second copy on
-disk would only add a source of truth that can disagree with the index after a crash. What existing
-caches do need, on every mount rather than once, is a **mount scan**: list `blobs/<group>/` on a
-blocking worker, record each CID-named regular file's length, recover leftover temporary files
-(section 9) and remove CID-named files too short to be a sealed record. It runs in
-`attach_blob_store`, between `blob_store()` and `set_blob_store`, where nothing else holds the new
-handle and no read is in flight; that step moves into `spawn_blocking` with the existing staging
-sweep, and also runs the Studio reference scan so protection starts known. The scan enumerates the
-directory itself: the composite store's `cids()` also lists Keep copies. The one-time migration is
-the starting limit for caches that predate the setting (section 5).
+**No persisted listing index.** The planner reads the index each pass. A second copy on disk would
+only add a source of truth that can disagree after a crash.
 
-**Order of eviction**, run only while usage is over the limit and stopping as soon as it is not:
+**The index must be readable, or nothing is evicted.** The planner receives the index as a result,
+not a possibly empty list. It pauses when the index document is not open, its projection fails
+(more than 256 conflicting `ROOT/FILES` values), or the raw row count exceeds the 256-row cap
+(`raw_file_index_row_count`), because then honest rows may be invisible. The same applies to the
+profile document, whose avatar and banner references protect unlisted blobs.
 
-1. **Unclaimed blobs**: blobs already present at the mount scan that are not a chunk of any live
-   listing, not a known non-file reference (every avatar and banner named in the profile document,
-   including departed members' still shown beside old messages, and this device's own) and not
-   Studio-protected. Livery images are inline in the livery document and event images are listed
-   files, so neither is a separate blob reference. These are
-   mostly chunks of listings someone else deleted (the delete-time GC runs only on the deleting
-   device) and superseded profile images. They go first, in CID order, and are never counted as
-   "files" in the UI. Requiring presence at the mount scan keeps anything written during this mount,
-   by any handle, out of this class. That covers Studio's publish-then-reference window:
-   `publish_pix` stores a frame before any record names it.
-2. **Listed files, oldest listing first.** A file is dropped whole: every held chunk of every
-   variant, except chunks pinned for another reason. Partly cached files count their held chunks.
+**Mount scan.** `attach_blob_store` opens the primary cache, scans `blobs/<group>/` on a blocking
+worker (CID-named regular files and their lengths), recovers leftover temporary files (section 9),
+removes CID-named files too short to be a sealed record, and keeps the result in the store: a size
+index and the **mount set** (CIDs present at the scan). The store keeps the size index current for
+its own writes and deletes. A CID written, promoted or deleted through this handle leaves the mount
+set, so a re-published blob (for example a Studio frame whose CID happened to be present) never
+counts as unclaimed. The scan reads the directory itself because the composite store's `cids()`
+also lists Keep copies. If any entry cannot be read, the scan is marked incomplete and eviction
+stays off for that mount.
 
-The planner is a pure function of (scan sizes, index snapshot, pin sets) so order and pins are
-unit-testable without a disk.
+**Order of eviction**, run only while usage is over the limit and stopping when it is not:
 
-### 2. Pins (never evicted)
+0. **Completed Keep duplicates** (owner decision 5): a cache chunk that a completed Keep copy holds
+   is dropped on every pass, over the limit or not, unless another pin holds it. Reads, serving and
+   Storage health fall back to the Keep copy through the composite store.
+1. **Unclaimed blobs**: CIDs in the mount set that no live listing names, no profile names as an
+   avatar or banner, and no pin set holds. Mostly chunks of listings someone else deleted (the
+   delete-time GC runs only on the deleting device) and superseded profile images. They go first,
+   in CID order, and are never counted as files. Livery images are inline in the livery document
+   and event images are listed files, so neither is a separate blob reference.
+2. **Listed files, oldest position first.** A file is dropped as a whole: every held chunk except
+   those a pin set holds. Partly cached files count only their held chunks.
 
-- **Keep**: any file with a Keep record, completed, partial or paused (`kept_files()`,
-  `kept_saved_plans`). Its cache chunks stay. The Keep copy itself lives in `kept/`, has its own
-  1 GiB / 32-file quota and is not counted in usage. Keeping the cache duplicate is the literal
-  reading of the decision; dropping it while a completed Keep copy exists would save space and is
-  listed as a question below.
-- **Studio**: every eviction delete goes through `ProtectedBlobs::delete`, which checks durable
-  pins and live job holds under its mutex through the unlink. The planner also excludes Studio
-  pins up front so it does not count bytes it cannot free. Protection starts unknown on a vault
-  with epoch files and becomes unknown again after some durable writes, and the guard then refuses
-  every delete. A pass that finds it unknown first runs the same complete scan Studio runs
-  (`creative_pinned_cids`, on a blocking worker under the store's existing custody). Only if that
-  scan fails does eviction pause, and the footer says so.
-- **Displayed or transferring now**: files with an in-flight read job, media range read, upload,
-  Keep run, Download or export, plus files read in the last 10 minutes by the monotonic Clock. The
-  actor keeps this as a bounded recency set (64 files). Displaying an image or playing a video
-  refreshes it. It is a short pin, never an ordering input.
-- **In-flight Downloads**: any unfinished Download record, whether running or paused
-  (`downloads()`, `download_saved_plans`).
-- **Saved-files list**: whatever PR #56 agrees, added to the same pin input.
+The planner is a pure function of (size index, mount set, index snapshot, profile references, pin
+sets, limit), unit-tested without a disk.
 
-**Not pins: wiki embeds and "Keep forever".** Both are circulation rules that members set for
-every device. Any member can embed any listed file in a wiki page, and even a pending edit pins it
-(`wiki_pinned_cids`); any uploader can mark their own files "Keep forever" (circulation expiry
-never). Treating either as a cache pin would let one member exempt chosen files from everyone's
-limit. The older retention contract pinned both, but for expiry, which stays unenforced. The code
-comment on `wiki_pinned_cids` that says every retention pass must consult it is narrowed to expiry.
-The "Keep forever" label now reads as a local promise it does not make, so it should change (for
-example "Circulate forever"). Both are listed as a question below.
+### 2. Pins
 
-**Unknown pins pause eviction.** If the Keep or Download inventory reports an error, or Studio
-protection cannot be made known, the pass deletes nothing and the footer shows "check paused". A
-pin set that cannot be read is never treated as empty. This includes Keep before it is bound to
-the group and device: its inventory then reads empty but carries an error, which pauses the pass.
-Eviction runs only on the persistent sealed store; the in-memory fallback keeps its own FIFO
-budget.
+Every pin is a **set of chunk addresses taken from its owner's own saved plans**, applied to every
+class above, including unclaimed blobs and Keep duplicates:
 
-**One evicting owner per directory.** One vault can attach the same group under two native server
-numbers (an alias). Only the handle that holds the Keep lease for the namespace evicts; a second
-attachment fails that lease, reports a Keep inventory error and is paused by the rule above. Its
-setting is ignored while it does not own the lease.
+- **Keep in progress**: every chunk of every saved plan of each Keep transfer that is not completed
+  (`kept_files().transfers`, `kept_saved_plans`). A completed Keep is not a pin: its cache duplicate
+  is dropped (class 0).
+- **Downloads**: every chunk of every saved plan of each unfinished Download record, running or
+  paused (`downloads()`, `download_saved_plans`).
+- **In use**: the chunks of every manifest an in-flight read, range read, Keep run, Download or
+  export is using, plus the chunks of files read in the last 10 minutes by the monotonic Clock. The
+  actor keeps this as a bounded recency set (64 files); when it is full the oldest entry leaves.
+- **Own uploads** (owner decision 2): the chunks of every live listing row whose attestation
+  verifies under this device's own key (`author_verified` and `author_identity` equal to this
+  device). Only verified rows count, so a member cannot exempt a file from this device's limit by
+  writing this device's short fingerprint into a row. Legacy unsigned uploads from before
+  attestation are not pinned. Own uploads that are deleted from the index are no longer listed and
+  become ordinary unclaimed blobs.
+- **Studio**: the group's protected set from `ProtectedBlobs` (durable references plus live job
+  holds). The deletion guard also re-checks it under its mutex through each unlink.
+- **Saved-files list**: added by PR #56 to the same input.
 
-Pinned bytes still count in usage, so usage can sit above the limit when pins alone exceed it. The
-footer then says the cache is over its limit because of pinned files, rather than showing a count
-that nothing will act on.
+**Not pins: wiki embeds and "Never expires".** Both are circulation rules members set for every
+device: any member can embed a listed file in a wiki page (even a pending edit pins it in
+`wiki_pinned_cids`), and the uploader, an admin or the owner can mark a listing "Never expires".
+As cache pins they would let one member exempt chosen files from everyone's limit. Expiry stays
+unenforced; the `wiki_pinned_cids` comment is narrowed to expiry. The Properties button is renamed
+from "Keep forever" to "Never expires" (owner decision 3), so it no longer reads as a local promise.
 
-### 3. When eviction runs, and concurrency
+**Unknown pins pause eviction.** If the Keep or Download inventory reports an error (including Keep
+not yet bound to the group and device), a Keep or Download plan cannot be read, or Studio
+protection is unknown, the pass deletes nothing and the footer says "cleanup paused". A pin set that
+cannot be read never reads as empty.
 
-- **Triggers**: after the mount scan; after a store write takes usage over the limit (coalesced,
-  at most one pass per 30 seconds by the Clock); immediately when the user lowers the limit.
-- **Where**: planning runs on the server actor, which owns the index, the pin inputs and the blob
-  handle. Deletes must use the actor's handle, because only it issues background read plans whose
-  epoch a delete has to retire. Deletes run in batches of at most 64 per actor turn, so commands
-  and sync keep flowing. Before each batch the actor rechecks the recency set, the Keep and
-  Download inventories and the index revision; a changed index discards the rest of the plan and
-  replans on the next turn.
-- **Fresh numbers**: Studio and the desktop open extra handles on the same directory, so the actor's
-  running total can drift. Each pass starts from a fresh measurement scan on a blocking worker
-  (metadata only; recovery happens at mount, never mid-session). The running total only feeds the
-  footer between scans. Class 1 stays limited to CIDs the mount scan saw.
-- **Local reads and fetches**: display reads, whole-chunk and page serving, and chunk acceptance
-  all run synchronously on the actor, so eviction never lands mid-read or mid-write. Between two
-  chunks an evicted chunk is simply fetched again. A file being fetched is in the recency set. A
-  fetch that lands after its file was dropped stores the chunk again; the file stays old and can
-  leave again later.
-- **Background readers**: only file-source serving reads off the actor (at most two per process).
-  `delete` retires the store's read epoch, which revokes every outstanding plan, not only the
-  deleted CID's: a revoked read answers Absent or Unavailable, never stale bytes. That is a second
-  reason to batch and rate-limit passes, and `delete` is never called for a CID the scan did not
-  see, because it retires the epoch even when nothing is removed.
-- **Windows**: our own readers open with delete sharing, so they cannot block an unlink. Antivirus,
-  indexers or sync clients can (error 32); such a delete is counted as failed and retried next
-  pass. On a filesystem without POSIX delete semantics a refetch of the same CID during the brief
-  delete-pending window can fail once and retries.
-- **Crash mid-pass**: deletes are independent unlinks. A file left half-dropped is a partly cached
-  file; the next pass continues. Nothing needs reconciling.
+**One evicting owner per directory.** One vault can attach a group under two native server numbers.
+Only the handle that holds the namespace's Keep lease evicts; any other attachment fails that lease,
+reports a Keep error and is paused by the rule above. A Studio per-request handle that wins the
+lease during an actor reload leaves eviction paused for that mount, which fails safe.
 
-### 4. What a peer gets for an evicted chunk
+Pinned bytes count in usage, so usage can sit above the limit when pins alone exceed it. The footer
+then says so ("held by pinned files") instead of a count nothing will act on.
 
-Exactly what it gets for a chunk this device never held: an empty reply to a whole-chunk request,
-a signed Absent to a page or file-source request, or Unavailable if the delete revoked a read
-already under way. The requester then tries its next provider and, after that, the bridge catalog.
-Nothing advertises holdings, so there is no stale advertisement to correct. There is no eviction
-marker and no wire change, so a peer cannot tell eviction from absence or throttling. A completed
-Keep copy of the same chunk is still served through the composite store's fallback. The storage
-pane's cached health report goes stale after eviction and is refreshed by the next explicit scan.
+### 3. The Studio-reference service
 
-### 5. Default limit
+The actor cannot run `creative_pinned_cids`, which needs the mounted `ServerStore`. A native service
+in the desktop bridge runs it on a blocking worker under the store lock:
 
-**Proposed: on by default, 5 GiB per server.**
+- once after each unlock, once after a server's blob store attaches, and when an actor asks;
+- at most once per 60 seconds by the Clock, coalescing requests that arrive meanwhile;
+- then it tells every actor that protection may have changed, and they replan.
 
-- It holds 20 files at the default 256 MiB server file limit, and is never smaller than the 1 GiB
-  largest legal file, so a single file always fits.
-- It stays modest on disk with several servers.
-- The setting allows 1 GiB to 1 TiB, or **No limit** (today's behaviour, shown as usage without a
-  percentage).
-- **Upgrade migration**: a server with no saved setting gets
-  `max(5 GiB, usage / 0.8 rounded up to a whole GiB)` and that value is saved. The upgrade itself
-  therefore drops nothing and starts below the warning threshold; the user can lower it.
+An actor asks when a pass would delete and its store reports protection unknown. The actor reads
+known or unknown and the group's protected set through a new `BlobStore::protected_cids()`
+(`None` = unknown), which `ProtectedBlobs` answers from its shared state. Durable writes that make
+protection unknown again are followed by a new request, still bounded by the 60-second rate.
 
-Without a holder probe (the older `design-retention-integration.md` contract), size eviction can
-drop the last copy anyone has. The user-chosen limit and the leaving-soon warning are the
-safeguards; this is listed as a question below.
+### 4. When eviction runs, and concurrency
 
-### 6. "Leaving soon" and "nearly full"
+- **Triggers**: after the mount scan; after a store write takes usage over the limit; after the
+  Studio service reports; when the user lowers the limit. At most one pass per 30 seconds by the
+  Clock, except an explicit limit change.
+- **Where**: planning and deletes run on the server actor, which owns the index, the pin inputs and
+  the blob handle. Deletes must use the actor's handle, because only it issues background read plans
+  whose epoch a delete has to retire. At most 64 deletes per actor turn, so commands and sync keep
+  flowing. Before each batch the actor rechecks the pins and the index row identities it planned
+  from (not document heads, so junk edits cannot keep discarding plans); a change discards the rest
+  and replans at the next allowed pass.
+- **Numbers**: the store's size index covers its own writes. Studio and the desktop open other
+  handles on the same directory, so before a pass that would delete, the actor refreshes the index
+  with a metadata-only rescan (no recovery mid-session; Windows directory listings carry sizes, so
+  this is cheap). The rescan is bounded; if it is incomplete the pass deletes nothing.
+- **Local reads and fetches**: display reads, whole-chunk and page serving, and chunk acceptance all
+  run synchronously on the actor, so eviction never lands mid-read or mid-write. Between two chunks
+  an evicted chunk is fetched again.
+- **Background readers**: only file-source serving reads off the actor (two per process). A delete
+  retires the store's read epoch, revoking every outstanding plan; a revoked read answers Absent or
+  Unavailable, never stale bytes. That is why passes are batched and rate-limited, and why `delete`
+  is never called for a CID the size index does not hold.
+- **Windows**: our own readers open with delete sharing. Antivirus, indexers or sync clients can
+  block an unlink (error 32); that delete counts as failed and is retried next pass.
+- **Crash mid-pass**: deletes are independent unlinks; a half-dropped file is a partly cached file.
 
-- **Leaving soon** = the files the planner would drop if the next **10% of the limit** arrived as new
-  data: walk the eviction order, skipping pins, until `usage + 10% of limit - freed <= limit`, and
-  count the distinct listed files touched. Unclaimed blobs count toward the bytes but not the
-  number.
-- **Nearly full** = usage at or above **90%** of the limit. With no unclaimed blobs the two rules
-  coincide: the count becomes non-zero exactly when the bar turns amber, before anything is
-  dropped.
-- **Over** = usage above the limit (only possible while pins hold it there, or between a write and
-  the next pass).
+### 5. What a peer gets for an evicted chunk
 
-### 7. The setting
+Exactly what it gets for a chunk this device never held: an empty reply to a whole-chunk request, a
+signed Absent to a page or file-source request, or Unavailable if the delete revoked a read already
+under way. The requester tries its next provider and then the bridge catalog. Nothing advertises
+holdings, and there is no eviction marker or wire change. A completed Keep copy keeps serving
+through the composite store.
 
-- **Storage**: a new sealed record `servers/<id>.storage`, sealed under the vault `db_key` like
-  `.net`, written with the existing atomic record helper. Version 1 holds the group id (a record
-  naming another group is ignored), the limit in bytes (0 = no limit) and its origin (default,
-  migrated or user). Per device, never replicated, unrelated to livery. `remove_server` deletes it
-  with the other per-server records.
-- **Unreadable record**: eviction stays off for that server and the settings page asks the user to
-  choose a limit again. Losing data to a damaged setting is worse than a cache that grows a while.
-- **UI**: a new Server settings page, **Storage on this device** (all servers, including DMs). It
-  shows the same bar as the footer, a limit picker (1, 2, 5, 10, 20, 50, 100 GB, custom, No limit),
-  what is pinned (Keep, Studio, Downloads, open now) and the leaving-soon list with names and sizes.
-  Lowering the limit below current usage confirms first: "This removes 6 files (2.1 GB) from this
-  device now."
-- **Commands**: `get_cache_status(server)` and `set_cache_limit(server, bytes|null)`, registered in
-  the command policy, capability and frontend security ledger like the other per-server commands.
-  The status is cheap: the actor keeps the last plan (usage, limit, pinned bytes, leaving-soon count
-  and bytes, state) and recomputes it at most once a second after an index change, store write or
-  pass. Nothing is decrypted, and the expensive storage-health scan is not involved.
+### 6. Default limit and migration
 
-### 8. Footer
+- **On by default at 5 GiB per server; 1 GiB to 1 TiB, or No limit.** 5 GiB holds 20 files at the
+  default 256 MiB server file limit and is never smaller than the 1 GiB largest legal file.
+- **Migration**: a server with no saved setting (or a record naming another group, which reads as
+  missing) gets `max(5 GiB, usage / 0.8 rounded up to a whole GiB)`. If that exceeds 1 TiB it gets
+  No limit. If the mount scan was incomplete, no record is written and eviction stays off until a
+  complete scan.
+- **Unreadable record**: eviction stays off and the settings page asks for a limit again.
+- Without a holder probe the limit can drop the last copy anywhere; own uploads are pinned
+  (decision 2), which covers the most common sole holder.
 
-A segment in the existing `<footer class="statusbar">`, on the right after the spacer and before
-the fingerprint, so it stays clear of the Transfers button and tab that PR #51 is changing:
+### 7. Leaving soon and nearly full
 
-- `CACHE` label, a slim token-coloured bar (`role="progressbar"` with values) and the percentage.
-- At 90% the bar turns amber and a chip appears: "4 leaving soon". Over 100% it turns red with
-  "over limit"; pinned-only overflow says "held by pinned files". Paused eviction says "check
-  paused". No limit shows "CACHE 3.2 GB" without a bar.
-- The title text reads, for example: "2.8 GB of 5 GB used on this device. The oldest files leave
-  first. Kept files, Studio work and files in use stay."
-- Clicking opens the Storage page above. Hidden when no server or DM is selected.
-- Data: `get_cache_status` on server switch, plus a native `cache-status` event coalesced to at most
-  once a second after writes and passes.
-- No animation, so `[data-motion="off"]` needs nothing extra; compact density and terminal chrome
-  reuse the footer's existing rules and tokens.
+- **Leaving soon** = the listed files the planner would drop if the next **10% of the limit**
+  arrived: walk classes 1 and 2, skipping pins, until `usage + 10% of limit - freed <= limit`, and
+  count the distinct listed files touched. Unclaimed blobs count toward the bytes, not the number.
+- **Nearly full** = usage at or above **90%** of the limit; with no unclaimed blobs the count turns
+  non-zero exactly when the bar turns amber.
+- **Over** = usage above the limit: while pins hold it there, or between a write and the next pass.
+  One large write can jump straight past 90%, so the warning comes before the cache is full in the
+  usual case, not in every case.
+
+### 8. The setting, commands and UI
+
+- **Record**: `servers/<id>.storage`, sealed under the vault `db_key` like `.net`, written with the
+  existing atomic record helper. Version 1: group id, limit in bytes (0 = No limit), origin
+  (migrated or user). `remove_server` deletes it with the other per-server records.
+- **Commands**: `get_cache_status(server)` (cheap: the actor keeps the last plan's totals and
+  recomputes at most once a second) and `set_cache_limit(server, bytes|null)`, which refuses values
+  outside 1 GiB to 1 TiB natively. Both are registered in the command policy, the capability and the
+  frontend security ledger.
+- **Settings page**: Server settings → **Storage** ("Storage on this device"), for servers and DMs:
+  the same bar, a limit picker (1, 2, 5, 10, 20, 50, 100 GB, 1 TB, No limit), what is pinned, and
+  the leaving-soon count. Lowering below current usage confirms with what will go.
+- **Footer**: a segment on the right of the status bar, after the spacer and before the fingerprint,
+  clear of the Transfers button PR #51 is changing. `CACHE`, a slim bar (`role="progressbar"`) and
+  the percentage; amber at 90% with a "N leaving soon" chip; red over the limit; "held by pinned
+  files" or "cleanup paused" when those apply; "CACHE 3.2 GB" with no bar for No limit. Title text
+  such as "2.8 GB of 5 GB used on this device. The oldest files leave first. Kept files, your
+  uploads, Studio work and files in use stay." Clicking opens the Storage page. Hidden when no server
+  is selected. Data: `get_cache_status` on server switch and a native `cache-status` event, at most
+  once a second. No animation.
 
 ### 9. Crash-safe writes
 
-- **`put`** on the primary cache store: seal, write to
-  `incoming/<cid hex>.<process id>.<sequence>` with `create_new`, `sync_all`, rename onto
-  `<cid hex>`, then a directory barrier on the cache directory. The naming follows the store's
-  existing `atomic_write` staging (process id plus a process-wide counter, no randomness). The
-  barrier reuses `kept::persistence::directory_barrier`, which works on Unix and Windows. The
-  existing rule stays: an existing record is replaced only after a bounded read proved it absent or
-  invalid.
+- **Primary cache `put`**: seal, write `incoming/<cid hex>.<process id>.<mount generation>.<seq>`
+  with `create_new`, `sync_all`, then rename onto `<cid hex>`. No directory flush per write: the
+  guarantee is "never torn", and a rename lost to power failure only loses an entry that is fetched
+  again. The mount generation is a process-wide counter assigned when a primary handle opens and
+  kept in a process-wide live set until that handle drops. An existing record is still replaced
+  only after a bounded read proved it absent or invalid.
 - **Only the primary cache changes.** Keep reuses `SealingBlobStore` for each `kept/<cid>/` and
-  `transfers-v2/<name>/` directory, and those loaders refuse any unexpected entry, so an `incoming/`
-  folder or a leftover temporary file there would fault the whole Keep store. Keep already flushes
-  each chunk and re-verifies its prefix after a crash, so its stores keep today's write path. The
-  atomic mode is a constructor option used only by `ServerStore::blob_store` for the primary.
-- **`put_staged`**: `sync_all` before close, so promotion's rename publishes durable bytes;
-  promotion adds the directory barrier. `promote_staged_bounded` already flushes.
-- **Barrier failure**: the rename is already visible, so `put` logs the failed directory flush and
-  succeeds. Power loss can then lose the entry (it is fetched again) but cannot leave it torn.
-- **Held means verified**: `put` derives the CID from the bytes it writes, and a CID name now
-  appears only after a complete synced write. `has()` remains a cheap hint as documented; legacy
-  torn files longer than a sealed header still fail their read check and are repaired by `put`, as
-  today.
-- **Mount recovery** (in the mount scan): delete `incoming/` files whose process id is not this
-  process (a vault is locked to one process, so they are abandoned; this process's own files may
-  belong to a concurrent handle), and, in the sealing store, delete CID-named files shorter than
-  40 bytes (24-byte nonce plus 16-byte tag, the size of a sealed empty blob), which cannot be a
-  valid record. The plain test store legitimately holds an empty blob as an empty file, so it skips
-  this rule.
+  `transfers-v2/<name>/` directory, and those loaders reject any unexpected entry, so an `incoming/`
+  folder there would fault the Keep store. Keep already flushes each chunk and re-verifies after a
+  crash. The atomic mode is a constructor option used only by `ServerStore::blob_store`.
+- **Staging and promotion**: `put_staged` syncs before close; promotion keeps its existing flush and
+  directory barrier (`promote_staged_bounded`), and `promote_staged` gains the same best-effort
+  barrier.
+- **Held means verified**: `put` derives the CID from the bytes it writes, and a CID name appears
+  only after a complete synced write. `has()` stays a cheap hint; legacy torn files still fail their
+  read check and are repaired by `put`.
+- **Mount recovery**: delete `incoming/` files whose process id is not this process, or whose mount
+  generation is not live in this process. In the sealing store, delete CID-named files shorter than
+  40 bytes (nonce plus tag, the size of a sealed empty blob). The plain test store holds an empty
+  blob as an empty file and skips that rule.
 
-### 10. Leave cleanup
+### 10. Saved files into the cache
 
-Order, after the existing steps (actor stopped and its blob handle dropped, persistence drained,
-registry row removed and the registry persisted, so a crash during cleanup cannot bring the server
-back with half its cache). The work runs on a blocking worker holding the store lock:
+During a Download, when a chunk has passed its ciphertext CID check and file decryption and has
+been written to the private Download store, the same ciphertext is also put into the shared cache
+unless it already holds a healthy copy; chunks taken from the private store on resume are copied the
+same way. A failed cache copy is logged and never fails the save. Keep runs do not copy (their
+completed copy serves). The copy happens per chunk, so a cancelled save can leave cached chunks;
+that is the same standard as display, and the whole-file check still gates the export. Afterwards
+this device serves those chunks to members like any file it has displayed, so a member asking can
+learn it holds the file. Tests that pinned "a Download never becomes a source" change with this
+decision.
 
-1. Write a `leaving` marker in `blobs/<group>/` and flush it, so an interrupted cleanup resumes.
-2. Run a complete Studio reference scan (`creative_pinned_cids`, off the executor under the existing
-   store custody). If it fails, skip step 3 entirely, keep the marker and report the cache as kept.
-3. Delete every cache file through `ProtectedBlobs::delete`, which keeps Studio pins, then clear
-   `staging/` and `incoming/`.
-4. Open the Keep store (its lease is free once the actor stopped), bind it to the group and this
-   device as Keep requires, and release every Keep and Download record through the existing
-   durable release path. Close the store, then remove the remaining `format-v2` and `lease.lock`
-   files and the empty `kept/` tree (Windows cannot delete the lease file while it is held).
-   Exported files outside the vault are untouched; a leftover `.mewtual-part` stays for the user.
-5. `remove_server` deletes `.bin`, `.net`, `.cache` and the new `.storage`.
-6. Remove the marker, and the namespace directory if it is empty (Studio-pinned blobs keep it).
-7. Return `{freed_bytes, kept_bytes, failed}`. The UI shows a toast such as "Left Lantern Room.
+### 11. Storage health and Repair
+
+- A referenced chunk that is neither in the cache nor in a completed Keep copy is **not cached**
+  (new `not_cached_chunks`), unless it belongs to one of this device's own uploads, where it stays
+  **missing**. Completed Keep chunks verify through the composite store's fallback, so dropped
+  duplicates are not missing.
+- **Repair** fetches only unreadable chunks (held but failing their checks) and missing own-upload
+  chunks. It no longer fetches every not-cached chunk back, which would fight the limit.
+- The storage pane shows "not cached on this device" as normal, not as damage.
+
+### 12. Leave cleanup
+
+`leave_server` keeps today's order: stop the actor, drain persistence, remove the registry row,
+`remove_server` (which now also deletes `.storage`), persist the registry. Then:
+
+1. Write a plain `leaving` marker in `blobs/<group>/` and flush it. Its presence in a namespace
+   whose group no running server uses is the only trigger for resumed cleanup.
+2. Under the store lock: run the Studio scan (`creative_pinned_cids`) and open a blob handle. If the
+   scan fails, delete nothing from the cache and keep the marker. Release the store lock.
+3. Without the store lock, delete every cache file through `ProtectedBlobs::delete` in batches,
+   checking between batches that the unlocked session is still current. Studio pins stay.
+4. Remove `staging/` and `incoming/`, then delete `kept/` wholesale: take its lease, remove every
+   entry except the lease file without following links, release the lease, remove the lease file
+   and the directory. No per-record release and no device binding are needed, so this also works
+   on resume. Exported files outside the vault are untouched.
+5. Remove the marker only when every delete succeeded, then the namespace if it is empty.
+   Studio-pinned blobs keep it, without the marker.
+6. Return `{freed_bytes, kept_bytes, failed}`; the UI shows a toast such as "Left Lantern Room.
    Freed 1.2 GB on this device." and names any kept or failed amount.
 
-A failed delete is counted and skipped; leaving still completes. At the next unlock, any namespace
-with a `leaving` marker whose group is not in the registry is finished the same way, recomputing
-Studio pins first. Rejoining the same group first removes the marker and keeps the cache. If
-another registry row maps to the same group (aliases exist), the namespace is left alone. Caches of
-servers left before this change carry no marker and are not touched automatically.
+**Resume**: after unlock, once every registry server has restored, each namespace with a marker
+whose group no running server uses is cleaned the same way. A rejoined group removes the marker and
+keeps the cache. If any registry server failed to restore, the sweep waits.
 
-### 11. Saved files into the cache
+**Confirmation** (owner decision 4): every Leave entry point (the rail menu and the settings page)
+asks first, naming the Keep copies and unfinished Downloads it will permanently delete. Caches of
+servers left before this change carry no marker and are not touched.
 
-Per chunk, during a Download's acquisition: when a chunk has passed its ciphertext CID check and
-file-layer decryption and has been written to the private Download store
-(`file_transfers.rs`, the network accept path and the local private-store hit), the same ciphertext
-is also stored in the shared cache with the crash-safe `put`, unless the cache already holds a
-healthy copy. Keep runs do not copy, because a completed Keep copy is already served. This is the
-same per-chunk standard the display path uses; the whole-file check still gates the export.
-
-Privacy note for the guide and threat model: after a save, this device answers members' fetches for
-that file's chunks, as it does for any file it has displayed, so a member asking for them can learn
-this device holds the file. Saved files are ordinary cache entries afterwards: an old saved file
-may be among the first to leave once the save is no longer in progress.
-
-Contract change: tests asserting that a Download never reaches the shared cache are updated
-(`private_download_uses_real_acquisition_and_protected_store_without_publication` and the
-six-client recovery check). The storage-level test that the private record stays out of public
-reads still holds, because the copy happens in the app layer.
-
-### 12. Docs to correct
+### 13. Docs to correct
 
 - `USER_GUIDE.md` §6: the circulation date is displayed only; this device keeps cached files up to
-  its limit and drops the oldest listings first; Keep holds a file. Remove "nothing is ever deleted
-  from anyone's device", and say that wiki-embedded and "Keep forever" files never stop circulating
-  but can still leave this device's cache.
-- `catcoms-storage` crate docs (`lib.rs`, `retention.rs`): the retention engine is not used by the
-  app; there is no SQLCipher persistence.
-- `catcoms-app` `FileExpiry` docs: expiry is still not enforced; the size limit is the only
-  eviction.
-- `INTERFACES.md`, `ARCHITECTURE.md` files row, `THREAT-MODEL.md` (the "sealing disk store has no
-  quota" note, the new privacy note, eviction without holder proof), `HANDOVER.md` limitations, and
+  its limit and drops the oldest listings first; Keep, own uploads and files in use stay; "Never
+  expires" and wiki embeds keep circulating but can leave this device's cache; leaving deletes the
+  server's cache, Keep copies and unfinished Downloads after confirming.
+- `catcoms-storage` docs (`lib.rs`, `retention.rs`): the retention engine is not used by the app;
+  there is no SQLCipher persistence.
+- `catcoms-app` `FileExpiry` and `wiki_pinned_cids` docs.
+- `INTERFACES.md`, `ARCHITECTURE.md` files row, `THREAT-MODEL.md` (the no-quota note, the save
+  privacy note, the Download source rule, eviction without holder proof), `HANDOVER.md`, and
   `design-file-reliability.md` remaining limits.
 
 ### Out of scope, honest limits
 
-- No holder probe, remote possession acknowledgement or automatic replication.
-- Expiry is not enforced.
-- Caches of servers left before this change are not cleaned automatically. Unclaimed blobs written
-  during the current mount wait for the next mount.
-- A server reload between Studio's `publish_pix` and the save that references it makes that frame
-  an unclaimed blob of the new mount; if the cache is over its limit it can be dropped, and the save
-  then fails with the existing "publish the frame PIX before saving its reference" error.
+- No holder probe, remote possession acknowledgement or automatic replication; expiry is not
+  enforced.
+- Caches of servers left before this change are not cleaned automatically.
 - Usage measures sealed file lengths, not filesystem allocation.
-- A hostile listing can name non-file blobs it knows as chunks of an old fake file. Known references
-  (profile avatars and banners, Studio pins) are pinned; anything else it names can be dropped early
-  and is fetched again on demand.
-
-## Questions for the owner
-
-1. Default limit on at 5 GiB per server, with the upgrade never dropping anything (section 5).
-2. Leaving soon = files the next 10% of the limit would push out; nearly full at 90% (section 6).
-3. Wiki embeds and "Keep forever" are not cache pins, because any member can set them for everyone;
-   rename "Keep forever" to "Circulate forever" (section 2)?
-4. No holder probe: the limit may drop the last copy anyone has; the warning is the safeguard.
-5. Keep the cache duplicate of a kept file (literal), or drop it while a completed Keep copy exists?
+- A hostile listing can name other blobs as chunks of an old fake file. Profile images, pinned
+  chunks and newer listings' chunks are protected; anything else it names can leave early and is
+  fetched again on demand.
+- Unclaimed blobs written during the current mount wait for the next mount.
 
 ## Verification
 
-- Unit tests for eviction order, the pins, and the threshold and footer counts.
-- Crash tests for a torn write, the rename and verify step, and recovery at mount.
-- Leave-server cleanup tests that include Studio references.
-- The save-fills-cache test.
-- Footer and setting UI tests and visual-fixture screenshots at 900 x 640.
-- The full suites, `test:startup` and `test:flows`.
-- An adversarial review of the diff, as `AGENTS.md` requires.
+- Unit tests for eviction order, chunk positions, pins on every class, pause rules, thresholds and
+  footer counts.
+- Torn-write and recovery tests, including the live mount-generation filter.
+- Leave-cleanup tests with Studio references, failed deletes and resume.
+- The save-fills-cache test; Storage health and Repair with evicted and Keep-held chunks.
+- Footer, settings and leave-confirmation UI tests; visual-fixture screenshots at 900 x 640.
+- The full suites, `test:startup` and `test:flows`, and an adversarial review of the diff.
