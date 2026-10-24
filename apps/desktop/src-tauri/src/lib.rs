@@ -20639,18 +20639,21 @@ mod tests {
         std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o755)).unwrap();
     }
 
-    /// PR51 M1: a staging name swapped after the bytes were verified must never become the saved
-    /// file. Linux and Android link our open descriptor, so the save completes with our bytes;
-    /// Windows' pin finds a foreign object at the staging name and refuses before linking; macOS's
-    /// post-link check finds the foreign object at the final name and fails the save. In every case
-    /// the swapped-in file is left exactly where it was.
+    /// PR51 M1: a staging name swapped during the transfer must never become the saved file. Linux
+    /// and Android first check, inside the pinned folder, that the staging name still holds our
+    /// open file (review of the Linux CI fix, MEDIUM 1(b), `74b9dfe4`: without a journal that is
+    /// what binds the folder), and Windows' pin finds the foreign object there: both refuse before
+    /// linking, with a message that names no path and does not ask the user to delete someone
+    /// else's file. macOS's post-link check finds the foreign object at the final name and fails
+    /// the save. In every case the swapped-in file is left exactly where it was, and our own file,
+    /// moved away by the other program, is never touched.
     #[tokio::test]
     async fn a_fallback_save_never_publishes_a_file_swapped_in_at_its_staging_name() {
         let dir = tempfile::tempdir().unwrap();
         let staging = dir.path().join("y.bin.part");
         let aside = dir.path().join("ours, moved by someone");
         let mut source = ScriptedSave::new(vec![b"verified bytes".to_vec()]);
-        source.swap_staging_during_fetch = Some((staging.clone(), aside));
+        source.swap_staging_during_fetch = Some((staging.clone(), aside.clone()));
         let (total, size, target) = (source.total(), source.size(), source.address());
 
         let saved =
@@ -20658,20 +20661,19 @@ mod tests {
 
         let final_path = dir.path().join("y.bin");
         assert_eq!(std::fs::read(&staging).unwrap(), b"someone else's file");
-        #[cfg(any(target_os = "linux", target_os = "android"))]
+        #[cfg(any(windows, target_os = "linux", target_os = "android"))]
         {
-            let (path, note) = saved.unwrap();
-            assert_eq!(path, final_path);
-            assert!(
-                note.is_empty(),
-                "the staging name holds their file, not ours: {note}"
+            assert_eq!(
+                saved.unwrap_err(),
+                "a different file appeared at the save's name",
+                "the whole message: no path, nothing to delete"
             );
-            assert_eq!(std::fs::read(&final_path).unwrap(), b"verified bytes");
-        }
-        #[cfg(windows)]
-        {
-            assert!(saved.is_err());
             assert!(!final_path.exists(), "nothing was linked");
+            assert_eq!(
+                std::fs::read(&aside).unwrap(),
+                b"verified bytes",
+                "our moved file is left where it is"
+            );
         }
         #[cfg(all(unix, not(any(target_os = "linux", target_os = "android"))))]
         {
