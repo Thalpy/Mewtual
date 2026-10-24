@@ -32,6 +32,8 @@ pub(crate) enum SourceProgress<'a> {
     Exchange(&'a Arc<super::negotiation::Exchange>),
     // Restricted HIGH first-Offer verification only; never an Active SDP action lender.
     ReadyReceive(&'a Arc<super::negotiation::Exchange>),
+    // Exact LOW Ready retry verification after its original Workflow lane was moved.
+    LowReadyRetry(&'a Arc<super::negotiation::Exchange>),
     Ready(&'a super::ready::source_authority::ReadySourceAuthority),
 }
 impl fmt::Debug for SourceProgress<'_> {
@@ -77,6 +79,12 @@ impl SourceProgress<'_> {
                 exchange.charge_ready_offer_verification(bytes)
             }
             Self::Ready(ready) => ready.charge(resources, group, stage, bytes),
+            Self::LowReadyRetry(exchange) => {
+                if stage != Stage::Crypto || !exchange.uses_resources(resources, group) {
+                    return Err(VoiceError::Scope);
+                }
+                exchange.charge_low_ready_retry_verification(bytes)
+            }
         }
     }
     /// Lookup only COMPARES the actual supplied owner. It never constructs packet authority
@@ -116,6 +124,14 @@ impl SourceProgress<'_> {
             Self::Ready(ready) => {
                 let (wall, mono) = sampled.ok_or(VoiceError::Unauthorized)?;
                 return ready.require_current_at(resources, group, wall, mono);
+            }
+            Self::LowReadyRetry(expected) => {
+                expected.uses_resources(resources, group)
+                    && expected.low_ready_retry_open()
+                    && resources
+                        .exchange(group)
+                        .as_ref()
+                        .is_some_and(|actual| Arc::ptr_eq(actual, expected))
             }
         };
         if current {
@@ -255,10 +271,10 @@ impl SourceActivity {
     fn observation_time(&self) -> Option<(u64, u64)> {
         self.packet.as_ref().map(|packet| packet.observation_time())
     }
-    fn obsolete_high_confirmation(&self) -> bool {
+    fn obsolete_confirmation(&self) -> bool {
         self.packet
             .as_ref()
-            .is_some_and(PacketActivity::obsolete_high_confirmation)
+            .is_some_and(PacketActivity::obsolete_confirmation)
     }
     fn is_live_at(&self, packet_time: Option<(u64, u64)>) -> bool {
         self.lease.is_live()
@@ -512,15 +528,15 @@ impl SourceLedger {
             // retain custody; a permanently ended native join/watch needs no idle retry
             // record until signed expiry. Otherwise preserve the original call's attempts;
             // generic room/pair/authority loss is not permission to recreate a retry record.
-            // The narrow extra terminal case is HIGH's actual native Finish-open followed
-            // by irreversible old-plan closure. LOW Finish is deliberately excluded until
-            // causal Ready exists. Fixed original phase history prevents re-admission, while
+            // Extra terminal cases are HIGH's native Finish-open plus old-plan closure,
+            // and LOW's exact authenticated native Ready. LOW local Finish/Established
+            // alone is insufficient. Fixed original phase history prevents re-admission, while
             // actual flights/Lower/ACK owners remain charged by the first branch below.
             // Map removal is not drainage proof: external activities/authorities may still
             // retain the original Workflow/Packet and its actual credit after this removal.
             packet.active.load(Ordering::Acquire) != 0
                 || (packet.activity.lease.is_live()
-                    && !packet.activity.obsolete_high_confirmation()
+                    && !packet.activity.obsolete_confirmation()
                     // Ready may retire only after irreversible native completion/closure or
                     // strict expiry. Exhausted-but-live records keep their spent allowance.
                     && (packet.activity.ready().is_none() || packet.activity.is_live())

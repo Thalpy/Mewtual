@@ -102,6 +102,18 @@ pub(super) struct PublicInbox {
     cursor: Option<Key>,
 }
 impl PublicInbox {
+    #[cfg(test)]
+    pub(crate) fn occupy_namespace_for_test(
+        &mut self,
+    ) -> Vec<voice_v2::negotiation::namespace::ReceiptPosition> {
+        // Isolate the immutable-ID count fence with unreachable test-only positions.
+        // These never authorize Source/Ready or claim256 feasible paid network admissions.
+        let mut positions = Vec::new();
+        while let Ok(position) = self.reserve_position() {
+            positions.push(position);
+        }
+        positions
+    }
     pub(super) fn full_for_ready(&self) -> bool {
         self.full()
     }

@@ -1,5 +1,54 @@
 # Mewtual; Handover
 
+## LOW Ready admission and delayed lane transfer (24 October; application scheduling pending)
+
+The actual Root now admits Ready only for its original protected LOW pair and exact native
+signed Finish identity/hash, epoch, joins and keys. It classifies the shared public/encrypted
+ID before effects. One immutable fixed receipt survives lost replies and transfer, with frozen
+helpers, actual room/actor/member/policy/session gates and one original native-clock deadline.
+The deadline is bounded by original Finish custody and signed Ready remaining time; recovery
+cannot renew HIGH's receive promise. Ordinary public intake still refuses Ready.
+
+An allocation-free fixed-header peek selects the existing LOW Workflow verifier. Normal
+requester/process debits, signatures, route checks and final native origin remain mandatory.
+After registered transfer, a separate exact-retry lender uses the SAME original Exchange lane;
+generic SDP action/packet lenders remain inactive. A previously unseen legitimate helper can
+still need its ordinary requester record: full ordinary memory refuses that pre-effect step,
+then the SAME signed Ready succeeds when pressure clears. Protected capacity never bypasses it.
+
+LOW's fixed receipt pays1600B from original HistoryPlan byte capacity, without issuing an
+action row. Ten published original history rows in the capacity fixture plus that fee leave
+both original SDP slots; SDP record bytes come from the prepaid Exchange. A complete1024B shared-map-node
+allowance is guarded against actual key/value/header/edge sizes. The original fixed binding
+drops LAST, after the fee/reservation. History owns no Workflow/Exchange/input/action/keys.
+
+Only exact native Ready publication stops LOW Finish authority. Its old packet leases are
+revoked and native caches removed outside final guards. Await remains open until the original
+lane is idle and actual handoff/verifier/reply custody permits extraction. Explicit native
+`prepay_voice_low_sdp` pays endpoint origin records and capacity; `prepare_voice_low_sdp`
+retains the SAME Reserved/Transferred owner through refusals. Its boolean means actual old
+Workflow drainage, never SDP/browser/RTC activation. Real Source/Lower/request owners still
+keep old work charged until their actual last Drop.
+
+Focused validation passes:652 Root voice tests (13.14s),306 native handoff tests (6.56s),
+ten real TCP/HTTP/Node confirmation scenarios (127.53s), native check (38.24s), strict Sync
+Clippy (21.69s), strict native Clippy (52.85s), formatting, diff and ambient checks. Frontend
+is unchanged; complete suites remain deferred until integration is coherent.
+The actual Root regression discovers/confirms both
+endpoints through its normal permitted member bridge (mock AEAD), borrows a real Ready Source
+attempt, then exercises Root intake: full namespace refusal before marker, same receipt retry,
+cross-kind ID collision, reply-custody transfer refusal, and recovery after registered transfer.
+Its namespace saturation uses unreachable test positions to isolate the count fence; it does
+not claim256 feasible paid network admissions. Ready is injected at native intake in this
+regression, not yet delivered by operational Ready scheduling. Read-only review fixed an
+unknown-handshake panic and confirmed no remaining blocker/high/medium in this boundary.
+
+Still open: operational application Ready/SDP progression, authenticated original-key browser
+SDP adoption, typed SDP/RTC integration, multi-peer composition, member media relay and combined/
+physical acceptance. Only one physical desktop is available. Full suites remain deferred during
+unfinished integration; the crypto-bigint dependency audit remains open. External download
+resume stays on its separate branch. Older checkpoint sections below retain their own scope.
+
 ## Ready Source and causal retries (24 October; application scheduling off)
 
 The explicit native Root prepare/queue APIs now connect the original HIGH cache, installed

@@ -3,9 +3,49 @@
 //! comparing its own original Finish identity/hash and repeating current native authority.
 use super::*;
 
+pub(crate) mod admission;
 pub(in crate::voice_v2) mod capacity;
 pub(in crate::voice_v2) mod producer;
 pub(crate) mod source_authority;
+
+/// Untrusted, allocation-free header view used ONLY to select an existing native verifier.
+/// Signature, helper policy, immutable identity and final admission remain separate checks.
+pub(super) struct ReadyPeek {
+    pub epoch: u64,
+    pub target: DeviceId,
+    pub source_join: Nonce,
+    pub target_join: Nonce,
+    pub source_key_ref: Nonce,
+    pub target_key_ref: Nonce,
+    pub handshake: Nonce,
+    pub finish_message: MessageId,
+    pub finish_object_hash: [u8; 32],
+    pub helpers: [Option<DeviceId>; 2],
+}
+impl ReadyPeek {
+    pub(super) fn get(d: &mut Decoder<'_>) -> Result<Self, VoiceError> {
+        let mut value = Self {
+            epoch: d.get_u64()?,
+            target: DeviceId::from_bytes(array(d)?),
+            source_join: array(d)?,
+            target_join: array(d)?,
+            source_key_ref: array(d)?,
+            target_key_ref: array(d)?,
+            handshake: array(d)?,
+            finish_message: array(d)?,
+            finish_object_hash: array(d)?,
+            helpers: [None; 2],
+        };
+        let count = d.get_u8()?;
+        if count > 2 {
+            return Err(VoiceError::Bounds);
+        }
+        for helper in value.helpers.iter_mut().take(usize::from(count)) {
+            *helper = Some(DeviceId::from_bytes(array(d)?));
+        }
+        Ok(value)
+    }
+}
 
 /// High endpoint's immutable receive-readiness claim for one original native Finish. The
 /// hash is the native SIGNED Finish object's hash, not a WebCrypto output fingerprint.

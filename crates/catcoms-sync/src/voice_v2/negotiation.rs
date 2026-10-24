@@ -31,6 +31,7 @@ const ACTION_BYTES: usize = CIPHERTEXT + MAX_AAD + 1536;
 const ENGINE_BYTES: usize = 4 * (CIPHERTEXT + MAX_AAD) + 3 * MAX_SDP_PLAINTEXT + 2048;
 const RESULT_BYTES: usize = MAX_SDP_PLAINTEXT + 1040;
 pub(crate) mod admission;
+mod low_ready;
 pub(crate) mod namespace;
 mod packet_capacity;
 mod ready_capacity;
@@ -114,6 +115,9 @@ pub struct Exchange {
     // Observers only. Actual inbox/canonical bytes remain outside Exchange to avoid cycles.
     ready_receive: std::sync::OnceLock<CallLease>,
     ready_publication: receive::PublicationCell,
+    // One-way fixed receipt observation. Receipt owns NO Exchange/Workflow/progress credit.
+    // It selects only exact Ready ACK recovery while generic SDP lenders remain inactive.
+    low_ready: Option<Arc<super::ready::admission::ReadyAdmission>>,
     // Last: every enclosing owner/reservation/slot remains paid through field destruction.
     _metadata: Credit,
     // MUST remain last. All actual successor fields/credits return before whole-plan
@@ -197,6 +201,20 @@ impl Exchange {
         ticket: super::chain::TransferredSdpCapacity,
         helpers: Vec<DeviceId>,
     ) -> Arc<Self> {
+        Self::from_transferred_inner(ticket, helpers, None)
+    }
+    pub(in crate::voice_v2) fn from_low_transferred(
+        ticket: super::chain::TransferredSdpCapacity,
+        receipt: Arc<super::ready::admission::ReadyAdmission>,
+    ) -> Arc<Self> {
+        let helpers = receipt.helpers().collect();
+        Self::from_transferred_inner(ticket, helpers, Some(receipt))
+    }
+    fn from_transferred_inner(
+        ticket: super::chain::TransferredSdpCapacity,
+        helpers: Vec<DeviceId>,
+        low_ready: Option<Arc<super::ready::admission::ReadyAdmission>>,
+    ) -> Arc<Self> {
         let super::chain::TransferredParts {
             // Bind FIRST for reverse local-drop order during constructor unwinding.
             // Normal construction moves it to Exchange's LAST field unchanged.
@@ -251,6 +269,7 @@ impl Exchange {
             ready: Some(ready),
             ready_receive: std::sync::OnceLock::new(),
             ready_publication: std::sync::OnceLock::new(),
+            low_ready,
             _metadata: metadata,
             _successor_custody: Some(custody),
         })
@@ -276,6 +295,10 @@ impl Exchange {
                 !proof.live() || mono >= self.active_until.load(Ordering::Acquire)
             } else {
                 !proof.current_at(mono)
+                    || self
+                        .low_ready
+                        .as_ref()
+                        .is_some_and(|receipt| mono >= receipt.deadline())
             }
         });
         if expired || !self.live.is_live() {
@@ -392,6 +415,7 @@ impl Exchange {
             ready: None,
             ready_receive: std::sync::OnceLock::new(),
             ready_publication: std::sync::OnceLock::new(),
+            low_ready: None,
             _successor_custody: None,
         }))
     }

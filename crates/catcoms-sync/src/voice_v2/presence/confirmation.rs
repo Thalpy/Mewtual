@@ -22,6 +22,7 @@ mod derivation;
 mod first_offer;
 mod pair;
 mod protected;
+mod ready;
 mod response;
 mod result;
 mod start;
@@ -73,6 +74,8 @@ pub(super) struct Pair {
     // Fixed history must not hold an Exchange/receiver/input. The actual event is separate
     // progress custody and is collected with its original successor on expiry/revocation.
     first_offer: Option<Arc<crate::voice_v2::negotiation::admission::FirstOfferAdmission>>,
+    // One fixed LOW admission, independent of the live successor. No progress backedge.
+    ready_admission: Option<Arc<crate::voice_v2::ready::admission::ReadyAdmission>>,
     sdp_input: Option<Box<InboundPacket>>,
     _credit: Credit,
 }
@@ -1044,6 +1047,7 @@ impl LocalJoin {
                 protected_epoch: None,
                 sdp_successor: None,
                 first_offer: None,
+                ready_admission: None,
                 sdp_input: None,
                 _credit: credit,
             },

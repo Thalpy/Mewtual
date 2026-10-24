@@ -1,5 +1,59 @@
 use super::*;
 
+#[test]
+fn unpaid_ready_peek_has_exact_native_fields_hash_and_fixed_helpers_with_no_trailing_admission() {
+    let (_, high, scope, mut header) = fixture();
+    header.helpers = vec![
+        DeviceKeypair::from_seed(&[3; 32]).device_id(),
+        DeviceKeypair::from_seed(&[4; 32]).device_id(),
+    ];
+    header.helpers.sort();
+    let object = issue(&high, scope, header.clone()).unwrap();
+    let direct = Envelope::Direct(object.clone());
+    let peek = Envelope::peek_ready(&direct.encode()).unwrap();
+    assert_eq!(
+        (peek.issuer, peek.message, peek.hash, peek.scope),
+        (object.issuer(), object.id(), object.hash(), scope)
+    );
+    assert_eq!(peek.header.epoch, header.epoch);
+    assert_eq!(peek.header.finish_message, header.finish_message);
+    assert_eq!(peek.header.finish_object_hash, header.finish_object_hash);
+    assert_eq!(
+        peek.header.helpers,
+        [Some(header.helpers[0]), Some(header.helpers[1])]
+    );
+    for helper in &header.helpers {
+        let forwarded = Envelope::HelperDelivery {
+            object: object.clone(),
+            permit: RoutePermit::issue(&high, &object, *helper, 1000, 16000).unwrap(),
+        };
+        let peek = Envelope::peek_ready(&forwarded.encode()).unwrap();
+        assert_eq!(peek.envelope_kind, 3);
+        assert_eq!(peek.hash, object.hash());
+    }
+    let mut trailing = direct.encode();
+    trailing.push(0);
+    assert!(Envelope::peek_ready(&trailing).is_err());
+    // Change the declared count without constructing any Vec in the unpaid parser.
+    let mut unsigned = object.unsigned();
+    let count = unsigned.len() - 2 * (4 + 32) - 1;
+    assert_eq!(unsigned[count], 2);
+    for value in [3, 255] {
+        unsigned[count] = value;
+        let mut signed = Encoder::new();
+        fixed(&mut signed, &unsigned);
+        fixed(&mut signed, &object.signature);
+        let mut outer = Encoder::new();
+        outer.put_u8(VERSION);
+        outer.put_u8(1);
+        fixed(&mut outer, &signed.finish());
+        assert!(matches!(
+            Envelope::peek_ready(&outer.finish()),
+            Err(VoiceError::Bounds)
+        ));
+    }
+}
+
 fn fixture() -> (DeviceKeypair, DeviceKeypair, Scope, ReadyHeader) {
     let mut devices = [
         DeviceKeypair::from_seed(&[1; 32]),

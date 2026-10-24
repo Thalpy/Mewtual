@@ -175,6 +175,9 @@ impl PreparedSdpCapacity {
 }
 
 impl PreparedChain {
+    pub(in crate::voice_v2) fn original_observation(&self) -> OriginalPlanObservation {
+        OriginalPlanObservation(self.binding.clone())
+    }
     pub(in crate::voice_v2) fn successor_actor_matches(
         &self,
         actor: &super::super::runtime::ActorOwner,

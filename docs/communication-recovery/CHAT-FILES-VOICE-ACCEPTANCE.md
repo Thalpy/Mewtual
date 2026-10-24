@@ -1,5 +1,28 @@
 # Chat, files and voice implementation evidence
 
+## LOW Ready acceptance evidence (24 October; focused checks)
+
+The actual protected LOW and Root intake now accept exact original Ready, retain a fixed plain
+receipt, stop old Finish authority and delay the same lane's extraction behind actual ingress/
+reply/handoff custody. Direct and selected-helper lost-ACK retries after registered transfer use
+original capacity with ordinary bytes/Crypto full. A new helper's ordinary requester row still
+waits for ordinary capacity, then retries the same identity. Rogue helpers, changed original
+Finish/epoch/joins/keys/IDs, final native clock closure and lock/unlock, strict timeout/wall
+rollback, full packet tables and real Lower/request lifetime are covered by focused regressions.
+Ten published original history rows plus the1600B byte-only Ready fee preserve both SDP slots;
+this capacity test is not a synthetic substitute for native protocol readiness. Fixed receipt/
+effect/shared node growth guards and actual progress-registry cleanup protect its retained graph.
+
+The Root integration uses normal discovery/confirmation through an unjoined permitted member
+bridge with mocked AEAD. It borrows a real queued Ready Source attempt, then tests actual native
+Root intake, namespace saturation before marker, cross-kind collision, same-receipt recovery and
+reply-owned lane delay. The count-saturation positions are deliberately unreachable test data,
+not256 feasible paid admissions. This is not operational Ready delivery, browser SDP/RTC, physical
+A-C exclusion or audible media. Focused checks pass:652 Root voice,306 native handoff, ten
+real TCP/HTTP/Node confirmation scenarios; native check, strict Sync/native Clippy, formatting,
+diff and ambient checks pass. Frontend is unchanged. Full suites remain deferred during
+unfinished integration; the dependency audit remains open.
+
 ## Ready Source evidence (24 October; focused checks)
 
 Explicit native Root preparation/queue now reaches original Ready Source/Lower/retained ACK

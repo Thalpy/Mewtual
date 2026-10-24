@@ -57,6 +57,7 @@ pub mod negotiation;
 pub mod packets;
 pub mod presence;
 mod ready;
+pub(crate) use ready::admission::ReadyAdmission;
 pub use ready::ReadyHeader;
 pub mod resources;
 pub mod runtime;
@@ -1200,6 +1201,14 @@ struct UnverifiedEncrypted {
     issuer: DeviceId,
     header: EncryptedHeader,
 }
+struct UnverifiedReady {
+    envelope_kind: u8,
+    scope: Scope,
+    issuer: DeviceId,
+    message: MessageId,
+    hash: [u8; 32],
+    header: ready::ReadyPeek,
+}
 
 /// Snapshot only for synchronous validation. Deferred effects must acquire fresh native/actor
 /// authority at commit. `indirect` comes from policy_allows_member_mesh(), never a UI mode; the
@@ -1244,6 +1253,61 @@ impl<T: catcoms_rt::MeshTransport, R: catcoms_rt::CryptoRngCore> crate::ChannelS
     }
 }
 impl Envelope {
+    /// This parser borrows every wire field and never allocates a helper Vec. It selects
+    /// capacity only; even an exact header must still pass normal authentication/admission.
+    fn peek_ready(bytes: &[u8]) -> Result<UnverifiedReady, VoiceError> {
+        if bytes.len() > MAX_ENVELOPE {
+            return Err(VoiceError::Bounds);
+        }
+        let mut outer = Decoder::new(bytes);
+        if outer.get_u8()? != VERSION {
+            return Err(VoiceError::Malformed);
+        }
+        let envelope_kind = outer.get_u8()?;
+        if !matches!(envelope_kind, 1..=3) {
+            return Err(VoiceError::Malformed);
+        }
+        let object = outer.get_bytes()?;
+        if envelope_kind != 1 && outer.get_bytes()?.len() > 1024 {
+            return Err(VoiceError::Bounds);
+        }
+        outer.finish()?;
+        let mut signed = Decoder::new(object);
+        let unsigned = signed.get_bytes()?;
+        let _: [u8; 64] = array(&mut signed)?;
+        signed.finish()?;
+        let mut d = Decoder::new(unsigned);
+        if d.get_str()? != OBJECT_DOMAIN || d.get_u8()? != VERSION || d.get_u8()? != 5 {
+            return Err(VoiceError::Malformed);
+        }
+        let scope = Scope::get(&mut d)?;
+        let issuer = DeviceId::from_bytes(array(&mut d)?);
+        let _: [u8; 32] = array(&mut d)?;
+        let message = array(&mut d)?;
+        d.get_u64()?;
+        d.get_u64()?;
+        let header = ready::ReadyPeek::get(&mut d)?;
+        d.finish()?;
+        if issuer <= header.target
+            || (scope.policy.is_none() && header.helpers[0].is_some())
+            || header
+                .helpers
+                .iter()
+                .flatten()
+                .any(|helper| *helper == issuer || *helper == header.target)
+            || matches!(header.helpers, [Some(a), Some(b)] if a >= b)
+        {
+            return Err(VoiceError::Malformed);
+        }
+        Ok(UnverifiedReady {
+            envelope_kind,
+            scope,
+            issuer,
+            message,
+            hash: *blake3::hash(object).as_bytes(),
+            header,
+        })
+    }
     pub(crate) fn as_ref(&self) -> EnvelopeRef<'_> {
         match self {
             Self::Direct(object) => EnvelopeRef::Direct(object),

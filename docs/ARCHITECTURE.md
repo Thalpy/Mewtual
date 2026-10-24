@@ -1,5 +1,22 @@
 # Mewtual; Architecture
 
+## LOW Ready receipt and original-lane extraction (24 October)
+
+Root now classifies Ready in the same immutable public/encrypted identity namespace, then admits
+it through the actual protected LOW pair. Exact signed native Finish, epoch, joins, keys, frozen
+helpers and original room/native gates precede final origin publication. Fixed history owns an
+original paid plan observation and plain1600B history byte loan; it consumes no action position
+and retains no Workflow/Exchange/input/keys. Its1024B shared-node allowance includes keys, values,
+header and internal edges; the original fixed anchor drops after fee/reservation destruction.
+
+An allocation-free bounded peek selects the original Workflow verifier before transfer. A
+separate inactive-Exchange exact-ID/hash/route retry lender follows registered transfer, sharing
+the SAME Crypto quota/lane. Normal request work/authentication/admission is never bypassed. Native
+Ready stops/revokes old LOW Source/cache work outside final guards, without closing Await early.
+Native maintenance can retain/retry prepaid capacity and extract only after actual lane/handoff
+custody permits it. Old Workflow drainage remains a separate last-owner observation. Generic
+SDP/browser/RTC activation and automatic application progression are still pending.
+
 ## Original Ready Source custody (24 October)
 
 The closed Source packet binding now distinguishes encrypted ledger authority from private

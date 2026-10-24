@@ -4,6 +4,8 @@ use catcoms_rt::ManualClock;
 use voice_v2::directory::{MAX_DIRECTORY_KEYS, MAX_DIRECTORY_ROOMS};
 const INDEX: u128 = 991;
 include!("transport_tests.rs");
+#[path = "ready_tests.rs"]
+mod ready_tests;
 fn reader(doc: Option<&AutoCommit>) -> Result<BTreeSet<u128>, VoiceError> {
     let mut rooms = BTreeSet::from([1]);
     if let Some(doc) = doc {

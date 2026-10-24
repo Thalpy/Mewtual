@@ -8,6 +8,29 @@ use std::sync::{
     Mutex,
 };
 
+#[tokio::test]
+async fn root_low_successor_unknown_handshake_and_wrong_role_refuse_without_payment_or_panic() {
+    let (mut f, handshake) = confirmed().await;
+    let before = f.runtime.resources().counts();
+    assert_eq!(
+        f.receiver.prepay_voice_low_sdp(&f.grant, [241; 32]),
+        Err(VoiceError::Unauthorized)
+    );
+    assert_eq!(
+        f.receiver.prepare_voice_low_sdp(&f.grant, [241; 32]),
+        Err(VoiceError::Unauthorized)
+    );
+    assert_eq!(
+        f.receiver.prepay_voice_low_sdp(&f.grant, handshake),
+        Err(VoiceError::Unauthorized)
+    );
+    assert_eq!(
+        f.receiver.prepare_voice_low_sdp(&f.grant, handshake),
+        Err(VoiceError::Unauthorized)
+    );
+    assert_eq!(f.runtime.resources().counts(), before);
+}
+
 struct AckClock {
     inner: Arc<ManualClock>,
     probe: Mutex<Option<Arc<dyn Fn() -> bool + Send + Sync>>>,

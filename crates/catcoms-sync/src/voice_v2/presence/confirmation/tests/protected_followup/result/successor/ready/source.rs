@@ -174,7 +174,7 @@ fn native_ready_source_keeps_stamping_clock_when_preparation_has_a_different_mon
     assert!(!job.authority().authorized());
     assert_eq!(queue(&p, &namespace), Err(VoiceError::Unauthorized));
 }
-fn routes(ids: &[DeviceId]) -> Vec<BoundRoute> {
+pub(super) fn routes(ids: &[DeviceId]) -> Vec<BoundRoute> {
     ids.iter()
         .enumerate()
         .map(|(i, device)| BoundRoute {

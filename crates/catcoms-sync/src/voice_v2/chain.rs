@@ -17,12 +17,17 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, Weak};
 
 pub(super) const ROW_BYTES: usize = 1536;
+// LOW Ready uses no action position. Its plain history fee also covers a conservative
+// complete shared-map node allowance, including internal edges. Two unused byte rows
+// remain after ten confirmation rows; the two SDP slots get record bytes from Exchange.
+pub(in crate::voice_v2) const LOW_READY_RECEIPT_BYTES: usize = ROW_BYTES + 64;
 const ROWS: usize = 12;
 const NO_ROW: u8 = u8::MAX;
 mod admission;
 mod derivation;
 mod lifecycle;
 mod outgoing;
+mod ready;
 mod start;
 mod transfer;
 mod transition;
@@ -93,6 +98,9 @@ pub(super) struct PlanBinding {
     // Distinct from old-Workflow retirement: a prepared/ticket/Exchange can survive it.
     successor_closed: AtomicBool,
     successor_busy: AtomicBool,
+    // Set only by exact authenticated LOW Ready publication. Local Finish/ACK/Established
+    // never imply remote readiness. This stops old Source work without closing Await.
+    low_ready: AtomicBool,
     _metadata: Credit,
 }
 impl PlanBinding {
@@ -499,6 +507,7 @@ impl PreparedChain {
             workflow_drained: AtomicBool::new(false),
             successor_closed: AtomicBool::new(false),
             successor_busy: AtomicBool::new(false),
+            low_ready: AtomicBool::new(false),
         });
         let history = Arc::new(HistoryPlan {
             binding: binding.clone(),

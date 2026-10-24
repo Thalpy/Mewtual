@@ -45,8 +45,8 @@ impl PacketActivity {
             _ => false,
         }
     }
-    pub(super) fn obsolete_high_confirmation(&self) -> bool {
-        matches!(self, Self::Encrypted(packet) if packet.obsolete_high_confirmation())
+    pub(super) fn obsolete_confirmation(&self) -> bool {
+        matches!(self, Self::Encrypted(packet) if packet.obsolete_confirmation())
     }
     pub(super) fn check(&self, object: &SignedObject, local: &CallLease) -> bool {
         match self {

@@ -561,10 +561,11 @@ pub(super) struct SourcePacketAuthority {
     expires: u64,
 }
 impl SourcePacketAuthority {
-    pub(super) fn obsolete_high_confirmation(&self) -> bool {
-        self.workflow
-            .as_ref()
-            .is_some_and(|workflow| workflow.high_confirmation_sources_retired())
+    pub(super) fn obsolete_confirmation(&self) -> bool {
+        self.workflow.as_ref().is_some_and(|workflow| {
+            workflow.high_confirmation_sources_retired()
+                || workflow.low_confirmation_sources_retired()
+        })
     }
     /// Always use this packet's actual original clock. The caller may not replace its
     /// monotonic origin with the enclosing source job's clock, even if wall time agrees.
@@ -578,6 +579,10 @@ impl SourcePacketAuthority {
             && self.pair.is_live()
             && self.packet.is_live()
             && self.chain.as_ref().is_none_or(CallLease::is_live)
+            && self
+                .workflow
+                .as_ref()
+                .is_none_or(|workflow| !workflow.low_confirmation_sources_retired())
             && mono < self.deadline
             && wall < self.expires
             && self
@@ -696,6 +701,56 @@ redacted_debug!(
 );
 
 impl PacketLedger {
+    /// Only exact committed native Ready makes LOW's old Finish obsolete. Closing the
+    /// whole chain here would also close the verifier lane before its reply can drain.
+    pub(in crate::voice_v2) fn retire_low_confirmation_cache(
+        &mut self,
+        chain: &super::chain::PreparedChain,
+    ) -> Result<(), VoiceError> {
+        let binding = chain
+            .ready_low_confirmation_binding()
+            .ok_or(VoiceError::Unauthorized)?;
+        if binding.scope != self.scope
+            || binding.local != self.local
+            || binding.local_join != self.join
+            || binding.local_key != self.key_ref
+            || !binding.call.is_same(&self.lease)
+        {
+            return Err(VoiceError::Scope);
+        }
+        self.outgoing.retain(|_, outgoing| {
+            if outgoing
+                .workflow
+                .as_ref()
+                .is_some_and(|workflow| workflow.belongs_to_plan(chain))
+            {
+                outgoing.live.revoke();
+                false
+            } else {
+                true
+            }
+        });
+        // A selected Proof was consumed at local Finish, but earlier authenticated
+        // candidates may still occupy native inboxes. They cannot progress after Ready.
+        // Only remove this exact plan's native cache; independently retained SDK/result
+        // input still owns its credit and continues to delay real Workflow drainage.
+        self.incoming.retain(|_, incoming| {
+            let Body::Encrypted { header, .. } = incoming.object.body() else {
+                return true;
+            };
+            !(incoming.confirmation.is_some()
+                && incoming.object.scope() == binding.scope
+                && incoming.object.issuer() == binding.peer
+                && header.target == binding.local
+                && header.source_join == binding.peer_join
+                && header.target_join == binding.local_join
+                && header.source_key_ref == binding.peer_key
+                && header.target_key_ref == binding.local_key
+                && header.handshake == binding.handshake
+                && header.kind == EncryptedKind::ConfirmProof)
+        });
+        Ok(())
+    }
     /// Remove only obsolete confirmation CACHE owners for this exact native HIGH plan.
     /// Native Finish-open proves LOW received Proof; closing/extraction already forbids
     /// every old action. Fixed Pair counters/replay and native result/admission histories

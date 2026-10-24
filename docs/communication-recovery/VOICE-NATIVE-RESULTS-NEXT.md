@@ -1,5 +1,71 @@
 # Next voice milestone: native result recovery
 
+## Current LOW Ready boundary and next consumer (24 October)
+
+Exact protected LOW Ready/Root admission, immutable fixed receipt, original Workflow verifier,
+registered inactive-Exchange exact retry lender and delayed original-lane extraction now exist.
+Only native Ready stops LOW Finish; actual ticket/reply/handoff/Source/Lower owners still drain
+through real custody. The1600B plain history fee uses no action row; ten confirmation rows keep
+both original SDP positions. Namespace, original Finish/epoch/joins/keys/helper route, strict
+first deadline, native clock/revocation, ordinary pressure and fixed-history cleanup are pinned.
+
+NEXT: operational native/application progression and authenticated original-key browser SDP
+phase adoption. That proof must bind the actual original Claim/session/parent action and current
+native LOW Ready or HIGH Offer, without extending old Claim/action authority. It must prepay
+HTTP/IPC/body/UTF16 SDK strings before SDK awaits, keep actual owners through lost replies/End,
+and issue typed SDP/result/RTC permissions. Current528/2048-byte confirmation data grammar and
+192KiB SDP accounting do not establish that composition. The complete-SDP/non-trickle initial
+profile remains unimplemented. Multi-peer, member relay, combined and physical acceptance follow.
+Older sections below describe their checkpoints; they are not a claim of live availability.
+
+### Reviewed adoption/round dependencies (design only; not implemented)
+
+Separate key retention from SDP effects. A native established-key custodian must adopt the
+SAME actual protected Finish, original Claim/session/parent action, executor, call, pair and
+epoch while original custody is current. Requiring HIGH's first Offer before retaining keys
+would strand a gather/bridge failure before that Offer at the old30s expiry. LOW local Finish
+may justify key retention but still cannot stop Finish retries or grant SDP preparation.
+
+Before its adoption RPC, browser must install a paid PendingAdoption owner of EXISTING keys.
+An uncertain reply may quarantine them for exact same-session recovery/cleanup after old
+expiry, with NO SDK/packet/RTC authority. It must never derive/reconstruct keys or renew the old
+Claim. Native latches the same pending identity before its Root await, retains actual returned
+publication before replying, and repeats final UI/selection/epoch/native gates. End first closes
+effects, drains actual SDK/RPC owners, recovers the original adoption and releases every actual
+obligation. Permanent history holds fixed observations, not Exchange/large weak/input custody.
+
+Each later SDP round needs a new bounded owner after actual preceding round input/SDK/Lower/
+result drainage. Keys, nonce domain and burned sequence counters persist independently of its
+Crypto lane. Bind the exact native round (for example Ready message ID) into signed Offer/Answer,
+AAD, actions, fixed receipts and PC generation using an explicit closed mode/version grammar.
+A delayed, previously unadmitted old Offer must not activate a newer Ready even if its global
+sequence/freshness still passes. Never reset old attempt/action issuance to manufacture a round.
+
+LOW starts with an InitiatorPendingOffer preparation lease: OfferId currently comes from the
+native packet MessageId when ciphertext length is known, AFTER complete SDP gathering. Freeze
+that exact string/bytes once, then create one original draft/action/OfferId. HIGH already has its
+native admitted token/OfferId. Gathering listeners precede completion checks; after completion
+read localDescription.sdp once and enforce8192 UTF-8 bytes, never truncate. Separate ICE is
+rejected at both boundaries in this initial complete-SDP profile. Preserve audio/jam/drawing.
+
+Introduce typed SDP seal/open actions and retained-only successor handoff custody; old
+protected_plan/borrow_handoff depend on closed confirmation Workflow. Keep decrypted text private
+through exact native token/AAD/sequence/ciphertext/round commit. Only a fresh same-session/PC/
+Offer/profile delivery ticket may authorize setRemoteDescription. Pay UTF-8, UTF-16, IPC/native/
+SDK copies and keep them through real finally. An unresolved SDK promise cannot be refunded by
+expiry. The192KiB native declaration leaves8642B; one maximum UTF-16 SDP string alone needs
+16384B. Browser's current96KiB variable+32KiB fixed+28KiB retained channel/key composition also
+cannot simply add192KiB under its256KiB group ceiling. Measure complete coexistence and review
+any new bounded envelope/limit; do not use ordinary fallback or silently discard a hedge.
+
+Multi-peer/repeated rounds additionally require explicit terminal compaction after real ACK,
+settlement and copy drainage. Root ActionQueue/native rows currently retain32 claims; browser
+NativeWorkPump has one parent and slot-only completed bits. Use full RowId/generation/round
+identity, with paid closed-round tombstones/replay floor, rather than resetting bits or growing
+history forever. Established peers retain paid keys/PC state while the sole variable negotiation
+position moves fairly to another peer. This boundary is required for production recovery, not
+just an optional extension of a successful first SDP exchange.
+
 ## Current Ready Source implementation (24 October)
 
 Trusted native Root prepare/queue, exact inline cache/receiver/position provenance, original

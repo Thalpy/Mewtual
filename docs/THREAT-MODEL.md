@@ -1,5 +1,25 @@
 # Threat model; client integrity & enforcement boundaries
 
+## LOW causal Ready and exact retry custody (24 October)
+
+A signed Ready alone cannot advance an ordinary/unconfirmed pair. Root requires its actual
+original protected LOW native Finish identity/hash, epoch/joins/keys, native room/call/actor/
+member/policy/session gates and the exact frozen helper route. Shared immutable-ID classification
+precedes the final origin transaction. A fixed plain-funded1600B history receipt retains no
+Workflow/Exchange/action/input/keys and drops original paid provenance LAST.
+
+The unpaid selector parses only bounded borrowed/fixed fields; it creates no helper Vec and
+certifies no signature. Both pre-transfer Workflow and post-transfer exact Ready retry lenders
+still require normal request/process work, authentication, routing and native admission. A new
+helper's ordinary requester fee cannot be bypassed by protected Crypto. No ACK or local Finish
+can fabricate LOW readiness, refund attempts or renew its immutable Ready/Finish bounds.
+
+Only exact native Ready stores the old-Source stop marker; packet revocation/destruction follows
+outside final guards. Actual verifier/reply/handoff/Lower owners retain their real custody.
+Extraction moves the same idle lane and action slots; it never infers drainage from weak-zero
+or closes Await merely to clear Finish. Generic SDP/RTC stays inactive pending original-key
+browser adoption. Operational progression, relay and physical acceptance are not established.
+
 ## Ready Source authority and transport acknowledgement (24 October)
 
 A copied Ready or capacity owner cannot create Source authority. Only its original native

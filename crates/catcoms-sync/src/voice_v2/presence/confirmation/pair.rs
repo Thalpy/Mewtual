@@ -238,6 +238,7 @@ impl LocalJoin {
             protected_epoch: Some(selector.epoch),
             sdp_successor: None,
             first_offer: None,
+            ready_admission: None,
             sdp_input: None,
             _credit: credit,
         };

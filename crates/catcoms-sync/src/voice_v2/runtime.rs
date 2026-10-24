@@ -1319,11 +1319,40 @@ impl ActorOwner {
         } else {
             None
         };
+        let low_ready =
+            if retained_progress.is_none() && peeked.is_none() && ready_receive.is_none() {
+                self.resources
+                    .workflow(self.group.hash)
+                    .filter(|workflow| workflow.lends_low_ready_verification(requester, frame, now))
+            } else {
+                None
+            };
+        let low_ready_retry = if retained_progress.is_none()
+            && peeked.is_none()
+            && ready_receive.is_none()
+            && low_ready.is_none()
+        {
+            self.resources.exchange(self.group.hash).filter(|exchange| {
+                exchange.lends_low_ready_retry_verification(requester, frame, wall, now)
+            })
+        } else {
+            None
+        };
         let progress = retained_progress.unwrap_or_else(|| {
             ready_receive.as_ref().map_or_else(
                 || {
-                    peeked.as_ref().map_or(
-                        super::source::SourceProgress::Ordinary,
+                    peeked.as_ref().map_or_else(
+                        || {
+                            low_ready.as_ref().map_or_else(
+                                || {
+                                    low_ready_retry.as_ref().map_or(
+                                        super::source::SourceProgress::Ordinary,
+                                        super::source::SourceProgress::LowReadyRetry,
+                                    )
+                                },
+                                super::source::SourceProgress::Workflow,
+                            )
+                        },
                         super::source::SourceProgress::Exchange,
                     )
                 },

@@ -1,5 +1,27 @@
 # Mewtual; Interfaces & Hooks Schema
 
+## LOW Ready native admission and capacity APIs (24 October)
+
+Ready has a dedicated Root intake branch; it cannot obtain a generic public receipt. Exact
+original protected LOW Finish/epoch/endpoints/joins/keys/helper choice and current native owners
+produce one recoverable fixed admission. Shared-ID content/kind collisions refuse before effects.
+Retries before/after registered transfer return the SAME receipt without a new origin debit or
+deadline. The plain1600B history fee issues no action row; both original SDP positions survive.
+
+`ChannelSync::prepay_voice_low_sdp(grant, handshake)` prepares endpoint origin rows and original
+inert capacity after local native Finish. It does not accept Ready or stop Finish retries.
+`prepare_voice_low_sdp(grant, handshake)` requires actual native Ready, keeps the SAME owner on
+retryable refusal, and returns a boolean observing actual old Workflow drainage. It grants no
+browser key adoption, SDP activation or RTC authority. Unknown/retired/wrong-role handshakes
+refuse rather than panic. Application maintenance does not call these APIs yet.
+
+Actual ingress and reply work hold the original verifier lane through their real last Drop.
+After registered transfer, only exact accepted Ready retries may borrow the inactive successor's
+Crypto quota. Ordinary requester bookkeeping still needs its existing ordinary fee: first
+arrival through a new helper may wait for capacity. Original Finish and signed Ready bounds do
+not renew on retry, wall rollback or phase preparation. Old confirmation action deadlines stay
+unchanged. A dedicated original-key native/browser SDP phase remains the next interface.
+
 ## Native Ready Source queue and response verification (24 October)
 
 `ChannelSync::queue_voice_high_ready(grant, handshake)` queues only the prepared original HIGH
