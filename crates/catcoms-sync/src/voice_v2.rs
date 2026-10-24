@@ -56,6 +56,8 @@ pub mod limits;
 pub mod negotiation;
 pub mod packets;
 pub mod presence;
+mod ready;
+pub use ready::ReadyHeader;
 pub mod resources;
 pub mod runtime;
 pub mod source;
@@ -575,6 +577,9 @@ pub enum Body {
         header: EncryptedHeader,
         ciphertext: Vec<u8>,
     },
+    /// Signed causal readiness metadata. Codec/route validity is not exact native pair
+    /// admission, and this public control can never supply SDP plaintext or RTC authority.
+    PairReady { header: ReadyHeader },
 }
 impl Body {
     fn kind(&self) -> u8 {
@@ -583,6 +588,7 @@ impl Body {
             Self::WatchChallenge { .. } => 2,
             Self::JoinProof { .. } => 3,
             Self::Encrypted { .. } => 4,
+            Self::PairReady { .. } => 5,
         }
     }
     pub fn target(&self) -> Option<DeviceId> {
@@ -591,6 +597,7 @@ impl Body {
             Self::WatchChallenge { target, .. } => Some(*target),
             Self::JoinProof { watcher, .. } => Some(*watcher),
             Self::Encrypted { header, .. } => Some(header.target),
+            Self::PairReady { header } => Some(header.target),
         }
     }
     fn put_header(&self, e: &mut Encoder) {
@@ -633,6 +640,7 @@ impl Body {
                 fixed(e, challenge_id);
             }
             Self::Encrypted { header, .. } => header.put(e),
+            Self::PairReady { header } => header.put(e),
         }
     }
     fn get(kind: u8, d: &mut Decoder<'_>) -> Result<Self, VoiceError> {
@@ -668,6 +676,9 @@ impl Body {
                     ciphertext: bytes.to_vec(),
                 }
             }
+            5 => Self::PairReady {
+                header: ReadyHeader::get(d)?,
+            },
             _ => return Err(VoiceError::Malformed),
         })
     }
@@ -763,6 +774,7 @@ impl SignedObject {
                     return Err(VoiceError::Bounds);
                 }
             }
+            Body::PairReady { header } => header.validate(self.issuer, self.scope)?,
             _ => {}
         }
         Ok(())
@@ -1412,6 +1424,16 @@ impl EnvelopeRef<'_> {
         if matches!(object.body, Body::Announcement { epoch, .. } if epoch > context.epoch) {
             return Err(VoiceError::Freshness);
         }
+        if let Body::PairReady { header } = &object.body {
+            // Ready protects an exact original epoch, unlike renewable discovery. Verify
+            // every named helper now; native pair admission repeats this at final commit.
+            if header.epoch != context.epoch
+                || (!header.helpers.is_empty() && !context.indirect)
+                || header.helpers.iter().any(|helper| !member(*helper))
+            {
+                return Err(VoiceError::Unauthorized);
+            }
+        }
         match self {
             Self::Direct(_) => {
                 if requester != object.issuer
@@ -1426,6 +1448,10 @@ impl EnvelopeRef<'_> {
             }
             Self::ToHelper { permit, .. } | Self::HelperDelivery { permit, .. } => {
                 if !context.indirect || context.scope.policy.is_none() || !member(permit.helper) {
+                    return Err(VoiceError::Unauthorized);
+                }
+                if matches!(&object.body, Body::PairReady { header } if !header.helpers.contains(&permit.helper))
+                {
                     return Err(VoiceError::Unauthorized);
                 }
                 if let Some(hash) = cached_hash {

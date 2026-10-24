@@ -62,6 +62,12 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         context: &Context,
         room: RoomAuthority,
     ) -> Result<EndpointReceipt, VoiceError> {
+        // A signed Ready is NOT a queued public notification. Until its dedicated exact
+        // protected native admission exists, refuse it here: a generic PublicReceipt would
+        // falsely acknowledge readiness before validating/advancing the original pair.
+        if matches!(envelope.object().body(), Body::PairReady { .. }) {
+            return Err(VoiceError::Unauthorized);
+        }
         if !matches!(envelope.object().body(), Body::Encrypted { .. }) {
             return self
                 .admit_voice_endpoint_public(ticket, envelope, context, room)

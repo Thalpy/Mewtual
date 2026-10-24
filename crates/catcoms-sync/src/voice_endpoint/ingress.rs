@@ -146,7 +146,10 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
     ) -> Result<PublicReceipt, VoiceError> {
         // Caller has already authenticated the exact frame and final-delivery role. Never let
         // public control intake bypass encrypted replay/confirmation/negotiation ownership.
-        if matches!(envelope.object().body(), Body::Encrypted { .. }) {
+        if matches!(
+            envelope.object().body(),
+            Body::Encrypted { .. } | Body::PairReady { .. }
+        ) {
             return Err(VoiceError::Unauthorized);
         }
         let clock = self.voice_v2_clock();
@@ -225,7 +228,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
                 }
                 Targets::Join(participant.watch.id, participant.lease.clone())
             }
-            Body::Encrypted { .. } => unreachable!(),
+            Body::Encrypted { .. } | Body::PairReady { .. } => unreachable!(),
         };
         if !targets.live() || room.scope != context.scope || !room.lease.is_live() {
             return Err(VoiceError::Unauthorized);
@@ -507,7 +510,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
                     participant.join.source_activity(&authority)?,
                 )))
             }
-            Body::Encrypted { .. } => Err(VoiceError::Unauthorized),
+            Body::Encrypted { .. } | Body::PairReady { .. } => Err(VoiceError::Unauthorized),
         }
     }
     pub fn voice_watch_peers(

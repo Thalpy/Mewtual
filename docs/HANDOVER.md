@@ -1,5 +1,29 @@
 # Mewtual; Handover
 
+## Causal Ready wire continuation (24 October; native admission still closed)
+
+Closed Body tag5 now carries high-to-low Ready metadata: exact protected epoch, endpoint
+joins/key references, handshake, original native signed Finish ID/hash and a canonical list
+of at most two helpers. Existing tags/signing domains are unchanged. Codec/route checks
+enforce direction, bounds, current epoch/membership/policy and permitted helper identity.
+BOTH native endpoint entry points refuse Ready before public queuing; ordinary SourceActivity
+cannot send it. Native pair admission, AwaitReady and causal Source completion remain absent.
+
+Voice focus523 and strict catcoms-sync Clippy pass. Follow-up coverage passes15 matching
+tests, including maximum two-helper round-trip and normal authenticated dispatch returning
+HelperQueued at the helper and Refused at the endpoint. Read-only review found no blocker,
+high or medium in the wire leaf. No readiness/Exchange/RTC authority follows from decoding.
+
+Full validation at the earlier75e15199 checkpoint finished: Root3,325 passed, zero failed,
+24 existing ignored; native lib771 passed/17 failed (681.36s), so later native targets did
+not run. Sixteen failures are the same initial authenticated route-capture wait before any
+chat/voice scenario assertions, under at least17 concurrent six-client fixtures. Their
+ServerActors share the process-wide four-flight member-maintenance pool; its opportunistic
+admission has no FIFO turn. This is a fairness/interference mechanism, not proof of16 new
+chat/V2 defects. The separate active-download failure reached post-restart recovery and
+needs its own current finalization/transfer-state observations. Preserve that failed run;
+do not raise deadlines or claim a green native gate. Fair maintenance admission is next.
+
 ## SDP capacity transfer continuation (24 October; integration in progress)
 
 `ConfirmationControl` can prepare one affine successor envelope, then freeze the original

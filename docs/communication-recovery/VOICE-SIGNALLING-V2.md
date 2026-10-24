@@ -55,6 +55,13 @@ refusal rather than count it as interoperability.
 
 ## Canonical objects and endpoint keys
 
+24 October wire continuation: closed object tag5 is high-to-low `PairReady`, binding the
+protected epoch, both endpoints/joins/key references, handshake, native signed Finish ID/hash
+and at most two canonical agreed helper identities. Tags1–4 and signing domains remain
+unchanged. Current helpers enforce this list and current epoch/member/policy checks. Native
+endpoints still refuse the body until synchronous exact pair admission exists; helper custody
+or a transport ACK is never causal readiness. AwaitReady, native adoption and RTC remain open.
+
 Use the repository's injective fixed-width/bounded-length codec. Decoders consume all bytes,
 reject unknown versions/kinds/suites and enforce bounds before allocation or crypto. A stable
 group identifier is the hash of the exact native MLS group bytes, not a numeric UI server id.

@@ -1252,6 +1252,36 @@ fn frame_hash(frame: &[u8]) -> [u8; 32] {
     voice_v2::Envelope::decode(&inner).unwrap().object().hash()
 }
 
+#[tokio::test]
+async fn voice_ready_normal_dispatch_distinguishes_helper_custody_from_refused_endpoint() {
+    let mut f = VoiceForwardFixture::empty().await;
+    if f._source.device_id() < f.recipient.device_id() {
+        std::mem::swap(&mut f._source, &mut f.recipient);
+    }
+    for node in [&mut f._source, &mut f.helper, &mut f.recipient] {
+        node.set_voice_routing(VoiceRouting::Forwarding);
+    }
+    let context = f._source.voice_v2_context(1).unwrap();
+    let object = voice_v2::SignedObject::issue(context.scope, &f._source.device, [171; 32], 1000, 16_000,
+        voice_v2::Body::PairReady { header: voice_v2::ReadyHeader {
+            epoch: context.epoch, target: f.recipient.device_id(), source_join: [1; 32],
+            target_join: [2; 32], source_key_ref: [3; 32], target_key_ref: [4; 32],
+            handshake: [5; 32], finish_message: [6; 32], finish_object_hash: [7; 32],
+            helpers: vec![f.helper.device_id()],
+        }}).unwrap();
+    let permit = voice_v2::RoutePermit::issue(&f._source.device, &object, f.helper.device_id(), 1000, 16_000).unwrap();
+    let frame = voice_frame(&mut f._source, &voice_v2::Envelope::ToHelper { object: object.clone(), permit: permit.clone() });
+    let reply = dispatched(&f._source, &mut f.helper, &frame).await;
+    assert_eq!(f._source.verify_voice_transport_response(f.helper.local_peer(), &frame, object.hash(), &reply).unwrap(),
+        crate::VoiceTransportStatus::HelperQueued);
+    // Use the actual permitted helper role and normal final dispatch. A signed wire Ready
+    // must not become a queued PublicReceipt/EndpointAdmitted before exact pair admission.
+    let frame = voice_frame(&mut f.helper, &voice_v2::Envelope::HelperDelivery { object: object.clone(), permit });
+    let reply = dispatched(&f.helper, &mut f.recipient, &frame).await;
+    assert_eq!(f.helper.verify_voice_transport_response(f.recipient.local_peer(), &frame, object.hash(), &reply).unwrap(),
+        crate::VoiceTransportStatus::Refused);
+}
+
 /// Poll the actual detached worker against normal Root dispatch. No private ingress helper,
 /// invented endpoint receipt or wall-clock delay substitutes for a network response here.
 async fn drive_voice_flight<F: std::future::Future>(flight: F, node: &mut VoiceTestNode) -> F::Output {

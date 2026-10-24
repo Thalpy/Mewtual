@@ -6,13 +6,13 @@ fn device(seed: u8) -> DeviceKeypair {
 fn scope() -> Scope {
     Scope::for_group(b"exact MLS group", Some([8; 32]), 123)
 }
-fn key(join: u8) -> JoinKey {
+pub(super) fn key(join: u8) -> JoinKey {
     // SEC2 P-256 generator, a valid uncompressed point. Point validation in the endpoint uses
     // WebCrypto, independently of this native structural/signature codec.
     let bytes = hex::decode("046b17d1f2e12c4247f8bce6e563a440f277037d812deb33a0f4a13945d898c2964fe342e2fe1a7f9b8ee7eb4a7c0f9e162bce33576b315ececbb6406837bf51f5").unwrap();
     JoinKey::new([join; 32], bytes.try_into().unwrap()).unwrap()
 }
-fn announcement(signer: &DeviceKeypair, join: u8) -> SignedObject {
+pub(super) fn announcement(signer: &DeviceKeypair, join: u8) -> SignedObject {
     SignedObject::issue(
         scope(),
         signer,

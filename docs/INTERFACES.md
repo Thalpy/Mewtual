@@ -1,5 +1,15 @@
 # Mewtual; Interfaces & Hooks Schema
 
+## Signed Ready wire value (24 October; admission unavailable)
+
+`Body::PairReady { header: ReadyHeader }` uses tag5. It binds original epoch, high issuer,
+low target, both joins/key references, handshake and native signed Finish ID/object hash.
+The signed helper list is strictly increasing with at most two non-endpoint members. Current
+route authorization checks epoch, all helpers and policy; a helper permit must name a listed
+helper. Existing tags/domains/version are unchanged. This is public signed metadata, not a
+native Ready receipt. Both endpoint intake paths currently refuse it; generic public queues
+and ordinary SourceActivity cannot substitute for the pending exact native admission.
+
 ## Affine successor capacity (24 October; capacity only)
 
 `ConfirmationControl::prepare_sdp_capacity()` prepays one192KiB envelope and moves two

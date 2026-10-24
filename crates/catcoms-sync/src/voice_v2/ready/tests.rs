@@ -1,0 +1,196 @@
+use super::*;
+
+fn fixture() -> (DeviceKeypair, DeviceKeypair, Scope, ReadyHeader) {
+    let mut devices = [
+        DeviceKeypair::from_seed(&[1; 32]),
+        DeviceKeypair::from_seed(&[2; 32]),
+    ];
+    devices.sort_by_key(DeviceKeypair::device_id);
+    let [low, high] = devices;
+    let scope = Scope::for_group(b"ready wire boundary", Some([8; 32]), 99);
+    let header = ReadyHeader {
+        epoch: 7,
+        target: low.device_id(),
+        source_join: [11; 32],
+        target_join: [12; 32],
+        source_key_ref: [13; 32],
+        target_key_ref: [14; 32],
+        handshake: [15; 32],
+        finish_message: [16; 32],
+        finish_object_hash: [17; 32],
+        helpers: vec![],
+    };
+    (low, high, scope, header)
+}
+fn issue(
+    high: &DeviceKeypair,
+    scope: Scope,
+    header: ReadyHeader,
+) -> Result<SignedObject, VoiceError> {
+    SignedObject::issue(
+        scope,
+        high,
+        [18; 32],
+        1000,
+        16_000,
+        Body::PairReady { header },
+    )
+}
+
+#[test]
+fn maximum_two_helper_ready_roundtrips_with_the_same_immutable_canonical_list() {
+    let (_, high, scope, mut header) = fixture();
+    header.helpers = vec![
+        DeviceKeypair::from_seed(&[3; 32]).device_id(),
+        DeviceKeypair::from_seed(&[4; 32]).device_id(),
+    ];
+    header.helpers.sort();
+    let object = issue(&high, scope, header.clone()).unwrap();
+    let decoded = SignedObject::decode(&object.encode()).unwrap();
+    assert_eq!(decoded.body(), &Body::PairReady { header });
+    assert_eq!(decoded.encode(), object.encode());
+}
+fn context(scope: Scope, local: DeviceId) -> Context {
+    Context {
+        scope,
+        local,
+        now: 2000,
+        epoch: 7,
+        indirect: true,
+    }
+}
+
+#[test]
+fn ready_roundtrips_as_closed_tag_five_and_never_exposes_encrypted_aad() {
+    let (low, high, scope, header) = fixture();
+    let object = issue(&high, scope, header).unwrap();
+    assert_eq!(object.body.kind(), 5);
+    assert_eq!(object.body.target(), Some(low.device_id()));
+    assert_eq!(SignedObject::decode(&object.encode()).unwrap(), object);
+    let envelope = Envelope::Direct(object.clone());
+    assert_eq!(
+        Envelope::decode(&envelope.encode()).unwrap().object(),
+        &object
+    );
+    assert_eq!(
+        envelope.authorize(high.device_id(), &context(scope, low.device_id()), |_| true),
+        Ok(Disposition::Deliver)
+    );
+    assert_eq!(object.aad(), Err(VoiceError::Malformed));
+    assert_eq!(format!("{:?}", object.body), "Body { .. }");
+    // Neither a signed wire object nor a live join can manufacture the private future Ready
+    // Source owner. Until that factory exists, ordinary joined activity refuses this body.
+    let key = JoinKey::new([11; 32], super::super::tests::key(1).public_key).unwrap();
+    let activity =
+        source::SourceActivity::joined(scope, high.device_id(), key, CallLease::default());
+    assert_eq!(activity.check(&object), Err(VoiceError::Unauthorized));
+}
+
+#[test]
+fn ready_rejects_wrong_direction_and_noncanonical_or_endpoint_helpers_before_signing() {
+    let (low, high, scope, header) = fixture();
+    let mut reversed = header.clone();
+    reversed.target = high.device_id();
+    assert_eq!(issue(&low, scope, reversed), Err(VoiceError::Malformed));
+    let a = DeviceKeypair::from_seed(&[3; 32]).device_id();
+    let b = DeviceKeypair::from_seed(&[4; 32]).device_id();
+    let mut helpers = [a, b];
+    helpers.sort();
+    for invalid in [
+        vec![helpers[1], helpers[0]],
+        vec![a, a],
+        vec![low.device_id()],
+        vec![high.device_id()],
+    ] {
+        let mut changed = header.clone();
+        changed.helpers = invalid;
+        assert_eq!(issue(&high, scope, changed), Err(VoiceError::Malformed));
+    }
+    let mut changed = header.clone();
+    changed.helpers = vec![a, b, a];
+    assert_eq!(issue(&high, scope, changed), Err(VoiceError::Bounds));
+    let mut direct = scope;
+    direct.policy = None;
+    let mut changed = header;
+    changed.helpers = vec![a];
+    assert_eq!(issue(&high, direct, changed), Err(VoiceError::Unauthorized));
+}
+
+#[test]
+fn exact_epoch_helpers_and_permitted_helper_route_are_independent_checks() {
+    let (low, high, scope, mut header) = fixture();
+    let helper = DeviceKeypair::from_seed(&[3; 32]).device_id();
+    let unrelated = DeviceKeypair::from_seed(&[4; 32]).device_id();
+    header.helpers = vec![helper];
+    let object = issue(&high, scope, header).unwrap();
+    let permit = RoutePermit::issue(&high, &object, helper, 1000, 16_000).unwrap();
+    let envelope = Envelope::HelperDelivery {
+        object: object.clone(),
+        permit,
+    };
+    let expected = context(scope, low.device_id());
+    assert_eq!(
+        envelope.authorize(helper, &expected, |_| true),
+        Ok(Disposition::Deliver)
+    );
+    for epoch in [6, 8, u64::MAX] {
+        let changed = Context { epoch, ..expected };
+        assert_eq!(
+            envelope.authorize(helper, &changed, |_| true),
+            Err(VoiceError::Unauthorized)
+        );
+    }
+    let direct_only = Context {
+        indirect: false,
+        ..expected
+    };
+    assert_eq!(
+        Envelope::Direct(object.clone()).authorize(high.device_id(), &direct_only, |_| true),
+        Err(VoiceError::Unauthorized)
+    );
+    assert_eq!(
+        Envelope::Direct(object.clone())
+            .authorize(high.device_id(), &expected, |member| member != helper),
+        Err(VoiceError::Unauthorized)
+    );
+    let changed = Envelope::HelperDelivery {
+        permit: RoutePermit::issue(&high, &object, unrelated, 1000, 16_000).unwrap(),
+        object,
+    };
+    assert_eq!(
+        changed.authorize(unrelated, &expected, |_| true),
+        Err(VoiceError::Unauthorized)
+    );
+}
+
+#[test]
+fn every_ready_field_and_helper_is_signed_and_decoder_bounds_count_before_allocation() {
+    let (_, high, scope, mut header) = fixture();
+    header.helpers = vec![DeviceKeypair::from_seed(&[3; 32]).device_id()];
+    let object = issue(&high, scope, header).unwrap();
+    let encoded = object.encode();
+    for offset in 0..encoded.len() {
+        let mut changed = encoded.clone();
+        changed[offset] ^= 1;
+        assert!(
+            SignedObject::decode(&changed).is_err(),
+            "accepted altered Ready byte{offset}"
+        );
+    }
+    let mut trailing = encoded;
+    trailing.push(0);
+    assert!(SignedObject::decode(&trailing).is_err());
+    let (_, _, _, header) = fixture();
+    let mut encoding = Encoder::new();
+    header.put(&mut encoding);
+    let mut bytes = encoding.finish();
+    *bytes.last_mut().unwrap() = 3; // count, with NO allocation/read of helper bytes allowed
+    assert_eq!(
+        ReadyHeader::get(&mut Decoder::new(&bytes)),
+        Err(VoiceError::Bounds)
+    );
+    // The existing signing domains/version and tags remain unchanged.
+    assert_eq!(OBJECT_DOMAIN, "mewtual/voice/object/v2");
+    assert_eq!(VERSION, 2);
+    assert_eq!(super::super::tests::announcement(&high, 1).body.kind(), 1);
+}

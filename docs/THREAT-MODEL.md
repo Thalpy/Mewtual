@@ -1,5 +1,14 @@
 # Threat model; client integrity & enforcement boundaries
 
+## Ready codec does not admit a pair (24 October)
+
+The new high-signed Ready header authenticates metadata, including exact epoch, original
+Finish identity/hash and immutable helper list. Helpers may acknowledge bounded forwarding
+custody, but both endpoint intake paths refuse Ready pending its exact protected admission.
+A generic public receipt must never stand in for that transition. Future native Ready Source
+must ignore endpoint transport ACKs as causal completion and require the authenticated exact
+low-issued Offer witness. The codec exposes no SDP/ICE plaintext, key or RTC capability.
+
 ## Successor capacity is not readiness (24 October; integration in progress)
 
 An original ConfirmationControl may extract its idle Crypto lane into an opaque affine
