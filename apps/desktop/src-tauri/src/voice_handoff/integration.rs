@@ -17,6 +17,30 @@ pub(crate) use confirmation::{
     confirmation_rejected_result, confirmation_round_trip,
 };
 
+/// Real application service/maintenance for post-authentication native adapter fixtures.
+/// A setup ACK alone does not start maintenance. One adoption nudge may return Capacity;
+/// the same production cadence must retry it rather than a fixture calling Ready APIs.
+pub(crate) struct NativeFixtureService(Option<service::RunningServer>);
+impl NativeFixtureService {
+    pub(crate) fn start(state: &AppState) -> Self {
+        let bound = service::BoundServer::bind_application(
+            state.voice_channels.clone(),
+            crate::voice_runtime(state),
+            service::Origin::PackagedHttp,
+            context::Context::new(state),
+        )
+        .unwrap();
+        Self(Some(bound.start().unwrap()))
+    }
+    pub(crate) async fn finish(mut self) {
+        let completion = self.0.take().unwrap().finish().await.unwrap();
+        assert!(
+            !completion.io_failed,
+            "actual fixture service stopped without IO failure"
+        );
+    }
+}
+
 pub(crate) async fn derivation(
     state: &AppState,
     selected: &Arc<SelectedHandoffOwner>,

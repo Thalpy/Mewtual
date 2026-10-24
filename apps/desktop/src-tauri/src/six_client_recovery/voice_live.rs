@@ -545,6 +545,18 @@ async fn confirmation_over_blocked_tcp(
             discovered[1].1
         ),
     );
+    // This post-authentication fixture used to have no HTTP Host. Native key adoption
+    // nudges once, but actual old-Lower drainage can require another paid Ready turn.
+    // Start the real service cadence; never manufacture Ready/CoreDrained in the test.
+    let services = if framed && !reject && !known_incoming {
+        Some([1, 2].map(|index| {
+            crate::voice_handoff::integration::NativeFixtureService::start(
+                &scenario.online(index).state,
+            )
+        }))
+    } else {
+        None
+    };
     if scenario.clients[1].identity.as_ref().unwrap().1
         < scenario.clients[2].identity.as_ref().unwrap().1
     {
@@ -667,6 +679,11 @@ async fn confirmation_over_blocked_tcp(
                 .is_none(),
             "dead original history collects only after its actual last row owner drops"
         );
+    }
+    if let Some(services) = services {
+        for service in services {
+            service.finish().await;
+        }
     }
     scenario.close(&[0, 1, 2]).await;
     scenario.rules.assert_graph();
