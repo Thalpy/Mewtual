@@ -1,5 +1,22 @@
 # Mewtual; Interfaces & Hooks Schema
 
+## Native SDP storage control (24 October; no SDK/RTC permission)
+
+Authenticated opcode 12 uses Control only and full original parent RowId in its Header.
+Request version 5 is: action serial(u64 BE), version(u64 BE), inputTag32, handshake32,
+original KeyClaim receipt32, positive round sequence(u64 BE), kind byte. Prepare kind 0
+ends there (122B total); Release kind 1 appends the original storage proof32 (154B).
+Current native admission accepts sequence 1 only. There is no renderer selector, peer, epoch,
+time, Ready ID or PC-generation authority in this storage-only request.
+
+A 170 B reply is version 5, state byte, parent RowId16, action serial/version/tag, handshake32,
+key receipt32, sequence u64 and storage proof32. State 0 = Preparing,1 = Funded,2 = Closing,3 = Drained.
+These are storage observations only. Exact recovery precedes current-UI checks; first intent
+and final arm both use native UI -> Coordinator -> Route -> try-Index/row admission. Release
+closes effects first, then an owned cleanup ticket retires capacity outside native guards.
+No SDK permission follows from Funded. Existing Input/Result Data limits remain2048B.
+Shared native/browser vectors live in voice_handoff/requests/sdp-vectors.json.
+
 ## Ready and SDP round wire forms (24 October; closed initial profile)
 
 `Body::PairReadyRound` has body tag6: the unchanged ReadyHeader, a positive big-endian u64 native round sequence, then one profile byte.

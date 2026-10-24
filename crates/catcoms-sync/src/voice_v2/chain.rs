@@ -26,6 +26,8 @@ const NO_ROW: u8 = u8::MAX;
 mod admission;
 mod derivation;
 mod established;
+/// Separately prepaid native SDP storage; no SDK or protocol permission by itself.
+pub mod sdp_handoff;
 pub use established::EstablishedKeyCustody;
 mod lifecycle;
 mod outgoing;

@@ -26,7 +26,9 @@ const ROW_BYTES: usize = 2304;
 mod children;
 mod continuation;
 mod key_session;
+mod sdp;
 pub(super) use key_session::KeySessionReceipt;
+pub(super) use sdp::Receipt as SdpReceipt;
 mod plan;
 mod projection;
 mod transition;
@@ -617,6 +619,12 @@ impl Ledger {
     fn root_retirement_ready(state: &State) -> bool {
         state.plan().is_none_or(Plan::root_drained)
             && state
+                .plan()
+                .and_then(|plan| plan.transition.as_ref())
+                .and_then(|claim| claim.key.as_ref())
+                .and_then(|key| key.sdp.as_ref())
+                .is_none_or(sdp::Claim::is_drained)
+            && state
                 .final_phase
                 .as_ref()
                 .is_none_or(|phase| phase.confirmation_status() == ConfirmationStatus::Drained)
@@ -663,6 +671,7 @@ impl Ledger {
     /// Pending (including a possibly published Root pair), Live and final-unready rows remain
     /// untouched. A later bounded collection hook observes Root readiness without a new wake.
     pub(super) fn collect_retired(&self) {
+        self.close_retired_sdp();
         let mut removed: [Option<Arc<Row>>; ROWS] = std::array::from_fn(|_| None);
         {
             let mut index = self.index.lock().unwrap_or_else(|error| error.into_inner());
@@ -785,6 +794,25 @@ impl Ledger {
     ) -> Result<ResolvedRow, VoiceError> {
         let row = self.row(id)?;
         if !row.key.matches(selected, purpose) {
+            return Err(VoiceError::Unauthorized);
+        }
+        Ok(ResolvedRow {
+            ledger: self.clone(),
+            row,
+        })
+    }
+    /// Resolve the authenticated full parent identity using its actual stored Derive
+    /// purpose. SDP controls cannot supply a second selector or redirect a child row.
+    pub(super) fn resolve_sdp_parent(
+        self: &Arc<Self>,
+        selected: &SelectedHandoffOwner,
+        id: RowId,
+    ) -> Result<ResolvedRow, VoiceError> {
+        let row = self.row(id)?;
+        if row.key.parent.is_some()
+            || !matches!(row.key.purpose, Purpose::Derive(_))
+            || !row.key.matches(selected, row.key.purpose)
+        {
             return Err(VoiceError::Unauthorized);
         }
         Ok(ResolvedRow {

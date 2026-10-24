@@ -6,6 +6,7 @@ use super::*;
 /// finite Finish custody does NOT renew it, authorize SDP, or keep confirmation work alive.
 /// The native adapter must attach one exact original-session release obligation before
 /// exposing a receipt, and must gate every later protocol/SDK effect independently.
+#[derive(Clone)]
 pub struct EstablishedKeyCustody {
     // The existing fixed PlanBinding payment covers its own allocation through last Drop.
     // No strong or weak reference here retains an Action, Workflow, Exchange or input.
@@ -44,5 +45,18 @@ impl transition::ConfirmationCustody {
         Ok(EstablishedKeyCustody {
             binding: binding.clone(),
         })
+    }
+}
+
+impl EstablishedKeyCustody {
+    /// Prepare inert native SDP storage for this actual original key allocation. Copied
+    /// peer/epoch labels cannot select another pool or construct this owner. The trusted
+    /// adapter must still bind Session/KeyClaim and admit it before exposing any effect.
+    pub fn prepare_sdp_handoff(&self) -> Result<Arc<super::sdp_handoff::Phase>, VoiceError> {
+        super::sdp_handoff::Phase::prepare(self.binding.clone())
+    }
+    /// Allocation identity, independent of equal serialized labels. This is not admission.
+    pub fn contains_sdp_handoff(&self, phase: &super::sdp_handoff::Phase) -> bool {
+        phase.belongs_to(&self.binding)
     }
 }

@@ -1,5 +1,20 @@
 # Threat model; client integrity & enforcement boundaries
 
+## Native SDP storage authority and cleanup (24 October)
+
+Equal peer/epoch labels cannot construct SDP storage custody: Root requires the actual
+EstablishedKeyCustody PlanBinding, and native admission binds original Session, full parent
+RowId/stored Derive purpose, action, handshake and KeyClaim proof. Preparing is inert; neither
+Funded nor historical recovery authorizes SDK, key use, packet publication or RTC effects.
+Original call/pair/epoch/whole-plan closure fences the paid observer irreversibly.
+
+The fixed preparation marker precedes allocation, preventing Release/GC from claiming drainage
+while a worker is still preparing. CloseTicket performs notifications/reserve return outside
+native guards on normal return and unwind; quiet collection resumes closed intents. Real copies
+remain charged until destruction. Before SDK admission, independent browser-SDK obligations
+must gate normal finalization AND orphan GC: HTTP Session collection is not proof that a live
+RTC promise drained. That SDK enforcement and full SDP/RTC path remain unimplemented.
+
 ## Authenticated SDP round/profile isolation (24 October)
 
 A delayed authenticated offer must not enter a replacement native receive promise. Protected

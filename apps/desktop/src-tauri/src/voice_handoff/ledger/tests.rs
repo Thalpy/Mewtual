@@ -128,7 +128,7 @@ fn complete_records_index_handles_and_one_worker_fit_existing_fixed_payments() {
         + std::mem::size_of::<Observation>()
         // Pending preparation and a fully compacted plan can never close concurrently on
         // the SAME row. Cover the larger actual closure ticket in this paid position.
-        + std::mem::size_of::<PendingRetirement>().max(plan::RETIREMENT_MEMORY_BYTES)
+        + std::mem::size_of::<PendingRetirement>().max(plan::RETIREMENT_MEMORY_BYTES).max(std::mem::size_of::<sdp::Preparation>())
         + std::mem::size_of::<ClosePending>()
         + std::mem::size_of::<Option<Arc<Row>>>() // fixed collector's one removed-slot owner
         + std::mem::size_of_val(&waiter)

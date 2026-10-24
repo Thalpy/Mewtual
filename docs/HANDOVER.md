@@ -1,5 +1,43 @@
 # Mewtual; Handover
 
+## SDP handoff storage admission (24 October; integration remains open)
+
+The original native KeyClaim now admits a separately paid 64KiB SDP storage phase through
+closed opcode 12/version 5. It resolves the authenticated full parent RowId and actual stored
+Derive purpose, then binds the original Session/action/handshake/key receipt and sequence 1.
+A small fixed Preparing intent is published before the reservation; real preparation and
+buffer owners block both normal finalization and orphan GC until actual destruction.
+
+Root prepares capacity only from the actual EstablishedKeyCustody PlanBinding, deriving its
+original pool/scope and observing original call/pair/epoch/whole-plan closure. Its independently
+paid fixed observer survives Phase destruction without retaining Phase/Workflow/native Row.
+Preparing is inert, closing is irreversible, and close returns only unused capacity. Copy
+credits remain charged until actual buffer destruction. Affine close tickets finish cleanup
+outside native guards, including unwind; quiet maintenance also resumes closed intents.
+
+Native/browser shared vectors pin 122/154-byte requests and 170-byte replies, full u64 counters
+and all four storage states. Existing 2048-byte Data and 12 KiB Control limits are unchanged.
+Funded storage is not Ready, an SDP action, SDK/PC admission or RTC delivery permission.
+
+Before operational use, extract/prepay the core 192 KiB + Ready 32 KiB and drain actual old 96 KiB
+work BEFORE acquiring this 64 KiB sidecar. Paying the sidecar first can prevent the 224 KiB
+preparation needed to return old progress. The current storage tests do not establish that
+whole composition. Browser 64 KiB SDK storage, independent SDK drainage in normal AND orphan
+cleanup, typed SDP seal/open/private delivery, complete ICE/RTC, repeated rounds/compaction,
+multi-peer scheduling, member relay and combined acceptance still need implementation.
+Physical two-device/network acceptance remains unavailable with the single desktop.
+
+Focused validation for this storage checkpoint:672 Root voice tests (all features),376 native
+voice tests (including11 real TCP/HTTP/Node scenarios), and564 browser voice tests passed.
+Strict catcoms-sync all-target/all-feature Clippy, native all-target Clippy, explicit native
+check, both formatting checks, the ambient-dependency gate, Svelte checks (zero errors/warnings)
+and frontend production build passed. Read-only adversarial review found no remaining B/H/M;
+its cleanup-unwind and fixed receipt graph findings were fixed and regressions passed.
+Full root/native/frontend suites plus startup/flow gates remain pending final integration.
+The previously recorded dependency advisory remains a separate release gate; no new cargo-deny
+pass is claimed. This checkpoint does not enable the V2 call switch or establish RTC/audio.
+
+
 ## Native SDP round/profile admission (24 October; live integration still open)
 
 New Ready body6 explicitly selects CompleteSdpV1 and signs a positive u64 round number.

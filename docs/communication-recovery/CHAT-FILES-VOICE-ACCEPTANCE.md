@@ -1,5 +1,19 @@
 # Chat, files and voice implementation evidence
 
+## 24 October: original-key SDP storage checkpoint
+
+Opcode12/version5 now admits and recovers a native64KiB storage phase on the exact original
+KeyClaim/Session/parent action. Preparing is tracked before allocation; release/unwind and
+quiet collection return unused bytes while real copies remain paid. Normal finalization and
+orphan GC wait for actual preparation/copy drainage. Shared native/browser vectors and fixed
+row/Control/service ownership guards pass. HANDOVER records672 focused Root,376 native and564
+browser voice passes plus checks/build/lints. Full combined suites remain pending integration.
+
+This is storage acceptance only. Operational Ready scheduling, browser SDK custody, typed
+SDP/RTC effects and fresh delivery, repeated rounds/compaction, multi-peer composition, member
+media relay and combined/physical acceptance remain open. Paying core192KiB+Ready32KiB and
+returning old96KiB before the native64KiB sidecar is still a required composition check.
+
 ## Current round-profile checkpoint (24 October; integration incomplete)
 
 Protected native Ready now uses explicit body6/profile1; Offer8/Answer9 echo its original native

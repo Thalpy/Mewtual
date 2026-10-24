@@ -7,9 +7,10 @@ use catcoms_sync::voice_v2::crypto_actions::EstablishedKeyCustody;
 use sha2::{Digest, Sha256};
 
 pub(super) struct KeyClaim {
-    custody: EstablishedKeyCustody,
-    receipt: [u8; 32],
-    released: bool,
+    pub(super) custody: EstablishedKeyCustody,
+    pub(super) receipt: [u8; 32],
+    pub(super) released: bool,
+    pub(super) sdp: Option<super::sdp::Claim>,
 }
 pub(in crate::voice_handoff) struct KeySessionReceipt {
     pub row: RowId,
@@ -25,7 +26,10 @@ pub(in crate::voice_handoff) struct KeySessionReceipt {
 }
 impl Claim {
     pub(super) fn all_released(&self) -> bool {
-        self.released && self.key.as_ref().is_none_or(|key| key.released)
+        self.released
+            && self.key.as_ref().is_none_or(|key| {
+                key.released && key.sdp.as_ref().is_none_or(super::sdp::Claim::is_drained)
+            })
     }
     fn key_snapshot(
         &self,
@@ -182,6 +186,7 @@ impl ResolvedRow {
             custody,
             receipt: hash.finalize().into(),
             released: false,
+            sdp: None,
         });
         let receipt = claim
             .key_snapshot(self.row.id, action, handshake)
@@ -199,26 +204,42 @@ impl ResolvedRow {
         claim_proof: [u8; 32],
         proof: [u8; 32],
     ) -> Result<KeySessionReceipt, VoiceError> {
-        let _index = self.transition_index()?;
-        let mut state = try_lock(&self.row.state)?;
-        if self.row.key.parent.is_some() || !action_matches(&state, action) {
-            return Err(VoiceError::Unauthorized);
-        }
-        let plan = state.plan_mut().ok_or(VoiceError::Unauthorized)?;
-        if plan.identity.handshake() != handshake {
-            return Err(VoiceError::Unauthorized);
-        }
-        let claim = plan.transition.as_mut().ok_or(VoiceError::Unauthorized)?;
-        if !Arc::ptr_eq(&claim.session, session) || claim.receipt != claim_proof {
-            return Err(VoiceError::Unauthorized);
-        }
-        let key = claim.key.as_mut().ok_or(VoiceError::Unauthorized)?;
-        if key.receipt != proof {
-            return Err(VoiceError::Unauthorized);
-        }
-        key.released = true;
-        Ok(claim
-            .key_snapshot(self.row.id, action, handshake)
-            .expect("original released key claim"))
+        let (receipt, close) = {
+            let _index = self.transition_index()?;
+            let mut state = try_lock(&self.row.state)?;
+            if self.row.key.parent.is_some() || !action_matches(&state, action) {
+                return Err(VoiceError::Unauthorized);
+            }
+            let plan = state.plan_mut().ok_or(VoiceError::Unauthorized)?;
+            if plan.identity.handshake() != handshake {
+                return Err(VoiceError::Unauthorized);
+            }
+            let claim = plan.transition.as_mut().ok_or(VoiceError::Unauthorized)?;
+            if !Arc::ptr_eq(&claim.session, session) || claim.receipt != claim_proof {
+                return Err(VoiceError::Unauthorized);
+            }
+            let key = claim.key.as_mut().ok_or(VoiceError::Unauthorized)?;
+            if key.receipt != proof {
+                return Err(VoiceError::Unauthorized);
+            }
+            key.released = true;
+            let receipt = claim
+                .key_snapshot(self.row.id, action, handshake)
+                .expect("original released key claim");
+            // Construct the affine cleanup ticket only in this final infallible tail. It
+            // moves out before native guards drop; no destructor/notification runs inside.
+            (
+                receipt,
+                claim
+                    .key
+                    .as_mut()
+                    .unwrap()
+                    .sdp
+                    .as_mut()
+                    .and_then(super::sdp::Claim::request_close),
+            )
+        };
+        drop(close);
+        Ok(receipt)
     }
 }

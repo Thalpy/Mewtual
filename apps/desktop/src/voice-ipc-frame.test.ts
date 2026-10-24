@@ -52,7 +52,7 @@ for (const vector of vectors.cases) test(`Rust / real WebCrypto fixed frame vect
 });
 
 test("closed direction / operation / body matrix accepts only the native classes at exact bounds", () => {
-  for (const direction of [0, 1] as VoiceIpcDirection[]) for (let operation = 1; operation <= 11; operation++) {
+  for (const direction of [0, 1] as VoiceIpcDirection[]) for (let operation = 1; operation <= 12; operation++) {
     for (const kind of [0, 1] as VoiceIpcBodyKind[]) {
       const header = { ...base, direction, operation: operation as VoiceIpcOperation, kind };
       const data = (direction === 0 && operation === 3) || (direction === 1 && operation === 1);

@@ -29,6 +29,7 @@ impl<'a> Request<'a> {
                 | Operation::FinalAck
                 | Operation::ChainTransition
                 | Operation::KeySession
+                | Operation::SdpPhase
         ) || body_kind
             != if operation == Operation::Result {
                 BodyKind::Data

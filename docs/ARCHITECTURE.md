@@ -1,5 +1,16 @@
 # Mewtual; Architecture
 
+## Native SDP storage (24 October; operational consumers pending)
+
+EstablishedKeyCustody now prepares a separate 64KiB storage phase from its actual Root
+PlanBinding. A paid fixed observer has no Phase/Workflow/Row backedge. Native KeyClaim tracks
+Preparing before allocation; real preparation/copy owners gate normal finalization and orphan
+GC. Atomic closure precedes guard-free affine cleanup. Unused bytes return on close; actual
+buffers retain their loans through destruction. Native opcode 12/version 5 exposes storage
+observations only; SDP actions, SDK admission and RTC delivery remain separate unfinished work.
+Core 192 KiB + Ready 32 KiB extraction and actual old 96 KiB drainage must precede this 64 KiB sidecar.
+HANDOVER and VOICE-NATIVE-RESULTS-NEXT record the composition and remaining integration.
+
 ## Closed complete-SDP round grammar (24 October; runtime activation pending)
 
 Protected preparation now irreversibly selects CompleteSdpV1 in the native pair before

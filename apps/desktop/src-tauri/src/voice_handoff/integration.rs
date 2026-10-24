@@ -8,6 +8,7 @@ use sha2::{Digest, Sha256};
 use std::sync::Arc;
 mod confirmation;
 mod key_session;
+mod sdp;
 mod transition;
 pub(crate) mod webcrypto;
 pub(crate) use confirmation::{

@@ -130,6 +130,15 @@ pub(super) async fn custody_cycle(
     assert!(u32::from_be_bytes(first[178..182].try_into().unwrap()) > 0);
     let receipt: [u8; 32] = first[182..214].try_into().unwrap();
     let key_proof = super::key_session::adopt(state, &public, &route, parent, receipt).await;
+    super::sdp::exercise(
+        state,
+        &public,
+        &route,
+        parent,
+        key_proof,
+        !end_before_recovery,
+    )
+    .await;
     assert!(
         matches!(parent.retire_plan(), Err(VoiceError::Capacity)),
         "browser key custody must precede normal whole-plan retirement"
