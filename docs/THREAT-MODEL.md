@@ -42,13 +42,30 @@ leaf as a successful process (`OwnPrivateMessage` / `OwnPendingCommit`) where 0.
 an echo of our own message, and also a forgery from any member who writes our leaf index into
 the encrypted sender data. `ServerGroup::process_incoming` refuses both, as 0.8 did. Without that
 refusal, the sync layer would record an unmerged or forged commit as applied while the epoch stayed
-put. `group/own_echo_tests.rs` pins this.
+put. Two tests in `group/own_echo_tests.rs` fail without the refusal. The match now names every
+variant, so an openmls upgrade that adds one fails to compile instead of degrading to "processed".
 
 **Stored state.** State written by openmls 0.8.1 restores and works under 0.9.2: groups, signer,
 PendingCommits (merge and abort), Welcomes and KeyPackage material. Frozen fixtures
-(`persist/compat_tests.rs`) pin this. The reverse is not true: a group created **or joined** under
-0.9.2 does not load in 0.8.x (`MlsGroupJoinConfig` changed shape). Downgrading a build below this
-change therefore strands those servers until a rejoin. Older servers still load.
+(`persist/compat_tests.rs`) pin this. Their leaves never expire, so wall-clock time cannot fail
+them. The reverse is not true: a group created **or joined** under 0.9.2 does not load in 0.8.x
+(`MlsGroupJoinConfig` changed shape).
+
+Downgrading a build below this change is therefore not just an inconvenience:
+
+- the older build skips each such server at unlock;
+- its next registry write (join, leave, rename, backup) rebuilds the registry from the servers it
+  loaded, which drops those records;
+- a later server can then reuse an orphaned id and overwrite its snapshot.
+
+Reinstalling the newer build recovers them only if the older build changed nothing. Testers must
+not downgrade. Servers that existed before the upgrade still load in either build. Keeping
+unrestorable records, and not reusing their ids, is an app follow-up.
+
+**Ambient time in snapshots.** openmls 0.9 stamps each epoch's `MessageSecrets` with
+`SystemTime::now()`, so sealed snapshots and backups now record the local wall-clock time of epoch
+changes. Nothing reads it under the default past-epoch policy (`MaxEpochs(0)`). Like openmls's own
+RNG use, this sits outside the catcoms-rt seams, and the ambient gate does not scan dependencies.
 
 ## Switchable V2 voice transport and pinned call mode (22 October, branch only)
 

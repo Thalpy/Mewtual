@@ -19,7 +19,17 @@ findings it already had, minus tokio. Details, compatibility results and the exi
 in `docs/design-crypto-bigint-upgrade.md` and the THREAT-MODEL section of the same date.
 
 Known limitation: a group created or joined under openmls 0.9.2 does not load in older alphas.
-Downgrading a tester's build strands those servers until a rejoin.
+Testers must not downgrade. The older build skips those servers, and its next registry write
+drops their records, after which their ids can be reused. Reinstalling the newer build recovers
+them only if the older build changed nothing (THREAT-MODEL, 24 October).
+
+Pre-existing, found in review, not fixed here: any member's KeyPackage leaf expires after
+openmls's default 84 days. Nothing in `crates/` ever self-updates a leaf, so once any leaf in a
+group is that old, every new Welcome join to that group fails with `Lifetime(Expired)`. openmls
+0.8 behaves the same, so alpha groups may already be affected. A second pre-existing issue:
+`catcoms-sync` `apply_commit_in_order` records any `Ok` from `process_incoming` as an applied
+commit, including application messages, so an authorized committer can put a non-commit into
+the commit log. Both need their own follow-ups.
 
 Focused checks for each step are listed in the commit messages. The complete root, native and
 frontend suites have not yet been run on the final commit.

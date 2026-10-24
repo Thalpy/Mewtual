@@ -353,6 +353,13 @@ not fix the Linux failure. No live V2/media/combined acceptance follows.
 
 ### Newly reachable native ECDH source review
 
+> Superseded version note (24 October): the native edge is now `p256 =0.14.0`
+> (crypto-bigint 0.7.7, RUSTSEC-2026-0387), and multiplication is primeorder 0.14's 8-point
+> lookup table. Wire format and derivation are unchanged and still match the shared vectors. The
+> review below names the 0.13.2 sources it read. Its conclusions about audit status, zeroization
+> limits and authentication still apply. The current boundary is in THREAT-MODEL "Crypto dependency
+> boundary" and `docs/design-crypto-bigint-upgrade.md`.
+
 The direct pinned `p256=0.13.2` ECDH edge adds only that dependency to the native package's
 lock entry; no resolved version changed. `default-features=false` limits this edge's request,
 not features unified by other dependants. This is a new secret-arithmetic consumer, not

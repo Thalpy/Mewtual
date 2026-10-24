@@ -201,6 +201,15 @@ What a remote peer can drive is public-key work: `MlsDevice::parse_key_package` 
 foreign P-256 KeyPackage's ECDSA signature against the peer's own key. Its timing reveals nothing
 secret. `hpke-rs-rust-crypto` never selects `k256` or `p384` for any suite we accept.
 
+Re-checked on openmls 0.9.2 (the version the update PR pins), with the same order:
+
+* `commit_builder.rs`: ValSem105 at `:757` runs before the update path (`:868`/`:879`) and before
+  the Welcome seals (`:1091`). The check itself is in `validation.rs:372-386`.
+* `creation.rs`: `supports()` at `:148-152`, then `keys_for_welcome`, then the
+  `CiphersuiteMismatch` check at `:165-171`, all before the HPKE open at `:174`.
+
+`group/suite_refusal_tests.rs` exercises both refusals.
+
 This argument holds **only while** `config.rs` pins one X25519/Ed25519 suite and the openmls
 version keeps those checks. Section 8 turns that into review triggers and bans.
 
@@ -313,7 +322,9 @@ API changes:
     existing unwinding-RNG test (`voice_handoff/bootstrap/tests.rs:418`) shows that the panic closes
     the ticket.
   * The adapter must never seed a second RNG, and must never call `Generate::generate()`, which
-    uses `SysRng` when `crypto-common`'s `getrandom` feature is on.
+    uses `SysRng` when `crypto-common`'s `getrandom` feature is on. (Implemented note: after the
+    openmls 0.9 step that feature *is* on in both workspaces, through `ml-dsa`, so those OS-RNG
+    constructors are compiled and callable. `check-no-ambient.sh` refuses their spellings.)
 * `elliptic_curve::sec1::ToEncodedPoint` is deprecated; use `ToSec1Point::to_sec1_point(false)`.
 * These keep their shape: `PublicKey::from_sec1_bytes`, `SecretKey::from_slice`,
   `to_nonzero_scalar`, `as_affine`, `ecdh::diffie_hellman` and `SharedSecret::raw_secret_bytes`.
@@ -425,10 +436,27 @@ encryption-key entries.
 * (iv) **The production staged shapes survive restore under 0.9.2: pass.** The fixtures cover
   `stage_add` and `stage_remove`, each snapshotted while pending, then both merged and aborted
   (`clear_pending_commit`).
+* **Mixed versions in a group founded under 0.9.2: pass** (measured by the review's scratch
+  probes). A 0.8.1 member joins from the 0.9.2 founder's Welcome and reads its application message
+  and commit. Its own message and self-update are accepted back.
+
+The fixture leaves never expire (`Lifetime::init(0, u64::MAX)`). openmls checks leaf lifetimes
+against the wall clock on Welcome joins and processed Adds, so the production 84-day default
+would have failed the frozen files on 2027-01-16; a regression test now asserts that no leaf
+expires before 2100.
 
 Consequence for testers: upgrading is safe. **Downgrading** a build to an alpha older than this PR
-breaks every server created or joined after the upgrade: the restore fails, and the server needs
-a rejoin. Servers that existed before the upgrade still restore.
+is unsafe for every server created or joined after the upgrade:
+
+- the restore fails, and the app skips the server;
+- the old build's next registry write (join, leave, rename, backup) rebuilds the registry from
+  the servers it loaded, so the records are dropped;
+- a later server can reuse an orphaned id and overwrite its snapshot.
+
+Servers that existed before the upgrade still restore. Testers must not downgrade. Keeping
+unrestorable records is an app follow-up.
+
+Not covered: an inactive (self-removed) group snapshot.
 
 **Behaviour change found and neutralised.** For a message attributed to this device's own leaf,
 openmls 0.9 returns `OwnPrivateMessage` / `OwnPendingCommit` as a successful process, where 0.8
@@ -436,8 +464,12 @@ returned an error. That includes a forged PrivateMessage whose encrypted sender 
 our leaf, which any member can write. `ServerGroup::process_incoming` mapped unknown content to
 `Incoming::Other`, and catcoms-sync's `apply_commit_in_order` records a commit as applied on any
 `Ok`. So an echoed or forged commit would have been recorded as applied while the epoch stayed
-put. `process_incoming` now refuses both variants, as 0.8 did (`group/own_echo_tests.rs`; the tests
-fail without the guard).
+put. `process_incoming` now refuses both variants, as 0.8 did (`group/own_echo_tests.rs`: two of
+its three tests fail without the guard; the third, a post-merge echo, is refused earlier as a
+past-epoch message). The match now names every variant, so a new openmls variant is a compile
+error rather than a silent `Other`. openmls 0.9 also stamps each epoch's `MessageSecrets` with
+`SystemTime::now()`, an ambient time read that lands in sealed snapshots (unused under
+`MaxEpochs(0)`; recorded in THREAT-MODEL).
 
 Still not covered: states with many past epochs (`MessageSecretsStore` reordering on read, #2197
 on main) and openmls releases after 0.9.2 (`Capabilities` defaults change in #2205 on main, and
