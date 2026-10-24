@@ -1,5 +1,21 @@
 # Mewtual; Handover
 
+## Process maintenance admission (24 October; native recovery rerun next)
+
+Member maintenance now retains one FIFO semaphore acquisition per Actor across cancelled
+select turns. A queued actor holds no local flight, signed context, request or peer authority;
+fresh Root preparation still follows an actual grant. Empty, locally saturated or entirely
+lower-busy queues release unused grants, including assigned but unobserved ones. Actual
+Flight/Lower retirement still controls the original two/server and four/process limits.
+
+All18 focused maintenance tests pass, including eight competing actors, repeated observer
+cancellation, real delayed Lower release and a semaphore-only wake after abandoned admission.
+Root strict all-target/all-feature Clippy passes. Read-only adversarial review found no
+blocker/high/medium. This establishes FIFO admission after registration, not a wall-time
+progress guarantee or completed cross-group acceptance. The earlier complete native run
+remains771 passed/17 failed; rerun its recovery scenarios with this correction before
+attributing those failures or claiming a green gate. SDP/RTC and relay remain unfinished.
+
 ## Causal Ready wire continuation (24 October; native admission still closed)
 
 Closed Body tag5 now carries high-to-low Ready metadata: exact protected epoch, endpoint
@@ -19,10 +35,11 @@ Full validation at the earlier75e15199 checkpoint finished: Root3,325 passed, ze
 not run. Sixteen failures are the same initial authenticated route-capture wait before any
 chat/voice scenario assertions, under at least17 concurrent six-client fixtures. Their
 ServerActors share the process-wide four-flight member-maintenance pool; its opportunistic
-admission has no FIFO turn. This is a fairness/interference mechanism, not proof of16 new
+admission had no FIFO turn. This is a fairness/interference mechanism, not proof of16 new
 chat/V2 defects. The separate active-download failure reached post-restart recovery and
 needs its own current finalization/transfer-state observations. Preserve that failed run;
-do not raise deadlines or claim a green native gate. Fair maintenance admission is next.
+do not raise deadlines or claim a green native gate. FIFO admission is now implemented above;
+its effect on the native scenarios still needs measurement.
 
 ## SDP capacity transfer continuation (24 October; integration in progress)
 

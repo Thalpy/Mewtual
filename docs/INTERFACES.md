@@ -1086,7 +1086,11 @@ disconnection from unsupported legacy transport seams; only the latter retain ev
 The product actor queues each stage without awaiting its network response. Sixteen bounded peer
 chains, four waiters/chain, two lower flights/server and four/process are retained through actual
 lower release. Discovery coalesced onto explicit finalization survives waiter cancellation; later
-explicit callers receive a fresh exchange rather than a cached success. Original async sync-owner
+explicit callers receive a fresh exchange rather than a cached success. Admission retains one
+FIFO process acquisition per Actor across cancelled select observations.
+No local flight, signed context or request is held while queued; preparation follows the actual
+grant. Empty, locally saturated or wholly lower-busy queues release unused admission, including
+assigned but unobserved grants. Actual Lower ownership remains independent. Original async sync-owner
 wrappers and released kind 2/4/12/26 grammars remain available. Commits uses the existing current-
 epoch request and exact request-bound response, with unchanged unbound signer evidence; kind26
 remains the separate endpoint-bound exchange. Commit responses retain the existing 16 MiB byte

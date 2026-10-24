@@ -1212,6 +1212,12 @@ confirmation evidence; local queue/ACK observations cannot do so.
 ## Detached discovery boundary (2026-10-18)
 
 Connected maintenance holds no mutable MLS/store owner while waiting on peers. Driver authority
+is prepared only after a real process grant. One FIFO semaphore acquisition per Actor survives
+cancelled select observations, preventing already-busy actors from repeatedly taking a cold
+actor's registered turn. Waiting holds no local flight, signed context or request. Unused
+admission is released when no local work is eligible; actual Lower custody is never refunded.
+Progress still depends on Actor polling and actual lower retirement; this is not a wall-time
+guarantee or proof of fairness for other shared resource pools. Driver authority
 and fresh actor completion reject old root, membership epoch, effective policy, known descriptor
 replacement and disconnect/reconnect results before positive evidence or empty-offer deletion.
 The first authenticated descriptor can be pinned while reciprocal finalization is outstanding;
