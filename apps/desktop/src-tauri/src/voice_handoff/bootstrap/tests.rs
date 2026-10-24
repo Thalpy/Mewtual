@@ -394,24 +394,31 @@ async fn end_and_atomic_lock_registration_during_rng_each_refuse_final_publicati
 
 #[tokio::test]
 async fn malformed_curve_point_fails_before_rng_and_leaves_closed_counted_fence() {
-    let f = Fixture::new().await;
-    let mut invalid = [0; 65];
-    invalid[0] = 4;
-    let (owner, selected) = select(&f, invalid).await;
-    let mut rng = Rng::new();
-    assert!(matches!(
-        ensure(&f.state, &owner, [9; 32], &mut rng).await,
-        Err(Refused::Binding)
-    ));
-    assert_eq!(rng.draws, 0);
-    assert_eq!(selected.resources().counts().1, 0);
-    assert!(matches!(
-        ensure(&f.state, &owner, [9; 32], &mut rng).await.unwrap(),
-        Status::Closed {
-            native_setup_drained: true
-        }
-    ));
-    f.close().await;
+    // The all-zero encoding, and the generator with its y coordinate changed (a valid 0x04
+    // structure that is not on the curve). Both must be refused by the actual curve check before
+    // any scalar is drawn.
+    let mut zero = [0; 65];
+    zero[0] = 4;
+    let mut off_curve = point();
+    off_curve[64] ^= 1;
+    for invalid in [zero, off_curve] {
+        let f = Fixture::new().await;
+        let (owner, selected) = select(&f, invalid).await;
+        let mut rng = Rng::new();
+        assert!(matches!(
+            ensure(&f.state, &owner, [9; 32], &mut rng).await,
+            Err(Refused::Binding)
+        ));
+        assert_eq!(rng.draws, 0);
+        assert_eq!(selected.resources().counts().1, 0);
+        assert!(matches!(
+            ensure(&f.state, &owner, [9; 32], &mut rng).await.unwrap(),
+            Status::Closed {
+                native_setup_drained: true
+            }
+        ));
+        f.close().await;
+    }
 }
 
 #[tokio::test]

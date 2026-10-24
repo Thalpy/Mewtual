@@ -30,8 +30,14 @@ hmac = "=0.12.1"
 sha2 = "=0.10.9"
 # Newly reachable secret local-channel ECDH, not just an already-transitive public-key parser.
 # The bootstrap source review records arithmetic/zeroization limits. This edge requests only
-# ECDH; other dependants may unify further p256 features in the resolved native graph.
-p256 = { version = "=0.13.2", default-features = false, features = ["ecdh"] }
+# ECDH. 0.14 is required, not cosmetic: it moves the native secret scalar onto crypto-bigint
+# >= 0.7.6 (RUSTSEC-2026-0387). p256 0.13 stays in the graph for openmls only, where no secret
+# reaches it (docs/design-crypto-bigint-upgrade.md). Keep `default-features = false`: nothing else depends on
+# p256 0.14 here, so `precomputed-tables` stays off and the bootstrap layout guard stays valid.
+p256 = { version = "=0.14.0", default-features = false, features = ["ecdh"] }
+# p256 0.14 takes rand_core 0.10 RNGs; catcoms-rt's seam is rand_core 0.6. Only the trait bridge
+# in voice_handoff/channel/bootstrap.rs uses this. Already in this lockfile.
+rand_core_0_10 = { package = "rand_core", version = "=0.10.1", default-features = false }
 async-trait = "0.1"
 bytes = "1"
 tauri = { version = "2", features = [] }
