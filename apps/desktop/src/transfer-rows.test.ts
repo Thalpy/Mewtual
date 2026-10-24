@@ -168,10 +168,16 @@ test("each state has its one-line explanation, plain and without separators", ()
   // Each explanation names a button that the row actually offers.
   for (const [status, check] of cases) {
     const v = view(status, check);
-    for (const named of ["Resume download", "Resume saving", "Retry download", "Try again", "Save new copy", "Save again", "Remove", "Keep partly saved file"]) {
+    for (const named of ["Resume download", "Resume saving", "Retry download", "Try again", "Save new copy", "Save again", "Remove", "Keep partly saved file", "Keep the file"]) {
       if (v.why?.includes(named)) assert.ok(v.actions.some((a) => a.label === named), `${status}: ${named}`);
     }
   }
+  // Fix-the-lows round: a stuck Clear of a saved row (every part written) keeps a complete file,
+  // and its sentence names the row's own Keep button.
+  const stuckClear = view("removing", null, { savedChunks: 40, totalChunks: 40 });
+  assert.match(stuckClear.why!, /or Keep the file\.$/);
+  assert.ok(stuckClear.actions.some((a) => a.label === "Keep the file"));
+  assert.match(view("removing").why!, /or Keep partly saved file\.$/);
 });
 
 test("saved rows say where the file went without naming a folder native did not prove", () => {

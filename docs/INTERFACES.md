@@ -574,7 +574,11 @@ Renderer commands (no new command names):
   itself (at most one at a time, starting in Downloads or at the OS default when none resolves),
   validates the result and remembers the choice in the sealed record; the command's parameter
   list is pinned by a test so no path, folder or destination parameter can be added. A Save as on
-  a file whose saved record already has a journal is refused before anything is resumed.
+  a file whose saved record already has a journal is refused before anything is resumed. A start
+  that names no record (no `resume`: the chat's one-click Download from a stale list) is refused
+  with "This file is being saved right now. Its progress is in Transfers." while that file's
+  journaled save is running (`ExportView::Writing { active: true }`), instead of resuming the
+  record and interrupting the save (fix-the-lows round); an interrupted save still resumes.
   Closing the dialog returns exactly "Save as was cancelled." with nothing started. A plain
   Resume first runs a destination preflight (before any allowance is spent on re-verification);
   it may return a verified saved result directly when the file was already published before a
@@ -587,7 +591,10 @@ Renderer commands (no new command names):
   removal is two-step (durable Deleting, native removal of only the proven partial, then release).
   `keepPartial` releases the record and leaves the file. The returned notice says when a file of
   the save stays on disk. Busy while another removal or Save new copy of the same Download is
-  running. A failed proven removal leaves the row in `removing`.
+  running. A failed proven removal leaves the row in `removing`. Its error and Keep's "already
+  gone" notice have a saved-row form (a Clear of a published save removes only a temporary copy of
+  the saved file) and name only "Keep": the renderer labels Keep "Keep the file" when the row's
+  `savedChunks` equals `totalChunks`, else "Keep partly saved file" (fix-the-lows round).
 - `get_private_downloads` rows add `savedChunks` (journal checkpoint), `chosenPlace` (boolean) and
   the statuses `saving`, `save-interrupted`, `save-paused`, `destination-unavailable`,
   `destination-changed` and `saved`. Rows never carry a path, file name or file identity.
@@ -603,12 +610,20 @@ Renderer commands (no new command names):
   main window only): the same fenced, bounded, read-only identity check as `check_saved_download`
   (check slot, 3 s sanctioned-clock wait, same revision and Saved journal before and after, UI
   session and server entry unchanged), then the system file manager shows the saved file selected
-  (Windows `explorer /select`, macOS `open -R`, other Unix the folder through `xdg-open`). It never
+  (Windows `explorer /select,"<path>"` passed raw so a comma cannot split it, macOS `open -R`,
+  other Unix the folder through `xdg-open` with a trailing `/`; native `reveal_command` builds
+  each form, refuses a Windows path with `"`, and on that other Unix a path with no parent
+  folder). It never
   opens or runs the file and never returns its path. Refusals are fixed sentences: missing ("The
   saved file is no longer there."), replaced ("Another file is at the saved name now, so Mewtual
   did not show it."), could not check, could not open the folder, or the stale-download text.
   Storage: `saved_file_path(&ExportJournal) -> Result<PathBuf, SavedPresence>` and
   `ExportJournal::is_in_folder(&Path)`, both native-only.
+- Renderer (fix-the-lows round): `privateDownloadChatLabel(row)` labels the plain save item (file
+  and embed menus, image viewer, file pane) "Save to chosen place" while the file's listed row
+  remembers a Save as choice that item would use, else "Download". Clear of a Saved row runs
+  `check_saved_download` again before it skips the confirmation (the button is `aria-busy` while
+  it runs), and asks unless the answer is `present`.
 
 Rust interfaces:
 
@@ -622,7 +637,12 @@ Rust interfaces:
   Every creation with a captured folder identity re-reads it after creating its partial and
   refuses a swapped folder; creation also requires the partial's name to hold the new partial (a
   read-only check made with the identity recheck through one held folder handle on both
-  platforms, whose failure is the same refusal as a changed folder).
+  platforms). Another folder or object there, or a path leading to no folder, is the
+  changed-folder refusal; a check that could not be made is `ExportError::Local` ("the new file in
+  that folder could not be checked (<system reason>)"), never `Unsupported` (fix-the-lows round,
+  re-review LOW-C).
+  The held folder is kept through creation, and on Windows a refused creation removes its empty
+  partial relative to it (`HeldFolder::remove_session`, re-review LOW-a).
 - The non-resumable fallback writer (native `stream_download_staged`, used when a fresh save
   cannot be journaled) also runs its staging, writes, sync, cleanup and publication link on the
   blocking pool, and `SaveSource::liveness` is rechecked when each queued staging or write worker

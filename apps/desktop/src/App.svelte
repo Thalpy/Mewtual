@@ -96,7 +96,7 @@
   import {
     completedDownload, downloadSavedNotice, guideSavedNotice, isSaveAsCancelled, saveGroupFile, resumeGroupFile, saveSpaceGuide,
   } from "./native-download";
-  import { acceptSaveProgress, checkedPrivateDownloads, checkedSavedCheck, privateDownloadChatSave, privateDownloadOffers, privateDownloadSaveAsIsNewCopy, type PrivateDownload, type PrivateDownloadActionKind, type SavedCheck } from "./private-downloads";
+  import { acceptSaveProgress, checkedPrivateDownloads, checkedSavedCheck, privateDownloadChatLabel, privateDownloadChatSave, privateDownloadOffers, privateDownloadSaveAsIsNewCopy, type PrivateDownload, type PrivateDownloadActionKind, type SavedCheck } from "./private-downloads";
   import { SAVED_ROW_GROUPS, TRANSFER_ICONS, confirmWords, groupSavedRows, savedRowTransitions, savedRowView, type SavedRowAction, type SavedRowGroup, type SavedRowLive, type TransferIcon } from "./transfer-rows";
   import {
     newVaultSecretError, vaultSecretChangeNotice, type VaultSecretChangeResult,
@@ -9668,11 +9668,16 @@
     });
   }
 
+  /** The plain save item's label for `f`: "Save to chosen place" while its row remembers a Save as
+   * choice that this item would use, else "Download" (`privateDownloadChatLabel`). */
+  function downloadLabel(f: UiFile): string {
+    return privateDownloadChatLabel(privateDownloads.find((row) => row.cid === f.cid));
+  }
   function fileMenu(f: UiFile): MenuItem[] {
     const items: MenuItem[] = [
       { head: true, kind: "file", title: f.name },
       { label: "Open details", icon: "info", onSelect: () => openFileInfo(f) },
-      { label: "Download", icon: "down", onSelect: () => downloadFile(f) },
+      { label: downloadLabel(f), icon: "down", onSelect: () => downloadFile(f) },
       { label: "Save as", icon: "down", onSelect: () => downloadFile(f, true) },
       { label: "Post to chat", icon: "reply", onSelect: () => appendToDraft(`![${f.name}](cid:${f.cid})`) },
       { divider: true },
@@ -10069,7 +10074,7 @@
       }
       items.push({ label: "Properties", icon: "info", onSelect: () => openFileRef(cid) });
       if (embedded) {
-        items.push({ label: "Download", icon: "down", onSelect: () => downloadFile(embedded) });
+        items.push({ label: downloadLabel(embedded), icon: "down", onSelect: () => downloadFile(embedded) });
         items.push({ label: "Save as", icon: "down", onSelect: () => downloadFile(embedded, true) });
       }
       items.push({ label: "Copy address (CID)", icon: "fp", onSelect: () => copyText(cid) });
@@ -12363,8 +12368,42 @@
   }
   function rowButtonClick(row: PrivateDownload, action: SavedRowAction, group: SavedRowGroup) {
     if (action.disabled) return; // aria-disabled stays focusable, so its reason can be read
+    if (action.kind === "remove" && clearingSaved[row.id]) return; // Clear's re-check is running
     if (action.confirm && !confirmingRemove(row)) return void askRemove(row);
+    // Clear of a Saved row is unconfirmed only while its file was found present, and that answer
+    // can be from earlier in this visit: check again before releasing the private copy.
+    if (!action.confirm && action.kind === "remove" && row.status === "saved") return void clearSavedRow(row, action, group);
     void runSavedRowAction(row, action, group);
+  }
+  // Fix-the-lows round, review L9: Clear releases a Saved row's private copy, which is the only
+  // copy left once the saved file is gone. The row skips the confirmation when a check found the
+  // file present, but that check ran once per visit, so a file deleted since would be released
+  // without asking. Clear now checks the file again first and runs at once only on a fresh
+  // "present"; any other answer (missing, replaced, unknown, a refused or unreadable check) is
+  // recorded on the row and turns the press into the inline confirmation instead. The remaining
+  // window is this check's own round trip. While it runs (up to native's 3 s bound) the Clear
+  // button is marked busy, like Show in folder, and a second press does nothing.
+  let clearingSaved = $state<Record<string, boolean>>({});
+  async function clearSavedRow(row: PrivateDownload, action: SavedRowAction, group: SavedRowGroup) {
+    const server = activeServerId, gen = viewGeneration, visit = savedCheckVisit;
+    if (server === null || locked || clearingSaved[row.id]) return;
+    clearingSaved[row.id] = true;
+    let result: SavedCheck = "unknown";
+    try {
+      result = checkedSavedCheck(await invoke<unknown>("check_saved_download",
+        { server, download: row.id, expectedIntent: row.intent }));
+    } catch {
+      result = "unknown"; // a refused or failed check proves nothing, so it asks
+    } finally {
+      delete clearingSaved[row.id];
+    }
+    if (!unlockedViewCurrent(gen, server)) return;
+    // A row that changed while it was checked has other actions now; do nothing on stale terms.
+    const now = privateDownloads.find((other) => other.id === row.id);
+    if (!now || now.status !== "saved" || now.intent !== row.intent) return;
+    savedChecks[row.id] = { intent: row.intent, result, visit };
+    if (result === "present") return runSavedRowAction(now, action, group);
+    await askRemove(now);
   }
 
   // "Show in folder" for a Saved row: native checks the file read-only first and shows it selected
@@ -28595,9 +28634,10 @@
                                   type="button"
                                   data-sdl-remove={action.kind === "remove" ? saved.id : undefined}
                                   aria-label={action.accessibleName}
-                                  aria-disabled={action.disabled ? "true" : undefined}
+                                  aria-disabled={action.disabled || (action.kind === "remove" && clearingSaved[saved.id]) ? "true" : undefined}
+                                  aria-busy={action.kind === "remove" && clearingSaved[saved.id] ? "true" : undefined}
                                   aria-describedby={action.disabled ? `sdl-why-off-${saved.id}` : undefined}
-                                  title={action.disabledReason ?? undefined}
+                                  title={action.kind === "remove" && clearingSaved[saved.id] ? "Checking the saved file" : action.disabledReason ?? undefined}
                                   onclick={() => rowButtonClick(row, action, saved.group)}>{action.label}</button>
                               {/if}
                             {/each}
@@ -31715,7 +31755,7 @@
           </button>
           <button class="ghost small" onclick={() => lightbox && openFileRef(lightbox.cid)}>Properties</button>
           {#if lightboxFile}
-            <button class="ghost small" onclick={() => lightboxFile && downloadFile(lightboxFile)}>Download</button>
+            <button class="ghost small" onclick={() => lightboxFile && downloadFile(lightboxFile)}>{lightboxFile ? downloadLabel(lightboxFile) : "Download"}</button>
             <button class="ghost small" onclick={() => lightboxFile && downloadFile(lightboxFile, true)}>Save as</button>
           {/if}
           <span class="lightbox-div" aria-hidden="true"></span>
@@ -31936,7 +31976,7 @@
               {#if mediaKind(fileInfo.name, fileInfo.mime) === "pixa"}
                 <button class="primary" disabled={!mayFetchPixa(fileInfo.size)} onclick={() => fileInfo && openPixaViewer(fileInfo)}>Open flipnote</button>
               {/if}
-              <button class="primary" onclick={() => fileInfo && downloadFile(fileInfo)}>↓ Download</button>
+              <button class="primary" onclick={() => fileInfo && downloadFile(fileInfo)}>↓ {fileInfo ? downloadLabel(fileInfo) : "Download"}</button>
               <button class="ghost" onclick={() => fileInfo && downloadFile(fileInfo, true)}>Save as</button>
               {#if canSetExpiry}
                 <button class="ghost" disabled={fileInfoExpiryBusy} onclick={toggleKeepForever}>

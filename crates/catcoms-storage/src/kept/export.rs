@@ -657,19 +657,22 @@ impl ChosenDestination {
             Err(error) => return Err(chosen_error(error)),
         };
         // Picker review L4: an identified folder is checked again now that the partial exists.
-        let file = match self.folder_id {
-            Some(captured) => confirm_folder(
-                &self.folder,
-                captured,
-                file,
-                &staging,
-                refused(ChoiceRefusal::FolderChanged),
-                rng,
-            )?,
-            None => file,
+        let (file, held) = match self.folder_id {
+            Some(captured) => {
+                let (file, held) = confirm_folder(
+                    &self.folder,
+                    captured,
+                    file,
+                    &staging,
+                    refused(ChoiceRefusal::FolderChanged),
+                    rng,
+                )?;
+                (file, Some(held))
+            }
+            None => (file, None),
         };
-        let file =
-            confirm_staging_links_in(file, &self.folder, self.folder_id, &staging_leaf, rng)?;
+        let held = held.as_ref().zip(self.folder_id);
+        let file = confirm_staging_links_in(file, &self.folder, held, &staging_leaf, rng)?;
         Ok((file, staging, final_path))
     }
 }
@@ -700,16 +703,18 @@ pub fn confirm_staging_links(
     confirm_staging_links_in(file, folder, None, staging_leaf, rng)
 }
 
-/// [`confirm_staging_links`] with the folder identity captured at a chosen place, so the Windows
-/// probe holds that very folder and reports a path retargeted since `confirm_folder` as the
-/// changed-folder refusal (review of the L1 fix, LOW 1).
+/// [`confirm_staging_links`] with what [`confirm_folder`] proved at a chosen place: the folder it
+/// held and the captured identity. The Windows probe holds that very folder and reports a path
+/// retargeted since as the changed-folder refusal (review of the L1 fix, LOW 1), and a refused
+/// creation removes our partial inside the held folder ([`remove_created_in`], re-review LOW-a).
 fn confirm_staging_links_in(
     file: File,
     folder: &Path,
-    folder_id: Option<FileIdentity>,
+    confirmed: Option<(&external::HeldFolder, FileIdentity)>,
     staging_leaf: &str,
     rng: &mut dyn CryptoRngCore,
 ) -> Result<File, ExportError> {
+    let folder_id = confirmed.map(|(_, id)| id);
     let failure = match links_supported(folder, staging_leaf, &file, folder_id, rng) {
         LinkProbe::Works if staging_holds(&file, folder, staging_leaf) => return Ok(file),
         LinkProbe::Refused => ExportError::NoLinks,
@@ -738,7 +743,10 @@ fn confirm_staging_links_in(
         },
     };
     // Only while the name still proves to be the file this call created.
-    remove_created(file, &folder.join(staging_leaf), rng);
+    match confirmed {
+        Some((held, _)) => remove_created_in(file, held, &folder.join(staging_leaf), rng),
+        None => remove_created(file, &folder.join(staging_leaf), rng),
+    }
     Err(failure)
 }
 
@@ -773,7 +781,7 @@ fn staging_holds(file: &File, folder: &Path, leaf: &str) -> bool {
 /// A swap before the create and a swap back before this recheck passes the identity read, so the
 /// recheck must also prove that the name `created` holds our handle's object (picker re-review
 /// LOW 2): otherwise our handle is a partial in the other folder and every byte would go there.
-/// Both are proven here through one handle of the folder ([`external::folder_holds_session`]), so
+/// Both are proven here through one handle of the folder ([`external::hold_folder_holding`]), so
 /// a third swap between the two reads cannot pass either: on Unix a descriptor and `openat`; on
 /// Windows a directory handle and a handle-relative open, so retargeting a junction on the way
 /// between the recheck and the link probe no longer binds the journal to this folder while our
@@ -781,6 +789,20 @@ fn staging_holds(file: &File, folder: &Path, leaf: &str) -> bool {
 /// the Unix name check together with the Unix link probe; Linux CI caught it. A name that is not
 /// provably ours is a refusal with `changed`, never `Unsupported`: a detected swap must not
 /// quietly hand the save to the non-resumable writer (review of the Linux CI fix, MEDIUM 1).
+///
+/// Re-review LOW-C (fixed in the fix-the-lows round): only evidence of a change reads as one. A
+/// different or identity-less folder, a path that no longer leads to a folder (`NotFound`,
+/// `NotADirectory`, or on Unix a symbolic link loop: it was moved, renamed or replaced since the
+/// create) or a name that does not hold our file is `changed`. A check that could not be made (no
+/// in-session number for our own handle, descriptor exhaustion, an I/O error or a timeout, a
+/// folder its owner cannot read) is [`unconfirmed`]: the new file could not be checked, with the
+/// system's reason, instead of a "folder changed" that was not evidence of anything. Both refuse
+/// and remove our empty partial the same way, and neither is ever `Unsupported`, so neither
+/// switches writers.
+///
+/// On success the folder handle that proved both is returned with the file, so the rest of
+/// creation can remove our partial inside that very folder if its path changes later
+/// ([`remove_created_in`]; re-review LOW-a).
 fn confirm_folder(
     folder: &Path,
     captured: FileIdentity,
@@ -788,25 +810,58 @@ fn confirm_folder(
     created: &Path,
     changed: ExportError,
     rng: &mut dyn CryptoRngCore,
-) -> Result<File, ExportError> {
-    let same = matches!(external::folder_identity(folder), Ok(id) if id == captured);
-    let same = same
-        && created
-            .file_name()
-            .and_then(|leaf| leaf.to_str())
-            .is_some_and(|leaf| {
-                external::session_id(&file).is_ok_and(|id| {
-                    matches!(
-                        external::folder_holds_session(folder, captured, leaf, id),
-                        Ok(true)
-                    )
-                })
-            });
-    if same {
-        return Ok(file);
-    }
+) -> Result<(File, external::HeldFolder), ExportError> {
+    let checked = (|| -> io::Result<Option<external::HeldFolder>> {
+        match external::folder_identity(folder) {
+            Ok(id) if id == captured => {}
+            Ok(_) => return Ok(None),
+            // A folder that had an identity and now reports none is not provably the same one.
+            Err(error) if error.kind() == io::ErrorKind::Unsupported => return Ok(None),
+            Err(error) => return Err(error),
+        }
+        let Some(leaf) = created.file_name().and_then(|leaf| leaf.to_str()) else {
+            return Ok(None);
+        };
+        let id = external::session_id(&file)?;
+        external::hold_folder_holding(folder, captured, leaf, id)
+    })();
+    let failure = match checked {
+        Ok(Some(held)) => return Ok((file, held)),
+        Ok(None) => changed,
+        Err(error) if leads_nowhere(&error) => changed,
+        Err(error) => unconfirmed(error),
+    };
     remove_created(file, created, rng);
-    Err(changed)
+    Err(failure)
+}
+
+/// Whether a failed folder or name check means the path no longer leads to a folder: it is gone,
+/// something that is not a folder is there, or (Unix) a symbolic link loop was put at it. Each is
+/// evidence that the folder was moved, renamed or replaced, unlike an error reading it.
+fn leads_nowhere(error: &io::Error) -> bool {
+    #[cfg(unix)]
+    if error.raw_os_error() == Some(libc::ELOOP) {
+        return true;
+    }
+    matches!(
+        error.kind(),
+        io::ErrorKind::NotFound | io::ErrorKind::NotADirectory
+    )
+}
+
+/// Re-review LOW-C and its review (LOW-3): a check of the new partial that could not be made,
+/// right after the create succeeded. The creation-step mappers would misdescribe it (a folder we
+/// just created a file in is not "not writable", and no partial or journal is "unavailable" yet),
+/// so it says what happened, with the system's reason (never a path: `io::Error` from these calls
+/// carries none). Never `Unsupported`: that would switch writers on an unexplained failure.
+fn unconfirmed(error: io::Error) -> ExportError {
+    match error.kind() {
+        io::ErrorKind::StorageFull => ExportError::Full,
+        _ => ExportError::Local {
+            retryable: true,
+            reason: format!("the new file in that folder could not be checked ({error})"),
+        },
+    }
 }
 
 /// Remove a file this call created exclusively a moment ago, through [`external::remove_verified`]
@@ -826,6 +881,36 @@ fn remove_created(file: File, created: &Path, rng: &mut dyn CryptoRngCore) {
         let _ = external::remove_verified(folder, None, leaf, Expected::Session(id), rng);
     }
     drop(file);
+}
+
+/// [`remove_created`] inside the folder [`confirm_folder`] held (fix-the-lows round, re-review
+/// LOW-a). On Windows the name is opened relative to that handle ([`external::HeldFolder::
+/// remove_session`]), so our empty partial goes from the folder that holds it even when the
+/// folder's path was retargeted afterwards (a junction on the way): the path-based removal then
+/// looked in the other folder, found nothing of ours, and left the partial behind. Unix keeps the
+/// path-based [`remove_created`]: its link probe never reports a changed folder, and
+/// `remove_verified` applies the shared-folder rule there, which the held folder does not know.
+fn remove_created_in(
+    file: File,
+    held: &external::HeldFolder,
+    created: &Path,
+    rng: &mut dyn CryptoRngCore,
+) {
+    #[cfg(windows)]
+    {
+        let _ = rng;
+        let leaf = created.file_name().and_then(|leaf| leaf.to_str());
+        if let (Some(leaf), Ok(id)) = (leaf, external::session_id(&file)) {
+            let _ = held.remove_session(leaf, id);
+        }
+        // The handle stays open until the removal is over, so its number cannot be reused.
+        drop(file);
+    }
+    #[cfg(not(windows))]
+    {
+        let _ = held;
+        remove_created(file, created, rng);
+    }
 }
 
 /// Native's view of a file it created and holds open: the in-session number to verify the
@@ -1984,7 +2069,7 @@ impl ExportFile {
                 retryable: true,
                 reason: "the folder changed while the save was starting".into(),
             };
-            let file = confirm_folder(
+            let (file, held) = confirm_folder(
                 folder,
                 folder_id,
                 file,
@@ -1993,7 +2078,7 @@ impl ExportFile {
                 rng,
             )?;
             let leaves = (staging, final_leaf);
-            let bound = (folder_id, changed());
+            let bound = (folder_id, changed(), held);
             return Self::adopt_created(file, folder, encoded, bound, leaves, plan, rng);
         }
         Err(ExportError::Local {
@@ -2053,7 +2138,7 @@ impl ExportFile {
             Err(error) => return Err(chosen_error(error)),
         };
         // Picker review L4: the folder swapped between the identity check and the create.
-        let file = confirm_folder(
+        let (file, held) = confirm_folder(
             folder,
             captured,
             file,
@@ -2062,7 +2147,11 @@ impl ExportFile {
             rng,
         )?;
         let leaves = (staging, name.to_owned());
-        let bound = (captured, ExportError::Refused(ChoiceRefusal::FolderChanged));
+        let bound = (
+            captured,
+            ExportError::Refused(ChoiceRefusal::FolderChanged),
+            held,
+        );
         Self::adopt_created(file, folder, encoded, bound, leaves, plan, rng)
     }
 
@@ -2071,12 +2160,14 @@ impl ExportFile {
     /// callers have already run [`confirm_folder`], which also proved, through one held handle of
     /// the captured folder, that the staging name holds this file; the Windows link probe here
     /// holds the folder again against the same identity, and a path that no longer leads to it is
-    /// refused with the caller's `changed` error (the same one `confirm_folder` uses).
+    /// refused with the caller's `changed` error (the same one `confirm_folder` uses). `held` is
+    /// the folder `confirm_folder` proved; a refused creation removes our partial inside it
+    /// ([`remove_created_in`], re-review LOW-a).
     fn adopt_created(
         file: File,
         folder: &Path,
         encoded: Vec<u8>,
-        (folder_id, changed): (FileIdentity, ExportError),
+        (folder_id, changed, held): (FileIdentity, ExportError, external::HeldFolder),
         (staging, final_leaf): (String, String),
         plan: ExportPlan,
         rng: &mut dyn CryptoRngCore,
@@ -2110,8 +2201,9 @@ impl ExportFile {
             Err(error) => {
                 // Created by this call a moment ago; remove it so a refused or unsupported
                 // destination leaves nothing behind for the fallback writer to trip over. Only
-                // while the name still proves to be that object (a swap since is left alone).
-                remove_created(file, &path, rng);
+                // while the name still proves to be that object (a swap since is left alone),
+                // and inside the folder `confirm_folder` proved, wherever its path leads now.
+                remove_created_in(file, &held, &path, rng);
                 return Err(error);
             }
         };

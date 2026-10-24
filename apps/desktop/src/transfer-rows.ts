@@ -173,8 +173,9 @@ function savedShape(check: SavedCheck | null): { group: SavedRowGroup; tone: Sav
 }
 
 /** One sentence per state, checked against what native does (see the design doc's Transfers UX
- * section). `busy` matters only for Removing: running now, or stuck from an earlier attempt. */
-function explanation(state: PrivateDownloadStatus, check: SavedCheck | null, busy: boolean): string | null {
+ * section). `busy` matters only for Removing: running now, or stuck from an earlier attempt.
+ * `keepLabel` is the row's own Keep label, so the stuck sentence names the button it shows. */
+function explanation(state: PrivateDownloadStatus, check: SavedCheck | null, busy: boolean, keepLabel: string): string | null {
   switch (state) {
     case "receiving": case "saving": return null;
     case "ready": return "The private encrypted copy is complete. Choose where to save the readable file.";
@@ -191,7 +192,7 @@ function explanation(state: PrivateDownloadStatus, check: SavedCheck | null, bus
     // stuck one names "a file it created" because a Clear removes only a temporary second name.
     case "removing": return busy
       ? "Working on it. The other actions wait until this one finishes."
-      : "Mewtual could not finish removing a file it created for this save. Choose Remove to try again, or Keep partly saved file.";
+      : `Mewtual could not finish removing a file it created for this save. Choose Remove to try again, or ${keepLabel}.`;
     case "saved":
       if (check === "missing") return "The saved file is no longer there. Save again makes a fresh copy.";
       if (check === "replaced") return "A different file is at the saved name now. Save again makes a fresh copy.";
@@ -288,7 +289,8 @@ export function savedRowView(
     tone: look.tone,
     icon: look.icon,
     word: look.word,
-    why: explanation(state, saved ? check : null, activity.busy),
+    why: explanation(state, saved ? check : null, activity.busy,
+      actions.find((action) => action.kind === "keep")?.label ?? "Keep partly saved file"),
     bar: progress,
     chunks,
     where,

@@ -85,7 +85,16 @@ const resume = (label: string): PrivateDownloadAction => ({ kind: "resume", labe
 const fresh = (label: string): PrivateDownloadAction => ({ kind: "fresh", label, ghost: false, needsIdle: true });
 const pause: PrivateDownloadAction = { kind: "pause", label: "Pause", ghost: false, needsIdle: false };
 const remove = (label: string): PrivateDownloadAction => ({ kind: "remove", label, ghost: true, needsIdle: false });
-const keep: PrivateDownloadAction = { kind: "keep", label: "Keep partly saved file", ghost: true, needsIdle: false };
+/** Keep on a Removing row releases the record and leaves the file where it is. Once every part
+ * was written (a Clear of a saved file, or a save that had finished writing) that file is
+ * complete, so it is not called partly saved (fix-the-lows round, follow-up "Clear on a saved row
+ * with an unplugged folder"). Native's messages say only "Keep", which fits both labels. */
+const keep = (download: PrivateDownload): PrivateDownloadAction => ({
+  kind: "keep",
+  label: download.savedChunks === download.totalChunks ? "Keep the file" : "Keep partly saved file",
+  ghost: true,
+  needsIdle: false,
+});
 /** "Save as": native opens the OS dialog and the user picks the folder and name for this save. */
 const saveAs: PrivateDownloadAction = { kind: "saveAs", label: "Save as", ghost: true, needsIdle: true };
 /** The actions each typed state offers, in display order. Resume never appears for a changed
@@ -107,7 +116,7 @@ export function privateDownloadActions(download: PrivateDownload, check: SavedCh
     case "destination-changed": return [fresh("Save new copy"), saveAs, remove("Remove")];
     case "saved":
       return [fresh(check === "missing" || check === "replaced" ? "Save again" : "Save another copy"), saveAs, remove("Clear")];
-    case "removing": return [remove("Remove"), keep];
+    case "removing": return [remove("Remove"), keep(download)];
   }
 }
 /** Whether `download` currently offers the resume, fresh-copy or Save as action. */
@@ -126,6 +135,15 @@ export function privateDownloadChatSave(download: PrivateDownload): "resume" | "
   return download.status === "ready" || download.status === "incomplete" || download.status === "paused" ||
     download.status === "blocked" || download.status === "save-interrupted" || download.status === "save-paused"
     ? "resume" : "transfers";
+}
+
+/** The label of the plain save item (chat and file menus, the image viewer, the file pane). A file
+ * whose row remembers a Save as choice saves to that place from this item too, because the choice
+ * is the destination of its next save until that save begins; the item says so instead of a plain
+ * "Download" (fix-the-lows round, picker review residual). Only where the item continues the row
+ * directly: a row that opens Transfers instead keeps "Download". */
+export function privateDownloadChatLabel(download: PrivateDownload | undefined): string {
+  return download?.chosenPlace && privateDownloadChatSave(download) === "resume" ? "Save to chosen place" : "Download";
 }
 
 /** Native save progress must belong to the exact active invocation. Preview reads and delayed

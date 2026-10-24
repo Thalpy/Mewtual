@@ -743,23 +743,32 @@ fn a_path_retargeted_after_the_recheck_is_reported_as_changed() {
             ),
             "journaled: {journaled}, got {created:?}"
         );
-        // Our empty partial stays in the real folder: its cleanup goes by path, which now leads
-        // to the decoy (a recorded residual; a retry of this name then reads `PartialExists`).
-        let left: Vec<_> = fs::read_dir(&real)
-            .unwrap()
-            .map(|entry| entry.unwrap())
-            .collect();
-        assert_eq!(left.len(), 1, "journaled: {journaled}");
+        // Re-review LOW-a (fixed in the fix-the-lows round): our empty partial is removed from the
+        // real folder, through the folder handle `confirm_folder` held. The path-based cleanup
+        // looked in the decoy, where the path now leads, and left it (break-checked: with
+        // `remove_created` by path in its place one entry stays here, and a retry of this name
+        // read `PartialExists`).
         assert_eq!(
-            left[0].metadata().unwrap().len(),
+            fs::read_dir(&real).unwrap().count(),
             0,
-            "it holds no plaintext"
+            "journaled: {journaled}: our partial was removed where it was created"
         );
         assert_eq!(
             fs::read_dir(&decoy).unwrap().count(),
             0,
             "nothing in the decoy"
         );
+        // The same choice can be used again once the path leads to the real folder again.
+        fs::remove_dir(&path)
+            .or_else(|_| fs::remove_file(&path))
+            .unwrap();
+        assert!(external::tests::link_directory(&real, &path));
+        let again = if journaled {
+            ExportFile::create_chosen(&choice, export_plan(), &mut rng()).map(drop)
+        } else {
+            choice.create_unjournaled(&mut rng()).map(drop)
+        };
+        assert!(again.is_ok(), "journaled: {journaled}, got {again:?}");
     }
 }
 
@@ -1144,4 +1153,121 @@ fn a_choice_on_a_drive_without_links_is_refused_before_anything_starts() {
     assert!(ChoiceRefusal::NoLinks.to_string().contains("FAT"));
     assert_eq!(fs::read_dir(&folder).unwrap().count(), 0, "nothing created");
     assert!(ChosenDestination::validate(&folder.join("report.bin")).is_ok());
+}
+
+/// Re-review LOW-C (fixed in the fix-the-lows round): the held-folder check right after creation
+/// could not be made (modelled by a failing handle identity read inside it: the descriptor
+/// exhaustion, I/O error or timeout of a real folder, or a folder its owner cannot read). That
+/// says the new file could not be checked, with the system's reason and no path, not "the folder
+/// changed" and not a creation-step text ("cannot write", "unavailable") that would be untrue
+/// right after a successful create (review LOW-3). A path that no longer leads to a folder
+/// (`NotFound`) and a folder that stopped reporting an identity (`Unsupported`) still are a
+/// change. Either way our empty partial is removed, and nothing is `ExportError::Unsupported`,
+/// which would hand the save to the other writer. All three creations: chosen journaled, chosen
+/// without a journal, and Downloads.
+#[test]
+fn a_name_check_that_cannot_be_made_is_not_reported_as_a_changed_folder() {
+    const DOWNLOADS_CHANGED: &str = "the folder changed while the save was starting";
+    const UNCHECKED: &str = "the new file in that folder could not be checked (";
+    for (kind, changed) in [
+        (io::ErrorKind::TimedOut, false),
+        (io::ErrorKind::PermissionDenied, false),
+        (io::ErrorKind::NotFound, true),
+        (io::ErrorKind::Unsupported, true),
+    ] {
+        for writer in ["journaled", "unjournaled", "downloads"] {
+            let fx = fixture();
+            let folder = match writer {
+                "downloads" => {
+                    create_folder(&fx.downloads).unwrap();
+                    fx.downloads.clone()
+                }
+                _ => chosen_folder(&fx),
+            };
+            let choice = ChosenDestination::validate(&folder.join("report.bin")).unwrap();
+            let fired = std::rc::Rc::new(std::cell::Cell::new(false));
+            let seen = fired.clone();
+            external::BEFORE_NAME_CHECK.with(|hook| {
+                *hook.borrow_mut() = Some(Box::new(move |_| {
+                    if !seen.replace(true) {
+                        INJECT.with(|slot| slot.set(Some((Effect::Identity, kind, 1))));
+                    }
+                }))
+            });
+            let created = match writer {
+                "journaled" => {
+                    ExportFile::create_chosen(&choice, export_plan(), &mut rng()).map(drop)
+                }
+                "unjournaled" => choice.create_unjournaled(&mut rng()).map(drop),
+                _ => ExportFile::create(&folder, "report.bin", export_plan(), &mut rng()).map(drop),
+            };
+            external::BEFORE_NAME_CHECK.with(|hook| *hook.borrow_mut() = None);
+            INJECT.with(|slot| slot.set(None));
+            let case = format!("{writer}, {kind:?}: got {created:?}");
+            assert!(fired.get(), "{case}: the name check ran");
+            let path = folder.to_string_lossy().into_owned();
+            match (writer, changed) {
+                ("downloads", true) => assert!(
+                    matches!(&created, Err(ExportError::Local { reason, .. }) if reason == DOWNLOADS_CHANGED),
+                    "{case}"
+                ),
+                (_, true) => assert!(
+                    matches!(
+                        created,
+                        Err(ExportError::Refused(ChoiceRefusal::FolderChanged))
+                    ),
+                    "{case}"
+                ),
+                (_, false) => assert!(
+                    matches!(&created, Err(ExportError::Local { reason, .. })
+                        if reason.starts_with(UNCHECKED) && !reason.contains(&path)),
+                    "{case}"
+                ),
+            }
+            assert!(!matches!(created, Err(ExportError::Unsupported)), "{case}");
+            assert_eq!(
+                fs::read_dir(&folder).unwrap().count(),
+                0,
+                "{case}: our empty partial was removed"
+            );
+        }
+    }
+}
+
+/// Review of the fix-the-lows round: on Unix a symbolic link loop put at the folder's path after
+/// creation leaves the path leading to no folder, which is a change (as it read before LOW-C),
+/// not a check that could not be made.
+#[cfg(unix)]
+#[test]
+fn a_link_loop_put_at_the_folder_reads_as_a_changed_folder() {
+    let fx = fixture();
+    let folder = chosen_folder(&fx);
+    let choice = ChosenDestination::validate(&folder.join("report.bin")).unwrap();
+    let moved = folder.with_file_name("Moved");
+    let (path, aside) = (folder.clone(), moved.clone());
+    let fired = std::rc::Rc::new(std::cell::Cell::new(false));
+    let seen = fired.clone();
+    external::BEFORE_NAME_CHECK.with(|hook| {
+        *hook.borrow_mut() = Some(Box::new(move |_| {
+            if !seen.replace(true) {
+                fs::rename(&path, &aside).unwrap();
+                // A link to itself: opening the folder's path now fails with ELOOP.
+                std::os::unix::fs::symlink(&path, &path).unwrap();
+            }
+        }))
+    });
+    let created = ExportFile::create_chosen(&choice, export_plan(), &mut rng()).map(drop);
+    external::BEFORE_NAME_CHECK.with(|hook| *hook.borrow_mut() = None);
+    assert!(
+        fired.get(),
+        "the loop was put in place before the name check"
+    );
+    assert!(
+        matches!(
+            created,
+            Err(ExportError::Refused(ChoiceRefusal::FolderChanged))
+        ),
+        "got {created:?}"
+    );
+    assert!(holds_no_plaintext(&moved), "nothing was written anywhere");
 }

@@ -37,7 +37,12 @@
 //! delete-denying handle verified to be the object (`fs_at`), and on Unix renames the verified
 //! name aside relative to a pinned folder descriptor, verifies it again and unlinks it (`rustix`),
 //! never in a folder other accounts can (or may) modify; on Unix the guarantee therefore holds only
-//! against other accounts. Publication names exactly the held object: Linux and Android link the
+//! against other accounts. One Windows exception (fix-the-lows round, re-review LOW-a): a creation
+//! that is refused after `confirm_folder` removes its own empty partial through
+//! [`HeldFolder::remove_session`], relative to the held folder. fs_at opens that handle sharing
+//! delete, so the name is not pinned between the check and the delete; the delete still goes
+//! through the handle whose identity was verified, so it can only remove that object, which is
+//! never published and holds no plaintext. Publication names exactly the held object: Linux and Android link the
 //! open descriptor through `/proc/self/fd` ([`link_open`]); Windows holds a delete-denying pin on
 //! the staging name across the path-based link ([`open_leaf_pinned`], [`publish_session`]); macOS
 //! links by path and relies on the post-link check alone.
@@ -50,7 +55,7 @@
 //! our own handle's object (whenever the filesystem reports identities), so it refuses and no
 //! plaintext is ever written there, even if a file was planted at our name meanwhile. Both
 //! platforms read the folder identity and the name through one handle of the folder
-//! ([`folder_holds_session`]: a descriptor and `openat` on Unix, a directory handle and fs_at's
+//! ([`hold_folder_holding`]: a descriptor and `openat` on Unix, a directory handle and fs_at's
 //! `NtCreateFile`-relative open on Windows), so a third swap, or a junction retargeted on the way,
 //! cannot pass either. The Windows link probe that follows also checks its probe name through a
 //! held folder handle.
@@ -715,7 +720,7 @@ thread_local! {
     /// re-review LOW 2): a test swaps the folder back and plants a file at our name.
     pub(in crate::kept) static AFTER_CREATE: std::cell::RefCell<LinkHook> =
         const { std::cell::RefCell::new(None) };
-    /// Test-only interleaving point in [`folder_holds_session`], after creation's path-based
+    /// Test-only interleaving point in [`hold_folder_holding`], after creation's path-based
     /// folder identity recheck and before the held-folder name check: a test swaps the folder a
     /// third time there. The hook gets the partial's path.
     pub(in crate::kept) static BEFORE_NAME_CHECK: std::cell::RefCell<LinkHook> =
@@ -2149,10 +2154,53 @@ impl HeldFolder {
             Err(error) => Err(error),
         }
     }
+
+    /// Windows: delete `leaf` inside this folder only if it holds the object with `id`, the way
+    /// [`remove_verified`] does by path but relative to this handle (fix-the-lows round, re-review
+    /// LOW-a). The name is opened with `fs_at::OpenOptions::open_path_at` (`FILE_OPEN`,
+    /// `FILE_OPEN_REPARSE_POINT`, so a link at the name opens as itself and is never ours), with
+    /// `DELETE` and `FILE_READ_ATTRIBUTES` access; the identity is checked on that handle and the
+    /// delete goes through it (`delete_by_handle`). fs_at always shares delete, so unlike
+    /// [`remove_verified`] the name is not pinned between the check and the delete: whatever name
+    /// the object has by then, the delete can only remove the object proven to be `id`, and only
+    /// the one name the handle was opened through. Used only for the empty partial that creation
+    /// has just made, so a second name of a published file can never be involved.
+    #[cfg(windows)]
+    pub(super) fn remove_session(&self, leaf: &str, id: SessionId) -> io::Result<Verified> {
+        use fs_at::os::windows::{FileExt, OpenOptionsExt};
+        const DELETE: u32 = 0x0001_0000;
+        const FILE_READ_ATTRIBUTES: u32 = 0x0080;
+        let handle = match fs_at::OpenOptions::default()
+            .desired_access(DELETE | FILE_READ_ATTRIBUTES)
+            .open_path_at(&self.dir, leaf)
+        {
+            Ok(handle) => handle,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(Verified::Missing),
+            Err(error) => return Err(error),
+        };
+        let Some(links) = verify(&handle, Expected::Session(id))? else {
+            return Ok(Verified::NotOurs);
+        };
+        inject(Effect::Remove)?;
+        handle.delete_by_handle().map_err(|(_, error)| error)?;
+        Ok(Verified::Removed { links })
+    }
+}
+
+/// Test-only yes/no form of [`hold_folder_holding`].
+#[cfg(test)]
+pub(super) fn folder_holds_session(
+    folder: &Path,
+    folder_id: FileIdentity,
+    leaf: &str,
+    id: SessionId,
+) -> io::Result<bool> {
+    hold_folder_holding(folder, folder_id, leaf, id).map(|held| held.is_some())
 }
 
 /// Read-only: whether the folder at `folder` is still the one with `folder_id` and holds the
 /// object with `id` at `leaf`, both read through one handle of that folder ([`hold_folder`]).
+/// `Some` returns that held folder.
 ///
 /// Creation checks this right after its exclusive create (picker re-review LOW 2, restored after
 /// the Linux CI failures at `516ab8d0`; `confirm_folder` in `export.rs`). Reading the identity and
@@ -2160,14 +2208,18 @@ impl HeldFolder {
 /// reads (an identity read, then a name check or a link probe) can each be answered by a different
 /// folder if someone swaps the path between them, which let a third swap pass the check (review
 /// of that fix, MEDIUM 2 on Unix; the coordinator's review L1 on Windows, where retargeting a
-/// junction does it). `false` means not provably ours: a different or identity-less folder at
-/// the path, nothing at the name, or another object there. An error means it could not be read.
-pub(super) fn folder_holds_session(
+/// junction does it). `None` means not provably ours: a different or identity-less folder at the
+/// path, nothing at the name, or another object there. An error means it could not be read.
+///
+/// The held folder is kept so creation can go on acting inside that very directory after its
+/// path is changed (fix-the-lows round, re-review LOW-a: removing our empty partial after the
+/// link probe found the path retargeted).
+pub(super) fn hold_folder_holding(
     folder: &Path,
     folder_id: FileIdentity,
     leaf: &str,
     id: SessionId,
-) -> io::Result<bool> {
+) -> io::Result<Option<HeldFolder>> {
     #[cfg(test)]
     BEFORE_NAME_CHECK.with(|hook| {
         if let Some(hook) = hook.borrow_mut().as_mut() {
@@ -2175,8 +2227,8 @@ pub(super) fn folder_holds_session(
         }
     });
     match hold_folder(folder, Some(folder_id))? {
-        Some(held) => held.holds_session(leaf, id),
-        None => Ok(false),
+        Some(held) if held.holds_session(leaf, id)? => Ok(Some(held)),
+        _ => Ok(None),
     }
 }
 

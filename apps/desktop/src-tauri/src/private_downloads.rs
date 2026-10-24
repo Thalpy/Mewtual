@@ -282,11 +282,22 @@ pub(super) async fn remove_download(
     };
     remove_sequence(&ports, claim, keep_partial).await
 }
-const REMOVE_RETRY: &str = "The partly saved file could not be removed. Close any app using it, then choose Remove again, or choose Keep partly saved file.";
-const REMOVE_UNREACHABLE: &str = "The folder with the partly saved file is unavailable. Reconnect it and choose Remove again, or choose Keep partly saved file.";
+// A Removing row's Keep reads "Keep partly saved file", or "Keep the file" once every part was
+// written (the renderer decides from the row's counts), so these messages name only "Keep".
+// Fix-the-lows round (follow-up "Clear on a saved row with an unplugged folder"): a Clear of a
+// saved row (`published`) has its own wording, because what it removes is a temporary second name
+// of the complete saved file, not a partly saved file.
+const REMOVE_RETRY: &str = "The partly saved file could not be removed. Close any app using it, then choose Remove again, or choose Keep to leave it there.";
+const REMOVE_RETRY_SAVED: &str = "A temporary copy of the saved file could not be removed. Close any app using it, then choose Remove again, or choose Keep to leave it there.";
+const REMOVE_UNREACHABLE: &str = "The folder with the partly saved file is unavailable. Reconnect it and choose Remove again, or choose Keep to leave the file there.";
+const REMOVE_UNREACHABLE_SAVED: &str = "The folder with the saved file is unavailable. Reconnect it and choose Remove again, or choose Keep to leave the file there.";
 const CLEANUP_BUSY: &str = "This file is still being removed. Try again shortly.";
 const ALREADY_REMOVED: &str =
     "The partly saved file had already been removed, so there was nothing to keep.";
+/// Keep of a saved row whose check found neither the saved name nor its temporary copy holding
+/// the file (`partial_presence` looks at both).
+const ALREADY_REMOVED_SAVED: &str =
+    "The saved file and its temporary copy were already gone, so there was nothing to keep.";
 
 /// Process-wide ownership of every destructive cleanup (Remove, Save new copy) and every
 /// preserve decision ("Keep partly saved file") for one Download, keyed by (server, Download ID).
@@ -806,16 +817,22 @@ pub(super) async fn remove_sequence(
             () = ports.wait(KEEP_PRESENCE_WAIT) => None,
         };
         match checked {
+            Some(PartialPresence::Gone) if published => Some(ALREADY_REMOVED_SAVED),
             Some(PartialPresence::Gone) => Some(ALREADY_REMOVED),
             Some(PartialPresence::Present | PartialPresence::Unknown) | None => None,
         }
     } else {
         // Only an outcome that settles the question may forget the journal. A partial that cannot
         // be checked right now stays tracked in Removing.
+        let (unreachable, retry) = if published {
+            (REMOVE_UNREACHABLE_SAVED, REMOVE_RETRY_SAVED)
+        } else {
+            (REMOVE_UNREACHABLE, REMOVE_RETRY)
+        };
         match delete_owned(ports, journal, published, &claim).await? {
             Ok(outcome) if outcome.settled() => outcome.notice(published),
-            Ok(PartialRemoval::FolderUnreachable) => return Err(REMOVE_UNREACHABLE.into()),
-            Ok(_) | Err(_) => return Err(REMOVE_RETRY.into()),
+            Ok(PartialRemoval::FolderUnreachable) => return Err(unreachable.into()),
+            Ok(_) | Err(_) => return Err(retry.into()),
         }
     };
     ports.finish_cleanup().await?;

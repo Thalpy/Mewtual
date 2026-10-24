@@ -820,9 +820,9 @@ Re-review of `591ba423`: no blocker, high or medium remains. Low follow-ups, not
 | Follow-up | Note |
 | --- | --- |
 | Single writer across remount | Presence is per mounted transfer; key the exclusion process-wide by Download ID in native if a stalled-volume race across remount matters. Qualified above and in THREAT-MODEL. |
-| Clear on a saved row with an unplugged folder | Stays Removing and offers "Keep partly saved file", although what remains is a second name for the complete file; wording could be specialized. |
+| Clear on a saved row with an unplugged folder | Stays Removing and offers "Keep partly saved file", although what remains is a second name for the complete file; wording could be specialized (done in the fix-the-lows round, below). |
 | Older session still alive | Resume spends one re-verification before the presence refusal; Save new copy can forget the journal and then fail at Begin. Bounded by clicks and that session's lifetime. |
-| Remove on a hung share | `privateDownloadBusy` stays set until the blocking removal returns (OS I/O timeout); pre-existing pattern. |
+| Remove on a hung share | `privateDownloadBusy` stays set until the blocking removal returns (OS I/O timeout); pre-existing pattern. Since R2-M1 it holds only that row. |
 
 Later status of these follow-ups: "single writer across remount" is resolved by R-M1 (the OS lock);
 "older session still alive" no longer lets Save new copy forget the journal before its delete
@@ -915,7 +915,7 @@ breaking it and watching its test fail.
 | Residual: the one-dialog turn ends when the invocation future drops while an OS dialog stays open | Accepted: Tauri does not drop a running command future except at process exit. |
 | Residual: a dialog that fails to open looks like Cancel | Partly: a refused `run_on_main_thread` already returns "The Save as window could not be opened."; only a dialog task that ends without a result is treated as Cancel. Follow-up if it is seen in practice. |
 | Residual: any hard-link probe failure is reported as "FAT or exFAT" | Accepted wording residual ("for example"); copy follow-up. |
-| Residual: a remembered choice silently redirects the chat "Download" item | Documented; label follow-up. |
+| Residual: a remembered choice silently redirects the chat "Download" item | Documented; label follow-up (done in the fix-the-lows round, below). |
 | Residual: remembered choices without folder identity have no swap check | Documented (unchanged). |
 | Follow-on to M2 (found while fixing it) | With file work on the pool, a staging or write step could pass the async session check and start after Lock. Fixed in `d747c0d2`: `SaveSource::liveness` is evaluated when each queued staging or write worker starts, as on the journaled path. Test: `a_fallback_step_whose_worker_starts_after_retirement_does_nothing` (both checks break-checked). |
 
@@ -932,7 +932,7 @@ where stated.
 | LOW 2: `create_unjournaled` probed links without identity, so a swap and swap-back plus a planted file defeated the residual claim | Fixed in `4a71bf25`: the probe uses the new partial's handle identity when available and cleanup uses the proven removal. Test (new `AFTER_CREATE` hook, the swap through a directory link because Windows will not rename a folder holding our open file): `a_swap_and_swap_back_around_creation_with_a_planted_file_writes_nothing` (break-checked). |
 | LOW 3: `remove_created`'s proof branch was untested | Test added in `4a71bf25`: `removing_a_just_created_partial_needs_its_identity_to_still_match` (break-checked). |
 | LOW 4: "Remove it" in `PartialExists` read as the Transfers action | Fixed in `4a71bf25`: "Delete it from the folder, or choose another name." The orphan test asserts the wording. |
-| Design question: a stale-list one-click start can still resume a record whose journaled save is live, interrupting it | Not changed: this predates the picker (the renderer routes rows by status, so it needs a stale list) and refusing it changes the one-click contract. Follow-up: refuse a non-resume start when the found record shows an active Writing export. |
+| Design question: a stale-list one-click start can still resume a record whose journaled save is live, interrupting it | Not changed: this predates the picker (the renderer routes rows by status, so it needs a stale list) and refusing it changes the one-click contract. Follow-up: refuse a non-resume start when the found record shows an active Writing export (done in the fix-the-lows round, below). |
 | Residual: a hung guarded link stalls every command that takes the process-wide guard, not only Lock | Documented here and in THREAT-MODEL. |
 | Residual: a just-created partial whose name cannot be opened at cleanup time stays | Documented under Platform; it is empty and the refusal tells the user. |
 | Residual: a release that fails after Deleting is durable (inside the L2 undo) needs a storage check | Same failure mode as `cancel_download`; unchanged. |
@@ -1391,7 +1391,7 @@ Adversarial review of `bbdbdf99` and dispositions (no blocker or high finding):
 | LOW 4: doc and comment drift (`LinkProbe` and `confirm_staging_links` docs, the original test's comment, `link_open`'s "a writer without a journal has none", `EPERM` and "a security module", THREAT-MODEL silent on the fallback) | Fixed. |
 | Re-review LOW-A: the docs said the storage-only publication fix would reverse PR51 M1's contract | Moot: taken with the check before the link window, which keeps the contract. |
 | Re-review LOW-B: THREAT-MODEL's Publication bullet did not mention the identity gap | Fixed with the gap: the bullet now says how each writer binds the folder. |
-| Re-review LOW-C: transient failures of the Unix name check (session number, descriptor exhaustion, I/O, the umask case) read as "the folder changed" | Recorded: fails safe and matches the existing handling of a failed folder identity read in the same recheck; the wording is not evidence of an attack. |
+| Re-review LOW-C: transient failures of the Unix name check (session number, descriptor exhaustion, I/O, the umask case) read as "the folder changed" | Fixed in the fix-the-lows round (below), on both platforms. First recorded as failing safe. |
 | Re-review of `74b9dfe4`, LOW-1 and LOW-2 | Recorded below (a planted hard link also passes the publication check); the `NotFound` message now adds that the partial may still be in a folder that was moved or renamed. |
 | Residuals (no fix): a hard link to our partial planted at the staging name passes the name check, and one placed in a swapped-in folder passes the publication check of the writers without a journal (other accounts are stopped by `protected_hardlinks`, and the journal's single-link check catches it while writing); native's Downloads fallback has no folder identity check; a umask that removes the owner's read bit would make the read-only name check refuse | Recorded. (On Windows a swap and swap-back with nothing planted used to report `NoLinks`; since L1 below it is `FolderChanged` when the folder identity was captured. The identity-less path, through `confirm_staging_links`, still reports `NoLinks`: nothing there can tell a changed folder.) |
 
@@ -1424,7 +1424,7 @@ Adversarial review of the L1 to L3 fixes (`bc41d52e`) and dispositions (no block
 | LOW 1: a path retargeted after `confirm_folder` passed made the probe report a folder without links (its link failed in the other folder) or an inconclusive probe (a quiet switch to the non-resumable writer); and the double-swap probe test never reached its hook | Fixed: `LinkProbe::FolderChanged`. The probe returns it when the held folder no longer matches the captured identity, or when the link failed or the probe could not be confirmed while the path no longer leads to that folder; `adopt_created` and the chosen-place reservation turn it into the caller's changed-folder refusal. Test: `a_path_retargeted_after_the_recheck_is_reported_as_changed` (Windows: the chosen folder is a junction retargeted at `BEFORE_PROBE`; the hook must run; break-checked: without the new mapping it reads `NoLinks`). The third-swap tests now assert whether their hook ran: it runs before the name check, and it does not run before the probe because `confirm_folder` refuses first (that test's pre-fix `Ok(())` was shown by break-check). The probe's own held-name check stays defense in depth, reachable only if `confirm_folder` were broken. |
 | LOW 2: doc drift (FAT and exFAT "refused by the link probe" while the HIGH stood; the nothing-planted note held only with a captured identity) | Fixed: the probe claim is true again with the HIGH fixed; the note now says the identity-less path still reports `NoLinks`. |
 | LOW 3: the complete suites were not run | Recorded: this round ran the coordinator's gates (WSL storage suite, Windows storage, root and Android Clippy, app `actor::file_transfers` serially, native Clippy and the native publication filters, ambient, raw-fs, `cargo deny`). The complete root, native and frontend suites were not run. |
-| Re-review of `ceae7036`: no blocker, high or medium. LOW-a: after the probe's `FolderChanged`, our empty partial stays in the real folder, because its cleanup goes by path, which now leads elsewhere. LOW-b: inside `moved()` a failed identity read counted as moved, while the first hold counts it as inconclusive | LOW-a recorded (nothing is disclosed: the partial is empty; a retry of the same chosen name reads `PartialExists`, truthfully) and pinned: `a_path_retargeted_after_the_recheck_is_reported_as_changed` asserts the empty partial is left in the real folder. Deleting it through the held folder handle would close this; not taken here. LOW-b fixed: only a proven other folder counts as moved. |
+| Re-review of `ceae7036`: no blocker, high or medium. LOW-a: after the probe's `FolderChanged`, our empty partial stays in the real folder, because its cleanup goes by path, which now leads elsewhere. LOW-b: inside `moved()` a failed identity read counted as moved, while the first hold counts it as inconclusive | LOW-a recorded (nothing is disclosed: the partial is empty; a retry of the same chosen name reads `PartialExists`, truthfully) and pinned: `a_path_retargeted_after_the_recheck_is_reported_as_changed` asserts the empty partial is left in the real folder. Deleting it through the held folder handle would close this; not taken here (since taken: the fix-the-lows round, below). LOW-b fixed: only a proven other folder counts as moved. |
 | Residuals (no fix): our partial can be renamed out of the folder after `confirm_folder`, because the creation handle shares delete (only someone with modify rights on that folder); after a folder swap right after the link (L2), the folder flush and the reported path describe the new folder at that path, not the moved one that holds the copy | Recorded. |
 
 ## Transfers UX (PR #51, 24 October)
@@ -1473,7 +1473,7 @@ agents' `row.md` and `icons.md` (class contract `.sdl`, tokens only, motion and 
   | saved, missing | The saved file is no longer there. Save again makes a fresh copy. | Saved check `missing`; Save again is the fresh save from the private copy. |
   | saved, replaced | A different file is at the saved name now. Save again makes a fresh copy. | Saved check `replaced`: another object at the name (an in-place edit keeps the identity and reads present). |
   | removing, running | Working on it. The other actions wait until this one finishes. | A row in Deleting while one of its actions (Remove, Clear or Keep) runs; the sentence names none of them. |
-  | removing, stuck | Mewtual could not finish removing a file it created for this save. Choose Remove to try again, or Keep partly saved file. | A failed proven removal leaves the row in Removing (unreachable folder or a file in use); for a Clear of a saved row the file is only a temporary second name. |
+  | removing, stuck | Mewtual could not finish removing a file it created for this save. Choose Remove to try again, or Keep partly saved file. (Or "Keep the file" when every part was written.) | A failed proven removal leaves the row in Removing (unreachable folder or a file in use); for a Clear of a saved row the file is only a temporary second name. The sentence names the row's own Keep label. |
   | any, while a save writes | (none; the row reads Saving) | Native emits `download-progress` only while writing, and the list may not have refreshed since the save began (the non-resumable writer has no journal steps to refresh it); see "One row per file". |
 
   Deviations from the design copy: "Saved to the folder you chose" became "Saved to another
@@ -1541,15 +1541,114 @@ Adversarial review of `95eaeda6..1a3f67b4` and dispositions (no blocker or high)
 | L3: stale confirmations were never pruned | Fixed: each refresh drops entries whose row or token changed. |
 | L4: the live region kept its text, so a repeated sentence was not read again | Fixed: emptied, then set after a tick. |
 | L5: the Confirm button and Show in folder lacked a disabled description | Fixed: `aria-describedby` on Confirm; Show in folder gets `aria-busy` and a title while checking. |
-| L6: reveal residuals (window count not bounded by the slots, `xdg-open` of a swapped folder, Explorer's `/select,` with a comma) | Recorded in THREAT-MODEL; no change. |
+| L6: reveal residuals (window count not bounded by the slots, `xdg-open` of a swapped folder, Explorer's `/select,` with a comma) | Recorded in THREAT-MODEL. Comma and `xdg-open` narrowed in the fix-the-lows round (below); the window count is not changed. |
 | L7: Lock could wait behind 32 journal reads under the session commit guard | Fixed: the reads run after the guarded listing, then a generation check. |
 | L8: the incomplete sentence overreached for a copy whose parts all arrived but whose check did not finish | Fixed: "The download stopped before it finished. Resume download continues it." |
-| L9: Clear skips confirmation on a check from any time in the current Transfers visit | Recorded as a design note: the check is per visit and per row revision. If the saved file is deleted later in the same visit, Clear is unconfirmed; it still keeps a temporary staging name that is the only copy (`KeptOnlyCopy`), but when that name is already gone too (for example a leftover from Lock after the staging name was removed) Clear releases the private copy, the last one Mewtual had. |
+| L9: Clear skips confirmation on a check from any time in the current Transfers visit | Fixed in the fix-the-lows round (below): Clear checks the file again first. The note as first recorded: the check is per visit and per row revision. If the saved file is deleted later in the same visit, Clear is unconfirmed; it still keeps a temporary staging name that is the only copy (`KeptOnlyCopy`), but when that name is already gone too (for example a leftover from Lock after the staging name was removed) Clear releases the private copy, the last one Mewtual had. |
 | Re-review N1: the focus restore could move focus the user had not lost (returning to Transfers with focus on `<body>`, a deliberate blur followed by a row change, a long save finishing later) | Fixed: `runSavedRowAction` restores only when the control that had focus (or the one it moved focus to) left the page; the remembered row control is forgotten when focus moves anywhere else while it is still there, and when Transfers is left. Tests: focus moved elsewhere is never taken back. |
 | Re-review N2: after a non-confirm action focus preferred Remove | Fixed: Remove first only when returning from a confirmation; otherwise the row's first action. |
 | Re-review N3: USER_GUIDE said Show in folder selects the file on Linux | Fixed: "(on Linux, its folder)". |
 | Re-review N4: the L9 note overclaimed | Fixed (the row above). |
 | Re-review N5: no server-instance check after the journal reads | Fixed: the final check covers the server instance too. |
+
+## Fix-the-lows round (PR #51, 24 October)
+
+Owner: "Let's fix the lows if we can." Every open low, residual and follow-up recorded above, on
+top of `3f14ee2e`. Each fix has a regression test that was seen failing with its guard broken.
+Not in scope (owner): the overwrite setting and keeping finished saves listed (#56).
+
+Fixed:
+
+| Finding | Fix | Test (break-checked) |
+| --- | --- | --- |
+| Transfers L9 (and the coordinator's note): Clear on a Saved row skipped its confirmation on a "present" answer from earlier in the visit, so a file deleted since let Clear release the last private copy without asking | `rowButtonClick` sends an unconfirmed Clear of a Saved row to `clearSavedRow`, which runs `check_saved_download` again and clears at once only on a fresh `present`; any other answer (missing, replaced, unknown, a refused or unreadable check) is recorded on the row and turns the press into the inline confirmation. A row or view that changed meanwhile does nothing; while the check runs the button is `aria-busy` with the title "Checking the saved file" (review LOW-6) and a second press does nothing. The remaining window is that check's own round trip. | `transfers-row-app.test.ts`: `Clear of a Saved row checks the file again and asks unless it is present right now` (broken three times: without the redirect, with "present" forced, without the busy marker). |
+| Transfers L6, comma: Explorer split `/select,<path>` at a comma in the path | `reveal_command` builds `/select,"<path>"`, passed with `CommandExt::raw_arg` (std, no `unsafe`) so it is not quoted twice; a path with `"` (no Windows name holds one) is refused. Every save's reveal goes through it. | Native `reveal_commands_keep_the_path_whole_and_never_open_the_file`. |
+| Transfers L6, `xdg-open`: a file swapped in for the folder would be opened | The folder is passed with a trailing `/`, so a launcher that resolves the path itself refuses a non-folder; a path with no parent is refused instead of handing the file itself to `xdg-open` (the old fallback). Narrowed, not closed: a launcher that normalizes the path (GIO may drop the slash) still opens what is there; the full fix is the file manager's D-Bus `ShowItems`, a new dependency. | The same native test (Linux and FreeBSD forms, the root, no parent). |
+| Re-review LOW-C: a name check that could not be made read as "the folder changed" | `confirm_folder` returns the changed-folder refusal only for evidence (another or identity-less folder, a path that leads to no folder: `NotFound`, `NotADirectory`, or a Unix link loop; a name not holding our file); a check that could not be made is `unconfirmed`: "the new file in that folder could not be checked (<system reason>)", no path. (The first version reused the creation-step mappers, which said "cannot write" or "unavailable" right after a successful create; review LOW-3.) Never `Unsupported`, so it never switches writers; our empty partial is removed either way. | Storage `a_name_check_that_cannot_be_made_is_not_reported_as_a_changed_folder` (all three creations; `TimedOut`, `PermissionDenied`, `NotFound`, `Unsupported`; broken by mapping every error to `changed`, and by the creation-step mapper) and, Linux only, `a_link_loop_put_at_the_folder_reads_as_a_changed_folder` (broken in WSL by dropping the loop arm). |
+| Re-review of `ceae7036`, LOW-a: after the probe's `FolderChanged` our empty partial stayed in the real folder | `confirm_folder` keeps the held folder (`hold_folder_holding`) and creation removes a refused partial relative to it on Windows (`HeldFolder::remove_session`: fs_at `open_path_at`, `DELETE` plus attributes, identity checked on that handle, `delete_by_handle`). Unix keeps the path-based removal (its probe never reports a changed folder, and `remove_verified` applies the shared-folder rule). | Storage `a_path_retargeted_after_the_recheck_is_reported_as_changed` now expects the real folder empty and the same choice usable again (broken by removing by path: one entry stays), and `a_held_folder_removes_only_our_own_file_inside_itself` (a foreign file, nothing, a junction at the name, and ours after the path was retargeted). |
+| Picker design question: a stale list's one-click start resumed a record whose journaled save was running, interrupting it | `start_saved` refuses a start that names no record while the found record shows `ExportView::Writing { active: true }` ("This file is being saved right now. Its progress is in Transfers."), before `resume_download`, like the Save as refusal beside it. An interrupted save still resumes in one click. | App `a_one_click_start_never_interrupts_a_live_journaled_save` (the live save keeps its epoch and publishes; after it ends the same start resumes the record; broken by disabling the refusal). |
+| Picker residual: a remembered choice silently redirected the plain "Download" item | `privateDownloadChatLabel` labels the item "Save to chosen place" while the listed row remembers a choice the item would use (file and embed menus, image viewer, file pane). Narrowed, not closed: the attachment chip (it shows the file's name), the .pixa viewer's download button and Unlock copy (whose help text says "to Downloads") are not labelled, and a list that has not shown the row yet labels nothing (review LOW-5). | `the plain save item names a remembered choice it would use instead of a plain Download`, `the menu, image viewer and file pane save items take their label from the file's row` (both broken). |
+| Follow-up: a stuck Clear of a saved row offered "Keep partly saved file" for a complete file, and native's message spoke of a partly saved file | Keep reads "Keep the file" when every part was written (`savedChunks === totalChunks`), and the stuck sentence names the row's own label; native's Remove errors and Keep's "already gone" notice have saved-row forms (`REMOVE_RETRY_SAVED`, `REMOVE_UNREACHABLE_SAVED`, `ALREADY_REMOVED_SAVED`) and name only "Keep". Residual (review LOW-2): a save that wrote every part but was never published (a crash or halt at publication) shows "Keep the file" while native's message still speaks of "the partly saved file"; both are true (the content is complete, the save did not finish) and the message names no label. | `Keep on a Removing row calls a complete file complete`, the explanation test, native `a_stuck_clear_of_a_saved_row_is_not_called_a_partly_saved_file`. |
+
+Resolved earlier, records corrected (no code change):
+
+- L13, an `ExportFile` dropped on an async thread in an error path: closed by re-review 2 LOW 7
+  (`OnPool`) and R2-L1 (custody). The one remaining moment, the Begin transition's await between
+  creation and `OnPool`, drops a bare session only if the invocation future itself is dropped,
+  which Tauri does only at process exit.
+- L13, "0 of N chunks saved" at checkpoint granularity: a running save's row shows its live
+  progress (Transfers UX); otherwise the count is the durable checkpoint, which is what Resume
+  keeps.
+- Remove on a hung share holding `privateDownloadBusy`: since R2-M1 it holds only that row.
+- "Any hard-link probe failure reads as FAT or exFAT": the sentence names FAT and exFAT only as an
+  example ("for example a FAT or exFAT drive") and is true for any folder that cannot link.
+
+Not fixed, with the reason:
+
+| Item | Why |
+| --- | --- |
+| Transfers L6: window count not bounded | The same posture as `open_external_url` and every other OS-launching command; a bound would need a new rate policy on the sanctioned clock, and a compromised renderer could open windows through those commands anyway. Out of scope. |
+| ReFS 128-bit file identity | No vetted safe crate exposes the volume's file system or the 128-bit id; reading it needs `unsafe`. |
+| Windows ancestor junction retarget (guarantee (b)) and the probe link by path | No safe handle-relative hard link on Windows (fs_at has none); it needs `NtSetInformationFile` with a root directory, which is `unsafe`. The save halts and is never reported saved. |
+| Our partial can be renamed out of the folder after `confirm_folder` (the creation handle shares delete) | Denying delete sharing on our own handle would make every verified removal of it (which opens with `DELETE`) fail with a sharing violation. Only someone with modify rights on that folder can do it. |
+| After a folder swap right after the link, the folder flush and the reported path describe the new folder | Naming the moved folder needs its path from the handle (`GetFinalPathNameByHandle`), not exposed by a vetted safe crate; the flush is best effort. Cosmetic: the copy is published in the moved folder. |
+| A hung guarded link stalls every guarded command | Publication must serialize with Lock; a link stuck in the kernel on a hard NFS mount cannot be cancelled safely. |
+| A just-created partial whose name cannot be opened at cleanup stays; empty files on SMB folders without file numbers | It is empty, and deleting without an identity proof could delete somebody else's file. |
+| A release that fails after Deleting is durable | The same failure mode as `cancel_download`, settled by the storage check; changing it is outside this PR. |
+| No real OS dialog run; a dialog that fails to open looks like Cancel | Manual OS UI, not automatable here; `rfd` returns the same `None` for both. |
+| Remembered choices without folder identity have no swap check | There is nothing to compare against. |
+| Test gaps: std writes and sync off the runtime; `save_group_file`, `stream_download_to_chosen` and the post-dialog recheck end to end; `ActorSavedCheck` itself; Remove or Pause in the flush gap | std's file writes cannot be parked from a test; the end-to-end paths need a real AppHandle, actor and dialog. Covered through the port seams. |
+| macOS: never compiled; publication guarantee (a) only | Not buildable on this host or in CI. |
+| Single writer across remount; an older session still alive | Design changes to the session exclusion (process-wide by Download ID), bounded today by clicks and that session's lifetime. Out of scope. |
+| L-4: let Keep put back a crash leftover at a `mewtual-removing-` name (Unix) | Keep never touches the destination by design; putting a file back is a new journaled step for a crash-only case. Out of scope. |
+| L-5: the panic path checks the number without the handle | After a worker panic the handle is gone; the number is all that is left. |
+| Linux confinement can deny the descriptor link; a real descriptor-link probe at creation | A probe leaves a second name in exactly the folders where Unix refuses automatic deletion (L-2). The halt at publication is truthful. |
+| Four stalled validations or cleanups disable Save as or Remove | That bound is the design (a bounded pool); the messages are truthful and a retry recovers. |
+| Unix writers without a journal: a failed unlink plus a failed put-back leave plaintext at a `mewtual-removing-` name | Same-account or kernel failure paths with no record to carry it. |
+| LOW 2: a crash leftover found after the folder became shared is reported with the staging name's wording | Needs a new removal outcome for a crash-then-permission-change case; the file is verified ours and only the name in the message is wrong. Out of scope. |
+| A planted hard link at the staging name; native's Downloads fallback without a folder identity; an owner-unreadable folder | `protected_hardlinks` stops other accounts; the Downloads fallback runs where no identity exists; an owner-unreadable folder now refuses with its own reason (LOW-C above). |
+| The one-off freeze/thaw failure | Not reproduced since; the 5 s bound around a real snapshot save is the likely cause, unconfirmed. |
+| Decisions recorded as such (M-6, L-2, "warning once", vaults at `27ffa183`, the PR #51 Windows range-chunk test) | Owner decisions or not part of this work. |
+
+Adversarial review of the fixes (read-only, on the uncommitted diff over `3f14ee2e`): no
+blocker, high or medium. Its answers: the held-folder removal cannot delete anything but our
+verified empty partial (a junction at the name reads as not ours; no attribute access); no
+`reveal_path` caller regresses (no `\\?\` paths reach it; UNC paths and spaces quote correctly,
+and the raw OS string drops the old lossy conversion); `clearSavedRow` is fenced on server, view
+generation and row revision; no legitimate flow reaches the one-click refusal (every row path
+passes `resume`, and `active` is false after Lock, unlock or restart).
+
+| Finding | Disposition |
+| --- | --- |
+| LOW-1: the `external.rs` module doc and THREAT-MODEL said every Windows delete holds a delete-denying handle, which the new held-folder removal (fs_at shares delete) does not | Fixed: both name the exception and what still holds (the delete goes through the verified handle, so it can only remove our never-published empty partial). |
+| LOW-2: "Keep the file" for a complete but unpublished save beside native's "partly saved file" | Recorded as a residual (the follow-up row above): both statements are true and the message names no label. |
+| LOW-3: the check failure reused creation-step mappers ("cannot write", "unavailable") | Fixed: `unconfirmed`; the test adds `PermissionDenied` and `Unsupported` and asserts no path and never `ExportError::Unsupported`. |
+| LOW-4: the reveal test sat between another test and its doc comment | Fixed: moved above it. |
+| LOW-5: the chip, the .pixa viewer, Unlock copy and a stale list still do not name a remembered choice; the test name and THREAT-MODEL overclaimed | Wording narrowed (test name, THREAT-MODEL, USER_GUIDE, the row above); the rest recorded as a residual. |
+| LOW-6: Clear showed nothing while its re-check ran | Fixed: `clearingSaved` state, `aria-busy` and a title on the button; test asserts the marker (break-checked). |
+| Residual: a Unix folder swapped for a symbolic link loop read as a local error | Fixed: a loop counts as a path leading to no folder (`leads_nowhere`); Linux test, break-checked in WSL. |
+| Residuals (no fix): Unix creation cleanup still goes by path, so a folder renamed before a creation refused for another reason (no lock, no `/proc`) strands the empty partial in the moved folder, as before this round; `SAVE_RUNNING` can show briefly for a session winding down after Pause (only without a listed row); `remove_session` has no test with a plain directory at the name (its `verify` refuses non-regular objects, as the junction case shows) | Recorded. |
+| Process note: a break-check edit (`if false && published`) was briefly visible during the review | Restored before commit; the committed diff was checked for `false &&`. |
+
+A short re-review of those fixes found nothing (`unconfirmed` and `leads_nowhere` keep every
+invariant; `libc::ELOOP` is per target; a Windows junction loop reads as "could not be checked",
+still a refusal, and the docs claim the loop case for Unix only). Its optional suggestion, an
+early return in `rowButtonClick` while Clear's check runs, was taken.
+
+Focused checks for this round (the coordinator's process: CI runs the complete suites,
+`test:startup` and `test:flows`; none were run here), Windows host unless noted, all passing:
+
+- Frontend: the 30 test files that read `App.svelte` plus `private-downloads`, `transfer-rows`
+  and `visual-fixture` (447 tests); `npm run check` 0 errors, 0 warnings.
+- Native `--lib` filters `reveal_command cleanup_tests show_in_folder` (19 tests) and `private_downloads
+  streamed_save fallback publish download stops_the_save lock in_downloads_flag device_name
+  keep_session reveal` (173); strict native Clippy (all targets, all features, `-D warnings`);
+  native fmt.
+- Root: `cargo test -p catcoms-storage --lib kept::export held_folder` (86); WSL Ubuntu
+  `cargo test -p catcoms-storage --lib` 235 passed (1 existing ignored) with Unix Clippy clean;
+  `cargo test -p catcoms-app --lib actor::file_transfers` serially (63); Clippy for storage and
+  app; fmt;
+  `scripts/check-no-ambient.sh`; `scripts/check-store-raw-fs.sh`.
 
 ## Ledger (24 October, Transfers UX)
 

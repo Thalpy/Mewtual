@@ -10,7 +10,7 @@ const source = readFileSync(new URL("./App.svelte", import.meta.url), "utf8");
 const script = source.slice(source.indexOf(">", source.indexOf("<script")) + 1, source.indexOf("</script>"));
 const tree = ts.createSourceFile("App.ts", script, ts.ScriptTarget.ES2022, true, ts.ScriptKind.TS);
 const names = new Set(["liveSaveFor", "confirmingRemove", "askRemove", "cancelRemove", "runSavedRowAction",
-  "rowButtonClick", "revealSavedRow", "rowFocusTarget"]);
+  "rowButtonClick", "clearSavedRow", "revealSavedRow", "rowFocusTarget"]);
 const handlers = tree.statements.filter((n) => ts.isFunctionDeclaration(n) && n.name && names.has(n.name.text));
 assert.equal(handlers.length, names.size);
 const constant = (name: string) => {
@@ -28,8 +28,11 @@ const remove = { kind: "remove", label: "Remove", confirm: true, disabled: false
 
 function app() {
   return new Function("rowValue", "nextValue", `
-    let activeServerId = 1, viewGeneration = 1, locked = false;
-    let downloads = {}, activeSaves = {}, confirmRemove = {}, revealingSaved = {}, savedChecks = {};
+    let activeServerId = 1, viewGeneration = 1, locked = false, savedCheckVisit = 4;
+    let downloads = {}, activeSaves = {}, confirmRemove = {}, revealingSaved = {}, savedChecks = {}, clearingSaved = {};
+    let privateDownloads = [rowValue, nextValue];
+    // The real validator accepts exactly these answers; anything else is "unknown".
+    const checkedSavedCheck = (value) => ["present", "missing", "replaced", "unknown"].includes(value) ? value : "unknown";
     let present = new Set([rowValue.id, nextValue.id]);
     const ran = [], focused = [], calls = [], notices = [], checks = [];
     let replies = new Map();
@@ -73,7 +76,14 @@ function app() {
       if (!persist.has(target.id)) present.delete(target.id);
       if (document.activeElement && !document.activeElement.isConnected) document.activeElement = document.body;
     };
-    const invoke = async (command, args) => { calls.push([command, args]); const reply = replies.get(command); if (reply instanceof Error) throw reply; return reply ?? null; };
+    // A reply can be a value, an Error to throw, or a function run when the command is answered
+    // (a test models what changes while native works).
+    const invoke = async (command, args) => {
+      calls.push([command, args]);
+      const reply = replies.get(command);
+      if (reply instanceof Error) throw reply;
+      return (typeof reply === "function" ? reply(args) : reply) ?? null;
+    };
     const unlockedViewCurrent = (gen, server) => !locked && gen === viewGeneration && server === activeServerId;
     const toast = (...args) => notices.push(args);
     const checkSavedRows = async () => { checks.push("check"); };
@@ -86,11 +96,14 @@ function app() {
       set downloads(value) { downloads = value; }, set activeSaves(value) { activeSaves = value; },
       set server(value) { activeServerId = value; },
       set savedChecks(value) { savedChecks = value; }, get savedChecks() { return savedChecks; },
+      set privateDownloads(value) { privateDownloads = value; },
+      get clearingSaved() { return clearingSaved; },
+      set generation(value) { viewGeneration = value; },
       get confirmRemove() { return confirmRemove; },
       keep(id) { persist.add(id); },
       gone(id) { present.delete(id); },
-      liveSaveFor, confirmingRemove, askRemove, cancelRemove, rowButtonClick, runSavedRowAction, revealSavedRow,
-      rowFocusTarget,
+      liveSaveFor, confirmingRemove, askRemove, cancelRemove, rowButtonClick, clearSavedRow, runSavedRowAction,
+      revealSavedRow, rowFocusTarget,
     };
   `)(row, next);
 }
@@ -197,6 +210,74 @@ test("Show in folder sends only the Download ID and revision, and a refusal re-c
   assert.deepEqual(a.checks, ["check"]);
 });
 
+test("Clear of a Saved row checks the file again and asks unless it is present right now", async () => {
+  // Review L9: the row skips the confirmation on an earlier "present", but Clear releases the
+  // private copy, the only copy left once the saved file is gone.
+  const saved = { ...row, status: "saved" };
+  const clear = { kind: "remove", label: "Clear", confirm: false, disabled: false, disabledReason: null };
+  const check = ["check_saved_download", { server: 1, download: row.id, expectedIntent: "3" }];
+  const settle = () => new Promise((resolve) => setTimeout(resolve, 0));
+  // Deleted since the visit's check: the press checks again and asks instead of clearing.
+  for (const answer of ["missing", "replaced", "unknown", "nonsense", new Error("Mewtual is locked.")]) {
+    const a = app();
+    a.privateDownloads = [saved, next];
+    a.savedChecks = { [row.id]: { intent: "3", result: "present", visit: 4 } };
+    a.replies.set("check_saved_download", answer);
+    a.rowButtonClick(saved, clear, "saved");
+    await settle();
+    assert.deepEqual(a.calls, [check], `${answer}: checked again first`);
+    assert.deepEqual(a.ran, [], `${answer}: nothing released`);
+    assert.equal(a.confirmingRemove(saved), true, `${answer}: it asks inline`);
+    assert.equal(a.savedChecks[row.id].result, typeof answer === "string" && answer !== "nonsense" ? answer : "unknown",
+      `${answer}: the row shows what was found`);
+  }
+  // Still present: it clears at once, after the fresh check.
+  const b = app();
+  b.privateDownloads = [saved, next];
+  b.replies.set("check_saved_download", "present");
+  b.rowButtonClick(saved, clear, "saved");
+  await settle();
+  assert.deepEqual(b.calls, [check]);
+  assert.deepEqual(b.ran, [[row.id, "remove"]]);
+  // A confirmed Clear (the row already asked) runs without another check.
+  const c = app();
+  c.privateDownloads = [saved, next];
+  await c.askRemove(saved);
+  c.rowButtonClick(saved, { ...clear, confirm: true }, "saved");
+  await settle();
+  assert.deepEqual(c.calls, []);
+  assert.deepEqual(c.ran, [[row.id, "remove"]]);
+  // The row changed, or the view moved on, while the check ran: nothing runs and nothing asks.
+  for (const change of ["row", "view"]) {
+    const d = app();
+    d.privateDownloads = [saved, next];
+    d.replies.set("check_saved_download", () => {
+      if (change === "row") d.privateDownloads = [{ ...saved, intent: "4" }, next];
+      else d.generation = 2;
+      return "present";
+    });
+    d.rowButtonClick(saved, clear, "saved");
+    await settle();
+    assert.deepEqual(d.ran, [], `${change}: nothing released on stale terms`);
+    assert.equal(d.confirmingRemove(saved), false, `${change}: nothing asked`);
+  }
+  // A second press while the check runs does not start another check or a second Clear.
+  const e = app();
+  e.privateDownloads = [saved, next];
+  let answer: (value: string) => void = () => {};
+  e.replies.set("check_saved_download", () => new Promise<string>((resolve) => { answer = resolve; }));
+  e.rowButtonClick(saved, clear, "saved");
+  e.rowButtonClick(saved, clear, "saved");
+  await settle();
+  assert.equal(e.calls.length, 1);
+  // Review LOW-6: the button shows the check running, as Show in folder does.
+  assert.equal(e.clearingSaved[row.id], true, "Clear is marked busy while its check runs");
+  answer("present");
+  await settle();
+  assert.deepEqual(e.ran, [[row.id, "remove"]]);
+  assert.equal(e.clearingSaved[row.id], undefined, "and no longer once it answered");
+});
+
 test("the Transfers markup keeps one row per file and the new contracts", () => {
   // The live list leaves out a download whose private row carries its save.
   assert.match(source, /let liveTransferList = \$derived\(\s*transferList\.filter\(\(t\) => t\.direction !== "download" \|\| !privateDownloadCids\.has\(t\.cid\)\)/);
@@ -215,5 +296,22 @@ test("the Transfers markup keeps one row per file and the new contracts", () => 
   // Action buttons name their file and say why they are disabled.
   assert.match(source, /aria-label=\{action\.accessibleName\}/);
   assert.match(source, /title=\{action\.disabledReason \?\? undefined\}/);
+  // A Clear whose re-check is running is marked busy (review LOW-6 of the fix-the-lows round).
+  assert.match(source, /aria-busy=\{action\.kind === "remove" && clearingSaved\[saved\.id\] \? "true" : undefined\}/);
+  assert.match(source, /title=\{action\.kind === "remove" && clearingSaved\[saved\.id\] \? "Checking the saved file" : action\.disabledReason \?\? undefined\}/);
   assert.match(source, /aria-label=\{`Show \$\{saved\.name\} in folder`\}/);
+});
+
+test("the menu, image viewer and file pane save items take their label from the file's row", () => {
+  // Fix-the-lows round (picker review residual): the file menu, the inline embed menu, the image
+  // viewer and the file pane say "Save to chosen place" while a remembered Save as choice would
+  // be used (`privateDownloadChatLabel`), not a fixed "Download". The attachment chip (the file's
+  // name), the .pixa viewer's button and Unlock copy are not labelled (a recorded residual).
+  assert.match(source, /function downloadLabel\(f: UiFile\): string \{\s*return privateDownloadChatLabel\(privateDownloads\.find\(\(row\) => row\.cid === f\.cid\)\);/);
+  assert.match(source, /\{ label: downloadLabel\(f\), icon: "down", onSelect: \(\) => downloadFile\(f\) \}/);
+  assert.match(source, /\{ label: downloadLabel\(embedded\), icon: "down", onSelect: \(\) => downloadFile\(embedded\) \}/);
+  assert.match(source, /downloadFile\(lightboxFile\)\}>\{lightboxFile \? downloadLabel\(lightboxFile\) : "Download"\}</);
+  assert.match(source, /downloadFile\(fileInfo\)\}>↓ \{fileInfo \? downloadLabel\(fileInfo\) : "Download"\}</);
+  assert.doesNotMatch(source, /label: "Download", icon: "down", onSelect: \(\) => downloadFile/);
+  assert.doesNotMatch(source, /downloadFile\((lightboxFile|fileInfo)\)\}>(↓ )?Download</);
 });

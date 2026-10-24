@@ -14113,26 +14113,82 @@ fn launch_path(path: &Path) -> Result<(), String> {
 fn reveal_path(path: &Path) -> Result<(), String> {
     // Reveal rather than execute arbitrary shared files. This gives every Download button a
     // visible system window without silently launching a peer-supplied executable or document.
-    #[cfg(target_os = "windows")]
-    let mut cmd = {
-        let mut c = std::process::Command::new("explorer.exe");
-        c.arg(format!("/select,{}", path.to_string_lossy()));
-        c
-    };
-    #[cfg(target_os = "macos")]
-    let mut cmd = {
-        let mut c = std::process::Command::new("open");
-        c.arg("-R").arg(path);
-        c
-    };
-    #[cfg(all(unix, not(target_os = "macos")))]
-    let mut cmd = {
-        let mut c = std::process::Command::new("xdg-open");
-        c.arg(path.parent().unwrap_or(path));
-        c
-    };
+    let command = reveal_command(path, std::env::consts::OS)?;
+    let mut cmd = std::process::Command::new(command.program);
+    cmd.args(command.flags);
+    // Windows: the target is already quoted for Explorer's own parser (see `reveal_command`), so
+    // it must reach the command line as is; `arg` would quote it a second time.
+    #[cfg(windows)]
+    std::os::windows::process::CommandExt::raw_arg(&mut cmd, &command.target);
+    #[cfg(not(windows))]
+    cmd.arg(&command.target);
     cmd.spawn().map_err(|e| e.to_string())?;
     Ok(())
+}
+
+/// How [`reveal_path`] asks the system file manager to show `path`. Pure and keyed by `os`
+/// (`std::env::consts::OS` in production), so every platform's form is tested on any host.
+#[derive(Debug, PartialEq, Eq)]
+struct RevealCommand {
+    program: &'static str,
+    /// Fixed flags, each its own argument, before the target.
+    flags: &'static [&'static str],
+    /// The one variable argument. On Windows it is passed raw (`CommandExt::raw_arg`), already in
+    /// Explorer's syntax; elsewhere it is one literal argument, never seen by a shell.
+    target: std::ffi::OsString,
+}
+
+/// Fix-the-lows round (Transfers review L6). The forms, and why each is the safe one:
+///
+/// - Windows: Explorer parses its own command line and splits `/select,` at commas, so an
+///   unquoted path such as `C:\a,b\c.txt` selected the wrong item or opened another folder. The
+///   path is quoted inside the option (`/select,"C:\a,b\c.txt"`) and passed raw. Windows names
+///   cannot contain `"`, so a path with one was not made by Mewtual and is refused rather than
+///   escaped (Explorer has no escape for it).
+/// - macOS: `open -R` reveals the file without opening it.
+/// - Linux and the other Unix systems: `xdg-open` cannot select a file, so it opens the parent
+///   folder, given with a trailing `/` so that a launcher which resolves the path itself refuses
+///   a non-folder put at that path since the check (`ENOTDIR`) instead of opening it with its
+///   default application. A launcher that normalizes the path first (GIO may drop the slash)
+///   still opens what is there then; see THREAT-MODEL. A path with no parent is refused: the old
+///   fallback handed the file itself to `xdg-open`, which opens (and for some types runs) it.
+fn reveal_command(path: &Path, os: &str) -> Result<RevealCommand, String> {
+    const UNSHOWABLE: &str = "This file cannot be shown in its folder.";
+    match os {
+        "windows" => {
+            if path.as_os_str().to_string_lossy().contains('"') {
+                return Err(UNSHOWABLE.into());
+            }
+            let mut target = std::ffi::OsString::from("/select,\"");
+            target.push(path.as_os_str());
+            target.push("\"");
+            Ok(RevealCommand {
+                program: "explorer.exe",
+                flags: &[],
+                target,
+            })
+        }
+        "macos" => Ok(RevealCommand {
+            program: "open",
+            flags: &["-R"],
+            target: path.as_os_str().to_owned(),
+        }),
+        _ => {
+            let parent = path
+                .parent()
+                .filter(|parent| !parent.as_os_str().is_empty())
+                .ok_or(UNSHOWABLE)?;
+            let mut target = parent.as_os_str().to_owned();
+            if !target.to_string_lossy().ends_with('/') {
+                target.push("/");
+            }
+            Ok(RevealCommand {
+                program: "xdg-open",
+                flags: &[],
+                target,
+            })
+        }
+    }
 }
 
 #[derive(Serialize)]
@@ -20638,6 +20694,52 @@ mod tests {
         assert!(note.contains("\"w.bin.part\""), "{note}");
         assert!(dir.path().join("w.bin.part").exists());
         std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    /// Transfers review L6 (fixed in the fix-the-lows round): every platform's reveal form, built
+    /// on any host. Explorer gets the path quoted inside `/select,` so a comma cannot split it;
+    /// `xdg-open` gets the parent folder with a trailing `/`, never the file itself.
+    #[test]
+    fn reveal_commands_keep_the_path_whole_and_never_open_the_file() {
+        use std::ffi::OsString;
+        let windows = reveal_command(Path::new(r"C:\Users\me\Down,loads\a,b c.txt"), "windows")
+            .expect("a Windows path");
+        assert_eq!(windows.program, "explorer.exe");
+        assert!(windows.flags.is_empty());
+        assert_eq!(
+            windows.target,
+            OsString::from(r#"/select,"C:\Users\me\Down,loads\a,b c.txt""#),
+            "quoted inside the option, so Explorer's comma split cannot cut the path"
+        );
+        assert!(
+            reveal_command(Path::new(r#"C:\x\a"b.txt"#), "windows").is_err(),
+            "a quote cannot be escaped for Explorer, and no Windows name holds one"
+        );
+
+        let macos = reveal_command(Path::new("/Users/me/Downloads/a,b.txt"), "macos").unwrap();
+        assert_eq!((macos.program, macos.flags), ("open", &["-R"][..]));
+        assert_eq!(macos.target, OsString::from("/Users/me/Downloads/a,b.txt"));
+
+        for os in ["linux", "freebsd"] {
+            let unix = reveal_command(Path::new("/home/me/Downloads/run.desktop"), os).unwrap();
+            assert_eq!((unix.program, unix.flags), ("xdg-open", &[][..]));
+            assert_eq!(
+                unix.target,
+                OsString::from("/home/me/Downloads/"),
+                "{os}: the folder, with a trailing slash so a file swapped in there is refused"
+            );
+            assert_eq!(
+                reveal_command(Path::new("/run.desktop"), os)
+                    .unwrap()
+                    .target,
+                OsString::from("/"),
+                "{os}: the root keeps its single slash"
+            );
+            assert!(
+                reveal_command(Path::new("run.desktop"), os).is_err(),
+                "{os}: a path with no parent is refused; xdg-open would open the file itself"
+            );
+        }
     }
 
     /// PR51 M1: a staging name swapped during the transfer must never become the saved file. Linux

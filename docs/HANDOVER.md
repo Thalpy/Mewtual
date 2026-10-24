@@ -1194,6 +1194,17 @@ handling) are fixed. `cargo deny` now fails on RUSTSEC-2026-0387 (`crypto-bigint
 published after `95eaeda6` and unrelated to this work. Details, dispositions and the ledger are in
 the design document's Transfers UX section.
 
+Fix-the-lows round (24 October, on top of `3f14ee2e`; focused checks only, CI runs the suites):
+Clear on a Saved row checks the file again before skipping its confirmation; Explorer gets
+`/select,"<path>"` (a comma no longer splits it) and `xdg-open` the folder with a trailing `/`
+(never the file itself); a name check that could not be made is no longer reported as "the folder
+changed"; on Windows a refused creation removes its empty partial through the held folder even
+after a junction retarget; a stale list's one-click start no longer interrupts a running
+journaled save; the plain save item reads "Save to chosen place" while a Save as choice would be
+used; a stuck Clear offers "Keep the file" and native's messages describe a temporary copy. The
+remaining items, each with its reason (no safe API, macOS, out of scope), are in the design
+document's "Fix-the-lows round" section.
+
 ## Chat history adversarial checkpoint (2026-10-20)
 
 The latest user request is to explain/test additive chat history across MLS epochs, disconnected

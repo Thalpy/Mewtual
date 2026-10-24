@@ -572,6 +572,15 @@ different file now has its name, the row says so and offers **Save again**, whic
 from that private copy under a free name. If the file could not be checked (the drive is unplugged,
 for example), the row still says Saved and adds that it could not check. **Show in folder** opens
 your file manager with the saved file selected (on Linux, its folder), after the same check.
+**Clear** on a Saved row checks the file once more first: it clears at once only when the file is
+still there, and otherwise asks you to confirm, because the private copy may then be the only one
+left. If Mewtual cannot finish removing a file it created for a save (the folder is unplugged,
+for example), the row offers **Keep the file** when every part of that file had been written, or
+**Keep partly saved file** when not; either leaves the file where it is and drops the row.
+
+If you choose **Save as** for a file and its save has not started yet, Mewtual remembers that
+place. The file's save item in the chat and file menus, the image viewer and the file pane then
+reads **Save to chosen place** instead of **Download** until that save begins.
 
 ### What loads by itself, and how big it may be
 

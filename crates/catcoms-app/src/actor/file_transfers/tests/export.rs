@@ -270,6 +270,63 @@ async fn a_save_as_choice_never_interrupts_a_live_journaled_save() {
     run.close().await;
 }
 
+/// Fix-the-lows round (picker re-review design question): a start that names no record, the
+/// chat's one-click Download from a list that did not show this save yet, is refused while the
+/// file's journaled save is running, instead of resuming the record and interrupting that save.
+/// Once no session is live, the same one-click start resumes the record as before.
+#[tokio::test]
+async fn a_one_click_start_never_interrupts_a_live_journaled_save() {
+    let run = running().await;
+    let first = ready(&run, None).await;
+    let mut file = begin(&run, &first).await;
+    let refused = bounded(run.actor.acquire_download(
+        run.cid.as_bytes().to_vec(),
+        None,
+        run.origin.clone(),
+    ))
+    .await;
+    assert_eq!(refused.err().as_deref(), Some(SAVE_RUNNING));
+    assert!(first.is_current(), "the live save keeps its read epoch");
+    let id = bounded(run.actor.downloads()).await.unwrap()[0].id;
+    // The live save is untouched: it writes and publishes normally.
+    write_all(&run, &first, &mut file).await;
+    drop(file);
+    // With no live session (an interrupted save), the one-click start resumes the record.
+    assert!(matches!(
+        bounded(run.actor.downloads()).await.unwrap()[0].export,
+        catcoms_storage::kept::ExportView::Writing { active: false, .. }
+    ));
+    let second = ready(&run, None).await;
+    assert_eq!(second.id(), id, "the same record");
+    assert!(
+        !first.is_current(),
+        "the resumed run replaced the interrupted one"
+    );
+    let Some(ExportState::Writing(journal)) = saved_state(&run).await else {
+        panic!("the journal survives the interruption");
+    };
+    let ExportReopen::Ready(mut file) =
+        ExportFile::reopen(&journal, second.export_plan().unwrap()).unwrap()
+    else {
+        panic!("our partial reopens");
+    };
+    bounded(run.actor.download_export_transition(
+        second.clone(),
+        DownloadExportTransition::Resume {
+            journal,
+            presence: file.presence(),
+        },
+        run.origin.clone(),
+    ))
+    .await
+    .unwrap();
+    write_all(&run, &second, &mut file).await;
+    let path = publish(&run, &second, &mut file).await;
+    file.finish(&mut rng()).unwrap();
+    assert_eq!(std::fs::read(path).unwrap(), run.data);
+    run.close().await;
+}
+
 #[tokio::test]
 async fn pause_mid_export_stops_effects_and_resume_continues_the_same_partial_file() {
     let run = running().await;
