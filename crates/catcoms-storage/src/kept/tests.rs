@@ -314,3 +314,29 @@ fn corrupt_primary_record_falls_back_to_the_completed_kept_copy() {
     assert!(store.primary.get(&p.cid).is_err());
     assert_eq!(store.get(&p.cid).unwrap().unwrap(), b"owned");
 }
+
+/// Cache housekeeping drops a cache duplicate only when reads can fall back to a Keep copy. That
+/// is a completed copy that is actually on disk; a copy still in progress never counts, and
+/// dropping the duplicate must leave the bytes readable through the composite store.
+#[test]
+fn retained_chunks_are_exactly_the_completed_copies_reads_fall_back_to() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut store = open(dir.path());
+    let p = plan(b"kept bytes");
+    store.put(b"kept bytes").unwrap();
+    let token = store.begin_keep(p.clone()).unwrap();
+    store.put_keep(token, b"kept bytes").unwrap();
+    assert!(
+        store.retained_chunks().is_empty(),
+        "an unfinished copy is not a fallback"
+    );
+    store.finish_keep(token).unwrap();
+    assert_eq!(
+        store.retained_chunks().into_iter().collect::<Vec<_>>(),
+        vec![p.cid]
+    );
+    assert!(store.delete(&p.cid).unwrap(), "the primary duplicate goes");
+    assert_eq!(store.get(&p.cid).unwrap().unwrap(), b"kept bytes");
+    store.forget_kept(&p.cid).unwrap();
+    assert!(store.retained_chunks().is_empty());
+}

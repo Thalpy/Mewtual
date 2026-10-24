@@ -1,0 +1,485 @@
+//! Bookkeeping for the size-limited primary blob cache (`<vault>/blobs/<group>/`).
+//!
+//! Three jobs live here, all of them filesystem facts rather than policy:
+//!
+//! - **Crash-safe temporary names.** The primary cache writes each blob to
+//!   `incoming/<cid hex>.<process id>.<mount generation>.<sequence>`, syncs it and renames it into
+//!   place, so a CID-named file only ever appears with complete content. The mount generation is a
+//!   process-wide counter handed to each primary handle when it opens and kept in [`live`] until the
+//!   handle drops. Recovery can then tell an abandoned temporary file (another process, or a handle
+//!   that no longer exists) from one a live handle in this process is still writing.
+//! - **The cache scan.** One pass over the directory records each CID-named regular file and its
+//!   length (metadata only, nothing is decrypted) into a [`CacheIndex`]. The first scan of a mount
+//!   also fixes the *mount set*: the CIDs that were present before this mount wrote anything. Only
+//!   those may ever be classed as unclaimed, which keeps a blob published during this mount (for
+//!   example a Studio frame stored before any record names it) out of that class.
+//! - **Leave cleanup.** The marker, scratch-directory and `kept/` removal steps used when the user
+//!   leaves a server. Policy (what may be deleted, Studio pins) stays with the caller; these helpers
+//!   only remove what they are pointed at, never follow links, and count what they could not remove
+//!   so a caller never reports space it did not free.
+//!
+//! The eviction *planner* is deliberately not here: it needs the replicated file index and the pin
+//! sets, which belong to the application crate.
+
+use std::collections::{BTreeMap, BTreeSet};
+use std::fs;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Mutex;
+
+use crate::cid::Cid;
+use crate::StorageError;
+
+/// Subdirectory of the primary cache holding writes in progress. Never inside a Keep directory:
+/// Keep's loaders reject any entry they do not recognise.
+pub(crate) const INCOMING_DIR: &str = "incoming";
+/// Staging subdirectory name, duplicated from `blob.rs` so leave cleanup can name it.
+const STAGING_DIR: &str = "staging";
+/// Keep subdirectory name, as created by `ServerStore::blob_store`.
+const KEPT_DIR: &str = "kept";
+/// The Keep lease file inside `kept/` (see `kept.rs`).
+const KEPT_LEASE: &str = "lease.lock";
+/// Marker that a leave cleanup of this namespace started and has not finished. Its presence in a
+/// namespace whose group no running server uses is the only trigger for resumed cleanup.
+pub const LEAVING_MARKER: &str = "leaving";
+/// Fixed marker content, so a stray empty file is not mistaken for ours.
+const LEAVING_TAG: &[u8] = b"mewtual/cache-leaving/v1\n";
+/// The shortest valid sealed record: a 24-byte nonce plus the 16-byte tag of an empty plaintext.
+/// A CID-named file shorter than this in the sealing store is a torn write and can never verify.
+pub const MIN_SEALED_RECORD: u64 = 40;
+/// Upper bound on entries one scan will examine. A larger directory is reported incomplete, and
+/// an incomplete index never authorizes eviction.
+pub const MAX_CACHE_ENTRIES: usize = 1 << 20;
+/// Upper bound on entries one tree removal will visit, so a hostile or damaged tree cannot pin a
+/// leave cleanup in an unbounded walk. Anything left is counted as failed and retried later.
+const MAX_REMOVAL_ENTRIES: usize = 1 << 20;
+
+static NEXT_GENERATION: AtomicU64 = AtomicU64::new(1);
+static LIVE_GENERATIONS: Mutex<BTreeSet<u64>> = Mutex::new(BTreeSet::new());
+
+/// A live primary-cache handle's generation. Registered on creation and removed on drop, so
+/// recovery never deletes a temporary file a handle in this process may still be writing.
+#[derive(Debug)]
+pub(crate) struct MountGeneration(u64);
+
+impl MountGeneration {
+    pub(crate) fn register() -> Self {
+        let generation = NEXT_GENERATION.fetch_add(1, Ordering::Relaxed);
+        // A poisoned set only ever loses the ability to protect in-flight temp files; recovery
+        // then treats generations as live (see `is_live`), which keeps files rather than deletes.
+        if let Ok(mut live) = LIVE_GENERATIONS.lock() {
+            live.insert(generation);
+        }
+        Self(generation)
+    }
+    pub(crate) fn value(&self) -> u64 {
+        self.0
+    }
+}
+
+impl Drop for MountGeneration {
+    fn drop(&mut self) {
+        if let Ok(mut live) = LIVE_GENERATIONS.lock() {
+            live.remove(&self.0);
+        }
+    }
+}
+
+/// Whether `generation` belongs to a primary handle that is still open in this process. A
+/// poisoned registry answers "live", so the failure mode is a leftover file, never a lost write.
+fn is_live(generation: u64) -> bool {
+    LIVE_GENERATIONS
+        .lock()
+        .map(|live| live.contains(&generation))
+        .unwrap_or(true)
+}
+
+/// The temporary file name for one write. Process id plus generation plus a per-handle sequence
+/// separates every concurrent writer without randomness; the file is still opened `create_new`.
+pub(crate) fn temp_name(cid: &Cid, generation: u64, sequence: u64) -> String {
+    format!(
+        "{}.{}.{}.{}",
+        cid.to_hex(),
+        std::process::id(),
+        generation,
+        sequence
+    )
+}
+
+/// `(process id, generation)` of a well-formed temporary name.
+fn parse_temp(name: &str) -> Option<(u32, u64)> {
+    let mut parts = name.split('.');
+    let cid = parts.next()?;
+    let pid = parts.next()?.parse().ok()?;
+    let generation = parts.next()?.parse().ok()?;
+    parts.next()?.parse::<u64>().ok()?;
+    if parts.next().is_some() || Cid::from_hex(cid).is_none() {
+        return None;
+    }
+    Some((pid, generation))
+}
+
+/// What one handle knows about its cache directory: the size of every CID-named record, which of
+/// them were present before this mount wrote anything, and whether the last scan saw everything.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct CacheIndex {
+    sizes: BTreeMap<Cid, u64>,
+    mount: BTreeSet<Cid>,
+    complete: bool,
+}
+
+impl CacheIndex {
+    /// Total sealed bytes of every indexed record.
+    pub fn usage(&self) -> u64 {
+        self.sizes.values().fold(0, |sum, n| sum.saturating_add(*n))
+    }
+    /// Sealed length of each indexed record.
+    pub fn sizes(&self) -> &BTreeMap<Cid, u64> {
+        &self.sizes
+    }
+    /// CIDs present at the mount scan that this handle has not written, promoted or deleted since.
+    pub fn mount_set(&self) -> &BTreeSet<Cid> {
+        &self.mount
+    }
+    /// False when the last scan skipped an entry it could not read or hit [`MAX_CACHE_ENTRIES`].
+    /// An incomplete index must never authorize eviction: unseen bytes make usage a guess.
+    pub fn complete(&self) -> bool {
+        self.complete
+    }
+    /// Test and planner constructor: an index over explicit sizes, all of them in the mount set.
+    pub fn from_sizes(sizes: BTreeMap<Cid, u64>, complete: bool) -> Self {
+        let mount = sizes.keys().copied().collect();
+        Self {
+            sizes,
+            mount,
+            complete,
+        }
+    }
+    /// This handle stored `cid` with `len` sealed bytes. It leaves the mount set: it was written
+    /// during this mount, so it can no longer be presumed unclaimed.
+    pub(crate) fn note_written(&mut self, cid: Cid, len: u64) {
+        self.sizes.insert(cid, len);
+        self.mount.remove(&cid);
+    }
+    /// This handle removed `cid`.
+    pub(crate) fn note_removed(&mut self, cid: &Cid) {
+        self.sizes.remove(cid);
+        self.mount.remove(cid);
+    }
+}
+
+/// Counts from one scan, for logs and tests.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct CacheScanReport {
+    pub entries: usize,
+    pub bytes: u64,
+    pub complete: bool,
+    /// Abandoned temporary files removed from `incoming/` (mount scans only).
+    pub recovered_temps: usize,
+    /// CID-named files too short to be a sealed record, removed (mount scans of the sealing store).
+    pub removed_torn: usize,
+}
+
+/// Scan `dir`. A mount scan (`recover`) also removes abandoned temporary files and, when `sealed`,
+/// torn records, and fixes the mount set; a refresh keeps the previous mount set minus CIDs that
+/// are gone, so blobs other handles wrote since the mount never join it.
+pub(crate) fn scan(
+    dir: &Path,
+    sealed: bool,
+    recover: bool,
+    previous: Option<&CacheIndex>,
+) -> (CacheIndex, CacheScanReport) {
+    let mut report = CacheScanReport::default();
+    let mut sizes = BTreeMap::new();
+    let mut complete = true;
+    if recover {
+        report.recovered_temps = recover_incoming(&dir.join(INCOMING_DIR));
+    }
+    match fs::read_dir(dir) {
+        Ok(entries) => {
+            for entry in entries {
+                if report.entries >= MAX_CACHE_ENTRIES {
+                    complete = false;
+                    break;
+                }
+                let Ok(entry) = entry else {
+                    complete = false;
+                    continue;
+                };
+                let Some(cid) = entry.file_name().to_str().and_then(Cid::from_hex) else {
+                    continue; // staging/, kept/, incoming/, the leaving marker
+                };
+                report.entries += 1;
+                // `file_type` does not follow links. A link or directory under a CID name is not
+                // a record this store wrote; it is neither counted nor ever offered for deletion.
+                let Ok(kind) = entry.file_type() else {
+                    complete = false;
+                    continue;
+                };
+                if !kind.is_file() {
+                    continue;
+                }
+                let Ok(metadata) = entry.metadata() else {
+                    complete = false;
+                    continue;
+                };
+                let len = metadata.len();
+                if recover && sealed && len < MIN_SEALED_RECORD {
+                    if fs::remove_file(entry.path()).is_ok() {
+                        report.removed_torn += 1;
+                    } else {
+                        complete = false;
+                    }
+                    continue;
+                }
+                sizes.insert(cid, len);
+            }
+        }
+        Err(_) => complete = false,
+    }
+    let mount = if recover {
+        sizes.keys().copied().collect()
+    } else {
+        previous
+            .map(|index| {
+                index
+                    .mount
+                    .iter()
+                    .filter(|cid| sizes.contains_key(cid))
+                    .copied()
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+    report.bytes = sizes.values().fold(0u64, |sum, n| sum.saturating_add(*n));
+    report.complete = complete;
+    (
+        CacheIndex {
+            sizes,
+            mount,
+            complete,
+        },
+        report,
+    )
+}
+
+/// Remove temporary files no live writer can still own: another process's, a dropped handle's,
+/// or any name this module did not produce. Returns how many were removed.
+fn recover_incoming(incoming: &Path) -> usize {
+    let Ok(entries) = fs::read_dir(incoming) else {
+        return 0;
+    };
+    let pid = std::process::id();
+    let mut removed = 0;
+    for entry in entries.flatten().take(MAX_CACHE_ENTRIES) {
+        let abandoned = match entry.file_name().to_str().and_then(parse_temp) {
+            Some((owner, generation)) => owner != pid || !is_live(generation),
+            None => true,
+        };
+        if abandoned
+            && entry.file_type().is_ok_and(|kind| kind.is_file())
+            && fs::remove_file(entry.path()).is_ok()
+        {
+            removed += 1;
+        }
+    }
+    removed
+}
+
+/// Bytes freed and entries that could not be removed by one cleanup step. A caller reports only
+/// `freed_bytes` as reclaimed and keeps its resume marker while `failed` is non-zero.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Removal {
+    pub freed_bytes: u64,
+    pub failed: usize,
+}
+
+impl Removal {
+    pub fn add(&mut self, other: Removal) {
+        self.freed_bytes = self.freed_bytes.saturating_add(other.freed_bytes);
+        self.failed = self.failed.saturating_add(other.failed);
+    }
+}
+
+/// Write the leave marker into the namespace and flush it, so a cleanup interrupted by a crash or
+/// a lock is resumed later. Idempotent.
+pub fn write_leaving_marker(namespace: &Path) -> Result<(), StorageError> {
+    use std::io::Write;
+    let path = namespace.join(LEAVING_MARKER);
+    let mut file = fs::OpenOptions::new()
+        .create(true)
+        .truncate(true)
+        .write(true)
+        .open(&path)
+        .map_err(|e| StorageError::Io(e.to_string()))?;
+    file.write_all(LEAVING_TAG)
+        .and_then(|()| file.sync_all())
+        .map_err(|e| StorageError::Io(e.to_string()))?;
+    crate::kept::directory_barrier(namespace)
+}
+
+/// Whether `namespace` carries a leave marker written by [`write_leaving_marker`].
+pub fn has_leaving_marker(namespace: &Path) -> bool {
+    let path = namespace.join(LEAVING_MARKER);
+    fs::symlink_metadata(&path).is_ok_and(|m| m.is_file() && m.len() == LEAVING_TAG.len() as u64)
+        && crate::blob::read_bounded(&path, LEAVING_TAG.len())
+            .ok()
+            .flatten()
+            .is_some_and(|bytes| bytes == LEAVING_TAG)
+}
+
+/// Remove the marker, then the namespace directory if nothing else is left in it. Returns whether
+/// the namespace itself is gone. Call only once every delete of the cleanup succeeded.
+pub fn finish_leaving(namespace: &Path) -> Result<bool, StorageError> {
+    match fs::remove_file(namespace.join(LEAVING_MARKER)) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => return Err(StorageError::Io(e.to_string())),
+    }
+    // `remove_dir` refuses a non-empty directory, which is exactly the "Studio-pinned blobs keep
+    // the namespace" case; that is success, not an error.
+    Ok(fs::remove_dir(namespace).is_ok())
+}
+
+/// Namespaces under `blobs_root` that carry a leave marker, as `(directory name, path)`.
+/// Bounded; names are returned only if they are a plausible namespace (lowercase hex).
+pub fn leaving_namespaces(blobs_root: &Path) -> Vec<(String, PathBuf)> {
+    let Ok(entries) = fs::read_dir(blobs_root) else {
+        return Vec::new();
+    };
+    let mut found = Vec::new();
+    for entry in entries.flatten().take(4096) {
+        let Some(name) = entry.file_name().to_str().map(str::to_string) else {
+            continue;
+        };
+        if name.is_empty()
+            || name.len() > 512
+            || !name
+                .bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+        {
+            continue;
+        }
+        let path = entry.path();
+        if entry.file_type().is_ok_and(|kind| kind.is_dir()) && has_leaving_marker(&path) {
+            found.push((name, path));
+        }
+    }
+    found.sort();
+    found
+}
+
+/// Remove the `staging/` and `incoming/` trees of a namespace whose server has left.
+pub fn remove_scratch(namespace: &Path) -> Removal {
+    let mut removal = Removal::default();
+    let mut budget = MAX_REMOVAL_ENTRIES;
+    for name in [STAGING_DIR, INCOMING_DIR] {
+        remove_tree(&namespace.join(name), &mut removal, &mut budget);
+    }
+    removal
+}
+
+/// Delete `kept/` wholesale under its own lease: every entry except the lease file, then the lease
+/// file and the directory. Used only after the server has left, so no Keep record is needed and no
+/// device binding is required, which is what makes this step resumable. If another handle holds
+/// the lease, nothing is removed and one failure is reported.
+pub fn remove_kept_tree(namespace: &Path) -> Removal {
+    let kept = namespace.join(KEPT_DIR);
+    let mut removal = Removal::default();
+    match fs::symlink_metadata(&kept) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return removal,
+        Err(_) => {
+            removal.failed = 1;
+            return removal;
+        }
+        Ok(m) if m.file_type().is_symlink() || !m.is_dir() => {
+            // Never follow a link out of the namespace; just unlink the link itself.
+            if fs::remove_file(&kept).is_err() {
+                removal.failed = 1;
+            }
+            return removal;
+        }
+        Ok(_) => {}
+    }
+    let lease_path = kept.join(KEPT_LEASE);
+    let lease = match crate::vault::try_lock_file(&lease_path) {
+        Ok(lease) => lease,
+        Err(_) => {
+            removal.failed = 1;
+            return removal;
+        }
+    };
+    let mut budget = MAX_REMOVAL_ENTRIES;
+    match fs::read_dir(&kept) {
+        Ok(entries) => {
+            for entry in entries {
+                let Ok(entry) = entry else {
+                    removal.failed += 1;
+                    continue;
+                };
+                if entry.file_name() == KEPT_LEASE {
+                    continue;
+                }
+                remove_tree(&entry.path(), &mut removal, &mut budget);
+            }
+        }
+        Err(_) => removal.failed += 1,
+    }
+    // Windows cannot delete a file another handle has open, so release the lease first.
+    drop(lease);
+    if removal.failed == 0 {
+        if fs::remove_file(&lease_path).is_err() || fs::remove_dir(&kept).is_err() {
+            removal.failed += 1;
+        }
+    }
+    removal
+}
+
+/// Remove `path` and everything below it without following links, counting freed file bytes.
+fn remove_tree(path: &Path, removal: &mut Removal, budget: &mut usize) {
+    let metadata = match fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return,
+        Err(_) => {
+            removal.failed += 1;
+            return;
+        }
+    };
+    if *budget == 0 {
+        removal.failed += 1;
+        return;
+    }
+    *budget -= 1;
+    if metadata.is_dir() && !metadata.file_type().is_symlink() {
+        match fs::read_dir(path) {
+            Ok(entries) => {
+                for entry in entries {
+                    match entry {
+                        Ok(entry) => remove_tree(&entry.path(), removal, budget),
+                        Err(_) => removal.failed += 1,
+                    }
+                }
+            }
+            Err(_) => removal.failed += 1,
+        }
+        if fs::remove_dir(path).is_err() {
+            removal.failed += 1;
+        }
+    } else {
+        // A file, or a link (removed as a link, never followed). On Windows a directory link is
+        // removed with `remove_dir`; try that if `remove_file` refuses it.
+        let len = if metadata.is_file() {
+            metadata.len()
+        } else {
+            0
+        };
+        if fs::remove_file(path).is_ok() || fs::remove_dir(path).is_ok() {
+            removal.freed_bytes = removal.freed_bytes.saturating_add(len);
+        } else {
+            removal.failed += 1;
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests;
