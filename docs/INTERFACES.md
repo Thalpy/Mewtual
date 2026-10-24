@@ -1,5 +1,19 @@
 # Mewtual; Interfaces & Hooks Schema
 
+## Prepared Ready capacity and terminal HIGH cache cleanup (24 October)
+
+`prepare_sdp_capacity` now pays a separate32KiB Ready envelope before extracting the original
+lane/slots. A refusal rolls back payment and leaves old confirmation usable. Closing the
+original row reserve during that preparation reports Unauthorized, rather than temporary
+slot Capacity; genuine slot pressure remains Capacity. No Ready lender or protocol effect
+is exposed. The original affine owner carries both reservations through whole-plan cleanup.
+
+Private HIGH cache cleanup requires actual native Finish history, irreversible old closure,
+the same scope/local/join/key and actual call allocation. Outgoing ownership also compares
+the actual original PlanBinding. Only matching protected confirmation cache rows are removed;
+pair counters/replay, native results and admission histories remain. Source prunes the same
+terminal HIGH producer only after actual flights drain. LOW and unrelated rows are preserved.
+
 ## Whole-plan cleanup observation (24 October)
 
 `ConfirmationControl::retire_all` irreversibly fences successor preparation/lending and

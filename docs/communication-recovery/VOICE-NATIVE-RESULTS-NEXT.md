@@ -1,5 +1,41 @@
 # Next voice milestone: native result recovery
 
+## Current transition boundary and next implementation (24 October)
+
+Original browser/native key custody is implemented by opcode10 Claim/Release and Broker22;
+the older proposed browser boundary below is historical. Whole-plan retirement now includes
+actual prepared/ticket/Exchange capacity, independently of old-Workflow drainage. The next
+increment prepays Ready32KiB before extraction and removes only obsolete HIGH confirmation
+caches after native Finish-open/old closure. Maximum signed Ready683B and declared29,015B
+capacity composition are pinned. This still issues no Ready or receive/SDK/RTC authority.
+
+The reviewed implementation order is:
+
+1. Build the independent Ready Producer and exact immutable Prepared/Published signed cache.
+   Producer retains Exchange LAST, after its own credits; Exchange never retains Producer.
+   Separate Ready quotas share the original Crypto lane and two group outgoing positions.
+   Prepay existing endpoint/helper origin rows separately, without resetting limits.
+2. Install HIGH's actual bounded native receive owner before Ready publication. Keep generic
+   Exchange liveness Active-only. ReceiveInstalled permits only exact original first-Offer
+   verification/retention; an immutable Ready-publication marker must precede Offer admission.
+3. Give native Ready Source causal-Offer completion. Direct/helper transport ACKs cannot stop
+   its retries. Terminal record pruning waits for actual flights and cannot reset attempts.
+4. Admit LOW Ready through a bounded peek into the original protected Workflow loan, normal
+   work budgets/signatures/native final admission and shared immutable-ID classification.
+   Store exact paid receipt without Workflow custody; do not transfer inline while the real
+   verification/reply owner still holds the lane. Maintenance retries the same preparation.
+5. Native first-Offer publication must retain the exact recoverable token/event outside
+   Exchange. Prepare all fallible gates before origin debit, then publish token/replay/OfferId,
+   Active phase and Ready terminal state infallibly. Lost ACK recovers the same token.
+6. Add authenticated browser key-phase transfer, typed SDP/ICE actions/results and fresh RTC
+   authority. Preserve original keys/counter domain. Release is cleanup, not phase transfer;
+   old confirmation expiry must remain unchanged. Only the new phase may have its own
+   once-admitted bounded work deadline. Multi-peer/relay integration follows this path.
+
+Ready/receive/adoption stays bounded by the original Finish window. A Ready publication or
+packet header does not prove SDP decryption, RTC connection or audible media. Full current
+evidence and the open dependency audit are in HANDOVER and the communication acceptance ledger.
+
 ## High-side affine successor continuation (24 October; unscheduled)
 
 Native HIGH can now retain Reserved capacity across busy-lane refusal and consume the

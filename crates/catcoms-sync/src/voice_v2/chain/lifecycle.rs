@@ -19,6 +19,34 @@ fn plan_drained(binding: &PlanBinding) -> bool {
     binding.workflow_drained.load(Ordering::Acquire)
         && !binding.successor_busy.load(Ordering::Acquire)
 }
+
+impl Workflow {
+    /// Only HIGH's actual native Finish-open makes its old outgoing Hello/Proof work
+    /// obsolete. Closed old state is irreversible. LOW must keep Finish retries until
+    /// its separately authenticated Ready admission exists; this predicate excludes LOW.
+    pub(in crate::voice_v2) fn high_confirmation_sources_retired(&self) -> bool {
+        !self.binding.low
+            && self.binding.transition.original_until().is_some()
+            && self.state.lock().unwrap_or_else(|e| e.into_inner()).closed
+    }
+    pub(in crate::voice_v2) fn belongs_to_plan(&self, chain: &PreparedChain) -> bool {
+        Arc::ptr_eq(&self.binding, &chain.binding)
+    }
+}
+impl PreparedChain {
+    /// Cleanup-only original binding. This cannot reconstruct a Workflow or authorize
+    /// work. Call outside Group/Policy: subsequent cache drops may retire real credits.
+    pub(in crate::voice_v2) fn retired_high_confirmation_binding(&self) -> Option<&Binding> {
+        (!self.binding.low
+            && self.binding.transition.original_until().is_some()
+            && self
+                .control
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .closed)
+            .then_some(&self.binding.value)
+    }
+}
 impl ConfirmationControl {
     /// Whole-plan observation, distinct from `is_drained`'s old-Workflow-only meaning.
     /// Before explicit closure, callers must separately fence new admission (for example
@@ -31,7 +59,13 @@ impl ConfirmationControl {
     /// Existing old-Workflow witnesses intentionally retain their original meaning: Ready
     /// needs to observe that phase while its new successor is already retained.
     pub fn retire_all(self) -> PlanRetirement {
+        self.retire_all_after_close(|| {})
+    }
+    // Production supplies no callback; a deterministic test observes the real close store
+    // before it waits for Control, while preparation is between its open check and busy CAS.
+    pub(super) fn retire_all_after_close(self, after_close: impl FnOnce()) -> PlanRetirement {
         self.binding.successor_closed.store(true, Ordering::Release);
+        after_close();
         let binding = self.binding.clone();
         drop(self.retire());
         PlanRetirement { binding }
@@ -49,9 +83,18 @@ impl SuccessorCustody {
     /// retire_all may set closed first, but cannot drop the old Workflow until the same
     /// fence releases. Therefore old-Workflow drainage cannot overtake guard publication.
     pub(super) fn begin(binding: &Arc<PlanBinding>) -> Result<Self, VoiceError> {
+        Self::begin_after_open_check(binding, || {})
+    }
+    // Same unpublished decision, with a private deterministic scheduling seam. No public
+    // caller can inject code under Control/Workflow; the production closure is empty.
+    pub(super) fn begin_after_open_check(
+        binding: &Arc<PlanBinding>,
+        after_open: impl FnOnce(),
+    ) -> Result<Self, VoiceError> {
         if binding.successor_closed.load(Ordering::Acquire) {
             return Err(VoiceError::Unauthorized);
         }
+        after_open();
         binding
             .successor_busy
             .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)

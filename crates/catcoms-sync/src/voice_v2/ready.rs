@@ -3,6 +3,8 @@
 //! comparing its own original Finish identity/hash and repeating current native authority.
 use super::*;
 
+pub(in crate::voice_v2) mod capacity;
+
 /// High endpoint's immutable receive-readiness claim for one original native Finish. The
 /// hash is the native SIGNED Finish object's hash, not a WebCrypto output fingerprint.
 /// Helpers are selected once by high, then adopted exactly by low; endpoint-independent

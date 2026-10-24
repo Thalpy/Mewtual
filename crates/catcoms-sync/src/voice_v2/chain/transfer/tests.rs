@@ -4,6 +4,89 @@ use super::*;
 use crate::voice_v2::chain::tests::{binding, prepare_chain, publish};
 
 #[test]
+fn original_affine_successor_prepays_ready_and_never_acquires_another_crypto_lane() {
+    let (pool, chain, workflow, slots) = fixture();
+    let control = workflow.confirmation_control();
+    let before = pool.counts();
+    let ticket = control
+        .transfer_sdp_capacity(control.prepare_sdp_capacity().unwrap())
+        .unwrap();
+    let exchange = super::super::super::negotiation::Exchange::from_transferred(ticket, Vec::new());
+    assert!(exchange.ready_prepaid_for_test());
+    assert_eq!(pool.counts().1, before.1);
+    let whole = control.retire_all();
+    drop(workflow);
+    assert!(!whole.is_drained());
+    drop(exchange);
+    assert!(whole.is_drained());
+    drop((whole, chain));
+    assert_eq!(pool.counts(), (0, 0));
+    drop(slots.charge(ROWS).unwrap());
+}
+
+#[test]
+fn ready_prepayment_refusal_after_sdp_payment_keeps_original_confirmation_usable() {
+    let (pool, chain, workflow, slots) = fixture();
+    let control = workflow.confirmation_control();
+    let group = chain.binding.scope.group;
+    // SDP reserve succeeds, but only half the separate Ready envelope remains. This is
+    // local pre-effect refusal: no lane/slot extraction, old closure or budget reset.
+    let pressure = pool
+        .charge(
+            group,
+            super::super::super::resources::GROUP_BYTES
+                - pool.counts().0
+                - super::super::super::negotiation::EXCHANGE_BYTES
+                - 16 * 1024,
+            ResourceKind::Retained,
+        )
+        .unwrap();
+    let before = pool.counts();
+    assert_eq!(
+        control.prepare_sdp_capacity().err(),
+        Some(VoiceError::Capacity)
+    );
+    assert_eq!(pool.counts(), before);
+    assert!(workflow.is_live());
+    assert!(!chain.binding.successor_busy.load(Ordering::Acquire));
+    assert!(!workflow.state.lock().unwrap().sdp_preparing);
+    drop(pressure);
+    let prepared = control.prepare_sdp_capacity().unwrap();
+    let whole = control.retire_all();
+    drop(workflow);
+    assert!(!whole.is_drained());
+    drop(prepared);
+    assert!(whole.is_drained());
+    drop((whole, chain));
+    assert_eq!(pool.counts(), (0, 0));
+    drop(slots.charge(ROWS).unwrap());
+}
+
+#[test]
+fn whole_retirement_after_ready_payment_refuses_original_slots_as_terminal_closure() {
+    let (pool, chain, workflow, slots) = fixture();
+    let left = workflow.confirmation_control();
+    let right = workflow.confirmation_control();
+    let mut whole = None;
+    assert_eq!(
+        left.prepare_sdp_capacity_before_slots(|| {
+            whole = Some(right.retire_all());
+            assert!(
+                !whole.as_ref().unwrap().is_drained(),
+                "actual preparation still owns bytes"
+            );
+        })
+        .err(),
+        Some(VoiceError::Unauthorized)
+    );
+    drop(workflow);
+    assert!(whole.as_ref().unwrap().is_drained());
+    drop((whole, left, chain));
+    assert_eq!(pool.counts(), (0, 0));
+    drop(slots.charge(ROWS).unwrap());
+}
+
+#[test]
 fn actual_engine_preflight_before_commit_prevents_transfer_and_late_old_lender_cannot_borrow() {
     let (resources, chain, workflow, slots) = fixture();
     let (queue, action) = publish(&chain, &resources, &slots);
@@ -262,6 +345,46 @@ fn simultaneous_whole_retirement_and_real_preparation_never_outpace_actual_custo
     assert!(whole.is_drained());
     drop((whole, left, chain));
     assert_eq!(resources.counts(), (0, 0));
+    drop(slots.charge(ROWS).unwrap());
+}
+
+#[test]
+fn whole_close_between_open_observation_and_guard_cas_cannot_overtake_original_control() {
+    let (pool, chain, workflow, slots) = fixture();
+    let right = workflow.confirmation_control();
+    let (observed, wait_observed) = std::sync::mpsc::channel();
+    let (closed, wait_closed) = std::sync::mpsc::channel();
+    let (custody, whole) = std::thread::scope(|scope| {
+        let closing = scope.spawn(move || {
+            wait_observed.recv().unwrap();
+            right.retire_all_after_close(|| closed.send(()).unwrap())
+        });
+        // Actual preparation's Control -> Workflow order, before its first payment. The
+        // closer stores closed=true, then must block at THIS same original Control fence.
+        let control = chain.control.lock().unwrap();
+        let state = workflow.state.lock().unwrap();
+        let custody = SuccessorCustody::begin_after_open_check(&chain.binding, || {
+            observed.send(()).unwrap();
+            wait_closed.recv().unwrap();
+        })
+        .unwrap();
+        assert!(chain.binding.successor_closed.load(Ordering::Acquire));
+        assert!(chain.binding.successor_busy.load(Ordering::Acquire));
+        assert!(!chain.binding.workflow_drained.load(Ordering::Acquire));
+        drop(state);
+        drop(control);
+        (custody, closing.join().unwrap())
+    });
+    drop(workflow);
+    assert!(chain.binding.workflow_drained.load(Ordering::Acquire));
+    assert!(
+        !whole.is_drained(),
+        "the late published guard still owns original preparation"
+    );
+    drop(custody);
+    assert!(whole.is_drained());
+    drop((whole, chain));
+    assert_eq!(pool.counts(), (0, 0));
     drop(slots.charge(ROWS).unwrap());
 }
 

@@ -17,6 +17,7 @@ struct PreparedCapacity {
     _reserve: Arc<Reservation>,
     _lowers: Arc<GroupForwardLanes>,
     _slots: Arc<slots::ReservedSlots>,
+    ready: super::super::ready::capacity::ReadyCapacity,
     binding: Arc<PlanBinding>,
     _preparation: Preparation,
     // All capacity fields precede their metadata credit; only the fixed-plan publisher
@@ -70,6 +71,7 @@ impl TransferredSdpCapacity {
             _reserve: reserve,
             _lowers: lowers,
             _slots: slots,
+            ready,
             binding,
             _preparation: preparation,
             _metadata: metadata,
@@ -80,6 +82,7 @@ impl TransferredSdpCapacity {
             reserve,
             lowers,
             slots,
+            ready,
             proof: SuccessorProof(binding),
             lane: self.lane.take().expect("one original idle lane"),
             metadata,
@@ -123,6 +126,7 @@ pub(in crate::voice_v2) struct TransferredParts {
     pub reserve: Arc<Reservation>,
     pub lowers: Arc<GroupForwardLanes>,
     pub slots: Arc<slots::ReservedSlots>,
+    pub ready: super::super::ready::capacity::ReadyCapacity,
     pub proof: SuccessorProof,
     pub lane: Arc<WorkLane>,
     pub metadata: Credit,
@@ -187,6 +191,14 @@ impl ConfirmationControl {
     /// Keep the actual returned owner across any asynchronous work or uncertain reply.
     /// Another control cannot create a competing envelope while this one is retained.
     pub fn prepare_sdp_capacity(&self) -> Result<PreparedSdpCapacity, VoiceError> {
+        self.prepare_sdp_capacity_before_slots(|| {})
+    }
+    // Production supplies no callback. Tests close the real original plan after payment,
+    // before its original row subreserve, to pin closure-versus-capacity classification.
+    fn prepare_sdp_capacity_before_slots(
+        &self,
+        before_slots: impl FnOnce(),
+    ) -> Result<PreparedSdpCapacity, VoiceError> {
         let chain = self.control.upgrade().ok_or(VoiceError::Unauthorized)?;
         let (original_slots, preparation, custody) = {
             let control = chain.control.lock().unwrap_or_else(|e| e.into_inner());
@@ -220,14 +232,27 @@ impl ConfirmationControl {
             super::super::negotiation::METADATA_BYTES,
             ResourceKind::Retained,
         )?;
+        // Ready cache/Source/actual Lower/ACK work must survive ordinary-pool pressure.
+        // Pay before irreversible extraction; never borrow SDP's sole Source quota for it.
+        let ready = super::super::ready::capacity::ReadyCapacity::new(&resources, group)?;
         let lowers = resources.group_forward_lanes(group)?;
-        let slots = original_slots.subreserve(2)?;
+        before_slots();
+        let slots = original_slots.subreserve(2).map_err(|error| {
+            // Whole retirement closes the original row reserve too. A refusal caused by
+            // that irreversible authority loss is terminal, not transient slot pressure.
+            if self.binding.successor_closed.load(Ordering::Acquire) {
+                VoiceError::Unauthorized
+            } else {
+                error
+            }
+        })?;
         let prepared = PreparedSdpCapacity {
             inner: Box::new(PreparedCapacity {
                 resources,
                 _reserve: reserve,
                 _lowers: lowers,
                 _slots: slots,
+                ready,
                 binding: self.binding.clone(),
                 _preparation: preparation,
                 _metadata: metadata,

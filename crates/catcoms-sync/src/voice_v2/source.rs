@@ -189,6 +189,11 @@ impl SourceActivity {
     fn observation_time(&self) -> Option<(u64, u64)> {
         self.packet.as_ref().map(|packet| packet.observation_time())
     }
+    fn obsolete_high_confirmation(&self) -> bool {
+        self.packet
+            .as_ref()
+            .is_some_and(super::packets::SourcePacketAuthority::obsolete_high_confirmation)
+    }
     fn is_live_at(&self, packet_time: Option<(u64, u64)>) -> bool {
         self.lease.is_live()
             && match (&self.packet, packet_time) {
@@ -432,12 +437,17 @@ impl SourceLedger {
         state.packets.retain(|_, packet| {
             // SourceState also fences new Flight publication. Actual Lower owners always
             // retain custody; a permanently ended native join/watch needs no idle retry
-            // record until signed expiry. Check ONLY its irreversible activity lease: chain
-            // completion, room loss or pair retirement must not reset a live call's attempts.
+            // record until signed expiry. Otherwise preserve the original call's attempts;
+            // generic room/pair/authority loss is not permission to recreate a retry record.
+            // The narrow extra terminal case is HIGH's actual native Finish-open followed
+            // by irreversible old-plan closure. LOW Finish is deliberately excluded until
+            // causal Ready exists. Fixed original phase history prevents re-admission, while
+            // actual flights/Lower/ACK owners remain charged by the first branch below.
             // Map removal is not drainage proof: external activities/authorities may still
             // retain the original Workflow/Packet and its actual credit after this removal.
             packet.active.load(Ordering::Acquire) != 0
                 || (packet.activity.lease.is_live()
+                    && !packet.activity.obsolete_high_confirmation()
                     && (now <= packet.object.expires().saturating_add(CLOCK_SKEW_MS)
                         || mono < packet.deadline))
         });

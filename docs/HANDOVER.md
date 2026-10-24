@@ -1,5 +1,43 @@
 # Mewtual; Handover
 
+## Ready byte prepayment and terminal HIGH caches (24 October; focused checks passed)
+
+Original successor preparation now prepays a separate32KiB Ready envelope before extraction,
+alongside the existing192KiB SDP reserve. It moves through the same affine guard and inactive
+Exchange, creates no extra Crypto/Lower positions and closes unused bytes with that owner.
+An actual683B maximum signed Ready and29,015B declared cache/Source/two-Lower/ACK peak fit
+under full ordinary-pool pressure. This is capacity feasibility only: Producer quotas and
+wrapper accounting, receive installation, member-row prepayment and actual Ready admission
+remain open. No Ready lender, signature, packet or RTC authority is created.
+
+HIGH's actual native Finish-open plus irreversible old closure now permits narrow obsolete
+confirmation cache cleanup. Same native plan/call/scope checks protect PacketLedger cleanup;
+pair counters/replay and fixed native result/admission histories remain. Source removes only
+idle matching HIGH records, while actual Source/Lower/input/reply owners still delay real
+old Workflow drainage. LOW local Finish and unrelated rows are preserved. Incoming identity
+depends on the enforced single permanent protected chain per handshake, documented in code.
+
+All577 focused Root voice tests pass (12.27s),306 native handoff checks pass (8.96s), and all
+ten voice_live TCP/HTTP/Node scenarios pass (135.50s). Strict all-target/all-feature Sync/native
+Clippy, native check, both formatting checks, diff and ambient checks pass. Read-only review
+found no blocker/high/medium. The prior precise-interleaving LOW is closed: a deterministic
+test forces open observation -> actual whole-close store -> busy CAS under original Control/
+Workflow, then checks real drainage. Earlier Ready v1/v2 runs exposed closed original slots
+reported as transient Capacity; code now reports terminal Unauthorized and a paid-then-close
+regression pins that path. Genuine capacity refusal still rolls back without closing old work.
+Frontend code is unchanged; full current suites remain deferred while implementation continues.
+The dependency audit below remains an open release gate.
+
+Next receive-capacity correction: three retained HIGH Proof attempts can occupy all original
+outgoing claims. Unused-slot splitting before extraction is therefore insufficient. Move the
+original packet reservation closing rights with the lane, retire obsolete caches, then carve
+the successor's one incoming/one outgoing claim without a refund/reacquisition gap. Actual
+packet-slot ownership must outlive whole-plan drainage. ICE needs separate bounded claims/
+bytes/work; it cannot consume those two SDP claims. The detailed Ready/SDP sequence is in
+VOICE-NATIVE-RESULTS-NEXT. Production V2, SDP/ICE/RTC, multi-peer, media relay and combined/
+physical acceptance remain open. External download resume is excluded; only one desktop is
+available for local testing, so separate-device/network audible acceptance cannot close here.
+
 ## Whole original-plan cleanup (24 October; integration continues)
 
 Original PlanBinding now carries permanent successor closure and one affine busy guard.
@@ -15,7 +53,8 @@ first and partial payment failures with exact rollback, concurrent prepare/close
 Parent Final pending behind genuine prepared capacity, and quiet original pair expiry.
 Read-only review found no blocker/high/medium. LOW: the simultaneous-start barrier test
 does not force the exact closed-check/busy-CAS interleaving; sequential orderings and the
-shared-Control locking argument cover that boundary. All ten voice_live TCP/HTTP/Node
+shared-Control locking argument covered that checkpoint. The new deterministic test above
+closes this coverage limit. All ten voice_live TCP/HTTP/Node
 scenarios pass (145.18s), as do separate native cargo check and strict all-target/all-feature
 Clippy, strict Sync Clippy, both workspace formatting checks, diff and ambient-dependency
 checks. Full suites remain deferred during implementation; the dependency audit gate below

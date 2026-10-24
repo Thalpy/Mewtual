@@ -466,6 +466,11 @@ pub(super) struct SourcePacketAuthority {
     expires: u64,
 }
 impl SourcePacketAuthority {
+    pub(super) fn obsolete_high_confirmation(&self) -> bool {
+        self.workflow
+            .as_ref()
+            .is_some_and(|workflow| workflow.high_confirmation_sources_retired())
+    }
     /// Always use this packet's actual original clock. The caller may not replace its
     /// monotonic origin with the enclosing source job's clock, even if wall time agrees.
     pub(super) fn observation_time(&self) -> (u64, u64) {
@@ -596,6 +601,59 @@ redacted_debug!(
 );
 
 impl PacketLedger {
+    /// Remove only obsolete confirmation CACHE owners for this exact native HIGH plan.
+    /// Native Finish-open proves LOW received Proof; closing/extraction already forbids
+    /// every old action. Fixed Pair counters/replay and native result/admission histories
+    /// stay untouched. Actual inputs/SDK/Source/Lower/reply owners retain their own credits.
+    /// This is never the LOW Finish retirement path, and runs outside Group/Policy guards.
+    pub(in crate::voice_v2) fn retire_high_confirmation_cache(
+        &mut self,
+        chain: &super::chain::PreparedChain,
+    ) -> Result<(), VoiceError> {
+        let binding = chain
+            .retired_high_confirmation_binding()
+            .ok_or(VoiceError::Unauthorized)?;
+        if binding.scope != self.scope
+            || binding.local != self.local
+            || binding.local_join != self.join
+            || binding.local_key != self.key_ref
+            || !binding.call.is_same(&self.lease)
+        {
+            return Err(VoiceError::Scope);
+        }
+        self.outgoing.retain(|_, outgoing| {
+            !outgoing
+                .workflow
+                .as_ref()
+                .is_some_and(|workflow| workflow.belongs_to_plan(chain))
+        });
+        self.incoming.retain(|_, incoming| {
+            let Body::Encrypted { header, .. } = incoming.object.body() else {
+                return true;
+            };
+            // LocalJoin permanently selects one protected chain before any ordinary use
+            // of this handshake. Its immutable pair binding plus these exact header fields
+            // therefore identify this plan; ordinary or unrelated incoming rows stay live.
+            // If multiple plans per handshake ever become legal, add original-plan identity
+            // to Incoming before changing that selection invariant.
+            !(incoming.confirmation.is_some()
+                && incoming.object.scope() == binding.scope
+                && incoming.object.issuer() == binding.peer
+                && header.target == binding.local
+                && header.source_join == binding.peer_join
+                && header.target_join == binding.local_join
+                && header.source_key_ref == binding.peer_key
+                && header.target_key_ref == binding.local_key
+                && header.handshake == binding.handshake
+                && matches!(
+                    header.kind,
+                    EncryptedKind::ConfirmHello
+                        | EncryptedKind::ConfirmProof
+                        | EncryptedKind::ConfirmFinish
+                ))
+        });
+        Ok(())
+    }
     #[cfg(test)]
     pub(super) fn pair_count_for_test(&self) -> usize {
         self.pairs.len()

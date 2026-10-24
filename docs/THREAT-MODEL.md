@@ -1,5 +1,21 @@
 # Threat model; client integrity & enforcement boundaries
 
+## Ready prepayment cannot authorize a transition (24 October)
+
+The new32KiB subtree is paid before successor extraction and remains inside original
+SuccessorCustody. It shares existing Crypto/Lower lanes, creates no work positions and lends
+nothing while Exchange is inactive. The maximum wire/declared peak check demonstrates
+capacity only; it does not establish a complete Producer graph, protected receive admission,
+current helper records or RTC readiness. UI V2 remains off.
+
+Prompt old-Workflow drainage removes only HIGH confirmation caches after actual native
+Finish-open and permanent old-phase closure. LOW local Finish is not evidence that Ready
+arrived. Source keeps actual flights/Lower owners; externally retained actual credits also
+delay the original destructor witness. Exact original call/plan checks protect PacketLedger
+cleanup, while incoming identity relies on the enforced one protected chain per handshake.
+Counters, replay, immutable Finish and fixed result/admission histories are never reset.
+This private cleanup runs outside Group/Policy, where destructors may safely return credits.
+
 ## Successor custody cannot outlive reported parent cleanup (24 October)
 
 The original fixed binding closes successor admission before old Workflow retirement.

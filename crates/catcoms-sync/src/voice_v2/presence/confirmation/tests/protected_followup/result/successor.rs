@@ -41,6 +41,233 @@ fn pending(p: &ProtectedFixture) -> Arc<Exchange> {
 }
 
 #[test]
+fn sdp_successor_releases_obsolete_high_caches_without_waiting_for_signed_expiry() {
+    let mut p = confirmed_high();
+    let now = p.f.clock.monotonic_ms();
+    assert!(p.f.high.join.published_source_packets().next().is_some());
+    let output = prepare(&mut p, |_, _| Ok(())).unwrap();
+    assert!(p.f.high.lease.is_live());
+    assert!(p.f.high.join.confirmations.pairs[&p.f.id].established);
+    assert!(p.f.high.join.published_source_packets().next().is_none());
+    assert!(
+        output.confirmation_drained(),
+        "idle native caches must not pin old capacity"
+    );
+    assert_eq!(
+        p.f.clock.monotonic_ms(),
+        now,
+        "no expiry or retry window was advanced"
+    );
+}
+
+#[test]
+fn sdp_successor_obsolete_source_waits_for_actual_lower_before_old_drain() {
+    let mut p = confirmed_high();
+    let object = p.f.high.join.published_source_packets().find(|object| {
+        matches!(object.body(), Body::Encrypted { header, .. } if header.kind == EncryptedKind::ConfirmProof)
+    }).unwrap().clone();
+    let source = p.high.source().unwrap();
+    let activity =
+        p.f.high
+            .join
+            .source_packet_activity(
+                &object,
+                &ca(&p.f.high.context, &p.f.high.lease),
+                Arc::new(p.f.clock.clone()),
+            )
+            .unwrap();
+    source
+        .admit_borrowed(&p.high, &object, activity, room(&p.f.high))
+        .unwrap();
+    let job = source
+        .take_ready(
+            &p.high,
+            &[crate::voice_v2::helper::BoundRoute {
+                device: p.f.low.context.local,
+                peer: catcoms_rt::PeerId::from_u64(91),
+            }],
+        )
+        .unwrap()
+        .pop()
+        .unwrap();
+    let lower = job.keepalive();
+    let output = prepare(&mut p, |_, _| Ok(())).unwrap();
+    assert!(!job.authority().authorized());
+    assert!(!output.confirmation_drained());
+    assert_eq!(source.counts(), (1, 1, 1));
+    drop(job);
+    assert_eq!(
+        source.counts(),
+        (1, 1, 1),
+        "actual detached Lower still retains flight"
+    );
+    assert!(!output.confirmation_drained());
+    drop(lower);
+    assert_eq!(source.counts(), (0, 0, 0));
+    assert!(output.confirmation_drained());
+    // Exact old signed identity cannot recreate attempts after terminal cache collection.
+    assert!(p
+        .f
+        .high
+        .join
+        .source_packet_activity(
+            &object,
+            &ca(&p.f.high.context, &p.f.high.lease),
+            Arc::new(p.f.clock.clone()),
+        )
+        .is_err());
+}
+
+#[test]
+fn terminal_high_cleanup_cannot_remove_a_foreign_ledgers_confirmation_cache() {
+    let mut p = confirmed_high();
+    let chain = p.f.high.join.confirmations.pairs[&p.f.id]
+        .chain
+        .clone()
+        .unwrap();
+    let before =
+        p.f.low
+            .join
+            .published_source_packets()
+            .map(SignedObject::encode)
+            .collect::<Vec<_>>();
+    let _output = prepare(&mut p, |_, _| Ok(())).unwrap();
+    assert_eq!(
+        p.f.low.join.ledger.retire_high_confirmation_cache(&chain),
+        Err(VoiceError::Scope)
+    );
+    assert_eq!(
+        p.f.low
+            .join
+            .published_source_packets()
+            .map(SignedObject::encode)
+            .collect::<Vec<_>>(),
+        before
+    );
+}
+
+#[test]
+fn terminal_high_cleanup_preserves_an_unrelated_incoming_token_and_its_replay_floor() {
+    let mut p = confirmed_high();
+    let peer = DeviceKeypair::from_seed(&[77; 32]);
+    let handshake = [78; 32];
+    let authority = ca(&p.f.high.context, &p.f.high.lease);
+    // Build an ordinary unrelated packet at the PacketLedger seam. This tests cache
+    // isolation only; it does not claim the outsider passed native Root membership.
+    p.f.high
+        .join
+        .ledger
+        .register_pair(
+            PairBinding {
+                peer: peer.device_id(),
+                join: [79; 32],
+                key_ref: [80; 32],
+                handshake,
+            },
+            &authority,
+        )
+        .unwrap();
+    p.f.high
+        .join
+        .ledger
+        .establish(&handshake, &authority)
+        .unwrap();
+    let object = SignedObject::issue(
+        p.f.high.context.scope,
+        &peer,
+        [81; 32],
+        1000,
+        16000,
+        Body::Encrypted {
+            header: EncryptedHeader {
+                source_join: [79; 32],
+                target: p.f.high.context.local,
+                target_join: p.f.high.join.key.join,
+                source_key_ref: [80; 32],
+                target_key_ref: p.f.high.join.key.key_ref,
+                handshake,
+                low_to_high: peer.device_id() < p.f.high.context.local,
+                kind: EncryptedKind::Ice,
+                sequence: 1,
+                offer: Some(OfferId {
+                    issuer: peer.device_id(),
+                    message: [82; 32],
+                }),
+            },
+            ciphertext: vec![5; 17],
+        },
+    )
+    .unwrap();
+    let prepared =
+        p.f.high
+            .join
+            .ledger
+            .prepare_inbound(object.clone(), &authority, &p.f.clock)
+            .unwrap();
+    let event =
+        p.f.high
+            .join
+            .ledger
+            .commit_prepared_inbound(prepared, &authority, &p.f.clock, |_| Ok(()))
+            .unwrap();
+    let _output = prepare(&mut p, |_, _| Ok(())).unwrap();
+    let authority = ca(&p.f.high.context, &p.f.high.lease);
+    p.f.high
+        .join
+        .ledger
+        .commit_inbound(
+            event.token,
+            event.aad(),
+            event.header.sequence,
+            event.ciphertext(),
+            &authority,
+            &p.f.clock,
+        )
+        .unwrap();
+    assert_eq!(
+        p.f.high
+            .join
+            .ledger
+            .prepare_inbound(object, &authority, &p.f.clock)
+            .err(),
+        Some(VoiceError::Replay)
+    );
+}
+
+#[test]
+fn source_pruning_does_not_treat_low_local_finish_as_received_ready() {
+    let (mut p, finish) = super::transition::ready_to_finish();
+    let (object, _) = protected_seal(&mut p.f.low, &p.low, &finish, &p.f.clock);
+    let source = p.low.source().unwrap();
+    let activity =
+        p.f.low
+            .join
+            .source_packet_activity(
+                &object,
+                &ca(&p.f.low.context, &p.f.low.lease),
+                Arc::new(p.f.clock.clone()),
+            )
+            .unwrap();
+    source
+        .admit_borrowed(&p.low, &object, activity, room(&p.f.low))
+        .unwrap();
+    let chain = p.f.low.join.confirmations.pairs[&p.f.id]
+        .chain
+        .clone()
+        .unwrap();
+    let old = chain.workflow().unwrap().confirmation_control().retire();
+    assert_eq!(
+        source.counts(),
+        (1, 0, 0),
+        "HIGH-only pruning cannot substitute for LOW Ready admission"
+    );
+    assert!(!old.is_drained());
+    assert!(p.f.low.lease.is_live());
+    p.f.low.lease.revoke();
+    assert_eq!(source.counts(), (0, 0, 0));
+}
+
+#[test]
 fn sdp_successor_whole_retirement_fences_real_confirmed_owner_and_waits_for_its_last_drop() {
     let mut p = confirmed_high();
     let chain = p.f.high.join.confirmations.pairs[&p.f.id]

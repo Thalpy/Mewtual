@@ -52,8 +52,9 @@ impl LocalJoin {
     ///
     /// This native-only factory is deliberately not scheduled by application maintenance yet.
     /// Causal Ready publication/admission and explicit browser key transfer must be implemented
-    /// before scheduling it; the low-side equivalent does not exist. Helper origin rows and
-    /// the separate Ready Source still need prepayment before any readiness can be promised.
+    /// before scheduling it; the low-side equivalent does not exist. The separate32KiB Ready
+    /// byte envelope is prepaid, but helper origin rows and the independently owned/quotaed
+    /// Ready Source must still be installed before any readiness can be promised.
     ///
     /// `final_owner` runs under the ACTUAL Group -> Policy guards. It must only check the
     /// original native grant/UI generation, without Clock sampling, runtime/ledger/Engine
@@ -169,6 +170,9 @@ impl LocalJoin {
             .get_mut(&handshake)
             .expect("current pair")
             .sdp_successor = Some(preparation);
+        // No old cache may pin the retired Workflow until signed expiry. Actual native
+        // result/SDK/Source/Lower owners remain independent and still delay real drainage.
+        self.ledger.retire_high_confirmation_cache(&chain)?;
         let Some(Preparation::Transferred(owner)) =
             &self.confirmations.pairs[&handshake].sdp_successor
         else {

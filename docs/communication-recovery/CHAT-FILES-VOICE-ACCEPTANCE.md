@@ -1,5 +1,23 @@
 # Chat, files and voice implementation evidence
 
+## Ready capacity and terminal HIGH cache continuation (24 October; focused checks)
+
+Separate32KiB Ready byte prepayment now survives original affine extraction without another
+Crypto/Lower position. Actual maximum signed Ready is683B and the declared29,015B peak fits
+with two real Lowers and ACK verification under ordinary-pool saturation. No Ready lender/
+Producer/receive or SDK/RTC authority is issued. Narrow HIGH cache retirement after native
+Finish-open releases idle old Workflow custody without releasing held real flight ownership.
+LOW Finish, unrelated token/replay state and original native histories are preserved.
+
+All577 focused Root voice checks,306 native handoff checks and all ten real voice_live
+TCP/HTTP/Node scenarios (135.50s) pass. Strict Sync/native Clippy, native check, formatting,
+diff and ambient checks pass. Read-only review has no remaining blocker/high/medium/low in
+this increment; exact original close-store/busy-CAS coverage closes the earlier LOW. HANDOVER
+records earlier failed runs and corrected closure classification. Full current suites remain
+deferred, and the dependency audit remains an open release gate. Native packet-claim transfer,
+Ready/source/admission, SDP/ICE/RTC, multi-peer, media relay and combined/physical acceptance
+remain unfinished. External download resume remains outside this session.
+
 ## Whole-plan cleanup continuation (24 October; focused checks)
 
 Native Parent Final and abandoned-owner collection now require actual old Workflow AND

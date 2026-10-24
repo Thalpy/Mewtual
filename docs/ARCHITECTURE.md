@@ -1,5 +1,22 @@
 # Mewtual; Architecture
 
+## Ready capacity and old confirmation cache retirement (24 October)
+
+Affine successor preparation now prepays a separate32KiB Ready reservation in addition to
+SDP's192KiB, before extraction. It moves unchanged through the original custody guard into
+inactive Exchange; closure returns unused Ready bytes and actual last-drop remains covered.
+It acquires no additional Crypto lane or outgoing positions. Maximum signed Ready is683B;
+the declared cache/Source/two-Lower/ACK peak is29,015B. This is capacity feasibility only:
+independent Producer quotas, wrapper accounting and Ready source/admission are still absent.
+Existing OriginLimits rows for endpoints/helpers need separate prepayment before readiness.
+
+After actual HIGH Finish-open and irreversible old-phase closure, the exact native plan can
+discard obsolete confirmation cache owners. Source drops only idle matching HIGH records;
+actual Flight/Lower/ACK/input owners continue delaying old Workflow drainage. PacketLedger
+keeps pair sequences, replay and fixed native histories. Incoming cleanup depends on one
+permanent protected chain per handshake and its immutable binding; preserve that invariant.
+LOW Finish retry custody is unchanged until a future authenticated Ready transition exists.
+
 ## Whole original-plan retirement (24 October)
 
 The fixed original PlanBinding now separately records permanent successor closure and one

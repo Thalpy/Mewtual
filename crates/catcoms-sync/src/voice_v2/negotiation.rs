@@ -94,6 +94,9 @@ pub struct Exchange {
     // Only legacy construction activates today. No causal native activation exists yet.
     activated: AtomicBool,
     successor: Option<super::chain::SuccessorProof>,
+    // Present only on the protected affine path. Ordinary legacy SDP does not promise
+    // causal Ready. Never store a Ready producer here: that owner retains Exchange one way.
+    ready: Option<super::ready::capacity::ReadyCapacity>,
     // Last: every enclosing owner/reservation/slot remains paid through field destruction.
     _metadata: Credit,
     // MUST remain last. All actual successor fields/credits return before whole-plan
@@ -157,6 +160,10 @@ impl Drop for PhaseLoan {
 }
 impl Exchange {
     #[cfg(test)]
+    pub(in crate::voice_v2) fn ready_prepaid_for_test(&self) -> bool {
+        self.ready.is_some()
+    }
+    #[cfg(test)]
     pub(in crate::voice_v2) fn capacity_identities_for_test(&self) -> [usize; 4] {
         let state = self.state.lock().unwrap();
         [
@@ -181,6 +188,7 @@ impl Exchange {
             reserve,
             lowers,
             slots,
+            ready,
             proof,
             lane,
             metadata,
@@ -218,6 +226,7 @@ impl Exchange {
             action_slots: slots,
             activated: AtomicBool::new(false),
             successor: Some(proof),
+            ready: Some(ready),
             _metadata: metadata,
             _successor_custody: Some(custody),
         })
@@ -349,6 +358,7 @@ impl Exchange {
             action_slots,
             activated: AtomicBool::new(true),
             successor: None,
+            ready: None,
             _successor_custody: None,
         }))
     }
@@ -525,6 +535,9 @@ impl Exchange {
         };
         self.live.revoke();
         self.reserve.close();
+        if let Some(ready) = &self.ready {
+            ready.close();
+        }
         self.action_slots.close();
         self.lane.close();
         // Never close another phase's capacity. Dropping this handle outside State releases
