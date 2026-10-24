@@ -134,10 +134,13 @@ struct Client {
     generation: u64,
     running: Option<Running>,
     driver: Option<watch::Receiver<MeshObservationSnapshot>>,
+    // Transport::new spawns the real driver before it can return a receiver. Cancellation
+    // in that interval is unfinished custody, including on the first client/reopen.
+    driver_starting: bool,
 }
 impl Drop for Client {
     fn drop(&mut self) {
-        if self.running.is_some() || self.driver.is_some() {
+        if self.driver_starting || self.running.is_some() || self.driver.is_some() {
             // A failed fixture aborts tasks but cannot claim they synchronously drained.
             // Preserve its vault until those actual owners disappear rather than deleting
             // storage ahead of their asynchronous shutdown and obscuring the original error.
@@ -160,11 +163,9 @@ struct Scenario {
 impl Drop for Scenario {
     fn drop(&mut self) {
         if let Some(admission) = &self.admission {
-            if self
-                .clients
-                .iter()
-                .any(|client| client.running.is_some() || client.driver.is_some())
-            {
+            if self.clients.iter().any(|client| {
+                client.driver_starting || client.running.is_some() || client.driver.is_some()
+            }) {
                 admission.capacity.close();
                 assert!(std::thread::panicking(), "recovery fixture must await all actual actors/drivers before releasing admission");
             }
@@ -197,6 +198,7 @@ impl Scenario {
                     generation: 0,
                     running: None,
                     driver: None,
+                    driver_starting: false,
                 }
             })
             .collect();
@@ -263,10 +265,12 @@ impl Scenario {
         assert!(matches!(count, 3 | 6));
         for index in 0..count {
             let state = mount(self.clients[index].root.path()).await;
+            self.clients[index].driver_starting = true;
             let transport =
                 Transport::new(index, &mut self.clients[index].net, self.rules.clone()).await;
             let mesh = transport.handle();
             self.clients[index].driver = Some(transport.driver_lifetime().await);
+            self.clients[index].driver_starting = false;
             let mut server = if index == 0 {
                 Server::found(
                     transport,
@@ -458,9 +462,11 @@ impl Scenario {
                 .unwrap()
                 .load_server(1)
                 .unwrap();
+            self.clients[index].driver_starting = true;
             let transport = Transport::new(index, &mut net, self.rules.clone()).await;
             let mesh = transport.handle();
             self.clients[index].driver = Some(transport.driver_lifetime().await);
+            self.clients[index].driver_starting = false;
             let record = ServerRecord {
                 id: 1,
                 display_name: format!("client {}", index + 1),

@@ -31,6 +31,29 @@ async fn isolation_completed_owner_returns_its_original_private_turn() {
 }
 
 #[tokio::test]
+async fn isolation_cancelled_driver_construction_cannot_release_an_untracked_turn() {
+    let parent = tempfile::tempdir().unwrap();
+    let capacity = Arc::new(tokio::sync::Semaphore::new(1));
+    let mut scenario = admitted(&capacity).await;
+    scenario.clients[0].root = tempfile::tempdir_in(parent.path()).unwrap();
+    let vault = scenario.clients[0].root.path().to_path_buf();
+    // Exactly the marker interval around BOTH real Transport::new callers: no Running or
+    // driver receiver exists yet. Drop the parked constructor before receiver installation.
+    scenario.clients[0].driver_starting = true;
+    let mut construction = Box::pin(async move {
+        let _original = scenario;
+        std::future::pending::<()>().await;
+    });
+    let mut context = std::task::Context::from_waker(std::task::Waker::noop());
+    assert!(construction.as_mut().poll(&mut context).is_pending());
+    let failure = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| drop(construction)));
+    assert!(failure.is_err());
+    assert!(capacity.is_closed());
+    assert!(capacity.clone().acquire_owned().await.is_err());
+    assert!(vault.exists());
+}
+
+#[tokio::test]
 async fn isolation_unfinished_driver_closes_admission_and_preserves_failed_vault() {
     let parent = tempfile::tempdir().unwrap();
     let capacity = Arc::new(tokio::sync::Semaphore::new(1));
