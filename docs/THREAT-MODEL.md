@@ -1,5 +1,23 @@
 # Threat model; client integrity & enforcement boundaries
 
+## Ready Source authority and transport acknowledgement (24 October)
+
+A copied Ready or capacity owner cannot create Source authority. Only its original native
+signed cache, installed receiver/intent and exact Root receipt position issue the private
+binding. Its original call, epoch, room, helper choice, signature and stamping clock remain
+current checks. There is no ordinary budget fallback. Rejected queue preparation and lost
+replies cannot redraw identity/deadline or refill attempts. Direct/helper ACKs cannot complete
+causal readiness; three exhausted live attempts remain recorded to prevent re-admission reset.
+
+Actual first-Offer token/event/history publication precedes activation. Its receipt-position
+observer, native closure and strict timeout cancel pending Ready work; cancellation is not
+proof of acceptance. Native Source and final ACK checks sample clocks before nonblocking
+Group/Policy guards. The response-only check rejects driver-bound tickets before callbacks;
+it does not replace incoming driver admission. The original paid receiver/Producer remain
+owned by actual Lower/request-authority lifetimes after record collection. The full Source
+map/set graph and observer are included in existing32KiB capacity (32,599B declared peak).
+Application Ready scheduling, LOW/browser SDP/RTC, relay and physical acceptance remain open.
+
 ## First-Offer native custody and recovery (24 October)
 
 A signed packet/valid forwarding permit alone cannot activate protected HIGH. Native admission

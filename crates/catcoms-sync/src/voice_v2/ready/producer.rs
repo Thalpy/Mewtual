@@ -224,6 +224,10 @@ mod tests {
             // Root's shared count allocation is independent of Root and can survive it.
             // Charge the whole allocation to each live Ready rather than rely on sharing.
             + size_of::<std::sync::atomic::AtomicUsize>()
+            + 2 * size_of::<usize>()
+            // Position's pending/cause/Drop observer is allocated only AFTER this native
+            // metadata fee exists. Sources clone it; they never allocate another watch.
+            + size_of::<crate::voice_v2::LeaseState>()
             + 2 * size_of::<usize>();
         assert!(
             graph < capacity::METADATA,

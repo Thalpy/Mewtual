@@ -102,6 +102,9 @@ pub(super) struct PublicInbox {
     cursor: Option<Key>,
 }
 impl PublicInbox {
+    pub(super) fn full_for_ready(&self) -> bool {
+        self.full()
+    }
     pub(super) fn namespace(&self) -> &voice_v2::negotiation::namespace::ReceiptNamespace {
         &self.positions
     }

@@ -48,7 +48,9 @@ fn original_source_progress_and_ack_admission_survive_full_ordinary_pool_and_bus
         .unwrap()
         .clone();
     let progress = SourceProgress::Workflow(&workflow);
-    progress.require_current(&pool, bound.scope.group).unwrap();
+    progress
+        .require_current(&pool, bound.scope.group, None)
+        .unwrap();
     let fill = pool
         .charge(
             bound.scope.group,
@@ -152,11 +154,11 @@ fn progress_never_adopts_an_equal_foreign_pool_or_retired_workflow_and_never_fal
         .clone();
     let before = (pool.counts(), foreign.counts());
     assert_eq!(
-        SourceProgress::Workflow(&wrong).require_current(&pool, bound.scope.group),
+        SourceProgress::Workflow(&wrong).require_current(&pool, bound.scope.group, None),
         Err(VoiceError::Unauthorized)
     );
     assert_eq!(
-        SourceProgress::Workflow(&workflow).require_current(&pool, [99; 32]),
+        SourceProgress::Workflow(&workflow).require_current(&pool, [99; 32], None),
         Err(VoiceError::Unauthorized)
     );
     assert_eq!(
@@ -169,7 +171,7 @@ fn progress_never_adopts_an_equal_foreign_pool_or_retired_workflow_and_never_fal
     chain.close();
     let before = pool.counts();
     assert_eq!(
-        SourceProgress::Workflow(&workflow).require_current(&pool, bound.scope.group),
+        SourceProgress::Workflow(&workflow).require_current(&pool, bound.scope.group, None),
         Err(VoiceError::Unauthorized)
     );
     assert_eq!(

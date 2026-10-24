@@ -1,5 +1,23 @@
 # Next voice milestone: native result recovery
 
+## Current Ready Source implementation (24 October)
+
+Trusted native Root prepare/queue, exact inline cache/receiver/position provenance, original
+stamping clock, frozen helpers and causal retry completion now exist. ACKs cannot complete
+Ready or refund its three attempts; exhausted live records stay retained. Native first-Offer
+publication activates only after token/event/history and consumes the position that wakes
+Ready cancellation. Dedicated pending waits avoid generic inactive Exchange cancellation.
+Ready Source4267B plus metadata/cache/receipt/two Lower/ACK totals32,599B within32KiB. Final
+ACK tickets sample outside nonblocking Group/Policy guards and reject bound incoming tickets.
+Focused evidence is recorded in HANDOVER; application scheduling stays off.
+
+NEXT: LOW Ready bounded original-Workflow verifier and exact native fixed receipt admission;
+shared immutable-ID classification; original signed Finish identity/hash/epoch/helper adoption;
+retry delayed transfer only after actual verification/reply owners drain; retire LOW Finish
+Sources only after causal Ready. Then implement original-key browser SDP adoption and typed
+SDP/RTC profile, serial multi-peer composition, relay and combined acceptance. Older sections
+below describe the then-missing Source boundary, not current application availability.
+
 ## Current first-Offer implementation (24 October)
 
 Root HIGH Ready preparation now reserves its shared endpoint receipt position; encrypted Offer

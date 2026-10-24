@@ -1,5 +1,27 @@
 # Mewtual; Interfaces & Hooks Schema
 
+## Native Ready Source queue and response verification (24 October)
+
+`ChannelSync::queue_voice_high_ready(grant, handshake)` queues only the prepared original HIGH
+Ready under the actual affine call, room and epoch. It accepts no caller packet, hash, signer,
+clock or producer. `Ok(false)` is the first Source admission; `Ok(true)` recovers the exact
+existing record without new origin work or attempts. A cache without its exact Root receipt
+position, closed/expired work, another call or a changed native epoch is refused. Automatic
+application maintenance does not call this API yet; LOW Ready/SDP consumers are still missing.
+
+Ready has a dedicated private Source activity and independent original Producer budgets. Its
+native stamping clock/deadline is retained across retries. Direct endpoint ACKs and helper
+custody ACKs are delivery metadata, not causal completion. Three exhausted attempts remain
+retained until irreversible completion/expiry/closure and actual flights finish. The native
+first-Offer transaction consumes the receipt position and activates last; the position observer
+cancels pending work but cancellation alone is not LOW readiness evidence. Real Lower and
+request-authority ownership remains charged even after the Source map no longer contains it.
+
+Final ACK verification uses an unbound response-only ticket check: hash/time preparation occurs
+before nonblocking Group/Policy acquisition, followed by pure exact binding/current predicates.
+Driver-bound incoming tickets are refused by this helper, retaining their separate admission
+checks. Ready's full retained Source fee is4267B and total declared peak32,599B within32KiB.
+
 ## Root HIGH preparation and native first-Offer admission (24 October)
 
 `ChannelSync::prepare_voice_high_ready(grant, handshake, helpers)` validates the actual affine

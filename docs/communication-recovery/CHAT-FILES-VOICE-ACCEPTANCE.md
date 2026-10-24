@@ -1,5 +1,27 @@
 # Chat, files and voice implementation evidence
 
+## Ready Source evidence (24 October; focused checks)
+
+Explicit native Root preparation/queue now reaches original Ready Source/Lower/retained ACK
+custody. Source tests cover ignored direct/helper ACK completion, immutable/exhausted attempt
+history, selected-helper rotation with an unselected member present, actual native first-Offer
+causal cancellation without time advance, and retained actual Lower ownership. Real ordinary
+bytes/Crypto can be full while maximum two-helper Source and the first Offer use their original
+payments. Local lane/Group/Policy refusals, lost queue replies, every final native clock owner
+closure, changed epoch, strict timeout and wall rollback are pinned. A different preparation
+monotonic origin cannot replace the native clock that stamped Source.
+
+The actual Root/connected-memory-transport fixture authenticates a real signed LOW refusal
+with full ordinary bytes/Crypto. It observes both native locks through EVERY completion clock
+callback, including final ACK ticket checking. This is capacity/lifecycle evidence, not LOW
+Ready acceptance, SDP decryption, RTC or physical media. Ready's complete retained Source is
+4267B; its original32KiB declared total is32,599B. The application does not automatically queue
+Ready. LOW Ready, browser SDP/RTC, multi-peer/relay and combined/physical acceptance remain open.
+Focused checks pass:633 Root voice tests,306 native handoff tests, ten real TCP/HTTP/Node
+confirmation scenarios, native check and strict Sync Clippy; native strict Clippy passes (65s).
+Formatting, diff and ambient checks pass. Full suites remain deferred during unfinished
+integration under the user's instruction. The dependency audit remains open.
+
 ## Native first-Offer admission evidence (24 October; focused checks)
 
 The native Root Offer path now stages and commits exact original input/token/replay/role/history

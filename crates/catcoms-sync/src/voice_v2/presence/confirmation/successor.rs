@@ -50,6 +50,37 @@ impl Pair {
 }
 
 impl LocalJoin {
+    /// Borrow one original Ready plus its private Source provenance. The actual Root
+    /// namespace is mandatory; a standalone signed-cache preparation cannot export work.
+    pub(crate) fn ready_source_activity(
+        &self,
+        handshake: Nonce,
+        namespace: &crate::voice_v2::negotiation::namespace::ReceiptNamespace,
+        authority: &Authority<'_>,
+    ) -> Result<(&SignedObject, crate::voice_v2::source::SourceActivity), VoiceError> {
+        let activity = self.source_activity(authority)?;
+        let pair = self
+            .confirmations
+            .pairs
+            .get(&handshake)
+            .ok_or(VoiceError::Unauthorized)?;
+        if pair.low
+            || pair.retired
+            || !pair.established
+            || !pair.pin.is_live()
+            || pair.protected_epoch != Some(authority.context.epoch)
+        {
+            return Err(VoiceError::Unauthorized);
+        }
+        let Some(Preparation::Transferred {
+            ready: Some(ready), ..
+        }) = &pair.sdp_successor
+        else {
+            return Err(VoiceError::Unauthorized);
+        };
+        let (object, ready) = ready.source_authority(namespace)?;
+        Ok((object, activity.with_ready(ready)))
+    }
     pub(crate) fn has_first_offer(&self, handshake: Nonce) -> bool {
         self.confirmations
             .pairs

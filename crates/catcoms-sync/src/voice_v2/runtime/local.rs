@@ -42,6 +42,11 @@ impl EpochObservation {
 }
 
 impl ActorOwner {
+    /// Preserve the exact native monotonic origin that stamped a Ready. A later Source
+    /// ledger may use another clock domain; callers must convert durations, not deadlines.
+    pub(in crate::voice_v2) fn preparation_clock(&self) -> Arc<dyn Clock> {
+        self.clock.clone()
+    }
     /// Native preparation clock only, outside every admission/Engine guard. This observation
     /// carries no authority; actual final publication must freshly enter the native view.
     pub(in crate::voice_v2) fn preparation_time(&self) -> Result<(u64, u64), VoiceError> {

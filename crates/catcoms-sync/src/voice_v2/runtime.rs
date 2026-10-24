@@ -24,6 +24,7 @@ const CHILDREN: usize = 64;
 const VERIFICATION_BUFFERS: usize = 5;
 const VERIFICATION_OVERHEAD: usize = 4096;
 mod local;
+mod ready_source;
 pub(in crate::voice_v2) use local::EpochObservation;
 pub(crate) use local::LocalOrigin;
 
@@ -545,6 +546,22 @@ pub struct View {
 redacted_debug!(View);
 impl ActorOwner {
     #[cfg(test)]
+    pub(crate) fn lock_probe_for_test(&self) -> Arc<dyn Fn() -> bool + Send + Sync> {
+        let group = Arc::downgrade(&self.group);
+        let actor = Arc::downgrade(&self.gate);
+        Arc::new(move || {
+            let Some(group) = group.upgrade() else {
+                return false;
+            };
+            let Some(actor) = actor.upgrade() else {
+                return false;
+            };
+            let group_free = group.state.try_lock().is_ok();
+            let policy_free = actor.policy.try_lock().is_ok();
+            group_free && policy_free
+        })
+    }
+    #[cfg(test)]
     pub(crate) fn with_held_policy_for_test<T>(&self, check: impl FnOnce() -> T) -> T {
         // A separate fixture thread holds the actual Policy mutex. The caller under test must
         // refuse at try_lock, without imposing a lock order on its own executing thread.
@@ -747,6 +764,9 @@ impl ActorOwner {
         room: &super::helper::RoomAuthority,
         commit: bool,
     ) -> Result<(), VoiceError> {
+        if activity.ready().is_some() {
+            return self.authorize_ready_source(object, activity, room, commit);
+        }
         self.current()?;
         let mut state = self.group.state.lock().unwrap_or_else(|e| e.into_inner());
         let policy = self.gate.policy.lock().unwrap_or_else(|e| e.into_inner());
@@ -1097,6 +1117,49 @@ pub(crate) struct IngressTicket {
 }
 redacted_debug!(IngressTicket);
 impl IngressTicket {
+    /// Final response verification has no incoming driver admission callback. Sample before
+    /// nonblocking native guards, then use only immutable bindings/atomic gates. This must
+    /// remain separate from bound incoming-request commit, which also checks that driver.
+    pub(crate) fn check_response(
+        &self,
+        actor: &ActorOwner,
+        frame: &[u8],
+    ) -> Result<(), VoiceError> {
+        if self.original_request.is_some() {
+            return Err(VoiceError::Unauthorized);
+        }
+        actor.current()?;
+        let hash = *blake3::hash(frame).as_bytes();
+        let now = actor.clock.monotonic_ms();
+        let state = match actor.group.state.try_lock() {
+            Ok(state) => state,
+            Err(std::sync::TryLockError::Poisoned(error)) => error.into_inner(),
+            Err(std::sync::TryLockError::WouldBlock) => return Err(VoiceError::Capacity),
+        };
+        let policy = match actor.gate.policy.try_lock() {
+            Ok(policy) => policy,
+            Err(std::sync::TryLockError::Poisoned(error)) => error.into_inner(),
+            Err(std::sync::TryLockError::WouldBlock) => return Err(VoiceError::Capacity),
+        };
+        if !Arc::ptr_eq(&self.actor, &actor.gate)
+            || state.revision != actor.revision
+            || state.epoch != Some(self.epoch)
+            || !state
+                .members
+                .get(&self.requester)
+                .is_some_and(|current| Arc::ptr_eq(current, &self.member))
+            || !self.member.live.is_live()
+            || !policy.live.is_same(&self.policy)
+            || !self.policy.is_live()
+            || !policy.eligible
+            || now >= self.deadline
+            || frame.len() != self.bytes
+            || hash != self.hash
+        {
+            return Err(VoiceError::Unauthorized);
+        }
+        actor.current()
+    }
     /// Observe the original requester/actor/session/policy and absolute verification deadline
     /// through an eventual reply send. This is not endpoint admission or byte custody; native
     /// additionally captures an exact RouteGate for epoch/proof/descriptor/connection changes.
@@ -1219,6 +1282,8 @@ impl ActorOwner {
         // without waiting so a busy view cannot age this admission/expiry observation.
         let wall = self.clock.now_ms();
         let now = self.clock.monotonic_ms();
+        let progress_time =
+            retained_progress.and_then(super::source::SourceProgress::observation_time);
         self.current()?;
         let mut state = match self.group.state.try_lock() {
             Ok(state) => state,
@@ -1265,7 +1330,7 @@ impl ActorOwner {
                 super::source::SourceProgress::ReadyReceive,
             )
         });
-        progress.require_current(&self.resources, self.group.hash)?;
+        progress.require_current(&self.resources, self.group.hash, progress_time)?;
         let allocate = || {
             progress.charge(
                 &self.resources,

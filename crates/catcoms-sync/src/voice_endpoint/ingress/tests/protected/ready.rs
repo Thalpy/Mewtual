@@ -3,9 +3,12 @@
 //! this does not claim that255 separately paid network admissions fit alongside Ready.
 use super::*;
 use voice_v2::presence::{OpenedFlight, ReceiveProgress};
+mod source;
 
 async fn confirmed() -> (Fixture, voice_v2::Nonce) {
-    let mut f = fixture().await;
+    confirmed_in(fixture().await).await
+}
+async fn confirmed_in(mut f: Fixture) -> (Fixture, voice_v2::Nonce) {
     let hello = f.object.clone();
     let Body::Encrypted { header, .. } = hello.body() else {
         panic!("Hello")

@@ -1,5 +1,25 @@
 # Mewtual; Architecture
 
+## Original Ready Source custody (24 October)
+
+The closed Source packet binding now distinguishes encrypted ledger authority from private
+Ready authority; an absent packet binding still means native public discovery. Only the
+original signed cache with installed receiver/intent and Root receipt position can issue the
+Ready variant. It retains Producer and receiver one way, exact ID/hash/signature/stamp and the
+actual stamping clock. No fresh authority allocation or ordinary capacity fallback occurs on
+queue retry. Helper selection uses this exact Exchange's frozen set.
+
+Source4267B includes its actual Packet/inline activity/effect and complete small map/set leaf
+allowances. The observer's lease/Arc is paid by Ready metadata before allocation. The total
+Ready peak is32,599/32,768B; no reserve/group/occupancy limit increased. Source preserves an
+exhausted live record; ACKs cannot mark it confirmed. Actual first-Offer publication consumes
+the reserved position and publishes activation; dedicated pending waits cancel Ready without
+using generic inactive Exchange revocation. Native clocks are sampled before Source admission
+and final ACK try-Group/Policy fences. Response-only ticket verification cannot bypass a bound
+incoming driver. Quiet collection releases only native records; real Lower/authority owners
+keep the original progress charged through actual last Drop. Automatic application scheduling,
+LOW adoption and browser SDP/RTC remain unfinished. Earlier preparation sections are historical.
+
 ## Exact native first-Offer transaction (24 October)
 
 Root's trusted HIGH preparation first reserves a position in its shared public/encrypted

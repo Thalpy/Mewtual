@@ -21,7 +21,7 @@ fn install(p: &mut ProtectedFixture, room: &RoomAuthority) {
         )
         .unwrap();
 }
-fn offer(p: &ProtectedFixture, message: u8, sequence: u64) -> SignedObject {
+pub(super) fn offer(p: &ProtectedFixture, message: u8, sequence: u64) -> SignedObject {
     let now = p.f.clock.now_ms();
     let message = [message; 32];
     SignedObject::issue(
@@ -51,7 +51,7 @@ fn offer(p: &ProtectedFixture, message: u8, sequence: u64) -> SignedObject {
     )
     .unwrap()
 }
-fn admit(
+pub(super) fn admit(
     p: &mut ProtectedFixture,
     object: &SignedObject,
     room: &RoomAuthority,

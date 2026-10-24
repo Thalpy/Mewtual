@@ -70,6 +70,36 @@ pub(in crate::voice_v2) struct AdmittedOfferParts {
 redacted_debug!(HighReceive, PreparedOffer, RetainedOffer);
 
 impl Exchange {
+    pub(in crate::voice_v2) fn ready_source_call(&self, call: &CallLease) -> bool {
+        self.successor
+            .as_ref()
+            .is_some_and(|proof| proof.binding().call.is_same(call))
+    }
+    /// Pending Ready needs native closure/pair cancellation, independently of generic
+    /// Active-only Exchange::revoked. Causal completion has its own receipt-position lease.
+    pub(in crate::voice_v2) async fn ready_source_closed(&self) {
+        use futures::FutureExt;
+        let mut waits = vec![self.live.wait_revoked().boxed()];
+        if let Some(binding) = &self.binding {
+            waits.push(binding.call.wait_revoked().boxed());
+            waits.push(binding.pair.wait_revoked().boxed());
+        }
+        futures::future::select_all(waits).await;
+    }
+    pub(in crate::voice_v2) fn ready_source_current_at(
+        &self,
+        id: MessageId,
+        hash: [u8; 32],
+        wall: u64,
+        mono: u64,
+    ) -> bool {
+        !self.activated.load(Ordering::Acquire)
+            && self.ready_publication_current_at(wall, mono)
+            && self
+                .ready_publication
+                .get()
+                .is_some_and(|marker| marker.id == id && marker.hash == hash)
+    }
     pub(in crate::voice_v2) fn first_offer_deadline(
         &self,
         expires: u64,

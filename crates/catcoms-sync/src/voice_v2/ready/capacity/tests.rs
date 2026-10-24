@@ -39,7 +39,7 @@ fn ready_peak_uses_actual_maximum_wire_and_fits_beside_both_actual_lowers() {
     assert_eq!(object.encode().len(), MAX_WIRE);
     assert_eq!(
         METADATA + CACHE + RECEIPT + SOURCE + 2 * LOWER + ACK_CRYPTO,
-        30551
+        32599
     );
 
     let pool = Arc::new(Resources::default());

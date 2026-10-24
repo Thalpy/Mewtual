@@ -275,7 +275,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         ) {
             return Err(VoiceError::Unauthorized);
         }
-        ticket.check(self.voice_transport_actor()?, verification_bytes)?;
+        ticket.check_response(self.voice_transport_actor()?, verification_bytes)?;
         Ok(status)
     }
 

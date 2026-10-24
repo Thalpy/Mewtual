@@ -38,7 +38,13 @@ async fn fixture() -> Fixture {
     fixture_in_room(1).await
 }
 async fn fixture_in_room(room: u128) -> Fixture {
-    let (mut sender, mut receiver, runtime, clock) = super::fixture().await;
+    fixture_in_room_with_clock(room, |clock| clock).await
+}
+async fn fixture_in_room_with_clock(
+    room: u128,
+    make_clock: impl FnOnce(Arc<ManualClock>) -> Arc<dyn Clock>,
+) -> Fixture {
+    let (mut sender, mut receiver, runtime, clock) = super::fixture_with_clock(make_clock).await;
     assert!(sender.device_id() < receiver.device_id());
     // The response verifier also needs its own actual native actor, not the receiver's owner.
     let sender_runtime = Runtime::new(clock.clone());

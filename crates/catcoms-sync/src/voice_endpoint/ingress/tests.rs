@@ -6,6 +6,11 @@ mod protected;
 mod protected_start;
 
 async fn fixture() -> (Node, Node, Arc<Runtime>, Arc<ManualClock>) {
+    fixture_with_clock(|clock| clock).await
+}
+async fn fixture_with_clock(
+    make_clock: impl FnOnce(Arc<ManualClock>) -> Arc<dyn Clock>,
+) -> (Node, Node, Arc<Runtime>, Arc<ManualClock>) {
     let (_hub, mut nodes, _) = crate::tests::build_members(2).await;
     crate::tests::converge_and_publish_test_routes(&mut nodes);
     nodes[0]
@@ -22,7 +27,7 @@ async fn fixture() -> (Node, Node, Arc<Runtime>, Arc<ManualClock>) {
     let clock = Arc::new(ManualClock::new(1000));
     sender.clock = clock.clone();
     receiver.clock = clock.clone();
-    let runtime = Runtime::new(clock.clone());
+    let runtime = Runtime::new(make_clock(clock.clone()));
     attach(&mut receiver, &runtime);
     let (ok, served) = tokio::join!(
         sender.finalize_member_connection(receiver.local_peer()),

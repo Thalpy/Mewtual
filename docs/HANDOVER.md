@@ -1,5 +1,43 @@
 # Mewtual; Handover
 
+## Ready Source and causal retries (24 October; application scheduling off)
+
+The explicit native Root prepare/queue APIs now connect the original HIGH cache, installed
+receiver and shared receipt position to Source. The private inline authority retains the
+original Producer/receiver, exact signed identity and stamping clock. Direct/helper ACKs do
+not complete Ready. Three submissions remain one immutable allowance; an exhausted live
+record cannot be collected and re-admitted. Only actual native first-Offer publication makes
+the causal activation marker. Consuming its receipt position wakes pending Ready work without
+waiting for a tick; End, native close and the original strict timeout also cancel it.
+
+Source and actual Lower/ACK work use Ready's own prepaid quotas. Its retained Source fee is
+now4267B, covering the actual Packet/activity/effect, helper storage and complete small map/set
+leaf allowances. The declared total is32,599B of32,768B, with unchanged total reserve, stage
+counts, Lower/ACK limits and group limits. Root checks receipt availability first, pays/prepares
+Ready, then allocates/attaches the observer under its exclusive borrow. Exact queue retries
+create no new identity, origin debit or attempt budget. Clock domains stay separate: the native
+stamping clock is retained and only remaining duration is converted for Source's deadline.
+
+Ready Source admission and final response verification sample clocks outside nonblocking
+Group/Policy guards. The response-only ticket check refuses driver-bound incoming tickets;
+incoming driver admission checks are unchanged. A real signed-ACK completion probe observes
+both locks at every clock callback. Final-observation expiry/actor/member/policy revocation and
+contention regressions protect that boundary. Actual Lower and external request-authority
+owners keep their original charged custody after cancellation or Source-map collection.
+
+Focused validation passes:633 Root voice tests (12.93s),306 native handoff tests (7.47s),
+ten real TCP/HTTP/Node confirmation scenarios (131.32s), native check (44.82s), strict
+all-target/all-feature Sync Clippy (28.03s), formatting, diff and ambient checks. Native strict
+Clippy passes (65s). Full suites remain deferred during unfinished integration; frontend
+is unchanged. Read-only design and adversarial reviews closed observer-payment ordering and
+final ACK clock findings;
+no remaining blocker/high/medium was identified in the reviewed Source boundary. Application
+maintenance still does not queue Ready. LOW Ready admission and delayed native transfer after
+actual verifier drainage are next, followed by browser SDP adoption/RTC, multi-peer, media
+relay and combined acceptance. No new physical audio/separate-network result is claimed.
+Earlier sections below describe their own checkpoints; this section supersedes their Source
+status and Ready byte totals. External download resume remains separate on its own branch.
+
 ## Native first-Offer admission (24 October; operational scheduling still off)
 
 HIGH now admits the exact original LOW Offer through Root's encrypted endpoint path after

@@ -5,6 +5,7 @@ use super::*;
 
 pub(in crate::voice_v2) mod capacity;
 pub(in crate::voice_v2) mod producer;
+pub(crate) mod source_authority;
 
 /// High endpoint's immutable receive-readiness claim for one original native Finish. The
 /// hash is the native SIGNED Finish object's hash, not a WebCrypto output fingerprint.

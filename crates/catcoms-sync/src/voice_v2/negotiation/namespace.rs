@@ -2,7 +2,7 @@
 //! capacity is separate. Ordinary admissions must include these positions in their full check.
 //! Root's exclusive actor borrow serializes reservation/ordinary insertion; release is atomic
 //! so native custody can disappear outside Root without retaining the whole Root allocation.
-use super::VoiceError;
+use super::{CallLease, VoiceError};
 use std::sync::{
     atomic::{AtomicUsize, Ordering},
     Arc,
@@ -14,7 +14,7 @@ pub(crate) struct ReceiptNamespace {
 }
 pub(crate) struct ReceiptPosition {
     held: Arc<AtomicUsize>,
-    live: bool,
+    live: CallLease,
 }
 impl ReceiptNamespace {
     #[cfg(test)]
@@ -35,19 +35,25 @@ impl ReceiptNamespace {
         self.held.fetch_add(1, Ordering::AcqRel);
         Ok(ReceiptPosition {
             held: self.held.clone(),
-            live: true,
+            live: CallLease::default(),
         })
     }
     pub(crate) fn owns(&self, position: &ReceiptPosition) -> bool {
-        position.live && Arc::ptr_eq(&self.held, &position.held)
+        position.live.is_live() && Arc::ptr_eq(&self.held, &position.held)
     }
 }
 impl ReceiptPosition {
+    /// Observation only, issued by the exact held position. Native Ready work keeps this
+    /// short lease, never Root or reservation closing rights. Consume/Drop synchronously
+    /// cancel it, including while a real transport flight still holds its paid capacity.
+    pub(in crate::voice_v2) fn observation(&self) -> CallLease {
+        self.live.clone()
+    }
     /// Only the final native apply tail consumes this. Root's exclusive borrow ensures
     /// no ordinary insert can interleave before its corresponding receipt-map insertion.
     pub(in crate::voice_v2) fn consume(&mut self) {
-        assert!(self.live, "one reserved endpoint receipt");
-        self.live = false;
+        assert!(self.live.is_live(), "one reserved endpoint receipt");
+        self.live.revoke();
         assert!(
             self.held.fetch_sub(1, Ordering::AcqRel) > 0,
             "reserved receipt position"
@@ -56,7 +62,7 @@ impl ReceiptPosition {
 }
 impl Drop for ReceiptPosition {
     fn drop(&mut self) {
-        if self.live {
+        if self.live.is_live() {
             self.consume();
         }
     }

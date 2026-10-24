@@ -18,6 +18,7 @@ struct Stamp {
     scope: Scope,
     local: DeviceId,
     header: ReadyHeader,
+    clock: std::sync::Arc<dyn catcoms_rt::Clock>,
 }
 struct Artifact {
     object: SignedObject,
@@ -62,6 +63,46 @@ impl SignedReadyStamp {
 }
 
 impl CacheCapacity {
+    /// Only the original Root namespace position plus actual installed native receiver can
+    /// export Ready Source provenance. A bare signed artifact/marker is insufficient.
+    pub(in crate::voice_v2) fn source_authority(
+        &self,
+        namespace: &crate::voice_v2::negotiation::namespace::ReceiptNamespace,
+    ) -> Result<
+        (
+            &SignedObject,
+            crate::voice_v2::ready::source_authority::ReadySourceAuthority,
+        ),
+        VoiceError,
+    > {
+        if !self.has_position(namespace) {
+            return Err(VoiceError::Unauthorized);
+        }
+        let stamp = self
+            .artifact
+            .stamp
+            .as_ref()
+            .ok_or(VoiceError::Unauthorized)?;
+        let artifact = self
+            .artifact
+            .signed
+            .as_ref()
+            .ok_or(VoiceError::Unauthorized)?;
+        let authority = crate::voice_v2::ready::source_authority::ReadySourceAuthority::new(
+            &artifact.object,
+            artifact._hash,
+            stamp.first_mono,
+            stamp.deadline,
+            self.position
+                .as_ref()
+                .expect("exact Root reservation")
+                .observation(),
+            stamp.clock.clone(),
+            self.receive()?,
+            self.producer.clone(),
+        )?;
+        Ok((&artifact.object, authority))
+    }
     pub(in crate::voice_v2) fn prepare_publication(
         &self,
         wall: u64,
@@ -147,6 +188,7 @@ impl CacheCapacity {
                 scope,
                 local,
                 header,
+                clock: actor.preparation_clock(),
             });
         }
         self.check_stamp_at(wall, mono)?;

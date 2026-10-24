@@ -12,7 +12,10 @@ pub(in crate::voice_v2) const METADATA: usize = 4096;
 pub(in crate::voice_v2) const MAX_WIRE: usize = 683;
 pub(in crate::voice_v2) const CACHE: usize = 2048;
 pub(in crate::voice_v2) const RECEIPT: usize = 1536;
-pub(super) const SOURCE: usize = MAX_WIRE + 512 + 1024;
+// Actual Ready Source owns a full native Packet/activity/effect and bounded map/set nodes.
+// Repartition existing32KiB slack; keep its one Source position and total reserve unchanged.
+pub(in crate::voice_v2) const SOURCE_METADATA: usize = 3072;
+pub(in crate::voice_v2) const SOURCE: usize = MAX_WIRE + 512 + SOURCE_METADATA;
 pub(super) const LOWER: usize = 2 * (MAX_WIRE + 512) + 4096 + super::super::ROUTE_METADATA_BYTES;
 pub(super) const ACK_CRYPTO: usize = 5 * 512 + 4096;
 const _: () = assert!(METADATA + CACHE + RECEIPT + SOURCE + 2 * LOWER + ACK_CRYPTO <= BYTES);
