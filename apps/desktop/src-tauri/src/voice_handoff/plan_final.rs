@@ -72,7 +72,7 @@ pub(super) async fn request(
     row.issue_final(admission.session()).map_err(Into::into)
 }
 
-/// Inactive authenticated Control adapter. Keep the original physical position through
+/// Authenticated Control adapter. Keep the original physical position through
 /// await, synchronous Root retirement, serialization and actual output collection. Socket
 /// loss may abandon this future before intent, but can never relabel a committed Return.
 pub(super) async fn apply(

@@ -1,4 +1,4 @@
-//! Inactive child engine admission under the same original native/Root fences.
+//! Child engine admission under the same original native/Root fences.
 //! No production opcode is enabled by this adapter alone.
 use super::bootstrap::Route;
 use super::channel::{self, BodyKind, CompletedReply, Incoming, Operation};

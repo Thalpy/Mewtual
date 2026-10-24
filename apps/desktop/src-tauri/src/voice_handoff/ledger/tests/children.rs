@@ -3,6 +3,75 @@
 use super::*;
 
 #[test]
+fn continuation_scan_does_not_infer_derived_success_or_incoming_authority_from_return() {
+    let (mut coordinator, selected, selector) = selection();
+    let ledger = Arc::new(Ledger::default());
+    let (_join, _action, parent) = returned_parent(&ledger, &coordinator, &selected, selector);
+    let mut cursor = 0;
+    let before = selected.resources().counts();
+    assert!(
+        ledger
+            .confirmation_continuation(&selected, &mut cursor)
+            .is_none(),
+        "ordinary Return without Derived/ACK is not Start authority"
+    );
+    assert_eq!(selected.resources().counts(), before);
+    let mut rows = Vec::new();
+    for request in [
+        ConfirmationPurpose::Incoming(1),
+        ConfirmationPurpose::Start(None),
+    ] {
+        let (Begin::Factory(ticket), _) = ledger
+            .begin_child(selected.clone(), &parent, request)
+            .unwrap()
+        else {
+            panic!("original child")
+        };
+        ticket.mark_handoff().unwrap();
+        rows.push((request, ticket.id()));
+        if matches!(request, ConfirmationPurpose::Start(_)) {
+            assert!(
+                ledger
+                    .confirmation_continuation(&selected, &mut cursor)
+                    .is_none(),
+                "an actual worker cannot be selected again"
+            );
+        }
+        drop(ticket);
+    }
+    let before = selected.resources().counts();
+    for _ in 0..4 {
+        let original = ledger
+            .confirmation_continuation(&selected, &mut cursor)
+            .unwrap();
+        assert!(original.request == ConfirmationPurpose::Start(None));
+        assert!(Arc::ptr_eq(&original.parent.row, &parent.row));
+        assert!(original.incoming.is_none() && original.known.is_none());
+        assert_eq!(
+            selected.resources().counts(),
+            before,
+            "scans never allocate work or renew capacity"
+        );
+    }
+    let (_, foreign, _) = selection();
+    assert!(ledger
+        .confirmation_continuation(&foreign, &mut cursor)
+        .is_none());
+    for (request, id) in rows {
+        ledger
+            .lookup_child(&selected, &parent, request, Some(id))
+            .unwrap()
+            .close_pending()
+            .unwrap();
+    }
+    coordinator.end(selected.id());
+    parent.retire_plan().unwrap();
+    assert!(ledger
+        .confirmation_continuation(&selected, &mut cursor)
+        .is_none());
+}
+
+#[test]
 fn existing_work_projection_keeps_full_child_purpose_after_actual_parent_return_and_compaction() {
     let (mut coordinator, selected, selector) = selection();
     let ledger = Arc::new(Ledger::default());

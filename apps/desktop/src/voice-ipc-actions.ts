@@ -1,7 +1,8 @@
 /** Fixed private action-request encoding. These bytes own no native authority. The retained
  * channel authenticates its original frame; native then checks the complete purpose, original
  * selected allocation and exact header RowId before any operation. No JSON number carries u64s.
- * Production admits only existing-history Begin(retry=false) beside Status; effect requests stay disabled. */
+ * Application-bound native dispatch checks every effect against its original owner and row;
+ * UI V2/SDP activation remains unavailable. Cleanup uses existing-history Begin(false). */
 import type { VoiceIpcOperation, VoiceIpcBodyKind } from "./voice-ipc-frame.ts";
 
 export type VoiceIpcPurpose = Readonly<{ peer: string; join: string; keyRef: string; epoch: string }>;

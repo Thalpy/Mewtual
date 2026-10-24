@@ -55,6 +55,14 @@ fn original(
         return Err(VoiceError::Unauthorized.into());
     }
     if identity.is_none() {
+        if !matches!(status.pending, super::ledger::PendingStatus::NotPending) {
+            // Native production can lose its Actor/attachment reply before the browser has
+            // ever seen this parent. Return must close that SAME idle local preparation,
+            // just as for a child. close_pending rechecks the actual Registration worker:
+            // it cannot overtake admitted publication or pretend Root never published.
+            // ClosedPending keeps settled/ACK/drained false and can never rearm the factory.
+            return Ok((row.id(), row.close_pending()?));
+        }
         row.close_phase(
             route.session().identity(),
             super::custody::CloseMode::Return,
@@ -88,6 +96,7 @@ pub(super) fn layout_bytes() -> usize {
         + std::mem::size_of::<Request<'static>>()
         + 3 * std::mem::size_of::<Status>()
         + std::mem::size_of::<super::custody::PhaseClosure>()
+        + super::ledger::pending_close_layout_bytes()
         + std::mem::size_of::<sha2::Sha256>()
         + 128 // nested resolver/retirement/digest argument wrappers
 }

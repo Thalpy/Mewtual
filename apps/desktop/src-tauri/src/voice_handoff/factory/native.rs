@@ -3,10 +3,26 @@
 //! because an actual browser Control request may coexist on this Session.
 use super::*;
 use crate::voice_handoff::channel::NativeHold;
+use catcoms_sync::voice_v2::crypto_actions::{CryptoActionSnapshot, CryptoActionSnapshotPermit};
+use catcoms_sync::voice_v2::presence::PeerSnapshotPermit;
+
+enum Selection {
+    Exact(PairSelector),
+    Discover {
+        cursor: u8,
+        permit: PeerSnapshotPermit,
+    },
+    Confirmation {
+        cursor: u8,
+        incoming: Option<CryptoActionSnapshotPermit>,
+    },
+    Consumed,
+}
 
 // Unlike the physical factory's4KiB publication-only task, this standalone task also pays
 // its entire preflight/UI preparation, concurrent with an independently occupied browser
-// Control envelope. Actual v4 measurement is4,456B; the provisional4KiB contract refused.
+// Control envelope. The complete discovery/confirmation/reconciliation graph is measured
+// by layout at admission and in tests; a publication-only4KiB inventory is insufficient.
 // Reserve8KiB once, as native Begin does, within the SAME512KiB group/2MiB process pool.
 // This reduces available ordinary capacity; it adds no pool, lane, row or admission limit.
 const NATIVE_TASK_BYTES: usize = 8 * 1024;
@@ -32,7 +48,7 @@ impl NativeCompletion {
 }
 struct Worker {
     context: Option<Context>,
-    selector: PairSelector,
+    selector: Selection,
     custody: NativeCustody,
 }
 
@@ -63,6 +79,45 @@ pub(in crate::voice_handoff) fn produce_derivation(
     route: &Route,
     selector: PairSelector,
 ) -> Result<NativeWaiter, Refused> {
+    spawn(context, route, Selection::Exact(selector))
+}
+
+/// One original native position includes the discovery RPC as well as publication. A parked
+/// Actor can occupy only this channel's paid worker, never the Host's round-robin scheduler
+/// or a replacement channel. The additional affine4KiB payment follows the actual peer
+/// snapshot command/output even if its observing future disappears.
+pub(in crate::voice_handoff) fn discover_derivation(
+    context: &Context,
+    route: &Route,
+    cursor: u8,
+) -> Result<NativeWaiter, Refused> {
+    let selected = route.selected();
+    let permit = PeerSnapshotPermit::new(&selected.resources(), selected.binding().scope)?;
+    spawn(context, route, Selection::Discover { cursor, permit })
+}
+
+/// Native-owned continuation selection. An incoming turn prepays its actual snapshot RPC
+/// before spawning, while a local turn scans only original retained publications/results.
+/// Both share this channel's one native position; no browser request is fabricated.
+pub(in crate::voice_handoff) fn produce_confirmation(
+    context: &Context,
+    route: &Route,
+    cursor: u8,
+    incoming: bool,
+) -> Result<NativeWaiter, Refused> {
+    let selected = route.selected();
+    let incoming = if incoming {
+        Some(CryptoActionSnapshotPermit::new(
+            &selected.resources(),
+            selected.binding().scope,
+        )?)
+    } else {
+        None
+    };
+    spawn(context, route, Selection::Confirmation { cursor, incoming })
+}
+
+fn spawn(context: &Context, route: &Route, selector: Selection) -> Result<NativeWaiter, Refused> {
     let runtime = tokio::runtime::Handle::try_current().map_err(|_| Refused::Stopped)?;
     {
         let live = context.upgrade().ok_or(Refused::Closed)?;
@@ -118,6 +173,33 @@ fn layout<F: std::future::Future<Output = NativeCompletion>>(future: &F) -> usiz
     let publication = std::mem::size_of::<super::super::context::LiveContext>()
         + std::mem::size_of::<super::super::ledger::Status>()
         + 128;
+    let discovery = std::mem::size_of::<super::super::context::LiveContext>()
+        + std::mem::size_of::<catcoms_sync::voice_v2::presence::PeerSnapshot>()
+        + std::mem::size_of::<
+            Result<(u64, &[catcoms_sync::voice_v2::presence::FreshPeer]), VoiceError>,
+        >()
+        + std::mem::size_of::<PairSelector>()
+        + std::mem::size_of::<Option<super::super::ledger::ResolvedRow>>()
+        + std::mem::size_of::<Result<Arc<CallGrant>, String>>()
+        + 128; // native resolver/guard and argument wrappers, not the separately-paid Vec
+    let confirmation_observation = std::mem::size_of::<super::super::context::LiveContext>()
+        + std::mem::size_of::<CryptoActionSnapshot>()
+        + std::mem::size_of::<super::super::ledger::Continuation>()
+        + 128;
+    let confirmation_admission = std::mem::size_of::<super::super::context::LiveContext>()
+        + std::mem::size_of::<super::super::ledger::Continuation>()
+        + std::mem::size_of::<Begin>()
+        + std::mem::size_of::<Registration>()
+        + 256; // bounded Index/parent/child, native wrappers and trigger observation
+               // Respond reconciliation runs synchronously before its Begin/Registration exists.
+               // Pay its actual Root snapshot/merge graph independently; neither a later value's
+               // storage nor generic guard slack can substitute for this live observer inventory.
+    let confirmation_reconciliation = std::mem::size_of::<super::super::context::LiveContext>()
+        + std::mem::size_of::<super::super::ledger::Continuation>()
+        + 2 * std::mem::size_of::<super::super::ledger::ResolvedRow>()
+        + std::mem::size_of::<RowId>()
+        + super::super::ledger::reconciliation_layout_bytes()
+        + 128;
     worker_layout(future)
         // Replace the shared helper's bare handle with the complete opaque observer.
         // The latter contains that handle today; future metadata must stay counted too.
@@ -126,19 +208,193 @@ fn layout<F: std::future::Future<Output = NativeCompletion>>(future: &F) -> usiz
         // Both synchronous stages execute inside the SAME already-paid outer future.
         // Its full future/output remains additive; only non-overlapping scoped stages
         // may share their declared maximum. Include actual preflight reply/Begin/output.
-        + admission.max(publication)
+        + admission.max(publication).max(discovery)
+            .max(confirmation_observation).max(confirmation_admission)
+            .max(confirmation_reconciliation)
 }
-async fn run_native(worker: Worker) -> NativeCompletion {
+async fn run_native(mut worker: Worker) -> NativeCompletion {
     // Complete preparation/publication in one paid state machine. Returning an intermediate
     // Effect enum embedded a second full registration/output graph in this outer future
     // throughout publication. No such copied admission result needs to survive this await.
-    let result = execute(&worker).await;
+    let result = execute(&mut worker).await;
     NativeCompletion {
         result,
         _custody: worker.custody,
     }
 }
-async fn execute(worker: &Worker) -> Result<RowId, Refused> {
+async fn execute(worker: &mut Worker) -> Result<RowId, Refused> {
+    let selector = match std::mem::replace(&mut worker.selector, Selection::Consumed) {
+        Selection::Exact(selector) => selector,
+        Selection::Discover { cursor, permit } => discover(worker, cursor, permit).await?,
+        Selection::Confirmation { cursor, incoming } => {
+            return execute_confirmation(worker, cursor, incoming).await;
+        }
+        Selection::Consumed => return Err(Refused::Closed),
+    };
+    execute_selected(worker, selector).await
+}
+
+async fn execute_confirmation(
+    worker: &Worker,
+    mut cursor: u8,
+    incoming: Option<CryptoActionSnapshotPermit>,
+) -> Result<RowId, Refused> {
+    let context = worker.context.as_ref().ok_or(Refused::Closed)?;
+    let route = &worker.custody.route;
+    let selected = route.selected().clone();
+    let continuation = if let Some(permit) = incoming {
+        let (actor, grant) = observation_actor(context, route)?;
+        let snapshot = actor.voice_confirmation_actions(grant, permit).await?;
+        let live = context.upgrade().ok_or(Refused::Closed)?;
+        let mut found = None;
+        for action in snapshot.result()? {
+            if let Some(continuation) = live.ledger.incoming_confirmation(&selected, action) {
+                found = Some(continuation);
+                break;
+            }
+        }
+        // Destroy the Vec/RPC owner before a child can borrow the chain-wide Phase loan.
+        drop(snapshot);
+        found
+    } else {
+        let live = context.upgrade().ok_or(Refused::Closed)?;
+        live.ledger
+            .confirmation_continuation(&selected, &mut cursor)
+    }
+    .ok_or(VoiceError::Capacity)?;
+    let commit = preflight_binding(context, route).await?;
+    let commit = commit.lock_owned().await;
+    let live = context.upgrade().ok_or(Refused::Closed)?;
+    live.gate()
+        .require_unlocked()
+        .await
+        .map_err(|_| Refused::Closed)?;
+    let actor = {
+        let servers = live.servers.lock().await;
+        let binding = selected.binding();
+        servers
+            .get(&binding.server)
+            .filter(|entry| entry.instance == binding.instance && entry.group_id == binding.group)
+            .map(|entry| entry.actor.clone())
+            .ok_or(Refused::Closed)?
+    };
+    {
+        // Same final ordering as the physical factory. No earlier scan or original
+        // allocation can authorize first publication after End, lock, or replacement.
+        let authority = live
+            .authority
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        require_current_selection(live.gate(), &authority, &selected)?;
+        route.require_open().map_err(|_| Refused::Closed)?;
+    }
+    let grant = selected.grant()?;
+    let handshake = continuation.parent.confirmation_handshake()?;
+    let (begin, trigger) = if let Some(child) = &continuation.known {
+        (
+            live.ledger.resume_known_child(
+                selected.clone(),
+                &continuation.parent,
+                child,
+                continuation.request,
+            )?,
+            None,
+        )
+    } else {
+        live.ledger
+            .begin_child(selected.clone(), &continuation.parent, continuation.request)?
+    };
+    let registration = match begin {
+        Begin::Existing(id) => return Ok(id),
+        Begin::Factory(registration) => registration,
+    };
+    drop(live);
+    let result = super::confirmation::publish_confirmation(
+        registration,
+        actor,
+        grant,
+        handshake,
+        continuation.request,
+        continuation.incoming.or(trigger),
+    )
+    .await;
+    drop(commit);
+    drop(selected);
+    result
+}
+
+/// Resolve only the genuine original Actor/grant for a non-effect observation. Do not
+/// hold an upgraded mounted store, server map, or Coordinator over the Actor RPC.
+fn observation_actor(
+    context: &Context,
+    route: &Route,
+) -> Result<(ServerActor, Arc<CallGrant>), Refused> {
+    let selected = route.selected();
+    let live = context.upgrade().ok_or(Refused::Closed)?;
+    if !live.try_unlocked()? {
+        return Err(Refused::Closed);
+    }
+    let servers = live.servers.try_lock().map_err(|_| VoiceError::Capacity)?;
+    let binding = selected.binding();
+    let actor = servers
+        .get(&binding.server)
+        .filter(|entry| entry.instance == binding.instance && entry.group_id == binding.group)
+        .map(|entry| entry.actor.clone())
+        .ok_or(Refused::Closed)?;
+    Ok((actor, selected.grant()?))
+}
+
+async fn discover(
+    worker: &Worker,
+    cursor: u8,
+    permit: PeerSnapshotPermit,
+) -> Result<PairSelector, Refused> {
+    let context = worker.context.as_ref().ok_or(Refused::Closed)?;
+    let route = &worker.custody.route;
+    let selected = route.selected();
+    let (actor, grant) = {
+        let live = context.upgrade().ok_or(Refused::Closed)?;
+        if !live.try_unlocked()? {
+            return Err(Refused::Closed);
+        }
+        let servers = live.servers.try_lock().map_err(|_| VoiceError::Capacity)?;
+        let binding = selected.binding();
+        let actor = servers
+            .get(&binding.server)
+            .filter(|entry| entry.instance == binding.instance && entry.group_id == binding.group)
+            .map(|entry| entry.actor.clone())
+            .ok_or(Refused::Closed)?;
+        (actor, selected.grant()?)
+    }; // No upgraded mounted Store, server map or Coordinator crosses the Actor wait.
+    let snapshot = actor.voice_participant_peer_snapshot(grant, permit).await?;
+    let (epoch, peers) = snapshot.result()?;
+    let live = context.upgrade().ok_or(Refused::Closed)?;
+    // Already-known purposes are handled by the scheduler's separate Pending turn. Never
+    // replace an expired original selector with this observation's later epoch or proof.
+    for offset in 0..peers.len() {
+        let peer = &peers[(usize::from(cursor) + offset) % peers.len()];
+        if let catcoms_sync::voice_v2::Body::Announcement { key, .. } = peer.announcement().body() {
+            let selector = PairSelector {
+                peer: peer.announcement().issuer(),
+                join: key.join,
+                key_ref: key.key_ref,
+                epoch,
+            };
+            if live
+                .ledger
+                .lookup_original(selected, Purpose::Derive(selector))
+                .is_none()
+            {
+                // Only immutable fixed metadata leaves this scope. The actual Vec/proof
+                // observation and permit drop before pair/Phase/ledger publication begins.
+                return Ok(selector);
+            }
+        }
+    }
+    Err(VoiceError::Unauthorized.into())
+}
+
+async fn execute_selected(worker: &Worker, selector: PairSelector) -> Result<RowId, Refused> {
     let context = worker.context.as_ref().ok_or(Refused::Closed)?;
     let route = &worker.custody.route;
     let selected = route.selected().clone();
@@ -169,7 +425,7 @@ async fn execute(worker: &Worker) -> Result<RowId, Refused> {
     let grant = selected.grant()?;
     let registration = match context
         .ledger
-        .begin(selected.clone(), Purpose::Derive(worker.selector))?
+        .begin(selected.clone(), Purpose::Derive(selector))?
     {
         Begin::Existing(id) => return Ok(id),
         Begin::Factory(registration) => registration,
@@ -178,7 +434,7 @@ async fn execute(worker: &Worker) -> Result<RowId, Refused> {
     // Only this task's weak context remains; no mounted Store/registry/Coordinator crosses
     // Actor publication. Retain the original selected owner and UI commit to the end of
     // this scope, after the shared exact-publication path has collected its Actor replies.
-    let result = publish_derivation(registration, actor, grant, worker.selector).await;
+    let result = publish_derivation(registration, actor, grant, selector).await;
     drop(commit);
     drop(selected);
     result

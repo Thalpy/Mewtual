@@ -1,5 +1,47 @@
 # Threat model; client integrity & enforcement boundaries
 
+## Unseen native work at End (24 October; validation in progress)
+
+Independent native production can create work before a browser descriptor exists. End alone
+does not prove its engine unstarted or permit native blanket settlement. After actual known
+SDK/RPC drainage the retained original browser authenticates metadata-selected history and
+closes that exact work without Input or new crypto. A separate first-effect fence is ordered
+against native publication by the original UI commit while Control routing remains available.
+Normal closure cannot bypass an attached parent's final proof/ACK merely because Root drained.
+Lost replies retain one deferred parent/current descriptor and any exact issued proof; children
+are scanned before retrying a blocked parent. Metadata16KiB plus encrypted control8KiB are
+prepaid before setup ACK; these are application graph bounds, not framework/SDK/GC/RSS claims.
+
+Reconnect capture serializes current claims, sealed merge and live command enqueue per numeric
+server ID, rechecking local permission after waiting. The lock grants no dial authority: current
+membership, signed descriptor/endpoint binding and route parsing still apply at actual use.
+An old asynchronous capture must not erase a newer saved direction or enqueue its stale live
+vector afterward. HANDOVER distinguishes source-confirmed race and observed full-run failure.
+
+## Application-bound handoff effects (24 October; validation in progress)
+
+Authenticated loopback action/final dispatch and bounded native maintenance now exist in
+ordinary application construction. UI V2 activation remains unavailable. The local Origin,
+MAC and AEAD checks do not replace original grant/selection/parent/action, current generation,
+route or Root authorization. Impossible authenticated class/length/logical combinations fail
+before body allocation/counter debit; malformed admitted plaintext never refunds counters.
+Status-only construction has no weak application Context and cannot dispatch these effects.
+
+Native discovery snapshot permits use the original Resources/scope. Their affine payment
+follows both caller waiter and actual Actor command/output, including stop/caller loss. One
+paid native position includes parked discovery and final publication, so a slow old Actor
+cannot occupy the Host scheduler or adopt a replacement join. Only actual authenticated Root
+actions contained by the original plan can create Incoming children. Pending without a
+publication cannot be retried from its role. A closed unseen parent records local preparation
+closure; it never invents a receipt, Root absence or settlement.
+
+Ordinary browser Derive Return retains actual SDK/settlement/Control ownership. End fences
+new flights and awaits an admitted Return outside the shared execution lane before clearing
+keys/unlinking history; activity must reach zero before collection. This preserves confirmation
+keys only. Local Finish sealing is not remote Finish acceptance, and neither a historical
+receipt nor pair status authorizes SDP/ICE/RTC. Those factories, causal ownership transfer,
+browser/RTC budgeting, multi-peer reclamation and scoped media relay remain open boundaries.
+
 ## Historical work metadata IPC (24 October; inactive integration)
 
 The new main-only read returns public original-channel work metadata, including historical
@@ -43,7 +85,8 @@ collection. This narrows the cryptographic interoperability gap; it does not est
 packaged WebView policy, live work delivery, RTC or audible media. The continuation adds an
 independent native pair observation described above; its current validation is in HANDOVER.
 
-The effect dispatcher and negative Input contention flag are cfg(test) only. The latter
+The effect dispatcher now runs in application-bound builds. Only the negative Input
+contention flag is cfg(test). That flag
 holds the real server-map mutex after authenticated v1 Input selection, forcing actual
 preflight Capacity before Work/Input/Actor admission, then releases it before transmission.
 The Node oracle retries the same intake only after a fresh authenticated Capacity observed

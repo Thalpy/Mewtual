@@ -493,6 +493,11 @@ struct AppState {
     /// writes did not even serialize against each other. Here they do, and the incarnation check
     /// inside the lock then decides which of them is still entitled to write.
     persist_locks: StdMutex<HashMap<u64, Arc<Mutex<()>>>>,
+    /// Order reconnect claims -> sealed merge -> live installation separately from ordinary
+    /// snapshot persistence. Numeric-id lifetime also serializes departing/replaced entries;
+    /// the final registry check still decides which incarnation may write. Never substitute
+    /// persist_locks here: capture itself seals a snapshot through that other lock.
+    reconnect_persist_locks: StdMutex<HashMap<u64, Arc<Mutex<()>>>>,
     store: Arc<Mutex<Option<ServerStore>>>,
     /// Whether a freshly-mounted frontend may restore the already-unlocked UI session. This stays
     /// true across F5/HMR, but an explicit Ctrl+L clears it so a reload cannot bypass the lock.

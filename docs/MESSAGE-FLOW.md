@@ -32,6 +32,15 @@ The dated evidence in the acceptance ledger takes precedence over older coverage
 
 ## Quiet receipts and sole-owner responsiveness (19 October)
 
+24 October reconnect continuation: event, cadence and shutdown captures now serialize their
+claims observation, latest sealed-route merge and live-route command enqueue per numeric
+server ID. They use a dedicated lock after snapshot persistence, then recheck local policy.
+This prevents an earlier incomplete descriptor snapshot deleting a newly saved bridge route,
+or a late old command replacing the newer vector. The Actor processes those enqueued commands
+in order; actual dials retain all current membership/descriptor/endpoint checks. Cold Noise
+acceptance establishes route use, not application catch-up or an authenticated chat exchange.
+Current validation/failure boundaries are in HANDOVER.
+
 A genuinely new bound member endpoint requests one coalesced reconciliation pass for documents
 already open at authentication. This is independent of the restore's first-source latch: its
 connection may have arrived before it was authorized as a source. The async owner drains that

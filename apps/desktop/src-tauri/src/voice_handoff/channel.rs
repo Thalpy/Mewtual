@@ -1,6 +1,6 @@
-//! Disabled encrypted framing and one prepaid physical position. This is not a listener,
-//! stock-IPC copy proof, browser-close proof, native action adapter or live driver. Its child
-//! bootstrap module is an internal ECDH candidate, without a renderer/IO consumer yet.
+//! Encrypted framing and prepaid native/physical positions for the application handoff.
+//! Framing alone supplies no stock-IPC copy proof, browser-close proof or RTC grant. Its
+//! bootstrap owns the exact ECDH channel used by the authenticated service and browser broker.
 //! A MAC identifies this local channel only; every Root effect still needs its actual owner.
 use super::custody::{Buffer, Phase};
 use super::http;
@@ -25,7 +25,9 @@ pub(super) const CONTROL_BYTES: usize = 12 * 1024;
 // Browser-owned fixed control metadata, SDK input/output views, one request and one BYOB
 // response are separate from the native header/body/reply envelope. Both share the original
 // serial Crypto lane, but these bytes coexist across the local HTTP boundary.
-pub(super) const BROWSER_CONTROL_BYTES: usize = 8 * 1024;
+// Existing8KiB encrypted control plus16KiB metadata read/cleanup custody. Both are prepaid
+// before setup ACK can enable independent producers; End/full-pool pressure needs no grant.
+pub(super) const BROWSER_CONTROL_BYTES: usize = 24 * 1024;
 pub(super) const BOOTSTRAP_BYTES: usize = 2048;
 const CONTROL_CIPHER: usize = 256 + 16;
 
@@ -450,6 +452,11 @@ pub(super) struct AuthenticatedRequest {
     worker: HeaderWorker,
 }
 impl AuthenticatedRequest {
+    /// Authenticated ciphertext length, including the AEAD tag. A dispatcher may reject an
+    /// impossible fixed grammar before Phase lookup/allocation or irreversible counter debit.
+    pub(super) fn length(&self) -> usize {
+        self.request.length()
+    }
     pub(super) fn logical(&self) -> [u8; 16] {
         self.request.logical()
     }

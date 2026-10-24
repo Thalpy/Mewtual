@@ -1,6 +1,6 @@
 //! Original-row derivation input. Serialization writes directly into the already-paid Data
 //! reply; its actual CryptoInputLease, Phase and Work survive all IO/output collection.
-//! This adapter is not yet admitted by production ingress.
+//! Production ingress authenticates the original Session and exact header before this adapter.
 use super::bootstrap::Route;
 use super::channel::{self, BodyKind, CompletedReply, Incoming, Operation};
 use super::context::Context;

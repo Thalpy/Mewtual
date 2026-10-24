@@ -29,6 +29,25 @@ fn native_browser_vectors_preserve_complete_purpose_identity_and_borrow_the_exac
         let bytes = hex::decode(case["plaintext"].as_str().unwrap()).unwrap();
         let request =
             Request::decode(operation(case["operation"].as_u64().unwrap()), &bytes).unwrap();
+        let op = operation(case["operation"].as_u64().unwrap());
+        let logical = if op == Operation::BeginDerive {
+            [0; 16]
+        } else {
+            let mut row = [0; 16];
+            row[15] = 1;
+            row
+        };
+        assert!(wire_shape(
+            op,
+            if op == Operation::Result {
+                super::super::channel::BodyKind::Data
+            } else {
+                super::super::channel::BodyKind::Control
+            },
+            logical,
+            bytes.len() + 16,
+            [9; 16],
+        ));
         assert_eq!(request.selector.peer.as_bytes(), &[0x11; 32]);
         assert_eq!(request.selector.join, [0x22; 32]);
         assert_eq!(request.selector.key_ref, [0x33; 32]);
@@ -79,6 +98,94 @@ fn native_browser_vectors_preserve_complete_purpose_identity_and_borrow_the_exac
             Kind::FinalAck { proof } => assert_eq!(proof, [0x55; 32]),
         }
     }
+}
+
+#[test]
+fn header_shape_refuses_impossible_classes_identities_and_bounds_without_body_access() {
+    use super::super::channel::BodyKind;
+    let mut row = [0; 16];
+    row[15] = 1;
+    for op in [
+        Operation::Input,
+        Operation::Admit,
+        Operation::Result,
+        Operation::ReceiptAck,
+        Operation::Settle,
+        Operation::ClosePhase,
+        Operation::FinalAck,
+    ] {
+        for logical in [[0; 16], [0xff; 16]] {
+            for length in 0..=800 {
+                assert!(!wire_shape(op, BodyKind::Control, logical, length, [9; 16]));
+                assert!(!wire_shape(op, BodyKind::Data, logical, length, [9; 16]));
+            }
+        }
+        assert!(!wire_shape(op, BodyKind::Control, row, usize::MAX, [9; 16]));
+        assert!(!wire_shape(op, BodyKind::Data, row, usize::MAX, [9; 16]));
+    }
+    assert!(wire_shape(
+        Operation::Status,
+        BodyKind::Control,
+        [9; 16],
+        65,
+        [9; 16]
+    ));
+    assert!(!wire_shape(
+        Operation::Status,
+        BodyKind::Control,
+        row,
+        65,
+        [9; 16]
+    ));
+    assert!(!wire_shape(
+        Operation::Status,
+        BodyKind::Data,
+        [9; 16],
+        65,
+        [9; 16]
+    ));
+    assert!(!wire_shape(
+        Operation::Status,
+        BodyKind::Control,
+        [9; 16],
+        66,
+        [9; 16]
+    ));
+    assert!(!wire_shape(
+        Operation::BeginDerive,
+        BodyKind::Control,
+        row,
+        122,
+        [9; 16]
+    ));
+    assert!(!wire_shape(
+        Operation::BeginDerive,
+        BodyKind::Data,
+        [0; 16],
+        122,
+        [9; 16]
+    ));
+    assert!(wire_shape(
+        Operation::Result,
+        BodyKind::Data,
+        row,
+        154 + 82 + 528 + 16,
+        [9; 16]
+    ));
+    assert!(!wire_shape(
+        Operation::Result,
+        BodyKind::Data,
+        row,
+        154 + 82 + 529 + 16,
+        [9; 16]
+    ));
+    assert!(!wire_shape(
+        Operation::Result,
+        BodyKind::Control,
+        row,
+        105 + 82 + 16,
+        [9; 16]
+    ));
 }
 
 #[test]

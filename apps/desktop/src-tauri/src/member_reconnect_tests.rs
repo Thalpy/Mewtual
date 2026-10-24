@@ -5,6 +5,7 @@ mod member_reconnect_regressions {
     use rand_core::SeedableRng;
 
     include!("member_shutdown_tests.rs");
+    include!("member_capture_race_tests.rs");
 
     #[test]
     fn duplicate_address_families_do_not_hide_another_member_finalization_target() {

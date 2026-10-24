@@ -4,6 +4,62 @@ use super::*;
 use voice_v2::crypto_actions::CryptoOutcome;
 
 #[tokio::test]
+async fn paid_peer_snapshot_recovers_proven_originals_under_pressure_without_pair_creation() {
+    use voice_v2::presence::PeerSnapshotPermit;
+    let (mut root, remote, runtime, _clock, grant) = low_discovery_fixture(1).await;
+    let resources = runtime.resources();
+    let before = resources.counts();
+    let foreign_pool = Arc::new(voice_v2::resources::Resources::default());
+    let permit = PeerSnapshotPermit::new(&foreign_pool, grant.scope()).unwrap();
+    let refusal = root.voice_participant_peer_snapshot(&grant, permit);
+    assert_eq!(refusal.result().err(), Some(VoiceError::Unauthorized));
+    assert_eq!(foreign_pool.counts().0, PeerSnapshotPermit::MEMORY_BYTES);
+    drop(refusal);
+    assert_eq!(foreign_pool.counts().0, 0);
+    assert_eq!(resources.counts(), before);
+    let mut wrong_scope = grant.scope();
+    wrong_scope.room += 1;
+    let permit = PeerSnapshotPermit::new(&resources, wrong_scope).unwrap();
+    let refusal = root.voice_participant_peer_snapshot(&grant, permit);
+    assert_eq!(refusal.result().err(), Some(VoiceError::Unauthorized));
+    drop(refusal);
+    assert_eq!(resources.counts(), before);
+    let mut permit = PeerSnapshotPermit::new(&resources, grant.scope()).unwrap();
+    let pressure = resources
+        .charge(
+            grant.scope().group,
+            voice_v2::resources::GROUP_BYTES - resources.counts().0,
+            voice_v2::resources::ResourceKind::Retained,
+        )
+        .unwrap();
+    let full = resources.counts();
+    let epoch = root.voice_v2_context(grant.scope().room).unwrap().epoch;
+    for _ in 0..8 {
+        let output = root.voice_participant_peer_snapshot(&grant, permit);
+        let (observed_epoch, peers) = output.result().unwrap();
+        assert_eq!(observed_epoch, epoch);
+        assert_eq!(peers.len(), 1);
+        assert_eq!(peers[0].announcement().issuer(), remote.device_id());
+        assert_eq!(
+            resources.counts(),
+            full,
+            "observation creates no pair/Workflow/record"
+        );
+        permit = output.return_permit();
+        assert_eq!(resources.counts(), full);
+    }
+    let foreign = Arc::new(CallGrant::from_lease(grant.lease(), grant.scope()));
+    let refused = root.voice_participant_peer_snapshot(&foreign, permit);
+    assert_eq!(refused.result().err(), Some(VoiceError::Unauthorized));
+    permit = refused.return_permit();
+    root.stop_voice_endpoint(&grant);
+    let ended = root.voice_participant_peer_snapshot(&grant, permit);
+    assert_eq!(ended.result().err(), Some(VoiceError::Unauthorized));
+    drop(ended);
+    drop(pressure);
+}
+
+#[tokio::test]
 async fn native_action_pull_recovers_original_pending_arcs_under_pressure_and_rejects_foreign_or_ended_calls(
 ) {
     let (mut root, _remote, runtime, _clock, grant, handshake) = low_fixture().await;

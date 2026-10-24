@@ -1,5 +1,6 @@
-//! Inactive original-Pending closure adapter. It terminates ONLY local native preparation,
-//! not an uncertain Root pair/action or full Workflow. Production serves only Status/read-only history.
+//! Original-Pending closure adapter used by focused native tests. Production dispatch uses
+//! settlement::apply's equivalent original-row closure. It terminates ONLY local native
+//! preparation, not an uncertain Root pair/action or full Workflow.
 //! The retained broker must first drain actual SDK/RPC work before issuing ClosePhase; frame
 //! authentication cannot prove that protocol precondition on its own.
 use super::bootstrap::Route;

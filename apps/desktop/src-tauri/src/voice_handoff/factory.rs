@@ -1,4 +1,5 @@
-//! Native-owned derivation registration. No command/listener exposes this pilot yet. The
+//! Native-owned derivation registration. Automatic production uses the separate native
+//! origin; the browser cannot choose the first Derive factory with a listener request. The
 //! selected key, original actor and UI commit travel with actual work rather than an invoke
 //! waiter. A lost reply must recover the same counted ledger purpose, never create new work.
 use super::bootstrap::Route;
@@ -29,8 +30,8 @@ const TASK_AND_REPLY_BYTES: usize = 1024;
 const DERIVATION_HANDOFF_BYTES: usize = 16 * 1024;
 mod confirmation;
 pub(super) mod native;
-// The inactive authenticated Begin adapter and integration fixtures call these factories.
-// The production listener still rejects effect admission before child dispatch.
+// The authenticated Begin adapter resolves original native parent/purpose authority before
+// these factories. The native Derive producer has a separately paid original Session position.
 pub(super) use confirmation::{
     ensure_confirmation_row, ensure_incoming_row, ensure_known_incoming_row,
 };

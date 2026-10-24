@@ -1,6 +1,7 @@
 /** Bounded private action-history decoder. Call only AFTER the retained channel authenticates
  * its original response, operation, counters and logical header. Decoding metadata grants no
- * factory, engine, receipt or RTC authority. This is not wired to production action dispatch. */
+ * factory, engine, receipt or RTC authority. Application-bound dispatch independently checks
+ * each original native row; a decoded historical reply never enables UI V2 or RTC. */
 import type { VoiceIpcActionIdentity } from "./voice-ipc-actions.ts";
 
 const ERRORS = ["malformed", "bounds", "signature", "scope", "freshness", "unauthorized",

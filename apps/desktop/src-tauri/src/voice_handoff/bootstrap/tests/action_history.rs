@@ -547,8 +547,27 @@ async fn both_explicit_close_variants_preserve_control_while_original_factory_is
             settle_setup(&f.state, selected.id(), selected.executor()).await
         };
         assert!(matches!(result, Err(Refused::Capacity)));
-        assert!(route.require_open().is_ok());
-        assert_eq!(route.snapshot(), [1, 1, 1]);
+        assert!(
+            route.require_open().is_err(),
+            "close-first fences new effects even on Capacity"
+        );
+        assert!(!route.native_ready());
+        assert!(f.state.voice_channels.require_cleanup_route(&route).is_ok());
+        assert_eq!(route.snapshot(), [1, 2, 1]);
+        assert!(
+            matches!(
+                ensure(
+                    &f.state,
+                    selected.id(),
+                    selected.executor(),
+                    &mut Rng::new()
+                )
+                .await
+                .unwrap(),
+                Status::Closed { .. }
+            ),
+            "setup retry cannot revive the original producer"
+        );
         assert_eq!(selected.resources().counts(), counts);
         drop(registration); // demonstrably unstarted: no actor publication ever occurred
         collect_channel(&f.state, selected.id(), selected.executor())
@@ -615,8 +634,9 @@ async fn both_explicit_close_variants_keep_control_until_compacted_final_root_pr
                 settle_setup(&f.state, selected.id(), selected.executor()).await
             };
             assert!(matches!(result, Err(Refused::Capacity)));
-            assert!(route.require_open().is_ok());
-            assert_eq!(route.snapshot(), original_slots);
+            assert!(route.require_open().is_err());
+            assert!(f.state.voice_channels.require_cleanup_route(&route).is_ok());
+            assert_eq!(route.snapshot(), [original_slots[0], 2, original_slots[2]]);
             assert_eq!(selected.resources().counts(), counts);
             assert_eq!(
                 row.confirmation_status().unwrap(),
@@ -638,7 +658,8 @@ async fn both_explicit_close_variants_keep_control_until_compacted_final_root_pr
                 matches!(result, Err(Refused::Capacity)),
                 "unACKed final stage {stage}"
             );
-            assert!(route.require_open().is_ok());
+            assert!(route.require_open().is_err());
+            assert!(f.state.voice_channels.require_cleanup_route(&route).is_ok());
             let issued = row.issue_final(route.session().identity()).unwrap();
             assert!(issued.proof.is_some() && !issued.acknowledged);
         }

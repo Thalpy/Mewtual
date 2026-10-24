@@ -10,6 +10,64 @@ use catcoms_sync::voice_v2::presence::PairSelector;
 use catcoms_sync::voice_v2::VoiceError;
 use sha2::{Digest, Sha256};
 
+/// Header-only necessary conditions for the closed v1 parent / v2 confirmation grammars.
+/// Call only AFTER authenticating the immutable Header, BEFORE allocating Data or debiting
+/// either directional counter. These are not sufficient conditions: AEAD and the exact
+/// versioned decoder still validate every field and original native purpose afterward.
+///
+/// Prefix sizes are the v1 selector (105 bytes), or selector + parent + purpose tag with
+/// Start(None), Incoming(role), Respond(row), or Start(predecessor). The encrypted version
+/// cannot be known here, so lengths are the union, never a decoder fallback. Keep this table
+/// pinned to both shared native/browser vector sets when introducing a new grammar.
+pub(super) fn wire_shape(
+    operation: Operation,
+    kind: super::channel::BodyKind,
+    logical: [u8; 16],
+    cipher_bytes: usize,
+    session: [u8; 16],
+) -> bool {
+    use super::channel::BodyKind;
+    const PREFIXES: [usize; 5] = [105, 122, 123, 138, 154];
+    let Some(plain_bytes) = cipher_bytes.checked_sub(16) else {
+        return false;
+    };
+    if operation == Operation::Status {
+        return kind == BodyKind::Control && logical == session && plain_bytes == 49;
+    }
+    if operation == Operation::BeginDerive {
+        return kind == BodyKind::Control
+            && logical == [0; 16]
+            && PREFIXES.iter().any(|prefix| plain_bytes == prefix + 1);
+    }
+    if super::ledger::RowId::from_logical(logical).is_err()
+        || kind
+            != if operation == Operation::Result {
+                BodyKind::Data
+            } else {
+                BodyKind::Control
+            }
+    {
+        return false;
+    }
+    if operation == Operation::FinalAck {
+        return plain_bytes == 105 + 32; // Only the original v1 parent owns final ACK.
+    }
+    PREFIXES.iter().any(|prefix| {
+        let Some(suffix) = plain_bytes.checked_sub(*prefix) else {
+            return false;
+        };
+        match operation {
+            Operation::Input => suffix == 0,
+            Operation::Admit => suffix == 48 + 4,
+            Operation::Result => (48 + 32 + 2..=48 + 32 + 2 + 528).contains(&suffix),
+            Operation::ReceiptAck => suffix == 48 + 32,
+            Operation::Settle => suffix == 48,
+            Operation::ClosePhase => suffix == 1,
+            Operation::BeginDerive | Operation::FinalAck | Operation::Status => false,
+        }
+    })
+}
+
 /// Exact identity of the original native action, in addition to full purpose and RowId.
 /// A copied identity is a lookup hint only, never a fresh engine or publication permit.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

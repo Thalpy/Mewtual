@@ -83,12 +83,24 @@ async fn lost_incomplete_ordinary_return_compacts_on_later_terminal_retry_withou
     );
     assert!(row.retire_plan().unwrap());
     assert!(
-        case.native
+        !case
+            .native
             .state
             .voice_handoff
             .channel_may_close(&case.selected),
-        "actual original plan retirement permits ordinary close without a fabricated final ACK"
+        "actual Root retirement cannot bypass original final proof delivery"
     );
+    let issued = super::super::plan_final::request(&case.context, &case.route, &row)
+        .await
+        .unwrap();
+    assert!(issued.proof.is_some() && !issued.acknowledged);
+    row.acknowledge_final(case.route.session().identity(), issued.proof.unwrap())
+        .unwrap();
+    assert!(case
+        .native
+        .state
+        .voice_handoff
+        .channel_may_close(&case.selected));
     case.native.close().await;
 }
 

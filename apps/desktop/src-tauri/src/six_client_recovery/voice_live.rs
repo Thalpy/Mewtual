@@ -9,6 +9,15 @@ use catcoms_sync::voice_v2::{Body, CallGrant};
 /// proves a single-pair Node/native cycle; it does not establish WebView policy or live RTC.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn native_webcrypto_confirmation_uses_real_http_and_blocked_tcp_member_bridge() {
+    native_webcrypto_cycle(false).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn native_webcrypto_end_closes_automatic_work_before_first_browser_input() {
+    native_webcrypto_cycle(true).await;
+}
+
+async fn native_webcrypto_cycle(end_before_input: bool) {
     use crate::voice_handoff::integration::webcrypto::{catch_fixture, Endpoint, Failure};
     async fn observation(
         actor: &catcoms_app::ServerActor,
@@ -86,6 +95,16 @@ async fn native_webcrypto_confirmation_uses_real_http_and_blocked_tcp_member_bri
         let ag = a_selected.grant().unwrap();
         let cg = c_selected.grant().unwrap();
         let discovered = both_fresh(&scenario, &a_selected, &c_selected, &ag, &cg, None, 0).await;
+        if end_before_input {
+            let (ap, cp) = tokio::join!(
+                a.wait_native_derivation(discovered[0].1),
+                c.wait_native_derivation(discovered[1].1)
+            );
+            assert!(!ap.status().unwrap().engine.settled && !cp.status().unwrap().engine.settled);
+            // Neither Node has received a Derive/child control step. The normal close
+            // below must discover native work and use original authenticated cleanup only.
+            return;
+        }
         let (ap, cp) = tokio::join!(a.derive(discovered[0].1), c.derive(discovered[1].1));
         let a_handshake = ap.confirmation_handshake().unwrap();
         let c_handshake = cp.confirmation_handshake().unwrap();

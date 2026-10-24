@@ -93,7 +93,7 @@ impl Endpoint {
     /// protected pair. A slow process launch/setup cannot consume the original pair deadline.
     pub(crate) async fn prepare(state: Arc<AppState>, owner: String) -> Result<Self, Failure> {
         let runtime = crate::voice_runtime(&state);
-        let bound = match service::BoundServer::bind_effect_fixture(
+        let bound = match service::BoundServer::bind_application(
             state.voice_channels.clone(),
             runtime,
             service::Origin::PackagedHttp,
@@ -249,25 +249,7 @@ impl Endpoint {
             .voice_channels
             .route(public.public().slot)
             .unwrap();
-        let clock = crate::voice_runtime(&self.state).clock();
-        let id = super::original_native_derivation(
-            &context::Context::new(&self.state),
-            &route,
-            selector,
-            clock.as_ref(),
-            clock.monotonic_ms().saturating_add(10_000),
-        )
-        .await;
-        let row = self
-            .state
-            .voice_handoff
-            .resolve(&selected, ledger::Purpose::Derive(selector), id)
-            .unwrap();
-        assert!(row.status().unwrap().action.is_some());
-        assert!(
-            row.status().unwrap().engine.receipt.is_none(),
-            "genuine uncommitted native Derive"
-        );
+        let row = self.wait_native_derivation(selector).await;
         // The fixture can only make the next authenticated Input fail locally; it cannot
         // synthesize a receipt or renew this original parent/action's authority.
         route.session().fixture_arm_input_pressure();
@@ -283,6 +265,41 @@ impl Endpoint {
             row.status().unwrap().engine.receipt.unwrap().outcome,
             catcoms_sync::voice_v2::crypto_actions::CryptoOutcome::Derived
         ));
+        row
+    }
+
+    /// Observe original automatic work without delivering a descriptor/Input to Node.
+    /// Used by the real-HTTP End-before-first-browser-work regression.
+    pub(crate) async fn wait_native_derivation(
+        &self,
+        selector: PairSelector,
+    ) -> ledger::ResolvedRow {
+        let selected = self.selected();
+        let clock = crate::voice_runtime(&self.state).clock();
+        // No fixture factory call: the ordinary application service must independently
+        // discover this proven counterpart and attach the original native Derive. The
+        // browser then reads its descriptor through the actual metadata IPC handler.
+        let row = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            loop {
+                if let Some(row) = self
+                    .state
+                    .voice_handoff
+                    .lookup_original(&selected, ledger::Purpose::Derive(selector))
+                {
+                    if row.status().unwrap().action.is_some() {
+                        break row;
+                    }
+                }
+                clock.sleep(std::time::Duration::from_millis(25)).await;
+            }
+        })
+        .await
+        .expect("automatic native producer did not attach the original Derive");
+        assert!(row.status().unwrap().action.is_some());
+        assert!(
+            row.status().unwrap().engine.receipt.is_none(),
+            "genuine uncommitted native Derive"
+        );
         row
     }
     pub(crate) async fn start(&mut self, parent: &ledger::ResolvedRow) -> ledger::RowId {
@@ -310,6 +327,26 @@ impl Endpoint {
         parent: &ledger::ResolvedRow,
         request: ledger::ConfirmationPurpose,
     ) -> ledger::RowId {
+        let selected = self.selected();
+        // No fixture or browser factory call may make this attachment. The actual normal
+        // service must independently choose Start/Respond or the authenticated incoming
+        // action, under the original parent and real native worker/shutdown position.
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                if let Ok(row) = self
+                    .state
+                    .voice_handoff
+                    .lookup_child(&selected, parent, request, None)
+                {
+                    if row.status().unwrap().action.is_some() {
+                        break;
+                    }
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("automatic native confirmation attachment exceeded its bound");
         let metadata = match request {
             ledger::ConfirmationPurpose::Start(predecessor) => {
                 json!({"kind":"start", "predecessor":predecessor.map(hex::encode)})

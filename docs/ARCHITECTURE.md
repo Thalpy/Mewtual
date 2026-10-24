@@ -1,5 +1,48 @@
 # Mewtual; Architecture
 
+## Native close-first cleanup continuation (24 October; validation in progress)
+
+Channel first effects and final Control closure have separate irreversible fences. Native
+setup settlement holds the original UI commit while stopping first effects before inspecting
+the ledger; Capacity leaves cleanup routable. Automatic maintenance cannot create successors
+after that fence. Normal closure requires an attached parent's actual issued/ACKed final
+delivery even when Root has already retired its plan.
+
+After known browser SDK/RPC drainage, Broker20 uses original public metadata and authenticated
+Begin(false) to discover unseen work, closes children before parent Plan-final2, and retains
+one deferred parent plus the current cleanup descriptor through uncertainty. It performs no
+Input, new admission or crypto. Metadata16KiB is prepaid before setup ACK, separately from
+encrypted control8KiB; native Session prepays the matching24KiB browser custody. Full gates
+are recorded in HANDOVER. Automatic browser execution, SDP/ICE/RTC and relay remain unfinished.
+
+## Application handoff dispatch and native production (24 October; validation in progress)
+
+The application-bound loopback service now dispatches the closed authenticated Derive and
+confirmation adapters in ordinary builds. Context-free construction remains Status-only.
+MAC, immutable operation/class/length/logical checks and original Phase lookup precede body
+allocation/counter debit; the decrypted version selects one exact grammar, never fallback.
+This changes the local handoff boundary, not the unavailable UI V2 activation switch or RTC.
+
+One Host maintenance future rotates canonical channel slots every250ms without awaiting an
+Actor. Setup ACK and the original live selection precede production. Each chosen channel
+has one separately paid8KiB native worker; discovery uses an affine4KiB peer/action snapshot
+from the same group/process pool. A parked old Actor therefore retains its real task/payment
+without blocking IO, End/replacement or another channel. Pending Derive/child publication is
+retried under its original identity, independently of a fresh discovery proof. Shutdown waits
+for actual native and physical ownership, including detached tasks and retained outputs.
+
+Native continuation chooses first Start only after actual Derived/ACK/settlement/Return,
+Respond only from the original accepted Opened trigger, and Incoming only from an actual Root
+action contained by the original plan. Browser `returnNativeDerivation` coalesces real SDK/
+settlement/Return under the original channel while preserving keys/counters/deadline. End
+drains that admitted flight outside its execution lane before final cleanup. Automatic new
+confirmation candidates are deliberately not inferred from delayed delivery or local sealing.
+
+Automatic browser work orchestration, SDP/ICE factories and RTC authorization, causal
+Finish-to-SDP key/phase transfer, multi-peer history reclamation and member media relay remain
+unfinished. Earlier dated inactive-dispatch descriptions below are historical checkpoints.
+HANDOVER records the exact source/test scope; no physical two-device claim follows here.
+
 ## Read-only existing work projection (24 October; inactive integration)
 
 Native work discovery is a synchronous bounded scan, separate from producers and the future
@@ -67,7 +110,8 @@ revokes the affected runtime lease; Disabled/Forwarding pauses preserve the nati
 The renderer pins legacy/V2 mode before a join becomes current. V2 rooms exclude legacy
 writers, including delayed hangups, before presence or RTC mutation. Activation remains
 unavailable: the call driver is a contract-tested consumer of a native interface that is not
-implemented. Native loopback action/final dispatch stays disabled. See VOICE-V2-CALL-DRIVER.md
+implemented. Native loopback action/final dispatch is now application-bound as described above;
+this does not supply that complete call adapter. See VOICE-V2-CALL-DRIVER.md
 for exact contracts, retained risks and enablement gates; HANDOVER records combined validation.
 Older claims that kind 28 is undispatched describe the default, not the opt-in test seam.
 

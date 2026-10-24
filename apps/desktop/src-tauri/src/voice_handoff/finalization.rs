@@ -1,4 +1,4 @@
-//! Inactive exact original-Session terminal closure/issuance/ACK adapter. This is metadata
+//! Exact original-Session terminal closure/issuance/ACK adapter. This is metadata
 //! cleanup, not engine admission, browser drainage evidence or a normal Actor/WebView flow.
 //! Production's whitelist remains unchanged until the complete action contracts are ready.
 use super::bootstrap::Route;

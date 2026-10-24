@@ -1,10 +1,10 @@
-//! Process-owned registration for the disabled row-zero pilot. Reserve before either native
+//! Process-owned registration for the bounded application handoff. Reserve before either native
 //! pair/derivation factory, retain the native task independently of its invoke waiter, and attach
 //! before exposing input. No renderer descriptor can create a SelectedHandoffOwner or Action.
 //!
 //! This is deliberately a finite pilot: pending, live and drained rows share 32 positions. A
-//! live owner cannot evict old uncertain history to make space. Physical reply/control-flight
-//! prepayment, authenticated browser drainage and live dispatch are separate integration gates.
+//! live owner cannot evict old uncertain history to make space. Original physical/native
+//! prepayments and authenticated browser drainage remain independent admission/cleanup gates.
 use super::channel::{AuthenticatedRequest, BodyKind, Operation, SessionIdentity};
 use super::custody::{CloseMode, ConfirmationStatus, CopyCustody, Phase, PreparedPhase};
 use crate::voice_authority::SelectedHandoffOwner;
@@ -24,9 +24,11 @@ const ROWS: usize = 32;
 // factory admission. The32-row,512KiB group and2MiB process ceilings are unchanged.
 const ROW_BYTES: usize = 2304;
 mod children;
+mod continuation;
 mod plan;
 mod projection;
 pub(super) use children::ConfirmationPurpose;
+pub(super) use continuation::Continuation;
 use plan::Plan;
 pub(super) use projection::{WorkMetadata, WorkProjection};
 
@@ -577,7 +579,9 @@ impl Ledger {
     /// enter until channel closure commits under that SAME mutex. Drained is monotonic;
     /// unknown rows do not assert SDK drainage, but no original action means there is no
     /// action Control path to strand. Pending and Live (even settled/ACKed) refuse closure;
-    /// final-intent Drained also requires the SAME actual Root retirement witness to be ready.
+    /// An attached parent always requires exact issued/ACKed final delivery, even if native
+    /// End already drained its Root plan. Otherwise an early close-first call could discard
+    /// the only Control route before the browser recovered that original final proof.
     pub(super) fn channel_may_close(&self, selected: &SelectedHandoffOwner) -> bool {
         let index = self.index.lock().unwrap_or_else(|error| error.into_inner());
         index.rows.iter().flatten().all(|row| {
@@ -587,7 +591,9 @@ impl Ledger {
             let state = row.state.lock().unwrap_or_else(|error| error.into_inner());
             matches!(state.body, Body::Drained(..) | Body::ClosedPending)
                 && Self::final_retirement_ready(&state)
-                && ((state.final_phase.is_none() && state.final_delivery().is_none())
+                && ((state.final_phase.is_none()
+                    && state.final_delivery().is_none()
+                    && (row.key.parent.is_some() || state.status.action.is_none()))
                     || state
                         .final_delivery()
                         .is_some_and(|delivery| delivery.issued.is_some() && delivery.acknowledged))
@@ -596,8 +602,8 @@ impl Ledger {
 
     /// Local compaction/physical session closure cannot discard a requested final proof.
     /// Ordinary continuation and explicit ClosedPending require no invented Root witness.
-    /// Final-phase wire dispatch remains disabled until its retained cleanup driver can
-    /// recheck this snapshot: Root has no notification into Row's existing Notify.
+    /// The retained cleanup driver must recheck this snapshot: Root has no notification
+    /// into Row's existing Notify, so a prior Pending observation is not a final answer.
     fn final_retirement_ready(state: &State) -> bool {
         state.plan().is_none_or(Plan::is_drained)
             && state
@@ -720,6 +726,35 @@ impl Ledger {
             ledger: self.clone(),
             row,
         })
+    }
+
+    /// Native scheduler scan of original idle Derive preparation. Discovery expiry cannot
+    /// erase the need to recover an admitted publication. Copy only this exact selector;
+    /// no new epoch/proof, factory, lease upgrade, Clock or deadline is introduced here.
+    pub(super) fn pending_derivation(
+        &self,
+        selected: &SelectedHandoffOwner,
+        cursor: &mut u8,
+    ) -> Option<PairSelector> {
+        let index = self.index.lock().unwrap_or_else(|error| error.into_inner());
+        for offset in 0..ROWS {
+            let slot = (usize::from(*cursor) + offset) % ROWS;
+            let Some(row) = &index.rows[slot] else {
+                continue;
+            };
+            let Purpose::Derive(selector) = row.key.purpose else {
+                continue;
+            };
+            if !row.key.matches(selected, Purpose::Derive(selector)) {
+                continue;
+            }
+            let state = row.state.lock().unwrap_or_else(|error| error.into_inner());
+            if matches!(&state.body, Body::Pending(pending) if !pending.worker) {
+                *cursor = ((slot + 1) % ROWS) as u8;
+                return Some(selector);
+            }
+        }
+        None
     }
     /// Resolve against the ORIGINAL native-selected owner, not the current replacement and
     /// not strings from the request. Preserve access to exact historical cleanup after End;

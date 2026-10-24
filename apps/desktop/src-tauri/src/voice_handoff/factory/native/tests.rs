@@ -16,13 +16,59 @@ fn worker(context: &Context, route: &Route, selector: PairSelector) -> Worker {
         .unwrap();
     Worker {
         context: Some(context.clone()),
-        selector,
+        selector: Selection::Exact(selector),
         custody: NativeCustody {
             _credit: credit,
             route: route.clone(),
             _native: route.session().native_hold().unwrap(),
         },
     }
+}
+
+#[tokio::test]
+async fn lost_confirmation_observer_keeps_parked_snapshot_paid_and_blocks_actual_shutdown() {
+    let f = Fixture::new().await;
+    let context = Context::new(&f.state);
+    let (_, selected, _) = selection(&f).await;
+    let route = channel_route(&f, &selected).await;
+    let grant = selected.grant().unwrap();
+    let owners = Arc::strong_count(&grant);
+    let pool = selected.resources();
+    let before = pool.counts();
+    let parked = park(&f.actor).await;
+    let observer = produce_confirmation(&context, &route, 0, true).unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        while Arc::strong_count(&grant) <= owners {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("actual original snapshot command must reach the parked Actor");
+    assert_eq!(
+        pool.counts(),
+        (
+            before.0 + NATIVE_TASK_BYTES + CryptoActionSnapshotPermit::MEMORY_BYTES,
+            before.1
+        )
+    );
+    drop(observer); // observing caller loss must detach, not cancel the actual RPC/task
+    let mut shutdown = Box::pin(f.state.voice_channels.stop_and_wait_for_physical());
+    assert!(pending(shutdown.as_mut()).await);
+    assert!(route.session().native_hold().is_err());
+    assert_eq!(
+        pool.counts(),
+        (
+            before.0 + NATIVE_TASK_BYTES + CryptoActionSnapshotPermit::MEMORY_BYTES,
+            before.1
+        )
+    );
+    drop(parked);
+    tokio::time::timeout(std::time::Duration::from_secs(10), shutdown)
+        .await
+        .unwrap();
+    assert_eq!(pool.counts(), before);
+    drop(grant);
+    f.close().await;
 }
 async fn pending<F: Future>(future: std::pin::Pin<&mut F>) -> bool {
     let mut future = future;
@@ -64,6 +110,56 @@ async fn native_preflight_and_uncollected_output_keep_the_original_payment_and_s
     drop(output);
     shutdown.await;
     assert_eq!(pool.counts(), before);
+    f.close().await;
+}
+
+#[tokio::test]
+async fn native_factory_waiting_for_ui_cannot_cross_the_close_first_effect_fence() {
+    let f = Fixture::new().await;
+    let context = Context::new(&f.state);
+    let (_, selected, selector) = selection(&f).await;
+    let route = channel_route(&f, &selected).await;
+    let Begin::Factory(registration) = f
+        .state
+        .voice_handoff
+        .begin(selected.clone(), Purpose::Derive(selector))
+        .unwrap()
+    else {
+        panic!("original unseen Pending");
+    };
+    registration.mark_handoff().unwrap();
+    let boundary = f.state.ui_session_commit.lock().await;
+    let mut closing = Box::pin(crate::voice_handoff::bootstrap::settle_setup(
+        &f.state,
+        selected.id(),
+        selected.executor(),
+    ));
+    assert!(pending(closing.as_mut()).await); // actual close queues before final factory admission
+    let mut producing = Box::pin(run_native(worker(&context, &route, selector)));
+    assert!(pending(producing.as_mut()).await);
+    f.actor.member_count().await;
+    assert!(pending(producing.as_mut()).await);
+    drop(boundary);
+    assert!(matches!(
+        closing.await,
+        Err(crate::voice_handoff::channel::Refused::Capacity)
+    ));
+    let completion = producing.await;
+    assert_eq!(completion.result(), Err(Refused::Closed));
+    assert!(selected.lease().is_live());
+    assert!(f.state.voice_channels.require_cleanup_route(&route).is_ok());
+    drop(completion);
+    drop(registration);
+    let row = f
+        .state
+        .voice_handoff
+        .lookup_original(&selected, Purpose::Derive(selector))
+        .unwrap();
+    assert!(
+        row.status().unwrap().action.is_none(),
+        "queued producer never published after the fence"
+    );
+    row.close_pending().unwrap();
     f.close().await;
 }
 

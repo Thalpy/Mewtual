@@ -71,7 +71,7 @@ async function fixture(t: TestContext, sharedBroker?: VoiceCryptoBroker, identit
       return value.apply(target, args);
     };
   } });
-  const owner = createVoiceCryptoOwner(identitySeed === 1 ? "native-owner" : `native-owner-${identitySeed}`, hash(identitySeed), () => true);
+  const owner = createVoiceCryptoOwner(`voice-${identitySeed.toString(16).padStart(16, "0")}`, hash(identitySeed), () => true);
   const admission = { async admit() { ordinary++; return "ordinary"; }, async settle() {}, async commitInbound() {} };
   const broker = sharedBroker ?? new VoiceCryptoBroker(admission, engine, () => now, {
     now: () => now, schedule(run, ms) {
@@ -112,6 +112,10 @@ async function fixture(t: TestContext, sharedBroker?: VoiceCryptoBroker, identit
   const responseMac = await real.deriveKey(parameters("v1 n2c header HMAC-SHA256"), material, { name: "HMAC", hash: "SHA-256", length: 256 }, false, ["sign"]);
   const responseBody = await real.deriveKey(parameters("v1 n2c body AES-256-GCM"), material, { name: "AES-GCM", length: 256 }, false, ["encrypt"]);
   const native: VoiceIpcNative = {
+    async readWork(value, execution, _fromSlot) {
+      assert.equal(value, owner.token); assert.equal(execution, executor);
+      return { kind: "snapshot", owner: value, executor: execution, nextSlot: 32, work: null };
+    },
     async setup(value, execution) {
       setups++; assert.equal(value, owner.token); assert.equal(execution, executor);
       if (loseSetup) { loseSetup = false; throw new Error("native ready reply lost"); }
@@ -296,11 +300,12 @@ async function framedDerivation(f: Awaited<ReturnType<typeof fixture>>) {
   let inputReads = 0, admissions = 0, commits = 0, acknowledgements = 0, settlements = 0;
   let derived = false, acknowledged = false, settled = false, historical = false, lostResult = false;
   let retireCalls = 0, finalCalls = 0, finalAcknowledged = false, finalPending = false;
-  let loseIssuance = false, loseFinalAck = false, ordinaryReturned = false;
+  let loseIssuance = false, loseFinalAck = false, ordinaryReturned = false, loseReturn = false;
   let planCalls = 0, finalMode: 1 | 2 = 1, replyMode: 1 | 2 | null = null;
   let alter: ((data: Uint8Array) => Uint8Array) | null = null;
   let childResponder: Parameters<typeof f.actions>[0] = null;
   let settleHold: ReturnType<typeof gate> | null = null;
+  let returnHold: ReturnType<typeof gate> | null = null;
   let checkFinal: (() => void) | null = null;
   const emptyTag = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
   const receipt = hash(77);
@@ -320,7 +325,7 @@ async function framedDerivation(f: Awaited<ReturnType<typeof fixture>>) {
     assert.ok(finalAcknowledged, "native setup cannot close ahead of the separate original final ACK");
     await nativeSettle(...args);
   };
-  f.cleanup(() => { finalPending = false; loseIssuance = false; loseFinalAck = false; settleHold?.release(); f.native.settleSetup = nativeSettle; });
+  f.cleanup(() => { finalPending = false; loseIssuance = false; loseFinalAck = false; settleHold?.release(); returnHold?.release(); f.native.settleSetup = nativeSettle; });
   f.actions(async (header, opened) => {
     if (opened[0] === 2) {
       assert.ok(childResponder, "unexpected child action");
@@ -357,7 +362,10 @@ async function framedDerivation(f: Awaited<ReturnType<typeof fixture>>) {
       if (header.operation === 6) {
         if (opened[105] === 0) {
           assert.deepEqual(opened, encodeVoiceIpcAction(historyPurpose, { kind: "close", mode: "return" }).body);
-          ordinaryReturned = true; return status();
+          ordinaryReturned = true;
+          if (returnHold) await returnHold.promise;
+          if (loseReturn) { loseReturn = false; throw new Error("ordinary Return committed but reply lost"); }
+          return status();
         }
         checkFinal?.();
         if (opened[105] === 1) {
@@ -394,6 +402,8 @@ async function framedDerivation(f: Awaited<ReturnType<typeof fixture>>) {
     loseFinalReplies() { loseIssuance = true; loseFinalAck = true; },
     returned() { ordinaryReturned = true; historical = true; settled = true; },
     wasReturned: () => ordinaryReturned,
+    loseReturn() { loseReturn = true; },
+    holdReturn() { returnHold = gate(); return returnHold; },
     childReplies(responder: typeof childResponder) { childResponder = responder; },
     holdSettlement() { settleHold = gate(); return settleHold; },
     beforeFinal(check: () => void) { checkFinal = check; },
@@ -421,6 +431,7 @@ async function framedConfirmation(f: Awaited<ReturnType<typeof fixture>>) {
   let inputs = 0, admissions = 0, results = 0, acknowledgements = 0, settlements = 0, returns = 0;
   let resultTag: string | null = null, output: Uint8Array | null = null, acknowledged = false, settled = false, returned = false;
   let lostInput = false, lostResult = false, lostReturn = false, historical = false, rejected = false;
+  let nativeOnly = false;
   let alter: ((data: Uint8Array) => Uint8Array) | null = null, onInput: (() => void) | null = null;
   let holdSettle: ReturnType<typeof gate> | null = null;
   let beginMode: "attached" | "pending" | "absent" = "attached", lostBegin = false;
@@ -453,7 +464,7 @@ async function framedConfirmation(f: Awaited<ReturnType<typeof fixture>>) {
     const exact = (request: Parameters<typeof encodeVoiceIpcConfirmationAction>[1]) => assert.deepEqual(opened, encodeVoiceIpcConfirmationAction(purpose, request).body);
     if (header.operation === 8) {
       const retry = opened.at(-1) === 1; exact({ kind: "begin", retry }); begins.push(retry);
-      assert.deepEqual(f.rowBudget(), { reserved: retry ? 11 : 1, actions: 1 },
+      assert.deepEqual(f.rowBudget(), { reserved: retry ? 11 : nativeOnly ? 0 : 1, actions: 1 },
         "original descriptor claim precedes Begin; End refunds only unused rows");
       if (holdBegin) await holdBegin.promise;
       onBegin?.();
@@ -498,6 +509,7 @@ async function framedConfirmation(f: Awaited<ReturnType<typeof fixture>>) {
     return status();
   });
   return { channel, parent, ready, purpose, row, identity,
+    nativeOnly() { nativeOnly = true; },
     handle: () => f.broker.nativeConfirmationFromChannel(f.owner, channel, ready.chain, purpose, row, identity),
     begin: () => f.broker.nativeConfirmationFromChannel(f.owner, channel, ready.chain, purpose),
     begins: () => [...begins],
@@ -894,6 +906,108 @@ test("native Input prepays and transfers the same claim, then executes real fram
   assert.deepEqual(f.operations(), [9, 1, 2, 3, 4, 5]);
 });
 
+test("native continuation Return coalesces and waits for the actual Derive settlement", async t => {
+  const f = await fixture(t), channel = f.channel(); await channel.status();
+  const parent = await framedDerivation(f), held = parent.holdSettlement();
+  const ready = await f.broker.nativeDerivationFromChannel(f.owner, channel, f.key, historyPurpose, parent.row, parent.identity).attempt();
+  assert.equal(ready.kind, "ready"); if (ready.kind !== "ready") throw new Error("original derivation required");
+  assert.equal((await ready.derivation.attempt()).kind, "accepted");
+  await until(() => parent.counts().settlements === 1);
+  const returning = f.broker.returnNativeDerivation(f.owner, channel, ready.chain);
+  assert.equal(f.broker.returnNativeDerivation(f.owner, channel, ready.chain), returning);
+  await new Promise<void>(resolve => setImmediate(resolve));
+  assert.equal(parent.wasReturned(), false, "a receipt cannot substitute actual settlement");
+  assert.ok(f.broker.counts().active > 0);
+  held.release(); await returning;
+  assert.ok(parent.wasReturned()); assert.ok(ready.derivation.pair()); assert.ok(ready.chain.isCurrent());
+  // Exact Return repeats the original idempotent native Settle before closing its Phase.
+  assert.deepEqual(parent.counts(), { inputReads: 1, admissions: 1, commits: 1, acknowledgements: 1, settlements: 2 });
+});
+
+test("lost ordinary Return retries the same native Derive without recomputation or End", async t => {
+  const f = await fixture(t), channel = f.channel(); await channel.status();
+  const parent = await framedDerivation(f);
+  const ready = await f.broker.nativeDerivationFromChannel(f.owner, channel, f.key, historyPurpose, parent.row, parent.identity).attempt();
+  assert.equal(ready.kind, "ready"); if (ready.kind !== "ready") throw new Error("original derivation required");
+  assert.equal((await ready.derivation.attempt()).kind, "accepted");
+  parent.loseReturn();
+  await assert.rejects(f.broker.returnNativeDerivation(f.owner, channel, ready.chain));
+  assert.ok(parent.wasReturned());
+  const before = parent.counts();
+  await f.broker.returnNativeDerivation(f.owner, channel, ready.chain);
+  assert.deepEqual(parent.counts(), { ...before, settlements: before.settlements + 1 });
+  assert.ok(ready.derivation.pair()); assert.ok(ready.chain.isCurrent());
+  assert.equal(parent.finalCounts().retireCalls, 0); assert.equal(parent.planCalls(), 0);
+});
+
+test("continuation Return requires the exact original broker owner, channel and chain", async t => {
+  const f = await fixture(t), foreign = await fixture(t), channel = f.channel(); await channel.status();
+  const parent = await framedDerivation(f);
+  const ready = await f.broker.nativeDerivationFromChannel(f.owner, channel, f.key, historyPurpose, parent.row, parent.identity).attempt();
+  assert.equal(ready.kind, "ready"); if (ready.kind !== "ready") throw new Error("original derivation required");
+  const before = f.operations();
+  for (const [owner, handle, chain] of [
+    [foreign.owner, channel, ready.chain], [f.owner, foreign.channel(), ready.chain],
+    [f.owner, channel, Object.freeze({ close() {}, isCurrent: () => true })],
+  ] as const) {
+    assert.throws(() => f.broker.returnNativeDerivation(owner, handle, chain), /original native derivation/);
+  }
+  assert.deepEqual(f.operations(), before); assert.equal(parent.wasReturned(), false);
+});
+
+test("End cannot collect an ordinary Derive Return while its actual response is outstanding", async t => {
+  const f = await fixture(t), channel = f.channel(); await channel.status();
+  const parent = await framedDerivation(f), held = parent.holdReturn();
+  const ready = await f.broker.nativeDerivationFromChannel(f.owner, channel, f.key, historyPurpose, parent.row, parent.identity).attempt();
+  assert.equal(ready.kind, "ready"); if (ready.kind !== "ready") throw new Error("original derivation required");
+  assert.equal((await ready.derivation.attempt()).kind, "accepted");
+  const returning = f.broker.returnNativeDerivation(f.owner, channel, ready.chain);
+  const returned = returning.then(() => "returned", () => "cancelled");
+  await until(parent.wasReturned);
+  f.owner.retire(); let collected = false;
+  const closed = channel.close().then(() => { collected = true; });
+  await new Promise<void>(resolve => setImmediate(resolve));
+  assert.equal(collected, false); assert.ok(f.broker.counts().bytes > 0);
+  held.release(); await returned; await closed;
+  await until(() => f.broker.counts().active === 0);
+  assert.equal(f.broker.counts().bytes, 0);
+});
+
+test("End waits for an admitted ordinary Return's earlier Settle RPC before final cleanup", async t => {
+  const f = await fixture(t), channel = f.channel(); await channel.status();
+  const parent = await framedDerivation(f);
+  const ready = await f.broker.nativeDerivationFromChannel(f.owner, channel, f.key, historyPurpose, parent.row, parent.identity).attempt();
+  assert.equal(ready.kind, "ready"); if (ready.kind !== "ready") throw new Error("original derivation required");
+  assert.equal((await ready.derivation.attempt()).kind, "accepted");
+  await until(() => f.broker.counts().active === 0);
+  const held = parent.holdSettlement();
+  const returning = f.broker.returnNativeDerivation(f.owner, channel, ready.chain).then(() => "returned", () => "cancelled");
+  await until(() => parent.counts().settlements === 2);
+  f.owner.retire(); let closed = false;
+  const closure = channel.close().then(() => { closed = true; });
+  await new Promise<void>(resolve => setImmediate(resolve));
+  assert.equal(closed, false); assert.equal(parent.finalCounts().retireCalls, 0);
+  held.release(); await returning; await closure;
+  await until(() => f.broker.counts().active === 0);
+  assert.equal(f.broker.counts().bytes, 0);
+});
+
+test("a final-cleanup callback cannot enqueue new ordinary Return after End", async t => {
+  const f = await fixture(t), channel = f.channel(); await channel.status();
+  const parent = await framedDerivation(f);
+  const ready = await f.broker.nativeDerivationFromChannel(f.owner, channel, f.key, historyPurpose, parent.row, parent.identity).attempt();
+  assert.equal(ready.kind, "ready"); if (ready.kind !== "ready") throw new Error("original derivation required");
+  assert.equal((await ready.derivation.attempt()).kind, "accepted");
+  let fenced = false;
+  parent.beforeFinal(() => {
+    assert.throws(() => f.broker.returnNativeDerivation(f.owner, channel, ready.chain), /channel closed/);
+    fenced = true;
+  });
+  f.owner.retire(); await channel.close();
+  await until(() => f.broker.counts().active === 0);
+  assert.ok(fenced); assert.equal(f.broker.counts().bytes, 0);
+});
+
 test("historical Input drains prepaid intake without deriving keys or admitting an engine", async t => {
   const f = await fixture(t), channel = f.channel(); await channel.status();
   const source = await framedDerivation(f); source.historical();
@@ -1013,11 +1127,13 @@ test("ordinary history never bypasses native channel preflight or loses keys aft
   const settle = f.native.settleSetup; let attempts = 0;
   f.cleanup(() => { f.native.settleSetup = settle; });
   f.native.settleSetup = async (...args) => {
-    if (++attempts === 1) throw new Error("native preflight still owns a required original channel row");
+    // The first call is the new close-first producer fence, before final cleanup. Refuse
+    // the later actual closure too so the test still pins retained keys across that refusal.
+    if (++attempts === 2) throw new Error("native preflight still owns a required original channel row");
     await settle(...args);
   };
   f.owner.retire(); const close = channel.close();
-  await until(() => attempts === 1 && f.timers().delays.includes(1000));
+  await until(() => attempts === 2 && f.timers().delays.includes(1000));
   assert.equal(f.counts().collections, 0); assert.equal(f.counts().settlements, 0);
   assert.ok(f.broker.counts().bytes > 0);
   f.advance(1000); await close; await until(() => f.broker.counts().bytes === 0);
@@ -1232,6 +1348,7 @@ test("production native adapter remount and lost setup reply retain one selected
     if (command === "setup_voice_channel") return await f.native.setup(owner, executor) as T;
     if (command === "settle_voice_channel_setup") return await f.native.settleSetup(owner, executor) as T;
     if (command === "collect_voice_channel") return await f.native.collectChannel(owner, executor) as T;
+    if (command === "read_voice_channel_work") return await f.native.readWork(owner, executor, args.fromSlot as number) as T;
     throw new Error("unexpected native command");
   };
   const native = windowVoiceIpcNative(invoke, host);
@@ -1732,7 +1849,11 @@ test("Derive intake and terminal Control payload graphs fit their separate origi
   const descriptor = 2 * (3 * 64 + 20 + 32 + 2 * 20 + 64 + 64);
   const decoded = 2 * 1024; // bounded fixed status/final graph, including exact-u64 strings
   const wrappers = 3 * 1024 + 2 * "retire-plan".length; // retained fixed final-mode discriminator
-  const control = controlBuffers + descriptor + decoded + wrappers;
+  // One coalesced ordinary-Return promise, fixed chain/record/channel references and
+  // its continuation/finally wrappers can overlap the actual Control RPC. No byte copy
+  // or new execution lane is created. End drains it before keys/history are unlinked.
+  const ordinaryReturn = 512;
+  const control = controlBuffers + descriptor + decoded + wrappers + ordinaryReturn;
   assert.ok(control <= 8 * 1024, `terminal Control payload/wrapper envelope ${control}/8192`);
 });
 
@@ -1762,7 +1883,8 @@ test("nine child descriptors and serial Data adoption fit unchanged chain envelo
   assert.ok(historicalRow <= 2048, `full historical Sealed row inventory ${historicalRow}/2048`);
   const parentSelector = 2 * (3 * 64 + 20);
   const sharedBinding = 2 * (7 * 64 + 4 * 20) + 8;
-  const metadata = parentSelector + sharedBinding + 2 * 128 + 4096 + 2 * 128;
+  const ordinaryReturn = 512; // same one retained completion/closure graph, no data buffers
+  const metadata = parentSelector + sharedBinding + 2 * 128 + 4096 + 2 * 128 + ordinaryReturn;
   assert.ok(metadata <= 8 * 1024, `chain metadata/maps/drainage inventory ${metadata}/8192`);
 
   // The current child can overlap frame ciphertext/opened body, decoder-owned input and
@@ -1773,4 +1895,154 @@ test("nine child descriptors and serial Data adoption fit unchanged chain envelo
   const framing = 2 * (largestRequest + 16) + 4 * 2064 + 144 + 288 + 4 * 40 + 2 * 32 + 2 * 12 + 1;
   const variable = retained + framing + 16 * 1024 + 16 * 1024;
   assert.ok(variable <= 96 * 1024, `child Data/engine/retained-input inventory ${variable}/98304`);
+});
+
+for (const { loseFinalAck, lateChild, alterAck } of [
+  { loseFinalAck: false, lateChild: false, alterAck: null }, { loseFinalAck: true, lateChild: false, alterAck: null },
+  { loseFinalAck: false, lateChild: true, alterAck: null }, { loseFinalAck: false, lateChild: false, alterAck: "proof" },
+  { loseFinalAck: false, lateChild: false, alterAck: "pending" },
+]) test(`End discovers unseen work without Input/SDK; lost ACK=${loseFinalAck}, late child=${lateChild}, altered ACK=${alterAck}`, async t => {
+  const f = await fixture(t), channel = f.channel(); await channel.status();
+  const row = "00000000000000000000000000000001";
+  const identity = { action: "42", version: "1", inputTag: hash(42) };
+  const proof = hash(43);
+  let settled = false, returned = false, final = false, acknowledged = false, lose = loseFinalAck;
+  let reads = 0, closeAttempts = 0;
+  let altered = false, planRequests = 0, finalRequests = 0;
+  let childAppeared = false, childClosed = false;
+  const childRow = "00000000000000010000000000000001";
+  const childStatus = () => { const body = Buffer.alloc(242); body[0] = 1; Buffer.from(childRow, "hex").copy(body, 2);
+    body[18] = childClosed ? 3 : 1; return { kind: 0 as const, body }; };
+  const held = gate(); f.cleanup(held.release);
+  const metadata = { row, purpose: { kind: "derive", ...historyPurpose }, state: "attached", actorHandoff: null, identity };
+  f.native.readWork = async (owner, executor, fromSlot) => {
+    reads++; if (reads === 1) await held.promise;
+    const child = { row: childRow, state: "pending", actorHandoff: null, identity: null,
+      purpose: { kind: "confirmation", parent: row, parentPurpose: metadata.purpose, request: "start", predecessor: null } };
+    return { kind: "snapshot", owner, executor, nextSlot: fromSlot === 0 ? 1 : fromSlot === 1 && childAppeared ? 2 : 32,
+      work: fromSlot === 0 ? metadata : fromSlot === 1 && childAppeared ? child : null };
+  };
+  const status = () => {
+    const body = Buffer.alloc(242); body[0] = 1; Buffer.from(row, "hex").copy(body, 2); body[19] = 1;
+    integer(42n, 8).copy(body, 20); integer(1n, 8).copy(body, 28); Buffer.from(identity.inputTag, "hex").copy(body, 36);
+    body[68] = Number(settled); body[209] = Number(returned); f.historyBytes(body);
+    return { kind: 0 as const, body };
+  };
+  status();
+  const originalClose = f.native.settleSetup;
+  f.native.settleSetup = async (...args) => {
+    closeAttempts++;
+    if (!acknowledged) throw new Error("original unseen parent still owns native work");
+    await originalClose(...args);
+  };
+  f.actions(async (header, opened) => {
+    if (opened[0] === 2) {
+      assert.equal(header.logical, header.operation === 8 ? "0".repeat(32) : childRow);
+      if (header.operation === 8) { assert.equal(opened.at(-1), 0); return childStatus(); }
+      assert.equal(header.operation, 6); childClosed = true; return childStatus();
+    }
+    assert.equal(header.logical, row);
+    assert.ok(closeAttempts > 0, "native close-first fence precedes unseen action cleanup");
+    assert.ok(![1, 2, 3].includes(header.operation), "cleanup must never fetch Input, admit or compute");
+    if (header.operation === 5) { settled = true; return status(); }
+    if (header.operation === 6 && opened[105] === 0) { assert.ok(settled); returned = true; return status(); }
+    if (header.operation === 6) {
+      planRequests++;
+      assert.deepEqual(opened, encodeVoiceIpcAction(historyPurpose, { kind: "close-plan" }).body);
+      if (lateChild && !childAppeared) { childAppeared = true; return { kind: 0, body: new Uint8Array([1, 3, 7]) }; }
+      if (lateChild) assert.ok(childClosed, "late child must close before the retained parent can retry finalization");
+      assert.ok(returned); final = true;
+    } else {
+      finalRequests++;
+      assert.equal(header.operation, 7); assert.ok(final);
+      assert.deepEqual(opened, encodeVoiceIpcAction(historyPurpose, { kind: "final", proof }).body);
+      acknowledged = true;
+      if (lose) { lose = false; throw new Error("actual native final ACK reply lost"); }
+      if (alterAck && !altered) {
+        altered = true;
+        return { kind: 0, body: Buffer.concat([Buffer.from([1, 4]), Buffer.from(row, "hex"), integer(42n, 8), integer(1n, 8),
+          Buffer.from(identity.inputTag, "hex"), Buffer.from([2, alterAck === "pending" ? 0 : 2]),
+          Buffer.from(alterAck === "pending" ? "0".repeat(64) : hash(44), "hex")]) };
+      }
+    }
+    return { kind: 0, body: Buffer.concat([Buffer.from([1, 4]), Buffer.from(row, "hex"), integer(42n, 8), integer(1n, 8),
+      Buffer.from(identity.inputTag, "hex"), Buffer.from([2, acknowledged ? 2 : 1]), Buffer.from(proof, "hex")]) };
+  });
+  const funding = f.broker.counts().bytes;
+  const engineSteps = f.counts().steps.filter(step => step === "deriveBits").length;
+  f.owner.retire(); let closed = false; const closing = channel.close().then(() => { closed = true; });
+  await until(() => reads === 1);
+  assert.equal(closed, false); assert.equal(f.counts().collections, 0);
+  assert.equal(f.broker.counts().bytes, funding, "parked public metadata read retains original payment");
+  held.release();
+  if (lateChild) {
+    await until(() => childAppeared && f.timers().delays.includes(1000));
+    f.advance(1000);
+  }
+  if (loseFinalAck) {
+    await until(() => acknowledged && f.timers().delays.includes(1000));
+    assert.equal(f.counts().collections, 0); f.advance(1000);
+  }
+  if (alterAck) {
+    await until(() => altered && f.timers().delays.includes(1000));
+    assert.equal(f.counts().collections, 0, "changed proof/Pending cannot replace an already-issued final proof");
+    f.advance(1000);
+  }
+  await closing;
+  assert.ok(settled && returned && final && acknowledged);
+  assert.equal(childClosed, lateChild);
+  if (alterAck || loseFinalAck) {
+    assert.equal(planRequests, 1, "issued proof survives retries without reissuance");
+    assert.equal(finalRequests, 2, "retry only the exact original final ACK");
+  }
+  assert.equal(f.counts().steps.filter(step => step === "deriveBits").length, engineSteps);
+  assert.equal(f.counts().collections, 1);
+  await until(() => f.broker.counts().active === 0);
+  assert.equal(f.broker.counts().bytes, 0);
+});
+
+for (const attaches of [false, true]) test(`End closes an unseen child; Pending attaches before authenticated history=${attaches}`, async t => {
+  const f = await fixture(t), child = await framedConfirmation(f);
+  child.nativeOnly();
+  assert.equal((await child.derive()).kind, "accepted");
+  await f.broker.returnNativeDerivation(f.owner, child.channel, child.ready.chain);
+  if (!attaches) child.beginMode("pending");
+  const p = child.purpose;
+  const request = p.request;
+  assert.equal(request.kind, "start");
+  if (request.kind !== "start") throw new Error("original Start required");
+  const descriptor = { row: child.row, state: "pending", actorHandoff: null, identity: null,
+    purpose: { kind: "confirmation", parent: p.parentRow, parentPurpose: { kind: "derive", ...p.parent },
+      request: "start", predecessor: request.predecessor } };
+  f.native.readWork = async (owner, executor, fromSlot) => ({ kind: "snapshot", owner, executor,
+    nextSlot: fromSlot <= 1 ? 2 : 32, work: fromSlot <= 1 ? descriptor : null });
+  child.parent.beforeFinal(() => {
+    assert.equal(child.counts().returns, 1, "the actual unseen child closes before parent final issuance");
+  });
+  f.owner.retire(); await child.channel.close(); await until(() => f.broker.counts().active === 0);
+  assert.deepEqual(child.begins(), [false], "metadata hints cannot request new native work");
+  assert.deepEqual(child.counts(), { inputs: 0, admissions: 0, results: 0, acknowledgements: 0,
+    settlements: Number(attaches), returns: 1 });
+  assert.equal(f.broker.counts().bytes, 0);
+});
+
+test("deferred parent, current cleanup descriptor and serial projection fit the separate16KiB prepayment", () => {
+  // Concrete payload bounds plus conservative wrappers. Native caps JSON to2304B; allow
+  // its UTF16 string, raw parsed graph AND the decoded graph, original purpose copies,
+  // proof/row strings, two asynchronous frames and map/closure/Promise scratch. Encrypted
+  // request/response buffers retain their existing separate8KiB Control payment.
+  const largest = { kind: "snapshot", owner: "voice-ffffffffffffffff", executor: hash(1), nextSlot: 32,
+    work: { row: "000000000000001fffffffffffffffff", state: "attached", actorHandoff: null,
+      purpose: { kind: "confirmation", parent: "000000000000001effffffffffffffff",
+        parentPurpose: { kind: "derive", peer: hash(2), join: hash(3), keyRef: hash(4), epoch: "18446744073709551615" },
+        request: "start", predecessor: hash(5) }, identity: { action: "18446744073709551615", version: "18446744073709551615", inputTag: hash(6) } } };
+  const strings = (value: unknown): number => typeof value === "string" ? value.length * 2
+    : value && typeof value === "object" ? Object.entries(value).reduce((n, [key, item]) => n + key.length * 2 + strings(item), 0) : 8;
+  const json = 2304, stringAndGraphs = json * 2 + 3 * strings(largest);
+  const wrappers = 4096, originalPurposeAndProof = (3 * 64 + 20 + 32 + 64) * 2;
+  assert.ok(JSON.stringify(largest).length <= json);
+  assert.ok(stringAndGraphs + wrappers + originalPurposeAndProof <= 16 * 1024);
+  assert.ok(json < stringAndGraphs);
+  const source = readFileSync(new URL("./voice-crypto.ts", import.meta.url), "utf8");
+  assert.match(source, /const IPC_WORK_BYTES = 16 \* 1024;/);
 });

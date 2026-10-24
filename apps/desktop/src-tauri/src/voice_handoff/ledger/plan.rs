@@ -8,6 +8,9 @@ use catcoms_sync::voice_v2::crypto_actions::{
 
 pub(super) struct Plan {
     pub(super) identity: ProtectedCryptoPlan,
+    // Immutable scheduling metadata captured from the ACTUAL Derive action. Native Start
+    // selection must not guess orientation from renderer fields or retained public IDs.
+    pub(super) local_is_low: bool,
     pub(super) control: Option<ConfirmationControl>,
     retirement: Option<ConfirmationRetirement>,
 }
@@ -15,6 +18,7 @@ impl Plan {
     pub(super) fn capture(action: &CryptoAction) -> Result<Self, VoiceError> {
         Ok(Self {
             identity: action.protected_plan()?,
+            local_is_low: action.protected_binding()?.local_is_low,
             control: Some(action.confirmation_control()?),
             retirement: None,
         })

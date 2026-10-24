@@ -1,5 +1,23 @@
 # V2 call and native handoff contract
 
+24 October continuation: the application-bound encrypted handoff now dispatches typed
+effects in ordinary code and independently schedules native Derive/confirmation work. Context-
+free service construction remains Status-only. Exact native pending/publication ownership,
+paid peer/action snapshots and native Session positions survive parked Actors and lost callers.
+Browser19 `returnNativeDerivation` coalesces actual SDK/settlement/ordinary Return while keeping
+the original keys/counters/deadline; End drains admitted Return before final cleanup. HANDOVER
+contains current validation. This still does not implement the complete `VoiceV2Native`
+start/events/submit adapter, automatic browser work pump, SDP/ICE/RTC or enable UI V2.
+
+Broker20/metadata adapter2 additionally support original-channel work discovery for cleanup
+after actual known SDK/RPC drainage. Before setup ACK they prepay16KiB metadata custody,
+separate from8KiB encrypted control (native matching browser reserve24KiB). Close-first native
+settlement irreversibly stops effects even on Capacity while preserving Control for unseen
+rows. Begin(false), Pending Return, attached Settle/ACK/Return and separate parent Plan-final2
+never create Input or crypto. Deferred parents cannot starve newly discovered child cleanup.
+Normal attached-parent channel closure requires actual final issuance/ACK even after Root End.
+Current review/regressions and outstanding full validation are recorded in HANDOVER.
+
 The primary/native handoff owner accepts the `VoiceV2Native` interface in
 `apps/desktop/src/voice-v2-call.ts` as the integration contract. This records agreement;
 it does not claim an implementation or enable V2. The native adapter, complete confirmation
@@ -23,8 +41,8 @@ The private native `factory::native::produce_derivation` now supplies the origin
 uncommitted Derive without a fabricated browser request. Its canonical Route and separately
 paid native position survive actual Actor publication and output collection; shutdown waits
 for both native and browser physical owners. The opaque observer supports await/detach,
-without exposing task cancellation. This is not yet connected to production work delivery.
-These adapters do not activate production dispatch or implement `VoiceV2Native`/RTC.
+without exposing task cancellation. Native maintenance now supplies that production origin;
+automatic browser delivery and complete `VoiceV2Native`/RTC remain unfinished.
 
 - `start(server, room, attempt)` selects one current native join. A lost reply repeats the
   same attempt and returns its original result. Server incarnation, UI-session generation,

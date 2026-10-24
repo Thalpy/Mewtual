@@ -14,8 +14,8 @@
 // - keep signalling progress, native submission and media connectivity as separate facts;
 // - never fall back to the legacy protocol, whatever fails.
 //
-// ACTIVATION IS INCOMPLETE. No native command implements VoiceV2Native yet: the handoff channel
-// serves setup/history only, and native SDP phase factories do not exist. `voiceV2Activation()` therefore
+// ACTIVATION IS INCOMPLETE. The encrypted handoff supports native Derive/confirmation and
+// cleanup, but no complete VoiceV2Native adapter or native SDP phase factory exists. `voiceV2Activation()` therefore
 // reports unavailable and App.svelte keeps every call on legacy signalling. The contract tests in
 // voice-v2-call.test.ts pin the behaviour a native adapter must support before that changes.
 

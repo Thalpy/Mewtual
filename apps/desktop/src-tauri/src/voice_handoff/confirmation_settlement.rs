@@ -1,4 +1,4 @@
-//! Inactive child receipt ACK, settlement and Return, including after End/lock.
+//! Child receipt ACK, settlement and Return, including after End/lock.
 //! A renderer digest is compared to the actual retained receipt; it cannot construct one.
 use super::bootstrap::Route;
 use super::channel::{BodyKind, Incoming, Operation};

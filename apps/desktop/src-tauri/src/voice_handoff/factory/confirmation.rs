@@ -1,6 +1,7 @@
 //! Native confirmation continuation under the original Derive parent. The request reserves
 //! a finite purpose before Actor work; the admitted task outlives its caller and retains the
-//! UI commit through publication. No listener, renderer command or protocol switch uses it.
+//! UI commit through publication. Native maintenance and the authenticated child adapter
+//! share the actual publication routine; neither can manufacture a Root action from IDs.
 use super::*;
 use crate::voice_handoff::ledger::{ConfirmationPurpose, ResolvedRow};
 
@@ -161,37 +162,49 @@ async fn run_confirmation(
     _commit: tokio::sync::OwnedMutexGuard<()>,
     custody: FactoryCustody,
 ) -> Completion {
-    let result = async {
-        if registration.has_publication()? {
-            return registration
-                .attach_published(DERIVATION_HANDOFF_BYTES)
-                .map_err(Refused::from);
-        }
-        registration.mark_handoff()?;
-        let action = match request {
-            ConfirmationPurpose::Start(predecessor) => {
-                actor
-                    .start_voice_confirmation(grant, handshake, predecessor)
-                    .await?
-            }
-            ConfirmationPurpose::Respond(_) => {
-                actor
-                    .respond_voice_confirmation(
-                        grant,
-                        handshake,
-                        trigger.ok_or(VoiceError::Unauthorized)?,
-                    )
-                    .await?
-            }
-            ConfirmationPurpose::Incoming(_) => trigger.ok_or(VoiceError::Unauthorized)?,
-        };
-        registration
-            .attach_child(action, DERIVATION_HANDOFF_BYTES)
-            .map_err(Refused::from)
-    }
-    .await;
+    let result =
+        publish_confirmation(registration, actor, grant, handshake, request, trigger).await;
     Completion {
         result,
         _custody: custody,
     }
+}
+
+/// Actual Actor publication shared by the separately paid physical and native producers.
+/// Admission, UI commit, exact selected owner, and real drain custody belong to the caller
+/// for this entire future. A known publication retries attachment without calling Actor.
+pub(super) async fn publish_confirmation(
+    registration: Registration,
+    actor: ServerActor,
+    grant: Arc<CallGrant>,
+    handshake: [u8; 32],
+    request: ConfirmationPurpose,
+    trigger: Option<Arc<catcoms_sync::voice_v2::crypto_actions::CryptoAction>>,
+) -> Result<RowId, Refused> {
+    if registration.has_publication()? {
+        return registration
+            .attach_published(DERIVATION_HANDOFF_BYTES)
+            .map_err(Refused::from);
+    }
+    registration.mark_handoff()?;
+    let action = match request {
+        ConfirmationPurpose::Start(predecessor) => {
+            actor
+                .start_voice_confirmation(grant, handshake, predecessor)
+                .await?
+        }
+        ConfirmationPurpose::Respond(_) => {
+            actor
+                .respond_voice_confirmation(
+                    grant,
+                    handshake,
+                    trigger.ok_or(VoiceError::Unauthorized)?,
+                )
+                .await?
+        }
+        ConfirmationPurpose::Incoming(_) => trigger.ok_or(VoiceError::Unauthorized)?,
+    };
+    registration
+        .attach_child(action, DERIVATION_HANDOFF_BYTES)
+        .map_err(Refused::from)
 }

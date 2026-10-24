@@ -562,4 +562,30 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         let watch = participant.watch.clone();
         self.voice_watch_peers(&watch)
     }
+
+    /// Paid version for a long-lived native producer. Its original metadata owner follows
+    /// the command and completed output independently of the observing caller. A foreign
+    /// pool/scope cannot debit this Actor or convert equal public labels into call authority.
+    pub fn voice_participant_peer_snapshot(
+        &mut self,
+        grant: &Arc<CallGrant>,
+        permit: voice_v2::presence::PeerSnapshotPermit,
+    ) -> voice_v2::presence::PeerSnapshot {
+        let result = (|| {
+            let context = self.voice_v2_context(grant.scope().room)?;
+            if permit.scope() != grant.scope()
+                || context.scope != permit.scope()
+                || !self
+                    .voice_runtime
+                    .as_ref()
+                    .and_then(|voice| voice.current.as_ref())
+                    .is_some_and(|actor| actor.uses_resources(permit.resources()))
+            {
+                return Err(VoiceError::Unauthorized);
+            }
+            self.voice_participant_peers(grant)
+                .map(|peers| (context.epoch, peers))
+        })();
+        permit.complete(result)
+    }
 }

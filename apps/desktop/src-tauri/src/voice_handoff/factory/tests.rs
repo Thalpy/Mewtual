@@ -224,8 +224,12 @@ async fn admitted_factory_holds_channel_collection_behind_actual_actor_completio
         Err(crate::voice_handoff::channel::Refused::Capacity)
     ));
     assert!(
-        route.require_open().is_ok(),
+        f.state.voice_channels.require_cleanup_route(&route).is_ok(),
         "actual publication completed, but its uncertain purpose still needs Control cleanup"
+    );
+    assert!(
+        route.require_open().is_err(),
+        "publication preceded the permanent close-first fence"
     );
     assert!(f
         .state

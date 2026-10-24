@@ -1,4 +1,4 @@
-//! Inactive child Input projection. Only an actual registered Root action lends bytes;
+//! Child Input projection. Only an actual registered Root action lends bytes;
 //! metadata/role hints cannot create a packet, a decrypt token, a parent or an engine.
 use super::bootstrap::Route;
 use super::channel::{self, BodyKind, CompletedReply, Incoming, Operation};

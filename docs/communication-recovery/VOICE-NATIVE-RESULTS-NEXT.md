@@ -1,5 +1,66 @@
 # Next voice milestone: native result recovery
 
+## Current production continuation (24 October; validation in progress)
+
+Application-bound authenticated v1/v2 effects and bounded native maintenance now exist in
+ordinary code. The Host schedules original Derive/Pending and actual confirmation work through
+separately paid native-position tasks; incoming actions come from the existing paid Root
+snapshot. Browser19 has an exact coalesced SDK/settlement/ordinary Derive Return, preserving
+keys/counters/deadline before native Start. End fences/drains that flight before final cleanup.
+HANDOVER records current focused results and unresolved validation; earlier disabled-dispatch
+descriptions below are historical. UI V2 activation and the complete call adapter stay off.
+
+Broker20 now discovers unseen work during cleanup after actual SDK/RPC drainage. Its original
+metadata payment precedes setup ACK; close-first stops new effects while preserving Control.
+Children close before a retained parent retries; stored final proofs survive lost replies.
+Normal attached-parent closure requires actual issued/ACKed final delivery, independently
+of Root End. HANDOVER records reviewed boundaries and pending current native/full gates.
+
+Remaining implementation order: automatic browser work execution and replayable native events;
+explicit causal Finish-to-SDP transfer; separate typed SDP/ICE factories and byte grammar;
+exact native receipt commit plus fresh RTC dispatch authority; measured browser/RTC custody;
+serial multi-peer progress and terminal-history reclamation; scoped media relay and combined
+acceptance. Low-side Finish sealing cannot retire its retry custody or start an Offer budget
+before the responder can causally be known ready. Native ICE must resolve the active OfferId/
+pair/direction/generation before publishing replay/token work. The current single Exchange and
+32 retained rows cannot be advertised as a supported16-peer lifecycle. Physical two-device/
+separate-network audible acceptance is still unavailable from the one desktop.
+
+### Reviewed SDP transition design (not implemented)
+
+The next increment should give high a small independently prepaid Ready/control Source
+owner, prepared before irreversible Finish-open publication. Finish history and one Ready
+intent commit together; high publishes Ready only after its confirmation owners actually drain
+and its exact SDP receive owner is installed. Low accepts that original signed Ready only for
+the exact Finish ID/hash, scope/current protected epoch, endpoint devices/joins/key references
+and handshake, then retires only Finish retry authority and transfers its original keys.
+This avoids consuming low's finite Offer attempts while high is unable to retain the Offer.
+Ready needs its own Source slot/payment: borrowing Exchange's single Source stage would
+block the Answer, and retaining Workflow to fund Ready would prevent the intended transfer.
+
+Keep Ready's exact signed bytes, first issue/expiry and Source allowance through lost replies.
+High may retire Ready retries on a fully authenticated canonical low-issued original-pair
+Offer header; this is causal retry evidence only, never plaintext/token/RTC authorization.
+An authenticated malicious low can sabotage only its own pair with bad ciphertext. Compare
+the actual original protected epoch to current context: Scope and the Offer header do not
+carry that epoch. Third-party, other-pair/join and high-issued Offers must not advance it.
+
+Ready verification needs a narrowly selected existing protected loan under ordinary-pool
+pressure. Untrusted peek selects capacity only; normal signature/requester/rate/current-view
+checks remain mandatory. Release actual verification Crypto custody before awaiting transfer.
+Use explicit browser/native transfer owners preserving the same key objects and burned
+sequence domain; closeChain/Plan-final/Return are not transfers. The new closed Body tag must
+leave existing signing domains/tags unchanged and update target/codec/validation/peeking,
+helper routing, Source activity and exact current-owner enforcement together.
+
+If Ready is instead published before high has SDP capacity, high must retain one fully paid
+original Offer inbox and its exact first deadline, not only a hash or a refused transport ACK.
+That alternative also needs protected pre-Exchange Offer verification and must release the
+verification ticket before waiting for old Lowers. The independent Ready owner is preferred
+because it removes those extra receive states. Tests must hold Finish and two real Lowers,
+fill ordinary capacity, lose replies, change every binding, and End/lock/replace at each
+transition; no new deadline, attempt budget, key or allocator may be manufactured.
+
 ## Existing work projection continuation (24 October; validated inactive integration)
 
 `read_voice_channel_work` and `voice-ipc-work.ts` now implement a bounded metadata-only

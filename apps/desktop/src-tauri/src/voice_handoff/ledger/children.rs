@@ -1,4 +1,4 @@
-//! Original-parent reservations for the inactive native confirmation adapter. A copied
+//! Original-parent reservations for the native confirmation adapter. A copied
 //! RowId selects history only; the indexed strong parent and its opaque Root plan establish
 //! provenance. The common Index -> parent State gate orders reservation against retirement.
 use super::*;
@@ -359,7 +359,7 @@ impl Ledger {
 /// engine/packet capability. None message on an outgoing role means capture is incomplete.
 #[derive(Clone, Copy)]
 pub(super) struct ChildMetadata {
-    role: u8,
+    pub(super) role: u8,
     message: Option<[u8; 32]>,
 }
 

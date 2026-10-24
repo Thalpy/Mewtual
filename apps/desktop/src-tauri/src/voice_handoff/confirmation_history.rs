@@ -1,4 +1,4 @@
-//! Inactive, authenticated read-only child recovery. Renderer metadata never constructs a
+//! Authenticated read-only child recovery. Renderer metadata never constructs a
 //! parent, action or incoming token. Unknown history is refusal, not permission to recompute.
 use super::bootstrap::Route;
 use super::channel::{Incoming, Operation};

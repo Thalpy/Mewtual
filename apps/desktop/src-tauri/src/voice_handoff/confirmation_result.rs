@@ -1,6 +1,6 @@
-//! Inactive typed executor for an original confirmation child result. It owns the actual authenticated request
+//! Typed executor for an original confirmation child result. It owns the actual authenticated request
 //! through actor publication and completed-output collection, including after socket loss.
-//! This effect executor is not exposed by the listener: ingress serves only Status and read-only history.
+//! The application-bound authenticated listener routes only its exact v2 Result grammar here.
 use super::bootstrap::Route;
 use super::channel::{self, BodyKind, CompletedReply, Incoming, Operation};
 use super::context::Context;

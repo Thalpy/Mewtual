@@ -1,4 +1,4 @@
-//! Inactive authenticated child creation/adoption. Renderer purpose/role fields are lookup
+//! Authenticated child creation/adoption. Renderer purpose/role fields are lookup
 //! hints only. One actual native snapshot (not a polling loop) supplies an incoming action.
 use super::bootstrap::Route;
 use super::channel::{self, BodyKind, CompletedReply, Incoming, Operation, PhysicalHold};

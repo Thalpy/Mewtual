@@ -1082,6 +1082,7 @@ async fn project_and_admit(
     assert_eq!(&data[430 + aad.len()..], body);
     let serial = work.action().serial();
     let engine_bytes = work.action().engine_bytes();
+    let original_deadline = work.action().protected_binding().unwrap().deadline;
     let mut admission = prefix;
     admission.extend_from_slice(&serial.to_be_bytes());
     admission.extend_from_slice(&work.action().version().to_be_bytes());
@@ -1110,20 +1111,35 @@ async fn project_and_admit(
     drop(unpolled);
     assert!(!route.session().fixture_counts().0);
     assert!(row.reconcile().unwrap() == status_before);
-    let header = (
-        route.session().fixture_counts().1 + 1,
-        2,
-        0,
-        row.id().logical(),
-    );
-    let reply = confirmation_admission::admit(
-        &context,
-        &route,
-        opened_frame(&public, &route, header, &admission, None),
-    )
-    .await
-    .unwrap();
-    let bytes = opened_reply(&public, header, &admission, &reply);
+    let clock = crate::voice_runtime(state).clock();
+    let bytes = loop {
+        let header = (
+            route.session().fixture_counts().1 + 1,
+            2,
+            0,
+            row.id().logical(),
+        );
+        let reply = confirmation_admission::admit(
+            &context,
+            &route,
+            opened_frame(&public, &route, header, &admission, None),
+        )
+        .await
+        .unwrap();
+        let bytes = opened_reply(&public, header, &admission, &reply);
+        drop(reply);
+        if bytes != replies::refused(factory::Refused::Protocol(VoiceError::Capacity)) {
+            break bytes;
+        }
+        // Final engine admission deliberately refuses a busy native fence. Retry only
+        // that authenticated Capacity, with this exact body/action and its first deadline;
+        // no new row, engine permit, transcript or execution allowance is manufactured.
+        assert!(
+            clock.monotonic_ms() < original_deadline,
+            "original engine admission stayed busy"
+        );
+        clock.sleep(Duration::from_millis(25)).await;
+    };
     assert_eq!(bytes.len(), replies::PERMIT_BYTES);
     assert_eq!(
         &bytes[66..74],

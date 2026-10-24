@@ -1,5 +1,114 @@
 # Mewtual; Handover
 
+## Cleanup and reconnect capture continuation (24 October; validation in progress)
+
+This continuation on `communication-native-production-handoff` follows
+`c2dfafb3` in `target/communication-native-work-metadata-worktree`. External download resume
+is excluded. UI V2 activation stays unavailable; this checkpoint does not complete SDP/ICE/RTC,
+the browser work pump/events adapter, multi-peer phase/history composition or media relay.
+
+Review found a HIGH cleanup liveness gap introduced by independent native maintenance:
+End can leave a parent/child the browser has never seen. The original broker now reserves
+16KiB for serial metadata cleanup before setup ACK enables producers. Native separately
+prepays24KiB browser control (the existing8KiB encrypted control plus that16KiB metadata
+custody). Broker20 and metadata adapter2 reject incompatible retained versions.
+
+Close-first native setup settlement latches `effects_closed` under the original UI commit,
+including on Capacity, before checking action drainage. First-effect/native-production
+fences honor it; original Control/history/cleanup routing remains. An attached parent needs
+issued and ACKed final delivery even after Root End drained its plan. After actual known
+SDK/RPC drainage the browser scans children before parents, authenticates Begin(false),
+closes Pending or Settle/ACK/Returns attached work without Input or new crypto, then uses
+separate parent Plan-final2 and exact ACK. One deferred parent can coexist with the current
+child so late publication cannot starve cleanup. A stored proof is never overwritten on retry.
+Forced process shutdown/independent last-owner collection retains its separate semantics.
+
+Focused browser handoff/adapter tests pass159, including lost-before-fence then late child,
+unseen Pending-to-attached work, held actual metadata read, lost final ACK and changed-proof/
+Pending-ACK rejection. Root paid-peer snapshot1 and Actor snapshot4 passed earlier; current
+Root strict Clippy, formatting, ambient gate and dependency audit passed. Complete frontend
+passes2,656 (72.52s), Svelte reports zero errors/warnings and production build passes. Current
+native handoff focus passes302, reconnect capture passes both regressions, and all8 TCP
+voice cases pass65.12s. Native strict Clippy/check/build pass. Current complete Root/native
+suites remain pending; the real application startup gate also passes. No current all-green
+claim is made.
+
+The first full native attempt ran782 library tests:779 passed and3 failed, plus5 passing ACL
+tests. The new TCP fixture incorrectly used Phase Retire after immutable Return; it now
+retires the separate plan. The framed provider expected an immediate permit and received
+an authenticated temporary Capacity; its exact same action/body now retries only Capacity
+within the first native deadline. The six-client failure lacked connectivity to client6;
+an isolated rerun passed182.67s, which does not establish a fix.
+
+Static investigation found a concrete concurrent reconnect-capture race: old claims sampled
+before a store wait could remove a route saved by a newer capture. A dedicated per-numeric-ID
+mutex now orders claims, latest sealed merge and route-install command enqueue, with the
+local permission rechecked after acquisition. The ordinary snapshot-persistence lock is
+separate. Actor FIFO preserves enqueue order; awaiting enqueue alone is not application
+completion. New actual capture/store/cold-Noise tests cover the two barrier orderings; the
+passing regressions include the strengthened before/after-lock observations. The precise failed
+full-run interleaving remains unproven. Logs use `target/production-handoff-*`.
+
+The first native run after the stronger final-delivery gate passed298/302; four older tests
+explicitly allowed normal closure after Root retirement without final delivery. That contract
+is intentionally strengthened for production close-first cleanup. Updated tests now retain
+Control until actual Plan-final issuance/ACK, including both UI-commit orderings; ordinary
+Return and independent forced-collection semantics remain distinct. A new actual Node/HTTP
+case ends after automatic native Derive but before the first browser Input; it passes in
+the current8-case TCP run. The earlier automatic six-flight Node cycle passed26.06s and also passed
+inside the first complete native run, before these cleanup corrections.
+
+All ten unchanged browser flows pass with literal development App transform warmup. Earlier
+cold attempts failed before App mounted; the isolated transform took50.496s. Warmup changes
+compilation timing, not module evaluation, fixture authorization, assertions or deadlines.
+One desktop still cannot establish independent-device/network audible acceptance.
+
+## Earlier application handoff and automatic confirmation (24 October)
+
+Worktree `target/communication-native-work-metadata-worktree`, local branch
+`communication-native-production-handoff`, continues published `c2dfafb3`. External download
+resume belongs to another session and is excluded. Application-bound authenticated effects
+are now ordinary code, with closed pre-debit header checks and exact v1/v2 dispatch; UI V2
+activation remains unavailable. Host maintenance independently produces proven Derive work
+and original Pending retries, plus actual Start/Respond/Incoming confirmation continuations.
+It never awaits Actor on the Host: each actual channel owns one paid8KiB native worker and
+an incoming/peer observation has its own affine4KiB snapshot through real RPC/output lifetime.
+
+The current browser19 continuation adds a coalesced ordinary Derive Return after actual SDK/
+settlement, preserving keys/counters/deadline so native can select Start. Review found and
+corrected a Return-vs-End cleanup race and missing native reconciliation inventory. End now
+fences new Return flights, drains an admitted one outside the shared lane before cleanup,
+and requires zero activity before collection. Review also corrected Pending cursor starvation,
+parent-Pending cleanup and shipping-dispatch documentation. Current static re-review has no
+remaining blocker/high/medium; current native/integration/full gates remain pending.
+
+Focused evidence so far: Root paid-peer snapshot1 pass; Actor snapshot4 pass (queued caller
+loss, stopped receiver, retained output, pool/waiter bounds). Browser IPC-session147 passes,
+including held Settle/Close during End, lost Return, exact coalescing/provenance and unchanged
+structural bounds. The Derive-only automatic scheduling checkpoint passes real blocked-TCP
+Node/WebCrypto confirmation1 (9.10s): no fixture factory creates Derive. Its native worker
+peak was4,824B/8KiB before automatic confirmation was added. The updated fixture now also
+requires native creation of all six confirmation actions, but that stricter test is not yet
+validated. Native handoff current compilation/size checks are running; do not reuse older full
+suite totals for these changed Root/native/browser inputs. Logs use `production-handoff-*`.
+
+Earlier runs are retained: native dispatch293 pass; subsequent Pending/scheduler run297/1
+failed because the new test expected Root Unauthorized where native correctly returned Closed
+after End/lock. The exact expected Closed result is corrected. An earlier run293/5 exposed a
+connection-yield lifetime, clock-anchor test count and foreign-Runtime fixture; fixes retain
+the production invariants. First confirmation compilation found private metadata visibility;
+first browser confirmation run142/2 expected no idempotent Settle during Return. Corrected
+tests now count that existing closure protocol and pin that no crypto/action is recreated.
+
+Next: complete automatic browser work delivery/cleanup and replayable native events; causal
+Finish-to-SDP key/phase transfer; typed paid SDP and ICE factories/receipt commits/RTC dispatch;
+serial multi-peer progress plus safe terminal-history reclamation; scoped endpoint TURN
+gateways/member relay; combined and packaged-WebView acceptance. SDP design review identified
+that local Finish sealing is not peer readiness, ICE currently lacks native negotiation
+ownership, and the existing one Workflow/Exchange and32 history rows cannot advertise16-peer
+completion. Resolve those before activation, without renewing old attempts or evicting uncertain
+history. One desktop cannot supply independent two-device/network audible acceptance.
+
 ## Pair observation and work metadata (24 October; validated)
 
 Runtime `2f35c49b` adds the original-grant native Confirming/Established query through the

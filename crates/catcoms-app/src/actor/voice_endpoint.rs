@@ -6,7 +6,7 @@ use catcoms_sync::voice_v2::crypto_actions::{
     CryptoAction, CryptoActionSnapshot, CryptoActionSnapshotPermit, CryptoResultReceipt,
 };
 use catcoms_sync::voice_v2::presence::{
-    FreshPeer, PairReceipt, PairSelector, VoicePairConfirmation,
+    FreshPeer, PairReceipt, PairSelector, PeerSnapshot, PeerSnapshotPermit, VoicePairConfirmation,
 };
 use catcoms_sync::voice_v2::{CallGrant, CallLease, Nonce, VoiceError};
 use catcoms_sync::VoiceWatchGrant;
@@ -63,6 +63,11 @@ enum Command {
     ParticipantPeers {
         grant: Arc<CallGrant>,
         reply: Reply<Vec<FreshPeer>>,
+    },
+    ParticipantPeerSnapshot {
+        grant: Arc<CallGrant>,
+        permit: PeerSnapshotPermit,
+        reply: Reply<PeerSnapshot>,
     },
     Start {
         grant: Arc<CallGrant>,
@@ -152,6 +157,17 @@ impl Command {
             Self::ParticipantPeers { grant, reply } => {
                 if !reply.is_closed() {
                     let _ = reply.send(server.sync.voice_participant_peers(&grant));
+                }
+            }
+            Self::ParticipantPeerSnapshot {
+                grant,
+                permit,
+                reply,
+            } => {
+                if !reply.is_closed() {
+                    let _ = reply.send(Ok(server
+                        .sync
+                        .voice_participant_peer_snapshot(&grant, permit)));
                 }
             }
             Self::Start {
@@ -337,6 +353,23 @@ impl ServerActor {
     ) -> Result<Vec<FreshPeer>, VoiceEndpointError> {
         self.voice_endpoint_request(|reply| Command::ParticipantPeers { grant, reply })
             .await
+    }
+
+    /// Observe proven peers with original bounded RPC/output custody. Cancellation drops
+    /// only this receiver; the same permit remains with an admitted command or late reply.
+    /// No browser metadata, pair factory, engine permit or native deadline is created here.
+    pub async fn voice_participant_peer_snapshot(
+        &self,
+        grant: Arc<CallGrant>,
+        permit: PeerSnapshotPermit,
+    ) -> Result<PeerSnapshot, VoiceEndpointError> {
+        let _waiter = permit.rpc_waiter().map_err(VoiceEndpointError::Protocol)?;
+        self.voice_endpoint_request(|reply| Command::ParticipantPeerSnapshot {
+            grant,
+            permit,
+            reply,
+        })
+        .await
     }
     /// Select the actual implicit watch's proven peer using immutable remote join/key identity.
     /// Lost replies retry this same selector; a peer rejoin cannot silently change the request.

@@ -142,6 +142,51 @@ pub(super) fn future_layout_bytes() -> usize {
 }
 
 #[tokio::test]
+async fn returned_and_root_retired_parent_cannot_close_control_before_its_actual_final_intent_and_ack(
+) {
+    for setup in [false, true] {
+        let mut case = Case::new();
+        case.returned();
+        case.coordinator.end(case.selected.id());
+        assert!(
+            case.row.retire_plan().unwrap(),
+            "actual original Root control/witness retired"
+        );
+        assert!(case.row.reconcile().unwrap().drained);
+        // Native End/Root drainage is independent from delivery of final proof to the
+        // original browser. The first close-first call must preserve that Control path.
+        assert!(matches!(
+            case.finish(setup).await,
+            Err(channel::Refused::Capacity)
+        ));
+        assert!(case.route.require_open().is_err());
+        assert!(case
+            .state
+            .voice_channels
+            .require_cleanup_route(&case.route)
+            .is_ok());
+        let context = Context::new(&case.state);
+        let final_receipt = request(&context, &case.route, &case.row).await.unwrap();
+        assert_eq!(final_receipt.kind, FinalKind::Plan);
+        assert!(final_receipt.proof.is_some() && !final_receipt.acknowledged);
+        assert!(matches!(
+            case.finish(setup).await,
+            Err(channel::Refused::Capacity)
+        ));
+        case.row
+            .acknowledge_final(
+                case.route.session().identity(),
+                final_receipt.proof.unwrap(),
+            )
+            .unwrap();
+        assert!(matches!(
+            case.finish(setup).await,
+            Ok(bootstrap::Status::Closed { .. })
+        ));
+    }
+}
+
+#[tokio::test]
 async fn encrypted_plan_intent_lost_results_and_exact_ack_use_the_original_session_after_end_and_lock(
 ) {
     let mut case = Case::new();
@@ -696,14 +741,23 @@ async fn intent_and_both_normal_closures_share_the_same_actual_ui_commit_in_both
                 let mut terminal = Box::pin(request(&context, &case.route, &case.row));
                 assert!(once(terminal.as_mut()).await.is_pending());
                 drop(boundary);
-                assert!(matches!(close.await, Ok(bootstrap::Status::Closed { .. })));
-                assert!(matches!(terminal.await, Err(Refused::Closed)));
                 assert!(
-                    case.row
-                        .issue_final(case.route.session().identity())
-                        .is_err(),
-                    "no unreachable new intent after normal close"
+                    matches!(close.await, Err(channel::Refused::Capacity)),
+                    "close-first fences effects but must preserve original final delivery"
                 );
+                let issued = terminal.await.unwrap();
+                assert!(issued.proof.is_some() && !issued.acknowledged);
+                assert!(matches!(
+                    case.finish(setup).await,
+                    Err(channel::Refused::Capacity)
+                ));
+                case.row
+                    .acknowledge_final(case.route.session().identity(), issued.proof.unwrap())
+                    .unwrap();
+                assert!(matches!(
+                    case.finish(setup).await,
+                    Ok(bootstrap::Status::Closed { .. })
+                ));
             }
         }
     }

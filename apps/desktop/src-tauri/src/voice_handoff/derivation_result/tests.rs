@@ -318,8 +318,16 @@ async fn actual_actor_rejection_retains_work_input_and_task_custody_until_collec
             Err(crate::voice_handoff::channel::Refused::Capacity)
         ));
         assert!(
-            case.route.require_open().is_ok(),
+            case.native
+                .state
+                .voice_channels
+                .require_cleanup_route(&case.route)
+                .is_ok(),
             "an uncollected actual result cannot lose its cleanup route"
+        );
+        assert!(
+            case.route.require_open().is_err(),
+            "close-first refuses subsequent effects"
         );
         assert!(response.work.is_some());
         assert_eq!(case.selected.resources().counts(), before);

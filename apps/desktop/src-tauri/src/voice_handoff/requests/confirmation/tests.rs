@@ -38,6 +38,13 @@ fn child_vectors_bind_full_parent_purpose_header_and_borrow_original_result_byte
         let wire = bytes(&case["plaintext"]);
         let op = operation(case["operation"].as_u64().unwrap());
         let kind = body_kind(case["bodyKind"].as_u64().unwrap());
+        assert!(super::super::wire_shape(
+            op,
+            kind,
+            logical(&case["logical"]),
+            wire.len() + 16,
+            [9; 16]
+        ));
         let decoded = Request::decode(op, kind, logical(&case["logical"]), &wire).unwrap();
         assert_eq!(decoded.selector.peer.as_bytes(), &[0x11; 32]);
         assert_eq!(decoded.selector.join, [0x22; 32]);

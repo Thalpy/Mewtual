@@ -1,5 +1,40 @@
 # Mewtual; Interfaces & Hooks Schema
 
+## Original work cleanup contract (24 October; validation in progress)
+
+Broker20 requires metadata adapter2, including `readWork(owner, executor, fromSlot)` mapped
+to existing main-window `read_voice_channel_work`. This public metadata remains available
+after End/lock and never grants an action or RTC effect. Close-first `settleSetup` now stops
+first effects under the native UI commit even if outstanding work returns Capacity; cleanup
+routing stays open. Attached parents require exact issued/ACKed final delivery before normal
+closure. Actual broker SDK/RPC drainage precedes unseen-work history/Settle/ACK/Return and
+separate Plan-final2. Unknown/empty/Pending/refused remain distinct. No wire tag or grammar
+changes here; application V2 activation and the full VoiceV2Native adapter remain unavailable.
+
+## Application-bound effects and native scheduling (24 October; validation in progress)
+
+`BoundServer::bind_application` now selects normal typed authenticated action/final dispatch
+using its retained weak native Context. No renderer/body flag enables effects; each adapter
+still resolves its original selected owner, parent/action and final UI commit. Context-free
+`bind` remains Status-only. Header authentication and the closed `requests::wire_shape`
+predicate precede counter debit; Data Result additionally resolves the original paid Phase.
+The test-only Input contention injection remains absent from shipping builds.
+
+`voice_participant_peer_snapshot(grant, permit)` transfers one affine4KiB payment through
+the Actor request and actual output. It returns the native context epoch and at most64 proven
+peer handles; no serialization or owned-Vec extraction exists. One waiter is admitted before
+the oneshot. Scope, original grant/watch and resource provenance are checked by Root. Caller
+loss or Actor stop cannot refund a still-owned command, waiter or retained output.
+
+Maintenance produces exact Pending Derive retries, new proven Derive work, actual returned
+confirmation continuations and actual incoming snapshot actions under one native position.
+Those8KiB workers retain their original UI commit through shared Actor publication. Metadata
+remains observation only; Input/admission/result/ACK/settlement/Return authenticate separately.
+`VoiceCryptoBroker.returnNativeDerivation(owner, channel, chain)` requires those exact retained
+allocations, coalesces actual settlement/Return and preserves keys. New flights are refused
+after retirement; End drains existing ones before final cleanup. Broker20 rejects incompatible
+retained older brokers. This is not `VoiceV2Native.events`, SDP/ICE or live RTC activation.
+
 ## Existing native work snapshots (24 October; inactive integration)
 
 Main-window `read_voice_channel_work(owner, executor, fromSlot)` accepts canonical original
@@ -23,7 +58,8 @@ owners remain paid until serialization; the reply does not retain the process le
 `nextSlot` is a scan hint, not `VoiceV2Native.events(lease, after)`. Pending may become attached
 without changing RowId, so callers must rescan. Empty is not absence or drainage evidence;
 cleanup must first drain admitted production, then recover/close actual Pending or attached
-rows before channel settlement. That production broker/cleanup driver remains unimplemented.
+rows before channel settlement. Broker20 implements that cleanup; automatic forward work
+delivery and the complete production events adapter remain unimplemented.
 
 ## Native pair confirmation observation (23 October; inactive integration)
 
@@ -51,13 +87,12 @@ This adds no Tauri command, serialized byte path, wire or persistence format.
 null. Caller-supplied continuation hints never authenticate that value. An authenticated
 Begin/Input/history response may establish the original row; Pending establishes lookup
 identity only, not action admission or pair readiness. Native Respond still independently
-requires its original same-parent accepted Opened action. Broker18 refuses older retained
+requires its original same-parent accepted Opened action. Broker20 refuses older retained
 HMR shapes rather than adopting an incompatible handle.
 
-A private cfg(test) listener mode selects exact v1/v2 native adapters only after real Header
+A normal application-bound listener selects exact v1/v2 native adapters only after real Header
 authentication and AEAD opening. Result Data allocation resolves the original Phase before
-allocation. Shipping construction retains the existing read-only dispatcher; no IPC or HTTP
-flag can enable the fixture. Two separate Node processes use the actual broker, WebCrypto,
+allocation. Two separate test-only Node processes use that actual dispatcher, broker, WebCrypto,
 non-extractable selected keys and HTTP/BYOB transport. Their fixed 4KiB control frames carry
 only public selection/bootstrap/work metadata, never Input, Result, keys or SDP bytes.
 The Node Origin shim supplies no evidence about packaged WebView/CSP/ACL behavior.

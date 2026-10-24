@@ -13,6 +13,7 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 mod confirmation;
+mod snapshot;
 pub use confirmation::{
     ConfirmationOutput, CryptoFlight, FlightSubmission, OpenedFlight, PairReceipt, PairSelector,
     PairSetup, ReceiveProgress, VoicePairConfirmation,
@@ -21,6 +22,7 @@ pub(crate) use confirmation::{
     ProtectedDerivation, ProtectedDerivationResult, ProtectedOpenedResult, ProtectedPair,
     ProtectedResponse, ProtectedSealedResult, ProtectedStart,
 };
+pub use snapshot::{PeerSnapshot, PeerSnapshotPermit, PeerSnapshotWaiter};
 
 const RECORD_BYTES: usize = 1536;
 const MAX_PENDING: usize = 32;

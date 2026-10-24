@@ -10,6 +10,7 @@ import { readVoiceIpcResponse } from "./voice-ipc-body.ts";
 import { encodeVoiceIpcAction, encodeVoiceIpcConfirmationAction, type VoiceIpcPurpose, type VoiceIpcActionIdentity, type VoiceIpcActionRequest, type VoiceIpcConfirmationPurpose, type VoiceIpcConfirmationRequest } from "./voice-ipc-actions.ts";
 import { decodeVoiceIpcDerivationInput, decodeVoiceIpcPermit } from "./voice-ipc-input.ts";
 import { decodeVoiceIpcConfirmationInput } from "./voice-ipc-confirmation-input.ts";
+import { decodeVoiceWorkSnapshot, type VoiceWorkDescriptor } from "./voice-ipc-work.ts";
 import { decodeVoiceIpcActionReply, decodeVoiceIpcFinalReply, isVoiceIpcActionRow, type VoiceIpcActionReply } from "./voice-ipc-replies.ts";
 // The broker survives HMR, so new module instances must use its original owner brand.
 // This is lifecycle bookkeeping within one trusted window, not a security capability.
@@ -195,6 +196,10 @@ const SELECTED_KEY_BYTES = 4096;
 // These browser-side charges cover application-owned copies, not opaque SDK/GC heaps.
 const IPC_SETUP_BYTES = 8 * 1024;
 const IPC_CONTROL_BYTES = 8 * 1024;
+// Serial public metadata read/parse plus one retained cleanup descriptor/proof. Reserve
+// before setup ACK can enable native maintenance, including when End precedes first Input.
+// This bounds application-owned graphs, not the framework/SDK/GC heaps.
+const IPC_WORK_BYTES = 16 * 1024;
 // Only exact, already-started cleanup is retried automatically. A completed refusal starts
 // one new cadence interval; missed ticks cannot create catch-up work or overlap native RPCs.
 const IPC_CLEANUP_RETRY_MS = 1_000;
@@ -212,6 +217,8 @@ export interface VoiceIpcNative {
    * Native detaches its Session only after fencing new routing; live native replies retain
    * their original capacity until their actual last owner drains. Reply loss is retryable. */
   collectChannel(owner: string, executor: string): Promise<void>;
+  /** Original-channel public metadata remains readable after End/lock for cleanup. */
+  readWork(owner: string, executor: string, fromSlot: number): Promise<unknown>;
 }
 export type VoiceIpcStatus = Readonly<{ kind: "ready" | "closed"; nativeSetupDrained: boolean }> |
   Readonly<{ kind: "uncertain" | "retired" | "failed" }>;
@@ -415,7 +422,7 @@ function context(label: string, transcript: Uint8Array): Uint8Array<ArrayBuffer>
  * unsettled work. Revoking an owner never frees a running promise; only its real settlement does.
  * A derive pipeline uses one permit for sequential import/ECDH/HKDF work, never parallel calls. */
 export class VoiceCryptoBroker {
-  readonly version = 18;
+  readonly version = 20;
   readonly subtle: SubtleCrypto;
   private readonly native: VoiceCryptoAdmission;
   private active = 0;
@@ -569,7 +576,7 @@ export class VoiceCryptoBroker {
         this.active - this.protectedActive - this.ipcActive + this.protectedPositions + this.ipcPositions >= MAX_ACTIVE) {
       throw new Error("voice channel capacity reached");
     }
-    this.charge(owner, IPC_SETUP_BYTES + IPC_CONTROL_BYTES);
+    this.charge(owner, IPC_SETUP_BYTES + IPC_CONTROL_BYTES + IPC_WORK_BYTES);
     this.ipcPositions++; selected.channelUsers++;
     let setupPaid = true, position = true, historyPaid = true;
     const channel = new RetainedIpcChannel(selected, native, transport, this.subtle, this.ipcClock, {
@@ -581,7 +588,7 @@ export class VoiceCryptoBroker {
         if (selected.retired && selected.drained) this.releaseSelectedKey(selected);
       },
       collected: () => {
-        if (historyPaid) { historyPaid = false; this.refund(owner, IPC_CONTROL_BYTES); }
+        if (historyPaid) { historyPaid = false; this.refund(owner, IPC_CONTROL_BYTES + IPC_WORK_BYTES); }
         this.ipcChannels.delete(owner.token);
       },
       unlinked: chain => {
@@ -606,6 +613,19 @@ export class VoiceCryptoBroker {
     // Compare actual original allocations BEFORE any owner predicate/callback can run.
     if (!channel || channel.handle !== handle || !channel.owns(owner)) throw new Error("voice channel identity changed");
     return channel.history(purpose, expectedRow);
+  }
+
+  /** Release only the completed Derive phase so native maintenance can select the first
+   * confirmation work. Preserve the original chain, keys, counters and deadline. The
+   * retained channel coalesces this actual settlement/Return flight; a caller disappearing
+   * or owner End cannot turn an outstanding SDK/RPC into drainage. */
+  returnNativeDerivation(owner: VoiceCryptoOwner, handle: VoiceIpcChannel, plan: VoiceCryptoChain): Promise<void> {
+    const channel = this.ipcChannels.get(owner.token), chain = this.chains.get(plan);
+    if (!channel || channel.handle !== handle || !channel.owns(owner) || !chain || chain.owner !== owner ||
+        chain.channel !== channel || !chain.record || chain.record.operation !== "derive") {
+      throw new Error("original native derivation required");
+    }
+    return channel.finishDerivation(chain);
   }
 
   /** Reserve the original group/row/variable position BEFORE Input fetch or materialization.
@@ -1676,7 +1696,15 @@ class RetainedIpcChannel {
   // key/phase transfer remains separate. Neither a renderer flag nor localDrained can
   // manufacture final proof or authorize closing the native channel.
   private terminalAction: Readonly<Pick<ChainIntake, "purpose" | "row" | "identity">> | null = null;
+  private derivationReturn: Promise<void> | null = null;
   private derivationReturned = false;
+  // One current metadata cleanup intent survives lost history/final replies, plus at most
+  // one waiting parent below. Never retain a32-row queue or reconstruct browser keys.
+  private cleanupWork: { work: VoiceWorkDescriptor; proof: string | null } | null = null;
+  // A parent may be waiting for a late native child. Retain that one original intent while
+  // scanning/closing one child at a time; retrying the parent first would starve its cleanup.
+  private cleanupParent: { work: VoiceWorkDescriptor; proof: string | null } | null = null;
+  private cleanupStarted = false;
   // Immutable after the one definite Phase-refusal transition. Unknown replies never
   // select a different intent, and an issued proof can only be ACKed in its original mode.
   private finalMode: "retire" | "retire-plan" = "retire";
@@ -1798,6 +1826,30 @@ class RetainedIpcChannel {
     await this.returnAction(original.row, original.identity, request => this.actionRpc(original.purpose, original.row,
       request, "status", true, opened => decodeVoiceIpcActionReply(opened, original.row)));
     this.derivationReturned = true;
+  }
+  finishDerivation(chain: BrowserChain): Promise<void> {
+    if (this.linked !== chain || !chain.record || chain.record.operation !== "derive") {
+      throw new Error("original linked derivation required");
+    }
+    if (this.derivationReturn) return this.derivationReturn;
+    // Coalescing an already-admitted flight is observation only. A new flight must not
+    // queue behind final cleanup after retirement; repeat flags after the owner predicate,
+    // whose callback can synchronously retire this same channel.
+    if (!this.live() || this.retired || this.drained || chain.closed) throw new Error("voice derivation channel closed");
+    const record = chain.record;
+    // Reserve actual channel activity before scheduling. The existing fixed channel/chain
+    // metadata pays one coalesced promise and its fixed original references, no byte copy.
+    this.beginActivity();
+    const pending = Promise.resolve().then(async () => {
+      await record.physicalDrained.promise;
+      if (record.outcome?.kind !== "accepted") throw new Error("accepted derivation required");
+      await this.returnDerivation();
+    }).finally(() => {
+      this.derivationReturn = null;
+      this.endActivity(); this.collect();
+    });
+    this.derivationReturn = pending;
+    return pending;
   }
   /** Only authenticated metadata from the SAME framed Session can resolve an unknown
    * purpose. Pending and attached identities are separate states; neither may change row. */
@@ -2077,7 +2129,7 @@ class RetainedIpcChannel {
     if (this.drained) this.collect(); else this.start();
   }
   private collect(): void {
-    if (this.collected || !this.drained || this.selected.owner.isCurrent()) return;
+    if (this.collected || !this.drained || this.activity !== 0 || this.selected.owner.isCurrent()) return;
     this.collected = true; this.unsubscribe(); this.custody.collected();
   }
   private status(): Promise<VoiceIpcStatus> {
@@ -2125,6 +2177,13 @@ class RetainedIpcChannel {
         // Framing keys and the selected-key/control payment remain until cleanup is last.
         if (this.intake) await this.intake.drained.promise;
         if (this.linked) await this.linked.drained.promise;
+        // Ordinary Return comprises several serialized RPCs. Acquiring the lane between
+        // them could clear keys/unlink/refund history while its next RPC is still queued.
+        // No new public Return is admitted after retirement; drain the existing owner
+        // OUTSIDE execution.run, including its rejection/cancellation finally.
+        if (this.derivationReturn) {
+          try { await this.derivationReturn; } catch { /* exact final cleanup resolves uncertainty */ }
+        }
         await this.execution.run(() => this.cleanup());
       }
       if (this.terminal) outcome = this.terminal;
@@ -2287,8 +2346,20 @@ class RetainedIpcChannel {
     while (this.attempted) {
       const observed = this.wakeIdentity;
       try {
+        // Close-first native admission irrevocably fences maintenance even when it refuses
+        // Capacity for unseen rows. Control routing/keys remain until actual final closure.
+        let firstRefused = false;
+        if (!this.cleanupStarted) {
+          this.cleanupStarted = true;
+          try { await this.native.settleSetup(this.selected.owner.token, this.selected.executor); break; }
+          catch { firstRefused = true; }
+        }
+        const discovered = this.keys && this.bootstrap ? await this.cleanupUnseenWork() : false;
         await this.cleanupConfirmationIntents();
         if (this.terminalAction && !this.finalAcknowledged) await this.retireOriginalAction();
+        // With no actual cleanup work, a lost close reply waits for the existing cadence
+        // rather than immediately issuing a second close in the same driver turn.
+        if (firstRefused && !discovered && !this.terminalAction) throw new Error("native close unresolved");
         await this.native.settleSetup(this.selected.owner.token, this.selected.executor); break;
       }
       catch {
@@ -2314,6 +2385,96 @@ class RetainedIpcChannel {
     this.terminalAction = null;
     if (linked) this.custody.unlinked(linked);
     this.custody.setupDrained(); this.custody.closed(); this.completion.resolve();
+  }
+
+  /** Runs inside the original serial lane AFTER all locally known SDK/IO has drained.
+   * Children close before parent finalization. A producer admitted before the close-first
+   * fence may still publish: retry/rescan until native's independent final gate accepts.
+   * Empty metadata never establishes absence; no Input/admission/Begin(true) is used here. */
+  private async cleanupUnseenWork(): Promise<boolean> {
+    if (this.cleanupWork?.work.purpose.kind === "derive") {
+      this.cleanupParent = this.cleanupWork; this.cleanupWork = null;
+    }
+    let discovered = this.cleanupWork !== null || this.cleanupParent !== null;
+    let completedParent: string | null = null;
+    if (this.cleanupWork) await this.cleanupDiscoveredWork();
+    for (const children of [true, false]) {
+      if (!children && this.cleanupParent) {
+        completedParent = this.cleanupParent.work.row;
+        this.cleanupWork = this.cleanupParent; this.cleanupParent = null;
+        await this.cleanupDiscoveredWork();
+      }
+      let fromSlot = 0;
+      while (fromSlot < 32) {
+        const snapshot = decodeVoiceWorkSnapshot(await this.native.readWork(
+          this.selected.owner.token, this.selected.executor, fromSlot),
+          this.selected.owner.token, this.selected.executor, fromSlot);
+        fromSlot = snapshot.nextSlot;
+        const work = snapshot.work;
+        if (!work || (work.purpose.kind === "confirmation") !== children ||
+            work.row === this.terminalAction?.row || (!children && work.row === completedParent)) continue;
+        this.cleanupWork = { work, proof: null };
+        discovered = true;
+        await this.cleanupDiscoveredWork();
+      }
+    }
+    return discovered;
+  }
+
+  private async cleanupDiscoveredWork(): Promise<void> {
+    const intent = this.cleanupWork!;
+    const { work } = intent;
+    const p = work.purpose;
+    const parent = p.kind === "derive" ? p : p.parentPurpose;
+    const purpose: VoiceIpcPurpose = { peer: parent.peer, join: parent.join, keyRef: parent.keyRef, epoch: parent.epoch };
+    const child: VoiceIpcConfirmationPurpose | null = p.kind === "derive" ? null : {
+      parent: purpose, parentRow: p.parent,
+      request: p.request === "start" ? { kind: "start", predecessor: p.predecessor }
+        : p.request === "respond" ? { kind: "respond", triggerRow: p.trigger } : { kind: "incoming", role: p.role },
+    };
+    const rpc = async (request: VoiceIpcConfirmationRequest) => {
+      const encoded = child ? encodeVoiceIpcConfirmationAction(child, request) : encodeVoiceIpcAction(purpose, request);
+      try { return await this.framed(encoded.operation, encoded.kind, request.kind === "begin" ? "0".repeat(32) : work.row,
+        encoded.body, true, (kind, length) => kind === 0 && (length === 19 || length === 258),
+        opened => decodeVoiceIpcActionReply(opened, work.row)); }
+      finally { encoded.body.fill(0); }
+    };
+    const history = await rpc({ kind: "begin", retry: false });
+    if (history.kind !== "status") throw new Error("native unseen work history unresolved");
+    if (history.pending !== "not-pending") {
+      const closed = await rpc({ kind: "close", mode: "return" });
+      if (closed.kind !== "status" || (closed.pending !== "closed-handed" && closed.pending !== "closed-unhanded")) {
+        throw new Error("native unseen Pending closure unresolved");
+      }
+    } else {
+      const identity = history.identity!;
+      if (work.identity && (identity.action !== work.identity.action || identity.version !== work.identity.version ||
+          identity.inputTag !== work.identity.inputTag)) throw new Error("native unseen work identity changed");
+      // A prior exact final intent can make another Return refuse. Its authenticated
+      // localDrained status already covers the immutable ordinary closure.
+      if (!history.localDrained) await this.returnAction(work.row, identity, rpc);
+      if (!child) {
+        const exchange = async (request: Extract<VoiceIpcActionRequest, { kind: "close-plan" | "final" }>) => {
+          const encoded = encodeVoiceIpcAction(purpose, request);
+          try { return await this.framed(encoded.operation, encoded.kind, work.row, encoded.body, true,
+            (kind, length) => kind === 0 && (length === 19 || length === 116),
+            opened => decodeVoiceIpcFinalReply(opened, work.row, identity,
+              request.kind === "final" ? intent.proof : null, "retire-plan")); }
+          finally { encoded.body.fill(0); }
+        };
+        let acknowledged = false;
+        if (intent.proof === null) {
+          const final = await exchange({ kind: "close-plan" });
+          if (final.kind !== "final" || final.stage === "pending") throw new Error("native unseen plan retirement unresolved");
+          intent.proof = final.proof; acknowledged = final.stage === "acknowledged";
+        }
+        if (!acknowledged) {
+          const ack = await exchange({ kind: "final", proof: intent.proof! });
+          if (ack.kind !== "final" || ack.stage !== "acknowledged") throw new Error("native unseen plan ACK unresolved");
+        }
+      }
+    }
+    this.cleanupWork = null;
   }
 
   /** Already inside the original execution lane, after actual local SDK/I/O drained.
@@ -2424,7 +2585,7 @@ export function windowVoiceCryptoBroker(
   const host = window as Record<symbol, unknown>;
   const previous = host[BROKER] as VoiceCryptoBroker | undefined;
   if (previous) {
-    if (previous.version !== 18 || typeof previous.nativeConfirmationFromChannel !== "function" || typeof previous.nativeDerivationFromChannel !== "function" || typeof previous.recoverChannelHistory !== "function" || typeof previous.prepareChainFromChannel !== "function" || typeof previous.nativeChannel !== "function" || typeof previous.run !== "function" || typeof previous.selectJoinKey !== "function" || typeof previous.retrySelectedJoinKeys !== "function" ||
+    if (previous.version !== 20 || typeof previous.returnNativeDerivation !== "function" || typeof previous.nativeConfirmationFromChannel !== "function" || typeof previous.nativeDerivationFromChannel !== "function" || typeof previous.recoverChannelHistory !== "function" || typeof previous.prepareChainFromChannel !== "function" || typeof previous.nativeChannel !== "function" || typeof previous.run !== "function" || typeof previous.selectJoinKey !== "function" || typeof previous.retrySelectedJoinKeys !== "function" ||
         typeof previous.registerProtectedConfirmation !== "function" ||
         typeof previous.registerProtectedDerivation !== "function" || typeof previous.registerConfirmation !== "function" || typeof previous.createPair !== "function") {
       throw new Error("voice crypto broker version changed; reload required");

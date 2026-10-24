@@ -1,6 +1,7 @@
-//! Native/browser handoff. Application bootstrap exposes fixed public metadata and an
-//! authenticated Status/setup and existing-history loopback service. Action input/results and live call dispatch
-//! remain disabled until original authority, funding and actual drainage are integrated.
+//! Native/browser handoff. Application bootstrap exposes fixed public metadata and the
+//! authenticated typed action/history loopback service. Native maintenance produces Derive
+//! and confirmation work from original history or proven native actions. UI V2 activation and SDP/ICE/RTC
+//! integration remain unavailable; a working crypto handoff does not establish live calls.
 mod admission;
 pub(crate) mod application;
 pub(crate) mod bootstrap;

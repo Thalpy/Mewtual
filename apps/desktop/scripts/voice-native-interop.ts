@@ -78,6 +78,7 @@ const native: VoiceIpcNative = Object.freeze({
   },
   settleSetup: (owner: string, executor: string) => rpc<void>("settleSetup", { owner, executor }),
   collectChannel: (owner: string, executor: string) => rpc<void>("collectChannel", { owner, executor }),
+  readWork: (owner: string, executor: string, fromSlot: number) => rpc<unknown>("readWork", { owner, executor, fromSlot }),
 });
 const realFetch = globalThis.fetch;
 // Node does not supply a WebView Origin. This is the sole fetch shim: actual HTTP,
@@ -157,13 +158,35 @@ async function step(value: Step): Promise<unknown> {
       chain = ready.chain;
       const outcome = await ready.derivation.attempt();
       assert.equal(outcome.kind, "accepted");
+      await broker.returnNativeDerivation(owner, channel, chain);
       await idle();
       return { kind: outcome.kind };
     }
     case "child": {
       assert.ok(chain && parent, "original derived chain required");
       const purpose = Object.freeze({ parent: parent.purpose, parentRow: parent.row, request: value.request });
-      const handle = broker.nativeConfirmationFromChannel(owner, channel, chain, purpose);
+      // Native maintenance, not this control step or a Begin(true), must have selected
+      // and attached this exact original child. Pull its bounded public descriptor using
+      // the same production metadata handler/strict decoder as the parent.
+      let fromSlot = 0;
+      let selected: ReturnType<typeof decodeVoiceWorkSnapshot>["work"] = null;
+      while (fromSlot < 32) {
+        const snapshot = decodeVoiceWorkSnapshot(await rpc("readWork", {
+          owner: owner.token, executor: channelExecutor!, fromSlot,
+        }), owner.token, channelExecutor!, fromSlot);
+        fromSlot = snapshot.nextSlot;
+        const work = snapshot.work;
+        if (!work || work.state !== "attached" || work.purpose.kind !== "confirmation" || work.purpose.parent !== parent.row) continue;
+        const request = work.purpose.request === "start" ? { kind: "start", predecessor: work.purpose.predecessor }
+          : work.purpose.request === "respond" ? { kind: "respond", triggerRow: work.purpose.trigger }
+            : { kind: "incoming", role: work.purpose.role };
+        if (JSON.stringify(request) !== JSON.stringify(value.request)) continue;
+        assert.deepEqual(work.purpose.parentPurpose, { kind: "derive", ...parent.purpose });
+        selected = work; break;
+      }
+      assert.ok(selected?.state === "attached", "native maintenance must attach the original child before browser execution");
+      if (!selected || selected.state !== "attached") throw new Error("native child unavailable");
+      const handle = broker.nativeConfirmationFromChannel(owner, channel, chain, purpose, selected.row, selected.identity);
       let outcome = await handle.attempt();
       // Real bridge ingress need not be ready at the first bounded observation. Retry only
       // the SAME descriptor/Phase and original chain while native reports local pressure or

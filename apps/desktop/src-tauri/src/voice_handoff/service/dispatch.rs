@@ -1,7 +1,7 @@
-//! Closed interoperability-fixture dispatch over the real paid HTTP service. This entire
-//! module is cfg(test), selected only by a private Rust constructor. It cannot enable effects
-//! in a shipping application. Header authentication, existing Phase lookup, original body
-//! custody and all typed adapter authorization remain the same as the eventual live path.
+//! Closed production action dispatch over the original paid HTTP service. A native Context
+//! enables these adapters, never an HTTP flag or a renderer-supplied owner. Authentication
+//! precedes Phase lookup and allocation; each adapter still resolves original authority and
+//! performs its own final UI/Actor checks. This does not enable V2 call selection or RTC.
 use super::*;
 use crate::voice_handoff::{
     admission, channel, confirmation_admission, confirmation_begin, confirmation_input,
@@ -32,6 +32,18 @@ pub(super) fn admit(
     let authenticated = worker
         .authenticate(port, origin)
         .map_err(|_| Refused::Header)?;
+    // A valid MAC alone must not spend counters for an impossible operation/class/length
+    // or logical identity. The encrypted version/purpose is checked after AEAD by exactly
+    // one typed decoder; this fixed header predicate never chooses a fallback grammar.
+    if !requests::wire_shape(
+        authenticated.operation(),
+        authenticated.kind(),
+        authenticated.logical(),
+        authenticated.length(),
+        route.session_id(),
+    ) {
+        return Err(Refused::Header);
+    }
     let phase = match (authenticated.operation(), authenticated.kind()) {
         (Operation::Result, BodyKind::Data) => {
             let live = context.upgrade().ok_or(Refused::Binding)?;
@@ -73,6 +85,7 @@ pub(super) async fn respond(
     let result = match (version, operation) {
         (1, Operation::BeginDerive) => history::recover(context, route, incoming).seal(),
         (1, Operation::Input) => {
+            #[cfg(test)]
             if route.session().fixture_take_input_pressure() {
                 // Refuse one genuine authenticated Input at the real preflight boundary.
                 // Do not retain a broad live context across the wait, fabricate bytes or
@@ -84,10 +97,9 @@ pub(super) async fn respond(
                 let held = servers.lock_owned().await;
                 let reply = input::pull(context, route, incoming).await;
                 drop(held);
-                reply
-            } else {
-                input::pull(context, route, incoming).await
+                return reply.map_err(|_| Refused::Body);
             }
+            input::pull(context, route, incoming).await
         }
         (1, Operation::Admit) => admission::admit(context, route, incoming).await,
         (1, Operation::Result) => {

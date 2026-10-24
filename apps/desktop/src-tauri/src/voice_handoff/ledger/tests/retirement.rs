@@ -159,8 +159,8 @@ fn ordinary_compaction_drops_phase_and_never_invents_final_retirement() {
         ConfirmationStatus::NotRequested
     );
     assert!(
-        ledger.channel_may_close(&selected),
-        "actual original LocalJoin drop retired the plan"
+        !ledger.channel_may_close(&selected),
+        "actual LocalJoin drop retires Root, but original final delivery still needs Control"
     );
 }
 
@@ -211,7 +211,10 @@ fn original_plan_anchor_survives_compaction_and_cleanup_between_children_waits_f
         row.retire_plan().unwrap(),
         "repeated cleanup never captures a replacement"
     );
-    assert!(ledger.channel_may_close(&selected));
+    assert!(
+        !ledger.channel_may_close(&selected),
+        "Root drainage leaves final delivery outstanding"
+    );
     assert_eq!(
         row.confirmation_status().unwrap(),
         ConfirmationStatus::NotRequested,

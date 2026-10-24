@@ -1,7 +1,7 @@
-//! Separate inactive child grammar. These fields are lookup hints, NEVER native parent,
+//! Separate child grammar. These fields are lookup hints, NEVER native parent,
 //! Action, incoming-token or engine authority. Authenticate the original Session first;
 //! resolve the actual parent by its full selector/RowId, then the actual child's SAME parent
-//! allocation, purpose and header RowId. Production admits no child operation yet.
+//! allocation, purpose and header RowId. The dispatcher never falls back to the parent grammar.
 use super::{decode_kind, Cursor, Kind, Operation, PairSelector, VoiceError};
 use crate::voice_handoff::channel::BodyKind;
 use crate::voice_handoff::custody::CloseMode;

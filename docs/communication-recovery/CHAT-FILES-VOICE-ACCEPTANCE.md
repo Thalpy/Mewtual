@@ -1,5 +1,23 @@
 # Chat, files and voice implementation evidence
 
+## Production handoff continuation (24 October; validation in progress)
+
+Application-bound authenticated effects and native Derive/confirmation maintenance are now
+implemented in ordinary code. UI V2 activation remains unavailable. The isolated continuation
+is not yet a fully validated checkpoint: Root snapshot1/Actor snapshot4 and browser handoff/
+adapter159 focused tests pass, plus complete frontend2,656/check/build. Automatic native
+creation of Derive and all six confirmation actions passed the real blocked-TCP Node cycle
+(26.06s) and the first full native run. Subsequent review added Broker20 unseen-work cleanup,
+an irreversible first-effect fence and mandatory attached-parent final delivery, with current
+native handoff302, both capture races, and all8 TCP cases now pass (65.12s for TCP).
+Native strict Clippy/check/build and actual startup pass; complete current Root/native remain pending.
+HANDOVER records exact failures,
+corrections, logs and review scope. Earlier suite totals apply to their frozen revisions.
+
+The complete browser work pump and replay events, causal key/phase transfer, SDP/ICE/RTC,
+supported multi-peer composition, production media relay and combined/physical acceptance
+remain open. External download resume is owned by another session and excluded here.
+
 ## Pair observation and existing work metadata (24 October; validated)
 
 `2f35c49b` passes six new focused native pair-query regressions and seven real blocked-TCP

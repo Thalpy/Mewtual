@@ -1,6 +1,6 @@
-//! Inactive typed executor for the row-zero result. It owns the actual authenticated request
+//! Typed executor for the original Derive result. It owns the actual authenticated request
 //! through actor publication and completed-output collection, including after socket loss.
-//! This effect executor is not exposed by the listener: ingress serves only Status and read-only history.
+//! The application-bound authenticated listener routes only its exact v1 Result grammar here.
 use super::bootstrap::Route;
 use super::channel::{Incoming, Operation};
 use super::context::Context;
