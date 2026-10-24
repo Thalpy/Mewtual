@@ -7,6 +7,12 @@ delete its entry here (and any pointer to it).
 
 Flagged 24 October 2026.
 
+**Ready in PR #57** (branch `crypto-bigint-upgrade`). It does the whole checklist below in labelled
+steps: Rust 1.89 → 1.91 with checks and fixes, openmls 0.9.2, portmapper 0.19, then Rust 1.91 →
+1.94 with checks and fixes. It also fences the rest of RUSTSEC-2026-0387. When the trigger below is
+met, merge #57 (after re-checking it against `main`), then delete this entry and the pointer in
+`rust-toolchain.toml`.
+
 **Trigger:** both of these have been merged into `main`:
 
 - PR #54, "Chat method redesign" (branch `Chat-method-redesign`)
