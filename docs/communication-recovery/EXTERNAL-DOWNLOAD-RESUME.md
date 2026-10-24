@@ -1262,7 +1262,13 @@ Implemented:
   `unix_removes_in_a_group_writable_folder_only_for_a_user_private_group`. Seven guards were broken
   one at a time and each turned a test red (owner, primary gid, other primary, other member,
   unresolvable group, NSS sources, world-writable).
-- **Lost saved file: check and say so.** Replaces the "Saved until cleared" residual. When
+- **Lost saved file: check and say so.** Replaces the "Saved until cleared" residual. Scope
+  (corrected 24 October): a finished save releases its Download record, and with it the private
+  encrypted copy, as soon as it is published and its temporary name is settled
+  (`finish_download_response` then `finish_download_export`). A Saved row, and the private copy it
+  keeps, therefore exists only when that cleanup did not complete: the temporary `.mewtual-part`
+  name could not be removed yet (`STAGING_LEFT`), or Lock, a crash or a failed release came after
+  publication. Everything below applies to those rows only. When
   Transfers is shown (once per visit) and after acting on a Saved row, the renderer asks
   `check_saved_download(server, download, expectedIntent)`. Native reads the record (revision and
   Published journal), runs `saved_presence` (read-only: the folder must still be the identified one,
@@ -1275,7 +1281,8 @@ Implemented:
   renderer keeps it only for the same view and row revision. Outcomes: `present` keeps "Saved";
   `missing` shows "The saved file is no longer there"; `replaced` shows "The saved file was changed
   or replaced" (never claimed as ours); both offer **Save again**, the existing explicit fresh save
-  from the private encrypted copy (no-replace, fresh or numbered name, never automatic);
+  from the private encrypted copy that row still keeps (no-replace, fresh or numbered name, never
+  automatic);
   `unknown` (timeout, folder unreachable or moved, busy, a refused or unreadable answer) keeps
   "Saved" with the quiet hint "Saved, could not check the file". Clear is unchanged. No path in any
   answer, error or log. The new command is `account-read` in `security/command-policy.json`,
@@ -1431,8 +1438,12 @@ agents' `row.md` and `icons.md` (class contract `.sdl`, tokens only, motion and 
   before, and the status bar still counts every transfer. Native emits `download-progress` only
   while writing the readable file (the journaled export and the non-resumable writer), never while
   the private copy is acquired, so the live numbers count the saved side only. The renderer keeps
-  them apart from the live list's held-chunk floor (`savedDone`, `savedBytes`), and the row never
-  shows less than what native recorded durably for the same side.
+  them apart from the live list's held-chunk floor (`savedDone`, `savedBytes`). From the first
+  write event of the active save the row reads Saving (icon, word, In progress, no sentence, the
+  live bar), whatever native last reported, because the list refreshes only on journal steps and
+  the non-resumable writer has none; Removing keeps its own state. The row never shows less than
+  what native recorded durably for the same file, except for a fresh copy (Save new copy, Save
+  again, Save another copy, Save as on a row with a journal), which starts at its own zero.
 - **Bytes and chunks.** Native rows carry `receivedBytes` (declared sizes of the verified chunks,
   from the saved manifest), `savedBytes` (the journal's written bytes) and `totalBytes` (the
   declared size), all `null` together when the manifest cannot be read here; sizes only. The bar's
@@ -1453,7 +1464,7 @@ agents' `row.md` and `icons.md` (class contract `.sdl`, tokens only, motion and 
   | ready | The private encrypted copy is complete. Choose where to save the readable file. | `checked` with no journal; Save to Downloads or chosen place, Save as. |
   | paused | Paused. Resume download picks up where it left off. | `user_paused` without a journal; verified chunks are kept. |
   | save-paused | Saving is paused. Resume saving picks up from the last saved part. | Resume reopens the journal at its durable checkpoint (it halts as changed if the partial changed). |
-  | incomplete | The download stopped partway. Resume download fetches the parts still missing. | Acquisition interrupted; verified chunks are kept. |
+  | incomplete | The download stopped before it finished. Resume download continues it. | Acquisition interrupted (verified chunks are kept), or every part arrived but the final check did not finish (native's fallback branch). |
   | exhausted | It ran out of attempts to fetch the missing parts. Retry download tries again. | Allowance exhausted; Retry grants a new allowance, then resumes. |
   | blocked | Some received data did not pass its check, so the download stopped. Resume download tries again. | `blocked`: a deterministic content failure retried only after explicit Resume. |
   | save-interrupted | Saving stopped partway, for example when Mewtual closed or locked. Resume saving picks up from the last saved part. | A journal with no active writer and no halt. |
@@ -1461,14 +1472,16 @@ agents' `row.md` and `icons.md` (class contract `.sdl`, tokens only, motion and 
   | destination-changed | The partly saved file was changed by something else, so Mewtual stopped adding to it. Save new copy starts a separate file. | Halt Changed; Resume is not offered. |
   | saved, missing | The saved file is no longer there. Save again makes a fresh copy. | Saved check `missing`; Save again is the fresh save from the private copy. |
   | saved, replaced | A different file is at the saved name now. Save again makes a fresh copy. | Saved check `replaced`: another object at the name (an in-place edit keeps the identity and reads present). |
-  | removing, running | Removing the saved progress and the partly saved file Mewtual created. | Remove of a row in Deleting while this row's action runs. |
-  | removing, stuck | Mewtual could not finish removing the partly saved file. Choose Remove to try again, or Keep partly saved file. | A failed proven removal leaves the row in Removing (unreachable folder or a file in use). |
+  | removing, running | Working on it. The other actions wait until this one finishes. | A row in Deleting while one of its actions (Remove, Clear or Keep) runs; the sentence names none of them. |
+  | removing, stuck | Mewtual could not finish removing a file it created for this save. Choose Remove to try again, or Keep partly saved file. | A failed proven removal leaves the row in Removing (unreachable folder or a file in use); for a Clear of a saved row the file is only a temporary second name. |
+  | any, while a save writes | (none; the row reads Saving) | Native emits `download-progress` only while writing, and the list may not have refreshed since the save began (the non-resumable writer has no journal steps to refresh it); see "One row per file". |
 
   Deviations from the design copy: "Saved to the folder you chose" became "Saved to another
   folder" (and "Was saved to ..." when the file is missing or replaced), because nothing records
   that the user chose the place: native proves only whether the recorded folder is the resolved
   Downloads folder (`savedTo`), and a Downloads folder that moved since would make "you chose"
-  untrue. The design's Show in folder on a destination-unavailable row is not offered: the reveal
+  untrue. When native can tell neither (no resolvable Downloads folder, an unreadable journal),
+  the row names no folder and still offers Show in folder. The design's Show in folder on a destination-unavailable row is not offered: the reveal
   command works on Saved rows only. Group headings are `h3` under the tab's `h2`.
 - **Show in folder** (`reveal_saved_download`, `os-facing`): Saved rows whose file may still be
   there (present, not checked yet, could not check). The same fenced, bounded, read-only check as
@@ -1515,6 +1528,51 @@ agents' `row.md` and `icons.md` (class contract `.sdl`, tokens only, motion and 
   Show in folder; markup contracts; break-checked), the visual fixture
   (`?fixture=chat&transfers=1`, one row per state), and the `private-download` flow updated for
   the new markup.
+
+Adversarial review of `95eaeda6..1a3f67b4` and dispositions (no blocker or high):
+
+| Finding | Disposition |
+| --- | --- |
+| M1: a running save was not reflected in rows native last reported as ready or receiving-side (the non-resumable writer never refreshes the list mid-save), while the live list now left that file out | Fixed: from the first write event of the active save the row reads Saving with the live bar (`liveSaveFor` returns nothing before it). Tests: `a save in flight shows its live progress in its own row, as Saving` (six native states), the App test's live gating. |
+| M2: "Saved to another folder" was claimed whenever "Downloads" was not proven (an unreadable journal, no Downloads folder) | Fixed: native sends `savedTo: null` unless the journal was read; the renderer names no folder for `null`. Tests: native projection with `None`, `view("saved", "present", { savedTo: null }).where === null`. |
+| M3: focus fell to `<body>` when a group emptied (its heading unmounts), when a confirmed row stayed, or when Confirm clear vanished because a check found the file | Fixed: `rowFocusTarget` (the row's Remove or first action, the next row, the group heading, any row, then the tab heading with `tabindex="-1"`), applied after the confirmation unmounts and after the action, plus a refresh-time restore when the last focused row control left the page. Tests: `focus never falls to <body> ...` (four cases; break-checked by dropping the last fallback). |
+| L1: a fresh copy used the earlier file's counts as its floor | Fixed: the live record carries `fresh`; no floor for a fresh copy. Test in the Saving test. |
+| L2: the Removing sentences named Remove while Keep ran, and "partly saved file" for a Clear | Fixed: neutral running sentence; the stuck one says "a file it created for this save". |
+| L3: stale confirmations were never pruned | Fixed: each refresh drops entries whose row or token changed. |
+| L4: the live region kept its text, so a repeated sentence was not read again | Fixed: emptied, then set after a tick. |
+| L5: the Confirm button and Show in folder lacked a disabled description | Fixed: `aria-describedby` on Confirm; Show in folder gets `aria-busy` and a title while checking. |
+| L6: reveal residuals (window count not bounded by the slots, `xdg-open` of a swapped folder, Explorer's `/select,` with a comma) | Recorded in THREAT-MODEL; no change. |
+| L7: Lock could wait behind 32 journal reads under the session commit guard | Fixed: the reads run after the guarded listing, then a generation check. |
+| L8: the incomplete sentence overreached for a copy whose parts all arrived but whose check did not finish | Fixed: "The download stopped before it finished. Resume download continues it." |
+| L9: Clear skips confirmation on a check from any time in the current Transfers visit | Recorded as a design note: the check is per visit and per row revision. If the saved file is deleted later in the same visit, Clear is unconfirmed; it still keeps a temporary staging name that is the only copy (`KeptOnlyCopy`), but when that name is already gone too (for example a leftover from Lock after the staging name was removed) Clear releases the private copy, the last one Mewtual had. |
+| Re-review N1: the focus restore could move focus the user had not lost (returning to Transfers with focus on `<body>`, a deliberate blur followed by a row change, a long save finishing later) | Fixed: `runSavedRowAction` restores only when the control that had focus (or the one it moved focus to) left the page; the remembered row control is forgotten when focus moves anywhere else while it is still there, and when Transfers is left. Tests: focus moved elsewhere is never taken back. |
+| Re-review N2: after a non-confirm action focus preferred Remove | Fixed: Remove first only when returning from a confirmation; otherwise the row's first action. |
+| Re-review N3: USER_GUIDE said Show in folder selects the file on Linux | Fixed: "(on Linux, its folder)". |
+| Re-review N4: the L9 note overclaimed | Fixed (the row above). |
+| Re-review N5: no server-instance check after the journal reads | Fixed: the final check covers the server instance too. |
+
+## Ledger (24 October, Transfers UX)
+
+On top of `95eaeda6`, Windows host unless noted, all passing unless noted:
+
+- Frontend: the complete suite 2,550 passed, 0 failed; `npm run check` 0 errors, 0 warnings;
+  `npm run build`; `FLOW_PORT=5189 FLOW_SCENARIO=private-download npm run test:flows`.
+- Native: strict Clippy (all targets, all features, `-D warnings`), fmt, and the `--lib` filters
+  `private_downloads streamed_save fallback publish download stops_the_save lock
+  in_downloads_flag device_name keep_session`: 170 passed.
+- Root: `cargo test -p catcoms-storage --lib` 223 passed (1 existing ignored) and WSL Ubuntu 233
+  passed with Unix Clippy clean; `catcoms-app` `actor::file_transfers` serially 62 passed; Clippy for
+  storage, sync and app, and for storage on `x86_64-linux-android` and `armv7-linux-androideabi`;
+  fmt; `scripts/check-no-ambient.sh`; `scripts/check-store-raw-fs.sh`.
+- `cargo deny check`: bans, licenses and sources ok; advisories fail on RUSTSEC-2026-0387
+  (`crypto-bigint` 0.5.5 through `p256`, `hpke-rs-rust-crypto`, `openmls_rust_crypto`), published
+  after `95eaeda6` and unrelated to this change (no dependency changed); `deny.toml`'s ignore of
+  RUSTSEC-2026-0381 is reported as not encountered. Both are left to the dependency owner.
+- Screenshots of every row state, the Confirm remove pair and the tab's top, at 900 x 640 through
+  `?fixture=chat&transfers=1` in headless Edge over CDP (scratch, not in the repository).
+
+Not run: the complete root and native suites, `test:startup` (no setup or process change), and
+the native app on a real OS file manager for Show in folder.
 
 ## Ledger (23 October, PR51 review rounds)
 

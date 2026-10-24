@@ -85,8 +85,10 @@ fn status(download: &DownloadStatus) -> &'static str {
     }
 }
 /// The renderer row. `in_downloads` answers, for a saved row only, whether its file sits in the
-/// resolved Downloads folder (see [`UiDownload::saved_to`]); it is ignored for every other state.
-fn project(download: DownloadStatus, in_downloads: bool) -> UiDownload {
+/// resolved Downloads folder (`Some(true)`), proven elsewhere (`Some(false)`), or could not be
+/// told (`None`: no resolvable Downloads folder, or the journal could not be read); see
+/// [`UiDownload::saved_to`]. It is ignored for every other state.
+fn project(download: DownloadStatus, in_downloads: Option<bool>) -> UiDownload {
     let status = status(&download);
     let total_chunks = download.state.plan.chunks.len();
     let saved_chunks = match download.export {
@@ -95,7 +97,11 @@ fn project(download: DownloadStatus, in_downloads: bool) -> UiDownload {
         ExportView::None => 0,
     };
     let chosen_place = download.planned;
-    let saved_to = (status == "saved").then_some(if in_downloads { "downloads" } else { "other" });
+    let saved_to = match (status == "saved", in_downloads) {
+        (true, Some(true)) => Some("downloads"),
+        (true, Some(false)) => Some("other"),
+        _ => None,
+    };
     let bytes = download.bytes;
     let state = download.state;
     UiDownload {
@@ -147,28 +153,36 @@ pub(super) async fn get_private_downloads(
 ) -> Result<Vec<UiDownload>, String> {
     let generation = keep_session::invocation_generation(&state).await?;
     let (actor, instance) = actor_instance_of(&state, server).await?;
+    let downloads =
+        commit_kept_command(&state, server, instance, generation, actor.downloads()).await?;
     // Transfers UX: a saved row says "Saved to Downloads" only when its published journal's
-    // folder is exactly the resolved Downloads folder. One journal read per saved row (at most
-    // 32 rows), inside the same session fence as the listing; a row whose journal cannot be read
-    // here, or no resolvable Downloads folder, names no folder. No filesystem access: the
-    // journal's folder is compared as recorded.
+    // folder is exactly the resolved Downloads folder, and "another folder" only when the journal
+    // was read and its folder differs; anything else names no folder. One journal read per saved
+    // row (at most 32), outside the session commit guard so Lock never waits behind them, then a
+    // cheap generation check so nothing from another session is returned. No filesystem access:
+    // the journal's folder is compared as recorded.
     let folder = app.path().download_dir().ok();
-    let listing = async {
-        let downloads = actor.downloads().await?;
-        let mut rows = Vec::with_capacity(downloads.len());
-        for download in downloads {
-            let in_downloads = match (&folder, download.export == ExportView::Published) {
-                (Some(folder), true) => matches!(
-                    actor.download_export_state(download.id).await,
-                    Ok(Some(ExportState::Published(journal))) if journal.is_in_folder(folder)
-                ),
-                _ => false,
-            };
-            rows.push(project(download, in_downloads));
-        }
-        Ok(rows)
-    };
-    commit_kept_command(&state, server, instance, generation, listing).await
+    let mut rows = Vec::with_capacity(downloads.len());
+    for download in downloads {
+        let in_downloads = match (&folder, download.export == ExportView::Published) {
+            (Some(folder), true) => match actor.download_export_state(download.id).await {
+                Ok(Some(ExportState::Published(journal))) => Some(journal.is_in_folder(folder)),
+                _ => None,
+            },
+            _ => None,
+        };
+        rows.push(project(download, in_downloads));
+    }
+    if keep_session::invocation_generation(&state).await? != generation {
+        return Err("the UI session changed while the operation was in progress".into());
+    }
+    if !actor_instance_of(&state, server)
+        .await
+        .is_ok_and(|(_, now)| now == instance)
+    {
+        return Err("server changed".into());
+    }
+    Ok(rows)
 }
 #[tauri::command]
 pub(super) async fn set_private_download_paused(
@@ -2272,7 +2286,7 @@ mod tests {
         ];
         for (download, expected) in cases {
             // `in_downloads` is ignored for every state but saved.
-            let projected = project(download, true);
+            let projected = project(download, Some(true));
             assert_eq!(projected.status, expected);
             let json = serde_json::to_string(&projected).unwrap();
             assert!(!json.contains("path") && !json.contains("folder"), "{json}");
@@ -2291,16 +2305,15 @@ mod tests {
         }
         let json = serde_json::to_string(&project(
             download(KeepPhase::Completed, writing(None, false), |_| {}, true),
-            false,
+            Some(false),
         ))
         .unwrap();
         assert!(json.contains("\"savedChunks\":1"), "{json}");
-        // A saved row whose folder is not proven to be Downloads says only "other".
-        let elsewhere = project(
-            download(KeepPhase::Completed, ExportView::Published, |_| {}, true),
-            false,
-        );
-        assert_eq!(elsewhere.saved_to, Some("other"));
+        // A saved row whose journal was read and whose folder differs says "other"; one where
+        // nothing could be told (no Downloads folder, an unreadable journal) says nothing.
+        let saved = || download(KeepPhase::Completed, ExportView::Published, |_| {}, true);
+        assert_eq!(project(saved(), Some(false)).saved_to, Some("other"));
+        assert_eq!(project(saved(), None).saved_to, None);
     }
 
     #[test]

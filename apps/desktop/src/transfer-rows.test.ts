@@ -113,25 +113,33 @@ test("unknown byte counts fall back to chunks, and an empty file reads 0 B", () 
   assert.equal(empty.fraction, 1, "an empty file's one chunk is the whole file");
 });
 
-test("a save in flight shows its live progress in its own row", () => {
-  const live = { done: 30, total: 40, bytesDone: 9_300_000, bytesTotal: 12_400_000 };
-  const v = savedRowView(row("ready"), null, "report.pdf", live, { busy: false, saving: true });
-  assert.equal(v.bar!.kind, "saved");
-  assert.equal(v.bar!.label, "9.3 MB / 12.4 MB");
-  assert.equal(v.chunks, "30 of 40 chunks");
-  // Native emits live progress only while writing the file, so a receiving row keeps its durable
-  // received counts whatever the live record says.
-  const receiving = savedRowView(row("receiving"), null, "report.pdf", live, idle);
-  assert.equal(receiving.bar!.kind, "received");
-  assert.equal(receiving.bar!.label, "3.1 MB / 12.4 MB");
-  assert.equal(receiving.chunks, "12 of 40 chunks");
-  // Never below what native already recorded durably for the saved side.
-  const behind = savedRowView(row("saving"), null, "report.pdf", { done: 1, total: 40, bytesDone: 10, bytesTotal: 12_400_000 }, idle);
+test("a save in flight shows its live progress in its own row, as Saving", () => {
+  const live = { done: 30, total: 40, bytesDone: 9_300_000, bytesTotal: 12_400_000, fresh: false };
+  // Native's last state may still be ready, receiving or a halt (the list refreshes only on
+  // journal steps, and the non-resumable writer has none): while bytes are written it is Saving.
+  for (const status of ["ready", "receiving", "incomplete", "paused", "save-interrupted", "destination-unavailable"] as const) {
+    const v = savedRowView(row(status), null, "report.pdf", live, { busy: false, saving: true });
+    assert.deepEqual([v.state, v.word, v.group, v.icon, v.why], ["saving", "Saving", "progress", "saving", null], status);
+    assert.equal(v.bar!.kind, "saved");
+    assert.equal(v.bar!.label, "9.3 MB / 12.4 MB");
+    assert.equal(v.chunks, "30 of 40 chunks");
+  }
+  // Removing keeps its own state.
+  assert.equal(savedRowView(row("removing"), null, "report.pdf", live, idle).word, "Removing");
+  // Never below what native already recorded durably for the same file.
+  const behind = savedRowView(row("saving"), null, "report.pdf", { done: 1, total: 40, bytesDone: 10, bytesTotal: 12_400_000, fresh: false }, idle);
   assert.equal(behind.bar!.label, "1.0 MB / 12.4 MB");
   assert.equal(behind.chunks, "4 of 40 chunks");
+  // A fresh copy starts at its own zero: the old file's counts are no floor, and a saved row
+  // being saved again no longer offers Show in folder for the earlier copy meanwhile.
+  const again = savedRowView(row("saved"), "present", "report.pdf", { done: 0, total: 40, bytesDone: 0, bytesTotal: 12_400_000, fresh: true }, idle);
+  assert.deepEqual([again.word, again.bar!.label, again.chunks, again.canReveal, again.where],
+    ["Saving", "0 B / 12.4 MB", "0 of 40 chunks", false, null]);
+  const copy = savedRowView(row("destination-changed"), null, "report.pdf", { done: 2, total: 40, bytesDone: 200, bytesTotal: 12_400_000, fresh: true }, idle);
+  assert.equal(copy.chunks, "2 of 40 chunks");
   // Out-of-range live numbers are clamped, never shown past the total.
   const wild = savedRowView(row("saving"), null, "report.pdf",
-    { done: 99, total: 40, bytesDone: 99e9, bytesTotal: 12_400_000 }, idle);
+    { done: 99, total: 40, bytesDone: 99e9, bytesTotal: 12_400_000, fresh: false }, idle);
   assert.equal(wild.bar!.fraction, 1);
   assert.equal(wild.chunks, "40 of 40 chunks");
 });
@@ -154,8 +162,9 @@ test("each state has its one-line explanation, plain and without separators", ()
     }
   }
   // Removing explains whether it is running now or stuck from an earlier attempt.
-  assert.match(savedRowView(row("removing"), null, "a", null, { busy: true, saving: false }).why!, /^Removing the saved progress/);
-  assert.match(view("removing").why!, /could not finish removing/);
+  // Busy covers Remove, Clear and Keep alike, so the running sentence names none of them.
+  assert.match(savedRowView(row("removing"), null, "a", null, { busy: true, saving: false }).why!, /^Working on it/);
+  assert.match(view("removing").why!, /could not finish removing a file it created/);
   // Each explanation names a button that the row actually offers.
   for (const [status, check] of cases) {
     const v = view(status, check);
@@ -170,6 +179,10 @@ test("saved rows say where the file went without naming a folder native did not 
   assert.equal(view("saved", "present", { savedTo: "other" }).where, "Saved to another folder");
   assert.equal(view("saved", "missing").where, "Was saved to Downloads");
   assert.equal(view("saved", "replaced", { savedTo: "other" }).where, "Was saved to another folder");
+  // Neither proven (no Downloads folder, an unreadable journal, an older native): no folder named,
+  // Show in folder still offered.
+  assert.equal(view("saved", "present", { savedTo: null }).where, null);
+  assert.equal(view("saved", "present", { savedTo: null }).canReveal, true);
   assert.equal(view("saved", "unknown").hint, "Could not check the file");
   assert.equal(view("saved", "present").hint, null);
   // Show in folder only where the file may still be there.

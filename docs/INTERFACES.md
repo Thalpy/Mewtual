@@ -593,9 +593,12 @@ Renderer commands (no new command names):
   `destination-changed` and `saved`. Rows never carry a path, file name or file identity.
   Transfers UX (PR #51): rows also carry `receivedBytes`, `savedBytes` and `totalBytes` (plaintext
   byte counts from the saved manifest and the journal's written bytes; all `null` together when
-  native cannot read the manifest) and `savedTo` (`"downloads"` or `"other"` on a saved row,
-  `null` otherwise; "downloads" only when the published journal's recorded folder equals the
-  resolved Downloads folder exactly). The renderer accepts rows without these fields as unknown.
+  native cannot read the manifest) and `savedTo` on a saved row: `"downloads"` when the published
+  journal's recorded folder equals the resolved Downloads folder exactly, `"other"` when the
+  journal was read and its folder differs, `null` when that cannot be told (no resolvable
+  Downloads folder, an unreadable journal) and on every other row. The journal reads run outside
+  the session commit guard, followed by a generation check. The renderer accepts rows without
+  these fields as unknown and names no folder for `null`.
 - `reveal_saved_download(server, download, expectedIntent) -> ()` (Transfers UX, `os-facing`,
   main window only): the same fenced, bounded, read-only identity check as `check_saved_download`
   (check slot, 3 s sanctioned-clock wait, same revision and Saved journal before and after, UI

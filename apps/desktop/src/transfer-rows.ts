@@ -84,8 +84,12 @@ export const SAVED_ROW_GROUPS: readonly { id: SavedRowGroup; heading: string }[]
 /** The renderer's live record of a save in flight for this file, from native `download-progress`
  * events of the active invocation. Native emits those only while writing the readable file (the
  * journaled export and the non-resumable writer), never while the private copy is acquired, so
- * `done` and `bytesDone` count the saved side. `null` when nothing is running. */
-export type SavedRowLive = { done: number; total: number; bytesDone: number; bytesTotal: number };
+ * `done` and `bytesDone` count the saved side. The renderer passes one only after the first such
+ * event, so a row shows "Saving" exactly while bytes are being written. `fresh`: the save starts a
+ * new file (Save new copy, Save again, Save another copy, Save as on a row with a journal), so the
+ * row's durable saved counts belong to the earlier file and are no floor for this one. `null` when
+ * nothing is being written. */
+export type SavedRowLive = { done: number; total: number; bytesDone: number; bytesTotal: number; fresh: boolean };
 
 /** What else is going on for this row: an action of this row is pending (`busy`), or a save of
  * this file is running (`saving`). */
@@ -176,15 +180,18 @@ function explanation(state: PrivateDownloadStatus, check: SavedCheck | null, bus
     case "ready": return "The private encrypted copy is complete. Choose where to save the readable file.";
     case "paused": return "Paused. Resume download picks up where it left off.";
     case "save-paused": return "Saving is paused. Resume saving picks up from the last saved part.";
-    case "incomplete": return "The download stopped partway. Resume download fetches the parts still missing.";
+    // Also shown for a copy whose parts all arrived but whose final check did not finish.
+    case "incomplete": return "The download stopped before it finished. Resume download continues it.";
     case "exhausted": return "It ran out of attempts to fetch the missing parts. Retry download tries again.";
     case "blocked": return "Some received data did not pass its check, so the download stopped. Resume download tries again.";
     case "save-interrupted": return "Saving stopped partway, for example when Mewtual closed or locked. Resume saving picks up from the last saved part.";
     case "destination-unavailable": return "The folder or the partly saved file cannot be reached right now. Reconnect it and choose Try again, or save a new copy.";
     case "destination-changed": return "The partly saved file was changed by something else, so Mewtual stopped adding to it. Save new copy starts a separate file.";
+    // Busy covers Remove, Clear and Keep alike, so the running sentence names none of them; the
+    // stuck one names "a file it created" because a Clear removes only a temporary second name.
     case "removing": return busy
-      ? "Removing the saved progress and the partly saved file Mewtual created."
-      : "Mewtual could not finish removing the partly saved file. Choose Remove to try again, or Keep partly saved file.";
+      ? "Working on it. The other actions wait until this one finishes."
+      : "Mewtual could not finish removing a file it created for this save. Choose Remove to try again, or Keep partly saved file.";
     case "saved":
       if (check === "missing") return "The saved file is no longer there. Save again makes a fresh copy.";
       if (check === "replaced") return "A different file is at the saved name now. Save again makes a fresh copy.";
@@ -198,20 +205,21 @@ const savingSide = new Set<PrivateDownloadStatus>([
   "saving", "save-interrupted", "save-paused", "destination-unavailable", "destination-changed",
 ]);
 
-function bar(row: PrivateDownload, name: string, live: SavedRowLive | null): { bar: SavedRowBar | null; chunks: string | null } {
-  const received = receivingSide.has(row.status);
-  // A live save counts the saved side; a row that native still reports as ready (the list has
-  // not refreshed since the save began) shows that save too.
-  if (!received && !savingSide.has(row.status) && !live) return { bar: null, chunks: null };
+/** `state` is the state the row shows: native's, or "saving" while a save is being written (the
+ * list may not have refreshed since it began). */
+function bar(row: PrivateDownload, state: PrivateDownloadStatus, name: string, live: SavedRowLive | null): { bar: SavedRowBar | null; chunks: string | null } {
+  const received = receivingSide.has(state);
+  if (!received && !savingSide.has(state)) return { bar: null, chunks: null };
   const kind = received ? "received" : "saved";
-  // Live numbers apply only to the saved side, and never below what native already recorded
-  // durably for it (both only grow during one save).
+  // Live numbers count the saved side, never below what native already recorded durably for the
+  // same file (both only grow during one save); a fresh copy has no such floor.
   const progress = received ? null : live;
+  const floor = !progress?.fresh;
   const totalChunks = row.totalChunks;
-  const durableChunks = received ? row.verifiedChunks : row.savedChunks;
+  const durableChunks = !floor ? 0 : received ? row.verifiedChunks : row.savedChunks;
   const doneChunks = Math.min(totalChunks, Math.max(durableChunks, progress ? Math.floor(progress.done) : 0));
   const totalBytes = row.totalBytes ?? (progress && progress.bytesTotal > 0 ? progress.bytesTotal : null);
-  const durableBytes = received ? row.receivedBytes : row.savedBytes;
+  const durableBytes = !floor ? 0 : received ? row.receivedBytes : row.savedBytes;
   const doneBytes = totalBytes === null ? null
     : Math.min(totalBytes, Math.max(durableBytes ?? 0, progress ? Math.max(0, progress.bytesDone) : 0));
   const bytesKnown = doneBytes !== null && totalBytes !== null;
@@ -244,12 +252,19 @@ export function savedRowView(
   live: SavedRowLive | null,
   activity: SavedRowActivity,
 ): SavedRowView {
-  const saved = row.status === "saved";
-  const look = row.status === "saved" ? savedShape(check) : { ...shape[row.status], word: privateDownloadLabel(row) };
+  // While bytes are being written the row says "Saving", whatever native last reported (ready,
+  // receiving, a halt, or saved for Save another copy): the list refreshes only on journal steps,
+  // and the non-resumable writer has none. Removing keeps its own state.
+  const state: PrivateDownloadStatus = live && row.status !== "removing" ? "saving" : row.status;
+  const saved = state === "saved";
+  const look = state === "saved" ? savedShape(check)
+    : { ...shape[state], word: privateDownloadLabel({ ...row, status: state }) };
   const gone = saved && (check === "missing" || check === "replaced");
-  const where = !saved ? null
+  // Only what native proved: Downloads, or another folder; `null` (not proven either way) names
+  // no folder at all.
+  const where = !saved || row.savedTo === null ? null
     : `${gone ? "Was saved" : "Saved"} to ${row.savedTo === "downloads" ? "Downloads" : "another folder"}`;
-  const { bar: progress, chunks } = bar(row, name, live);
+  const { bar: progress, chunks } = bar(row, state, name, live);
   const actions = privateDownloadActions(row, saved ? check : null).map((action): SavedRowAction => {
     const disabledReason = activity.busy ? BUSY_REASON
       : action.needsIdle && activity.saving ? SAVING_REASON : null;
@@ -267,13 +282,13 @@ export function savedRowView(
   return {
     id: row.id,
     name,
-    state: row.status,
+    state,
     check: saved ? check : null,
     group: look.group,
     tone: look.tone,
     icon: look.icon,
     word: look.word,
-    why: explanation(row.status, saved ? check : null, activity.busy),
+    why: explanation(state, saved ? check : null, activity.busy),
     bar: progress,
     chunks,
     where,

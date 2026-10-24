@@ -1186,8 +1186,13 @@ no percentage) plus the chunk count, one checked sentence per state, "Saved to D
 inline Confirm remove, file-specific accessible names, disabled reasons, one polite live region
 for state changes. Native rows carry byte counts and `savedTo`. Deferred to a follow-up PR (owner
 decision): "Replace my older saved copy", which needs a durable record of saved copies first. On
-hold (owner): keeping finished saves listed; a finished save still releases its row and shows done
-in the live list. Details and dispositions in the design document's Transfers UX section.
+hold (owner): keeping finished saves listed; a finished save still releases its row (and its
+private copy) and shows done in the live list, so a Saved row is only an interrupted cleanup's
+leftover. A row reads Saving from the first written byte of its save. An adversarial review and a
+re-review found no blocker or high; their mediums (Saving state, unproven "another folder", focus
+handling) are fixed. `cargo deny` now fails on RUSTSEC-2026-0387 (`crypto-bigint` through `p256`),
+published after `95eaeda6` and unrelated to this work. Details, dispositions and the ledger are in
+the design document's Transfers UX section.
 
 ## Chat history adversarial checkpoint (2026-10-20)
 

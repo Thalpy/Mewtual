@@ -12150,7 +12150,7 @@
       const name = filesByCid.get(row.cid)?.name ?? `download-${row.cid.slice(0, 12)}`;
       const file = filesByCid.get(row.cid), started = Date.now();
       activeSaves[key] = operation;
-      downloads[key] = { server, cid: row.cid, name, operation, author: file?.author ?? "",
+      downloads[key] = { server, cid: row.cid, name, operation, author: file?.author ?? "", fresh: newCopy,
         status: "queued", progress: row.verifiedChunks / row.totalChunks, done: row.verifiedChunks,
         total: row.totalChunks, heldBefore: row.verifiedChunks, bytesDone: 0, bytesTotal: file?.size ?? 0,
         networkBytesDone: 0, speed: 0, lastRateAt: started, updatedAt: started, ts: started };
@@ -12276,8 +12276,10 @@
     if (activeServerId === null) return null;
     const key = dlKey(activeServerId, row.cid);
     const live = downloads[key];
-    return live && activeSaves[key] === live.operation
-      ? { done: live.savedDone ?? 0, total: live.total, bytesDone: live.savedBytes ?? 0, bytesTotal: live.bytesTotal }
+    // Only once this save has written something: before that the row keeps native's state.
+    return live && activeSaves[key] === live.operation && live.savedDone !== undefined
+      ? { done: live.savedDone, total: live.total, bytesDone: live.savedBytes ?? 0, bytesTotal: live.bytesTotal,
+          fresh: live.fresh === true }
       : null;
   }
   function savedRowName(row: PrivateDownload): string {
@@ -12307,18 +12309,57 @@
     await tick();
     document.querySelector<HTMLButtonElement>(`[data-sdl-remove="${row.id}"]`)?.focus();
   }
-  /** Run a row's action, keeping focus off `<body>` when the row goes away: the next row of the
-   * same group, else that group's heading. */
+  /** Where focus goes when the control that had it disappeared: while the row is still there, its
+   * Remove (back from a confirmation) or its first action; else the next row of the same group,
+   * the group's heading, the first row of any group, and last the tab's own heading. */
+  function rowFocusTarget(rowId: string, group: SavedRowGroup, nextId: string | undefined, fromConfirm: boolean): HTMLElement | null {
+    const remove = document.querySelector<HTMLElement>(`[data-sdl-row="${rowId}"] [data-sdl-remove]`);
+    const first = document.querySelector<HTMLElement>(`[data-sdl-row="${rowId}"] .sdl-act`);
+    return (fromConfirm ? remove ?? first : first)
+      ?? (nextId ? document.querySelector<HTMLElement>(`[data-sdl-row="${nextId}"] .sdl-act`) : null)
+      ?? document.getElementById(`sdl-${group}`)
+      ?? document.querySelector<HTMLElement>(".sdl-row .sdl-act")
+      ?? document.getElementById("transfers-title");
+  }
+  const focusLost = () => document.activeElement === document.body || !document.activeElement;
+  /** Run a row's action. Focus moves only when the control that had it was taken away (the
+   * confirmation, or the row itself) and focus fell to `<body>`, never otherwise: a long save that
+   * finishes while the user is elsewhere moves nothing. */
   async function runSavedRowAction(row: PrivateDownload, action: SavedRowAction, group: SavedRowGroup) {
+    const had = document.activeElement instanceof HTMLElement && document.activeElement !== document.body
+      ? document.activeElement : null;
     delete confirmRemove[row.id];
     const rows = savedRowGroups[group];
     const next = rows[rows.findIndex((view) => view.id === row.id) + 1];
+    await tick();
+    let holder = had;
+    // The confirmation that had focus is gone now; keep focus on this row meanwhile.
+    if (had && !had.isConnected && focusLost()) {
+      holder = rowFocusTarget(row.id, group, next?.id, action.confirm);
+      holder?.focus();
+    }
     await runPrivateDownloadAction(row, action.kind);
     await tick();
-    if (document.querySelector(`[data-sdl-row="${row.id}"]`)) return;
-    const target = (next && document.querySelector<HTMLElement>(`[data-sdl-row="${next.id}"] .sdl-act`))
-      ?? document.getElementById(`sdl-${group}`);
-    if (target && (document.activeElement === document.body || !document.activeElement)) target.focus();
+    if (holder && !holder.isConnected && focusLost()) rowFocusTarget(row.id, group, next?.id, action.confirm)?.focus();
+  }
+  // A control that had focus can also disappear on its own, for example Confirm clear when a
+  // check finds the saved file present. Remember the focused row control and, when it leaves the
+  // page while focus falls to <body>, put focus back on that row (or its neighbours). Moving focus
+  // anywhere else, or leaving Transfers, forgets it, so nothing is restored the user did not lose.
+  let lastRowFocus: { element: HTMLElement; row: string; group: SavedRowGroup } | null = null;
+  function noteRowFocus(event: FocusEvent) {
+    const element = event.target instanceof HTMLElement ? event.target : null;
+    const row = element?.closest<HTMLElement>("[data-sdl-row]")?.dataset.sdlRow;
+    const group = savedRowViews.find((view) => view.id === row)?.group;
+    lastRowFocus = element && row && group ? { element, row, group } : null;
+  }
+  function forgetRowFocus(event: FocusEvent) {
+    const element = event.target;
+    // A control taken out of the page may report focus leaving too; only a control that is still
+    // there means the user moved away.
+    queueMicrotask(() => {
+      if (lastRowFocus?.element === element && element instanceof HTMLElement && element.isConnected) lastRowFocus = null;
+    });
   }
   function rowButtonClick(row: PrivateDownload, action: SavedRowAction, group: SavedRowGroup) {
     if (action.disabled) return; // aria-disabled stays focusable, so its reason can be read
@@ -12347,20 +12388,40 @@
     }
   }
 
-  // State transitions, announced politely through one live region (never chunk ticks).
+  // State transitions, announced politely through one live region (never chunk ticks). The region
+  // is emptied first, so the same sentence later is read out again. Each refresh also drops
+  // confirmations that no longer match their row and restores focus lost with a removed control.
   let transfersAnnouncement = $state("");
   let announcedRowWords: Map<string, string> | null = null;
   $effect(() => {
     const views = savedRowViews;
     const shown = view === "downloads";
     untrack(() => {
+      for (const id of Object.keys(confirmRemove)) {
+        const row = privateDownloads.find((r) => r.id === id);
+        if (!row || confirmRemove[id] !== confirmToken(row)) delete confirmRemove[id];
+      }
       if (!shown) {
         announcedRowWords = null;
+        lastRowFocus = null;
         return;
       }
       const { announcement, words } = savedRowTransitions(announcedRowWords, views);
       announcedRowWords = words;
-      if (announcement) transfersAnnouncement = announcement;
+      if (announcement) {
+        transfersAnnouncement = "";
+        void tick().then(() => { transfersAnnouncement = announcement; });
+      }
+      const lost = lastRowFocus;
+      void tick().then(() => {
+        if (lost && lastRowFocus === lost && !lost.element.isConnected && focusLost()) {
+          lastRowFocus = null;
+          const rows = savedRowGroups[lost.group];
+          const at = rows.findIndex((v) => v.id === lost.row);
+          rowFocusTarget(lost.row, lost.group, at >= 0 ? rows[at + 1]?.id : rows[0]?.id,
+            lost.element.hasAttribute("data-sdl-confirm"))?.focus();
+        }
+      });
     });
   });
 
@@ -12469,6 +12530,9 @@
      * any; `done` and `bytesDone` above also count chunks already held locally. */
     savedDone?: number;
     savedBytes?: number;
+    /** This save starts a new file (Save new copy, Save again, Save another copy, or Save as on a
+     * row with a journal): the row's durable saved counts belong to the earlier file. */
+    fresh?: boolean;
     bytesDone: number;
     bytesTotal: number;
     networkBytesDone: number;
@@ -28476,8 +28540,8 @@
             {/if}
           </div>
         {:else if view === "downloads"}
-          <h2>Transfers</h2>
-          <div class="downloads-tab tab-pane">
+          <h2 id="transfers-title" tabindex="-1">Transfers</h2>
+          <div class="downloads-tab tab-pane" onfocusin={noteRowFocus} onfocusout={forgetRowFocus}>
             {#if privateDownloadError}<p class="muted" role="status">{privateDownloadError}</p>{/if}
             <!-- Transfers UX (PR #51): one polite live region announces state changes of the rows
                  below (never chunk ticks). -->
@@ -28515,6 +28579,7 @@
                                   <button class="sdl-act danger" type="button" data-sdl-confirm={saved.id}
                                     aria-label={words.confirmName}
                                     aria-disabled={action.disabled ? "true" : undefined}
+                                    aria-describedby={action.disabled ? `sdl-why-off-${saved.id}` : undefined}
                                     title={action.disabledReason ?? undefined}
                                     onkeydown={(e) => { if (e.key === "Escape") { e.stopPropagation(); void cancelRemove(row); } }}
                                     onclick={() => rowButtonClick(row, action, saved.group)}>{words.confirm}</button>
@@ -28540,12 +28605,14 @@
                               <span class="sdl-sr" id={`sdl-why-off-${saved.id}`}>{saved.actions.find((a) => a.disabled)?.disabledReason}</span>
                             {/if}
                           </div>
-                          {#if saved.where}
+                          {#if saved.where || saved.canReveal || saved.hint}
                             <p class="sdl-where">
-                              <span>{saved.where}</span>
+                              {#if saved.where}<span>{saved.where}</span>{/if}
                               {#if saved.canReveal}
                                 <button class="sdl-link" type="button" aria-label={`Show ${saved.name} in folder`}
                                   aria-disabled={revealingSaved[saved.id] ? "true" : undefined}
+                                  aria-busy={revealingSaved[saved.id] ? "true" : undefined}
+                                  title={revealingSaved[saved.id] ? "Checking the saved file" : undefined}
                                   onclick={() => revealSavedRow(row)}>{@render transferIcon("show-in-folder")} Show in folder</button>
                               {/if}
                               {#if saved.hint}<span class="sdl-hint">{saved.hint}</span>{/if}

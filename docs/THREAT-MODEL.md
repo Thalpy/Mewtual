@@ -719,9 +719,14 @@ writer keeps those properties.
   check as the saved-file check, then asks the system file manager to show the file selected; it
   never opens or runs it and returns no path. The check and the reveal are separate steps, so
   another account able to rename entries in that folder could swap the name between them; the
-  file manager then shows the swapped-in file selected, still without opening it. A compromised
-  renderer can call it repeatedly, which opens file manager windows for Mewtual's own saved files
-  only and is bounded by the two saved-check slots.
+  file manager then shows the swapped-in file selected, still without opening it. On Linux and
+  other non-macOS Unix the reveal hands the folder to `xdg-open`; if that folder were swapped for a
+  file in the same window, `xdg-open` would open that file (only someone able to rename the
+  folder's parent could arrange it). Windows passes `/select,<path>` to Explorer, whose parsing of a
+  comma inside the saved name is not defined (no drive or folder can be injected: saved names
+  carry no `:` or `\`). A compromised renderer can call it repeatedly: the two saved-check slots
+  bound how many checks run at once, not how many windows open, which matches opening links; the
+  windows show Mewtual's own saved files only.
 - **Fences.** In-session journal transitions require the original export lease; the Resume
   preflight's edges require a preflight observation bound to the actor lifetime, Root authority,
   storage mount and transfer epoch, plus an exact journal CAS; all require the original native

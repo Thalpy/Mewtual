@@ -10,14 +10,17 @@ const source = readFileSync(new URL("./App.svelte", import.meta.url), "utf8");
 const script = source.slice(source.indexOf(">", source.indexOf("<script")) + 1, source.indexOf("</script>"));
 const tree = ts.createSourceFile("App.ts", script, ts.ScriptTarget.ES2022, true, ts.ScriptKind.TS);
 const names = new Set(["liveSaveFor", "confirmingRemove", "askRemove", "cancelRemove", "runSavedRowAction",
-  "rowButtonClick", "revealSavedRow"]);
+  "rowButtonClick", "revealSavedRow", "rowFocusTarget"]);
 const handlers = tree.statements.filter((n) => ts.isFunctionDeclaration(n) && n.name && names.has(n.name.text));
 assert.equal(handlers.length, names.size);
-const token = tree.statements.find((n) => ts.isVariableStatement(n) &&
-  n.declarationList.declarations.some((d) => ts.isIdentifier(d.name) && d.name.text === "confirmToken"));
-assert.ok(token);
-const production = ts.transpileModule([token, ...handlers].map((n) => n.getFullText(tree)).join("\n"),
-  { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText;
+const constant = (name: string) => {
+  const found = tree.statements.find((n) => ts.isVariableStatement(n) &&
+    n.declarationList.declarations.some((d) => ts.isIdentifier(d.name) && d.name.text === name));
+  assert.ok(found, name);
+  return found!;
+};
+const production = ts.transpileModule([constant("confirmToken"), constant("focusLost"), ...handlers]
+  .map((n) => n.getFullText(tree)).join("\n"), { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText;
 
 const row = { id: "d".repeat(64), cid: "c".repeat(64), intent: "3", status: "paused" };
 const next = { id: "e".repeat(64), cid: "f".repeat(64), intent: "1", status: "incomplete" };
@@ -33,32 +36,61 @@ function app() {
     const savedRowGroups = { needs: [{ id: rowValue.id }, { id: nextValue.id }], progress: [], saved: [] };
     const dlKey = (server, cid) => server + ":" + cid;
     const tick = async () => {};
-    const element = (key) => ({ focus() { focused.push(key); } });
+    // A tiny DOM: rows by ID (each with a Remove and a first action), the headings of groups that
+    // still have rows (an emptied group's section unmounts), and the tab's own heading. Focusing
+    // an element makes it active; an element taken away leaves focus on <body>.
+    class HTMLElement {
+      constructor(key, connected = () => true) { this.key = key; this.connected = connected; }
+      get isConnected() { return this.connected(); }
+      focus() { focused.push(this.key); document.activeElement = this; }
+    }
+    const element = (key) => {
+      const row = key.match(/data-sdl-row="([0-9a-f]+)"/);
+      return new HTMLElement(key, () => !row || present.has(row[1]));
+    };
+    // The Confirm remove button the user pressed: it unmounts once the action has run.
+    let confirmShown = true;
+    const confirmButton = new HTMLElement("confirm", () => confirmShown);
     const document = {
-      body: { tag: "body" }, activeElement: null,
+      body: new HTMLElement("body"), activeElement: null,
       querySelector(selector) {
         const row = selector.match(/data-sdl-row="([0-9a-f]+)"/);
-        if (row && !present.has(row[1])) return null;
+        if (row) return present.has(row[1]) ? element(selector) : null;
+        if (selector === ".sdl-row .sdl-act") return present.size ? element(selector) : null;
         return element(selector);
       },
-      getElementById(id) { return element("#" + id); },
+      getElementById(id) {
+        if (id === "sdl-needs") return present.size ? element("#" + id) : null;
+        return element("#" + id);
+      },
     };
     const persist = new Set();
-    const runPrivateDownloadAction = async (target, kind) => { ran.push([target.id, kind]); if (!persist.has(target.id)) present.delete(target.id); };
+    const runPrivateDownloadAction = async (target, kind) => {
+      ran.push([target.id, kind]);
+      // The control that ran it (Confirm remove) is gone after the action, whatever happened; a
+      // control that had focus and is taken away leaves focus on <body>.
+      confirmShown = false;
+      if (!persist.has(target.id)) present.delete(target.id);
+      if (document.activeElement && !document.activeElement.isConnected) document.activeElement = document.body;
+    };
     const invoke = async (command, args) => { calls.push([command, args]); const reply = replies.get(command); if (reply instanceof Error) throw reply; return reply ?? null; };
     const unlockedViewCurrent = (gen, server) => !locked && gen === viewGeneration && server === activeServerId;
     const toast = (...args) => notices.push(args);
     const checkSavedRows = async () => { checks.push("check"); };
     ${production}
-    document.activeElement = document.body;
+    document.activeElement = confirmButton;
     return {
       ran, focused, calls, notices, checks, replies,
+      blur() { document.activeElement = document.body; },
+      focusElsewhere() { document.activeElement = new HTMLElement("composer"); },
       set downloads(value) { downloads = value; }, set activeSaves(value) { activeSaves = value; },
       set server(value) { activeServerId = value; },
       set savedChecks(value) { savedChecks = value; }, get savedChecks() { return savedChecks; },
       get confirmRemove() { return confirmRemove; },
       keep(id) { persist.add(id); },
+      gone(id) { present.delete(id); },
       liveSaveFor, confirmingRemove, askRemove, cancelRemove, rowButtonClick, runSavedRowAction, revealSavedRow,
+      rowFocusTarget,
     };
   `)(row, next);
 }
@@ -71,9 +103,11 @@ test("a save in flight feeds its own row only while it is the active invocation"
   a.downloads = { [key]: { operation: "save-1", done: 7, total: 9, bytesDone: 700, bytesTotal: 900 } };
   assert.equal(a.liveSaveFor(row), null, "no active save of this file");
   a.activeSaves = { [key]: "save-1" };
-  assert.deepEqual(a.liveSaveFor(row), { done: 0, total: 9, bytesDone: 0, bytesTotal: 900 });
+  assert.equal(a.liveSaveFor(row), null, "nothing written yet: the row keeps native's state");
   a.downloads = { [key]: { operation: "save-1", done: 7, total: 9, bytesDone: 700, bytesTotal: 900, savedDone: 5, savedBytes: 500 } };
-  assert.deepEqual(a.liveSaveFor(row), { done: 5, total: 9, bytesDone: 500, bytesTotal: 900 });
+  assert.deepEqual(a.liveSaveFor(row), { done: 5, total: 9, bytesDone: 500, bytesTotal: 900, fresh: false });
+  a.downloads = { [key]: { operation: "save-1", done: 7, total: 9, bytesDone: 700, bytesTotal: 900, savedDone: 0, fresh: true } };
+  assert.deepEqual(a.liveSaveFor(row), { done: 0, total: 9, bytesDone: 0, bytesTotal: 900, fresh: true });
   a.activeSaves = { [key]: "save-2" };
   assert.equal(a.liveSaveFor(row), null, "a stale record of an older save");
   a.activeSaves = { [key]: "save-1" };
@@ -118,18 +152,36 @@ test("actions that need no confirmation run at once, and disabled ones do nothin
   assert.deepEqual(a.ran, [[row.id, "resume"]]);
 });
 
-test("focus moves to the next row, or the group heading, when a row goes away", async () => {
+test("focus never falls to <body> when a confirmation or a row goes away", async () => {
+  // The row goes: the next row of the group.
   const a = app();
   await a.runSavedRowAction(row, remove, "needs");
   assert.ok(a.focused.at(-1).includes(`data-sdl-row="${next.id}"`), "the next row's first action");
+  // The last row of a group that still has rows: its heading.
   const b = app();
   await b.runSavedRowAction(next, remove, "needs");
-  assert.equal(b.focused.at(-1), "#sdl-needs", "the last row hands focus to its group heading");
-  // A row that is still there keeps focus where it is.
+  assert.equal(b.focused.at(-1), "#sdl-needs");
+  // The group empties, so its section and heading unmount: the tab's own heading.
+  const d = app();
+  d.gone(next.id);
+  await d.runSavedRowAction(row, remove, "needs");
+  assert.equal(d.focused.at(-1), "#transfers-title");
+  // The row stays (a stuck removal, an error): the confirmation that had focus is gone, so focus
+  // goes back to the row's Remove.
   const c = app();
   c.keep(row.id);
-  await c.runSavedRowAction(row, { ...remove, kind: "pause" }, "needs");
-  assert.deepEqual(c.focused, []);
+  await c.runSavedRowAction(row, remove, "needs");
+  assert.equal(c.focused.at(-1), `[data-sdl-row="${row.id}"] [data-sdl-remove]`);
+  // Focus the user moved elsewhere meanwhile (a long save finishing later) is never taken back.
+  const e = app();
+  e.focusElsewhere();
+  await e.runSavedRowAction(row, remove, "needs");
+  assert.deepEqual(e.focused, []);
+  // Away from a confirmation, a row that stays gets its first action, not Remove.
+  const f = app();
+  f.keep(row.id);
+  assert.equal(f.rowFocusTarget(row.id, "needs", undefined, false).key, `[data-sdl-row="${row.id}"] .sdl-act`);
+  assert.equal(f.rowFocusTarget(row.id, "needs", undefined, true).key, `[data-sdl-row="${row.id}"] [data-sdl-remove]`);
 });
 
 test("Show in folder sends only the Download ID and revision, and a refusal re-checks the row", async () => {
