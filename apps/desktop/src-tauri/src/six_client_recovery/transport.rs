@@ -13,7 +13,7 @@ mod catchup_trace;
 
 #[test]
 fn ordinary_trace_bounds_phase_and_request_history_with_explicit_truncation() {
-    let scenario = Scenario::new(false);
+    let scenario = Scenario::observations(false);
     for _ in 0..PHASE_TRACE_LIMIT + 3 {
         scenario.rules.begin_phase(&"λ".repeat(200));
     }
@@ -49,7 +49,7 @@ fn ordinary_trace_bounds_phase_and_request_history_with_explicit_truncation() {
 
 #[test]
 fn ordinary_trace_distinguishes_lost_waiter_from_a_returned_transport_error() {
-    let scenario = Scenario::new(false);
+    let scenario = Scenario::observations(false);
     let observation = scenario
         .rules
         .observe_ordinary(0, scenario.rules.peers[1], 19);
@@ -84,7 +84,7 @@ fn ordinary_trace_retains_only_byte_count_after_a_reply_then_outer_waiter_is_los
             self.0.store(true, Ordering::Release);
         }
     }
-    let scenario = Scenario::new(false);
+    let scenario = Scenario::observations(false);
     let dropped = Arc::new(AtomicBool::new(false));
     let answer = Ok(Bytes::from_owner(Payload(dropped.clone(), [9; 4])));
     let observation = scenario
@@ -250,7 +250,7 @@ impl Drop for OrdinaryObservation {
 
 #[test]
 fn ordinary_trace_drop_preserves_an_original_failure_after_trace_poisoning() {
-    let scenario = Scenario::new(false);
+    let scenario = Scenario::observations(false);
     let observation = scenario
         .rules
         .observe_ordinary(0, scenario.rules.peers[1], 19);
@@ -764,7 +764,7 @@ impl MeshTransport for Transport {
 /// after the helper authenticates the probe and the requester authenticates its exact result.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn automatic_recovery_notifications_reach_authenticated_tcp_endpoints() {
-    let mut scenario = Scenario::new(false);
+    let mut scenario = Scenario::new(false, isolate().await);
     // Only these three devices are members. Closing three members of a six-member group would
     // leave authenticated offline targets/helper witnesses in the ordinary recovery schedule,
     // which does not establish receipt through the specific adapter path asserted below.

@@ -159,8 +159,8 @@ impl Scenario {
     }
 }
 
-async fn new_channel_bridge_scenario() {
-    let mut scenario = Scenario::new(true);
+async fn new_channel_bridge_scenario(admission: FixtureAdmission) {
+    let mut scenario = Scenario::new(true, admission);
     scenario.admit().await;
     scenario.rules.drop_gossip.store(true, Ordering::Release);
     scenario.close(&[0, 1, 2]).await;
@@ -245,8 +245,8 @@ async fn new_channel_bridge_scenario() {
     assert!(scenario.rules.trace.lock().unwrap().dropped_gossip > 0);
 }
 
-async fn missed_membership_bridge_scenario() {
-    let mut scenario = Scenario::new(true);
+async fn missed_membership_bridge_scenario(admission: FixtureAdmission) {
+    let mut scenario = Scenario::new(true, admission);
     scenario.admit().await;
     let mut expected = History::new();
     // Removed-author semantic history is separately scoped (R6). This matrix uses original
@@ -349,16 +349,18 @@ async fn missed_membership_bridge_scenario() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn new_channel_is_discovered_served_without_ui_open_and_sealed_by_every_recipient() {
+    let admission = isolate().await;
     tokio::select! {
-        _ = new_channel_bridge_scenario() => {},
+        _ = new_channel_bridge_scenario(admission) => {},
         _ = SystemClock.sleep(Duration::from_secs(300)) => panic!("new-channel bridge matrix exceeded its total bound"),
     }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn missed_membership_recovers_before_chat_through_non_founder_and_replacement_bridge() {
+    let admission = isolate().await;
     tokio::select! {
-        _ = missed_membership_bridge_scenario() => {},
+        _ = missed_membership_bridge_scenario(admission) => {},
         _ = SystemClock.sleep(Duration::from_secs(300)) => panic!("membership bridge matrix exceeded its total bound"),
     }
 }

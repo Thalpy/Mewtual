@@ -285,7 +285,7 @@ async fn observe_legacy_gap(scenario: &Scenario, bridge: usize) {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn legacy_voice_signals_have_no_member_bridge_fallback_on_tcp() {
-    let mut scenario = Scenario::new(false);
+    let mut scenario = Scenario::new(false, isolate().await);
     scenario.admit().await;
     let original_endpoints = wait_for_saved_bridge_endpoints(&scenario).await;
     // Native fixture blocks endpoint 1--2 in the actual swarm throughout admission/restart.

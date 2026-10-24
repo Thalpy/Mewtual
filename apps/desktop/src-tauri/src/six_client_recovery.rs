@@ -19,6 +19,27 @@ mod voice_live;
 use runtime::{mount, network, register, Running};
 use transport::{forbidden, NetworkRules, Trace, Transport};
 
+/// Each scenario models separate desktops inside ONE test process. Independent scenarios
+/// must not accidentally compete for that process's maintenance/file/helper pools. The six
+/// clients WITHIN one scenario still run concurrently with unchanged production limits.
+struct FixtureAdmission {
+    capacity: Arc<tokio::sync::Semaphore>,
+    _permit: tokio::sync::OwnedSemaphorePermit,
+}
+async fn isolate() -> FixtureAdmission {
+    static CAPACITY: std::sync::OnceLock<Arc<tokio::sync::Semaphore>> = std::sync::OnceLock::new();
+    let capacity = CAPACITY
+        .get_or_init(|| Arc::new(tokio::sync::Semaphore::new(1)))
+        .clone();
+    let permit = capacity.clone().acquire_owned().await.expect(
+        "an earlier recovery fixture failed before actual actor/driver shutdown; inspect its failure first"
+    );
+    FixtureAdmission {
+        capacity,
+        _permit: permit,
+    }
+}
+
 /// Two independent oracles: the product projection and the exact original signed-operation
 /// union. Rendered equality alone cannot detect a helper re-authoring or dropping signed history.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -88,6 +109,16 @@ struct Client {
     running: Option<Running>,
     driver: Option<watch::Receiver<MeshObservationSnapshot>>,
 }
+impl Drop for Client {
+    fn drop(&mut self) {
+        if self.running.is_some() || self.driver.is_some() {
+            // A failed fixture aborts tasks but cannot claim they synchronously drained.
+            // Preserve its vault until those actual owners disappear rather than deleting
+            // storage ahead of their asynchronous shutdown and obscuring the original error.
+            self.root.disable_cleanup(true);
+        }
+    }
+}
 
 struct Scenario {
     clients: Vec<Client>,
@@ -95,10 +126,34 @@ struct Scenario {
     clock: SystemClock,
     reverse: bool,
     token: u128,
+    // Last: successful scenarios have awaited every actor and driver before returning the
+    // isolation turn. Failure closes admission instead of starting another contaminated run.
+    admission: Option<FixtureAdmission>,
+}
+impl Drop for Scenario {
+    fn drop(&mut self) {
+        if let Some(admission) = &self.admission {
+            if self
+                .clients
+                .iter()
+                .any(|client| client.running.is_some() || client.driver.is_some())
+            {
+                admission.capacity.close();
+                assert!(std::thread::panicking(), "recovery fixture must await all actual actors/drivers before releasing admission");
+            }
+        }
+    }
 }
 
 impl Scenario {
-    fn new(reverse: bool) -> Self {
+    fn new(reverse: bool, admission: FixtureAdmission) -> Self {
+        Self::build(reverse, Some(admission))
+    }
+    /// Trace-only tests create no actor/driver; admit_prefix refuses this unstarted owner.
+    fn observations(reverse: bool) -> Self {
+        Self::build(reverse, None)
+    }
+    fn build(reverse: bool, admission: Option<FixtureAdmission>) -> Self {
         // Opt-in structured diagnostics keep the normal fixture quiet while making a failed
         // stage reproducible without changing its schedule or manufacturing recovery work.
         if std::env::var_os("RUST_LOG").is_some() {
@@ -145,6 +200,7 @@ impl Scenario {
             clock,
             reverse,
             token: 0,
+            admission,
         }
     }
 
@@ -173,6 +229,10 @@ impl Scenario {
     }
 
     async fn admit_prefix_with_files(&mut self, count: usize, files: bool) {
+        assert!(
+            self.admission.is_some(),
+            "real clients require isolated fixture admission"
+        );
         assert!(matches!(count, 3 | 6));
         for index in 0..count {
             let state = mount(self.clients[index].root.path()).await;
@@ -644,8 +704,8 @@ impl Scenario {
     }
 }
 
-async fn six_client_scenario(hostile: bool) {
-    let mut scenario = Scenario::new(hostile);
+async fn six_client_scenario(hostile: bool, admission: FixtureAdmission) {
+    let mut scenario = Scenario::new(hostile, admission);
     scenario.admit().await;
     scenario.rules.drop_gossip.store(hostile, Ordering::Release);
     let mut common = History::new();
@@ -814,16 +874,18 @@ async fn six_client_scenario(hostile: bool) {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn six_client_native_restart_and_partition_recovery() {
+    let admission = isolate().await;
     tokio::select! {
-        _ = six_client_scenario(false) => {},
+        _ = six_client_scenario(false, admission) => {},
         _ = SystemClock.sleep(Duration::from_secs(600)) => panic!("six-client baseline exceeded its total bound"),
     }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn six_client_native_reversed_reopen_gossip_loss_and_command_load() {
+    let admission = isolate().await;
     tokio::select! {
-        _ = six_client_scenario(true) => {},
+        _ = six_client_scenario(true, admission) => {},
         _ = SystemClock.sleep(Duration::from_secs(600)) => panic!("six-client hostile variant exceeded its total bound"),
     }
 }

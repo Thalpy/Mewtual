@@ -158,8 +158,8 @@ async fn assert_final_projection(
     }
 }
 
-async fn three_bubbles() {
-    let mut scenario = Scenario::new(true);
+async fn three_bubbles(admission: FixtureAdmission) {
+    let mut scenario = Scenario::new(true, admission);
     scenario.admit().await;
     scenario.rules.drop_gossip.store(true, Ordering::Release);
     // Admission already submits these permitted dials; wait for actual native capture of the
@@ -417,8 +417,9 @@ async fn three_bubbles() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn three_chat_bubbles_merge_edits_deletes_and_removed_author_history_through_a_replacement_bridge(
 ) {
+    let admission = isolate().await;
     tokio::select! {
-        _ = three_bubbles() => {},
+        _ = three_bubbles(admission) => {},
         _ = SystemClock.sleep(Duration::from_secs(600)) => panic!("three-bubble chat acceptance exceeded its total bound"),
     }
 }

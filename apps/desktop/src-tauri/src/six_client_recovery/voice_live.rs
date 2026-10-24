@@ -72,7 +72,7 @@ async fn native_webcrypto_cycle(end_before_input: bool, automatic_browser: bool)
             Err(error) => Err(error),
         }
     }
-    let mut scenario = Scenario::new(false);
+    let mut scenario = Scenario::new(false, isolate().await);
     scenario.admit().await;
     scenario.close(&[3, 4, 5]).await;
     scenario.rules.drop_gossip.store(true, Ordering::Release);
@@ -370,7 +370,7 @@ async fn both_fresh(
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn native_v2_discovers_blocked_endpoints_through_unjoined_tcp_bridge_then_restored_replacement(
 ) {
-    let mut scenario = Scenario::new(false);
+    let mut scenario = Scenario::new(false, isolate().await);
     scenario.admit().await;
     let saved = super::voice::wait_for_saved_bridge_endpoints(&scenario).await;
     scenario.close(&[3, 4, 5]).await;
@@ -475,7 +475,7 @@ async fn native_v2_confirmation_known_incoming_retry_survives_permanent_input_lo
 }
 
 async fn confirmation_over_blocked_tcp(framed: bool, reject: bool, known_incoming: bool) {
-    let mut scenario = Scenario::new(false);
+    let mut scenario = Scenario::new(false, isolate().await);
     scenario.admit().await;
     scenario.close(&[3, 4, 5]).await;
     scenario.rules.drop_gossip.store(true, Ordering::Release);
@@ -599,7 +599,7 @@ async fn confirmation_over_blocked_tcp(framed: bool, reject: bool, known_incomin
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn native_v2_confirmation_alias_claims_refuse_before_publication_in_both_barrier_orderings() {
     for (wrong_first, lose_input) in [(true, false), (false, false), (true, true), (false, true)] {
-        let mut scenario = Scenario::new(false);
+        let mut scenario = Scenario::new(false, isolate().await);
         scenario.admit().await;
         scenario.close(&[3, 4, 5]).await;
         scenario.rules.drop_gossip.store(true, Ordering::Release);
