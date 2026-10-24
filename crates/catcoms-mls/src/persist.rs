@@ -111,6 +111,11 @@ fn deserialize_map(bytes: &[u8]) -> Result<HashMap<Vec<u8>, Vec<u8>>, MlsError> 
     Ok(map)
 }
 
+// Frozen openmls 0.8.1 fixtures: stored state from the alpha builds must keep restoring after any
+// openmls upgrade. See the module docs before touching the fixture files.
+#[cfg(test)]
+mod compat_tests;
+
 #[cfg(test)]
 mod tests {
     use super::*;
