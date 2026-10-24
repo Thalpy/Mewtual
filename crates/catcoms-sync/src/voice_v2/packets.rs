@@ -34,7 +34,65 @@ pub(super) struct ConfirmationCapacity {
     incoming: Arc<slots::ReservedSlots>,
     outgoing: Arc<slots::ReservedSlots>,
 }
+/// One native Offer/Answer row per direction, carved from the original confirmation
+/// parents after obsolete rows return. No fresh global claim is acquired or refunded.
+pub(super) struct SdpPacketCapacity {
+    incoming: Arc<slots::ReservedSlots>,
+    outgoing: Arc<slots::ReservedSlots>,
+}
+impl SdpPacketCapacity {
+    pub(super) fn incoming_slot(&self, slots: &PacketSlots) -> Result<slots::Slot, VoiceError> {
+        self.incoming.loan(&slots.incoming)
+    }
+    pub(super) fn outgoing_slot(&self, slots: &PacketSlots) -> Result<slots::Slot, VoiceError> {
+        self.outgoing.loan(&slots.outgoing)
+    }
+    pub(super) fn close(&self) {
+        self.incoming.close();
+        self.outgoing.close();
+    }
+}
+impl Drop for SdpPacketCapacity {
+    fn drop(&mut self) {
+        self.close();
+    }
+}
+/// Slot custody is independent of payload custody. Keep the exact successor LAST even
+/// when an event/byte credit has already dropped, so parent drainage cannot precede Slot.
+pub(super) struct PacketSlot {
+    _slot: slots::Slot,
+    _exchange: Option<Arc<Exchange>>,
+}
+impl From<slots::Slot> for PacketSlot {
+    fn from(slot: slots::Slot) -> Self {
+        Self {
+            _slot: slot,
+            _exchange: None,
+        }
+    }
+}
+impl PacketSlot {
+    pub(super) fn successor(slot: slots::Slot, exchange: Arc<Exchange>) -> Self {
+        Self {
+            _slot: slot,
+            _exchange: Some(exchange),
+        }
+    }
+}
 impl PacketSlots {
+    #[cfg(test)]
+    pub(in crate::voice_v2) fn fill_unreserved_for_test(
+        &self,
+    ) -> (Vec<slots::Slot>, Vec<slots::Slot>) {
+        (
+            (0..RESERVATIONS)
+                .map_while(|_| self.incoming.charge(1).ok())
+                .collect(),
+            (0..RESERVATIONS)
+                .map_while(|_| self.outgoing.charge(1).ok())
+                .collect(),
+        )
+    }
     pub(super) fn new() -> Self {
         Self {
             incoming: Arc::new(slots::Slots::with_limit(RESERVATIONS)),
@@ -54,6 +112,11 @@ impl PacketSlots {
     }
 }
 impl ConfirmationCapacity {
+    pub(super) fn subreserve_sdp(&self) -> Result<SdpPacketCapacity, VoiceError> {
+        let incoming = self.incoming.subreserve(1)?;
+        let outgoing = self.outgoing.subreserve(1)?;
+        Ok(SdpPacketCapacity { incoming, outgoing })
+    }
     pub(super) fn outgoing_slot(&self, slots: &PacketSlots) -> Result<slots::Slot, VoiceError> {
         self.outgoing.loan(&slots.outgoing)
     }
@@ -66,6 +129,13 @@ impl ConfirmationCapacity {
     pub(super) fn close(&self) {
         self.incoming.close();
         self.outgoing.close();
+    }
+}
+impl Drop for ConfirmationCapacity {
+    fn drop(&mut self) {
+        // This wrapper owns closing rights, not just Arc handles. Abandonment/unwind must
+        // return unused claims even when a delayed actual Slot retains the parent allocation.
+        self.close();
     }
 }
 
@@ -145,9 +215,9 @@ struct Outgoing {
     // borrow this SAME capacity; a live chain lease alone carries no prepaid progress bytes.
     workflow: Option<Arc<super::chain::Workflow>>,
     _credit: Credit,
-    exchange: Option<Arc<Exchange>>,
     // Native table custody, separate from retained bytes and actual transport copies.
-    _slot: slots::Slot,
+    _slot: PacketSlot,
+    exchange: Option<Arc<Exchange>>,
 }
 #[derive(Clone)]
 pub(super) enum PendingConfirmation {
@@ -171,8 +241,8 @@ struct Incoming {
     token: RevocationOwner,
     confirmation: Option<PendingConfirmation>,
     _credit: Arc<Credit>,
+    _slot: PacketSlot,
     exchange: Option<Arc<Exchange>>,
-    _slot: slots::Slot,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -403,8 +473,8 @@ pub struct CommittedPacket {
 pub(super) struct ConsumedIncoming {
     _token: RevocationOwner,
     _confirmation: Option<PendingConfirmation>,
+    _slot: PacketSlot,
     _exchange: Option<Arc<Exchange>>,
-    _slot: slots::Slot,
 }
 
 /// Private synchronous transaction plan. It must not cross an await: its sole ledger owner
@@ -1400,20 +1470,27 @@ impl PacketLedger {
         if self.incoming.len() >= RESERVATIONS {
             return Err(VoiceError::Capacity);
         }
+        let exchange = self.sdp_owner(header, true)?;
         let slot = if let Some(workflow) = &workflow {
-            workflow.incoming_confirmation_slot(
-                &self.resources,
-                self.scope,
-                &self.lease,
-                &self.packet_slots,
-                &object,
-            )?
+            workflow
+                .incoming_confirmation_slot(
+                    &self.resources,
+                    self.scope,
+                    &self.lease,
+                    &self.packet_slots,
+                    &object,
+                )?
+                .into()
+        } else if let Some(exchange) = exchange
+            .as_ref()
+            .filter(|owner| owner.uses_successor_packet_claims())
+        {
+            exchange.incoming_sdp_slot(header, &self.packet_slots)?
         } else {
-            self.packet_slots.incoming.charge(1)?
+            self.packet_slots.incoming.charge(1)?.into()
         };
         let token = self.serial.checked_add(1).ok_or(VoiceError::Reservation)?;
         let aad = object.aad()?;
-        let exchange = self.sdp_owner(header, true)?;
         let bytes = 2 * (aad.len() + ciphertext.len()) + 256;
         let credit = Arc::new(if let Some(exchange) = &exchange {
             exchange.charge(Stage::RemotePacket, bytes)?

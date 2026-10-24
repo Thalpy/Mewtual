@@ -30,6 +30,7 @@ const LOWER_BYTES: usize = 2 * SOURCE_WIRE_BYTES + 4096 + ROUTE_METADATA_BYTES;
 const ACTION_BYTES: usize = CIPHERTEXT + MAX_AAD + 1536;
 const ENGINE_BYTES: usize = 4 * (CIPHERTEXT + MAX_AAD) + 3 * MAX_SDP_PLAINTEXT + 2048;
 const RESULT_BYTES: usize = MAX_SDP_PLAINTEXT + 1040;
+mod packet_capacity;
 
 /// Native allocation purpose. Callers cannot replace one phase with another to escape the
 /// record limits: each consuming factory selects its own stage, independently of IPC input.
@@ -63,6 +64,10 @@ impl Stage {
 }
 struct State {
     closed: bool,
+    // The original parents may initially have no unused positions. Once obsolete cache
+    // rows return them, carve exactly1+1 children, then close surplus originals outside State.
+    packet_parents: Option<super::packets::ConfirmationCapacity>,
+    packet_claims: Option<super::packets::SdpPacketCapacity>,
     // Retired outside the phase fence; actual Lower borrowers keep original group custody.
     lower_lanes: Option<Arc<GroupForwardLanes>>,
     used: [usize; STAGES],
@@ -189,6 +194,7 @@ impl Exchange {
             lowers,
             slots,
             ready,
+            packets,
             proof,
             lane,
             metadata,
@@ -216,6 +222,8 @@ impl Exchange {
             lane,
             state: Mutex::new(State {
                 closed: false,
+                packet_parents: Some(packets),
+                packet_claims: None,
                 lower_lanes: Some(lowers),
                 used: [0; STAGES],
                 action_preparing: [false; 2],
@@ -347,6 +355,8 @@ impl Exchange {
             lane,
             state: Mutex::new(State {
                 closed: false,
+                packet_parents: None,
+                packet_claims: None,
                 lower_lanes: Some(lower_lanes),
                 used: [0; STAGES],
                 action_preparing: [false; 2],
@@ -525,13 +535,17 @@ impl Exchange {
     /// Retire effects separately through their actual protocol leases. This releases unused
     /// capacity only. Actual stage credits keep both this owner and their retired lane alive.
     pub(crate) fn close(&self) {
-        let lower_lanes = {
+        let (lower_lanes, packet_parents, packet_claims) = {
             let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
             if state.closed {
                 return;
             }
             state.closed = true;
-            state.lower_lanes.take()
+            (
+                state.lower_lanes.take(),
+                state.packet_parents.take(),
+                state.packet_claims.take(),
+            )
         };
         self.live.revoke();
         self.reserve.close();
@@ -540,6 +554,12 @@ impl Exchange {
         }
         self.action_slots.close();
         self.lane.close();
+        if let Some(parents) = packet_parents {
+            parents.close();
+        }
+        if let Some(claims) = packet_claims {
+            claims.close();
+        }
         // Never close another phase's capacity. Dropping this handle outside State releases
         // idle slots only when no live phase or actual Lower retains the original owner.
         drop(lower_lanes);
@@ -612,10 +632,11 @@ mod tests {
             + size_of::<Reservation>()
             + size_of::<WorkLane>()
             + size_of::<super::super::crypto_actions::slots::ReservedSlots>()
+            + 2 * size_of::<super::super::crypto_actions::slots::ReservedSlots>()
             + size_of::<super::super::LeaseState>()
             + size_of::<SdpSuccessor>()
             + 2 * size_of::<DeviceId>()
-            + 5 * 2 * size_of::<usize>();
+            + 7 * 2 * size_of::<usize>();
         assert!(
             bytes < METADATA_BYTES,
             "successor native owner graph grew to {bytes}"

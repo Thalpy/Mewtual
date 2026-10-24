@@ -291,7 +291,11 @@ impl Workflow {
         {
             return Err(VoiceError::Unauthorized);
         }
-        self.packets.confirmation_incoming_slot(slots)
+        state
+            .packets
+            .as_ref()
+            .ok_or(VoiceError::Unauthorized)?
+            .confirmation_incoming_slot(slots)
     }
 }
 

@@ -162,7 +162,6 @@ pub struct Workflow {
     live: CallLease,
     control: Weak<PreparedChain>,
     reserve: Arc<Reservation>,
-    packets: super::packets::ConfirmationCapacity,
     state: Mutex<WorkflowState>,
     // MUST remain last. Arc's weak strong_count reaches0 BEFORE Drop/field destruction;
     // neither that count nor Workflow::close proves its actual capacity fields returned.
@@ -241,6 +240,9 @@ impl ConfirmationControl {
 }
 struct WorkflowState {
     closed: bool,
+    // Closing rights move with the lane. Actual old packet rows may occupy every original
+    // claim; returning them after extraction must feed the SAME successor reservation.
+    packets: Option<super::packets::ConfirmationCapacity>,
     // Taken affinely after freezing this phase. Old close/Drop may retire its reserve
     // and Lower custody, but must never close a lane already owned by the SDP transition.
     crypto: Option<Arc<WorkLane>>,
@@ -531,9 +533,9 @@ impl PreparedChain {
                     live,
                     control: control.clone(),
                     reserve,
-                    packets,
                     state: Mutex::new(WorkflowState {
                         closed: false,
+                        packets: Some(packets),
                         crypto: Some(crypto),
                         lowers: Some(lowers),
                         handoff_busy: false,
@@ -740,10 +742,14 @@ impl Workflow {
         }
     }
     fn close(&self) {
-        let (lowers, crypto) = {
+        let (lowers, crypto, packets) = {
             let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
             state.closed = true;
-            (state.lowers.take(), state.crypto.take())
+            (
+                state.lowers.take(),
+                state.crypto.take(),
+                state.packets.take(),
+            )
         };
         self.reserve.close();
         if let Some(crypto) = crypto {
@@ -753,7 +759,9 @@ impl Workflow {
         // Release this phase's handle outside its state fence. A real Lower or another live
         // phase retains the shared owner, while closed idle inputs no longer pin slots.
         drop(lowers);
-        self.packets.close();
+        if let Some(packets) = packets {
+            packets.close();
+        }
     }
 }
 impl Drop for Workflow {

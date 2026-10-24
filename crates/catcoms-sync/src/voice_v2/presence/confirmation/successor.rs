@@ -179,6 +179,9 @@ impl LocalJoin {
             unreachable!()
         };
         let owner = owner.clone();
+        // All three old Proof attempts may have occupied the original outgoing table.
+        // Cache retirement above returns them to these SAME moved parents before splitting.
+        owner.prepare_packet_claims()?;
         actor.with_local_origin(binding.peer, authority.context, |wall, mono, origin| {
             final_owner(wall, mono)?;
             if !room.lease.is_live()

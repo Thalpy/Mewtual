@@ -1,5 +1,30 @@
 # Mewtual; Handover
 
+## Original packet reservations move with the successor (24 October)
+
+The pending successor now owns the original packet-reservation closing rights. Obsolete
+HIGH cache retirement returns actual slots to the same parents; only then does preparation
+carve one incoming/one outgoing child and close surplus. Partial splitting rolls back to
+the original parent, without refunding to the ordinary table. Abandoned tickets close unused
+claims. Actual successor PacketSlot retains Exchange last even after payload/event custody
+is gone, so native whole-plan drainage cannot overtake that slot.
+
+Focused Root voice checks pass582 (12.13s), including all three real published Proof attempts,
+lost first/second replies, full ordinary packet tables, partial split retry, abandoned ticket,
+and last-slot drainage. Both endpoints' inactive-lender regression uses actual native Finish
+and a live original epoch proof before asserting Unauthorized and unused claims. Strict Sync
+all-target/all-feature Clippy passes. Native handoff checks pass306 (10.53s) for the same
+production inputs; later changes strengthen Root-only test fixtures. Native check passes;
+native lint/TCP validation is still running. Full suites remain deferred during integration.
+Read-only review found no blocker/high/medium; its inactive-fixture LOW prompted the genuine
+Finish strengthening. Old confirmation slot retirement must stay synchronous inside the
+actual LocalJoin borrow unless a detached owner gains its own fixed-plan metadata anchor.
+
+Prepared claims still lend no SDP authority. Ready production/admission, browser SDP/ICE/RTC,
+multi-peer composition, media relay and combined/physical acceptance remain open. ICE needs
+separate capacity and must not consume these two SDP claims. External download resume remains
+excluded; independent-device/network audio acceptance is unavailable on the single desktop.
+
 ## Ready byte prepayment and terminal HIGH caches (24 October; focused checks passed)
 
 Original successor preparation now prepays a separate32KiB Ready envelope before extraction,

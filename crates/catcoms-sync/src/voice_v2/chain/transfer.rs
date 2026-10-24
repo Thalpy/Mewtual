@@ -42,12 +42,14 @@ impl Drop for Preparation {
     }
 }
 
-/// One extracted original Crypto lane and prepaid SDP envelope. Not Clone and not a
+/// One extracted original Crypto lane, packet-reservation closing rights and prepaid SDP
+/// envelope. Not Clone and not a
 /// capability to sign, compute, dispatch or report a pair ready. No Workflow is retained:
 /// actual old input/Lower owners alone determine the separate retirement witness.
 /// Dropping this ticket closes its lane; it never reopens confirmation or renews time.
 pub struct TransferredSdpCapacity {
     lane: Option<Arc<WorkLane>>,
+    packets: Option<super::super::packets::ConfirmationCapacity>,
     _prepared: Option<PreparedSdpCapacity>,
     retirement: ConfirmationRetirement,
 }
@@ -83,6 +85,10 @@ impl TransferredSdpCapacity {
             lowers,
             slots,
             ready,
+            packets: self
+                .packets
+                .take()
+                .expect("one original packet reservation owner"),
             proof: SuccessorProof(binding),
             lane: self.lane.take().expect("one original idle lane"),
             metadata,
@@ -127,6 +133,7 @@ pub(in crate::voice_v2) struct TransferredParts {
     pub lowers: Arc<GroupForwardLanes>,
     pub slots: Arc<slots::ReservedSlots>,
     pub ready: super::super::ready::capacity::ReadyCapacity,
+    pub packets: super::super::packets::ConfirmationCapacity,
     pub proof: SuccessorProof,
     pub lane: Arc<WorkLane>,
     pub metadata: Credit,
@@ -181,6 +188,9 @@ impl Drop for TransferredSdpCapacity {
     fn drop(&mut self) {
         if let Some(lane) = self.lane.take() {
             lane.close();
+        }
+        if let Some(packets) = self.packets.take() {
+            packets.close();
         }
     }
 }
@@ -318,6 +328,10 @@ impl ConfirmationControl {
         chain.binding.transition.close();
         state.closed = true;
         let lane = state.crypto.take().expect("checked original idle lane");
+        let packets = state
+            .packets
+            .take()
+            .expect("original open packet reservations");
         control.closed = true;
         chain.live.revoke();
         let original = control.workflow.take();
@@ -339,6 +353,7 @@ impl ConfirmationControl {
         drop(workflow);
         Ok(TransferredSdpCapacity {
             lane: Some(lane),
+            packets: Some(packets),
             _prepared: Some(prepared),
             retirement,
         })

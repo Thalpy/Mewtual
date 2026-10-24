@@ -166,7 +166,12 @@ impl PacketLedger {
         }
         // Preserve ordinary refusal before RNG. A protected row instead loans the actual
         // matching workflow position after its native header has been formed below.
-        let ordinary_slot = if workflow.is_none() {
+        let successor_sdp = matches!(request.kind, EncryptedKind::Offer | EncryptedKind::Answer)
+            && self
+                .sdp
+                .as_ref()
+                .is_some_and(|sdp| sdp.owner.uses_successor_packet_claims());
+        let ordinary_slot = if workflow.is_none() && !successor_sdp {
             Some(self.packet_slots.outgoing.charge(1)?)
         } else {
             None
@@ -207,6 +212,7 @@ impl PacketLedger {
             sequence,
             offer,
         };
+        let exchange = self.sdp_owner(&header, false)?;
         let (slot, confirmation_deadline, chain) = if let Some(workflow) = &workflow {
             let (slot, deadline, chain) = workflow.outgoing_confirmation_slot(
                 &self.resources,
@@ -216,9 +222,18 @@ impl PacketLedger {
                 &self.packet_slots,
                 &header,
             )?;
-            (slot, deadline, Some(chain))
+            (slot.into(), deadline, Some(chain))
+        } else if successor_sdp {
+            (
+                exchange
+                    .as_ref()
+                    .ok_or(VoiceError::Unauthorized)?
+                    .outgoing_sdp_slot(&header, &self.packet_slots)?,
+                u64::MAX,
+                None,
+            )
         } else {
-            (ordinary_slot.expect("ordinary slot"), u64::MAX, None)
+            (ordinary_slot.expect("ordinary slot").into(), u64::MAX, None)
         };
         let issued = clock.now_ms();
         let expires = issued
@@ -226,7 +241,6 @@ impl PacketLedger {
             .ok_or(VoiceError::Freshness)?;
         let draft = PacketDraft::new(self.scope, public_key, id, issued, expires, header)?;
         let aad = draft.aad();
-        let exchange = self.sdp_owner(&draft.header, false)?;
         let deadline = self.sdp_deadline(exchange.as_ref())?;
         // Same byte formula for every lane. Workflow loans retain their actual variable owner;
         // permanent result/history rows are paid separately by the protected producer's fixed row.

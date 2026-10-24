@@ -33,11 +33,145 @@ fn prepare(
         final_owner,
     )
 }
+
+#[test]
+fn third_native_hello_finishes_with_every_proof_slot_retained_then_moves_original_packet_rights() {
+    let mut p = fixture();
+    let mut predecessor = None;
+    for attempt in 0..3 {
+        let hello = start(&mut p, predecessor);
+        let (hello_object, hello_plain) = protected_seal(&mut p.f.low, &p.low, &hello, &p.f.clock);
+        predecessor = Some(hello_object.id());
+        let (_, high_open) = admit(&mut p.f.high, &p.high, hello_object, &p.f.clock);
+        opened(
+            &mut p.f.high,
+            &p.high,
+            &high_open,
+            &hello_plain,
+            &p.f.clock,
+            &mut p.f.rng,
+        );
+        let proof = respond(
+            &mut p.f.high,
+            &p.high,
+            p.f.id,
+            &high_open,
+            &p.f.clock,
+            &mut p.f.rng,
+        )
+        .unwrap();
+        let (proof_object, proof_plain) =
+            protected_seal(&mut p.f.high, &p.high, &proof, &p.f.clock);
+        if attempt != 2 {
+            // Real published Proof rows remain retained while LOW observes lost replies.
+            // No manufactured settled/candidate boolean substitutes for the next handshake.
+            continue;
+        }
+        let (_, low_open) = admit(&mut p.f.low, &p.low, proof_object, &p.f.clock);
+        opened(
+            &mut p.f.low,
+            &p.low,
+            &low_open,
+            &proof_plain,
+            &p.f.clock,
+            &mut p.f.rng,
+        );
+        let finish = respond(
+            &mut p.f.low,
+            &p.low,
+            p.f.id,
+            &low_open,
+            &p.f.clock,
+            &mut p.f.rng,
+        )
+        .unwrap();
+        let (finish_object, finish_plain) =
+            protected_seal(&mut p.f.low, &p.low, &finish, &p.f.clock);
+        let (_, high_finish) = admit(&mut p.f.high, &p.high, finish_object, &p.f.clock);
+        opened(
+            &mut p.f.high,
+            &p.high,
+            &high_finish,
+            &finish_plain,
+            &p.f.clock,
+            &mut p.f.rng,
+        );
+    }
+    assert_eq!(p.f.high.join.published_source_packets().count(), 3);
+    let before =
+        p.f.high
+            .join
+            .ledger
+            .packet_slots()
+            .fill_unreserved_for_test();
+    assert_eq!((before.0.len(), before.1.len()), (26, 29));
+    let output = prepare(&mut p, |_, _| Ok(())).unwrap();
+    assert!(output.confirmation_drained());
+    assert!(p.f.high.join.published_source_packets().next().is_none());
+    let surplus =
+        p.f.high
+            .join
+            .ledger
+            .packet_slots()
+            .fill_unreserved_for_test();
+    assert_eq!((surplus.0.len(), surplus.1.len()), (5, 2));
+    // One incoming and one outgoing child remain prepaid even after all released surplus
+    // is occupied. This establishes packet capacity, not causal Ready/Offer/RTC admission.
+    let remaining =
+        p.f.high
+            .join
+            .ledger
+            .packet_slots()
+            .fill_unreserved_for_test();
+    assert!(remaining.0.is_empty() && remaining.1.is_empty());
+}
 fn pending(p: &ProtectedFixture) -> Arc<Exchange> {
     match &p.f.high.join.confirmations.pairs[&p.f.id].sdp_successor {
         Some(Preparation::Transferred(owner)) => owner.clone(),
         _ => panic!("actual transferred native holder"),
     }
+}
+
+#[test]
+fn prepared_packet_claims_cannot_lend_before_native_activation() {
+    let mut p = confirmed_high();
+    let high = prepare(&mut p, |_, _| Ok(())).unwrap();
+    let binding =
+        p.f.high
+            .join
+            .chain_binding(p.f.id, &ca(&p.f.high.context, &p.f.high.lease));
+    assert!(high.owner.successor_current_at(
+        &binding,
+        &p._runtimes[1].resources(),
+        p.f.clock.monotonic_ms()
+    ));
+    high.owner
+        .assert_inactive_packet_lenders_for_test(p.f.high.join.ledger.packet_slots());
+
+    // LOW extraction is test-scoped capacity construction only. Production still has no
+    // LOW factory before authenticated Ready. Its actual local Finish/epoch must exist so
+    // no independent proof gate can hide accidental removal of the activation check.
+    let chain = p.f.low.join.confirmations.pairs[&p.f.id]
+        .chain
+        .clone()
+        .unwrap();
+    let workflow = chain.workflow().unwrap();
+    let control = workflow.confirmation_control();
+    let ticket = control
+        .transfer_sdp_capacity(control.prepare_sdp_capacity().unwrap())
+        .unwrap();
+    let low = Exchange::from_transferred(ticket, Vec::new());
+    low.prepare_packet_claims().unwrap();
+    let binding =
+        p.f.low
+            .join
+            .chain_binding(p.f.id, &ca(&p.f.low.context, &p.f.low.lease));
+    assert!(low.successor_current_at(
+        &binding,
+        &p._runtimes[0].resources(),
+        p.f.clock.monotonic_ms()
+    ));
+    low.assert_inactive_packet_lenders_for_test(p.f.low.join.ledger.packet_slots());
 }
 
 #[test]

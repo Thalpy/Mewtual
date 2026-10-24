@@ -21,6 +21,24 @@ fn plan_drained(binding: &PlanBinding) -> bool {
 }
 
 impl Workflow {
+    /// Capacity-only table fixture: occupy every ORIGINAL claim without inventing a new
+    /// global pool or reducing a limit. Native third-attempt tests use real packet rows.
+    #[cfg(test)]
+    pub(in crate::voice_v2) fn occupy_packet_slots_for_test(
+        &self,
+        tables: &super::super::packets::PacketSlots,
+    ) -> (Vec<slots::Slot>, Vec<slots::Slot>) {
+        let state = self.state.lock().unwrap();
+        let packets = state.packets.as_ref().unwrap();
+        (
+            (0..if self.binding.low { 3 } else { 6 })
+                .map(|_| packets.confirmation_incoming_slot(tables).unwrap())
+                .collect(),
+            (0..if self.binding.low { 6 } else { 3 })
+                .map(|_| packets.outgoing_slot(tables).unwrap())
+                .collect(),
+        )
+    }
     /// Only HIGH's actual native Finish-open makes its old outgoing Hello/Proof work
     /// obsolete. Closed old state is irreversible. LOW must keep Finish retries until
     /// its separately authenticated Ready admission exists; this predicate excludes LOW.

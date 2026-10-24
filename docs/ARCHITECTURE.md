@@ -1,5 +1,17 @@
 # Mewtual; Architecture
 
+## Original packet closing rights (24 October)
+
+Affine extraction moves the original confirmation packet reservations with the Crypto lane.
+Old packet rows return their actual slots to those same parents. After obsolete HIGH caches
+are removed, the successor carves one incoming and one outgoing child and closes surplus;
+a partial split returns to the original parent without an ordinary-table refund. This also
+works when all three original Proof rows were retained before the successful third attempt.
+Abandoned tickets and capacity wrappers close unused claims explicitly. Successor PacketSlot
+keeps the exact Exchange last, independently of payload/event custody, so whole-plan drainage
+cannot precede the last actual packet slot. ICE requires separate capacity. Prepared claims
+remain unusable before native activation; this does not implement Ready or SDP admission.
+
 ## Ready capacity and old confirmation cache retirement (24 October)
 
 Affine successor preparation now prepays a separate32KiB Ready reservation in addition to

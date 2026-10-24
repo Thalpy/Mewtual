@@ -1,5 +1,16 @@
 # Mewtual; Interfaces & Hooks Schema
 
+## Successor packet claims (24 October)
+
+Extraction now moves original packet-reservation closing rights rather than subreserving
+only currently unused positions. Private `prepare_packet_claims` retries the same parents
+after cache retirement and retains both one-row children on success. Slot lenders compare
+the original pair/direction and table identity and require native activation. PacketLedger
+still owns exact OfferId authorization. Neither lender falls back to ordinary capacity.
+Successor slots retain Exchange through actual return, including separated consumed input.
+Old confirmation retirement remains synchronous inside an actual LocalJoin borrow; a future
+detached retirement task would need an independent original fixed-plan metadata anchor.
+
 ## Prepared Ready capacity and terminal HIGH cache cleanup (24 October)
 
 `prepare_sdp_capacity` now pays a separate32KiB Ready envelope before extracting the original

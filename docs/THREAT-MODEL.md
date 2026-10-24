@@ -1,5 +1,15 @@
 # Threat model; client integrity & enforcement boundaries
 
+## Occupied original packet reservations (24 October)
+
+All three retained HIGH Proof attempts may occupy every original outgoing claim. Successor
+capacity must therefore move the original parents, retire obsolete caches, and split after
+actual return; it cannot refund and reacquire from the shared table. Partial splitting is
+rollback-safe and closes no live original parent. Unused closing rights return on ticket
+abandonment. Actual successor slots retain Exchange even after payload custody disappears,
+preventing premature whole-plan cleanup. Both direction lenders reject prepared-but-inactive
+owners without consuming claims. This is capacity enforcement, not Ready, SDP/ICE or RTC.
+
 ## Ready prepayment cannot authorize a transition (24 October)
 
 The new32KiB subtree is paid before successor extraction and remains inside original

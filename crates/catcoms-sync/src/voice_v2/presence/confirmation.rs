@@ -328,6 +328,10 @@ impl ConfirmationRetirement {
     fn finish(self, join: &mut LocalJoin) {
         // Called only after the current Engine/result fence has returned. A different
         // action's engine/payload locks and credit destruction must never nest inside that fence.
+        // Keep retirement synchronous within this actual LocalJoin borrow. Its original
+        // chain/history payment anchors separated confirmation table slots until drop(self).
+        // Moving ConsumedIncoming into a detached task would need its own fixed-plan anchor;
+        // successor packet slots already retain their exact Exchange independently.
         if let Some(crypto) = &self.crypto {
             crypto.retire_if_unstarted();
         }

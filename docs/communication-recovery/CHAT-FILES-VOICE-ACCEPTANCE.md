@@ -2647,3 +2647,14 @@ Clippy passes (target/voice-native-action-fence-clippy-rerun.log). The first lin
 an oversized enum variant, corrected by a prepaid boxed inbound owner. Native typed tagging now
 streams borrowed variable fields, avoiding an extra encoding copy. Full branch suites remain
 deferred until the programme is coherent.
+# Original packet-reservation continuation (24 October)
+
+The successor moves original confirmation packet closing rights, retires obsolete HIGH
+caches, and then carves one incoming/one outgoing child. All three actual Proof rows can
+remain retained before successful native Finish; no shared-table refund/reacquisition gap
+is needed. Partial split, abandoned ticket and actual last-slot drainage are covered.
+Both inactive-lender directions use real native Finish/epoch proofs at both endpoints.
+Focused Root voice582 and native handoff306 pass; strict Sync Clippy and native check pass.
+Native lint/TCP validation remains in progress. Full current suites remain deferred during
+integration. This is capacity/lifetime evidence, not Ready, SDP/ICE/RTC or audio acceptance.
+

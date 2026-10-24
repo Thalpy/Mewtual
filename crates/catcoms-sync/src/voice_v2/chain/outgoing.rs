@@ -44,7 +44,11 @@ impl Workflow {
             return Err(VoiceError::Unauthorized);
         }
         Ok((
-            self.packets.outgoing_slot(slots)?,
+            state
+                .packets
+                .as_ref()
+                .ok_or(VoiceError::Unauthorized)?
+                .outgoing_slot(slots)?,
             self.binding.deadline,
             self.live.clone(),
         ))
