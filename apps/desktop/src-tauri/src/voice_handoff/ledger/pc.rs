@@ -97,11 +97,34 @@ impl Drop for Preparation {
     }
 }
 impl Claim {
+    pub(super) fn intent(&self) -> Option<&Arc<InitialSdpIntent>> {
+        self.intent.as_ref()
+    }
     pub(super) fn worker(&self) -> bool {
         self.worker
     }
 }
 impl ResolvedRow {
+    #[cfg(test)]
+    pub(in crate::voice_handoff) fn pc_test_proof(&self) -> [u8; 32] {
+        let state = self.row.state.lock().unwrap();
+        state
+            .plan()
+            .unwrap()
+            .transition
+            .as_ref()
+            .unwrap()
+            .key
+            .as_ref()
+            .unwrap()
+            .sdp
+            .as_ref()
+            .unwrap()
+            .pc
+            .as_ref()
+            .unwrap()
+            .proof
+    }
     /// Closed recovery is cleanup history only and remains available after lock/End.
     pub(in crate::voice_handoff) fn pc_early_receipt(
         &self,

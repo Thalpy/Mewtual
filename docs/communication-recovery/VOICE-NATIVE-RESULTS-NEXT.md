@@ -1,5 +1,16 @@
 # Next voice milestone: native result recovery
 
+## Current transport continuation (25 October; not live V2)
+
+`communication-sdp-native-transport` adds fixed Seal/Open history fees/IO counters, closed
+version8/class2 request codecs (including parent-only lost-Begin Resolve), and the original
+Session/Header/PC/Phase capacity-permit leaf. HANDOVER records exact validation. Production
+service rejects the entire family before admission; no SDP action row handler or browser SDK
+producer is enabled. Next implement shared-index Pending/Live/Drained rows and the actual
+native Input/engine/result/ACK/settlement/Return/delivery vertical under the constraints below.
+Then integrate private original-key browser WebCrypto, complete ICE/RTC, new rounds and
+multi-peer/relay composition. Codec/permit evidence must not be described as those outcomes.
+
 ## Reviewed next transport boundary (24 October; not yet implemented)
 
 The concrete original-paid Actor Buffer/Command/Pending/Completion bridge is implemented in

@@ -201,6 +201,7 @@ pub(super) async fn exercise(
         drop(physical);
         drop(incoming);
         // Keep the test-only nested stopped-Actor setup out of every ancestor TCP future.
+        super::sdp_intake::exercise(state, public, route, parent, &body);
         // This is fixture heap storage, not production task payment or a larger stack.
         let held = Box::pin(super::sdp_actor::exercise(
             state,

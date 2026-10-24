@@ -389,6 +389,69 @@ pub(in crate::voice_handoff) fn opened_frame(
     assert_eq!(incoming.open().unwrap(), plaintext);
     incoming
 }
+/// Independent real MAC/AEAD wire without body admission. Large-SDP regressions can then
+/// exercise the actual authenticated capacity permit and coalesced-header/tail boundary.
+pub(in crate::voice_handoff) fn signed_frame(
+    public: &SetupOutput,
+    header: (u64, u8, u8, [u8; 16]),
+    plaintext: &[u8],
+) -> Vec<u8> {
+    let client = Client::new(public.public());
+    let (_, admission, body) = client.packet(header.0, header.1, header.2, header.3, plaintext);
+    wire(41891, &admission, &body)
+}
+pub(in crate::voice_handoff) fn authenticated_header(
+    route: &super::super::bootstrap::Route,
+    wire: &[u8],
+) -> super::super::channel::AuthenticatedRequest {
+    let mut worker = route.session().header().unwrap();
+    let filled = wire.len().min(super::super::http::HEADER_BYTES);
+    worker.scratch_mut()[..filled].copy_from_slice(&wire[..filled]);
+    worker.set_filled(filled).unwrap();
+    worker
+        .authenticate(41891, Origin::PackagedHttp.value())
+        .unwrap()
+}
+#[tokio::test]
+async fn unsupported_sdp_control_and_large_data_refuse_before_allocation_or_nonce_debit() {
+    let (f, _owner, public, runtime, client) = setup().await;
+    let route = f.state.voice_channels.route(client.slot).unwrap();
+    let context = super::super::context::Context::new(&f.state);
+    let mut logical = [0; 16];
+    logical[15] = 1;
+    let before = runtime.resources().counts();
+    for op in 15..=27 {
+        let (kind, plain) = match op {
+            15 => (2, 230),
+            19 => (2, 117),
+            20 => (2, 101),
+            16 => (0, 225),
+            18 => (0, 70),
+            22 => (0, 98),
+            24 | 25 => (0, 18),
+            26 => (0, 67),
+            27 => (0, 227),
+            _ => (0, 66),
+        };
+        let wire = signed_frame(&public, (1, op, kind, logical), &vec![8; plain]);
+        let mut worker = route.session().header().unwrap();
+        worker.scratch_mut()[..wire.len()].copy_from_slice(&wire);
+        worker.set_filled(wire.len()).unwrap();
+        assert!(matches!(
+            super::dispatch::admit(
+                worker,
+                41891,
+                Origin::PackagedHttp.value(),
+                &route,
+                &context
+            ),
+            Err(Refused::Binding)
+        ));
+        assert_eq!(route.session().fixture_counts(), (false, 0, 0));
+        assert_eq!(runtime.resources().counts(), before);
+    }
+    f.close().await;
+}
 /// Independently verify a sibling adapter's ACTUAL completed MAC/AEAD reply against its
 /// original request. Fixture Vecs are test scaffolding, not application copy-custody evidence.
 pub(in crate::voice_handoff) fn opened_reply(

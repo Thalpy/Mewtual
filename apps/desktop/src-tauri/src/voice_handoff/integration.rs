@@ -12,6 +12,7 @@ mod pc;
 mod sdk;
 mod sdp;
 mod sdp_actor;
+mod sdp_intake;
 mod transition;
 pub(crate) mod webcrypto;
 pub(crate) use confirmation::{

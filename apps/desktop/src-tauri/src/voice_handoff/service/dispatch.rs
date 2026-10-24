@@ -32,6 +32,12 @@ pub(super) fn admit(
     let authenticated = worker
         .authenticate(port, origin)
         .map_err(|_| Refused::Header)?;
+    // Grammar is staged before its native action handlers. Until each original row/
+    // publication adapter exists, even small SDP control must refuse BEFORE admission;
+    // do not spend nonces through the generic Control arm and reject only after AEAD.
+    if authenticated.operation().is_sdp() {
+        return Err(Refused::Binding);
+    }
     // A valid MAC alone must not spend counters for an impossible operation/class/length
     // or logical identity. The encrypted version/purpose is checked after AEAD by exactly
     // one typed decoder; this fixed header predicate never chooses a fallback grammar.
@@ -53,7 +59,10 @@ pub(super) fn admit(
                     .map_err(|_| Refused::Binding)?,
             )
         }
-        (Operation::Result, _) | (_, BodyKind::Data) => return Err(Refused::Binding),
+        // SDP has a distinct opaque permit and may never use the legacy Phase fallback.
+        (Operation::Result, _) | (_, BodyKind::Data | BodyKind::Sdp) => {
+            return Err(Refused::Binding)
+        }
         (Operation::Status, BodyKind::Control) if authenticated.logical() != route.session_id() => {
             return Err(Refused::Binding)
         }

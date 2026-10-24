@@ -13,6 +13,7 @@ pub(super) mod key_session;
 pub(super) mod pc;
 pub(super) mod sdk;
 pub(super) mod sdp;
+pub(super) mod sdp_action;
 pub(super) mod transition;
 
 /// Header-only necessary conditions for the closed v1 parent / v2 confirmation grammars.
@@ -32,6 +33,9 @@ pub(super) fn wire_shape(
     session: [u8; 16],
 ) -> bool {
     use super::channel::BodyKind;
+    if operation.is_sdp() {
+        return sdp_action::wire_shape(operation, kind, logical, cipher_bytes);
+    }
     const PREFIXES: [usize; 5] = [105, 122, 123, 138, 154];
     let Some(plain_bytes) = cipher_bytes.checked_sub(16) else {
         return false;
@@ -84,14 +88,7 @@ pub(super) fn wire_shape(
             Operation::ReceiptAck => suffix == 48 + 32,
             Operation::Settle => suffix == 48,
             Operation::ClosePhase => suffix == 1,
-            Operation::BeginDerive
-            | Operation::FinalAck
-            | Operation::Status
-            | Operation::ChainTransition
-            | Operation::KeySession
-            | Operation::SdpPhase
-            | Operation::SdkCustody
-            | Operation::PcIntent => false,
+            _ => false,
         }
     })
 }
@@ -213,12 +210,7 @@ fn decode_kind(operation: Operation, bytes: &[u8]) -> Result<Kind<'_>, VoiceErro
         Operation::FinalAck => Kind::FinalAck {
             proof: cursor.take()?,
         },
-        Operation::Status
-        | Operation::ChainTransition
-        | Operation::KeySession
-        | Operation::SdpPhase
-        | Operation::SdkCustody
-        | Operation::PcIntent => return Err(VoiceError::Malformed),
+        _ => return Err(VoiceError::Malformed),
     };
     if !cursor.0.is_empty() {
         return Err(VoiceError::Malformed);

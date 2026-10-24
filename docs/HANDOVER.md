@@ -1,5 +1,50 @@
 # Mewtual; Handover
 
+## Native SDP intake continuation (25 October; action/SDK integration unfinished)
+
+`communication-sdp-native-transport` / `target/communication-sdp-native-transport-worktree`
+continues from frozen Actor checkpoint `0ee0285b`. This is implementation in progress.
+The service explicitly refuses every staged SDP opcode BEFORE allocation/nonce debit;
+neither the browser broker nor a production native SDP action handler is enabled.
+
+Root now prepays at most one fixed native history fee per Seal/Open purpose from the
+original64KiB phase. Those fees have no Phase/Row/Copy/publication backedge. Exact fee
+recovery is not row issuance. Concrete bound Copy counters close irreversibly and retire
+after actual bytes, publication reference, credit and Phase slot. Their independent16-Copy
+bound covers the intentional slot-before-counter retirement gap. Native whole finalization
+checks CLOSED+zero in addition to storage Drained; storage state3 remains unchanged.
+All20 focused Root custody regressions pass, including wake-callback try-locks, reserve
+Capacity rollback, the parked retirement gap and publication-destructor unwind. Read-only
+adversarial re-review found no remaining findings in this leaf.
+
+Closed version8 codecs and separate SDP class2/opcodes15..27 exist. They preserve old
+Data2048/confirmation528 bounds. Resolve227B names original parent/PC/purpose without needing
+the RowId/Action hidden by a lost Begin reply. These are bytes, not working History/Return
+endpoints yet. Shared Rust/browser vectors and codec/frame tests13 pass. Current native
+handoff328 regressions pass (24.32s), including the MAC-signed native header matrix and
+whole-family pre-admission refusal. Both blocked-TCP PC cases pass (22.53s), including the
+actual max-SDP intake, unknown/foreign parent/session, full ordinary-pool success, genuine
+Copy Capacity/no-debit, held physical permit and bad-AEAD permanent debit. The fixture holds
+15 positive-size Copies plus the actual PC completion's sixteenth; zero-byte Copies refuse
+and cannot serve as a pressure oracle. Full frontend2,740 tests pass (73.63s), as do type
+checking and production build (46.97s). Read-only final review reports no remaining findings.
+Formal native check/strict native and Root Clippy are running; full Root/native gates remain
+separate/pending. No full-suite green claim follows from these focused checks.
+
+The capacity-only permit binds the entire canonical Header, actual physical position,
+MAC-owning Session identity, original Phase/intent and concrete history funding. Native lookup
+checks stored selected allocation/KeyClaim/SDK/PC before funding outside guards. Original
+Runtime clock samples fence fresh intake; body allocation and concrete counter binding
+precede physical nonce debit. Generic confirmation Phase intake cannot accept class2.
+
+Next: actual SDP Pending/Live/Drained rows in the shared32-slot index; full2304B row inventory;
+capture uncertain original Actor publication before fallible attach; Input/engine/result/ACK/
+settlement/Return/delivery against that exact row. Then private original-key browser WebCrypto
+and complete-ICE RTC, fresh rounds, multi-peer composition, member relay and combined acceptance.
+Independent physical audio/network acceptance needs another device/network. External download
+resume remains outside this continuation. Full current Root/native sign-off is pending; the
+frozen Actor checkpoint's full suites run separately and earlier results remain historical.
+
 ## Paid SDP Actor bridge (25 October; endpoint/browser implementation continues)
 
 `communication-sdp-actor` / `target/communication-sdp-actor-worktree` extends pushed HIGH

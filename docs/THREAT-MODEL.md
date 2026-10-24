@@ -1,5 +1,27 @@
 # Threat model; client integrity & enforcement boundaries
 
+## Staged native SDP intake (25 October; no live action/RTC dispatch)
+
+The larger HTTP syntax ceiling is not permission to allocate/read that body. The service
+currently refuses the whole staged SDP family before nonce debit/body reads. Closed opcodes
+and classes prevent SDP from entering generic Data or confirmation parsers. The capacity
+leaf separately binds actual selected allocation, indexed parent, stored Session identity,
+key/SDK/PC and Phase. Its affine permit fixes the ENTIRE canonical Header and actual physical
+position. Fresh original Runtime clock samples outside guards precede funding/copy/Vec;
+an armed observer alone cannot replace the original finite PC deadline.
+
+Concrete bound Copies retire bytes/publication/credit/Phase position before their independent
+bounded IO counter. CLOSED+zero is irreversible, distinct from momentary zero on an open fee.
+Whole finalization checks it; storage Drained cannot overtake the counter retirement gap.
+Counter notification and credit/publication destruction run outside native/Phase guards,
+including unwind. Fixed history funding has no Phase/Row/Copy/publication backedge.
+
+These leaves do not issue action rows, prove SDK execution or enforce one RTC invocation.
+The future adapters must persist Pending before Actor handoff and retain returned original
+Actions before fallible current/attachment checks. Return closes only its purpose, without
+revoking sibling work or inventing engine/ACK/SDK drainage. Private browser producer and
+live V2 selection remain disabled.
+
 ## SDP Actor publication lifetime (24 October; no new renderer endpoint)
 
 A submitting worker, waiter or socket can disappear while an independent Actor still owns

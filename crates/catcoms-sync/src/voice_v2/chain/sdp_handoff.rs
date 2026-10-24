@@ -7,6 +7,8 @@ use crate::voice_v2::{CallLease, Scope, VoiceError};
 use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::{Arc, Mutex};
 use zeroize::Zeroize;
+mod native_history;
+pub use native_history::{NativeIoClosure, NativeRowFunding, NativeRowPurpose, NATIVE_ROW_BYTES};
 
 /// One original round's native handoff envelope, separate from its crypto reservation.
 /// Includes fixed ownership and every simultaneously retained SDK/HTTP/actor copy that
@@ -28,7 +30,7 @@ pub const NATIVE_PC_ADAPTER_METADATA_BYTES: usize = 288;
 const _: () = assert!(
     NATIVE_PC_ROOT_METADATA_BYTES + NATIVE_PC_ADAPTER_METADATA_BYTES <= NATIVE_PC_METADATA_BYTES
 );
-// Actual Buffer/Copy/Credit/keepalive graph plus128B caller bookkeeping is280B on the
+// Actual Buffer/Copy/Credit/keepalive/IO graph plus128B caller bookkeeping is288B on the
 // supported layout. Round its payment to32B; keep the whole64KiB envelope unchanged.
 const COPY_METADATA: usize = 288;
 const COPIES: usize = 16;
@@ -46,6 +48,9 @@ struct State {
     // Only the first close caller may publish this, AFTER Reservation::close returns.
     // A second idempotent close could otherwise overtake the first caller's credit Drop.
     reserve_closed: bool,
+    // Two plain fixed fees, never Copy/Row/Publication owners. Their payment survives
+    // variable drainage, and exact recovery cannot allocate a replacement allowance.
+    history: [Option<Arc<NativeRowFunding>>; 2],
 }
 
 pub struct Phase {
@@ -110,6 +115,8 @@ pub struct Copy {
     // task Copy pays that native wrapper; NEVER attach the wrapper to its own funding Copy
     // (Publication -> funding Copy -> Publication would prevent every last Drop).
     keepalive: Option<catcoms_rt::SharedRequestKeepalive>,
+    // LAST: independently paid concrete counter; never a callback or Row/Phase backedge.
+    history: Option<Arc<NativeRowFunding>>,
 }
 /// Separate native publication/task funding. Unlike an RPC/body Copy, this owner cannot
 /// adopt a payload or attach a keepalive: the native publication wrapper may own it without
@@ -129,6 +136,14 @@ impl TaskCopy {
     pub fn covers_work(&self, bytes: usize) -> bool {
         self.0.covers_work(bytes)
     }
+    /// Concrete paid collection only. Unlike a generic keepalive this fixed funding
+    /// cannot retain TaskCopy, a native publication or a Row, so it creates no self-cycle.
+    pub fn bind_native_history(
+        &mut self,
+        funding: Arc<NativeRowFunding>,
+    ) -> Result<(), VoiceError> {
+        self.0.bind_native_history(funding)
+    }
 }
 pub struct Buffer {
     bytes: Vec<u8>,
@@ -141,6 +156,12 @@ impl Drop for Buffer {
     }
 }
 impl Buffer {
+    pub fn bind_native_history(
+        &mut self,
+        funding: Arc<NativeRowFunding>,
+    ) -> Result<(), VoiceError> {
+        self._copy.bind_native_history(funding)
+    }
     pub fn bytes(&self) -> &[u8] {
         &self.bytes
     }
@@ -172,6 +193,22 @@ impl Buffer {
     }
 }
 impl Copy {
+    /// Bind once to the actual original phase's fixed native-row counter. Native must
+    /// select the SAME stored Seal/Open purpose; this proves payment, not authorization.
+    pub fn bind_native_history(
+        &mut self,
+        funding: Arc<NativeRowFunding>,
+    ) -> Result<(), VoiceError> {
+        if self.history.is_some() {
+            return Err(VoiceError::RetryMismatch);
+        }
+        if !funding.uses_phase(&self.phase) {
+            return Err(VoiceError::Unauthorized);
+        }
+        funding.acquire_copy()?;
+        self.history = Some(funding);
+        Ok(())
+    }
     /// Allocation identity only, even after Close. This grants no fresh SDK/packet/RTC use.
     pub fn uses_intent(&self, intent: &crate::voice_v2::sdp::InitialSdpIntent) -> bool {
         intent.uses_phase(&self.phase)
@@ -215,14 +252,23 @@ impl Copy {
 }
 impl Drop for Copy {
     fn drop(&mut self) {
-        // Buffer's bytes have already zeroized and deallocated. Releasing this keepalive
-        // reference can run its last native Drop and enter Row locks, so do it while this
-        // credit is paid, outside Phase/Root/native guards. If a worker still owns that
-        // publication, its separate TaskCopy pays the later last Drop and blocks drainage.
-        drop(self.keepalive.take());
-        // Never publish drainage before this actual reservation loan and its pool credit
-        // return. Drop may enter Pool, so do it outside the phase state mutex.
-        drop(self.credit.take());
+        self.retire(|| {});
+    }
+}
+/// Affine finally for credit, Phase position and fixed collection counter. A trusted
+/// publication destructor can unwind too; collection must never overtake credit/position
+/// retirement in that path. This guard borrows Phase and owns no variable backedge.
+struct Retirement<'a> {
+    phase: &'a Phase,
+    credit: Option<Credit>,
+    collection: Option<native_history::Collection>,
+}
+impl Retirement<'_> {
+    fn retire_phase(&mut self) {
+        let Some(credit) = self.credit.take() else {
+            return;
+        };
+        drop(credit);
         let mut state = self
             .phase
             .state
@@ -232,6 +278,36 @@ impl Drop for Copy {
         if state.status == Status::Closing && state.reserve_closed && state.copies == 0 {
             state.status = Status::Drained;
         }
+    }
+    fn finish(mut self, after_phase: impl FnOnce()) {
+        self.retire_phase();
+        after_phase(); // All Phase guards are already gone, even on test-hook unwind.
+    }
+}
+impl Drop for Retirement<'_> {
+    fn drop(&mut self) {
+        self.retire_phase();
+        drop(self.collection.take()); // Notify only after actual credit/count retirement.
+    }
+}
+impl Copy {
+    // The production hook is empty. A deterministic test can park the real after-Phase /
+    // before-native-counter gap without synthetic counters or enlarging any allowance.
+    fn retire(&mut self, after_phase: impl FnOnce()) {
+        let Some(credit) = self.credit.take() else {
+            return;
+        };
+        let retirement = Retirement {
+            phase: &self.phase,
+            credit: Some(credit),
+            collection: self.history.take().map(native_history::Collection::new),
+        };
+        // Buffer's bytes have already zeroized and deallocated. Releasing this keepalive
+        // reference can run its last native Drop and enter Row locks, so do it while this
+        // credit is paid, outside Phase/Root/native guards. If a worker still owns that
+        // publication, its separate TaskCopy pays the later last Drop and blocks drainage.
+        drop(self.keepalive.take());
+        retirement.finish(after_phase);
     }
 }
 impl Phase {
@@ -263,6 +339,7 @@ impl Phase {
                 status: Status::Preparing,
                 copies: 0,
                 reserve_closed: false,
+                history: [None, None],
             }),
             reserve,
         }))
@@ -313,6 +390,23 @@ impl Phase {
             Err(std::sync::TryLockError::WouldBlock) => Err(VoiceError::Capacity),
         }
     }
+    /// Stronger whole-native-IO observation. Storage can be Drained in the intentional gap
+    /// after Copy credit/count retirement but before its fixed history counter retires.
+    /// Native Final/GC must also require this predicate plus its worker/SDK/engine gates.
+    /// This performs only a try-lock and atomic loads, with no callbacks or owner drops.
+    pub fn try_is_collected(&self) -> Result<bool, VoiceError> {
+        let state = match self.state.try_lock() {
+            Ok(state) => state,
+            Err(std::sync::TryLockError::Poisoned(error)) => error.into_inner(),
+            Err(std::sync::TryLockError::WouldBlock) => return Err(VoiceError::Capacity),
+        };
+        Ok(state.status == Status::Drained
+            && state
+                .history
+                .iter()
+                .flatten()
+                .all(|funding| funding.is_collected()))
+    }
     pub fn status(&self) -> Status {
         self.state
             .lock()
@@ -354,6 +448,7 @@ impl Phase {
             phase: self.clone(),
             capacity: bytes,
             keepalive: None,
+            history: None,
         })
     }
     /// Close effects first and return ONLY unused capacity outside native/phase guards.
@@ -372,13 +467,17 @@ impl Phase {
     fn close_with(&self, after_claim: impl FnOnce()) {
         self.request_close();
         self.effect.lease.revoke();
-        {
+        let closures = {
             let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
             if matches!(state.status, Status::Closing | Status::Drained) {
                 return;
             }
             state.status = Status::Closing;
-        }
+            state
+                .history
+                .each_ref()
+                .map(|history| history.as_ref().map(|fee| fee.close_io()))
+        };
         after_claim();
         self.reserve.close();
         let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
@@ -386,6 +485,8 @@ impl Phase {
         if state.copies == 0 {
             state.status = Status::Drained;
         }
+        drop(state);
+        drop(closures); // Notify only after every Phase guard/resource-close operation.
     }
 }
 impl Drop for Phase {
@@ -396,12 +497,24 @@ impl Drop for Phase {
         self.request_close();
         self.effect.lease.revoke();
         self.reserve.close();
+        let closures = {
+            let state = self
+                .state
+                .get_mut()
+                .unwrap_or_else(|error| error.into_inner());
+            state
+                .history
+                .each_ref()
+                .map(|history| history.as_ref().map(|fee| fee.close_io()))
+        };
+        drop(closures); // No Phase/native guard exists in this exclusive last-owner path.
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    mod native_history;
     struct Alive {
         _actor: crate::voice_v2::runtime::ActorOwner,
         _runtime: Arc<crate::voice_v2::runtime::Runtime>,
@@ -485,6 +598,10 @@ mod tests {
         assert!(fixed <= METADATA, "SDP fixed graph {fixed}");
         let copy = size_of::<Buffer>() + 128;
         assert!(copy <= COPY_METADATA, "SDP copy graph {copy}");
+        assert!(
+            size_of::<Retirement<'_>>() <= 128,
+            "SDP retirement bookkeeping"
+        );
     }
     #[test]
     fn original_sdp_publication_custody_drops_before_credit_and_last_phase_drainage() {

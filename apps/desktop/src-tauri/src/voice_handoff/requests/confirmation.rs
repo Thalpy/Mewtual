@@ -32,12 +32,13 @@ impl<'a> Request<'a> {
                 | Operation::SdpPhase
                 | Operation::SdkCustody
                 | Operation::PcIntent
-        ) || body_kind
-            != if operation == Operation::Result {
-                BodyKind::Data
-            } else {
-                BodyKind::Control
-            }
+        ) || operation.is_sdp()
+            || body_kind
+                != if operation == Operation::Result {
+                    BodyKind::Data
+                } else {
+                    BodyKind::Control
+                }
         {
             return Err(VoiceError::Unauthorized);
         }

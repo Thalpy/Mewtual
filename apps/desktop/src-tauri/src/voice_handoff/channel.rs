@@ -18,6 +18,7 @@ use zeroize::Zeroizing;
 
 pub(super) mod bootstrap;
 mod crypto;
+pub(in crate::voice_handoff) mod sdp;
 pub(super) use crypto::{BodyKind, Operation};
 use crypto::{Direction, Header, Keys};
 
@@ -452,6 +453,11 @@ pub(super) struct AuthenticatedRequest {
     worker: HeaderWorker,
 }
 impl AuthenticatedRequest {
+    /// Native allocation identity of the channel which verified this immutable Header.
+    /// Equal seeds/transcripts/slots do not make another Session its original owner.
+    pub(in crate::voice_handoff) fn belongs_to(&self, identity: &Arc<SessionIdentity>) -> bool {
+        Arc::ptr_eq(self.worker.position.session.identity(), identity)
+    }
     /// Authenticated ciphertext length, including the AEAD tag. A dispatcher may reject an
     /// impossible fixed grammar before Phase lookup/allocation or irreversible counter debit.
     pub(super) fn length(&self) -> usize {
@@ -468,13 +474,31 @@ impl AuthenticatedRequest {
     }
     pub(super) fn admit(self, phase: Option<&Arc<Phase>>) -> Result<Incoming, Refused> {
         let request = self.request;
-        let mut body = Body::new(
+        let body = Body::new(
             request.kind(),
             request.length(),
             phase,
             &self.worker.position.session.resources,
             self.worker.position.session.group,
         )?;
+        self.admit_body(body)
+    }
+    /// Separate SDP-only custody. The generic optional confirmation Phase path always
+    /// rejects class2, including with an otherwise genuine paid confirmation owner.
+    pub(in crate::voice_handoff) fn admit_sdp(
+        self,
+        permit: sdp::Permit,
+    ) -> Result<Incoming, Refused> {
+        let buffer = permit.allocate(&self)?;
+        let body = Body {
+            storage: Storage::Sdp(buffer),
+            cipher_bytes: self.request.length(),
+            plain_bytes: None,
+        };
+        self.admit_body(body)
+    }
+    fn admit_body(self, mut body: Body) -> Result<Incoming, Refused> {
+        let request = self.request;
         body.cipher_mut()[..self.prefix_bytes].copy_from_slice(
             &self.worker.scratch[self.prefix_start..self.prefix_start + self.prefix_bytes],
         );
@@ -520,6 +544,7 @@ impl Drop for HeaderWorker {
 enum Storage {
     Control([u8; CONTROL_CIPHER]),
     Data(Buffer),
+    Sdp(catcoms_sync::voice_v2::chain::sdp_handoff::Buffer),
 }
 struct Body {
     storage: Storage,
@@ -557,12 +582,14 @@ impl Body {
         match &mut self.storage {
             Storage::Control(bytes) => &mut bytes[..self.cipher_bytes],
             Storage::Data(buffer) => buffer.bytes_mut(),
+            Storage::Sdp(buffer) => buffer.bytes_mut(),
         }
     }
     fn cipher(&self) -> &[u8] {
         match &self.storage {
             Storage::Control(bytes) => &bytes[..self.cipher_bytes],
             Storage::Data(buffer) => buffer.bytes(),
+            Storage::Sdp(buffer) => buffer.bytes(),
         }
     }
     fn plain(&self) -> Result<&[u8], Refused> {

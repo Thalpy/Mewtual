@@ -3,8 +3,9 @@
  * verifies the directional MAC and debits its original session before reading any body. Seed
  * import remains fixture-only; production construction uses the original selected key. */
 export type VoiceIpcDirection = 0 | 1;
-export type VoiceIpcOperation = 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10 | 11 | 12 | 13 | 14;
-export type VoiceIpcBodyKind = 0 | 1;
+export type VoiceIpcOperation = 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10 | 11 | 12 | 13 | 14 |
+  15 | 16 | 17 | 18 | 19 | 20 | 21 | 22 | 23 | 24 | 25 | 26 | 27;
+export type VoiceIpcBodyKind = 0 | 1 | 2;
 export type VoiceIpcHeader = Readonly<{
   direction: VoiceIpcDirection; operation: VoiceIpcOperation; kind: VoiceIpcBodyKind;
   slot: number; sequence: bigint; logical: string; length: number;
@@ -20,12 +21,20 @@ export class VoiceIpcFrameError extends Error {
 const refuse = (): never => { throw new VoiceIpcFrameError(); };
 
 /** Closed direction × operation × body-class matrix, shared with native channel/crypto.rs.
- * Only Result requests and Input responses carry data. Input responses may instead report
- * fixed control metadata; Result requests cannot substitute a control body. */
+ * SDP has distinct opcodes/class2. Declaring its grammar does not enable the broker/SDK or
+ * native action dispatcher. Old Data remains2048; no request can choose a larger fallback. */
 function maximum(header: VoiceIpcHeader): number {
   if ((header.direction !== 0 && header.direction !== 1) ||
-      !Number.isInteger(header.operation) || header.operation < 1 || header.operation > 14 ||
-      (header.kind !== 0 && header.kind !== 1)) return refuse();
+      !Number.isInteger(header.operation) || header.operation < 1 || header.operation > 27 ||
+      (header.kind !== 0 && header.kind !== 1 && header.kind !== 2)) return refuse();
+  if (header.operation >= 15) {
+    if (header.direction === 0) {
+      const max = header.operation === 15 ? 8435 : header.operation === 19 ? 8324 : header.operation === 20 ? 8308 : null;
+      if (max !== null) return header.kind === 2 ? max : refuse();
+    }
+    if (header.direction === 1 && header.operation === 17 && header.kind === 2) return 9232;
+    return header.kind === 0 ? 272 : refuse();
+  }
   if ((header.direction === 0 && header.operation === 3 && header.kind === 1) ||
       (header.direction === 1 && header.operation === 1 && header.kind === 1)) return 2064;
   if (header.kind === 0 && !(header.direction === 0 && header.operation === 3)) return 272;

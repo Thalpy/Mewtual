@@ -1,5 +1,44 @@
 # Mewtual; Interfaces & Hooks Schema
 
+## Staged SDP request grammar (25 October; production dispatch closed)
+
+Canonical native/browser framing adds separate class2 SDP and version8 plaintext. The service
+rejects this whole family before allocation/counter debit until native row/action handlers
+exist. The browser pilot reader still caps2064B; its live broker does not use these codecs.
+
+|Opcode|Request class/plaintext bytes|Meaning|
+|---|---|---|
+|15|SDP /227+1..8192|SealBegin: original parent identity, length, complete SDP|
+|16|Control /225|OpenBegin: native selects actual admitted incoming input|
+|17|Control /66|Input for actual row/action|
+|18|Control /70|Exact action and engine byte declaration|
+|19|SDP /100+17..8208|Exact sealed result/tag|
+|20|SDP /100+1..8192|Exact opened result/tag|
+|21|Control /66|Authentication failure; no fabricated plaintext|
+|22|Control /98|Exact original result ACK digest|
+|23|Control /66|Original action settlement|
+|24,25|Control /18|Original row Return or History|
+|26|Control /67|Original Open delivery admission/completion union|
+|27|Control /227|Resolve/close parent+purpose after a lost Begin reply|
+
+Begin/Resolve repeat original parent Action48B, handshake/key/storage sequence/proof, SDK
+generation/proof and PC proof. Header logical is the full parent RowId. Later prefixes carry
+parent RowId and closed Seal/Open purpose; Header logical is a distinct action RowId. They
+carry no role, Ready, round, timestamp, selector or input token. Native must derive these
+from SAME stored original PC/action allocations. Resolve has no Action sentinel or SDP body.
+
+Only request15/19/20 and eventual Input17 data responses permit class2. Control stays256B,
+generic Data2048B and confirmation results528B. Ciphertext adds the16B AEAD tag. HTTP's
+absolute8435B request ceiling is syntax only; actual MAC/class/shape/capacity admission must
+precede allocation. Input's reserved9232B response ceiling still needs its encoder/inventory.
+
+`ledger::sdp_begin_intake` / `AuthenticatedRequest::admit_sdp` are capacity-only leaves.
+Their affine permit binds full immutable Header, actual physical position/Session allocation,
+original Phase/intent and Runtime clock. The Buffer reserves backing bytes plus4096B RPC
+metadata before allocation/debit. Generic optional confirmation Phase cannot substitute.
+Full encrypted identities must still be checked after AEAD before Pending/action publication;
+those handlers remain unimplemented. Bad AEAD spends nonces but closes neither fee nor PC.
+
 ## Rust-only SDP Actor bodies and RPCs (24 October; native producer pending)
 
 VoiceSdpBody::from_buffer consumes the original sdp_handoff::Buffer, a bounded range and

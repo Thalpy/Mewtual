@@ -2,6 +2,86 @@ use super::*;
 use rand_chacha::ChaCha20Rng;
 use rand_core::SeedableRng;
 
+#[test]
+fn native_sdp_header_matrix_and_valid_mac_rejections_pin_all_directions_classes_and_bounds() {
+    let (session, keys) = session(Arc::new(Resources::default()), [3; 32]);
+    let operations = [
+        Operation::SdpSealBegin,
+        Operation::SdpOpenBegin,
+        Operation::SdpInput,
+        Operation::SdpEngineAdmit,
+        Operation::SdpSealedResult,
+        Operation::SdpOpenedResult,
+        Operation::SdpAuthenticationFailed,
+        Operation::SdpReceiptAck,
+        Operation::SdpSettle,
+        Operation::SdpReturn,
+        Operation::SdpHistory,
+        Operation::SdpDelivery,
+        Operation::SdpResolve,
+    ];
+    for direction in [Direction::Request, Direction::Response] {
+        for (offset, operation) in operations.into_iter().enumerate() {
+            let op = offset + 15;
+            for kind in [BodyKind::Control, BodyKind::Data, BodyKind::Sdp] {
+                let large_request = direction == Direction::Request && matches!(op, 15 | 19 | 20);
+                let max = match kind {
+                    BodyKind::Control if !large_request => Some(272),
+                    BodyKind::Sdp if large_request => Some(match op {
+                        15 => 8435,
+                        19 => 8324,
+                        20 => 8308,
+                        _ => unreachable!(),
+                    }),
+                    BodyKind::Sdp if direction == Direction::Response && op == 17 => Some(9232),
+                    _ => None,
+                };
+                let make = |length| Header::new(direction, operation, kind, 1, 1, [9; 16], length);
+                if let Some(max) = max {
+                    for length in [16, max] {
+                        assert!(
+                            make(length).is_ok(),
+                            "{direction:?}/{operation:?}/{kind:?}/{length}"
+                        );
+                    }
+                    assert!(make(max + 1).is_err());
+                    assert!(make(15).is_err());
+                } else {
+                    assert!(make(16).is_err());
+                }
+                // Deliberately bypass Header::new in the fixture and MAC-sign the raw
+                // illegal matrix. Refusal must come from canonical native parsing, never
+                // merely from a browser encoder or a now-invalid old authentication tag.
+                if max.is_none() || direction == Direction::Response {
+                    let mut raw = Header::new(
+                        Direction::Request,
+                        Operation::Status,
+                        BodyKind::Control,
+                        1,
+                        1,
+                        [9; 16],
+                        16,
+                    )
+                    .unwrap()
+                    .fixture_raw();
+                    raw[5] = direction as u8;
+                    raw[6] = op as u8;
+                    raw[36] = kind as u8;
+                    let admission = keys.fixture_raw_admission(raw);
+                    let wire=format!("POST /voice/v2 HTTP/1.1\r\nHost: 127.0.0.1:41891\r\nOrigin: http://tauri.localhost\r\nContent-Type: application/octet-stream\r\nContent-Length: 16\r\nx-voice-admission: {}\r\n\r\n",std::str::from_utf8(&admission).unwrap());
+                    let mut worker = session.header().unwrap();
+                    worker.scratch_mut()[..wire.len()].copy_from_slice(wire.as_bytes());
+                    worker.set_filled(wire.len()).unwrap();
+                    assert!(worker
+                        .authenticate(41891, "http://tauri.localhost")
+                        .is_err());
+                    assert_eq!(session.fixture_counts(), (false, 0, 0));
+                }
+            }
+        }
+    }
+}
+
 #[tokio::test]
 async fn native_and_physical_owners_both_delay_shutdown_in_either_drop_order() {
     use std::future::{poll_fn, Future};

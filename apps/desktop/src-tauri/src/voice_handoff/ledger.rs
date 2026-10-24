@@ -29,6 +29,7 @@ mod key_session;
 mod ready;
 mod sdk;
 mod sdp;
+mod sdp_intake;
 pub(super) use key_session::KeySessionReceipt;
 pub(in crate::voice_handoff) use ready::{ReadyContinuation, ReadyProgress};
 pub(super) use sdk::Receipt as SdkReceipt;

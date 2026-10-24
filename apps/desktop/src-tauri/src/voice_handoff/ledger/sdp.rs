@@ -28,6 +28,9 @@ impl Drop for CloseTicket {
     }
 }
 impl Claim {
+    pub(super) fn worker(&self) -> bool {
+        self.worker
+    }
     pub(super) fn storage_drained(&self) -> bool {
         !self.worker
             && self.phase.as_ref().is_none_or(|phase| {
@@ -41,6 +44,10 @@ impl Claim {
     /// drainage and cannot release this distinct installed obligation.
     pub(super) fn whole_drained(&self) -> bool {
         self.storage_drained()
+            // Copy frees its Phase position before its concrete history-IO counter. That
+            // intentional gap can make storage Drained while actual native IO is still
+            // retiring; Final and orphan GC must not overtake that stronger collection.
+            && self.phase.as_ref().is_none_or(|phase| phase.try_is_collected().unwrap_or(false))
             && self.pc.as_ref().is_none_or(|pc| !pc.worker())
             && !self.sdk_preparing
             && self.sdk.as_ref().is_none_or(|sdk| sdk.released())

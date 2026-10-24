@@ -5,6 +5,9 @@
 
 pub(super) const HEADER_BYTES: usize = 4096;
 pub(super) const BODY_BYTES: usize = 2048 + 16;
+// HTTP framing admits no body by itself. Canonical operation/class/length and the actual
+// original SDP capacity permit are checked after MAC, before allocation or counter debit.
+const HTTP_BODY_BYTES: usize = super::requests::sdp_action::MAX_CIPHER_BYTES;
 const HEADER_FIELDS: usize = 32;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -150,7 +153,7 @@ pub(super) fn parse<'a>(
     };
     match method {
         Method::Post => {
-            if !(16..=BODY_BYTES).contains(&declared)
+            if !(16..=HTTP_BODY_BYTES).contains(&declared)
                 || body_prefix.len() > declared
                 || content_type
                     .is_none_or(|value| !value.eq_ignore_ascii_case("application/octet-stream"))
@@ -252,7 +255,7 @@ mod tests {
             ("127.0.0.1:41234", "127.0.0.1:041234"),
             ("Content-Length: 16", "Content-Length: 016"),
             ("Content-Length: 16", "Content-Length: +16"),
-            ("Content-Length: 16", "Content-Length: 2065"),
+            ("Content-Length: 16", "Content-Length: 8436"),
             ("Content-Length: 16", "Content-Length: 15"),
             ("POST /voice/v2", "GET /voice/v2"),
             ("POST /voice/v2", "POST /voice/v2?x=1"),

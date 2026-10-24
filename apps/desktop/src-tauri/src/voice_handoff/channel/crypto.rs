@@ -23,6 +23,8 @@ pub(super) enum Direction {
 pub(in crate::voice_handoff) enum BodyKind {
     Control = 0,
     Data = 1,
+    /// Original64KiB SDP-only custody; never borrows a confirmation Workflow.
+    Sdp = 2,
 }
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(in crate::voice_handoff) enum Operation {
@@ -40,8 +42,39 @@ pub(in crate::voice_handoff) enum Operation {
     SdpPhase = 12,
     SdkCustody = 13,
     PcIntent = 14,
+    SdpSealBegin = 15,
+    SdpOpenBegin = 16,
+    SdpInput = 17,
+    SdpEngineAdmit = 18,
+    SdpSealedResult = 19,
+    SdpOpenedResult = 20,
+    SdpAuthenticationFailed = 21,
+    SdpReceiptAck = 22,
+    SdpSettle = 23,
+    SdpReturn = 24,
+    SdpHistory = 25,
+    SdpDelivery = 26,
+    SdpResolve = 27,
 }
 impl Operation {
+    pub(in crate::voice_handoff) fn is_sdp(self) -> bool {
+        matches!(
+            self,
+            Self::SdpSealBegin
+                | Self::SdpOpenBegin
+                | Self::SdpInput
+                | Self::SdpEngineAdmit
+                | Self::SdpSealedResult
+                | Self::SdpOpenedResult
+                | Self::SdpAuthenticationFailed
+                | Self::SdpReceiptAck
+                | Self::SdpSettle
+                | Self::SdpReturn
+                | Self::SdpHistory
+                | Self::SdpDelivery
+                | Self::SdpResolve
+        )
+    }
     fn parse(value: u8) -> Result<Self, Refused> {
         match value {
             1 => Ok(Self::Input),
@@ -58,6 +91,19 @@ impl Operation {
             12 => Ok(Self::SdpPhase),
             13 => Ok(Self::SdkCustody),
             14 => Ok(Self::PcIntent),
+            15 => Ok(Self::SdpSealBegin),
+            16 => Ok(Self::SdpOpenBegin),
+            17 => Ok(Self::SdpInput),
+            18 => Ok(Self::SdpEngineAdmit),
+            19 => Ok(Self::SdpSealedResult),
+            20 => Ok(Self::SdpOpenedResult),
+            21 => Ok(Self::SdpAuthenticationFailed),
+            22 => Ok(Self::SdpReceiptAck),
+            23 => Ok(Self::SdpSettle),
+            24 => Ok(Self::SdpReturn),
+            25 => Ok(Self::SdpHistory),
+            26 => Ok(Self::SdpDelivery),
+            27 => Ok(Self::SdpResolve),
             _ => Err(Refused::Header),
         }
     }
@@ -80,14 +126,68 @@ impl Header {
         logical: [u8; 16],
         length: usize,
     ) -> Result<Self, Refused> {
-        let class = match (direction, operation, kind) {
-            (Direction::Request, Operation::Result, BodyKind::Data)
-            | (Direction::Response, Operation::Input, BodyKind::Data) => 2048 + 16,
-            (Direction::Request, Operation::Result, BodyKind::Control) => {
-                return Err(Refused::Header)
+        let class = if operation.is_sdp() {
+            match (direction, operation, kind) {
+                (Direction::Request, Operation::SdpSealBegin, BodyKind::Sdp) => {
+                    super::super::requests::sdp_action::MAX_CIPHER_BYTES
+                }
+                (Direction::Request, Operation::SdpSealedResult, BodyKind::Sdp) => {
+                    100 + 8192 + 16 + 16
+                }
+                (Direction::Request, Operation::SdpOpenedResult, BodyKind::Sdp) => 100 + 8192 + 16,
+                (Direction::Response, Operation::SdpInput, BodyKind::Sdp) => {
+                    super::super::requests::sdp_action::INPUT_CIPHER_BYTES
+                }
+                (
+                    Direction::Request,
+                    Operation::SdpSealBegin
+                    | Operation::SdpSealedResult
+                    | Operation::SdpOpenedResult,
+                    _,
+                ) => return Err(Refused::Header),
+                (
+                    Direction::Request,
+                    Operation::SdpOpenBegin
+                    | Operation::SdpInput
+                    | Operation::SdpEngineAdmit
+                    | Operation::SdpAuthenticationFailed
+                    | Operation::SdpReceiptAck
+                    | Operation::SdpSettle
+                    | Operation::SdpReturn
+                    | Operation::SdpHistory
+                    | Operation::SdpDelivery
+                    | Operation::SdpResolve,
+                    BodyKind::Control,
+                )
+                | (
+                    Direction::Response,
+                    Operation::SdpSealBegin
+                    | Operation::SdpOpenBegin
+                    | Operation::SdpInput
+                    | Operation::SdpEngineAdmit
+                    | Operation::SdpSealedResult
+                    | Operation::SdpOpenedResult
+                    | Operation::SdpAuthenticationFailed
+                    | Operation::SdpReceiptAck
+                    | Operation::SdpSettle
+                    | Operation::SdpReturn
+                    | Operation::SdpHistory
+                    | Operation::SdpDelivery
+                    | Operation::SdpResolve,
+                    BodyKind::Control,
+                ) => 256 + 16,
+                _ => return Err(Refused::Header),
             }
-            (_, _, BodyKind::Control) => 256 + 16,
-            _ => return Err(Refused::Header),
+        } else {
+            match (direction, operation, kind) {
+                (Direction::Request, Operation::Result, BodyKind::Data)
+                | (Direction::Response, Operation::Input, BodyKind::Data) => 2048 + 16,
+                (Direction::Request, Operation::Result, BodyKind::Control) => {
+                    return Err(Refused::Header)
+                }
+                (_, _, BodyKind::Control) => 256 + 16,
+                _ => return Err(Refused::Header),
+            }
         };
         if !(1..=64).contains(&slot) || sequence == 0 || !(16..=class).contains(&length) {
             return Err(Refused::Header);
@@ -113,6 +213,7 @@ impl Header {
         let kind = match bytes[36] {
             0 => BodyKind::Control,
             1 => BodyKind::Data,
+            2 => BodyKind::Sdp,
             _ => return Err(Refused::Header),
         };
         let operation = Operation::parse(bytes[6])?;
@@ -144,10 +245,11 @@ impl Header {
         self.0[7]
     }
     pub(super) fn kind(&self) -> BodyKind {
-        if self.0[36] == 0 {
-            BodyKind::Control
-        } else {
-            BodyKind::Data
+        match self.0[36] {
+            0 => BodyKind::Control,
+            1 => BodyKind::Data,
+            2 => BodyKind::Sdp,
+            _ => unreachable!("closed header body class"),
         }
     }
     pub(super) fn operation(&self) -> Operation {
