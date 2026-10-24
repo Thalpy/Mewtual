@@ -7,6 +7,66 @@ use voice_v2::packets::Authority;
 use voice_v2::sdp::InitialSdpIntent;
 
 impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
+    /// Prepare only HIGH's original applied Offer response. Root resolves the actual
+    /// accepted Open/delivery and derives its OfferId internally; no renderer label or
+    /// result receipt is accepted as a substitute for that fixed native allocation.
+    pub fn prepare_voice_high_sdp_answer(
+        &mut self,
+        grant: &Arc<CallGrant>,
+        handshake: voice_v2::Nonce,
+        intent: &Arc<InitialSdpIntent>,
+        delivery: &Arc<voice_v2::sdp::SdpDelivery>,
+        plaintext: &[u8],
+    ) -> Result<Arc<voice_v2::crypto_actions::CryptoAction>, VoiceError> {
+        self.validate_current_voice_call_grant(grant)?;
+        let context = self.voice_v2_context(grant.scope().room)?;
+        let clock = self.voice_v2_clock();
+        let voice = self
+            .voice_runtime
+            .as_mut()
+            .ok_or(VoiceError::Unauthorized)?;
+        voice.endpoints.prune();
+        let actor = voice.current.as_ref().ok_or(VoiceError::Unauthorized)?;
+        let room = voice.directory.authority(context.scope)?;
+        let participant = voice
+            .endpoints
+            .participant
+            .as_mut()
+            .ok_or(VoiceError::Unauthorized)?;
+        if !std::sync::Weak::ptr_eq(&participant.grant, &Arc::downgrade(grant))
+            || participant.watch.scope != context.scope
+            || !participant.watch.is_live()
+        {
+            return Err(VoiceError::Unauthorized);
+        }
+        let peer = participant.join.protected_ready_peer(handshake)?;
+        let members = super::ready::ready_member_snapshot(actor, &context, peer, &[])?;
+        let call = participant.lease.clone();
+        let watch = participant.watch.lease.clone();
+        participant.join.prepare_high_sdp_answer(
+            actor,
+            &room,
+            handshake,
+            intent,
+            delivery,
+            plaintext,
+            &Authority {
+                context: &context,
+                lease: &call,
+                member: &|id| members.contains(&Some(id)),
+            },
+            clock,
+            &mut self.rng,
+            |_, _| {
+                if call.is_live() && watch.is_live() {
+                    Ok(())
+                } else {
+                    Err(VoiceError::Unauthorized)
+                }
+            },
+        )
+    }
+
     /// Commit the actual private SDK Open output. Root keeps only terminal metadata and an
     /// opaque delivery identity; plaintext remains in its separately paid browser inbox.
     pub fn submit_voice_sdp_open_result(
@@ -71,6 +131,28 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         action: &Arc<voice_v2::crypto_actions::CryptoAction>,
         delivery: &Arc<voice_v2::sdp::SdpDelivery>,
     ) -> Result<(), VoiceError> {
+        self.transition_voice_sdp_delivery(grant, action, delivery, false)
+    }
+
+    /// Called only by the original private native/browser SDK completion path. This is
+    /// causal history of a successful remote-description application, never drainage or
+    /// proof that a renderer-supplied boolean/Offer/header may authorize an Answer.
+    pub fn complete_voice_sdp_delivery(
+        &mut self,
+        grant: &Arc<CallGrant>,
+        action: &Arc<voice_v2::crypto_actions::CryptoAction>,
+        delivery: &Arc<voice_v2::sdp::SdpDelivery>,
+    ) -> Result<(), VoiceError> {
+        self.transition_voice_sdp_delivery(grant, action, delivery, true)
+    }
+
+    fn transition_voice_sdp_delivery(
+        &mut self,
+        grant: &Arc<CallGrant>,
+        action: &Arc<voice_v2::crypto_actions::CryptoAction>,
+        delivery: &Arc<voice_v2::sdp::SdpDelivery>,
+        applied: bool,
+    ) -> Result<(), VoiceError> {
         self.validate_current_voice_call_grant(grant)?;
         let context = self.voice_v2_context(grant.scope().room)?;
         let voice = self
@@ -93,7 +175,13 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         }
         let peer = action.sdp_peer().ok_or(VoiceError::Unauthorized)?;
         let members = super::ready::ready_member_snapshot(actor, &context, peer, &[])?;
-        participant.join.admit_sdp_delivery(
+        let transition = if applied {
+            voice_v2::presence::LocalJoin::complete_sdp_delivery
+        } else {
+            voice_v2::presence::LocalJoin::admit_sdp_delivery
+        };
+        transition(
+            &participant.join,
             actor,
             &room,
             action,

@@ -1,5 +1,21 @@
 # Mewtual; Interfaces & Hooks Schema
 
+## Protected HIGH Answer completion (24 October; Root-only integration)
+
+complete_voice_sdp_delivery takes the actual registered Open action and SAME SdpDelivery.
+Fresh completion requires prior admission and current original Actor/room/epoch/call/PC.
+The fixed record advances Prepared0 -> Admitted1 -> Applied2 with monotone operations;
+was_applied is historical metadata, not SDK attestation, drainage or standing authority.
+The eventual authenticated native row may recover this same history after a lost reply.
+Only the original private browser SDK-success producer may request fresh completion.
+
+prepare_voice_high_sdp_answer requires that original applied record and PC intent, deriving
+OfferId/round from the actual accepted Offer. It recovers the same action on exact plaintext
+retry, including after compaction. Generic packet reservation refuses every protected round
+kind; the private LOW first-Offer and HIGH applied-Answer factories are the only writers.
+Existing confirmation and unprofiled packet contracts are unchanged. Native/browser complete
+SDP grammar and actual SDK/RTC consumption are still unfinished.
+
 ## Typed Root SDP actions (24 October; native/browser endpoint pending)
 
 Trusted Root APIs prepare_voice_low_sdp_offer, prepare_voice_sdp_open and

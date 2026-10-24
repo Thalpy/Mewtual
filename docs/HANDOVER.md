@@ -1,5 +1,38 @@
 # Mewtual; Handover
 
+## Root HIGH Answer ordering (24 October; browser/native producer still pending)
+
+`communication-sdp-answer` / `target/communication-sdp-answer-worktree` extends the pushed
+Root SDP checkpoint `442285fc`; its lint follow-up is `eaa3a25a` on `communication-sdp-rtc`.
+The original accepted delivery now advances monotonically Prepared -> Admitted -> Applied.
+Repeated admission/completion replies cannot downgrade Applied. A separate current native
+completion API records application of the exact original remote description; it is ordering
+history, not evidence that a browser SDK actually ran or that its owners drained.
+
+HIGH Answer preparation resolves the original accepted Offer, Open action, SAME applied
+delivery and original PC/Ready/round. It derives OfferId internally, uses the existing Active
+packet/action claims, and publishes direction/action/packet/global sequence in one original
+origin tail. Exact retries retain the same action after input compaction; changed plaintext
+refuses. Generic packet reservation now rejects protected round kinds, including after
+header receipt or Applied: it cannot bypass the private HIGH factory or LOW's inert factory.
+
+Focused evidence: four HIGH Answer regressions pass, including equal-label foreign original
+allocations, missing/Admitted-only completion, generic bypass, actual PC close in final
+completion/Answer, and repeated Capacity under full ordinary bytes/Crypto/table pressure.
+An actual Root test completes signed LOW Offer -> HIGH Open/completion/Answer seal -> LOW
+Answer Open with ordinary bytes full, while LOW cannot use the HIGH factory. SDK success
+and AEAD outputs are mocked; this is neither blocked TCP nor browser/RTC/audio acceptance.
+All602 voice-v2 and54 runtime tests pass; current Sync/App/native metadata compilation passes.
+Read-only adversarial review found no blocker/high/medium in this Root boundary. Strict root
+all-target/all-feature Clippy passes (91s), as do formatting and ambient-dependency checks.
+Complete workspace/native suites and remaining native/build gates are pending; earlier
+checkpoint gates remain separately recorded below. No operational V2 activation follows.
+
+Next: paid typed Actor body/command/result ownership, native SDP request/body admission before
+allocation/counter debit, and the private original browser SDK/complete-ICE RTC producer.
+Fresh rounds, serial multi-peer composition, member relay and combined/physical acceptance
+remain open. The external-download branch stays outside this implementation area.
+
 ## Root SDP actions and protected Answer intake (24 October; integration continues)
 
 `communication-sdp-rtc` / `target/communication-sdp-rtc-worktree` continues from pushed

@@ -130,7 +130,7 @@ fn sdp_open_actual_final_group_and_policy_contention_preserve_token_and_same_act
     }
 }
 
-fn submit(
+pub(super) fn submit(
     p: &mut ProtectedFixture,
     action: &Arc<CryptoAction>,
     output: SdpOpenOutput<'_>,
@@ -146,7 +146,7 @@ fn submit(
         final_owner,
     )
 }
-fn deliver(
+pub(super) fn deliver(
     p: &ProtectedFixture,
     action: &Arc<CryptoAction>,
     delivery: &Arc<SdpDelivery>,
@@ -161,7 +161,7 @@ fn deliver(
         final_owner,
     )
 }
-fn output<'a>(action: &CryptoAction, bytes: &'a [u8]) -> SdpOpenOutput<'a> {
+pub(super) fn output<'a>(action: &CryptoAction, bytes: &'a [u8]) -> SdpOpenOutput<'a> {
     SdpOpenOutput::Plaintext {
         bytes,
         claimed_tag: action.output_tag(bytes).unwrap(),

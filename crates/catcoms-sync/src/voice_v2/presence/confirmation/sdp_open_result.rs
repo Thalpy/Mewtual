@@ -159,11 +159,42 @@ impl LocalJoin {
         authority: &Authority<'_>,
         final_owner: impl FnOnce(u64, u64) -> Result<(), VoiceError>,
     ) -> Result<(), VoiceError> {
+        self.transition_sdp_delivery(actor, room, action, delivery, authority, false, final_owner)
+    }
+
+    /// Trusted native completion after the original private SDK has actually applied this
+    /// remote description. Root records causal order only; browser/native actual promises,
+    /// strings and IO remain independently paid until their real last-owner destruction.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn complete_sdp_delivery(
+        &self,
+        actor: &ActorOwner,
+        room: &RoomAuthority,
+        action: &Arc<CryptoAction>,
+        delivery: &Arc<SdpDelivery>,
+        authority: &Authority<'_>,
+        final_owner: impl FnOnce(u64, u64) -> Result<(), VoiceError>,
+    ) -> Result<(), VoiceError> {
+        self.transition_sdp_delivery(actor, room, action, delivery, authority, true, final_owner)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn transition_sdp_delivery(
+        &self,
+        actor: &ActorOwner,
+        room: &RoomAuthority,
+        action: &Arc<CryptoAction>,
+        delivery: &Arc<SdpDelivery>,
+        authority: &Authority<'_>,
+        applied: bool,
+        final_owner: impl FnOnce(u64, u64) -> Result<(), VoiceError>,
+    ) -> Result<(), VoiceError> {
         if room.scope != self.scope
             || !room.lease.is_live()
             || !actor.uses_resources(&self.resources)
             || !action.belongs_to(self.scope, &self.lease)
             || !action.owns_sdp_delivery(delivery)?
+            || (applied && !delivery.was_admitted())
         {
             return Err(VoiceError::Unauthorized);
         }
@@ -201,7 +232,13 @@ impl LocalJoin {
             if !room.lease.is_live() || !delivery.current_at(wall, mono) {
                 return Err(VoiceError::Unauthorized);
             }
-            origin.publish(|| delivery.admit())
+            origin.publish(|| {
+                if applied {
+                    delivery.applied()
+                } else {
+                    delivery.admit()
+                }
+            })
         })
     }
 }

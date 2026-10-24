@@ -6,7 +6,7 @@ use super::*;
 use crate::voice_v2::crypto_actions::{CryptoAction, CryptoResultReceipt, RecordFunding};
 use crate::voice_v2::negotiation::admission::SdpAdmission;
 use crate::voice_v2::packets::InboundPacket;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicU8, Ordering};
 
 /// Closed result from the original private SDK computation. A failed AEAD operation has
 /// no plaintext or invented padding. The native adapter must authenticate the actual row,
@@ -35,7 +35,9 @@ pub struct SdpDelivery {
     binding: Arc<ActionBinding>,
     admission: Arc<SdpAdmission>,
     output_tag: [u8; 32],
-    admitted: AtomicBool,
+    // Monotone Prepared0 -> Admitted1 -> Applied2. A repeated admission after SDK
+    // completion must never downgrade Applied or strand the original HIGH Answer.
+    state: AtomicU8,
     // LAST: this plain fixed action fee survives Action/LocalJoin destruction. In particular
     // it must not be a Stage::Result/PhaseLoan credit, which would retain a live Exchange.
     _funding: Arc<RecordFunding>,
@@ -65,7 +67,7 @@ impl SdpDelivery {
             binding: binding.clone(),
             admission,
             output_tag,
-            admitted: AtomicBool::new(false),
+            state: AtomicU8::new(0),
             _funding: action.history_funding(),
         }))
     }
@@ -78,11 +80,32 @@ impl SdpDelivery {
     /// Call only in the actual original actor's callback-free origin publish tail. Retrying
     /// the same record never creates another identity, refreshes time, or resets its latch.
     pub(in crate::voice_v2) fn admit(&self) {
-        self.admitted.store(true, Ordering::Release);
+        self.state.fetch_max(1, Ordering::AcqRel);
+    }
+    /// Only the private native/browser completion producer may reach Root's applied tail,
+    /// after the original successful SDK await. This records ordering, not SDK attestation
+    /// or actual promise/buffer/PC drainage, and never renews the original finite round.
+    pub(in crate::voice_v2) fn applied(&self) {
+        debug_assert!(self.was_admitted());
+        self.state.fetch_max(2, Ordering::AcqRel);
     }
     /// Historical status only; true cannot substitute for current native delivery admission.
     pub fn was_admitted(&self) -> bool {
-        self.admitted.load(Ordering::Acquire)
+        self.state.load(Ordering::Acquire) >= 1
+    }
+    /// Immutable completion history. A trusted native adapter can recover it after a lost
+    /// reply, independently of the current-grant path. Fresh Answer still needs current
+    /// original Actor/room/epoch/PC admission and this SAME accepted record.
+    pub fn was_applied(&self) -> bool {
+        self.state.load(Ordering::Acquire) == 2
+    }
+    pub(in crate::voice_v2) fn permits_answer(
+        &self,
+        handshake: Nonce,
+        kind: EncryptedKind,
+        offer: Option<OfferId>,
+    ) -> bool {
+        self.was_applied() && self.binding.matches_answer(handshake, kind, offer)
     }
     pub fn output_tag(&self) -> [u8; 32] {
         self.output_tag

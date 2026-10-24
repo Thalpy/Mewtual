@@ -10,6 +10,17 @@ pub(in crate::voice_v2) struct PreparedOutgoing {
     // Original preparation anchor. Delayed publication cannot renew the packet or SDP window.
     started: u64,
 }
+impl PreparedOutgoing {
+    pub(in crate::voice_v2) fn id(&self) -> MessageId {
+        self.reservation.id
+    }
+    pub(in crate::voice_v2) fn header(&self) -> &EncryptedHeader {
+        &self.outgoing.draft.header
+    }
+    pub(in crate::voice_v2) fn aad_len(&self) -> usize {
+        self.reservation.aad.len()
+    }
+}
 
 /// Original native owners and time bounds, never reconstructed from a caller's reservation.
 pub(in crate::voice_v2) struct OutgoingAdmission {
@@ -169,7 +180,7 @@ impl PacketLedger {
         clock: &dyn Clock,
         rng: &mut impl CryptoRngCore,
     ) -> Result<PreparedOutgoing, VoiceError> {
-        self.prepare_outgoing_in_budget(public_key, request, authority, clock, rng, None)
+        self.prepare_outgoing_in_budget(public_key, request, authority, clock, rng, None, None)
     }
 
     pub(in crate::voice_v2) fn prepare_protected_outgoing(
@@ -181,9 +192,44 @@ impl PacketLedger {
         rng: &mut impl CryptoRngCore,
         workflow: Arc<super::super::chain::Workflow>,
     ) -> Result<PreparedOutgoing, VoiceError> {
-        self.prepare_outgoing_in_budget(public_key, request, authority, clock, rng, Some(workflow))
+        self.prepare_outgoing_in_budget(
+            public_key,
+            request,
+            authority,
+            clock,
+            rng,
+            Some(workflow),
+            None,
+        )
     }
 
+    /// Sole Active protected Answer path. Header receipt/Responder alone proves neither
+    /// successful Open nor application to the original PC. Never expose this private
+    /// original delivery record as a renderer OfferId/bool reservation selector.
+    pub(in crate::voice_v2) fn prepare_applied_sdp_answer(
+        &self,
+        public_key: [u8; 32],
+        request: ReserveRequest,
+        delivery: &Arc<super::super::sdp::SdpDelivery>,
+        authority: &Authority<'_>,
+        clock: &dyn Clock,
+        rng: &mut impl CryptoRngCore,
+    ) -> Result<PreparedOutgoing, VoiceError> {
+        if !delivery.permits_answer(request.handshake, request.kind, request.offer) {
+            return Err(VoiceError::Unauthorized);
+        }
+        self.prepare_outgoing_in_budget(
+            public_key,
+            request,
+            authority,
+            clock,
+            rng,
+            None,
+            Some(delivery),
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)] // Distinct original funding and applied-delivery provenance cannot be inferred from labels.
     fn prepare_outgoing_in_budget(
         &self,
         public_key: [u8; 32],
@@ -192,6 +238,7 @@ impl PacketLedger {
         clock: &dyn Clock,
         rng: &mut impl CryptoRngCore,
         workflow: Option<Arc<super::super::chain::Workflow>>,
+        applied: Option<&Arc<super::super::sdp::SdpDelivery>>,
     ) -> Result<PreparedOutgoing, VoiceError> {
         if DeviceId::from_public_key_bytes(&public_key) != self.local {
             return Err(VoiceError::Unauthorized);
@@ -217,9 +264,15 @@ impl PacketLedger {
                 .sdp
                 .as_ref()
                 .is_some_and(|sdp| sdp.owner.uses_successor_packet_claims());
-        if request.kind.round().is_some() && !successor_sdp {
-            // New mode never borrows an ordinary table/byte position if its exact
-            // original successor has not been registered; wait for native preparation.
+        if request.kind.round().is_some()
+            && (!successor_sdp
+                || applied.is_none_or(|delivery| {
+                    !delivery.permits_answer(request.handshake, request.kind, request.offer)
+                }))
+        {
+            // Generic protected reservations are forbidden even after header admission
+            // established Responder. LOW uses its separate inert factory; HIGH requires
+            // the SAME accepted/applied delivery. Refuse before RNG, slots or counters.
             return Err(VoiceError::Unauthorized);
         }
         let ordinary_slot = if workflow.is_none() && !successor_sdp {

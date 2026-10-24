@@ -1,5 +1,16 @@
 # Mewtual; Architecture
 
+## Root Answer production after applied Open (24 October)
+
+The original fixed delivery is a monotone Prepared/Admitted/Applied cell. Root's separate
+completion API requires the exact original accepted Open and current native owners; HIGH
+Answer resolves that SAME applied record and derives Offer/round internally. It borrows the
+existing Active packet/action claims and publishes action, draft and global counter together.
+Generic protected-round reservation is forbidden, including after header admission/Applied.
+This adds no permanent allocation or progress backedge. Native/browser SDK success, paid
+Actor transport, complete ICE/RTC and later operational rounds still need integration; the
+Root Applied marker establishes causal ordering and exact recovery, not SDK execution.
+
 ## Root SDP commit and delivery (24 October; native/browser integration pending)
 
 The original PC intent now binds typed SealSdp/OpenSdp actions and exact Offer/Answer

@@ -317,3 +317,169 @@ async fn root_unused_answer_namespace_position_returns_after_actual_pc_close_and
         }
     }
 }
+
+#[tokio::test]
+async fn root_original_offer_open_applied_answer_seal_and_answer_open_complete_without_legacy_reservation(
+) {
+    let (mut f, grants, handshake, low, phases, intents, _, offer) = sdp_fixture().await;
+    let high = 1 - low;
+    let high_node = if high == 0 { &mut f.a } else { &mut f.c };
+    assert!(matches!(
+        admit(high_node, Envelope::Direct(offer.clone())).unwrap(),
+        EndpointReceipt::FirstOffer(_)
+    ));
+    let opened = high_node
+        .prepare_voice_sdp_open(&grants[high], handshake, &intents[high])
+        .unwrap();
+    let ordinary = fill_ordinary(high_node, &grants[high]);
+    let before = observations(high_node);
+    opened.admit_engine(opened.engine_bytes()).unwrap();
+    let plaintext = b"v=0\r\n";
+    let result = high_node
+        .submit_voice_sdp_open_result(
+            &grants[high],
+            &opened,
+            voice_v2::sdp::SdpOpenOutput::Plaintext {
+                bytes: plaintext,
+                claimed_tag: opened.output_tag(plaintext).unwrap(),
+            },
+        )
+        .unwrap();
+    let delivery = result.delivery.unwrap();
+    assert_eq!(
+        high_node
+            .prepare_voice_high_sdp_answer(
+                &grants[high],
+                handshake,
+                &intents[high],
+                &delivery,
+                plaintext
+            )
+            .err(),
+        Some(VoiceError::Unauthorized)
+    );
+    high_node
+        .admit_voice_sdp_delivery(&grants[high], &opened, &delivery)
+        .unwrap();
+    assert_eq!(
+        high_node
+            .prepare_voice_high_sdp_answer(
+                &grants[high],
+                handshake,
+                &intents[high],
+                &delivery,
+                plaintext
+            )
+            .err(),
+        Some(VoiceError::Unauthorized)
+    );
+    // Test-only trusted SDK success boundary. No browser or real RTC is implied by this
+    // native completion marker; its actual private producer remains an integration task.
+    high_node
+        .complete_voice_sdp_delivery(&grants[high], &opened, &delivery)
+        .unwrap();
+    opened.acknowledge_result(&result.receipt).unwrap();
+    opened.settle_engine();
+    high_node
+        .admit_voice_sdp_delivery(&grants[high], &opened, &delivery)
+        .unwrap();
+    high_node
+        .complete_voice_sdp_delivery(&grants[high], &opened, &delivery)
+        .unwrap();
+    assert!(delivery.was_applied());
+    let seal = high_node
+        .prepare_voice_high_sdp_answer(
+            &grants[high],
+            handshake,
+            &intents[high],
+            &delivery,
+            plaintext,
+        )
+        .unwrap();
+    seal.admit_engine(seal.engine_bytes()).unwrap();
+    let ciphertext = [43; 21];
+    let sealed = high_node
+        .submit_voice_sdp_result(
+            &grants[high],
+            &seal,
+            &ciphertext,
+            seal.output_tag(&ciphertext).unwrap(),
+        )
+        .unwrap();
+    seal.acknowledge_result(&sealed).unwrap();
+    seal.settle_engine();
+    assert!(Arc::ptr_eq(
+        &seal,
+        &high_node
+            .prepare_voice_high_sdp_answer(
+                &grants[high],
+                handshake,
+                &intents[high],
+                &delivery,
+                plaintext
+            )
+            .unwrap()
+    ));
+    assert_eq!(
+        observations(high_node),
+        before,
+        "HIGH full original round uses paid Actor/directory only"
+    );
+    let answer = high_node.voice_runtime.as_ref().unwrap().endpoints.participant_join_for_test().unwrap()
+        .published_source_packets().find(|object| matches!(object.body(), Body::Encrypted { header, .. } if header.kind == EncryptedKind::AnswerRound(intents[high].round()))).unwrap().clone();
+    let Body::Encrypted { header, .. } = answer.body() else {
+        panic!("actual signed Answer")
+    };
+    assert_eq!(header.offer, Some(delivery.offer()));
+    assert_eq!(header.kind.round(), Some(intents[low].round()));
+    drop(ordinary);
+    let low_node = if low == 0 { &mut f.a } else { &mut f.c };
+    assert!(matches!(
+        admit(low_node, Envelope::Direct(answer)).unwrap(),
+        EndpointReceipt::Answer(_)
+    ));
+    let opened = low_node
+        .prepare_voice_sdp_open(&grants[low], handshake, &intents[low])
+        .unwrap();
+    let ordinary = fill_ordinary(low_node, &grants[low]);
+    opened.admit_engine(opened.engine_bytes()).unwrap();
+    let result = low_node
+        .submit_voice_sdp_open_result(
+            &grants[low],
+            &opened,
+            voice_v2::sdp::SdpOpenOutput::Plaintext {
+                bytes: plaintext,
+                claimed_tag: opened.output_tag(plaintext).unwrap(),
+            },
+        )
+        .unwrap();
+    assert_eq!(
+        result.receipt.outcome,
+        voice_v2::crypto_actions::CryptoOutcome::Opened
+    );
+    let delivery = result.delivery.unwrap();
+    low_node
+        .admit_voice_sdp_delivery(&grants[low], &opened, &delivery)
+        .unwrap();
+    low_node
+        .complete_voice_sdp_delivery(&grants[low], &opened, &delivery)
+        .unwrap();
+    assert_eq!(
+        low_node
+            .prepare_voice_high_sdp_answer(
+                &grants[low],
+                handshake,
+                &intents[low],
+                &delivery,
+                plaintext
+            )
+            .err(),
+        Some(VoiceError::Unauthorized)
+    );
+    opened.acknowledge_result(&result.receipt).unwrap();
+    opened.settle_engine();
+    drop(ordinary);
+    for phase in phases {
+        phase.close();
+    }
+}

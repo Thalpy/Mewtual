@@ -557,6 +557,7 @@ impl PreparedAction {
     pub(super) fn serial(&self) -> u64 {
         self.serial
     }
+    #[allow(clippy::too_many_arguments)] // Keep original issue, identity and both native clock samples explicit.
     pub(super) fn sdp_binding(
         &mut self,
         intent: Arc<super::sdp::InitialSdpIntent>,

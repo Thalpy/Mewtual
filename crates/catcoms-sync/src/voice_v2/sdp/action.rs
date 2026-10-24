@@ -25,6 +25,7 @@ impl ActionBinding {
     /// Call only after the original affine direction issue is held and before publication.
     /// Equal header/round labels never establish authority: the creating LocalJoin must also
     /// resolve its SAME stored intent and actual unpublished outgoing or retained token.
+    #[allow(clippy::too_many_arguments)] // Native issue/header provenance and clock samples are separate gates.
     pub(in crate::voice_v2) fn prepare(
         issue: &mut crate::voice_v2::negotiation::ActionIssue,
         intent: Arc<InitialSdpIntent>,
@@ -104,6 +105,18 @@ impl ActionBinding {
     }
     pub(in crate::voice_v2) fn peer(&self) -> DeviceId {
         self.intent.original.binding().peer
+    }
+    pub(in crate::voice_v2) fn matches_answer(
+        &self,
+        handshake: Nonce,
+        kind: EncryptedKind,
+        offer: Option<OfferId>,
+    ) -> bool {
+        !self.is_seal()
+            && !self.intent.local_is_low()
+            && handshake == self.handshake()
+            && kind == EncryptedKind::AnswerRound(self.intent.round())
+            && offer == Some(self.offer)
     }
     pub(in crate::voice_v2) async fn closed(&self) {
         let original = self.intent.original.binding();

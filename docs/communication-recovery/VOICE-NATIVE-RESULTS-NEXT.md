@@ -16,8 +16,12 @@ the SAME fixed delivery observation with token consumption and Opened. Closed au
 failure and invalid UTF8 retain Rejected without delivery. Shared fixed funding is last and
 fits the existing original confirmation rows and SDP history allowance.
 
-Next implement HIGH Answer creation after the original accepted Offer/remote description;
-paid typed Actor command/result custody; closed native SDP request/body grammar authenticated
+Root HIGH Answer now resolves the SAME accepted/applied Open delivery and derives Offer/round
+internally. Its monotone completion history cannot be downgraded by a delayed admission retry;
+generic protected-round reservation refuses bypass. Root signed two-way exchange and pressure
+regressions pass, with SDK success/AEAD mocked. This does not establish the actual SDK producer.
+
+Next implement paid typed Actor command/result custody; closed native SDP request/body grammar authenticated
 against original Session/key/storage/SDK/PC/action BEFORE allocation/counter debit; and private
 browser original-key seal/open plus complete-ICE RTC. Keep confirmation Data2048/result528
 unchanged. Native must recover the exact registered result before current Actor checks after

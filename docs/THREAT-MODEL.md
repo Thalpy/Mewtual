@@ -1,5 +1,20 @@
 # Threat model; client integrity & enforcement boundaries
 
+## Applied delivery and HIGH Answer (24 October; no SDK attestation)
+
+Signed Offer header admission alone cannot issue an Answer. The private HIGH factory requires
+the actual accepted Open, SAME fixed delivery/admission/intent and monotone Applied history,
+then repeats current original Actor/room/epoch/PC gates before publishing its action/draft/
+sequence. Generic protected round reservation is closed even after Applied, preventing a
+header-only or generic-ledger bypass. Equal serialized Offer/round labels do not establish
+allocation identity. An old admission retry cannot undo Applied or reset the original round.
+
+Applied is supplied by a trusted native completion API; its private authenticated browser
+producer does not exist yet. Thus these Root checks establish ordering/recovery, not proof
+of SDK execution. That producer must wait for the original successful SDK promise, preserve
+one SDK-started latch and retain actual native/browser/PC owners through real destruction.
+Failure/End must close the persisted phase, and cannot infer drainage or renew round1.
+
 ## Typed SDP action and Answer boundaries (24 October; Root integration only)
 
 Original PC/Ready/round/Offer identity is attached to typed SDP actions and their outgoing
