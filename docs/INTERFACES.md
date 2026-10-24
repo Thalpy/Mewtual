@@ -1,5 +1,13 @@
 # Mewtual; Interfaces & Hooks Schema
 
+## SDP phase retention (24 October)
+
+`prepare_sdp_exchange` can reuse the exact live owner, but cannot replace a closed owner
+still retained by external handles, prepared input, or actual Lower custody. Drop those real
+owners before retrying; closing alone does not establish retirement. The ledger releases its
+own closed entry during retry without clearing pair/replay/sequence/action history. No wire
+or persistence format changes, readiness permission, or new attempt allowance follow.
+
 ## Original native Finish evidence (24 October)
 
 `ConfirmationControl::confirmed_finish()` returns read-only `FinishEvidence` only after a

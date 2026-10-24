@@ -1,5 +1,13 @@
 # Mewtual; Architecture
 
+## Exact phase resource indices (24 October)
+
+The Resources group registry tracks one actual retained Exchange and one Workflow. A closed
+owner or actual input/Lower still blocks another Exchange; liveness alone never establishes
+capacity retirement. Destructors remove only the matching weak identity before final metadata
+payment returns, outside Pool for weak destruction. The packet ledger can release its own
+closed handle before a retry without reconstructing any pair, sequence or replay state.
+
 ## Native Finish custody window (24 October)
 
 Only successful application-bound Finish publication arms the original binding's one-shot

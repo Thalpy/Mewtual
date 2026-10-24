@@ -357,7 +357,7 @@ fn sdp_responder_pins_original_offer_only_at_successful_admission_and_allows_one
 }
 
 #[test]
-fn prepared_sdp_cannot_adopt_a_replacement_exchange_or_commit_after_final_revocation() {
+fn prepared_sdp_blocks_replacement_and_cannot_commit_after_final_revocation() {
     use std::cell::Cell;
     for replace in [false, true] {
         let mut a = Endpoint::new(1, Arc::new(Resources::default()));
@@ -377,8 +377,10 @@ fn prepared_sdp_cannot_adopt_a_replacement_exchange_or_commit_after_final_revoca
             .unwrap();
         if replace {
             owner.close();
-            let next = a.prepare_sdp(&clock).unwrap();
-            assert!(!Arc::ptr_eq(&owner, &next));
+            // Intentional stronger contract: actual prepared input and even an external
+            // closed owner prevent replacement, rather than allowing another owner and
+            // relying only on the later stale-admission check. No prepared input is lost.
+            assert_eq!(a.prepare_sdp(&clock).err(), Some(VoiceError::Capacity));
         }
         let effect = Cell::new(false);
         let result = a.ledger.commit_prepared_inbound(
@@ -394,14 +396,67 @@ fn prepared_sdp_cannot_adopt_a_replacement_exchange_or_commit_after_final_revoca
                 Ok(())
             },
         );
-        assert_eq!(result.err(), Some(VoiceError::Unauthorized));
+        // A failed replacement released only the ledger's closed SDP handle, so its
+        // capacity lookup refuses before the final authorization closure can run.
+        assert_eq!(
+            result.err(),
+            Some(if replace {
+                VoiceError::Capacity
+            } else {
+                VoiceError::Unauthorized
+            })
+        );
         assert!(!effect.get(), "no stale native origin/effect transaction");
         assert_eq!(a.ledger.serial, 0);
         assert_eq!(a.ledger.pairs[&HANDSHAKE].replay.highest, 0);
         assert!(a.ledger.incoming.is_empty());
-        let sdp = a.ledger.sdp.as_ref().unwrap();
-        assert!(sdp.role == SdpRole::Ready);
-        assert_eq!(sdp.remote, None);
+        if replace {
+            assert!(a.ledger.sdp.is_none(), "closed ledger handle was released");
+        } else {
+            let sdp = a.ledger.sdp.as_ref().unwrap();
+            assert!(sdp.role == SdpRole::Ready);
+            assert_eq!(sdp.remote, None);
+        }
+    }
+}
+
+#[test]
+fn sdp_registry_ledger_closed_entry_retries_after_actual_lower_drop_without_resetting_history() {
+    for hold_lower in [false, true] {
+        let mut a = Endpoint::new(1, Arc::new(Resources::default()));
+        let mut b = Endpoint::new(2, Arc::new(Resources::default()));
+        a.register(&b);
+        b.register(&a);
+        a.establish();
+        b.establish();
+        let clock = ManualClock::new(1000);
+        let mut rng = ChaCha20Rng::seed_from_u64(88);
+        // Populate the real allocator, replay window and retained packet maps first. A
+        // closed SDP entry may be removed, but no pair/counter/history may be reconstructed.
+        let outgoing = a.reserve(&clock, &mut rng).unwrap();
+        let remote = b.reserve(&clock, &mut rng).unwrap();
+        let signed = b.submit(&remote, &[6; 32], &clock).unwrap();
+        let incoming = a.admit(signed, &clock).unwrap();
+        let first = a.prepare_sdp(&clock).unwrap();
+        let lower = hold_lower.then(|| first.charge(Stage::Lower, 128).unwrap());
+        first.close();
+        drop(first);
+        if hold_lower {
+            assert_eq!(a.prepare_sdp(&clock).err(), Some(VoiceError::Capacity));
+            assert!(a.ledger.sdp.is_none());
+        }
+        drop(lower);
+        let next = a.prepare_sdp(&clock).unwrap();
+        assert!(Arc::ptr_eq(
+            &a.ledger.resources.exchange(a.context.scope.group).unwrap(),
+            &next
+        ));
+        assert_eq!(a.ledger.pairs[&HANDSHAKE].next, 1);
+        assert_eq!(a.ledger.pairs[&HANDSHAKE].replay.highest, 1);
+        assert_eq!(a.ledger.serial, 1);
+        assert!(a.ledger.outgoing.contains_key(&outgoing.id));
+        assert!(a.ledger.incoming.contains_key(&incoming.token));
+        assert!(next.is_live());
     }
 }
 

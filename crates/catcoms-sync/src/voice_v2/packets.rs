@@ -714,6 +714,10 @@ impl PacketLedger {
             pair: pair.live.clone(),
             helpers,
         };
+        // Release this ledger's closed owner before competing for a new registered phase.
+        // Actual input/Source/Lower borrowers or an external closed handle still retain the
+        // old owner and correctly refuse replacement until their real last drop.
+        drop(self.sdp.take());
         let slots = self.action_slots.reserve(2)?;
         let owner = Exchange::new_bound(self.resources.clone(), binding, slots)?;
         self.sdp = Some(SdpExchange {

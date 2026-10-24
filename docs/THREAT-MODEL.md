@@ -1,5 +1,13 @@
 # Threat model; client integrity & enforcement boundaries
 
+## Retained phase identity (24 October)
+
+Competing SDP preparation cannot replace the registered Exchange while any original actual
+owner survives, including closed/prepared/Lower custody. Same-object registration is idempotent;
+foreign pool/group registration refuses. Exact destructor cleanup cannot remove a successor's
+index or leave a dead weak allocation retained by unrelated group credits after metadata refund.
+This is resource ownership enforcement, not Ready, SDP authentication or RTC authority.
+
 ## Finish custody cannot renew protocol authority (24 October)
 
 Actual protected Finish publication records native signed ID/hash and arms one30-second

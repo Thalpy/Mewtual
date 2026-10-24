@@ -88,8 +88,9 @@ pub struct Exchange {
     state: Mutex<State>,
     binding: Option<Binding>,
     live: CallLease,
-    _metadata: Credit,
     action_slots: Arc<super::crypto_actions::slots::ReservedSlots>,
+    // Last: every enclosing owner/reservation/slot remains paid through field destruction.
+    _metadata: Credit,
 }
 struct PhaseLoan {
     exchange: Arc<Exchange>,
@@ -146,6 +147,9 @@ impl Drop for PhaseLoan {
     }
 }
 impl Exchange {
+    pub(crate) fn uses_registry(&self, resources: &Resources, group: [u8; 32]) -> bool {
+        std::ptr::eq(Arc::as_ptr(&self.resources), resources) && self.group == group
+    }
     pub(crate) fn allows_helper(&self, helper: DeviceId) -> bool {
         self.binding
             .as_ref()
@@ -184,7 +188,7 @@ impl Exchange {
     ) -> Result<Arc<Self>, VoiceError> {
         let group = binding.scope.group;
         let exchange = Self::new_inner(resources.clone(), group, Some(binding), slots)?;
-        resources.register_exchange(group, &exchange);
+        resources.register_exchange(group, &exchange)?;
         Ok(exchange)
     }
     /// The caller must reach a native readiness boundary before requesting this capacity.
@@ -419,7 +423,9 @@ impl Exchange {
 }
 impl Drop for Exchange {
     fn drop(&mut self) {
+        let original = self as *const Self;
         self.close();
+        self.resources.unregister_exchange(self.group, original);
     }
 }
 
@@ -449,6 +455,7 @@ impl SdpResult {
 #[cfg(test)]
 mod tests {
     use super::*;
+    mod registry;
     #[test]
     fn four_closed_exchanges_release_idle_slots_while_the_last_real_lower_stays_charged() {
         let pool = Arc::new(Resources::default());

@@ -749,7 +749,11 @@ impl Workflow {
 }
 impl Drop for Workflow {
     fn drop(&mut self) {
+        let original = self as *const Self;
         self.close();
+        self.binding
+            .resources()
+            .unregister_workflow(self.binding.scope.group, original);
     }
 }
 

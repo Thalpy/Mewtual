@@ -9,6 +9,47 @@ use catcoms_rt::ManualClock;
 mod handoff;
 mod progress;
 
+#[test]
+fn workflow_registry_clears_exact_last_owner_without_stranding_its_weak_allocation() {
+    let resources = Arc::new(Resources::default());
+    let first = prepare_chain(
+        resources.clone(),
+        binding(1),
+        Arc::new(slots::Slots::default()),
+    )
+    .unwrap();
+    let group = first.binding.scope.group;
+    let independent = resources.charge(group, 17, ResourceKind::Retained).unwrap();
+    let workflow = first.workflow().unwrap();
+    let original = Arc::as_ptr(&workflow);
+    // A test-only address guard prevents allocator reuse while checking delayed cleanup.
+    // Production must clear its own weak index before its last metadata payment returns.
+    let address_guard = Arc::downgrade(&workflow);
+    assert_eq!(
+        resources.retained_phase_indices_for_test(group),
+        (true, false)
+    );
+    first.close();
+    drop((workflow, first));
+    assert_eq!(
+        resources.retained_phase_indices_for_test(group),
+        (false, false)
+    );
+    assert_eq!(resources.counts(), (17, 0));
+    let next = prepare_chain(
+        resources.clone(),
+        binding(2),
+        Arc::new(slots::Slots::default()),
+    )
+    .unwrap();
+    let current = next.workflow().unwrap();
+    assert_ne!(original, Arc::as_ptr(&current));
+    resources.unregister_workflow(group, original);
+    assert!(Arc::ptr_eq(&resources.workflow(group).unwrap(), &current));
+    drop((current, next, independent, address_guard));
+    assert_eq!(resources.counts(), (0, 0));
+}
+
 pub(super) fn binding(seed: u8) -> Binding {
     Binding {
         scope: Scope::for_group(b"prepared chain", Some([7; 32]), 44),

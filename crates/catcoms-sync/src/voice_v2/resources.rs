@@ -355,15 +355,74 @@ impl Resources {
         &self,
         group: [u8; 32],
         exchange: &Arc<super::negotiation::Exchange>,
+    ) -> Result<(), VoiceError> {
+        if !exchange.uses_registry(self, group) {
+            return Err(VoiceError::Scope);
+        }
+        let candidate = Arc::downgrade(exchange);
+        let retired = {
+            let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+            let counts = state
+                .groups
+                .get_mut(&group)
+                .expect("prepaid exchange group");
+            if counts.exchange.strong_count() != 0 {
+                return if counts.exchange.ptr_eq(&candidate) {
+                    Ok(())
+                } else {
+                    Err(VoiceError::Capacity)
+                };
+            }
+            // Inert, closed and actual Lower-owned candidates still count as retained owners.
+            // Only strong-zero may be replaced. Never upgrade/drop an owner under Pool.
+            std::mem::replace(&mut counts.exchange, candidate)
+        };
+        drop(retired);
+        Ok(())
+    }
+    /// Remove only this exact last owner's index BEFORE its final metadata payment drops.
+    /// An unrelated retained group credit can keep Counts alive; a dead Weak would otherwise
+    /// strand the entire Arc allocation after the owner body released its own charge.
+    pub(crate) fn unregister_exchange(
+        &self,
+        group: [u8; 32],
+        owner: *const super::negotiation::Exchange,
     ) {
-        let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
-        // The prepaid backing/metadata keeps this group present. A Weak capacity index neither
-        // prolongs a call nor resets its limits, and disappears with the bounded group record.
-        state
-            .groups
-            .get_mut(&group)
-            .expect("prepaid exchange group")
-            .exchange = Arc::downgrade(exchange);
+        let retired = {
+            let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+            state.groups.get_mut(&group).and_then(|counts| {
+                std::ptr::eq(counts.exchange.as_ptr(), owner)
+                    .then(|| std::mem::take(&mut counts.exchange))
+            })
+        };
+        drop(retired);
+    }
+    pub(crate) fn unregister_workflow(
+        &self,
+        group: [u8; 32],
+        owner: *const super::chain::Workflow,
+    ) {
+        let retired = {
+            let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+            state.groups.get_mut(&group).and_then(|counts| {
+                std::ptr::eq(counts.workflow.as_ptr(), owner)
+                    .then(|| std::mem::take(&mut counts.workflow))
+            })
+        };
+        drop(retired);
+    }
+    #[cfg(test)]
+    pub(in crate::voice_v2) fn retained_phase_indices_for_test(
+        &self,
+        group: [u8; 32],
+    ) -> (bool, bool) {
+        let state = self.state.lock().unwrap();
+        state.groups.get(&group).map_or((false, false), |counts| {
+            (
+                !counts.workflow.ptr_eq(&std::sync::Weak::new()),
+                !counts.exchange.ptr_eq(&std::sync::Weak::new()),
+            )
+        })
     }
     pub(crate) fn exchange(&self, group: [u8; 32]) -> Option<Arc<super::negotiation::Exchange>> {
         self.state

@@ -1,5 +1,29 @@
 # Mewtual; Handover
 
+## Exact SDP resource ownership (24 October; transition integration continues)
+
+The group registry now refuses a competing Exchange while the original allocation is still
+retained, including a closed handle, prepared input or actual Lower. Same-owner publication
+is idempotent. Original Exchange/Workflow destructors clear only their own weak index before
+their final metadata payment returns; unrelated same-group credits cannot strand an unpaid
+dead Arc allocation. A ledger may drop its own closed Exchange entry before retrying, but
+keeps its pair, replay, sequence and action history. This intentionally strengthens the old
+replacement contract: retained prepared input blocks replacement instead of merely failing
+its later stale-admission check. Native causal adoption and RTC remain unavailable.
+
+All541 focused voice tests pass, including actual ledger retry after retained Lower release
+with nonempty sequence/replay/token history. Strict all-target/all-feature Sync Clippy and
+formatting pass; read-only re-review has no remaining findings. Complete newer-source gates
+remain pending coherent transition integration.
+
+Native recovery fixture isolation passed all32 scenarios at5f422bd3 (885.19s), including
+onward directory discovery, graceful restart history, interrupted file recovery and automatic
+browser confirmation through the blocked TCP member bridge. The current01382421 build passed
+all6 isolation regressions,302 handoff checks and9 voice_live TCP scenarios (127.64s); the
+two older voice-module scenarios were covered in the32-case run. These are focused checks,
+not a complete current native suite. They preserve the earlier failed-run evidence below;
+they do not prove production cross-group load fairness or abrupt-crash custody.
+
 ## Native Finish transfer window (24 October; SDP remains unavailable)
 
 Successful application-bound low Finish sealing and high Finish opening now record the exact
@@ -33,8 +57,8 @@ OS-process pools; a test-only admission turn now isolates unrelated scenarios be
 outer timers while preserving all six clients' concurrency, production limits and deadlines.
 Successful release waits for actual actors/drivers; failed cleanup closes further admission
 and preserves its synthetic vault. Review also corrected a taken-before-closed driver marker
-and timeout diagnostics hidden by future destruction. That corrected gate's focused checks
-and the native scenario rerun remain in progress. These are not current all-green gates.
+and timeout diagnostics hidden by future destruction. Focused reruns are recorded above.
+Complete current-head gates still remain pending.
 
 ## Process maintenance admission (24 October; native recovery rerun next)
 
