@@ -277,8 +277,11 @@ async fn native_webcrypto_cycle(
                         .unwrap(),
                     "LOW native Ready admission/drain does not complete HIGH Source before its native first Offer"
                 );
-                // No browser SDP adoption or RTC action was requested; true above observes
-                // original Workflow drainage following actual native Ready, not audio.
+                // Core192KiB + original HIGH Ready32KiB and both actual old Workflows
+                // have drained/extracted before either new64KiB native sidecar is paid.
+                // Actual browser64KiB custody uses HTTP12/13 and independently checks the
+                // installed native SDK records; no RTC/SDP effect permission is fabricated.
+                tokio::join!(a.sdp_custody(&ap), c.sdp_custody(&cp));
             }
             scenario.rules.assert_graph();
             return;

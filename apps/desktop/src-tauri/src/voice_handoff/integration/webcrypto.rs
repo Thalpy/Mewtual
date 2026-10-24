@@ -408,6 +408,34 @@ impl Endpoint {
         );
         id
     }
+    /// Actual original browser broker -> HTTP -> native12/13, after the caller established
+    /// native core/extraction/Ready separately. No fixture proof or mutable SDK flag is sent.
+    pub(crate) async fn sdp_custody(&mut self, parent: &ledger::ResolvedRow) {
+        assert!(parent.has_established_key_claim());
+        assert_eq!(parent.sdk_test_released(), None);
+        let selector = parent.confirmation_selector().unwrap();
+        let (action, version, input_tag) = parent.status().unwrap().action.unwrap();
+        let answer = self.step(json!({"tag":"step", "name":"sdp-custody",
+            "purpose":{"peer":selector.peer.to_string(), "join":hex::encode(selector.join),
+                "keyRef":hex::encode(selector.key_ref), "epoch":selector.epoch.to_string()},
+            "row":hex::encode(parent.id().logical()),
+            "identity":{"action":action.to_string(), "version":version.to_string(), "inputTag":hex::encode(input_tag)},
+        })).await;
+        assert_eq!(answer, json!({"kind":"custody-attempted", "bytes":65536}));
+        // Promise<void> alone is not success evidence: inspect the actual native installed
+        // phase and SDK record after the real authenticated dispatch/physical owners drained.
+        let phase = parent
+            .sdp_test_phase()
+            .expect("actual native64KiB storage admission");
+        let selected = self.selected();
+        assert!(phase.uses(&selected.resources(), selected.binding().scope));
+        assert_eq!(
+            phase.try_status().unwrap(),
+            catcoms_sync::voice_v2::chain::sdp_handoff::Status::Open
+        );
+        assert_eq!(parent.sdk_test_released(), Some(false));
+    }
+
     pub(crate) async fn close(mut self) -> Result<(), Failure> {
         let closed =
             catch_fixture(async {

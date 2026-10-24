@@ -25,7 +25,7 @@ let availability: ReturnType<typeof setInterval> | null = null;
 // Fixture-only bounded stage trace. No keys, Input, Result or ciphertext is copied/logged.
 // A closed native refusal code is metadata; every other crypto result contributes length.
 const stages: string[] = [];
-let capacityRefusals = 0;
+let capacityRefusals = 0, providerCalls = 0;
 // Test control only: Rust stops a long-lived automatic cycle after independently observing
 // actual native receipts/ACKs/Returns. No row, role, input or key is passed into this step.
 let stopPump: (() => void) | null = null;
@@ -34,6 +34,7 @@ const provider = new Proxy(webcrypto.subtle as unknown as SubtleCrypto, { get(ta
   const value = Reflect.get(target, name);
   if (typeof value !== "function") return value;
   return async (...args: unknown[]) => {
+    providerCalls++;
     const result = await Reflect.apply(value, target, args);
     let detail = String(name);
     if (result instanceof ArrayBuffer) {
@@ -101,6 +102,7 @@ async function idle(): Promise<void> {
 type Step =
   | { tag: "step"; name: "prepare"; owner: string; group: string }
   | { tag: "step"; name: "derive"; purpose: VoiceIpcPurpose }
+  | { tag: "step"; name: "sdp-custody"; purpose: VoiceIpcPurpose; row: string; identity: VoiceIpcActionIdentity }
   | { tag: "step"; name: "child"; request: VoiceIpcConfirmationPurpose["request"] }
   | { tag: "step"; name: "pump" | "close" | "wedge" };
 async function step(value: Step): Promise<unknown> {
@@ -221,6 +223,31 @@ async function step(value: Step): Promise<unknown> {
       assert.ok(handle.row(), "authenticated original child row required");
       await idle();
       return { kind: outcome.kind, row: handle.row(), confirmation: outcome.kind === "accepted" ? outcome.receipt.confirmation : null };
+    }
+    case "sdp-custody": {
+      // The automatic pump owns the original accepted intake. Recover that SAME retained
+      // handle using metadata only; a past Derived receipt cannot reconstruct missing keys.
+      const calls = providerCalls;
+      const ready = await broker.nativeDerivationFromChannel(owner, channel, key, value.purpose, value.row, value.identity).attempt();
+      assert.equal(ready.kind, "ready");
+      if (ready.kind !== "ready") throw new Error("original browser chain unavailable");
+      assert.equal(providerCalls, calls, "cached intake recovery must not reconstruct keys");
+      assert.equal(ready.derivation.inspect(), "accepted");
+      const before = broker.counts().bytes;
+      assert.ok(before < 96 * 1024, "actual old browser variable envelope returned");
+      const deadline = performance.now() + 5000;
+      let observed: number;
+      do {
+        assert.ok(performance.now() < deadline, "original SDK custody stayed busy");
+        observed = capacityRefusals;
+        await broker.prepareNativeSdpHandoff(owner, channel, ready.chain);
+        await idle();
+        // Retry ONLY an actual authenticated native Capacity on this same original
+        // intent. The Rust parent independently requires installed SDK custody below.
+        if (capacityRefusals > observed) await new Promise<void>(yes => setTimeout(yes, 25));
+      } while (capacityRefusals > observed);
+      assert.equal(broker.counts().bytes, before + 64 * 1024);
+      return { kind: "custody-attempted", bytes: 64 * 1024 };
     }
     case "close": {
       owner.retire(); broker.retrySelectedJoinKeys();

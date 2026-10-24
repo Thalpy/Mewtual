@@ -1,5 +1,29 @@
 # Mewtual; Handover
 
+## Ordered HTTP/TCP custody composition (24 October)
+
+The existing native Ready scenario now continues into real Node/browser opcode12/13 calls at
+both endpoints. HIGH core192KiB+Ready32KiB preparation and actual HIGH/LOW old Workflow drainage
+complete before either native64KiB handoff phase is paid. Each browser recovers its SAME
+accepted Derive intake without any provider call, verifies its actual old96KiB envelope has
+returned, then reserves a new64KiB subtree. Retries require a newly authenticated Capacity
+reply on the same intent and share a fixed5s observer bound.
+
+A returned Promise<void> is not the success oracle: Rust observes the exact original parent's
+actual Open phase in the selected resources/scope and an independently installed SDK obligation
+that was absent before the call. Missing or misbound opcode13 dispatch therefore fails. Normal
+End/close then has to release the real obligations through the original HTTP channel. The
+focused native Ready/HTTP/TCP scenario passed in19.27s; read-only review found no B/H/M.
+This establishes initial ORDERED custody composition, not operational scheduling/enforcement,
+actual SDK/SDP engine/UTF16 peak, RTC permission, repeated rounds or media acceptance.
+
+Current checks also pass the complete2,717-test frontend suite, Svelte checks, frontend build,
+both strict Clippy gates (root all-target/all-feature and native all-target), explicit native
+check, formatting/diff/ambient checks and browser flow gate. The flow gate needed normal
+process permissions: sandboxed Edge GPU startup crashed before app assertions; no browser
+security setting or harness code was relaxed. Complete root/native suites are still running.
+cargo deny still reports RUSTSEC-2026-0387; bans, licences and sources pass.
+
 ## Independent SDK custody (24 October; operational RTC remains open)
 
 Native opcode13/version6 now records a separately released SDK obligation under the original

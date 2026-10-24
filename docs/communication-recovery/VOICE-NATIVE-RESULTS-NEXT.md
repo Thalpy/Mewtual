@@ -1,5 +1,29 @@
 # Next voice milestone: native result recovery
 
+## Ordered HTTP/TCP custody composition (24 October)
+
+The existing native Ready scenario now continues into real Node/browser opcode12/13 calls at
+both endpoints. HIGH core192KiB+Ready32KiB preparation and actual HIGH/LOW old Workflow drainage
+complete before either native64KiB handoff phase is paid. Each browser recovers its SAME
+accepted Derive intake without any provider call, verifies its actual old96KiB envelope has
+returned, then reserves a new64KiB subtree. Retries require a newly authenticated Capacity
+reply on the same intent and share a fixed5s observer bound.
+
+A returned Promise<void> is not the success oracle: Rust observes the exact original parent's
+actual Open phase in the selected resources/scope and an independently installed SDK obligation
+that was absent before the call. Missing or misbound opcode13 dispatch therefore fails. Normal
+End/close then has to release the real obligations through the original HTTP channel. The
+focused native Ready/HTTP/TCP scenario passed in19.27s; read-only review found no B/H/M.
+This establishes initial ORDERED custody composition, not operational scheduling/enforcement,
+actual SDK/SDP engine/UTF16 peak, RTC permission, repeated rounds or media acceptance.
+
+Current checks also pass the complete2,717-test frontend suite, Svelte checks, frontend build,
+both strict Clippy gates (root all-target/all-feature and native all-target), explicit native
+check, formatting/diff/ambient checks and browser flow gate. The flow gate needed normal
+process permissions: sandboxed Edge GPU startup crashed before app assertions; no browser
+security setting or harness code was relaxed. Complete root/native suites are still running.
+cargo deny still reports RUSTSEC-2026-0387; bans, licences and sources pass.
+
 ## Independent SDK custody (24 October; operational RTC remains open)
 
 Native opcode13/version6 now records a separately released SDK obligation under the original
@@ -28,6 +52,28 @@ HTTP collection is insufficient, so abandoned fixed custody can remain bounded u
 exit. Host shutdown joins physical workers, not an impossible new request from a dead realm.
 No live V2 activation, operational Ready, SDP/RTC effect grant, repeated-round/multi-peer
 composition, member media relay or combined/physical audio acceptance is claimed.
+
+## Original-realm destruction remains an explicit lifecycle boundary
+
+The current executor is a browser nonce; native selection/Session registration captures no
+native WebView/controller/document incarnation. No window/page/process lifecycle hook is
+registered. Equal main-window labels cannot establish identity: pinned Tauri equality is
+label-only. Its Destroyed callback runs BEFORE runtime WebView-wrapper removal; Wry later
+calls controller.Close and ignores its HRESULT. destroy() success only enqueues a request.
+Page Started/Finished events carry URL/loading state, not old-realm destruction evidence.
+None may be used as a synthetic SDK Release or proof of actual native-buffer/Lower drainage.
+
+Local WebView2 bindings expose actual controller/environment access, distinct renderer/frame/
+GPU ProcessFailed kinds and BrowserProcessExited. A future validated adapter would need to
+register the original actual realm BEFORE executor/Session admission and distinguish original
+renderer death from a new document or unrelated process. Generated event signatures alone
+are insufficient evidence of provider or media shutdown; normal same-process reload might
+not generate process-exit evidence at all. Cooperative reload must await exact SDK cleanup,
+or use a native-controlled replacement with a proven original-realm destruction boundary.
+HMR/component remount already retains the same broker. Until this is implemented, abandoned
+fixed custody remains bounded until process exit; live V2 must not promise general reload
+recovery from these storage/custody leaves. A real realm-gone proof could retire fixed SDK
+custody, never fabricate authenticated Release or erase actual native owners/provider/OS heaps.
 
 ## Next operational Ready implementation: reviewed constraints (24 October)
 

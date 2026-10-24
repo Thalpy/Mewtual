@@ -109,6 +109,25 @@ impl Drop for Preparation {
     }
 }
 impl ResolvedRow {
+    /// Test-only observation of the actual installed obligation; this neither constructs
+    /// custody nor mutates release state. Used after real HTTP/browser admission.
+    #[cfg(test)]
+    pub(in crate::voice_handoff) fn sdk_test_released(&self) -> Option<bool> {
+        let state = self.row.state.lock().unwrap_or_else(|e| e.into_inner());
+        Some(
+            state
+                .plan()?
+                .transition
+                .as_ref()?
+                .key
+                .as_ref()?
+                .sdp
+                .as_ref()?
+                .sdk
+                .as_ref()?
+                .released(),
+        )
+    }
     /// Recover one immutable original obligation before current-authority checks. An End,
     /// expired old Claim, or collected physical position cannot manufacture its Release.
     pub(in crate::voice_handoff) fn recover_sdk(
