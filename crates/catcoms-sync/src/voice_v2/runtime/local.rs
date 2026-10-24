@@ -42,6 +42,15 @@ impl EpochObservation {
 }
 
 impl ActorOwner {
+    /// Native preparation clock only, outside every admission/Engine guard. This observation
+    /// carries no authority; actual final publication must freshly enter the native view.
+    pub(in crate::voice_v2) fn preparation_time(&self) -> Result<(u64, u64), VoiceError> {
+        self.current()?;
+        let wall = self.clock.now_ms();
+        let mono = self.clock.monotonic_ms();
+        self.current()?;
+        Ok((wall, mono))
+    }
     /// Capture only while preparing, before Engine/final publication. Later observations use
     /// atomics only; neither expiry collection nor a final Group/Policy closure reenters locks.
     pub(in crate::voice_v2) fn observe_epoch(
@@ -113,6 +122,58 @@ impl LocalOrigin<'_> {
 }
 
 impl ActorOwner {
+    /// Pay the existing endpoint/helper origin rows before promising Ready progress. Native
+    /// membership/policy are read under their actual guards; a caller's member predicate is
+    /// insufficient. This resets no traffic bucket and creates no forwarding/Ready authority.
+    /// Partial payment may leave ordinary bounded rows, as for pair-pin preparation.
+    pub(in crate::voice_v2) fn prepare_ready_members(
+        &self,
+        peer: DeviceId,
+        helpers: &[DeviceId],
+        context: &super::super::Context,
+    ) -> Result<(), VoiceError> {
+        if helpers.len() > 2 {
+            return Err(VoiceError::Bounds);
+        }
+        if helpers.windows(2).any(|pair| pair[0] >= pair[1])
+            || helpers
+                .iter()
+                .any(|helper| *helper == context.local || *helper == peer)
+        {
+            return Err(VoiceError::Malformed);
+        }
+        self.current()?;
+        // Injected time may revoke/reenter native owners. Never sample under either guard
+        // or block acquiring those guards. Metadata payment may enter Pool here; this is
+        // preparation only. Final publication must sample afresh after releasing all guards.
+        let mono = self.clock.monotonic_ms();
+        let mut state = match self.group.state.try_lock() {
+            Ok(state) => state,
+            Err(std::sync::TryLockError::Poisoned(error)) => error.into_inner(),
+            Err(std::sync::TryLockError::WouldBlock) => return Err(VoiceError::Capacity),
+        };
+        let policy = match self.gate.policy.try_lock() {
+            Ok(policy) => policy,
+            Err(std::sync::TryLockError::Poisoned(error)) => error.into_inner(),
+            Err(std::sync::TryLockError::WouldBlock) => return Err(VoiceError::Capacity),
+        };
+        self.check_route_view(&state, &policy, peer, context)?;
+        if peer == context.local
+            || !state.members.contains_key(&context.local)
+            || (!helpers.is_empty() && (!policy.indirect || policy.pin.is_none()))
+            || helpers
+                .iter()
+                .any(|helper| !state.members.contains_key(helper))
+        {
+            return Err(VoiceError::Unauthorized);
+        }
+        let mut members = [context.local, peer, context.local, context.local];
+        members[2..2 + helpers.len()].copy_from_slice(helpers);
+        state
+            .limits
+            .prepare_exchange_members(&members[..2 + helpers.len()], &self.resources, mono)
+    }
+
     #[cfg(test)]
     pub(crate) fn pair_pin_observer_for_test(
         &self,

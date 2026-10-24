@@ -1,5 +1,53 @@
 # Mewtual; Handover
 
+## Ready Producer and private signed artifact (24 October; focused integration)
+
+The native Pair now retains one boxed, separately paid Ready cache and independent Producer.
+An affine paid token and irreversible original Exchange latch enforce construction; private
+quota permits enforce original-owner Cache1/Source1/Lower2/Crypto1 limits. Actual external
+credits retain Producer -> Exchange through real last Drop. The cache remains outside both
+owners, avoiding a cycle. Ordinary bytes and Crypto slots can be full while the original
+protected work progresses. Native endpoint/helper rows are prepaid from the actual Group/
+Policy member view, without refilling traffic buckets; changed helper retries refuse first.
+
+After actual old-Workflow drainage, native preparation can sign one private Ready artifact.
+First fields freeze before both signer callbacks. Original announcement identity and native
+Finish ID/hash are mandatory; actual Runtime time fixes both signed expiry and strict
+monotonic deadline once, clamped to the original Finish window. Public-key/signing/signature
+failures and final Group/Policy contention preserve the same stamp. Cached success does no
+new RNG/signing/Crypto allocation. Callback delay/session close cannot report stale success.
+No packet/Vec/Source/publication marker/receive/RTC authority is exported, and maintenance
+does not schedule the preparation API yet.
+
+Root voice601 pass (15.07s); strict all-target/all-feature Sync Clippy passes (34.04s). New
+coverage includes genuine native signing/Finish, full byte/Crypto pressure, failed original
+cache payment without issuance, one-way issuance after Drop, foreign signer, invalid signature,
+actual final native locks, old Lower drainage, changed-helper no-row creation, strict deadline/
+wall rollback, preparation with only1s of original custody remaining, and signed-cache quiet
+expiry with a real Lower held. Earlier v3 had598 pass/2 fail: the inline cache exceeded Pair's
+6KiB allowance, and an old test expected invalid helpers to latch before native rejection.
+The cache is now boxed under its existing2KiB payment; the original Pair guard is unchanged.
+Invalid helpers now fail before any reservation/extraction, preserving healthy work. Current
+native handoff306 pass (8.29s), native check/strict Clippy pass, and all ten voice_live real
+TCP/HTTP/Node scenarios pass (136.50s). Root/native formatting, diff and ambient gates pass.
+Frontend is unchanged. Full suites remain deferred while the larger integration is unfinished.
+Read-only design/adversarial review found no remaining
+blocker/high/medium in this preparation boundary. Dependency audit remains an open release gate.
+
+The pushed packet-reservation checkpoint f88fb7f9 passed582 Root voice,306 native handoff,
+ten real TCP/HTTP/Node voice_live tests (136.11s), native check/strict Clippy, formatting and
+ambient gates. These results do not establish SDP or audible RTC.
+
+Next: actual HIGH receive installation and Ready publication/Source, LOW exact causal
+admission, original-parent browser key phase and typed SDP/RTC action/result/dispatch. A
+reviewed first RTC profile gathers all initial ICE into the complete encrypted SDP; it is
+not implemented yet. It must freeze localDescription only after actual gathering completion,
+reject separate ICE writers before token/replay, consume the same native phase lifetime,
+preserve initial audio/jam/drawing layout and use fresh incarnation for actual failed ICE.
+Signalling helper replacement should preserve a working RTC path and immutable retries.
+Multi-peer composition, member media relay and combined/physical acceptance remain open.
+External download resume remains excluded; only one desktop is available.
+
 ## Original packet reservations move with the successor (24 October)
 
 The pending successor now owns the original packet-reservation closing rights. Obsolete
@@ -25,15 +73,15 @@ multi-peer composition, media relay and combined/physical acceptance remain open
 separate capacity and must not consume these two SDP claims. External download resume remains
 excluded; independent-device/network audio acceptance is unavailable on the single desktop.
 
-## Ready byte prepayment and terminal HIGH caches (24 October; focused checks passed)
+## Ready byte prepayment and terminal HIGH caches (historical a4093282 checkpoint)
 
 Original successor preparation now prepays a separate32KiB Ready envelope before extraction,
 alongside the existing192KiB SDP reserve. It moves through the same affine guard and inactive
 Exchange, creates no extra Crypto/Lower positions and closes unused bytes with that owner.
 An actual683B maximum signed Ready and29,015B declared cache/Source/two-Lower/ACK peak fit
-under full ordinary-pool pressure. This is capacity feasibility only: Producer quotas and
-wrapper accounting, receive installation, member-row prepayment and actual Ready admission
-remain open. No Ready lender, signature, packet or RTC authority is created.
+under full ordinary-pool pressure. At that checkpoint, Producer quotas/wrapper accounting, receive installation, member-row
+prepayment and actual Ready admission were open. The current Producer/artifact increment is
+recorded above; receive/admission remains missing. No Ready lender, signature, packet or RTC authority is created.
 
 HIGH's actual native Finish-open plus irreversible old closure now permits narrow obsolete
 confirmation cache cleanup. Same native plan/call/scope checks protect PacketLedger cleanup;

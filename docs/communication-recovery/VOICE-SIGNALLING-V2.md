@@ -1,5 +1,44 @@
 # Voice signalling v2 decision
 
+## Initial RTC profile decision (24 October; implementation still open)
+
+The first supported native-authorized RTC profile will gather initial ICE into one complete
+encrypted Offer and one complete encrypted Answer. This fits the existing bounded Exchange
+without adding an independent candidate stream/history allowance. Regular ICE carries
+candidates in SDP; trickling is an extension, not a requirement for initial connectivity.
+See [ICE SDP procedures](https://www.rfc-editor.org/rfc/rfc8839.html) and
+[Trickle ICE](https://www.rfc-editor.org/rfc/rfc8838.html). This is a reviewed implementation
+decision, not evidence that production RTC or this profile is already implemented.
+
+Native must pin the supported profile before pair/phase admission and refuse incompatible
+or missing mode evidence without legacy/trickle fallback. Do not silently change existing
+canonical bytes. The capability/version boundary still needs implementation and mixed-version
+tests. For this profile, separate kind-Ice signalling must be rejected before token, replay,
+action or original-quota publication; the browser must neither submit nor buffer/apply it.
+The ICE agent's own STUN/connectivity traffic remains necessary.
+
+Before any SDK mutation, native admits/pays the exact PC/generation's GatherOffer/GatherAnswer
+owner on the original parent/keys/counter domain. Gathering consumes that same phase deadline,
+not a new window. Register the gathering listener before checking completion, await actual
+`iceGatheringState === "complete"`, then read/freeze `pc.localDescription.sdp` once. The SDP
+can change as candidates arrive; the object returned before gathering is not the final
+description. See [WebRTC localDescription](https://www.w3.org/TR/webrtc/#dom-rtcpeerconnection-localdescription).
+Only then may native mint the actual packet reservation/action/nonce. Lost replies/Capacity
+reuse those exact frozen bytes and identity. Refuse descriptions exceeding8192 UTF-8 bytes;
+do not truncate candidates or silently increase the bound.
+
+Fix the initial audio/data-channel layout before gathering, including instrument/jam/drawing
+traffic. Track replacement without renegotiation can preserve it; adding media sections cannot
+reuse this one-exchange budget. Existing App candidate filtering/PCP callbacks do not filter a
+full SDP automatically, so route policy must explicitly cover this snapshot. Timeout is not
+SDK/PC drainage proof. End/replacement retains actual owners until completion/closure.
+
+Signalling helper B->D replacement should preserve working RTC and immutable packet retries.
+Actual ICE/media-allocation failure may require a fresh authenticated incarnation, whose
+bounded replacement and drainage are also still unimplemented. This does not establish media
+relay, multi-peer composition, forced-TURN WebView results or physical audio/network acceptance.
+The broader trickle/glare design below is future work beyond this first supported profile.
+
 18 October 2026. Reviewed design; crypto, codecs and native packet/resource ownership are in
 implementation. **The live V2 protocol is not enabled or accepted.** Forwarding stays
 disabled until this contract, its implementation and compatibility tests pass review. Existing

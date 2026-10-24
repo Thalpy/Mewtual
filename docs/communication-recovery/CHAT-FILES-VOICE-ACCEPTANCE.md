@@ -1,5 +1,35 @@
 # Chat, files and voice implementation evidence
 
+## Independent Ready Producer and inert artifact (24 October)
+
+Native Pair retains one boxed Ready cache under the original2KiB payment and an independent
+Producer under the original32KiB envelope. Affine constructor/quota permits, actual native
+endpoint/helper row prepayment, immutable helper retries and real last-credit drainage are
+covered. First unsigned/signed fields and strict native deadlines survive signer failure,
+wrong identity, callback delay/revocation and final native-lock contention. Nothing is
+transmitted or installed as a receiver; generic SDP/RTC authority stays unavailable.
+
+Root voice601 pass (15.07s), strict Sync Clippy passes (34.04s). The unchanged6KiB native Pair
+layout test caught an oversized inline cache in v3 (598 pass/2 fail); existing paid boxed
+storage fixes it. Invalid helper requests now reject before reserving/freezing any choice.
+Near-window, max-helper/full-pressure, failed-payment, actual Group/Policy contention and
+signed-cache quiet-expiry regressions pass. Current native handoff306 pass (8.29s), all ten
+voice_live TCP/HTTP/Node scenarios pass (136.50s), and native check/strict Clippy, Root/native
+formatting, diff and ambient gates pass. Full suites remain deferred during implementation.
+Read-only reviews have no remaining B/H/M in
+this inert boundary. The dependency audit remains an open release gate recorded in HANDOVER.
+
+## Original packet-reservation continuation (24 October)
+
+The successor moves original confirmation packet closing rights, retires obsolete HIGH
+caches, and then carves one incoming/one outgoing child. All three actual Proof rows can
+remain retained before successful native Finish; no shared-table refund/reacquisition gap
+is needed. Partial split, abandoned ticket and actual last-slot drainage are covered.
+Both inactive-lender directions use real native Finish/epoch proofs at both endpoints.
+Focused Root voice582 and native handoff306 pass; strict Sync Clippy and native check pass.
+Native strict Clippy and all ten TCP/HTTP/Node scenarios pass (136.11s). Full current suites remain deferred during
+integration. This is capacity/lifetime evidence, not Ready, SDP/ICE/RTC or audio acceptance.
+
 ## Ready capacity and terminal HIGH cache continuation (24 October; focused checks)
 
 Separate32KiB Ready byte prepayment now survives original affine extraction without another
@@ -2647,14 +2677,3 @@ Clippy passes (target/voice-native-action-fence-clippy-rerun.log). The first lin
 an oversized enum variant, corrected by a prepaid boxed inbound owner. Native typed tagging now
 streams borrowed variable fields, avoiding an extra encoding copy. Full branch suites remain
 deferred until the programme is coherent.
-# Original packet-reservation continuation (24 October)
-
-The successor moves original confirmation packet closing rights, retires obsolete HIGH
-caches, and then carves one incoming/one outgoing child. All three actual Proof rows can
-remain retained before successful native Finish; no shared-table refund/reacquisition gap
-is needed. Partial split, abandoned ticket and actual last-slot drainage are covered.
-Both inactive-lender directions use real native Finish/epoch proofs at both endpoints.
-Focused Root voice582 and native handoff306 pass; strict Sync Clippy and native check pass.
-Native lint/TCP validation remains in progress. Full current suites remain deferred during
-integration. This is capacity/lifetime evidence, not Ready, SDP/ICE/RTC or audio acceptance.
-

@@ -47,7 +47,7 @@ impl Clock for OriginClock {
         self.inner.sleep(duration)
     }
 }
-fn register(runtime: &Arc<Runtime>, end: &End, peer: DeviceId) -> ActorOwner {
+fn register(runtime: &Arc<Runtime>, end: &End, peer: DeviceId, helpers: &[DeviceId]) -> ActorOwner {
     let ticket = runtime.session_ticket();
     runtime.activate_session(&ticket).unwrap();
     let (mut actor, registration) = runtime
@@ -57,7 +57,10 @@ fn register(runtime: &Arc<Runtime>, end: &End, peer: DeviceId) -> ActorOwner {
     actor
         .sync_view(View {
             epoch: end.context.epoch,
-            members: [end.context.local, peer].into(),
+            members: [end.context.local, peer]
+                .into_iter()
+                .chain(helpers.iter().copied())
+                .collect(),
             policy: end.context.scope.policy,
             eligible: true,
             indirect: true,
@@ -66,6 +69,9 @@ fn register(runtime: &Arc<Runtime>, end: &End, peer: DeviceId) -> ActorOwner {
     actor
 }
 fn fixture() -> ProtectedFixture {
+    fixture_with_members(&[])
+}
+fn fixture_with_members(helpers: &[DeviceId]) -> ProtectedFixture {
     let clock = ManualClock::new(1000);
     let origin_clock = Arc::new(OriginClock {
         inner: clock.clone(),
@@ -84,8 +90,8 @@ fn fixture() -> ProtectedFixture {
         (b, a, b_rt, a_rt)
     };
     let id = admit_pair(&mut low, &mut high, &clock, &mut rng);
-    let low_actor = register(&low_rt, &low, high.context.local);
-    let high_actor = register(&high_rt, &high, low.context.local);
+    let low_actor = register(&low_rt, &low, high.context.local, helpers);
+    let high_actor = register(&high_rt, &high, low.context.local, helpers);
     for end in [&mut low, &mut high] {
         end.join
             .prepare_crypto_chain(id, &ca(&end.context, &end.lease), &clock)

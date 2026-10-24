@@ -4,17 +4,19 @@
 
 Original browser/native key custody is implemented by opcode10 Claim/Release and Broker22;
 the older proposed browser boundary below is historical. Whole-plan retirement now includes
-actual prepared/ticket/Exchange capacity, independently of old-Workflow drainage. The next
-increment prepays Ready32KiB before extraction and removes only obsolete HIGH confirmation
-caches after native Finish-open/old closure. Maximum signed Ready683B and declared29,015B
-capacity composition are pinned. This still issues no Ready or receive/SDK/RTC authority.
+actual prepared/ticket/Exchange capacity, independently of old-Workflow drainage. Ready32KiB
+is prepaid before extraction. Independent Producer quotas, original member-row prepayment
+and a private first-stamped/signed artifact now exist; obsolete HIGH confirmation caches
+retire after native Finish-open/old closure. Maximum signed Ready683B, declared29,015B
+capacity composition and actual owner layouts are pinned. This still issues no Ready
+Source/publication or receive/SDK/RTC authority. HANDOVER records601 focused Root passes.
 
 The reviewed implementation order is:
 
-1. Build the independent Ready Producer and exact immutable Prepared/Published signed cache.
-   Producer retains Exchange LAST, after its own credits; Exchange never retains Producer.
-   Separate Ready quotas share the original Crypto lane and two group outgoing positions.
-   Prepay existing endpoint/helper origin rows separately, without resetting limits.
+1. Independent Producer, private immutable unsigned/signed cache, native endpoint/helper
+   origin-row payment and separate quotas are implemented. Producer retains Exchange LAST;
+   Exchange never retains Producer/cache. Published state/marker remains missing. Preserve
+   the first native monotonic deadline and stamp across every later refusal/lost reply.
 2. Install HIGH's actual bounded native receive owner before Ready publication. Keep generic
    Exchange liveness Active-only. ReceiveInstalled permits only exact original first-Offer
    verification/retention; an immutable Ready-publication marker must precede Offer admission.

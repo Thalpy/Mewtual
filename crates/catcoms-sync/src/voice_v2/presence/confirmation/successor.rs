@@ -12,11 +12,15 @@ pub(super) enum Preparation {
         capacity: PreparedSdpCapacity,
         helpers: Vec<DeviceId>,
     },
-    Transferred(Arc<Exchange>),
+    Transferred {
+        owner: Arc<Exchange>,
+        // Held outside Producer/Exchange to avoid a credited-cache self-custody cycle.
+        ready: Option<Box<crate::voice_v2::ready::producer::CacheCapacity>>,
+    },
 }
 impl Preparation {
     pub(super) fn close(&self) {
-        if let Self::Transferred(owner) = self {
+        if let Self::Transferred { owner, .. } = self {
             // An exported observation may still retain the allocation. Pair destruction
             // must close its unused lanes now rather than wait for that historical handle.
             owner.close();
@@ -30,7 +34,7 @@ pub(super) fn collect(preparation: &mut Option<Preparation>, mono: u64) {
             // reenter Pool and the unique old Workflow preparation latch.
             drop(preparation.take());
         }
-        Some(Preparation::Transferred(owner)) if owner.collect_pending_successor(mono) => {
+        Some(Preparation::Transferred { owner, .. }) if owner.collect_pending_successor(mono) => {
             // Release native closed custody too: keeping this Arc forever would occupy the
             // sole registry through the join. External observations/actual owners still
             // delay real last-drop. Original Finish/chain stamps prevent reconstruction.
@@ -46,6 +50,74 @@ impl Pair {
 }
 
 impl LocalJoin {
+    /// Prepare one immutable HIGH Ready signature in native Pair custody. This deliberately
+    /// exposes no SignedObject or Source activity: receive installation, exact publication
+    /// and causal LOW admission are separate missing consumers. Application maintenance does
+    /// not schedule this API yet. Never expose its signer as unrestricted renderer IPC.
+    ///
+    /// Refusal retains the same paid producer, first ID/timestamps and prepared signature.
+    /// Final UI/session admission runs after signer callbacks under the actual native view.
+    /// `final_owner` runs under Group -> Policy and must perform only pure owner checks:
+    /// no Clock, blocking locks, Engine/runtime reentry or actual owner destruction.
+    #[allow(clippy::too_many_arguments)]
+    pub fn prepare_high_ready_artifact(
+        &mut self,
+        actor: &ActorOwner,
+        room: &RoomAuthority,
+        handshake: Nonce,
+        helpers: &[DeviceId],
+        signer: &dyn VoiceSigner,
+        authority: &Authority<'_>,
+        clock: &dyn Clock,
+        rng: &mut dyn CryptoRngCore,
+        final_owner: impl FnOnce(u64, u64) -> Result<(), VoiceError>,
+    ) -> Result<(), VoiceError> {
+        let successor = self.prepare_high_sdp_successor(
+            actor,
+            room,
+            handshake,
+            helpers,
+            authority,
+            clock,
+            |_, _| Ok(()),
+        )?;
+        if !successor.confirmation_drained() {
+            return Err(VoiceError::Capacity);
+        }
+        let public_key = *self
+            .announcement
+            .as_ref()
+            .ok_or(VoiceError::Reservation)?
+            .public_key();
+        let binding = self.chain_binding(handshake, authority);
+        let Some(Preparation::Transferred {
+            owner,
+            ready: Some(ready),
+        }) = &mut self
+            .confirmations
+            .pairs
+            .get_mut(&handshake)
+            .expect("original pair")
+            .sdp_successor
+        else {
+            return Err(VoiceError::Unauthorized);
+        };
+        ready.prepare_artifact(signer, public_key, actor, rng)?;
+        actor.with_local_origin(binding.peer, authority.context, |wall, mono, origin| {
+            final_owner(wall, mono)?;
+            if !room.lease.is_live()
+                || !owner.successor_current_at(&binding, &self.resources, mono)
+                || !origin.contains_members(owner.helpers())
+            {
+                return Err(VoiceError::Unauthorized);
+            }
+            ready.prepared_at(owner, wall, mono)?;
+            // Preparation acknowledgement only. No original packet quota or Ready marker
+            // is published, and no receiver/crypto/SDK/RTC permission is manufactured.
+            origin.publish(|| ())
+        })
+    }
+
     /// Retain the HIGH endpoint's original inert SDP successor after actual native Finish-open.
     /// Exact retries keep the same reservation/lane/slots even across final-fence or registry
     /// Capacity. No Ready, new deadline, source attempt, crypto/SDP or RTC authority is created.
@@ -112,12 +184,15 @@ impl LocalJoin {
                 Preparation::Reserved {
                     helpers: original, ..
                 } => *original == helpers,
-                Preparation::Transferred(owner) => owner.same_helpers(&helpers),
+                Preparation::Transferred { owner, .. } => owner.same_helpers(&helpers),
             };
             if !same {
                 return Err(VoiceError::Scope);
             }
-        } else {
+        }
+        // Classify immutable helper identity before touching any new ordinary origin rows.
+        actor.prepare_ready_members(binding.peer, &helpers, authority.context)?;
+        if self.confirmations.pairs[&handshake].sdp_successor.is_none() {
             let workflow = chain.workflow()?;
             let capacity = workflow.confirmation_control().prepare_sdp_capacity()?;
             self.confirmations
@@ -148,9 +223,10 @@ impl LocalJoin {
                     .expect("original open workflow")
                     .transfer_sdp_capacity(capacity)
                 {
-                    Ok(ticket) => {
-                        Preparation::Transferred(Exchange::from_transferred(ticket, helpers))
-                    }
+                    Ok(ticket) => Preparation::Transferred {
+                        owner: Exchange::from_transferred(ticket, helpers),
+                        ready: None,
+                    },
                     Err((error, capacity)) => {
                         self.confirmations
                             .pairs
@@ -161,7 +237,7 @@ impl LocalJoin {
                     }
                 }
             }
-            preparation @ Preparation::Transferred(_) => preparation,
+            preparation @ Preparation::Transferred { .. } => preparation,
         };
         // The native holder is populated BEFORE either fallible final admission or registry
         // publication. A lost/refused reply cannot abandon the already extracted lane.
@@ -173,12 +249,24 @@ impl LocalJoin {
         // No old cache may pin the retired Workflow until signed expiry. Actual native
         // result/SDK/Source/Lower owners remain independent and still delay real drainage.
         self.ledger.retire_high_confirmation_cache(&chain)?;
-        let Some(Preparation::Transferred(owner)) =
-            &self.confirmations.pairs[&handshake].sdp_successor
+        let Some(Preparation::Transferred { owner, ready }) = &mut self
+            .confirmations
+            .pairs
+            .get_mut(&handshake)
+            .expect("current pair")
+            .sdp_successor
         else {
             unreachable!()
         };
         let owner = owner.clone();
+        if ready.is_none() {
+            // Retain immediately: later final-fence/registry refusals must not lose the
+            // sole issued Producer or let a retry create another independent allowance.
+            *ready = Some(owner.prepare_ready_cache()?);
+        }
+        let ready = ready
+            .as_ref()
+            .expect("original retained Ready cache capacity");
         // All three old Proof attempts may have occupied the original outgoing table.
         // Cache retirement above returns them to these SAME moved parents before splitting.
         owner.prepare_packet_claims()?;
@@ -186,6 +274,7 @@ impl LocalJoin {
             final_owner(wall, mono)?;
             if !room.lease.is_live()
                 || !owner.successor_current_at(&binding, &self.resources, mono)
+                || !ready.current_for(&owner)
                 || !origin.contains_members(owner.helpers())
             {
                 return Err(VoiceError::Unauthorized);

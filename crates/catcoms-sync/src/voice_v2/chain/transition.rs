@@ -158,6 +158,9 @@ pub(super) struct FinishWindow {
     epoch: OnceLock<EpochObservation>,
 }
 impl FinishWindow {
+    pub(super) fn original_identity(&self) -> Option<FinishIdentity> {
+        self.finish.get().map(|record| record.identity)
+    }
     pub(super) fn epoch_is_live(&self) -> bool {
         self.epoch.get().is_some_and(EpochObservation::is_live)
     }

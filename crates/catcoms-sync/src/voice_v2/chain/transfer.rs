@@ -102,6 +102,9 @@ impl TransferredSdpCapacity {
 /// successor checks deliberately use the ORIGINAL call/pair and epoch observation instead.
 pub(in crate::voice_v2) struct SuccessorProof(Arc<PlanBinding>);
 impl SuccessorProof {
+    pub(in crate::voice_v2) fn finish_identity(&self) -> Option<FinishIdentity> {
+        self.0.transition.original_identity()
+    }
     pub(in crate::voice_v2) fn binding(&self) -> &Binding {
         &self.0.value
     }

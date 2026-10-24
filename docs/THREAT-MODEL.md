@@ -1,5 +1,26 @@
 # Threat model; client integrity & enforcement boundaries
 
+## Inert Ready artifacts cannot promise receive readiness (24 October)
+
+The separate Producer's native cache/Source/Lower/Crypto capacities are quotas, not effect
+authority. Actual credits keep the original Exchange charged through last Drop. Affine paid
+construction and an unforgeable exact-Exchange quota permit prevent raw constructor/lender
+bypass. Producer stores no credited cache or child owner; the one-way ownership graph cannot
+keep itself alive. Quiet native cleanup releases cached artifacts while real credits remain.
+
+Only actual HIGH native Finish plus original call/epoch/native actor can prepare the cache.
+Helper choices come from the actual native member view, not a permissive convenience callback;
+changed retries fail before touching new origin rows. Preparation cannot reset rate buckets.
+Signed-object construction checks its supplied signer against itself, so the cache separately
+requires the original announcement identity. First fields freeze before signer callbacks and
+survive failures. Both strict native monotonic time and original Finish bounds remain mandatory,
+including wall rollback, signing delay, session close and final native-lock contention.
+
+An inert signature alone authorizes no transport. It is not exposed to published Source
+packets and cannot activate generic Exchange lenders. Ready publication must still install an
+actual bounded receive owner and commit a marker after fresh native authorization. LOW causal
+admission, SDP/ICE/RTC and relay remain open. UI V2 remains unavailable.
+
 ## Occupied original packet reservations (24 October)
 
 All three retained HIGH Proof attempts may occupy every original outgoing claim. Successor
@@ -13,10 +34,10 @@ owners without consuming claims. This is capacity enforcement, not Ready, SDP/IC
 ## Ready prepayment cannot authorize a transition (24 October)
 
 The new32KiB subtree is paid before successor extraction and remains inside original
-SuccessorCustody. It shares existing Crypto/Lower lanes, creates no work positions and lends
-nothing while Exchange is inactive. The maximum wire/declared peak check demonstrates
-capacity only; it does not establish a complete Producer graph, protected receive admission,
-current helper records or RTC readiness. UI V2 remains off.
+SuccessorCustody. It shares existing Crypto/Lower lanes and creates no work positions. Dedicated
+capacity-only Producer lenders now exist while generic SDP/effect lending remains inactive.
+The maximum wire/declared peak and wrapper checks establish capacity, not protected receive
+admission or RTC readiness. Native current-helper row preparation exists above. UI V2 remains off.
 
 Prompt old-Workflow drainage removes only HIGH confirmation caches after actual native
 Finish-open and permanent old-phase closure. LOW local Finish is not evidence that Ready

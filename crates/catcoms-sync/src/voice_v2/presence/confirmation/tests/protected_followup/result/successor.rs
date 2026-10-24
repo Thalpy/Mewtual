@@ -3,9 +3,13 @@ use super::*;
 use crate::voice_v2::negotiation::{Exchange, SdpSuccessor, Stage};
 use crate::voice_v2::presence::confirmation::successor::Preparation;
 use crate::voice_v2::resources::{ResourceKind, GROUP_BYTES};
+mod ready;
 
 fn confirmed_high() -> ProtectedFixture {
-    let (mut p, finish) = super::transition::ready_to_finish();
+    confirmed_high_in(fixture())
+}
+fn confirmed_high_in(p: ProtectedFixture) -> ProtectedFixture {
+    let (mut p, finish) = super::transition::ready_to_finish_in(p);
     let (object, plain) = protected_seal(&mut p.f.low, &p.low, &finish, &p.f.clock);
     let (_, action) = admit(&mut p.f.high, &p.high, object, &p.f.clock);
     opened(
@@ -127,8 +131,193 @@ fn third_native_hello_finishes_with_every_proof_slot_retained_then_moves_origina
 }
 fn pending(p: &ProtectedFixture) -> Arc<Exchange> {
     match &p.f.high.join.confirmations.pairs[&p.f.id].sdp_successor {
-        Some(Preparation::Transferred(owner)) => owner.clone(),
+        Some(Preparation::Transferred { owner, .. }) => owner.clone(),
         _ => panic!("actual transferred native holder"),
+    }
+}
+
+fn ready_producer(p: &ProtectedFixture) -> Arc<crate::voice_v2::ready::producer::Producer> {
+    match &p.f.high.join.confirmations.pairs[&p.f.id].sdp_successor {
+        Some(Preparation::Transferred {
+            ready: Some(ready), ..
+        }) => ready.producer_for_test(),
+        _ => panic!("actual original Ready producer capacity"),
+    }
+}
+
+#[test]
+fn ready_producer_is_retained_across_final_refusal_and_issuance_never_resets_on_drop() {
+    let mut p = confirmed_high();
+    assert_eq!(
+        prepare(&mut p, |_, _| Err(VoiceError::Capacity)).err(),
+        Some(VoiceError::Capacity)
+    );
+    let first = ready_producer(&p);
+    let output = prepare(&mut p, |_, _| Ok(())).unwrap();
+    assert!(Arc::ptr_eq(&first, &ready_producer(&p)));
+    assert_eq!(
+        output.owner.prepare_ready_cache().err(),
+        Some(VoiceError::Capacity)
+    );
+    let Some(Preparation::Transferred { ready, .. }) = &mut p
+        .f
+        .high
+        .join
+        .confirmations
+        .pairs
+        .get_mut(&p.f.id)
+        .unwrap()
+        .sdp_successor
+    else {
+        panic!("retained preparation")
+    };
+    drop(ready.take());
+    drop(first);
+    assert_eq!(
+        output.owner.prepare_ready_cache().err(),
+        Some(VoiceError::Capacity),
+        "actual last cache/producer drop cannot rearm issuance"
+    );
+}
+
+#[test]
+fn ready_producer_full_peak_uses_original_shared_lanes_and_independent_stage_quotas() {
+    let mut p = confirmed_high();
+    let output = prepare(&mut p, |_, _| Ok(())).unwrap();
+    let producer = ready_producer(&p);
+    let pool = p._runtimes[1].resources();
+    let group = p.f.high.context.scope.group;
+    let ordinary_crypto: Vec<_> = (0..3)
+        .map(|_| pool.charge(group, 0, ResourceKind::Crypto).unwrap())
+        .collect();
+    assert!(pool.charge(group, 0, ResourceKind::Crypto).is_err());
+    let pressure = pool
+        .charge(group, GROUP_BYTES - pool.counts().0, ResourceKind::Retained)
+        .unwrap();
+    for (stage, maximum) in [
+        (Stage::LocalPacket, 2048),
+        (Stage::Source, 683 + 512 + 1024),
+        (
+            Stage::Lower,
+            2 * (683 + 512) + 4096 + crate::voice_v2::ROUTE_METADATA_BYTES,
+        ),
+        (Stage::Crypto, 6656),
+    ] {
+        assert_eq!(
+            producer.charge(&pool, group, stage, 0).err(),
+            Some(VoiceError::Bounds)
+        );
+        assert_eq!(
+            producer.charge(&pool, group, stage, maximum + 1).err(),
+            Some(VoiceError::Bounds)
+        );
+    }
+    let foreign = Arc::new(crate::voice_v2::resources::Resources::default());
+    assert_eq!(
+        producer.charge(&foreign, group, Stage::Source, 1).err(),
+        Some(VoiceError::Scope)
+    );
+    assert_eq!(
+        producer.charge(&pool, [55; 32], Stage::Source, 1).err(),
+        Some(VoiceError::Scope)
+    );
+    for stage in [
+        Stage::RemotePacket,
+        Stage::EncryptAction,
+        Stage::DecryptAction,
+        Stage::Result,
+    ] {
+        assert_eq!(
+            producer.charge(&pool, group, stage, 1).err(),
+            Some(VoiceError::Scope)
+        );
+    }
+    assert_eq!(
+        producer.charge(&pool, group, Stage::LocalPacket, 1).err(),
+        Some(VoiceError::Capacity),
+        "native Pair already owns sole cache claim"
+    );
+    let source = producer
+        .charge(&pool, group, Stage::Source, 683 + 512 + 1024)
+        .unwrap();
+    assert_eq!(
+        producer.charge(&pool, group, Stage::Source, 1).err(),
+        Some(VoiceError::Capacity)
+    );
+    let lower_bytes = 2 * (683 + 512) + 4096 + crate::voice_v2::ROUTE_METADATA_BYTES;
+    let first = producer
+        .charge(&pool, group, Stage::Lower, lower_bytes)
+        .unwrap();
+    let second = producer
+        .charge(&pool, group, Stage::Lower, lower_bytes)
+        .unwrap();
+    assert_eq!(
+        producer.charge(&pool, group, Stage::Lower, 1).err(),
+        Some(VoiceError::Capacity)
+    );
+    let crypto = producer.charge(&pool, group, Stage::Crypto, 6656).unwrap();
+    assert_eq!(
+        producer.charge(&pool, group, Stage::Crypto, 1).err(),
+        Some(VoiceError::Capacity)
+    );
+    assert_eq!(pool.counts().0, GROUP_BYTES);
+    assert!(
+        output.owner.charge(Stage::Source, 1).is_err(),
+        "capacity grants no generic SDP or transmission authority"
+    );
+    drop(crypto);
+    let crypto = producer.charge(&pool, group, Stage::Crypto, 6656).unwrap();
+    output.owner.close();
+    for stage in [
+        Stage::LocalPacket,
+        Stage::Source,
+        Stage::Lower,
+        Stage::Crypto,
+    ] {
+        assert_eq!(
+            producer.charge(&pool, group, stage, 1).err(),
+            Some(VoiceError::Unauthorized)
+        );
+    }
+    drop((source, first, second, crypto, pressure, ordinary_crypto));
+}
+
+#[test]
+fn ready_actual_credit_delays_whole_plan_cleanup_after_native_pair_custody_is_removed() {
+    for stage in [Stage::Source, Stage::Lower, Stage::Crypto] {
+        let mut p = confirmed_high();
+        let chain = p.f.high.join.confirmations.pairs[&p.f.id]
+            .chain
+            .clone()
+            .unwrap();
+        let control = chain.workflow().unwrap().confirmation_control();
+        let output = prepare(&mut p, |_, _| Ok(())).unwrap();
+        let producer = ready_producer(&p);
+        let pool = p._runtimes[1].resources();
+        let group = p.f.high.context.scope.group;
+        let actual = Arc::new(producer.charge(&pool, group, stage, 128).unwrap());
+        let last = actual.clone();
+        let whole = control.retire_all();
+        output.owner.close();
+        let preparation =
+            p.f.high
+                .join
+                .confirmations
+                .pairs
+                .get_mut(&p.f.id)
+                .unwrap()
+                .sdp_successor
+                .take();
+        drop((preparation, producer, output, actual));
+        assert!(
+            !whole.is_drained(),
+            "actual Ready credit still retains the original Exchange"
+        );
+        drop(last);
+        assert!(
+            whole.is_drained(),
+            "last actual loan returns before whole-plan drainage"
+        );
     }
 }
 
@@ -172,6 +361,11 @@ fn prepared_packet_claims_cannot_lend_before_native_activation() {
         p.f.clock.monotonic_ms()
     ));
     low.assert_inactive_packet_lenders_for_test(p.f.low.join.ledger.packet_slots());
+    assert_eq!(
+        low.prepare_ready_cache().err(),
+        Some(VoiceError::Unauthorized),
+        "LOW cannot construct HIGH Ready capacity"
+    );
 }
 
 #[test]
@@ -723,7 +917,9 @@ fn sdp_successor_registry_refusal_keeps_same_native_owner_and_quiet_housekeeping
 #[test]
 fn sdp_successor_native_final_expiry_keeps_original_closed_custody_without_registering() {
     let mut p = confirmed_high();
-    let next = p.origin_clock.reads.load(Ordering::Acquire) + 1;
+    // First native monotonic sample prepays original member rows. The next sample is
+    // final local admission AFTER extraction; expiry must be forced at that actual fence.
+    let next = p.origin_clock.reads.load(Ordering::Acquire) + 2;
     *p.origin_clock.advance.lock().unwrap() = Some((next, 30_000));
     // Native time is sampled after extraction and outside Group/Policy. The final native
     // admission must refuse the now-expired window, not renew it or lose the taken lane.
@@ -805,6 +1001,7 @@ fn sdp_successor_native_helper_membership_refuses_spoofed_callback_and_choice_st
     let mut p = confirmed_high();
     let outsider = DeviceKeypair::from_seed(&[8; 32]).device_id();
     let room = room(&p.f.high);
+    let before = p._runtimes[1].resources().counts();
     // ca's convenience membership callback says true for everyone. The actual native
     // borrowed Group must still refuse a helper outside the original current member set.
     assert_eq!(
@@ -822,16 +1019,24 @@ fn sdp_successor_native_helper_membership_refuses_spoofed_callback_and_choice_st
             .err(),
         Some(VoiceError::Unauthorized)
     );
-    let original = pending(&p);
-    assert_eq!(
-        prepare(&mut p, |_, _| Ok(())).err(),
-        Some(VoiceError::Scope)
-    );
-    assert!(Arc::ptr_eq(&original, &pending(&p)));
+    // Native prepayment now rejects the forged member BEFORE any reservation/extraction
+    // or immutable helper stamp. An invalid request must not strand otherwise healthy work.
+    assert!(p.f.high.join.confirmations.pairs[&p.f.id]
+        .sdp_successor
+        .is_none());
+    assert!(p.f.high.join.confirmations.pairs[&p.f.id]
+        .chain
+        .as_ref()
+        .unwrap()
+        .workflow()
+        .unwrap()
+        .is_live());
+    assert_eq!(p._runtimes[1].resources().counts(), before);
     assert!(p._runtimes[1]
         .resources()
         .exchange(p.f.high.context.scope.group)
         .is_none());
+    prepare(&mut p, |_, _| Ok(())).unwrap();
 }
 
 #[test]

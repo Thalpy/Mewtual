@@ -3,7 +3,9 @@ use super::*;
 use crate::voice_v2::resources::{ResourceKind, GROUP_BYTES};
 
 pub(super) fn ready_to_finish() -> (ProtectedFixture, Arc<CryptoAction>) {
-    let mut p = fixture();
+    ready_to_finish_in(fixture())
+}
+pub(super) fn ready_to_finish_in(mut p: ProtectedFixture) -> (ProtectedFixture, Arc<CryptoAction>) {
     let hello = start(&mut p, None);
     let (object, plain) = protected_seal(&mut p.f.low, &p.low, &hello, &p.f.clock);
     let (_, high_open) = admit(&mut p.f.high, &p.high, object, &p.f.clock);

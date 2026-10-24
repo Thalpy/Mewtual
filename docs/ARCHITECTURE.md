@@ -1,5 +1,27 @@
 # Mewtual; Architecture
 
+## Independent Ready producer and inert signed cache (24 October)
+
+The native Pair now retains a separate Ready Producer and a boxed cache inside its existing
+32KiB payment. One irreversible Exchange latch permits construction; raw cache payment
+precedes that latch and infallible construction. The external cache retains Producer last,
+Producer retains Exchange last, and every actual Source/Lower/Crypto credit retains Producer.
+There is no cache/Producer/Exchange ownership cycle. Private affine payment and quota permits
+prevent bypassing the constructor or raw lender. Independent quotas share the original Crypto
+lane and two group Lower positions, without using SDP's Source quota.
+
+Native preparation checks actual endpoint/helper membership and prepays existing origin rows
+without resetting traffic buckets. After actual old-Workflow drainage, it can retain one
+unsigned/signed Ready artifact. The first ID, all signed fields, wall expiry and strict native
+monotonic deadline survive signing errors and final contention. Original announcement key
+and native Finish identity are mandatory. Clock/signing work stays outside final admission;
+final Group/Policy uses fresh samples and pure current-owner checks. The boxed cache body is
+paid before allocation; native Pair's original6KiB limit remains unchanged.
+
+This is still inert preparation. No Ready Source/publication marker, native receive inbox,
+LOW Ready admission, SDP action or RTC authority is issued. Generic Exchange lending remains
+Active-only. These are the next consumers, followed by multi-peer composition and relay.
+
 ## Original packet closing rights (24 October)
 
 Affine extraction moves the original confirmation packet reservations with the Crypto lane.
@@ -18,9 +40,9 @@ Affine successor preparation now prepays a separate32KiB Ready reservation in ad
 SDP's192KiB, before extraction. It moves unchanged through the original custody guard into
 inactive Exchange; closure returns unused Ready bytes and actual last-drop remains covered.
 It acquires no additional Crypto lane or outgoing positions. Maximum signed Ready is683B;
-the declared cache/Source/two-Lower/ACK peak is29,015B. This is capacity feasibility only:
-independent Producer quotas, wrapper accounting and Ready source/admission are still absent.
-Existing OriginLimits rows for endpoints/helpers need separate prepayment before readiness.
+the declared cache/Source/two-Lower/ACK peak is29,015B. Independent Producer quotas, wrapper
+accounting and native endpoint/helper row prepayment now exist as described above. Actual
+Ready Source/admission and receive installation remain absent.
 
 After actual HIGH Finish-open and irreversible old-phase closure, the exact native plan can
 discard obsolete confirmation cache owners. Source drops only idle matching HIGH records;

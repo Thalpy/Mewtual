@@ -1,5 +1,27 @@
 # Mewtual; Interfaces & Hooks Schema
 
+## Native Ready preparation (24 October; unscheduled)
+
+`prepare_high_sdp_successor` retains one independently quotaed Ready Producer/cache capacity
+before final native admission. Failed byte payment leaves issuance unused; actual cache Drop
+never resets successful issuance. Native endpoint/helper row prepayment verifies actual Group
+membership, policy and epoch, after immutable helper retry classification and before reserve
+extraction. Existing bucket allowances are preserved.
+
+`prepare_high_ready_artifact` is a native Rust preparation API returning only success/error.
+It retains the artifact privately in Pair and exports no packet, Vec, Source or receive handle.
+Actual old-Workflow drainage precedes signing. The original Runtime Clock sets firstMono and
+`min(15s, original Finish time remaining)` once. Stamp precedes both signer callbacks; returned
+public key/device must match the original announcement. Signing errors, invalid identity,
+expiry and final Group/Policy contention cannot renew ID/times or trigger cached re-signing.
+`final_owner` permits only pure original UI/session checks under Group -> Policy.
+
+No application scheduling, Ready publication, receive installation, LOW causal admission or
+SDP/RTC action is supplied by these APIs. Ready Source must require HIGH's actual old-Workflow
+drainage, bounded receive installation, publication marker and fresh native authority, then
+pay before cloning this same native artifact. LOW Ready admission and SDP/RTC are downstream
+missing consumers. Remote skew never extends the local deadline.
+
 ## Successor packet claims (24 October)
 
 Extraction now moves original packet-reservation closing rights rather than subreserving
@@ -16,8 +38,9 @@ detached retirement task would need an independent original fixed-plan metadata 
 `prepare_sdp_capacity` now pays a separate32KiB Ready envelope before extracting the original
 lane/slots. A refusal rolls back payment and leaves old confirmation usable. Closing the
 original row reserve during that preparation reports Unauthorized, rather than temporary
-slot Capacity; genuine slot pressure remains Capacity. No Ready lender or protocol effect
-is exposed. The original affine owner carries both reservations through whole-plan cleanup.
+slot Capacity; genuine slot pressure remains Capacity. Dedicated internal capacity-only
+Producer lenders now exist; they expose no Ready protocol effect. The original affine owner
+carries both reservations through whole-plan cleanup.
 
 Private HIGH cache cleanup requires actual native Finish history, irreversible old closure,
 the same scope/local/join/key and actual call allocation. Outgoing ownership also compares

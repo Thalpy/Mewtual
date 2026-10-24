@@ -31,6 +31,8 @@ const ACTION_BYTES: usize = CIPHERTEXT + MAX_AAD + 1536;
 const ENGINE_BYTES: usize = 4 * (CIPHERTEXT + MAX_AAD) + 3 * MAX_SDP_PLAINTEXT + 2048;
 const RESULT_BYTES: usize = MAX_SDP_PLAINTEXT + 1040;
 mod packet_capacity;
+mod ready_capacity;
+pub(in crate::voice_v2) use ready_capacity::PaidReadyCache;
 
 /// Native allocation purpose. Callers cannot replace one phase with another to escape the
 /// record limits: each consuming factory selects its own stage, independently of IPC input.
@@ -64,6 +66,8 @@ impl Stage {
 }
 struct State {
     closed: bool,
+    // One original Ready producer. Actual occupancy may drain, but issuance never rearms.
+    ready_producer_issued: bool,
     // The original parents may initially have no unused positions. Once obsolete cache
     // rows return them, carve exactly1+1 children, then close surplus originals outside State.
     packet_parents: Option<super::packets::ConfirmationCapacity>,
@@ -222,6 +226,7 @@ impl Exchange {
             lane,
             state: Mutex::new(State {
                 closed: false,
+                ready_producer_issued: false,
                 packet_parents: Some(packets),
                 packet_claims: None,
                 lower_lanes: Some(lowers),
@@ -355,6 +360,7 @@ impl Exchange {
             lane,
             state: Mutex::new(State {
                 closed: false,
+                ready_producer_issued: false,
                 packet_parents: None,
                 packet_claims: None,
                 lower_lanes: Some(lower_lanes),

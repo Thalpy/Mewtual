@@ -15,6 +15,177 @@ fn context() -> crate::voice_v2::Context {
 }
 
 #[test]
+fn ready_member_prepayment_survives_full_ordinary_capacity_without_refilling_traffic() {
+    let runtime = Runtime::new(Arc::new(ManualClock::new(1000)));
+    let mut actor = active(&runtime, 1);
+    actor.sync_view(view(2, &[1, 2, 3, 4])).unwrap();
+    let context = crate::voice_v2::Context {
+        epoch: 2,
+        ..context()
+    };
+    let mut helpers = [device(3), device(4)];
+    helpers.sort();
+    let before = runtime.resources().counts();
+    actor
+        .prepare_ready_members(device(2), &helpers, &context)
+        .unwrap();
+    assert_eq!(runtime.resources().counts().0 - before.0, 4 * 2048);
+    let members = [device(1), device(2), device(3), device(4)];
+    actor
+        .with_limits(|limits| {
+            for member in members {
+                for _ in 0..40 {
+                    limits.origin(member, crate::voice_v2::limits::Traffic::Setup, 1000)?;
+                }
+                assert_eq!(
+                    limits.origin(member, crate::voice_v2::limits::Traffic::Setup, 1000),
+                    Err(VoiceError::RateLimited)
+                );
+            }
+            Ok(())
+        })
+        .unwrap();
+    let pool = runtime.resources();
+    let pressure = pool
+        .charge(
+            context.scope.group,
+            crate::voice_v2::resources::GROUP_BYTES - pool.counts().0,
+            ResourceKind::Retained,
+        )
+        .unwrap();
+    let full = pool.counts();
+    actor
+        .prepare_ready_members(device(2), &helpers, &context)
+        .unwrap();
+    assert_eq!(pool.counts(), full);
+    actor
+        .with_limits(|limits| {
+            for member in members {
+                assert_eq!(
+                    limits.origin(member, crate::voice_v2::limits::Traffic::Setup, 1000),
+                    Err(VoiceError::RateLimited),
+                    "row preparation cannot reset exhausted buckets"
+                );
+            }
+            Ok(())
+        })
+        .unwrap();
+    drop(pressure);
+}
+
+#[test]
+fn ready_member_prepayment_checks_actual_native_membership_and_policy_before_payment() {
+    for kind in [
+        "unknown helper",
+        "duplicate",
+        "endpoint",
+        "self",
+        "too many",
+        "policy",
+        "epoch",
+        "direct",
+        "foreign scope",
+    ] {
+        let runtime = Runtime::new(Arc::new(ManualClock::new(1000)));
+        let mut actor = active(&runtime, 1);
+        let mut observed = context();
+        let mut peer = device(2);
+        let mut helpers = vec![device(3)];
+        let expected = match kind {
+            "duplicate" => {
+                helpers.push(device(3));
+                VoiceError::Malformed
+            }
+            "endpoint" => {
+                helpers = vec![peer];
+                VoiceError::Malformed
+            }
+            "self" => {
+                peer = device(1);
+                VoiceError::Unauthorized
+            }
+            "too many" => {
+                helpers = vec![device(3), device(4), device(5)];
+                VoiceError::Bounds
+            }
+            "unknown helper" => {
+                helpers = vec![device(4)];
+                VoiceError::Unauthorized
+            }
+            "policy" => {
+                observed.scope.policy = Some([9; 32]);
+                VoiceError::Unauthorized
+            }
+            "epoch" => {
+                observed.epoch += 1;
+                VoiceError::Unauthorized
+            }
+            "foreign scope" => {
+                observed.scope.group = [9; 32];
+                VoiceError::Unauthorized
+            }
+            "direct" => {
+                let mut next = view(1, &[1, 2, 3]);
+                next.indirect = false;
+                actor.sync_view(next).unwrap();
+                observed.indirect = false;
+                VoiceError::Unauthorized
+            }
+            _ => unreachable!(),
+        };
+        let before = runtime.resources().counts();
+        assert_eq!(
+            actor.prepare_ready_members(peer, &helpers, &observed),
+            Err(expected),
+            "{kind}"
+        );
+        assert_eq!(
+            runtime.resources().counts(),
+            before,
+            "{kind} cannot create rows"
+        );
+    }
+}
+
+#[test]
+fn ready_member_prepayment_samples_outside_native_guards_and_refuses_contention() {
+    let clock = Arc::new(OriginClockProbe {
+        inner: ManualClock::new(1000),
+        owners: Mutex::new(None),
+        outside: AtomicBool::new(true),
+        samples: AtomicU64::new(0),
+    });
+    let runtime = Runtime::new(clock.clone());
+    let actor = active(&runtime, 1);
+    *clock.owners.lock().unwrap() =
+        Some((Arc::downgrade(&actor.group), Arc::downgrade(&actor.gate)));
+    {
+        let _group = actor.group.state.lock().unwrap();
+        assert_eq!(
+            actor.prepare_ready_members(device(2), &[device(3)], &context()),
+            Err(VoiceError::Capacity)
+        );
+    }
+    {
+        let _policy = actor.gate.policy.lock().unwrap();
+        assert_eq!(
+            actor.prepare_ready_members(device(2), &[device(3)], &context()),
+            Err(VoiceError::Capacity)
+        );
+    }
+    clock.outside.store(true, Ordering::Release);
+    actor
+        .prepare_ready_members(device(2), &[device(3)], &context())
+        .unwrap();
+    assert!(clock.outside.load(Ordering::Acquire));
+    runtime.revoke_session();
+    assert_eq!(
+        actor.prepare_ready_members(device(2), &[device(3)], &context()),
+        Err(VoiceError::Unauthorized)
+    );
+}
+
+#[test]
 fn local_origin_and_effect_sample_clock_outside_guards_and_refuse_contention() {
     let clock = Arc::new(OriginClockProbe {
         inner: ManualClock::new(1000),
