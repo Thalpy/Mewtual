@@ -24,7 +24,7 @@ portmapper = { version = "=0.19.3", default-features = false }
 # keyed apart by `local_address`. Pinned to the exact version libp2p-upnp already builds so this
 # adds no second copy of the crate.
 igd-next = { version = "=0.16.2", features = ["aio_tokio"] }
-# `portmapper` 0.18 exposes only an IPv4 client. `getifs` preserves the IPv6 route's native
+# `portmapper` (0.19 as in 0.18) exposes only an IPv4 client. `getifs` preserves the IPv6 route's native
 # interface index (including Windows' IPv6-specific index), letting the PCP socket bind the exact
 # global listener and scoped default gateway instead of guessing from an IPv4-oriented snapshot.
 getifs = { version = "=0.6.1", default-features = false }
