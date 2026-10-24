@@ -1178,6 +1178,17 @@ manual: a real Save as dialog per OS, Pause/Lock during real writes, restart aft
 save, FAT/exFAT/SMB/ReFS/OneDrive volumes, power loss, and macOS. The acceptance ledger has the
 same summary.
 
+Transfers UX (24 October, on top of `95eaeda6`): one row per file (a save's live progress shows in
+its private download row, and the live list leaves that file out), rows grouped Needs you / In
+progress / Saved with an icon and a word per state, a byte bar ("3.1 MB / 12.4 MB", 1000-based,
+no percentage) plus the chunk count, one checked sentence per state, "Saved to Downloads" or
+"Saved to another folder" with Show in folder (new `os-facing` command `reveal_saved_download`),
+inline Confirm remove, file-specific accessible names, disabled reasons, one polite live region
+for state changes. Native rows carry byte counts and `savedTo`. Deferred to a follow-up PR (owner
+decision): "Replace my older saved copy", which needs a durable record of saved copies first. On
+hold (owner): keeping finished saves listed; a finished save still releases its row and shows done
+in the live list. Details and dispositions in the design document's Transfers UX section.
+
 ## Chat history adversarial checkpoint (2026-10-20)
 
 The latest user request is to explain/test additive chat history across MLS epochs, disconnected

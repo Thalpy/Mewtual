@@ -15,6 +15,15 @@ export type PrivateDownload = {
   totalChunks: number;
   /** A "Save as" choice is remembered for the next save. Native never sends the place itself. */
   chosenPlace: boolean;
+  /** Plaintext bytes in the private copy, bytes the external save's checkpoint covers, and the
+   * declared size (Transfers UX). All `null` together when native could not read the manifest;
+   * the row then shows chunk counts only. Sizes only, never a path. */
+  receivedBytes: number | null;
+  savedBytes: number | null;
+  totalBytes: number | null;
+  /** Saved rows only: native proved the file sits in the resolved Downloads folder
+   * (`"downloads"`) or not (`"other"`). `null` for every other state. Never a folder name. */
+  savedTo: "downloads" | "other" | null;
 };
 const labels: Record<PrivateDownloadStatus, string> = {
   receiving: "Receiving", incomplete: "Interrupted", ready: "Ready to save",
@@ -125,6 +134,19 @@ export function acceptSaveProgress(transfer: { operation?: string; status: strin
   return typeof transfer.operation === "string" && progress.cancellation === transfer.operation &&
     transfer.status !== "done" && transfer.status !== "failed";
 }
+/** The three byte counts, `null` together when absent (an older native or an unreadable
+ * manifest), else safe non-negative integers with received and saved within the total. Anything
+ * else is unreadable. */
+function checkedBytes(row: Record<string, unknown>): { receivedBytes: number | null; savedBytes: number | null; totalBytes: number | null } | null {
+  const fields = [row.receivedBytes, row.savedBytes, row.totalBytes];
+  if (fields.every((field) => field === undefined || field === null)) {
+    return { receivedBytes: null, savedBytes: null, totalBytes: null };
+  }
+  if (!fields.every((field) => Number.isSafeInteger(field) && (field as number) >= 0)) return null;
+  const [receivedBytes, savedBytes, totalBytes] = fields as number[];
+  if (receivedBytes > totalBytes || savedBytes > totalBytes) return null;
+  return { receivedBytes, savedBytes, totalBytes };
+}
 export function checkedPrivateDownloads(value: unknown): PrivateDownload[] {
   if (!Array.isArray(value) || value.length > 32) throw new Error("Download progress could not be read.");
   const seen = new Set<string>();
@@ -141,10 +163,17 @@ export function checkedPrivateDownloads(value: unknown): PrivateDownload[] {
         row.savedChunks < 0 || row.savedChunks > row.totalChunks) {
       throw new Error("Download progress could not be read.");
     }
+    const bytes = checkedBytes(row);
+    // Where a saved file went: one of two words on a saved row, nothing on any other row.
+    const savedTo = row.savedTo ?? null;
+    if (bytes === null || (savedTo !== null &&
+        (row.status !== "saved" || (savedTo !== "downloads" && savedTo !== "other")))) {
+      throw new Error("Download progress could not be read.");
+    }
     seen.add(row.id);
     // Closed projection: unexpected native properties must not become renderer-held secrets.
     return { id: row.id, cid: row.cid, intent: row.intent, grant: row.grant, status: row.status,
       verifiedChunks: row.verifiedChunks, savedChunks: row.savedChunks, totalChunks: row.totalChunks,
-      chosenPlace: row.chosenPlace } as PrivateDownload;
+      chosenPlace: row.chosenPlace, ...bytes, savedTo } as PrivateDownload;
   });
 }

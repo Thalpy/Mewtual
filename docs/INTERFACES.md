@@ -591,6 +591,21 @@ Renderer commands (no new command names):
 - `get_private_downloads` rows add `savedChunks` (journal checkpoint), `chosenPlace` (boolean) and
   the statuses `saving`, `save-interrupted`, `save-paused`, `destination-unavailable`,
   `destination-changed` and `saved`. Rows never carry a path, file name or file identity.
+  Transfers UX (PR #51): rows also carry `receivedBytes`, `savedBytes` and `totalBytes` (plaintext
+  byte counts from the saved manifest and the journal's written bytes; all `null` together when
+  native cannot read the manifest) and `savedTo` (`"downloads"` or `"other"` on a saved row,
+  `null` otherwise; "downloads" only when the published journal's recorded folder equals the
+  resolved Downloads folder exactly). The renderer accepts rows without these fields as unknown.
+- `reveal_saved_download(server, download, expectedIntent) -> ()` (Transfers UX, `os-facing`,
+  main window only): the same fenced, bounded, read-only identity check as `check_saved_download`
+  (check slot, 3 s sanctioned-clock wait, same revision and Saved journal before and after, UI
+  session and server entry unchanged), then the system file manager shows the saved file selected
+  (Windows `explorer /select`, macOS `open -R`, other Unix the folder through `xdg-open`). It never
+  opens or runs the file and never returns its path. Refusals are fixed sentences: missing ("The
+  saved file is no longer there."), replaced ("Another file is at the saved name now, so Mewtual
+  did not show it."), could not check, could not open the folder, or the stale-download text.
+  Storage: `saved_file_path(&ExportJournal) -> Result<PathBuf, SavedPresence>` and
+  `ExportJournal::is_in_folder(&Path)`, both native-only.
 
 Rust interfaces:
 

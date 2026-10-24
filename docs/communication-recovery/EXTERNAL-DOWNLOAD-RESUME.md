@@ -1420,6 +1420,102 @@ Adversarial review of the L1 to L3 fixes (`bc41d52e`) and dispositions (no block
 | Re-review of `ceae7036`: no blocker, high or medium. LOW-a: after the probe's `FolderChanged`, our empty partial stays in the real folder, because its cleanup goes by path, which now leads elsewhere. LOW-b: inside `moved()` a failed identity read counted as moved, while the first hold counts it as inconclusive | LOW-a recorded (nothing is disclosed: the partial is empty; a retry of the same chosen name reads `PartialExists`, truthfully) and pinned: `a_path_retargeted_after_the_recheck_is_reported_as_changed` asserts the empty partial is left in the real folder. Deleting it through the held folder handle would close this; not taken here. LOW-b fixed: only a proven other folder counts as moved. |
 | Residuals (no fix): our partial can be renamed out of the folder after `confirm_folder`, because the creation handle shares delete (only someone with modify rights on that folder); after a folder swap right after the link (L2), the folder flush and the reported path describe the new folder at that path, not the moved one that holds the copy | Recorded. |
 
+## Transfers UX (PR #51, 24 October)
+
+Owner-approved changes to the Transfers tab, on top of `95eaeda6`. Visual design from the design
+agents' `row.md` and `icons.md` (class contract `.sdl`, tokens only, motion and density variants).
+
+- **One row per file.** A private download's row carries the live progress of a save of that file
+  (the renderer's own `download-progress` record of the active invocation), and the live transfer
+  list leaves that file out (`liveTransferList`); uploads and other downloads show there as
+  before, and the status bar still counts every transfer. Native emits `download-progress` only
+  while writing the readable file (the journaled export and the non-resumable writer), never while
+  the private copy is acquired, so the live numbers count the saved side only. The renderer keeps
+  them apart from the live list's held-chunk floor (`savedDone`, `savedBytes`), and the row never
+  shows less than what native recorded durably for the same side.
+- **Bytes and chunks.** Native rows carry `receivedBytes` (declared sizes of the verified chunks,
+  from the saved manifest), `savedBytes` (the journal's written bytes) and `totalBytes` (the
+  declared size), all `null` together when the manifest cannot be read here; sizes only. The bar's
+  label is "3.1 MB / 12.4 MB" (1000-based: bytes below 1000, one decimal below 100 of a unit, none
+  from 100, moving up before rounding to 1000; no percentage) with "12 of 40 chunks" beside it.
+  Receiving-side states count received bytes; save-side states count saved bytes; ready, saved
+  and removing rows have no bar unless a save is running for them.
+- **Groups.** Needs you: incomplete, exhausted, blocked, save-interrupted,
+  destination-unavailable, destination-changed, saved with the file missing or replaced, removing.
+  In progress: receiving, saving, ready, paused, save-paused. Saved: saved with the file present,
+  could not be checked, or not checked yet. Each state has an icon and a word, never colour alone.
+- **One sentence per state**, replacing the paragraph above the list, each checked against what
+  native does:
+
+  | State | Sentence | Checked against |
+  | --- | --- | --- |
+  | receiving, saving | (none) | The bar says it. |
+  | ready | The private encrypted copy is complete. Choose where to save the readable file. | `checked` with no journal; Save to Downloads or chosen place, Save as. |
+  | paused | Paused. Resume download picks up where it left off. | `user_paused` without a journal; verified chunks are kept. |
+  | save-paused | Saving is paused. Resume saving picks up from the last saved part. | Resume reopens the journal at its durable checkpoint (it halts as changed if the partial changed). |
+  | incomplete | The download stopped partway. Resume download fetches the parts still missing. | Acquisition interrupted; verified chunks are kept. |
+  | exhausted | It ran out of attempts to fetch the missing parts. Retry download tries again. | Allowance exhausted; Retry grants a new allowance, then resumes. |
+  | blocked | Some received data did not pass its check, so the download stopped. Resume download tries again. | `blocked`: a deterministic content failure retried only after explicit Resume. |
+  | save-interrupted | Saving stopped partway, for example when Mewtual closed or locked. Resume saving picks up from the last saved part. | A journal with no active writer and no halt. |
+  | destination-unavailable | The folder or the partly saved file cannot be reached right now. Reconnect it and choose Try again, or save a new copy. | Halt Unavailable: folder missing or unreachable, or the partial gone. |
+  | destination-changed | The partly saved file was changed by something else, so Mewtual stopped adding to it. Save new copy starts a separate file. | Halt Changed; Resume is not offered. |
+  | saved, missing | The saved file is no longer there. Save again makes a fresh copy. | Saved check `missing`; Save again is the fresh save from the private copy. |
+  | saved, replaced | A different file is at the saved name now. Save again makes a fresh copy. | Saved check `replaced`: another object at the name (an in-place edit keeps the identity and reads present). |
+  | removing, running | Removing the saved progress and the partly saved file Mewtual created. | Remove of a row in Deleting while this row's action runs. |
+  | removing, stuck | Mewtual could not finish removing the partly saved file. Choose Remove to try again, or Keep partly saved file. | A failed proven removal leaves the row in Removing (unreachable folder or a file in use). |
+
+  Deviations from the design copy: "Saved to the folder you chose" became "Saved to another
+  folder" (and "Was saved to ..." when the file is missing or replaced), because nothing records
+  that the user chose the place: native proves only whether the recorded folder is the resolved
+  Downloads folder (`savedTo`), and a Downloads folder that moved since would make "you chose"
+  untrue. The design's Show in folder on a destination-unavailable row is not offered: the reveal
+  command works on Saved rows only. Group headings are `h3` under the tab's `h2`.
+- **Show in folder** (`reveal_saved_download`, `os-facing`): Saved rows whose file may still be
+  there (present, not checked yet, could not check). The same fenced, bounded, read-only check as
+  `check_saved_download`, then the system file manager shows the file selected; never opened or
+  run, no path returned, fixed refusal sentences; a refusal re-checks the row. Command policy,
+  capability, `tauri-command-security` ledger and visual-fixture mock added.
+- **Confirm before Remove**, inline: Remove becomes Confirm remove and Cancel (Escape cancels;
+  focus moves to Confirm, back to Remove on Cancel, and to the next row or the group heading when
+  the row goes away). A confirmation holds only for the row's state and revision it was asked for.
+  Clear on a saved row asks too, except when the saved file was just found where it was saved:
+  Clear releases the private encrypted copy and removes only a temporary second name of the saved
+  file, so with the file present the user loses no copy; with it missing, replaced, unchecked or
+  not checked yet, the private copy may be the only one left.
+- **Accessibility.** File-specific accessible names ("Remove report.pdf", "Show report.pdf in
+  folder", "Confirm remove report.pdf"); disabled actions use `aria-disabled` (they stay focusable)
+  with the reason as title and description ("Another action on this file is running", "A save of
+  this file is running"); each group's list is labelled by its heading; one polite live region
+  announces a row's word changing ("report.pdf: Ready to save."), never chunk ticks or the first
+  load; focus order is name, actions, then the where line and its link; `:focus-visible` rings.
+- **Deferred to a follow-up PR (owner decision): "Replace my older saved copy".** A read-only
+  design review of the proposal found: (H1) a successful save releases its Download record at once,
+  so a Saved row exists only as a leftover (a temporary name that could not be removed, or Lock or
+  a crash after publishing); the common case the owner meant, saving the same file again from chat,
+  starts a new Download with no record of the old copy, so the setting would do nothing there, and
+  within its scope only "Save another copy" of a present, unchanged copy would delete anything,
+  swapping a byte-identical file for another; (H2) the proposed Windows removal of the temporary
+  numbered name could delete the new copy's last name if the old name changed between a check and
+  the delete; (H3) on Unix, hashing after the rename-aside would hide the user's file meanwhile and
+  could strand plaintext at a random name after a crash; plus mediums on liveness before each
+  effect, read-only and reparse files, fencing of a new `RenamePublished` journal edge, claim order,
+  lost alternate streams and metadata, and wording. The follow-up adds a durable record of copies
+  Mewtual saved first. Nothing of the setting was built: no setting UI, copy or code here.
+- **On hold (owner): keeping finished saves listed.** Unchanged: a finished save releases its row
+  and shows done in the live list. `savedRowView` takes any row, so listing finished saves later
+  only needs rows fed in.
+- **Tests.** Storage: `transfer_rows_count_declared_plaintext_bytes`,
+  `the_download_listing_carries_the_byte_counts`, and `saved_file_path` / `is_in_folder` in the
+  saved-file check test. Native: projection bytes and `savedTo`, `show_in_folder_*` (each outcome,
+  the bounded wait, stale rows, Lock, a file manager that cannot start; break-checked by dropping
+  the after-check fence). Frontend: `transfer-rows.test.ts` (byte format boundaries, groups and
+  order, tones, icons, bars, explanations, where lines, confirm rule, accessible names, disabled
+  reasons, live-progress floors, transitions, closed projection), `transfers-row-app.test.ts`
+  (the real App handlers: live merge, confirm, cancel, stale confirmation, focus after removal,
+  Show in folder; markup contracts; break-checked), the visual fixture
+  (`?fixture=chat&transfers=1`, one row per state), and the `private-download` flow updated for
+  the new markup.
+
 ## Ledger (23 October, PR51 review rounds)
 
 Focused commands at the final PR51 commit (Windows host), all passing unless noted:

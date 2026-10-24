@@ -711,6 +711,17 @@ writer keeps those properties.
   included (R2-M3). A cloud-synced or shared chosen folder (for example OneDrive Desktop or Documents)
   uploads the partial plaintext and the probe name as they are written. A chosen folder inside the
   app's own data or vault folder is not refused (documented, not enforced).
+- **Transfers rows and Show in folder (Transfers UX, PR #51).** The row projection now also
+  carries plaintext byte counts (received, saved, declared total) and, for a saved row, one word
+  saying whether its recorded folder is exactly the resolved Downloads folder. Sizes and that word
+  only: no path, folder or file name reaches the renderer through them. `reveal_saved_download`
+  is `os-facing`: it takes a Download ID and revision, runs the same bounded read-only identity
+  check as the saved-file check, then asks the system file manager to show the file selected; it
+  never opens or runs it and returns no path. The check and the reveal are separate steps, so
+  another account able to rename entries in that folder could swap the name between them; the
+  file manager then shows the swapped-in file selected, still without opening it. A compromised
+  renderer can call it repeatedly, which opens file manager windows for Mewtual's own saved files
+  only and is bounded by the two saved-check slots.
 - **Fences.** In-session journal transitions require the original export lease; the Resume
   preflight's edges require a preflight observation bound to the actor lifetime, Root authority,
   storage mount and transfer epoch, plus an exact journal CAS; all require the original native

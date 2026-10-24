@@ -96,7 +96,8 @@
   import {
     completedDownload, downloadSavedNotice, guideSavedNotice, isSaveAsCancelled, saveGroupFile, resumeGroupFile, saveSpaceGuide,
   } from "./native-download";
-  import { acceptSaveProgress, checkedPrivateDownloads, checkedSavedCheck, privateDownloadActions, privateDownloadChatSave, privateDownloadDetail, privateDownloadOffers, privateDownloadSaveAsIsNewCopy, type PrivateDownload, type PrivateDownloadActionKind, type SavedCheck } from "./private-downloads";
+  import { acceptSaveProgress, checkedPrivateDownloads, checkedSavedCheck, privateDownloadChatSave, privateDownloadOffers, privateDownloadSaveAsIsNewCopy, type PrivateDownload, type PrivateDownloadActionKind, type SavedCheck } from "./private-downloads";
+  import { SAVED_ROW_GROUPS, TRANSFER_ICONS, confirmWords, groupSavedRows, savedRowTransitions, savedRowView, type SavedRowAction, type SavedRowGroup, type SavedRowLive, type TransferIcon } from "./transfer-rows";
   import {
     newVaultSecretError, vaultSecretChangeNotice, type VaultSecretChangeResult,
   } from "./vault-secret-change";
@@ -7113,6 +7114,8 @@
     privateDownloadSaves = {};
     savedChecks = {};
     savedChecking = {};
+    confirmRemove = {};
+    revealingSaved = {};
     fileInventoryGate.invalidate();
     cancelKeptTransfer();
     wikiPinned = new Set();
@@ -12264,6 +12267,103 @@
     return changePrivateDownload(row, true, kind === "keep");
   }
 
+  // Transfers UX (PR #51): one row per file. A save of a private download shows its live progress
+  // in that download's row (the renderer's own record of the active invocation, the same one the
+  // live list used to show), and the live list leaves that file out (`liveTransferList`). A save
+  // that finishes releases its record natively, so its row goes and the live list shows it done,
+  // as before; `savedRowView` takes any row, so keeping finished saves listed later only needs rows.
+  function liveSaveFor(row: PrivateDownload): SavedRowLive | null {
+    if (activeServerId === null) return null;
+    const key = dlKey(activeServerId, row.cid);
+    const live = downloads[key];
+    return live && activeSaves[key] === live.operation
+      ? { done: live.savedDone ?? 0, total: live.total, bytesDone: live.savedBytes ?? 0, bytesTotal: live.bytesTotal }
+      : null;
+  }
+  function savedRowName(row: PrivateDownload): string {
+    return filesByCid.get(row.cid)?.name ?? `File ${row.cid.slice(0, 12)}`;
+  }
+  let savedRowViews = $derived(privateDownloads.map((row) => savedRowView(row, savedCheckFor(row),
+    savedRowName(row), liveSaveFor(row),
+    { busy: !!privateDownloadBusy[row.id], saving: !!privateDownloadSaves[row.id] || saveInProgress(row.cid) })));
+  let savedRowGroups = $derived(groupSavedRows(savedRowViews));
+  let privateDownloadCids = $derived(new Set(privateDownloads.map((row) => row.cid)));
+
+  // Inline confirmation of Remove (or Clear) per row: the button becomes "Confirm remove" and
+  // "Cancel". It holds only while the row is still the state and revision it was asked for, so a
+  // row that changed meanwhile never confirms on stale terms; Escape and Cancel clear it.
+  let confirmRemove = $state<Record<string, string>>({});
+  const confirmToken = (row: PrivateDownload) => `${row.status}:${row.intent}`;
+  function confirmingRemove(row: PrivateDownload): boolean {
+    return confirmRemove[row.id] === confirmToken(row);
+  }
+  async function askRemove(row: PrivateDownload) {
+    confirmRemove[row.id] = confirmToken(row);
+    await tick();
+    document.querySelector<HTMLButtonElement>(`[data-sdl-confirm="${row.id}"]`)?.focus();
+  }
+  async function cancelRemove(row: PrivateDownload) {
+    delete confirmRemove[row.id];
+    await tick();
+    document.querySelector<HTMLButtonElement>(`[data-sdl-remove="${row.id}"]`)?.focus();
+  }
+  /** Run a row's action, keeping focus off `<body>` when the row goes away: the next row of the
+   * same group, else that group's heading. */
+  async function runSavedRowAction(row: PrivateDownload, action: SavedRowAction, group: SavedRowGroup) {
+    delete confirmRemove[row.id];
+    const rows = savedRowGroups[group];
+    const next = rows[rows.findIndex((view) => view.id === row.id) + 1];
+    await runPrivateDownloadAction(row, action.kind);
+    await tick();
+    if (document.querySelector(`[data-sdl-row="${row.id}"]`)) return;
+    const target = (next && document.querySelector<HTMLElement>(`[data-sdl-row="${next.id}"] .sdl-act`))
+      ?? document.getElementById(`sdl-${group}`);
+    if (target && (document.activeElement === document.body || !document.activeElement)) target.focus();
+  }
+  function rowButtonClick(row: PrivateDownload, action: SavedRowAction, group: SavedRowGroup) {
+    if (action.disabled) return; // aria-disabled stays focusable, so its reason can be read
+    if (action.confirm && !confirmingRemove(row)) return void askRemove(row);
+    void runSavedRowAction(row, action, group);
+  }
+
+  // "Show in folder" for a Saved row: native checks the file read-only first and shows it selected
+  // in the system file manager. No path comes back; a refusal is one fixed sentence, and the row
+  // is checked again so it says what is there now.
+  let revealingSaved = $state<Record<string, boolean>>({});
+  async function revealSavedRow(row: PrivateDownload) {
+    const server = activeServerId, gen = viewGeneration;
+    if (server === null || locked || revealingSaved[row.id]) return;
+    revealingSaved[row.id] = true;
+    try {
+      await invoke("reveal_saved_download", { server, download: row.id, expectedIntent: row.intent });
+    } catch (e) {
+      if (!unlockedViewCurrent(gen, server)) return;
+      toast(String(e), "warn", 6000);
+      const checked = savedChecks[row.id];
+      if (checked) savedChecks[row.id] = { ...checked, visit: -1 };
+      void checkSavedRows();
+    } finally {
+      delete revealingSaved[row.id];
+    }
+  }
+
+  // State transitions, announced politely through one live region (never chunk ticks).
+  let transfersAnnouncement = $state("");
+  let announcedRowWords: Map<string, string> | null = null;
+  $effect(() => {
+    const views = savedRowViews;
+    const shown = view === "downloads";
+    untrack(() => {
+      if (!shown) {
+        announcedRowWords = null;
+        return;
+      }
+      const { announcement, words } = savedRowTransitions(announcedRowWords, views);
+      announcedRowWords = words;
+      if (announcement) transfersAnnouncement = announcement;
+    });
+  });
+
   // The file info pane: click a file to inspect it (preview, availability, uploader, delete).
   let fileInfo = $state<UiFile | null>(null);
   let fileInfoKeptCopy = $derived(keptFiles?.files.find((copy) => copy.cid === fileInfo?.cid));
@@ -12365,6 +12465,10 @@
     done: number;
     total: number;
     heldBefore: number;
+    /** Chunks and bytes this save has written to the file so far (Transfers UX), unset before
+     * any; `done` and `bytesDone` above also count chunks already held locally. */
+    savedDone?: number;
+    savedBytes?: number;
     bytesDone: number;
     bytesTotal: number;
     networkBytesDone: number;
@@ -12424,6 +12528,21 @@
       ...uploadList.map((u): TransferRow => ({ ...u, direction: "upload", key: `upload:${u.id}` })),
     ].sort((a, b) => b.ts - a.ts)
   );
+  // The Transfers tab's live list: everything except a download whose private row is listed
+  // above it, which carries that save's progress itself (one row per file). The status bar keeps
+  // counting every transfer.
+  let liveTransferList = $derived(
+    transferList.filter((t) => t.direction !== "download" || !privateDownloadCids.has(t.cid))
+  );
+  let liveMovingTransfers = $derived(
+    liveTransferList.filter((t) => transferIsActive(t) && transferConnected(t)).length
+  );
+  let liveWaitingTransfers = $derived(Math.max(0, liveTransferList.filter((t) =>
+    t.status === "queued" || t.status === "waiting" || t.status === "downloading" ||
+    t.status === "verifying" || t.status === "reading" || t.status === "uploading" ||
+    t.status === "publishing"
+  ).length - liveMovingTransfers));
+  let liveFinishedTransfers = $derived(liveTransferList.filter((t) => t.status === "done" || t.status === "failed").length);
   let activeTransfers = $derived(
     transferList.filter((t) =>
       t.status === "queued" || t.status === "waiting" || t.status === "downloading" ||
@@ -21768,6 +21887,10 @@
         d.networkBytesDone = e.payload.network_bytes_done;
         d.total = e.payload.total;
         d.done = Math.max(d.heldBefore, e.payload.done);
+        // The chunks written to the file by this save (native emits these events only while
+        // writing), without the already-held floor above: the merged Transfers row counts them.
+        d.savedDone = Math.max(d.savedDone ?? 0, e.payload.done);
+        d.savedBytes = Math.max(d.savedBytes ?? 0, e.payload.bytes_done);
         d.bytesTotal = e.payload.bytes_total;
         d.bytesDone = Math.max(d.bytesDone, e.payload.bytes_done);
         d.progress = d.total > 0 ? Math.min(1, d.done / d.total) : 0;
@@ -23605,6 +23728,15 @@
   </svg>
 {/snippet}
 
+{#snippet transferIcon(name: TransferIcon)}
+  <!-- Transfers UX (PR #51): the 16x16 transfer state icons (design icons.md). The round caps turn
+       the `h.01` / `v.01` dots into discs, so keep this wrapper as it is. -->
+  <svg class="ico sdl-ico" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+    {#each TRANSFER_ICONS[name] as shape}
+      {#if "d" in shape}<path d={shape.d} />{:else}<rect x={shape.rect.x} y={shape.rect.y} width={shape.rect.width} height={shape.rect.height} rx={shape.rect.rx} />{/if}
+    {/each}
+  </svg>
+{/snippet}
 {#snippet icoStorage()}
   <svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
     <ellipse cx="12" cy="5.5" rx="8" ry="3" /><path d="M4 5.5v6c0 1.65 3.58 3 8 3s8-1.35 8-3v-6" /><path d="M4 11.5v6c0 1.65 3.58 3 8 3s8-1.35 8-3v-6" /><path d="m9 17.2 1.8 1.8 4-4" />
@@ -28347,25 +28479,85 @@
           <h2>Transfers</h2>
           <div class="downloads-tab tab-pane">
             {#if privateDownloadError}<p class="muted" role="status">{privateDownloadError}</p>{/if}
-            {#if privateDownloads.length}
-              <h3>Saved download progress</h3>
-              <p class="muted small">Resume continues a partly saved file only if it is still the file Mewtual created. Save new copy starts a separate file. Remove deletes saved progress and a partly saved file Mewtual created.</p>
-              <ul class="dl-list">
-                {#each privateDownloads as saved (saved.id)}
-                  <li class="dl-item">
-                    <b>{filesByCid.get(saved.cid)?.name ?? `File ${saved.cid.slice(0, 12)}`}</b>
-                    <span>{privateDownloadDetail(saved, savedCheckFor(saved))}</span>
-                    <div>
-                      {#each privateDownloadActions(saved, savedCheckFor(saved)) as action (action.kind)}
-                        <button class={action.ghost ? "ghost" : undefined}
-                          disabled={!!privateDownloadBusy[saved.id] || (action.needsIdle && (!!privateDownloadSaves[saved.id] || saveInProgress(saved.cid)))}
-                          onclick={() => runPrivateDownloadAction(saved, action.kind)}>{action.label}</button>
-                      {/each}
-                    </div>
-                  </li>
-                {/each}
-              </ul>
-            {/if}
+            <!-- Transfers UX (PR #51): one polite live region announces state changes of the rows
+                 below (never chunk ticks). -->
+            <div class="sdl-sr" aria-live="polite" aria-atomic="true">{transfersAnnouncement}</div>
+            {#each SAVED_ROW_GROUPS as group (group.id)}
+              {#if savedRowGroups[group.id].length}
+                <section class="sdl" aria-labelledby={`sdl-${group.id}`}>
+                  <h3 class="sdl-group" id={`sdl-${group.id}`} tabindex="-1">{group.heading}</h3>
+                  <ul class="sdl-list" aria-labelledby={`sdl-${group.id}`}>
+                    {#each savedRowGroups[group.id] as saved (saved.id)}
+                      {@const row = privateDownloads.find((r) => r.id === saved.id)}
+                      {#if row}
+                        <li class="sdl-row" data-sdl-row={saved.id} data-state={saved.state} data-tone={saved.tone}
+                          data-check={saved.check ?? undefined} aria-busy={saved.busy ? "true" : undefined}>
+                          <div class="sdl-head">
+                            <span class="sdl-name" title={saved.name}>{saved.name}</span>
+                            <span class="sdl-chip">{@render transferIcon(saved.icon)} <span>{saved.word}</span></span>
+                          </div>
+                          {#if saved.bar}
+                            <div class="sdl-bar" role="progressbar" aria-label={saved.bar.accessibleName}
+                              aria-valuemin="0" aria-valuemax={saved.bar.valueMax} aria-valuenow={saved.bar.valueNow}
+                              aria-valuetext={saved.bar.valueText}>
+                              <span class="sdl-bar-fill" style:--p={saved.bar.fraction}></span>
+                              {#if saved.bar.label}<span class="sdl-bar-label" aria-hidden="true">{saved.bar.label}</span>{/if}
+                            </div>
+                            <span class="sdl-chunks">{saved.chunks}</span>
+                          {/if}
+                          {#if saved.why}<p class="sdl-why">{saved.why}</p>{/if}
+                          <div class="sdl-actions">
+                            {#each saved.actions as action (action.kind)}
+                              {#if action.confirm && confirmingRemove(row)}
+                                {@const words = confirmWords(action, saved.name)}
+                                <!-- Escape on either button cancels, like Cancel. -->
+                                <span class="sdl-confirm" role="group" aria-label={words.group}>
+                                  <button class="sdl-act danger" type="button" data-sdl-confirm={saved.id}
+                                    aria-label={words.confirmName}
+                                    aria-disabled={action.disabled ? "true" : undefined}
+                                    title={action.disabledReason ?? undefined}
+                                    onkeydown={(e) => { if (e.key === "Escape") { e.stopPropagation(); void cancelRemove(row); } }}
+                                    onclick={() => rowButtonClick(row, action, saved.group)}>{words.confirm}</button>
+                                  <button class="sdl-act ghost" type="button" aria-label={words.cancelName}
+                                    onkeydown={(e) => { if (e.key === "Escape") { e.stopPropagation(); void cancelRemove(row); } }}
+                                    onclick={() => cancelRemove(row)}>Cancel</button>
+                                </span>
+                              {:else}
+                                <button
+                                  class="sdl-act"
+                                  class:ghost={action.ghost && action.kind !== "remove"}
+                                  class:danger={action.kind === "remove"}
+                                  type="button"
+                                  data-sdl-remove={action.kind === "remove" ? saved.id : undefined}
+                                  aria-label={action.accessibleName}
+                                  aria-disabled={action.disabled ? "true" : undefined}
+                                  aria-describedby={action.disabled ? `sdl-why-off-${saved.id}` : undefined}
+                                  title={action.disabledReason ?? undefined}
+                                  onclick={() => rowButtonClick(row, action, saved.group)}>{action.label}</button>
+                              {/if}
+                            {/each}
+                            {#if saved.actions.some((a) => a.disabled)}
+                              <span class="sdl-sr" id={`sdl-why-off-${saved.id}`}>{saved.actions.find((a) => a.disabled)?.disabledReason}</span>
+                            {/if}
+                          </div>
+                          {#if saved.where}
+                            <p class="sdl-where">
+                              <span>{saved.where}</span>
+                              {#if saved.canReveal}
+                                <button class="sdl-link" type="button" aria-label={`Show ${saved.name} in folder`}
+                                  aria-disabled={revealingSaved[saved.id] ? "true" : undefined}
+                                  onclick={() => revealSavedRow(row)}>{@render transferIcon("show-in-folder")} Show in folder</button>
+                              {/if}
+                              {#if saved.hint}<span class="sdl-hint">{saved.hint}</span>{/if}
+                            </p>
+                          {/if}
+                        </li>
+                      {/if}
+                    {/each}
+                  </ul>
+                </section>
+              {/if}
+            {/each}
             <button class="transfer-health" onclick={() => switchView("storage")}>
               {@render icoStorage()}
               {#if storageHealth}
@@ -28375,14 +28567,16 @@
               {/if}
               <i>Open →</i>
             </button>
-            {#if transferList.length === 0}
-              <p class="muted">No transfers yet. Shared files and downloads will appear here.</p>
+            {#if liveTransferList.length === 0}
+              {#if privateDownloads.length === 0}
+                <p class="muted">No transfers yet. Shared files and downloads will appear here.</p>
+              {/if}
             {:else}
               <div class="dl-toolbar">
                 <span class="muted small">
-                  {movingTransfers} active{#if waitingTransfers} · {waitingTransfers} waiting{/if} · {transferList.length} total
+                  {liveMovingTransfers} active{#if liveWaitingTransfers} · {liveWaitingTransfers} waiting{/if} · {liveTransferList.length} total
                 </span>
-                <button class="ghost small" disabled={finishedTransfers === 0} onclick={clearFinishedTransfers}>Clear finished</button>
+                <button class="ghost small" disabled={liveFinishedTransfers === 0} onclick={clearFinishedTransfers}>Clear finished</button>
               </div>
               <div class="transfer-legend" aria-label="Transfer piece colours">
                 <span><i class="transfer-piece held"></i>ready</span>
@@ -28391,7 +28585,7 @@
                 <span><i class="transfer-piece offline"></i>no connection</span>
               </div>
               <ul class="dl-list">
-                {#each transferList as d (d.key)}
+                {#each liveTransferList as d (d.key)}
                   {@const pieces = transferPieceStates(d)}
                   <li class="dl-item">
                     <div class="dl-item-main">

@@ -6,7 +6,8 @@ import {
   type PrivateDownload, type SavedCheck,
 } from "./private-downloads.ts";
 const row = { id: "ab".repeat(32), cid: "cd".repeat(32), intent: "18446744073709551615", grant: "2",
-  status: "incomplete", verifiedChunks: 1, savedChunks: 0, totalChunks: 2, chosenPlace: false };
+  status: "incomplete", verifiedChunks: 1, savedChunks: 0, totalChunks: 2, chosenPlace: false,
+  receivedBytes: 8, savedBytes: 0, totalBytes: 16, savedTo: null };
 const statuses = ["receiving", "incomplete", "ready", "paused", "exhausted", "blocked", "removing",
   "saving", "save-interrupted", "save-paused", "destination-unavailable", "destination-changed", "saved"] as const;
 const as = (status: PrivateDownload["status"], extra: Partial<PrivateDownload> = {}): PrivateDownload =>
