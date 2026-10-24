@@ -1,5 +1,22 @@
 # Chat, files and voice implementation evidence
 
+## Native first-Offer admission evidence (24 October; focused checks)
+
+The native Root Offer path now stages and commits exact original input/token/replay/role/history
+before activation. Focused regressions cover same-token lost-reply recovery before/after input
+consumption, same-ID equivocation, final owner/clock closure and lock/unlock, original Finish
+cap, quiet cleanup/actual last-input drainage, and full ordinary byte/table/Crypto pressure.
+Frozen helper enforcement includes a valid permit for an unselected member verified with
+ordinary capacity, on both initial admission and cached recovery. Root namespace saturation
+uses explicitly synthetic aliases to isolate its256-entry limit; this is not evidence that255
+separately paid network admissions coexist with Ready. No Ready Source/LOW/browser/RTC or
+physical media result is established. The declared Ready peak is30,551B within32KiB.
+Root voice 619 pass (13.24s); final first-Offer seven pass (1.51s), including the added empty-helper
+case. Native handoff 306 pass (6.78s), native check 38.59s and strict Sync Clippy 22.12s pass.
+Formatting/diff/ambient pass. Read-only adversarial review and re-review closed the helper and
+graph-accounting findings; no blocker/high/medium remains in this leaf. Full suites remain
+deferred during unfinished integration under the user's test instruction.
+
 ## Prepared HIGH receive evidence (24 October; live integration remains open)
 
 Root voice: 608 focused tests pass (13.38s), including actual native Finish/signatures, full

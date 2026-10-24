@@ -12,6 +12,9 @@ use futures::FutureExt;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
+mod first_offer;
+#[cfg(test)]
+pub(in crate::voice_v2) use first_offer::admission_metadata_bytes;
 mod outgoing;
 mod sealed;
 pub(in crate::voice_v2) use sealed::PreparedSealedPublication;
@@ -72,6 +75,9 @@ impl From<slots::Slot> for PacketSlot {
     }
 }
 impl PacketSlot {
+    pub(in crate::voice_v2) fn uses_incoming(&self, tables: &PacketSlots) -> bool {
+        self._slot.uses_pool(&tables.incoming)
+    }
     pub(super) fn successor(slot: slots::Slot, exchange: Arc<Exchange>) -> Self {
         Self {
             _slot: slot,
@@ -310,6 +316,25 @@ pub struct InboundPacket {
     _custody: Arc<Credit>,
 }
 impl InboundPacket {
+    pub(in crate::voice_v2) fn from_first_offer(
+        token: u64,
+        issuer: DeviceId,
+        header: EncryptedHeader,
+        ciphertext: Vec<u8>,
+        aad: Vec<u8>,
+        object_hash: [u8; 32],
+        credit: Arc<Credit>,
+    ) -> Self {
+        Self {
+            token,
+            issuer,
+            header,
+            ciphertext,
+            aad,
+            object_hash,
+            _custody: credit,
+        }
+    }
     pub(crate) fn object_hash(&self) -> [u8; 32] {
         self.object_hash
     }
@@ -1153,10 +1178,11 @@ impl PacketLedger {
     fn prune(&mut self, clock: &dyn Clock) {
         let now = clock.now_ms();
         let mono = clock.monotonic_ms();
-        if let Some(sdp) = &self.sdp {
-            if mono >= sdp.retire.unwrap_or(sdp.ready_until) || !sdp.owner.is_live() {
-                sdp.owner.close();
-            }
+        if self.sdp.as_ref().is_some_and(|sdp| {
+            mono >= sdp.retire.unwrap_or(sdp.ready_until) || !sdp.owner.is_live()
+        }) {
+            let sdp = self.sdp.take().expect("expired original SDP");
+            sdp.owner.close();
         }
         self.outgoing.retain(|_, outgoing| {
             mono < outgoing.retire && now <= outgoing.draft.expires.saturating_add(CLOCK_SKEW_MS)

@@ -101,7 +101,25 @@ impl TransferredSdpCapacity {
 /// never Workflow or browser keys. Old transition Closed is expected after extraction, so
 /// successor checks deliberately use the ORIGINAL call/pair and epoch observation instead.
 pub(in crate::voice_v2) struct SuccessorProof(Arc<PlanBinding>);
+
+/// Fixed historical provenance, independently of the old closed confirmation transition.
+/// This owns no Workflow, Exchange, byte lender or crypto lane. Receipt lookup is not effect
+/// authority: its caller must also check the actual room/epoch and immutable receipt times.
+pub(in crate::voice_v2) struct OriginalPlanObservation(Arc<PlanBinding>);
+impl OriginalPlanObservation {
+    pub(in crate::voice_v2) fn binding(&self) -> &Binding {
+        &self.0.value
+    }
+    pub(in crate::voice_v2) fn current(&self) -> bool {
+        self.0.value.live()
+            && self.0.transition.epoch_is_live()
+            && !self.0.successor_closed.load(Ordering::Acquire)
+    }
+}
 impl SuccessorProof {
+    pub(in crate::voice_v2) fn original_observation(&self) -> OriginalPlanObservation {
+        OriginalPlanObservation(self.0.clone())
+    }
     pub(in crate::voice_v2) fn finish_identity(&self) -> Option<FinishIdentity> {
         self.0.transition.original_identity()
     }

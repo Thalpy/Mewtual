@@ -50,6 +50,46 @@ impl Pair {
 }
 
 impl LocalJoin {
+    pub(crate) fn has_first_offer(&self, handshake: Nonce) -> bool {
+        self.confirmations
+            .pairs
+            .get(&handshake)
+            .is_some_and(|pair| pair.first_offer.is_some())
+    }
+    pub(crate) fn has_ready_position(
+        &self,
+        handshake: Nonce,
+        namespace: &crate::voice_v2::negotiation::namespace::ReceiptNamespace,
+    ) -> bool {
+        match self
+            .confirmations
+            .pairs
+            .get(&handshake)
+            .and_then(|pair| pair.sdp_successor.as_ref())
+        {
+            Some(Preparation::Transferred {
+                ready: Some(ready), ..
+            }) => ready.has_position(namespace),
+            _ => false,
+        }
+    }
+    pub(crate) fn attach_ready_position(
+        &mut self,
+        handshake: Nonce,
+        position: crate::voice_v2::negotiation::namespace::ReceiptPosition,
+    ) -> Result<(), VoiceError> {
+        match self
+            .confirmations
+            .pairs
+            .get_mut(&handshake)
+            .and_then(|pair| pair.sdp_successor.as_mut())
+        {
+            Some(Preparation::Transferred {
+                ready: Some(ready), ..
+            }) => ready.attach_position(position),
+            _ => Err(VoiceError::Unauthorized),
+        }
+    }
     /// Install the original HIGH bounded first-Offer inbox and commit the exact immutable
     /// Ready marker. This native-only preparation is still unscheduled: actual Source/LOW
     /// causal admission and recoverable Offer-token publication must precede activation.

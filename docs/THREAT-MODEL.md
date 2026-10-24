@@ -1,5 +1,24 @@
 # Threat model; client integrity & enforcement boundaries
 
+## First-Offer native custody and recovery (24 October)
+
+A signed packet/valid forwarding permit alone cannot activate protected HIGH. Native admission
+requires the original confirmed pair, installed receiver/Ready intent, current native call,
+room, actor, policy, epoch and the frozen helper selection. This helper restriction is enforced
+again at final admission and cached recovery, even when ordinary Crypto verified the packet.
+The shared immutable-ID classifier runs before replay/token preparation. One prepaid namespace
+position prevents ordinary intake from stealing promised receipt capacity. Every fallible gate
+precedes the final original-issuer debit; its apply tail publishes native token/input/replay/
+OfferId/fixed history before activation. Lost replies cannot issue another input or token.
+
+Fixed admission history has plain prepaid retained funding and no Exchange/receiver/input/
+Workflow/progress-backed-credit ownership. Expiry/revocation removes native progress holders,
+while real external inputs keep original capacity through actual Drop. No earlier-generation
+call, session or epoch can revive that work. The native deadline is capped by original Finish
+until authenticated browser SDP key-phase transfer exists. Native admission establishes input
+custody, not successful decryption, RTC connection or audio. Ready transmission/application
+activation stays off until causal Source, LOW Ready and browser consumers are integrated.
+
 ## Prepared receive custody does not activate SDP (24 October)
 
 HIGH's bounded receive owner holds an actual original incoming slot and RemotePacket payment

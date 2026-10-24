@@ -1,5 +1,24 @@
 # Mewtual; Architecture
 
+## Exact native first-Offer transaction (24 October)
+
+Root's trusted HIGH preparation first reserves a position in its shared public/encrypted
+receipt namespace. CacheCapacity owns that affine position and a plain1536B receipt fee,
+separate from Producer-backed progress custody. Ordinary admissions include held positions.
+The combined declared Ready peak is30,551B within32KiB; no stage or group limit was raised.
+
+The native first-Offer transaction borrows the original HighReceive slot/payment, stages an
+immutable receipt and native input, and performs actual current origin admission last. Its
+infallible tail installs replay/token/OfferId/role/event/history before publishing activation.
+Exchange never owns the receiver/event/receipt strongly. Permanent history retains original
+paid plan identity and fixed native gates, not Exchange or a progress loan. Initial admission
+and cached recovery both enforce the frozen Ready helpers, independently of verifier selection.
+Active cleanup removes native Pair/cache/input and ledger SDP owners outside native guards;
+real external input/verification/lower owners remain charged until actual Drop. A receipt
+cannot recreate consumed input. Work is capped by original Finish custody until a new native/
+browser SDP phase exists. No Ready Source, LOW Ready consumer or application activation is
+provided yet. Earlier preparation sections below describe preceding implementation stages.
+
 ## Prepared native HIGH receive inbox (24 October; unscheduled)
 
 Pair's separately paid Ready cache now holds Arc<HighReceive>. The receiver owns the original

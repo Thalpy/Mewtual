@@ -19,6 +19,7 @@ const MAX_CONFIRMING: usize = 8;
 const PAIR_BYTES: usize = 6144;
 const CONFIRM_DOMAIN: &str = "mewtual/voice/key-confirm/v2";
 mod derivation;
+mod first_offer;
 mod pair;
 mod protected;
 mod response;
@@ -69,6 +70,10 @@ pub(super) struct Pair {
     // Inert native successor custody stays outside PacketLedger.sdp. Quiet collection and
     // actual Pair destruction cover this owner even when registry installation is refused.
     sdp_successor: Option<successor::Preparation>,
+    // Fixed history must not hold an Exchange/receiver/input. The actual event is separate
+    // progress custody and is collected with its original successor on expiry/revocation.
+    first_offer: Option<Arc<crate::voice_v2::negotiation::admission::FirstOfferAdmission>>,
+    sdp_input: Option<Box<InboundPacket>>,
     _credit: Credit,
 }
 struct Action {
@@ -928,6 +933,9 @@ impl LocalJoin {
                 chain.collect_expired(clock.monotonic_ms());
             }
             successor::collect(&mut pair.sdp_successor, clock.monotonic_ms());
+            if pair.sdp_successor.is_none() {
+                drop(pair.sdp_input.take());
+            }
             if !pair.retired
                 && (!self.lease.is_live()
                     || !pair.pin.is_live()
@@ -1035,6 +1043,8 @@ impl LocalJoin {
                 chain: None,
                 protected_epoch: None,
                 sdp_successor: None,
+                first_offer: None,
+                sdp_input: None,
                 _credit: credit,
             },
         );

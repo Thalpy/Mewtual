@@ -48,6 +48,9 @@ impl ChargePermit<'_> {
 pub(in crate::voice_v2) struct CacheCapacity {
     artifact: artifact::ArtifactState,
     receive: Option<Arc<crate::voice_v2::negotiation::receive::HighReceive>>,
+    // Plain history funding. This fee must never retain Producer/Exchange progress custody.
+    receipt: Option<Arc<crate::voice_v2::negotiation::admission::ReceiptFunding>>,
+    position: Option<crate::voice_v2::negotiation::namespace::ReceiptPosition>,
     _cache: Credit,
     // Last, independently of the credit's Loan, for future artifact-field destruction.
     producer: Arc<Producer>,
@@ -110,7 +113,7 @@ impl Producer {
 }
 impl CacheCapacity {
     pub(in crate::voice_v2) fn from_paid(paid: PaidReadyCache) -> Self {
-        let (cache, exchange) = paid.into_parts();
+        let (cache, receipt, exchange) = paid.into_parts();
         let producer = Producer::new(exchange);
         let cache = cache.with_custody(Arc::new(Loan {
             index: 0,
@@ -119,6 +122,8 @@ impl CacheCapacity {
         Self {
             artifact: artifact::ArtifactState::default(),
             receive: None,
+            receipt: Some(crate::voice_v2::negotiation::admission::ReceiptFunding::new(receipt)),
+            position: None,
             _cache: cache,
             producer,
         }
@@ -143,6 +148,41 @@ impl CacheCapacity {
         } else {
             Err(VoiceError::Unauthorized)
         }
+    }
+    pub(in crate::voice_v2) fn receive(
+        &self,
+    ) -> Result<Arc<crate::voice_v2::negotiation::receive::HighReceive>, VoiceError> {
+        self.receive.clone().ok_or(VoiceError::Unauthorized)
+    }
+    pub(in crate::voice_v2) fn receipt_funding(
+        &self,
+    ) -> Result<Arc<crate::voice_v2::negotiation::admission::ReceiptFunding>, VoiceError> {
+        self.receipt.clone().ok_or(VoiceError::Unauthorized)
+    }
+    pub(in crate::voice_v2) fn commit_receipt(&mut self) {
+        if let Some(position) = &mut self.position {
+            position.consume();
+        }
+        drop(self.position.take());
+        drop(self.receipt.take());
+    }
+    pub(in crate::voice_v2) fn has_position(
+        &self,
+        namespace: &crate::voice_v2::negotiation::namespace::ReceiptNamespace,
+    ) -> bool {
+        self.position
+            .as_ref()
+            .is_some_and(|position| namespace.owns(position))
+    }
+    pub(in crate::voice_v2) fn attach_position(
+        &mut self,
+        position: crate::voice_v2::negotiation::namespace::ReceiptPosition,
+    ) -> Result<(), VoiceError> {
+        if self.position.is_some() {
+            return Err(VoiceError::Capacity);
+        }
+        self.position = Some(position);
+        Ok(())
     }
     #[cfg(test)]
     pub(in crate::voice_v2) fn receive_for_test(
@@ -180,7 +220,11 @@ mod tests {
             + size_of::<capacity::ReadyCapacity>()
             + size_of::<Reservation>()
             + 5 * size_of::<Loan>()
-            + 7 * 2 * size_of::<usize>();
+            + 7 * 2 * size_of::<usize>()
+            // Root's shared count allocation is independent of Root and can survive it.
+            // Charge the whole allocation to each live Ready rather than rely on sharing.
+            + size_of::<std::sync::atomic::AtomicUsize>()
+            + 2 * size_of::<usize>();
         assert!(
             graph < capacity::METADATA,
             "Ready owner graph grew to {graph}"

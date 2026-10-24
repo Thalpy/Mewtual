@@ -1,5 +1,25 @@
 # Mewtual; Interfaces & Hooks Schema
 
+## Root HIGH preparation and native first-Offer admission (24 October)
+
+`ChannelSync::prepare_voice_high_ready(grant, handshake, helpers)` validates the actual affine
+native call/room/epoch, reserves a combined endpoint receipt position, and prepares the original
+HIGH receiver and immutable Ready intent. `Ok(true)` means prepared; `Ok(false)` means this pair
+already has first-Offer history. Neither value means Ready was sent or RTC connected. Transient
+refusal retains original capacity/identity; an unused namespace position is returned on failure.
+Application maintenance does not call this API yet.
+
+Root encrypted ingress now routes an Offer to the exact protected native pair/Ready owner.
+It stages a native token/input and fixed recoverable receipt before the final original-issuer
+transaction. That commit publishes token, replay, responder OfferId/role, event, receipt and
+activation together. Direct and selected-helper exact retries recover the SAME token/receipt;
+unselected helpers and shared-ID content/kind changes refuse before any new effect. Cached
+history does not recreate an input after consumption and is not AEAD or RTC authority. Active
+quiet cleanup releases native live owners; real external owners keep their paid custody.
+SDP work remains bounded by original Finish, first Offer+20s and applicable packet bounds.
+LOW Ready, causal Source and authenticated browser SDP/RTC consumers are still pending. Earlier
+preparation interfaces below retain their historical scope; this section describes the new path.
+
 ## Native receive preparation and Ready intent (24 October; unscheduled)
 
 `LocalJoin::install_high_ready_receive` is a native Rust-only preparation API. It retains the

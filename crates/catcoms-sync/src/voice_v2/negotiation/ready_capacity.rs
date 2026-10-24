@@ -10,12 +10,13 @@ use crate::voice_v2::ready::{
 /// State fence after full cache payment. No public raw Producer/cache constructor exists.
 pub(in crate::voice_v2) struct PaidReadyCache {
     cache: Credit,
+    receipt: Credit,
     // LAST through unpublished destruction. This token grants no packet/effect authority.
     exchange: Arc<Exchange>,
 }
 impl PaidReadyCache {
-    pub(in crate::voice_v2) fn into_parts(self) -> (Credit, Arc<Exchange>) {
-        (self.cache, self.exchange)
+    pub(in crate::voice_v2) fn into_parts(self) -> (Credit, Credit, Arc<Exchange>) {
+        (self.cache, self.receipt, self.exchange)
     }
 }
 
@@ -111,6 +112,12 @@ impl Exchange {
         )?;
         let paid = PaidReadyCache {
             cache,
+            receipt: ByteBudget::Reserved(ready.reserve.clone()).charge(
+                &self.resources,
+                self.group,
+                capacity::RECEIPT,
+                ResourceKind::Retained,
+            )?,
             exchange: self.clone(),
         };
         state.ready_producer_issued = true;

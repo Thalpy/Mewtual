@@ -22,7 +22,8 @@ enum Targets {
 mod encrypted;
 #[cfg(test)]
 mod tests;
-pub(crate) use encrypted::{ConfirmationReceipt, EndpointReceipt};
+use encrypted::EncryptedReceipt;
+pub(crate) use encrypted::EndpointReceipt;
 impl Targets {
     fn live(&self) -> bool {
         match self {
@@ -96,10 +97,20 @@ pub(super) struct PublicInbox {
     packets: BTreeMap<Key, Work>,
     // Two work representations share ONE classifier and combined capacity. Never insert in
     // either map before check_identity: public control cannot reuse an encrypted admission ID.
-    encrypted: BTreeMap<Key, ConfirmationReceipt>,
+    encrypted: BTreeMap<Key, EncryptedReceipt>,
+    positions: voice_v2::negotiation::namespace::ReceiptNamespace,
     cursor: Option<Key>,
 }
 impl PublicInbox {
+    pub(super) fn namespace(&self) -> &voice_v2::negotiation::namespace::ReceiptNamespace {
+        &self.positions
+    }
+    pub(super) fn reserve_position(
+        &mut self,
+    ) -> Result<voice_v2::negotiation::namespace::ReceiptPosition, VoiceError> {
+        self.positions
+            .reserve(self.packets.len() + self.encrypted.len(), PACKETS)
+    }
     fn check_identity(&self, object: &SignedObject) -> Result<(), VoiceError> {
         let key = (object.issuer(), object.id());
         if self
@@ -116,7 +127,8 @@ impl PublicInbox {
         Ok(())
     }
     fn full(&self) -> bool {
-        self.packets.len() + self.encrypted.len() >= PACKETS
+        self.positions
+            .full(self.packets.len() + self.encrypted.len(), PACKETS)
     }
     pub(super) fn prune(&mut self, clock: &dyn Clock) {
         let now = clock.now_ms();

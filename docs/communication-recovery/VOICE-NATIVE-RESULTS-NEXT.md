@@ -1,5 +1,23 @@
 # Next voice milestone: native result recovery
 
+## Current first-Offer implementation (24 October)
+
+Root HIGH Ready preparation now reserves its shared endpoint receipt position; encrypted Offer
+intake uses the original receiver slot/bytes and publishes an exact token/input/fixed receipt
+through final native origin admission. Lost replies, consumed input, immutable ID/kind collisions,
+full ordinary capacity, final native close/unlock and frozen-helper enforcement have focused
+regressions. Fixed receipt funding adds1536B, making Ready's declared peak30,551B within32KiB.
+Preparation/committed graph guards include the native event, token/role, map allowances and
+namespace allocation. Quiet active cleanup takes native holders while actual external input
+retains custody through last Drop. SDP remains capped by original Finish pending browser phase.
+
+NEXT: causal Ready Source using the original Producer and strict deadline (transport ACK cannot
+stop retries); LOW Ready exact admission and delayed transfer after actual verifier drainage;
+original-key native/browser SDP adoption; typed bounded SDP/RTC integration; multi-peer and
+relay composition; combined acceptance. Application Ready scheduling and V2 UI activation stay
+off while these consumers are missing. The ordered preparation notes below describe the prior
+checkpoint; their absent first-Offer token/receipt and cleanup constraints are now implemented.
+
 ## Current transition boundary and next implementation (24 October)
 
 Original browser/native key custody is implemented by opcode10 Claim/Release and Broker22;

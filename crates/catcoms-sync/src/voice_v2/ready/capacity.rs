@@ -11,10 +11,11 @@ pub(in crate::voice_v2) const METADATA: usize = 4096;
 // SignedObject encoding, not size_of a Vec or a renderer-provided serialized length.
 pub(in crate::voice_v2) const MAX_WIRE: usize = 683;
 pub(in crate::voice_v2) const CACHE: usize = 2048;
+pub(in crate::voice_v2) const RECEIPT: usize = 1536;
 pub(super) const SOURCE: usize = MAX_WIRE + 512 + 1024;
 pub(super) const LOWER: usize = 2 * (MAX_WIRE + 512) + 4096 + super::super::ROUTE_METADATA_BYTES;
 pub(super) const ACK_CRYPTO: usize = 5 * 512 + 4096;
-const _: () = assert!(METADATA + CACHE + SOURCE + 2 * LOWER + ACK_CRYPTO <= BYTES);
+const _: () = assert!(METADATA + CACHE + RECEIPT + SOURCE + 2 * LOWER + ACK_CRYPTO <= BYTES);
 
 pub(in crate::voice_v2) struct ReadyCapacity {
     pub(in crate::voice_v2) reserve: Arc<Reservation>,

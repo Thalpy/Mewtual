@@ -123,6 +123,9 @@ impl ReservedSlots {
     }
 }
 impl Slot {
+    pub(crate) fn uses_pool(&self, expected: &Arc<Slots>) -> bool {
+        Arc::ptr_eq(&self.pool, expected)
+    }
     fn release(&mut self, count: usize) {
         assert!(count <= self.count, "native table backing slot");
         self.count -= count;

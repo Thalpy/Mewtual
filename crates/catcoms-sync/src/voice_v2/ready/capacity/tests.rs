@@ -37,7 +37,10 @@ fn ready_peak_uses_actual_maximum_wire_and_fits_beside_both_actual_lowers() {
     )
     .unwrap();
     assert_eq!(object.encode().len(), MAX_WIRE);
-    assert_eq!(METADATA + CACHE + SOURCE + 2 * LOWER + ACK_CRYPTO, 29015);
+    assert_eq!(
+        METADATA + CACHE + RECEIPT + SOURCE + 2 * LOWER + ACK_CRYPTO,
+        30551
+    );
 
     let pool = Arc::new(Resources::default());
     let group = [1; 32];
@@ -50,6 +53,9 @@ fn ready_peak_uses_actual_maximum_wire_and_fits_beside_both_actual_lowers() {
     let budget = ByteBudget::Reserved(capacity.reserve.clone());
     let cache = budget
         .charge(&pool, group, CACHE, ResourceKind::Retained)
+        .unwrap();
+    let receipt = budget
+        .charge(&pool, group, RECEIPT, ResourceKind::Retained)
         .unwrap();
     let crypto = ByteBudget::ReservedLane {
         reservation: capacity.reserve.clone(),
@@ -79,7 +85,8 @@ fn ready_peak_uses_actual_maximum_wire_and_fits_beside_both_actual_lowers() {
         .charge(&pool, group, 1, ResourceKind::Crypto)
         .is_err());
     drop((
-        cache, source, first, second, ack, crypto, budget, forwards, lane, capacity, pressure,
+        cache, receipt, source, first, second, ack, crypto, budget, forwards, lane, capacity,
+        pressure,
     ));
     assert_eq!(pool.counts(), (0, 0));
 }

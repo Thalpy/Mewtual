@@ -1,12 +1,13 @@
 //! HIGH's bounded first-Offer inbox, kept OUTSIDE Exchange. Installation consumes the
 //! original incoming packet claim and full remote-packet allowance before any Ready promise.
 //! A prepared packet borrows that same affine position; refusal returns it to this owner,
-//! never to the ordinary table. No token, replay, decrypt or RTC effect is issued here.
+//! never to the ordinary table. The native packet transaction consumes it into exact token/
+//! event/history custody; this module does not grant successful decrypt or RTC effects.
 // Native publication/Offer consumers are deliberately unscheduled until exact token and
 // original browser key-phase integration exist. Tests exercise the actual capacity boundary.
 #![allow(dead_code)]
 use super::*;
-use crate::voice_v2::packets::{PacketSlot, PacketSlots};
+use crate::voice_v2::packets::{InboundPacket, PacketSlot, PacketSlots};
 use crate::voice_v2::{Body, EncryptedHeader, MessageId, SignedObject};
 use std::sync::OnceLock;
 
@@ -60,9 +61,51 @@ pub(in crate::voice_v2) struct RetainedOffer {
     _slot: PacketSlot,
     _receive: Arc<HighReceive>,
 }
+pub(in crate::voice_v2) struct AdmittedOfferParts {
+    pub object: SignedObject,
+    pub slot: PacketSlot,
+    pub credit: Arc<Credit>,
+    pub exchange: Arc<Exchange>,
+}
 redacted_debug!(HighReceive, PreparedOffer, RetainedOffer);
 
 impl Exchange {
+    pub(in crate::voice_v2) fn first_offer_deadline(
+        &self,
+        expires: u64,
+        wall: u64,
+        mono: u64,
+    ) -> Result<u64, VoiceError> {
+        if !self.ready_publication_current_at(wall, mono) || self.is_live() {
+            return Err(VoiceError::Unauthorized);
+        }
+        let until = self
+            .successor
+            .as_ref()
+            .and_then(|proof| proof.until())
+            .ok_or(VoiceError::Unauthorized)?;
+        let deadline = mono.saturating_add(20_000).min(until).min(
+            mono.saturating_add(
+                expires
+                    .saturating_add(super::super::CLOCK_SKEW_MS)
+                    .saturating_sub(wall),
+            ),
+        );
+        if deadline <= mono {
+            return Err(VoiceError::Freshness);
+        }
+        Ok(deadline)
+    }
+    /// Only the actual native first-Offer apply tail can call this. No resource lock or
+    /// fallible CAS follows origin debit; receiver's affine claim already fences duplicates.
+    pub(in crate::voice_v2) fn publish_first_offer(&self, deadline: u64) {
+        assert!(
+            !self.activated.load(Ordering::Acquire),
+            "one original first Offer"
+        );
+        self.active_until.store(deadline, Ordering::Release);
+        self.activated.store(true, Ordering::Release);
+    }
     pub(in crate::voice_v2) fn ready_receive_open(&self) -> bool {
         self.ready_capacity_open()
             && self.ready_receive.get().is_some_and(CallLease::is_live)
@@ -212,6 +255,9 @@ impl Exchange {
 }
 
 impl HighReceive {
+    pub(in crate::voice_v2) fn exchange(&self) -> Arc<Exchange> {
+        self.exchange.clone()
+    }
     pub(in crate::voice_v2) fn prepare_publication(
         &self,
         signed: crate::voice_v2::ready::producer::SignedReadyStamp,
@@ -326,6 +372,52 @@ impl PreparedPublication {
     }
 }
 impl PreparedOffer {
+    pub(in crate::voice_v2) fn belongs_to(&self, exchange: &Arc<Exchange>) -> bool {
+        Arc::ptr_eq(&self.receive.exchange, exchange)
+    }
+    pub(in crate::voice_v2) fn uses_tables(&self, tables: &PacketSlots) -> bool {
+        self.slot
+            .as_ref()
+            .is_some_and(|slot| slot.uses_incoming(tables))
+    }
+    pub(in crate::voice_v2) fn object_hash(&self) -> [u8; 32] {
+        self.hash
+    }
+    /// Move AAD and pay the second ciphertext copy from the SAME full RemotePacket credit.
+    /// Native publication retains this event outside Exchange. On failure the containing
+    /// transaction MUST drop this event before PreparedOffer returns its slot.
+    pub(in crate::voice_v2) fn prepare_event(
+        &mut self,
+        token: u64,
+    ) -> Result<Box<InboundPacket>, VoiceError> {
+        if self.aad.is_empty() {
+            return Err(VoiceError::Reservation);
+        }
+        let object = self.object();
+        let Body::Encrypted { header, ciphertext } = object.body() else {
+            unreachable!()
+        };
+        Ok(Box::new(InboundPacket::from_first_offer(
+            token,
+            object.issuer(),
+            header.clone(),
+            ciphertext.clone(),
+            std::mem::take(&mut self.aad),
+            self.hash,
+            self.receive._credit.clone(),
+        )))
+    }
+    /// Infallible apply tail only. Actual native final admission has checked every gate;
+    /// the exclusive prepared slot makes a second publication impossible without any CAS.
+    pub(in crate::voice_v2) fn admit_parts(mut self) -> AdmittedOfferParts {
+        self.receive.spent.store(true, Ordering::Release);
+        AdmittedOfferParts {
+            object: self.object.take().expect("original prepared Offer"),
+            slot: self.slot.take().expect("original receive slot"),
+            credit: self.receive._credit.clone(),
+            exchange: self.receive.exchange.clone(),
+        }
+    }
     pub(in crate::voice_v2) fn object(&self) -> &SignedObject {
         self.object.as_ref().expect("unpublished Offer")
     }

@@ -237,6 +237,8 @@ impl LocalJoin {
             // An intervening MLS change cannot adopt this pair into a different epoch.
             protected_epoch: Some(selector.epoch),
             sdp_successor: None,
+            first_offer: None,
+            sdp_input: None,
             _credit: credit,
         };
         let receipt = PairReceipt {

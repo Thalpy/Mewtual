@@ -1,5 +1,43 @@
 # Mewtual; Handover
 
+## Native first-Offer admission (24 October; operational scheduling still off)
+
+HIGH now admits the exact original LOW Offer through Root's encrypted endpoint path after
+its native Ready preparation. It uses the SAME original incoming slot and RemotePacket bytes,
+not another ordinary allocation. One final native origin transaction publishes replay, token,
+OfferId/responder role, a paid native input event and fixed admission receipt before activation.
+Lost replies recover the original receipt/token, including after input consumption, without
+creating another event or replay debit. The original Ready helper choice is enforced on initial
+admission AND cached recovery, even when an unselected helper can obtain ordinary verification.
+
+Root reserves one position in its combined256-entry public/encrypted namespace before Ready
+preparation. Ordinary intake counts held positions; successful Offer admission consumes exactly
+one. Failed preparation, collision, retry and End cannot leak or duplicate it. The saturation
+regression uses explicitly unreachable aliases of one paid Packet to isolate namespace pressure
+from the512KiB byte limit; it does not establish255 feasible network admissions. A separate
+native regression fills actual ordinary bytes, Crypto slots and unreserved packet positions.
+
+Fixed receipt history owns original paid plan provenance plus a separately prepaid plain1536B
+fee. It retains no Exchange, receiver, input, Workflow or progress-backed credit. Ready's declared
+peak is now30,551B of32KiB. Layout guards cover preparation/committed wrappers, input/token/role,
+map allowances and shared namespace custody. Active quiet cleanup takes native Pair and ledger
+owners; an actual external input still delays progress drainage through its last Drop. Until
+browser key-phase adoption exists, native SDP work ends by the original Finish deadline and
+never later than first Offer+20s or its signed packet bounds.
+
+Focused Root voice: 619 pass (13.24s); the final seven first-Offer regressions pass (1.51s),
+including the additional empty-helper case. Native handoff: 306 pass (6.78s); native check
+passes (38.59s). Strict all-target/all-feature Sync Clippy passes (22.12s), as do formatting,
+diff and ambient gates. Read-only adversarial review and re-review found no remaining blocker,
+high or medium issue after frozen-helper enforcement and graph-guard fixes. Frontend is
+unchanged. Full suites remain deferred during unfinished integration under the user's test
+instruction; the disclosed dependency audit remains an open release gate. Application
+maintenance still does not schedule Ready; LOW Ready admission, causal Ready Source, browser
+SDP/RTC, multi-peer composition, media relay and combined acceptance remain unfinished. No new
+physical audio/separate-network result is claimed. External download resume remains separate on
+`origin/communication-external-download` at95eaeda6. Earlier checkpoint sections below record
+their own then-current boundaries; the current status is this section.
+
 ## Native first-Offer inbox and Ready intent (24 October; unscheduled)
 
 HIGH can now install a paid first-Offer inbox after actual native Finish and old-Workflow

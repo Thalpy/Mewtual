@@ -30,6 +30,8 @@ const LOWER_BYTES: usize = 2 * SOURCE_WIRE_BYTES + 4096 + ROUTE_METADATA_BYTES;
 const ACTION_BYTES: usize = CIPHERTEXT + MAX_AAD + 1536;
 const ENGINE_BYTES: usize = 4 * (CIPHERTEXT + MAX_AAD) + 3 * MAX_SDP_PLAINTEXT + 2048;
 const RESULT_BYTES: usize = MAX_SDP_PLAINTEXT + 1040;
+pub(crate) mod admission;
+pub(crate) mod namespace;
 mod packet_capacity;
 mod ready_capacity;
 pub(in crate::voice_v2) mod receive;
@@ -101,8 +103,10 @@ pub struct Exchange {
     live: CallLease,
     action_slots: Arc<super::crypto_actions::slots::ReservedSlots>,
     // Pure observation: charge/action paths already hold State and must not lock it again.
-    // Only legacy construction activates today. No causal native activation exists yet.
+    // Protected HIGH activates only after exact first-Offer token/event/history publication.
     activated: AtomicBool,
+    // First admission fixes a bounded native deadline, capped by original key custody.
+    active_until: std::sync::atomic::AtomicU64,
     successor: Option<super::chain::SuccessorProof>,
     // Present only on the protected affine path. Ordinary legacy SDP does not promise
     // causal Ready. Never store a Ready producer here: that owner retains Exchange one way.
@@ -242,6 +246,7 @@ impl Exchange {
             live: CallLease::default(),
             action_slots: slots,
             activated: AtomicBool::new(false),
+            active_until: std::sync::atomic::AtomicU64::new(0),
             successor: Some(proof),
             ready: Some(ready),
             ready_receive: std::sync::OnceLock::new(),
@@ -265,12 +270,15 @@ impl Exchange {
     /// Quiet Pair housekeeping must call this even if registry publication was refused.
     /// There is deliberately no route from this observation to activation or SDP authority.
     pub(in crate::voice_v2) fn collect_pending_successor(&self, mono: u64) -> bool {
-        if !self.activated.load(Ordering::Acquire)
-            && self
-                .successor
-                .as_ref()
-                .is_some_and(|proof| !proof.current_at(mono))
-        {
+        let active = self.activated.load(Ordering::Acquire);
+        let expired = self.successor.as_ref().is_some_and(|proof| {
+            if active {
+                !proof.live() || mono >= self.active_until.load(Ordering::Acquire)
+            } else {
+                !proof.current_at(mono)
+            }
+        });
+        if expired || !self.live.is_live() {
             self.close();
             return true;
         }
@@ -379,6 +387,7 @@ impl Exchange {
             _metadata: metadata,
             action_slots,
             activated: AtomicBool::new(true),
+            active_until: std::sync::atomic::AtomicU64::new(0),
             successor: None,
             ready: None,
             ready_receive: std::sync::OnceLock::new(),
@@ -660,7 +669,8 @@ mod tests {
             + size_of::<Credit>()
             + size_of::<PhaseLoan>()
             + size_of::<super::super::LeaseState>()
-            + size_of::<receive::PreparedOffer>().max(size_of::<receive::RetainedOffer>())
+            + super::super::packets::admission_metadata_bytes()
+                .max(size_of::<receive::RetainedOffer>())
             + 4 * 2 * size_of::<usize>()
             + 2 * size_of::<DeviceId>()
             + 7 * 2 * size_of::<usize>();
