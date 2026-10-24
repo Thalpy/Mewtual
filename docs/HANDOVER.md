@@ -55,8 +55,11 @@ Read-only reviews found no remaining blocker/high/medium in these Root slices. S
 current-source metadata compiles pass against exact cached dependencies. These are development
 checks, not full Cargo gates. All1,179 Sync tests passed in242.22s and all2,735 frontend
 tests passed in77.65s; the stronger last-owner test then also proved actual Phase and Exchange
-owners die while delivery remains. Remaining complete workspace/native suites and lint/build
-gates are pending for this increment.
+owners die while delivery remains. Root all-target/all-feature strict Clippy, formatting and
+ambient-dependency gates pass; the six actual RPC-wrapper lifecycle tests also pass after
+lint-only fixes. Dependency audit fails on the inherited crypto-bigint0.5.5 advisory
+RUSTSEC-2026-0387 (bans/licenses/sources pass); no dependency or ignore was changed. Complete
+workspace/native suites and remaining native/build gates are pending for this increment.
 
 The older Ready checkpoint's full Root suite passed3,505 tests. Its full native run passed803
 and failed9: one fixture lacked continued production Ready maintenance, then the fixture's

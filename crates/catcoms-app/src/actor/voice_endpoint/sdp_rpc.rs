@@ -81,12 +81,13 @@ mod tests {
         reply: oneshot::Sender<()>,
         _probe: Option<Probe>,
     }
-    fn pair() -> (
+    type TestPair = (
         Command<Message, Payment>,
         Pending<(), Payment>,
         Arc<AtomicBool>,
         Arc<AtomicBool>,
-    ) {
+    );
+    fn pair() -> TestPair {
         let refunded = Arc::new(AtomicBool::new(false));
         let dropped = Arc::new(AtomicBool::new(false));
         let (mut command, pending) = request(Payment(refunded.clone()), |reply| Message {
@@ -105,7 +106,10 @@ mod tests {
         drop(pending);
         let (sender, receiver) = tokio::sync::mpsc::channel(1);
         drop(receiver);
-        let failed = sender.send(command).await.err().expect("receiver stopped");
+        let failed = match sender.send(command).await {
+            Err(failed) => failed,
+            Ok(()) => panic!("receiver stopped"),
+        };
         assert!(!refunded.load(Ordering::Acquire));
         drop(failed);
         assert!(dropped.load(Ordering::Acquire));

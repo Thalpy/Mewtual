@@ -25,6 +25,7 @@ impl ActionBinding {
     /// Call only after the original affine direction issue is held and before publication.
     /// Equal header/round labels never establish authority: the creating LocalJoin must also
     /// resolve its SAME stored intent and actual unpublished outgoing or retained token.
+    #[allow(clippy::too_many_arguments)] // Native issue/header provenance and clock samples are separate gates.
     pub(in crate::voice_v2) fn prepare(
         issue: &mut crate::voice_v2::negotiation::ActionIssue,
         intent: Arc<InitialSdpIntent>,
