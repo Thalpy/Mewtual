@@ -324,7 +324,9 @@ API changes:
   * The adapter must never seed a second RNG, and must never call `Generate::generate()`, which
     uses `SysRng` when `crypto-common`'s `getrandom` feature is on. (Implemented note: after the
     openmls 0.9 step that feature *is* on in both workspaces, through `ml-dsa`, so those OS-RNG
-    constructors are compiled and callable. `check-no-ambient.sh` refuses their spellings.)
+    constructors are compiled and callable. `check-no-ambient.sh` refuses every `::generate()`
+    path call except `MlsDevice::generate()`, plus `SysRng`, `getrandom::` and `try_generate()`.
+    That is a text gate, so a determined bypass is still possible.)
 * `elliptic_curve::sec1::ToEncodedPoint` is deprecated; use `ToSec1Point::to_sec1_point(false)`.
 * These keep their shape: `PublicKey::from_sec1_bytes`, `SecretKey::from_slice`,
   `to_nonzero_scalar`, `as_affine`, `ecdh::diffie_hellman` and `SharedSecret::raw_secret_bytes`.
@@ -449,7 +451,8 @@ Consequence for testers: upgrading is safe. **Downgrading** a build to an alpha 
 is unsafe for every server created or joined after the upgrade:
 
 - the restore fails, and the app skips the server;
-- the old build's next registry write (join, leave, rename, backup) rebuilds the registry from
+- the old build's next registry write (almost any action, including founding a server or just
+  showing an invite) rebuilds the registry from
   the servers it loaded, so the records are dropped;
 - a later server can reuse an orphaned id and overwrite its snapshot.
 

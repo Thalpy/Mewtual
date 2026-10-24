@@ -375,7 +375,7 @@ Lease ownership is reference-counted across UPnP/PCP/NAT-PMP and manual forwards
 consumer sees authoritative current state rather than an unbounded event backlog, and failed probe
 or MAP attempts retry after 60 seconds. The next displayed invite is re-minted
 when the live address set changes, although an already copied signed code is immutable. `portmapper`
-is pinned (0.19.3 since the Rust 1.94 toolchain update; 0.18 before, for the old Rust 1.89
+is pinned (0.19.3 since the toolchain update's Rust 1.91 step; 0.18 before, for the old Rust 1.89
 baseline); its high-level gateway/address path is IPv4-only. A narrow internal
 PCPv6 MAP client supplies the missing firewall-pinhole path: it discovers the scoped default router
 for the exact global listener address from the operating system IPv6 route table, binds that

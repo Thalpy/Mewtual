@@ -273,8 +273,16 @@ fn openmls_0_8_1_pending_stage_remove_merges_and_aborts_after_restore() {
     pending_commit_merges_and_aborts(fixture!("staged_remove.snapshot"), &expect, true);
 }
 
-/// Writes the frozen fixtures. Run only on the openmls version named in the module docs:
-/// `CATCOMS_MLS_FIXTURE_OUT=<dir> cargo test -p catcoms-mls generate_openmls_0_8_1 -- --ignored`
+/// Writes the frozen fixtures. HEAD no longer compiles against openmls 0.8.1 (it names 0.9-only
+/// content variants, and `key_package_leaf_not_after` needs 0.9's public `public_group()`), so
+/// the recipe that produced the committed files is:
+/// 1. extract the tree of commit `1be214fe` (openmls 0.8.1 lockfile, Rust 1.89);
+/// 2. copy in this file and `config.rs`, and add `ServerGroup::create_with_lifetime` plus an
+///    own-leaf-only `key_package_leaf_not_after` (via `own_leaf_node()`) to its `group.rs`;
+/// 3. run `CATCOMS_MLS_FIXTURE_OUT=<dir> cargo test -p catcoms-mls generate_openmls_0_8_1 -- --ignored`.
+///
+/// In that tree only the `checked >= 8` assertion of the lifetime test fails, because the
+/// helper there sees only the own leaf. Never run this on a newer openmls.
 #[test]
 #[ignore = "fixture generator; the committed fixtures are frozen"]
 fn generate_openmls_0_8_1_fixtures() {

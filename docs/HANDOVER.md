@@ -24,8 +24,9 @@ drops their records, after which their ids can be reused. Reinstalling the newer
 them only if the older build changed nothing (THREAT-MODEL, 24 October).
 
 Pre-existing, found in review, not fixed here: any member's KeyPackage leaf expires after
-openmls's default 84 days. Nothing in `crates/` ever self-updates a leaf, so once any leaf in a
-group is that old, every new Welcome join to that group fails with `Lifetime(Expired)`. openmls
+openmls's default 84 days. The designated committer's own leaf is replaced by its commits, but
+non-committing members never refresh their KeyPackage leaves. Once any such leaf in a group is
+that old, every new Welcome join to that group fails with `Lifetime(Expired)`. openmls
 0.8 behaves the same, so alpha groups may already be affected. A second pre-existing issue:
 `catcoms-sync` `apply_commit_in_order` records any `Ok` from `process_incoming` as an applied
 commit, including application messages, so an authorized committer can put a non-commit into

@@ -54,7 +54,8 @@ them. The reverse is not true: a group created **or joined** under 0.9.2 does no
 Downgrading a build below this change is therefore not just an inconvenience:
 
 - the older build skips each such server at unlock;
-- its next registry write (join, leave, rename, backup) rebuilds the registry from the servers it
+- its next registry write (almost any action: founding, joining, leaving, renaming, a backup,
+  even showing or copying an invite) rebuilds the registry from the servers it
   loaded, which drops those records;
 - a later server can then reuse an orphaned id and overwrite its snapshot.
 
