@@ -447,3 +447,126 @@ fn await_ready_actual_result_refuses_a_collector_claim_before_any_signature_or_t
         }
     }
 }
+
+#[test]
+fn established_keys_keep_original_domain_after_finish_expiry_without_renewing_old_permission() {
+    let (mut p, finish) = ready_to_finish();
+    let control = finish.confirmation_control().unwrap();
+    let plan = finish.protected_plan().unwrap();
+    protected_seal(&mut p.f.low, &p.low, &finish, &p.f.clock);
+    let finite = plan.confirmation_custody(&control, 1_000).unwrap();
+    let before = p.f.pool.counts();
+    let keys = plan.established_key_custody(&finite, 30_999).unwrap();
+    assert!(plan.contains_established_keys(&keys));
+    assert!(keys.is_current());
+    assert_eq!(
+        p.f.pool.counts(),
+        before,
+        "fixed original proof needs no new lane or reserve"
+    );
+    assert_eq!(
+        plan.established_key_custody(&finite, 999).err(),
+        Some(VoiceError::Freshness)
+    );
+    assert_eq!(
+        plan.established_key_custody(&finite, 31_000).err(),
+        Some(VoiceError::Freshness)
+    );
+    p.f.clock.advance_ms(30_000);
+    p.f.low.join.collect_confirmations(&p.f.clock);
+    assert!(
+        keys.is_current(),
+        "ordinary old progress expiry does not erase adopted keys"
+    );
+    assert_eq!(finite.remaining_at(31_000), Err(VoiceError::Freshness));
+    assert!(
+        finish.admit_engine(finish.engine_bytes()).is_err(),
+        "old action stays expired/settled"
+    );
+    let retirement = control.retire_all();
+    assert!(
+        !keys.is_current(),
+        "whole-plan close ends retention before progress drain"
+    );
+    assert!(
+        !retirement.is_drained(),
+        "real old packet owners still retain progress"
+    );
+    drop(finish);
+    drop(p); // actual old cache/action/actor owners drain, not a synthetic completion flag
+    assert!(
+        retirement.is_drained(),
+        "fixed key history alone retains no old progress"
+    );
+}
+
+#[test]
+fn established_keys_reject_equal_labels_foreign_finish_and_whole_plan_close() {
+    let (mut p, finish) = ready_to_finish();
+    let control = finish.confirmation_control().unwrap();
+    let plan = finish.protected_plan().unwrap();
+    protected_seal(&mut p.f.low, &p.low, &finish, &p.f.clock);
+    let finite = plan.confirmation_custody(&control, 1_000).unwrap();
+    let (mut other, action) = ready_to_finish();
+    let other_plan = action.protected_plan().unwrap();
+    protected_seal(&mut other.f.low, &other.low, &action, &other.f.clock);
+    assert_eq!(plan.handshake(), other_plan.handshake());
+    assert_eq!(
+        other_plan.established_key_custody(&finite, 1_000).err(),
+        Some(VoiceError::Unauthorized)
+    );
+    let keys = plan.established_key_custody(&finite, 1_000).unwrap();
+    assert!(!other_plan.contains_established_keys(&keys));
+    drop(control.retire_all());
+    assert!(!keys.is_current());
+    assert_eq!(
+        plan.established_key_custody(&finite, 1_000).err(),
+        Some(VoiceError::Unauthorized)
+    );
+}
+
+#[test]
+fn established_keys_follow_original_epoch_policy_session_and_call_revocation() {
+    for cause in 0..4 {
+        let (mut p, finish) = ready_to_finish();
+        let control = finish.confirmation_control().unwrap();
+        let plan = finish.protected_plan().unwrap();
+        protected_seal(&mut p.f.low, &p.low, &finish, &p.f.clock);
+        let finite = plan.confirmation_custody(&control, 1_000).unwrap();
+        let keys = plan.established_key_custody(&finite, 1_000).unwrap();
+        match cause {
+            0 => p.f.low.lease.revoke(),
+            1 => {
+                p.low
+                    .sync_view(View {
+                        epoch: p.f.low.context.epoch + 1,
+                        members: [p.f.low.context.local, p.f.high.context.local].into(),
+                        policy: p.f.low.context.scope.policy,
+                        eligible: true,
+                        indirect: true,
+                    })
+                    .unwrap();
+            }
+            2 => {
+                p.low
+                    .sync_view(View {
+                        epoch: p.f.low.context.epoch,
+                        members: [p.f.low.context.local, p.f.high.context.local].into(),
+                        policy: p.f.low.context.scope.policy,
+                        eligible: false,
+                        indirect: true,
+                    })
+                    .unwrap();
+            }
+            _ => p._runtimes[0].revoke_session(),
+        }
+        assert!(
+            !keys.is_current(),
+            "original revocation {cause} fences keys"
+        );
+        assert_eq!(
+            plan.established_key_custody(&finite, 1_000).err(),
+            Some(VoiceError::Unauthorized)
+        );
+    }
+}

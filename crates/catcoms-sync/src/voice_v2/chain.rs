@@ -25,6 +25,8 @@ const ROWS: usize = 12;
 const NO_ROW: u8 = u8::MAX;
 mod admission;
 mod derivation;
+mod established;
+pub use established::EstablishedKeyCustody;
 mod lifecycle;
 mod outgoing;
 mod ready;

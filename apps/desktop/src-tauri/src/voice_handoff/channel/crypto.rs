@@ -36,6 +36,7 @@ pub(in crate::voice_handoff) enum Operation {
     BeginDerive = 8,
     Status = 9,
     ChainTransition = 10,
+    KeySession = 11,
 }
 impl Operation {
     fn parse(value: u8) -> Result<Self, Refused> {
@@ -50,6 +51,7 @@ impl Operation {
             8 => Ok(Self::BeginDerive),
             9 => Ok(Self::Status),
             10 => Ok(Self::ChainTransition),
+            11 => Ok(Self::KeySession),
             _ => Err(Refused::Header),
         }
     }

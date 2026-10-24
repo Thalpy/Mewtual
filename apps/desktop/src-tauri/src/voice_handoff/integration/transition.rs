@@ -5,7 +5,7 @@ use super::*;
 use crate::voice_handoff::transition as native_transition;
 use catcoms_sync::voice_v2::VoiceError;
 
-fn body(parent: &ledger::ResolvedRow, proof: Option<[u8; 32]>) -> Vec<u8> {
+pub(super) fn body(parent: &ledger::ResolvedRow, proof: Option<[u8; 32]>) -> Vec<u8> {
     let selector = parent.confirmation_selector().unwrap();
     let (serial, version, input_tag) = parent.status().unwrap().action.unwrap();
     let mut body = vec![3];
@@ -129,6 +129,7 @@ pub(super) async fn custody_cycle(
     assert_eq!(&first[2..18], &parent.id().logical());
     assert!(u32::from_be_bytes(first[178..182].try_into().unwrap()) > 0);
     let receipt: [u8; 32] = first[182..214].try_into().unwrap();
+    let key_proof = super::key_session::adopt(state, &public, &route, parent, receipt).await;
     assert!(
         matches!(parent.retire_plan(), Err(VoiceError::Capacity)),
         "browser key custody must precede normal whole-plan retirement"
@@ -151,6 +152,7 @@ pub(super) async fn custody_cycle(
         input_tag,
     };
     let handshake = parent.confirmation_handshake().unwrap();
+    super::key_session::foreign_refuses(parent, &foreign_route, receipt, key_proof);
     let mono = clock.monotonic_ms();
     assert!(matches!(
         parent.recover_transition(foreign_route.session().identity(), action, handshake, mono),
@@ -242,6 +244,12 @@ pub(super) async fn custody_cycle(
         exchange(state, &public, &route, parent, &body(parent, Some(wrong))).await,
         replies::refused(factory::Refused::Protocol(VoiceError::Unauthorized))
     );
+    // Exercise both release orders. Neither individual release can cover the other's
+    // separately latched obligation; the old finite Claim never changes identity.
+    if end_before_recovery {
+        super::key_session::release(state, &public, &route, parent, receipt, key_proof, true).await;
+        assert!(matches!(parent.retire_plan(), Err(VoiceError::Capacity)));
+    }
     let release = body(parent, Some(receipt));
     for _ in 0..2 {
         // lost Release reply does not create a new obligation or deadline
@@ -249,6 +257,18 @@ pub(super) async fn custody_cycle(
         assert_eq!(&released[..2], &[3, 3]);
         assert_eq!(&released[178..182], &[0; 4]);
         assert_eq!(&released[182..214], &receipt);
+    }
+    if !end_before_recovery {
+        assert!(
+            matches!(parent.retire_plan(), Err(VoiceError::Capacity)),
+            "old Release alone cannot cover established key custody"
+        );
+        assert!(matches!(
+            plan_final::request(&context, &route, parent).await,
+            Err(factory::Refused::Protocol(VoiceError::Capacity))
+        ));
+        super::key_session::release(state, &public, &route, parent, receipt, key_proof, false)
+            .await;
     }
     let closed = exchange(state, &public, &route, parent, &claim).await;
     assert_eq!(&closed[..2], &[3, 3], "released Claim can never reopen");

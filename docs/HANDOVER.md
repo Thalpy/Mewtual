@@ -1,5 +1,56 @@
 # Mewtual; Handover
 
+## Original key-domain adoption (24 October; SDP/RTC still pending)
+
+Root now supplies a distinct retention-only EstablishedKeyCustody from the SAME opaque finite
+Finish custody and PlanBinding. Minting requires the original native monotonic window; equal
+wire labels, expired custody and whole-plan closure refuse. The new fixed observation survives
+old confirmation expiry/extraction but follows original call/pair/actor/session/policy/epoch
+revocation and successor_closed. It owns no Workflow, Exchange, input, engine, keys or lane.
+It cannot authorize SDP, RTC or another old confirmation action.
+
+Authenticated opcode11/version4 adopts only the original unreleased opcode10 Claim, actual
+channel Session, parent action, handshake and Claim receipt. Final UI -> Coordinator -> Route -> Index ->
+row admission is synchronous after the original native Clock sample; existing Root Finish
+provenance avoids a new Finish-proof lookup. Normal Actor context preflight still awaits
+Root before final synchronous admission. Local parent/children must have drained.
+One nested fixed KeyClaim and domain-separated receipt are retained before replying. Recovery
+finds it before old-window/current-UI checks. Separate releases, in either order, are required
+before normal Final/retire; first adoption resets physical collection evidence. Existing orphan
+GC still needs the dead original lease, actual same-session collection and real Root drainage.
+
+Browser23 installs paid pending quarantine inside the authenticated old-Claim callback BEFORE
+its adoption RPC. Lost/delayed replies retain the same actual pair/keys/counter domain for exact
+recovery only; End/Closing/Released never reopen keys. Old Claim deadline/release is unchanged.
+Once actual browser jobs/continuations drain, old96KiB and unused confirmation rows return
+while fixed pair/history/control remains paid. No SDK promise or IO owner is declared drained
+by a deadline. Compact new history owns only state/proof; original identities stay in Claim.
+
+Focused checks pass:655 Root voice (13.36s),308 native handoff (6.73s),561 browser voice (5.41s),
+Svelte check with zero errors/warnings, strict Sync Clippy (22.02s), and all11 real TCP/HTTP/Node
+voice scenarios (142.31s). The independent automatic native terminal oracle now requires actual
+opcode11 KeyClaim on both endpoints; queued work/browser booleans cannot satisfy it. Framed
+native custody exercises actual UI contention, changed bindings, foreign Session and both
+release orders. Root/browser expiry and lost-reply regressions are separate: a framed native
+lost-adoption reply recovered after30s remains a low coverage gap, as does first adoption after
+an already released/finalized Claim without a previous KeyClaim. Native row and Control graph
+guards pass with unchanged limits after removing a selector retained across await; browser
+maximum key Control inventory is8191/8192B and fixed metadata stays within8KiB.
+
+Read-only review found an unchanged retained Broker22 version would bypass adoption on HMR.
+Both guards now require23. A fully shaped, funded old broker is refused without replacing its
+host allocation, refunding its real unresolved work or waking native setup. No blocker/high or
+other medium was found; short re-review confirms the fix with no remaining blocker/high/medium. Full suites remain deferred
+during unfinished integration. Native check (38.72s), strict native Clippy (54.37s),
+frontend production build (36.34s), formatting/diff/ambient checks also pass. The dependency
+audit remains open.
+
+Still unfinished: automatic application Ready/round progression, typed native/browser SDP seal/
+open and delivery tickets, complete-SDP/RTC integration, repeated-round and multi-peer history
+compaction, member media relay and combined/physical acceptance. New key custody does NOT extend
+current Ready/Exchange/action deadlines or activate the V2 UI. Only one physical desktop is
+available. External download resume stays separate; older checkpoint sections are historical.
+
 ## Actor Ready delivery through a blocked TCP bridge (24 October; focused integration)
 
 The bounded application actor now exposes the four existing native Ready/capacity controls.

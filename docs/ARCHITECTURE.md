@@ -1,5 +1,17 @@
 # Mewtual; Architecture
 
+## Retained original keys, separate from progress (24 October)
+
+EstablishedKeyCustody converts exact original native Finish custody while its finite window
+is current. It shares only the original independently paid PlanBinding. Its current predicate
+ignores normal old-phase closure but includes original call/pair/epoch/session/policy and
+whole-plan successor_closed. No new variable lane or authorization is created. Native nests a
+separately released KeyClaim in its original channel Claim; immutable recovery precedes old
+expiry checks. Both obligations gate normal retirement; physical orphan GC retains its stronger
+existing requirements. Browser23 quarantines the existing pair before RPC, compacts new receipt
+to state/proof and returns old variable work only after actual local drainage. The same keys,
+protected-key restrictions and nonce domain survive; first SDP/RTC permissions remain separate.
+
 ## LOW Ready receipt and original-lane extraction (24 October)
 
 Root now classifies Ready in the same immutable public/encrypted identity namespace, then admits

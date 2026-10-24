@@ -75,6 +75,11 @@ pub(super) async fn respond(
     if incoming.operation() == Operation::Status {
         return status(route, incoming);
     }
+    if incoming.operation() == Operation::KeySession {
+        return crate::voice_handoff::key_session::apply(context, route, incoming)
+            .await
+            .map_err(|_| Refused::Body);
+    }
     if incoming.operation() == Operation::ChainTransition {
         return crate::voice_handoff::transition::apply(context, route, incoming)
             .await

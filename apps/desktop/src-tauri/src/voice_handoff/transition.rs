@@ -22,7 +22,22 @@ pub(super) struct Admission<'a> {
     route: &'a Route,
     _commit: &'a tokio::sync::OwnedMutexGuard<()>,
 }
-impl Admission<'_> {
+impl<'a> Admission<'a> {
+    /// Borrow the actual already-held native admission guards; callers cannot substitute
+    /// a boolean or reconstructed lock for the process UI/selection publication fence.
+    pub(super) fn new(
+        context: &'a LiveContext,
+        authority: &'a Coordinator,
+        route: &'a Route,
+        commit: &'a tokio::sync::OwnedMutexGuard<()>,
+    ) -> Self {
+        Self {
+            context,
+            authority,
+            route,
+            _commit: commit,
+        }
+    }
     pub(super) fn ledger(&self) -> &Arc<Ledger> {
         &self.context.ledger
     }

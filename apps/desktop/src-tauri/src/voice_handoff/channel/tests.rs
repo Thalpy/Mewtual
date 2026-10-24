@@ -183,6 +183,7 @@ fn paid_fixed_storage_and_original_control_lane_cover_codec_peak() {
         super::super::admission::layout_bytes(),
         super::super::settlement::layout_bytes(),
         super::super::plan_final::layout_bytes(),
+        super::super::key_session::layout_bytes(),
         super::super::transition::layout_bytes(),
         super::super::confirmation_history::layout_bytes(),
         super::super::confirmation_input::layout_bytes(),

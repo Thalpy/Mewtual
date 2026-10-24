@@ -1,5 +1,23 @@
 # Next voice milestone: native result recovery
 
+## Original key adoption now implemented (24 October)
+
+Distinct Root EstablishedKeyCustody, exact authenticated opcode11 native adoption/recovery/
+release and browser23 pending quarantine now preserve the original key domain. Normal old
+confirmation expiry does not erase it; old Claim/action/Ready/Exchange deadlines are unchanged.
+Actual local old work returns independently while fixed key/history custody remains paid.
+The reviewed design below is partly historical: actual captured opaque Finish proof removed
+the need for another Finish-proof lookup in key retention. Normal Actor context preflight
+still awaits Root before final synchronous admission. No SDP/RTC permission follows from this leaf.
+
+NEXT: native long-lived key-session/round admission and explicit closed complete-SDP profile;
+prepaid native/browser SDK/IPC/UTF16 coexistence before any receive promise; typed seal/open and
+private decrypted-result commit; fresh exact round/Offer/PC-generation RTC delivery; old-round
+compaction after real custody drainage. Then multi-peer scheduling, member media relay and
+combined acceptance. The current one-shot Ready/exchange is still bounded by original Finish;
+it cannot be reset or lengthened to stand in for a live SDP round. HANDOVER records evidence
+and remaining low native late-recovery/first-adoption-negative coverage gaps.
+
 ## Current LOW Ready boundary and next consumer (24 October)
 
 Exact protected LOW Ready/Root admission, immutable fixed receipt, original Workflow verifier,

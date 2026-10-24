@@ -1,5 +1,23 @@
 # Threat model; client integrity & enforcement boundaries
 
+## Retention-only original key adoption (24 October)
+
+Copied Finish metadata, a local Established boolean or a Current key receipt cannot authorize
+SDP/RTC. First native key adoption requires exact opaque original Root Finish/PlanBinding,
+finite original native time, original unreleased Claim/session/parent action, no final intent,
+local actual drainage and final UI/selection/route gates. Recovery creates nothing and runs
+before expired-window/UI checks so lost replies remain cleanable after End. Whole-plan close
+and original epoch/session/policy/call/pair revocation end the Root retention observation.
+
+Separate old/new release obligations block normal finalization. Actual dead-original-lease,
+same-session physical collection and Root-drain evidence remain necessary for orphan cleanup.
+Browser quarantine precedes its adoption RPC and retains only existing paid keys/history.
+Unknown replies never rederive keys, reset nonce counters or grant SDK work. End closes locally
+before delayed replies; authenticated Closing/Released are terminal. Actual SDK/continuation
+finally gates old buffer return. Broker23 refuses older retained instances; HMR cannot silently
+keep the old expiry lifecycle or allocate a second pool over its unresolved work. Independent
+SDP authorization, round isolation, media relay and physical acceptance remain unimplemented.
+
 ## LOW causal Ready and exact retry custody (24 October)
 
 A signed Ready alone cannot advance an ordinary/unconfirmed pair. Root requires its actual

@@ -23,6 +23,7 @@ mod http;
 mod input;
 #[cfg(test)]
 pub(crate) mod integration;
+mod key_session;
 pub(crate) mod ledger;
 mod pending_close;
 mod plan_final;

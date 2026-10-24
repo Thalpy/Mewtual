@@ -9,6 +9,7 @@ use catcoms_sync::voice_v2::crypto_actions::{CryptoOutcome, CryptoResultReceipt}
 use catcoms_sync::voice_v2::presence::PairSelector;
 use catcoms_sync::voice_v2::VoiceError;
 use sha2::{Digest, Sha256};
+pub(super) mod key_session;
 pub(super) mod transition;
 
 /// Header-only necessary conditions for the closed v1 parent / v2 confirmation grammars.
@@ -50,6 +51,10 @@ pub(super) fn wire_shape(
     {
         return false;
     }
+    if operation == Operation::KeySession {
+        return plain_bytes == key_session::ADOPT_BYTES
+            || plain_bytes == key_session::RELEASE_BYTES;
+    }
     if operation == Operation::ChainTransition {
         return plain_bytes == transition::CLAIM_BYTES || plain_bytes == transition::RELEASE_BYTES;
     }
@@ -70,7 +75,8 @@ pub(super) fn wire_shape(
             Operation::BeginDerive
             | Operation::FinalAck
             | Operation::Status
-            | Operation::ChainTransition => false,
+            | Operation::ChainTransition
+            | Operation::KeySession => false,
         }
     })
 }
@@ -192,7 +198,9 @@ fn decode_kind(operation: Operation, bytes: &[u8]) -> Result<Kind<'_>, VoiceErro
         Operation::FinalAck => Kind::FinalAck {
             proof: cursor.take()?,
         },
-        Operation::Status | Operation::ChainTransition => return Err(VoiceError::Malformed),
+        Operation::Status | Operation::ChainTransition | Operation::KeySession => {
+            return Err(VoiceError::Malformed)
+        }
     };
     if !cursor.0.is_empty() {
         return Err(VoiceError::Malformed);

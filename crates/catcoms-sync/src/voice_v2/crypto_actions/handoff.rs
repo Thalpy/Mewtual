@@ -36,6 +36,26 @@ pub struct ProtectedCryptoPlan {
 redacted_debug!(ProtectedCryptoPlan);
 
 impl ProtectedCryptoPlan {
+    /// Retain only the existing confirmed key domain after authenticated native adoption.
+    /// This consumes no progress capacity and renews no finite Claim/action permission.
+    /// The trusted adapter must bind the exact original Session/parent/Claim receipt and
+    /// require its own separate release before finalization. A renderer cannot construct
+    /// either opaque proof from copied metadata.
+    pub fn established_key_custody(
+        &self,
+        custody: &super::super::chain::ConfirmationCustody,
+        mono: u64,
+    ) -> Result<super::super::chain::EstablishedKeyCustody, VoiceError> {
+        custody.retain_established(&self.binding, mono)
+    }
+    /// Historical allocation identity only, never fresh SDK/packet/RTC authority.
+    pub fn contains_established_keys(
+        &self,
+        custody: &super::super::chain::EstablishedKeyCustody,
+    ) -> bool {
+        custody.belongs_to(&self.binding)
+    }
+
     /// Lend finite key custody only for this exact original plan and captured Control after
     /// actual native Finish publication. LOW retains Finish retry authority; no lane moves.
     /// Native must still enforce original parent/Session/UI Claim and Release lifecycle.

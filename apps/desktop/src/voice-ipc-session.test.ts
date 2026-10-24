@@ -1,3 +1,4 @@
+import { encodeVoiceKeySession } from "./voice-ipc-key-session.ts";
 import assert from "node:assert/strict";
 import test, { type TestContext } from "node:test";
 import { webcrypto, createHash } from "node:crypto";
@@ -333,7 +334,7 @@ async function framedDerivation(f: Awaited<ReturnType<typeof fixture>>) {
   };
   f.cleanup(() => { finalPending = false; loseIssuance = false; loseFinalAck = false; settleHold?.release(); returnHold?.release(); f.native.settleSetup = nativeSettle; });
   f.actions(async (header, opened) => {
-    if (header.operation === 10) {
+    if (header.operation === 10 || header.operation === 11) {
       assert.ok(transitionResponder, "unexpected custody operation");
       return transitionResponder(header, opened);
     }
@@ -559,10 +560,37 @@ async function framedConfirmation(f: Awaited<ReturnType<typeof fixture>>, finish
 function custodyReplies(f: Awaited<ReturnType<typeof fixture>>, child: Awaited<ReturnType<typeof framedConfirmation>>) {
   let claims = 0, releases = 0, claimed = false, released = false, loseClaim = false, loseRelease = false, refuse = false;
   let releaseHold: ReturnType<typeof gate> | null = null;
+  let keyAdoptions = 0, keyReleases = 0, keyAdopted = false, keyReleased = false, loseAdoption = false;
+  let keyHold: ReturnType<typeof gate> | null = null, endOnKeyReply = false;
+  const keyProof = hash(99);
   const proof = hash(96);
-  f.cleanup(() => releaseHold?.release());
-  child.parent.beforeFinal(() => assert.ok(!claimed || released, "parent final cannot overtake native Release"));
+  f.cleanup(() => { releaseHold?.release(); keyHold?.release(); });
+  child.parent.beforeFinal(() => {
+    assert.ok(!claimed || released, "parent final cannot overtake native Release");
+    assert.ok(!keyAdopted || keyReleased, "parent final cannot overtake separate native key Release");
+  });
   child.parent.transitionReplies(async (header, opened) => {
+    if (header.operation === 11) {
+      const releasing = opened[185] === 1;
+      assert.deepEqual(opened, encodeVoiceKeySession({ parentRow: child.parent.row, purpose: historyPurpose,
+        identity: child.parent.identity, handshake: child.parent.binding.handshake, claim: proof,
+        request: releasing ? { kind: "release", receipt: keyProof } : { kind: "adopt" } }).body);
+      assert.ok(claimed, "existing original native Claim is required");
+      if (releasing) { keyReleases++; assert.ok(keyAdopted); keyReleased = true; }
+      else {
+        keyAdoptions++; keyAdopted = true;
+        if (keyHold) await keyHold.promise;
+        if (loseAdoption) { loseAdoption = false; throw new Error("key adoption committed; reply lost"); }
+      }
+      const state = keyReleased ? 3 : f.owner.isCurrent() ? 1 : 2;
+      const bytes = Buffer.concat([Buffer.from([4, state]), Buffer.from(child.parent.row, "hex"),
+        integer(BigInt(child.parent.identity.action), 8), integer(BigInt(child.parent.identity.version), 8),
+        Buffer.from(child.parent.identity.inputTag, "hex"), Buffer.from(child.parent.binding.handshake, "hex"),
+        integer(BigInt(historyPurpose.epoch), 8), Buffer.from(hash(97), "hex"), Buffer.from(hash(98), "hex"),
+        Buffer.from(proof, "hex"), Buffer.from(keyProof, "hex")]);
+      if (endOnKeyReply) { endOnKeyReply = false; f.owner.retire(); }
+      assert.equal(bytes.length, 234); return { kind: 0, body: bytes };
+    }
     const release = opened[185] === 1;
     assert.equal(header.logical, child.parent.row);
     assert.deepEqual(opened, encodeVoiceTransition({ parentRow: child.parent.row, purpose: historyPurpose,
@@ -589,6 +617,9 @@ function custodyReplies(f: Awaited<ReturnType<typeof fixture>>, child: Awaited<R
   return { counts: () => ({ claims, releases, claimed, released }),
     loseClaim() { loseClaim = true; }, loseRelease() { loseRelease = true; }, refuseClaim() { refuse = true; },
     holdRelease() { releaseHold = gate(); return releaseHold; },
+    keyCounts: () => ({ adoptions: keyAdoptions, releases: keyReleases, adopted: keyAdopted, released: keyReleased }),
+    loseAdoption() { loseAdoption = true; }, holdAdoption() { keyHold = gate(); return keyHold; },
+    endOnKeyReply() { endOnKeyReply = true; },
   };
 }
 
@@ -1768,7 +1799,7 @@ test("absolute IO deadline aborts stale-port fetch but retains custody until act
   assert.equal((await channel.status()).kind, "ready"); assert.deepEqual(f.counts().tx, [2n]);
 });
 
-for (const version of [7, 8, 9, 10, 11, 12, 13, 14, 15, 16]) test(`HMR refuses v${version} retained pool rather than creating a second channel allocator`, () => {
+for (const version of [7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 22]) test(`HMR refuses v${version} retained pool rather than creating a second channel allocator`, () => {
   const host = { [Symbol.for("mewtual.voice.crypto-broker.v2")]: { version } };
   const native = { async admit() { return ""; }, async settle() {}, async commitInbound() {} };
   assert.throws(() => windowVoiceCryptoBroker(native, host, real), /reload required/);
@@ -2009,6 +2040,11 @@ test("Derive intake and terminal Control payload graphs fit their separate origi
   const rawTransitionStrings = 2 * (8 + 32 + 20 + 20 + 64 + 64 + 20 + 64 + 64 + 20 + 64);
   const transitionDecoded = rawTransitionStrings + 512; // raw object/identity, expected/request references and codec wrappers
   assert.ok(transitionDecoded <= decoded, "complete transient custody decode fits existing fixed decoded peak");
+  const keyBuffers = 2 * (250 + 16) + 2 * (234 + 16) + 144 + 288 + 4 * 40 + 2 * 32 + 2 * 12 + 1;
+  const keyDecoded = 2 * (8 + 32 + 20 + 20 + 64 + 64 + 20 + 64 + 64 + 64 + 64) + 512;
+  assert.ok(keyDecoded <= decoded, "key reply transient graph fits the existing decode bound");
+  const keyControl = keyBuffers + descriptor + decoded + wrappers + ordinaryReturn;
+  assert.ok(keyControl <= 8 * 1024, `key Control graph ${keyControl}/8192`);
   const transitionControl = transitionBuffers + descriptor + transitionDecoded + wrappers + ordinaryReturn;
   assert.ok(transitionControl <= 8 * 1024, `custody Control graph ${transitionControl}/8192`);
 });
@@ -2046,7 +2082,10 @@ test("nine child descriptors and serial Data adoption fit unchanged chain envelo
   const custodyObjects = 256 + 64; // retained receipt + custody scalars/reference wrapper
   const transitionFlight = 512; // one coalesced promise, async frame/closures and channel/chain references
   const metadata = parentSelector + sharedBinding + 2 * 128 + 4096 + 2 * 128 + ordinaryReturn
-    + custodyStrings + custodyObjects + transitionFlight;
+    + custodyStrings + custodyObjects + transitionFlight
+    // Compact key history owns only state/proof. Original parent/Finish/Claim identities
+    // stay in the old receipt; the flag word fits its existing64B custody wrapper.
+    + 2 * 64 + 64;
   assert.ok(metadata <= 8 * 1024, `chain metadata/maps/drainage inventory ${metadata}/8192`);
 
   // The current child can overlap frame ciphertext/opened body, decoder-owned input and
@@ -2340,4 +2379,44 @@ test("End during an automatically consumed child waits for its actual held settl
   assert.equal(f.broker.counts().bytes, payment - unusedRows * 2048);
   held.release(); await closing; await until(() => f.broker.counts().active === 0);
   assert.equal(f.broker.counts().bytes, 0);
+});
+
+
+test("uncertain key adoption beyond old expiry preserves the identical pair and drains old progress", async t => {
+  const f = await fixture(t), child = await framedConfirmation(f, true), custody = custodyReplies(f, child);
+  await child.derive(); const pair = child.ready.derivation.pair(); assert.ok(pair);
+  custody.loseAdoption(); await child.handle().attempt();
+  await until(() => custody.keyCounts().adoptions === 1 && f.broker.counts().active === 0);
+  const retained = f.broker.counts().bytes;
+  assert.ok(retained < 96 * 1024, "old variable envelope actually returned while key/history custody remains paid");
+  f.advance(60_000); f.broker.collectChains();
+  assert.equal(child.ready.derivation.pair(), pair, "unknown adoption cannot reconstruct or retire the original key domain");
+  assert.throws(() => child.nextHistorical(), /original derived pair required/, "retention grants no old action");
+  f.owner.retire(); await child.channel.close();
+  assert.deepEqual(custody.keyCounts(), { adoptions: 2, releases: 1, adopted: true, released: true });
+  assert.equal(child.ready.derivation.pair(), null); assert.equal(child.parent.finalCounts().finalAcknowledged, true);
+});
+
+test("held adoption reply past old deadline keeps existing keys but actual Control remains occupied", async t => {
+  const f = await fixture(t), child = await framedConfirmation(f, true), custody = custodyReplies(f, child);
+  await child.derive(); const pair = child.ready.derivation.pair(); assert.ok(pair);
+  const held = custody.holdAdoption(); await child.handle().attempt();
+  await until(() => custody.keyCounts().adoptions === 1);
+  f.advance(60_000); f.broker.collectChains();
+  assert.equal(child.ready.derivation.pair(), pair);
+  assert.ok(f.broker.counts().active > 0, "an unresolved real IO promise cannot be refunded by expiry");
+  f.owner.retire(); const closing = child.channel.close();
+  assert.equal(child.ready.derivation.pair(), null, "End fences keys before the delayed Current reply");
+  held.release(); await closing;
+  assert.equal(custody.keyCounts().releases, 1); assert.equal(child.ready.derivation.pair(), null);
+});
+
+test("End during authenticated Current key reply cannot revive keys and still releases both obligations", async t => {
+  const f = await fixture(t), child = await framedConfirmation(f, true), custody = custodyReplies(f, child);
+  await child.derive(); custody.endOnKeyReply(); await child.handle().attempt();
+  await until(() => custody.keyCounts().adoptions === 1);
+  await child.channel.close();
+  assert.equal(child.ready.derivation.pair(), null);
+  assert.equal(custody.keyCounts().releases, 1); assert.equal(custody.counts().releases, 1);
+  assert.equal(child.parent.finalCounts().finalAcknowledged, true);
 });

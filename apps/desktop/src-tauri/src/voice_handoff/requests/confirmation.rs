@@ -25,7 +25,10 @@ impl<'a> Request<'a> {
     ) -> Result<Self, VoiceError> {
         if matches!(
             operation,
-            Operation::Status | Operation::FinalAck | Operation::ChainTransition
+            Operation::Status
+                | Operation::FinalAck
+                | Operation::ChainTransition
+                | Operation::KeySession
         ) || body_kind
             != if operation == Operation::Result {
                 BodyKind::Data

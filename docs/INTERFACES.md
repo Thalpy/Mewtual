@@ -1,5 +1,23 @@
 # Mewtual; Interfaces & Hooks Schema
 
+## Established-key retention opcode11 (24 October)
+
+The authenticated local channel adds operation11/version4 alongside unchanged operation10.
+Adopt218B/Release250B bind the exact original parent RowId, full selector/action/handshake and
+old Claim receipt; Release also needs the new receipt. Reply234B includes Current/Closing/
+Released, parent/action/handshake/epoch, native Finish ID/hash, old Claim receipt and new proof.
+Current is a retention snapshot with no cross-clock deadline or effect permission. Shared native/
+browser vectors pin full-u64 fields and closed grammar. Header MAC/class/length checks still
+precede body allocation/counter debit; only Control is admitted, within unchanged limits.
+
+Trusted Rust `ProtectedCryptoPlan::established_key_custody` accepts only the SAME opaque
+ConfirmationCustody and native Clock observation while its old window is current. The adapter
+must attach its actual original Session/parent/Claim and distinct release obligation. Historical
+`contains_established_keys` compares actual fixed allocation identity; neither API grants SDK,
+crypto, packet or RTC effects. Existing Claim/Release/deadline is never relabelled or renewed.
+Browser23 rejects retained22 on HMR without replacing its paid unresolved pool. New typed SDP
+handoff and fresh native round/delivery authority remain absent; V2 activation stays unavailable.
+
 ## Application actor Ready controls (24 October)
 
 `ServerActor` exposes the existing native `prepare_voice_high_ready`, `queue_voice_high_ready`,

@@ -682,6 +682,7 @@ fn automatic_terminal(state: &AppState, selected: &SelectedHandoffOwner) -> bool
                 if parent.replace(metadata.row).is_some()
                     || receipt.outcome != CryptoOutcome::Derived
                     || !row.has_transition_claim()
+                    || !row.has_established_key_claim()
                 {
                     return false;
                 }

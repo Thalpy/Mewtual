@@ -26,7 +26,10 @@ impl Plan {
         })
     }
     pub(super) fn is_drained(&self) -> bool {
-        self.transition.as_ref().is_none_or(|claim| claim.released) && self.root_drained()
+        self.transition
+            .as_ref()
+            .is_none_or(|claim| claim.all_released())
+            && self.root_drained()
     }
     pub(super) fn can_adopt_child(&self) -> bool {
         self.control.is_some() && self.transition.is_none()
@@ -131,7 +134,7 @@ impl ResolvedRow {
             if plan
                 .transition
                 .as_ref()
-                .is_some_and(|claim| !claim.released)
+                .is_some_and(|claim| !claim.all_released())
             {
                 return Err(VoiceError::Capacity);
             }
@@ -214,7 +217,7 @@ impl ResolvedRow {
         if plan
             .transition
             .as_ref()
-            .is_some_and(|claim| !claim.released)
+            .is_some_and(|claim| !claim.all_released())
         {
             return Err(VoiceError::Capacity);
         }

@@ -25,6 +25,8 @@ const ROWS: usize = 32;
 const ROW_BYTES: usize = 2304;
 mod children;
 mod continuation;
+mod key_session;
+pub(super) use key_session::KeySessionReceipt;
 mod plan;
 mod projection;
 mod transition;

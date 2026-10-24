@@ -7,8 +7,9 @@ use sha2::{Digest, Sha256};
 
 pub(super) struct Claim {
     pub(super) session: Arc<SessionIdentity>,
-    custody: ConfirmationCustody,
-    receipt: [u8; 32],
+    pub(super) custody: ConfirmationCustody,
+    pub(super) receipt: [u8; 32],
+    pub(super) key: Option<super::key_session::KeyClaim>,
     pub(super) released: bool,
 }
 pub(in crate::voice_handoff) struct TransitionReceipt {
@@ -25,7 +26,7 @@ pub(in crate::voice_handoff) struct TransitionReceipt {
     pub state: u8,
 }
 
-fn action_matches(state: &State, expected: Action) -> bool {
+pub(super) fn action_matches(state: &State, expected: Action) -> bool {
     state.status.action == Some((expected.serial, expected.version, expected.input_tag))
 }
 impl Claim {
@@ -99,7 +100,7 @@ impl ResolvedRow {
     }
     /// All final acquisitions after native Clock sampling refuse contention. Blocking a
     /// sampled deadline behind another thread would let it issue a stale remaining bound.
-    fn transition_index(&self) -> Result<std::sync::MutexGuard<'_, Index>, VoiceError> {
+    pub(super) fn transition_index(&self) -> Result<std::sync::MutexGuard<'_, Index>, VoiceError> {
         let index = try_lock(&self.ledger.index)?;
         if !index
             .rows
@@ -219,6 +220,7 @@ impl ResolvedRow {
             custody,
             receipt: hash.finalize().into(),
             released: false,
+            key: None,
         });
         let receipt = plan
             .transition
@@ -255,7 +257,7 @@ impl ResolvedRow {
         Ok(claim.snapshot(self.row.id, action, handshake, mono))
     }
 }
-fn try_lock<T>(lock: &Mutex<T>) -> Result<std::sync::MutexGuard<'_, T>, VoiceError> {
+pub(super) fn try_lock<T>(lock: &Mutex<T>) -> Result<std::sync::MutexGuard<'_, T>, VoiceError> {
     match lock.try_lock() {
         Ok(guard) => Ok(guard),
         Err(std::sync::TryLockError::Poisoned(error)) => Ok(error.into_inner()),
