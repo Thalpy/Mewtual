@@ -1,5 +1,25 @@
 # Mewtual; Architecture
 
+## High-side inert successor (24 October; not scheduled)
+
+After actual protected high-side Finish-open, LocalJoin can retain one original Reserved
+successor through busy-lane refusal and affinely move it into an inactive Exchange. Original
+reserve, Crypto lane, action claims and shared Lower owner move without reacquisition.
+The Pair stores Transferred before any fallible final native fence or registry operation;
+exact retries reuse it. Pending stays outside PacketLedger.sdp, whose active pruning cannot
+represent this phase. Pair's permission-independent housekeeping collects both states,
+including unregistered pending after a registry conflict. Pair Drop closes transferred
+capacity even when an opaque historical observation survives. Terminal expiry also removes
+native pending custody, allowing the sole registry to clear after actual external last-drop.
+No Runtime Exchange collector
+is claimed. Application scheduling and causal activation remain absent.
+
+LOW cannot call this factory: extracting on local Finish seal would revoke its original
+Finish Source before HIGH receives it. LOW must retain that retry authority until actual
+authenticated Ready. Fresh prepare_sdp_exchange also refuses protected pairs. Inactive
+Exchange denies all existing verifier, action, packet, Source, result and crypto lending.
+There is no activation method or SDP/RTC permission in this increment.
+
 ## Exact phase resource indices (24 October)
 
 The Resources group registry tracks one actual retained Exchange and one Workflow. A closed

@@ -503,6 +503,11 @@ impl LocalJoin {
         clock: &dyn Clock,
     ) -> Result<Arc<super::negotiation::Exchange>, VoiceError> {
         self.pair_current(handshake, authority, clock)?;
+        // Protected pairs may only adopt the ORIGINAL affine confirmation capacity through
+        // the causal native successor path. Fresh reserve/lane acquisition would bypass it.
+        if self.confirmations.pairs[&handshake].protected_mode() {
+            return Err(VoiceError::Unauthorized);
+        }
         if !self.confirmations.established(handshake) {
             return Err(VoiceError::Unauthorized);
         }

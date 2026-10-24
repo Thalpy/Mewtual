@@ -1,5 +1,25 @@
 # Next voice milestone: native result recovery
 
+## High-side affine successor continuation (24 October; unscheduled)
+
+Native HIGH can now retain Reserved capacity across busy-lane refusal and consume the
+original lane/reserve/action claims/Lower owner into an inactive Exchange after actual
+protected Finish-open. Pair owns pending before any fallible final fence or registry attempt;
+terminal expiry removes native closed custody. Actual external observations remain charged
+through last-drop. Pair's permission-independent housekeeping covers unregistered conflicts
+too. There is no activation method, browser key phase transfer, causal Ready admission or
+application scheduling in this leaf. LOW extraction remains absent so original Finish
+retries cannot be stopped before HIGH has received them. HANDOVER records current checks.
+
+The next browser boundary must preserve keys BEFORE a Finish that committed near the old
+deadline finishes asynchronous SDK/result/Return drainage. Split custody lifetime from
+original confirmation-action authority; never lengthen generic chain.expires. An exact
+authenticated native transition receipt must bind the retained channel/selected key/parent
+plan and original epoch/Finish/window, with conservative relative remaining time. LOW may
+obtain bounded AwaitReady key custody after actual native local Finish sealing, but it may
+not extract SDP or retire Finish Source until exact signed Ready. Public historical evidence
+or a browser boolean is not that receipt. Lost replies cannot rearm either lifetime.
+
 ## Automatic browser consumption (24 October; validation in progress)
 
 Broker21 now implements an explicit single-pair existing-work consumer on the exact Ready

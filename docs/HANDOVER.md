@@ -1,5 +1,37 @@
 # Mewtual; Handover
 
+## High-side inert SDP successor (24 October; focused validation passed)
+
+LocalJoin now has an unscheduled native HIGH-only pending factory after actual protected
+Finish-open. One Reserved owner survives busy handoff/crypto refusal; affine extraction moves
+the same original bytes/lane/two action slots/Lower owner into an inactive Exchange. Pair
+stores Transferred before fallible final admission or registration. Original fixed plan,
+actor/session/policy cells, exact pair/call/epoch and first Finish window remain enforced.
+Helper choice is immutable and actual native membership is checked inside the final fence.
+The opaque output observes history/drainage only. All Exchange lending remains closed and
+there is no activation method. Protected pairs cannot acquire fresh ordinary SDP capacity.
+
+Pair's existing permission-independent LocalJoin housekeeping covers both Reserved and
+Transferred, independently of global registration; Pair Drop closes pending even if an
+observation survives. Terminal expiry closes and removes native pending custody too, so a
+registered expired owner cannot occupy the registry for the whole join. Actual retained
+observations still delay last-drop; original fixed Finish/chain history prevents recreation.
+There is no added Runtime Exchange collector. LOW is deliberately
+refused before payment so its original Finish Source remains usable until authenticated
+Ready. This API is not wired to application maintenance: causal Ready Source/admission,
+browser key transfer, SDP/ICE/RTC and multi-peer/relay integration still remain unfinished.
+
+All554 focused voice tests pass (15.50s), including13 new successor/accounting/identity
+regressions since63902118. They cover LOW queued-Finish preservation, native final expiry,
+actual handoff/Lower custody, full ordinary-byte/Crypto pressure, exact original pointer
+transfer, immutable helpers and actual Group membership, lost/refused final admission,
+registry conflicts, quiet registered/unregistered expiry, registry reuse without End and
+Pair Drop with an actual surviving output. Structural retained Rust graph guards fit the
+unchanged allowances; these exclude Tokio/allocator heap and RSS. Strict all-target/all-feature
+Sync Clippy, formatting and diff checks pass. Read-only re-review has no remaining findings
+in this unscheduled leaf. Complete newer-source gates remain pending integration; these
+checks are not native/browser SDP, RTC, relay or physical acceptance.
+
 ## Exact SDP resource ownership (24 October; transition integration continues)
 
 The group registry now refuses a competing Exchange while the original allocation is still

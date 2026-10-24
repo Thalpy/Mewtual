@@ -69,6 +69,17 @@ pub(super) struct FinishWindow {
     epoch: OnceLock<EpochObservation>,
 }
 impl FinishWindow {
+    pub(super) fn epoch_is_live(&self) -> bool {
+        self.epoch.get().is_some_and(EpochObservation::is_live)
+    }
+    pub(super) fn original_until(&self) -> Option<u64> {
+        self.finish.get().map(|record| record.until)
+    }
+    pub(super) fn same_epoch(&self, epoch: &EpochObservation) -> bool {
+        self.epoch
+            .get()
+            .is_some_and(|original| original.same(epoch))
+    }
     pub(super) fn is_live(&self) -> bool {
         self.phase.load(Ordering::Acquire) != CLOSED
             && self.epoch.get().is_none_or(EpochObservation::is_live)

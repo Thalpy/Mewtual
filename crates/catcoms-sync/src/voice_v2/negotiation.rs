@@ -11,6 +11,7 @@ use super::resources::{
 };
 use super::{CallLease, EncryptedKind, Scope, VoiceError, MAX_SDP_PLAINTEXT, ROUTE_METADATA_BYTES};
 use catcoms_crypto::DeviceId;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 pub const EXCHANGE_BYTES: usize = 192 * 1024;
@@ -89,6 +90,10 @@ pub struct Exchange {
     binding: Option<Binding>,
     live: CallLease,
     action_slots: Arc<super::crypto_actions::slots::ReservedSlots>,
+    // Pure observation: charge/action paths already hold State and must not lock it again.
+    // Only legacy construction activates today. No causal native activation exists yet.
+    activated: AtomicBool,
+    successor: Option<super::chain::SuccessorProof>,
     // Last: every enclosing owner/reservation/slot remains paid through field destruction.
     _metadata: Credit,
 }
@@ -147,6 +152,94 @@ impl Drop for PhaseLoan {
     }
 }
 impl Exchange {
+    #[cfg(test)]
+    pub(in crate::voice_v2) fn capacity_identities_for_test(&self) -> [usize; 4] {
+        let state = self.state.lock().unwrap();
+        [
+            Arc::as_ptr(&self.reserve) as usize,
+            Arc::as_ptr(&self.lane) as usize,
+            Arc::as_ptr(&self.action_slots) as usize,
+            Arc::as_ptr(state.lower_lanes.as_ref().unwrap()) as usize,
+        ]
+    }
+    /// Consume only the original affine ticket. No replacement lane, reservation or action
+    /// position is acquired, even briefly. The high-side native holder retains this inert
+    /// owner before any fallible registration/final fence, and never installs it in sdp yet.
+    pub(in crate::voice_v2) fn from_transferred(
+        ticket: super::chain::TransferredSdpCapacity,
+        helpers: Vec<DeviceId>,
+    ) -> Arc<Self> {
+        let super::chain::TransferredParts {
+            resources,
+            reserve,
+            lowers,
+            slots,
+            proof,
+            lane,
+            metadata,
+        } = ticket.into_parts();
+        let original = proof.binding();
+        let binding = Binding {
+            scope: original.scope,
+            local: original.local,
+            join: original.local_join,
+            key_ref: original.local_key,
+            peer: super::packets::PairBinding {
+                peer: original.peer,
+                join: original.peer_join,
+                key_ref: original.peer_key,
+                handshake: original.handshake,
+            },
+            call: original.call.clone(),
+            pair: original.pair.clone(),
+            helpers,
+        };
+        Arc::new(Self {
+            group: binding.scope.group,
+            resources,
+            reserve,
+            lane,
+            state: Mutex::new(State {
+                closed: false,
+                lower_lanes: Some(lowers),
+                used: [0; STAGES],
+                action_preparing: [false; 2],
+                action_issued: [false; 2],
+            }),
+            binding: Some(binding),
+            live: CallLease::default(),
+            action_slots: slots,
+            activated: AtomicBool::new(false),
+            successor: Some(proof),
+            _metadata: metadata,
+        })
+    }
+    pub(in crate::voice_v2) fn successor_current_at(
+        &self,
+        binding: &super::chain::Binding,
+        resources: &Arc<Resources>,
+        mono: u64,
+    ) -> bool {
+        self.live.is_live()
+            && self
+                .successor
+                .as_ref()
+                .is_some_and(|proof| proof.matches(binding, resources) && proof.current_at(mono))
+    }
+    /// Quiet Pair housekeeping must call this even if registry publication was refused.
+    /// There is deliberately no route from this observation to activation or SDP authority.
+    pub(in crate::voice_v2) fn collect_pending_successor(&self, mono: u64) -> bool {
+        if !self.activated.load(Ordering::Acquire)
+            && self
+                .successor
+                .as_ref()
+                .is_some_and(|proof| !proof.current_at(mono))
+        {
+            self.close();
+            return true;
+        }
+        false
+    }
     pub(crate) fn uses_registry(&self, resources: &Resources, group: [u8; 32]) -> bool {
         std::ptr::eq(Arc::as_ptr(&self.resources), resources) && self.group == group
     }
@@ -159,6 +252,11 @@ impl Exchange {
         self.binding
             .as_ref()
             .is_some_and(|binding| binding.helpers == helpers)
+    }
+    pub(in crate::voice_v2) fn helpers(&self) -> &[DeviceId] {
+        self.binding
+            .as_ref()
+            .map_or(&[], |binding| &binding.helpers)
     }
     pub(crate) fn uses_resources(&self, resources: &Arc<Resources>, group: [u8; 32]) -> bool {
         Arc::ptr_eq(&self.resources, resources) && self.group == group
@@ -241,6 +339,8 @@ impl Exchange {
             live: CallLease::default(),
             _metadata: metadata,
             action_slots,
+            activated: AtomicBool::new(true),
+            successor: None,
         }))
     }
     pub(crate) fn action_slot(
@@ -253,7 +353,9 @@ impl Exchange {
         self.action_slots.loan(expected)
     }
     pub(crate) fn is_live(&self) -> bool {
-        self.live.is_live()
+        self.activated.load(Ordering::Acquire)
+            && self.live.is_live()
+            && self.successor.as_ref().is_none_or(|proof| proof.live())
             && self
                 .binding
                 .as_ref()
@@ -421,6 +523,29 @@ impl Exchange {
         drop(lower_lanes);
     }
 }
+
+/// Observation of one ORIGINAL inert native SDP successor. This exports no Exchange, budget,
+/// activation method, packet factory, key or RTC authority. Retention still owns real capacity.
+pub struct SdpSuccessor {
+    pub(in crate::voice_v2) owner: Arc<Exchange>,
+}
+redacted_debug!(SdpSuccessor);
+impl SdpSuccessor {
+    pub fn confirmation_drained(&self) -> bool {
+        self.owner
+            .successor
+            .as_ref()
+            .is_some_and(|proof| proof.drained())
+    }
+    /// First immutable native Finish window; observing it never grants current authority.
+    pub fn transition_until(&self) -> u64 {
+        self.owner
+            .successor
+            .as_ref()
+            .and_then(|proof| proof.until())
+            .expect("native successor follows original Finish")
+    }
+}
 impl Drop for Exchange {
     fn drop(&mut self) {
         let original = self as *const Self;
@@ -456,6 +581,24 @@ impl SdpResult {
 mod tests {
     use super::*;
     mod registry;
+    #[test]
+    fn successor_retained_rust_graph_fits_original_metadata_allowance() {
+        use std::mem::size_of;
+        // Structural growth guard for our owners, not allocator slack/Tokio watch heap/RSS.
+        // Original PlanBinding and shared GroupForwardLanes have separate retained payments.
+        let bytes = size_of::<Exchange>()
+            + size_of::<Reservation>()
+            + size_of::<WorkLane>()
+            + size_of::<super::super::crypto_actions::slots::ReservedSlots>()
+            + size_of::<super::super::LeaseState>()
+            + size_of::<SdpSuccessor>()
+            + 2 * size_of::<DeviceId>()
+            + 5 * 2 * size_of::<usize>();
+        assert!(
+            bytes < METADATA_BYTES,
+            "successor native owner graph grew to {bytes}"
+        );
+    }
     #[test]
     fn four_closed_exchanges_release_idle_slots_while_the_last_real_lower_stays_charged() {
         let pool = Arc::new(Resources::default());

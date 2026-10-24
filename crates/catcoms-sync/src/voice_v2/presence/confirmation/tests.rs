@@ -256,7 +256,8 @@ fn hello(f: &mut Fixture) -> (CryptoFlight, SignedObject) {
 fn native_pair_nonce_tags_fit_existing_record_with_maximum_derivation_transcript() {
     // PairSetup derivation input is capped at4096; canonical native pair transcripts are
     // smaller. Include the actual enlarged Pair layout without raising its original allowance.
-    assert!(std::mem::size_of::<Pair>() + 4096 <= PAIR_BYTES);
+    // Include both the retained two-helper selection and the bounded normalization scratch.
+    assert!(std::mem::size_of::<Pair>() + 4096 + 4 * std::mem::size_of::<DeviceId>() <= PAIR_BYTES);
     let f = fixture();
     for end in [&f.low, &f.high] {
         assert!(end.join.confirmations.pairs[&f.id].transcript.len() <= 4096);

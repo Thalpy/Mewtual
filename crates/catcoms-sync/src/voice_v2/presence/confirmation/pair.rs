@@ -236,6 +236,7 @@ impl LocalJoin {
             // Protection and its creation epoch are pinned BEFORE any later chain request.
             // An intervening MLS change cannot adopt this pair into a different epoch.
             protected_epoch: Some(selector.epoch),
+            sdp_successor: None,
             _credit: credit,
         };
         let receipt = PairReceipt {

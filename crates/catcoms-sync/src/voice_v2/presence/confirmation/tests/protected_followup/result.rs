@@ -2,6 +2,7 @@
 //! supplied AEAD output remains the trusted-output fixture used by the surrounding tests.
 use super::*;
 use std::sync::atomic::{AtomicUsize, Ordering};
+mod successor;
 mod transition;
 
 fn protected_seal(

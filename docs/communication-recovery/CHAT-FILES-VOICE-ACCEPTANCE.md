@@ -1,5 +1,21 @@
 # Chat, files and voice implementation evidence
 
+## Native Finish and inert successor continuation (24 October)
+
+Finish now records the original native signed ID/hash and one immutable30-second transfer
+window; both original collectors serialize expiry against that arm. Old action/Source
+deadlines/attempts remain unchanged. HIGH-only affine pending construction is implemented
+but unscheduled and inactive: no causal Ready admission, browser key phase transfer or
+SDP/ICE/RTC authority follows. External download resume is excluded from this session.
+
+At5f422bd3, fixture-isolated recovery passed all32 native scenarios (885.19s). At01382421,
+all6 isolation guards,302 native handoff checks and9 voice_live TCP scenarios pass. The
+two older voice-module scenarios were included in the32-case run. These are focused
+results with explicit source scope; previous failed full/native recovery runs remain in
+HANDOVER. Production cross-group load, combined acceptance, member media relay and physical
+audio/network acceptance are still open. One desktop cannot establish independent-device
+or separate-network physical acceptance. Current successor validation is tracked in HANDOVER.
+
 ## Automatic browser consumer (24 October; validation in progress)
 
 The first ordinary native-effects/cleanup checkpoint is pushed at `8d8a58c0`. Broker21 now

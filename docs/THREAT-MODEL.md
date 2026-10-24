@@ -1,5 +1,17 @@
 # Threat model; client integrity & enforcement boundaries
 
+## Inactive high successor cannot authorize SDP (24 October)
+
+Original HIGH Finish-open may prepare and extract only its own affine capacity. LOW local
+seal must not extract: that closes the old chain and would strand Finish delivery. The
+successor privately retains original PlanBinding/call/pair/epoch/window provenance; expected
+old-phase Closed is deliberately distinct from a live original actor/call/pair. Historical
+FinishEvidence never authorizes this factory. No activation method exists, and all existing
+Exchange lending surfaces require a pure activated observation which remains false here.
+No inactive owner is installed in PacketLedger.sdp. Native Pair housekeeping and Pair Drop
+own expiry/cleanup even when registry publication failed or an observation survives.
+Browser original-key transfer, Ready authentication and RTC dispatch are still open boundaries.
+
 ## Retained phase identity (24 October)
 
 Competing SDP preparation cannot replace the registered Exchange while any original actual

@@ -94,11 +94,25 @@ fn successor_moves_original_crypto_and_slots_under_full_ordinary_pressure() {
     // Old history released its ten unused positions. Fill them, then consume BOTH original
     // successor positions; no release/recharge window, larger pool or new reservation exists.
     let ordinary = slots.charge(ROWS - 2).unwrap();
-    let first = ticket._prepared.inner._slots.loan(&slots).unwrap();
-    let second = ticket._prepared.inner._slots.loan(&slots).unwrap();
+    let first = ticket
+        ._prepared
+        .as_ref()
+        .unwrap()
+        .inner
+        ._slots
+        .loan(&slots)
+        .unwrap();
+    let second = ticket
+        ._prepared
+        .as_ref()
+        .unwrap()
+        .inner
+        ._slots
+        .loan(&slots)
+        .unwrap();
     assert!(slots.charge(1).is_err());
     let budget = ByteBudget::ReservedLane {
-        reservation: ticket._prepared.inner._reserve.clone(),
+        reservation: ticket._prepared.as_ref().unwrap().inner._reserve.clone(),
         lane: ticket.lane.as_ref().unwrap().clone(),
     };
     let actual = budget
@@ -152,7 +166,7 @@ fn actual_engine_and_handoff_refusals_preserve_same_preparation_for_retry() {
     drop(held);
     let transferred = control.transfer_sdp_capacity(prepared).unwrap();
     assert_eq!(
-        &*transferred._prepared.inner as *const PreparedCapacity,
+        &*transferred._prepared.as_ref().unwrap().inner as *const PreparedCapacity,
         original
     );
     drop((transferred, control, workflow, chain));
@@ -350,4 +364,52 @@ fn successor_metadata_covers_box_child_reserve_and_affine_ticket_layouts() {
         bytes < super::super::super::negotiation::METADATA_BYTES,
         "successor metadata graph grew to {bytes}"
     );
+}
+
+#[test]
+fn successor_inert_exchange_consumes_exact_original_reserve_lane_slots_and_lower_owner() {
+    let (resources, chain, workflow, slots) = fixture();
+    let control = workflow.confirmation_control();
+    let prepared = control.prepare_sdp_capacity().unwrap();
+    let expected = [
+        Arc::as_ptr(&prepared.inner._reserve) as usize,
+        Arc::as_ptr(workflow.state.lock().unwrap().crypto.as_ref().unwrap()) as usize,
+        Arc::as_ptr(&prepared.inner._slots) as usize,
+        Arc::as_ptr(&prepared.inner._lowers) as usize,
+    ];
+    let group = chain.binding.scope.group;
+    let busy: Vec<_> = (0..3)
+        .map(|_| resources.charge(group, 0, ResourceKind::Crypto).unwrap())
+        .collect();
+    let fill = resources
+        .charge(
+            group,
+            super::super::super::resources::GROUP_BYTES - resources.counts().0,
+            ResourceKind::Retained,
+        )
+        .unwrap();
+    let ticket = control.transfer_sdp_capacity(prepared).unwrap();
+    let exchange = super::super::super::negotiation::Exchange::from_transferred(ticket, Vec::new());
+    assert_eq!(exchange.capacity_identities_for_test(), expected);
+    assert!(!exchange.is_live(), "capacity movement is never activation");
+    assert!(resources.charge(group, 0, ResourceKind::Crypto).is_err());
+    let other_slots = slots.charge(ROWS - 2).unwrap();
+    assert!(
+        slots.charge(1).is_err(),
+        "two original positions remain protected"
+    );
+    exchange.close();
+    let released = slots.charge(2).unwrap();
+    drop((
+        released,
+        other_slots,
+        exchange,
+        control,
+        workflow,
+        chain,
+        fill,
+        busy,
+    ));
+    assert_eq!(resources.counts(), (0, 0));
+    drop(slots.charge(ROWS).unwrap());
 }

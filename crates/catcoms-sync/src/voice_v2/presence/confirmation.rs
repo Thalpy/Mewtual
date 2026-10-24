@@ -24,6 +24,7 @@ mod protected;
 mod response;
 mod result;
 mod start;
+mod successor;
 pub(crate) use derivation::{ProtectedDerivation, ProtectedDerivationResult};
 pub(crate) use pair::ProtectedPair;
 pub use pair::{PairReceipt, PairSelector, VoicePairConfirmation};
@@ -65,6 +66,9 @@ pub(super) struct Pair {
     // Mode selection precedes capacity acquisition and never rolls back on local pressure.
     // An ordinary action issued before selection cannot be adopted; a fresh pair is required.
     protected_epoch: Option<u64>,
+    // Inert native successor custody stays outside PacketLedger.sdp. Quiet collection and
+    // actual Pair destruction cover this owner even when registry installation is refused.
+    sdp_successor: Option<successor::Preparation>,
     _credit: Credit,
 }
 struct Action {
@@ -82,6 +86,10 @@ impl Drop for Pair {
         if let Some(chain) = &self.chain {
             chain.close();
         }
+        if let Some(preparation) = &self.sdp_successor {
+            preparation.close();
+        }
+        drop(self.sdp_successor.take());
     }
 }
 impl Confirmations {
@@ -915,6 +923,7 @@ impl LocalJoin {
                 // custody alive does not change pair.deadline or any old action/source grant.
                 chain.collect_expired(clock.monotonic_ms());
             }
+            successor::collect(&mut pair.sdp_successor, clock.monotonic_ms());
             if !pair.retired
                 && (!self.lease.is_live()
                     || !pair.pin.is_live()
@@ -1021,6 +1030,7 @@ impl LocalJoin {
                 retired: false,
                 chain: None,
                 protected_epoch: None,
+                sdp_successor: None,
                 _credit: credit,
             },
         );

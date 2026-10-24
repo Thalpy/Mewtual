@@ -44,7 +44,7 @@ impl Drop for Preparation {
 /// Dropping this ticket closes its lane; it never reopens confirmation or renews time.
 pub struct TransferredSdpCapacity {
     lane: Option<Arc<WorkLane>>,
-    _prepared: PreparedSdpCapacity,
+    _prepared: Option<PreparedSdpCapacity>,
     retirement: ConfirmationRetirement,
 }
 redacted_debug!(PreparedSdpCapacity, TransferredSdpCapacity);
@@ -53,6 +53,113 @@ impl TransferredSdpCapacity {
     /// Actual old Workflow retirement, not SDP activation or a current authority check.
     pub fn confirmation_drained(&self) -> bool {
         self.retirement.is_drained()
+    }
+
+    /// Private affine decomposition for the native successor constructor. The original lane
+    /// moves before this ticket's destructor; no reserve/slot/lane is closed or recharged.
+    /// Call outside Group/Policy because dropping Preparation may enter old WorkflowState.
+    pub(in crate::voice_v2) fn into_parts(mut self) -> TransferredParts {
+        let prepared = self._prepared.take().expect("one original preparation");
+        let PreparedCapacity {
+            resources,
+            _reserve: reserve,
+            _lowers: lowers,
+            _slots: slots,
+            binding,
+            _preparation: preparation,
+            _metadata: metadata,
+        } = *prepared.inner;
+        drop(preparation);
+        TransferredParts {
+            resources,
+            reserve,
+            lowers,
+            slots,
+            proof: SuccessorProof(binding),
+            lane: self.lane.take().expect("one original idle lane"),
+            metadata,
+        }
+    }
+}
+
+/// Only an actual affine extraction constructs this proof. It owns fixed paid provenance,
+/// never Workflow or browser keys. Old transition Closed is expected after extraction, so
+/// successor checks deliberately use the ORIGINAL call/pair and epoch observation instead.
+pub(in crate::voice_v2) struct SuccessorProof(Arc<PlanBinding>);
+impl SuccessorProof {
+    pub(in crate::voice_v2) fn binding(&self) -> &Binding {
+        &self.0.value
+    }
+    pub(in crate::voice_v2) fn matches(
+        &self,
+        binding: &Binding,
+        resources: &Arc<Resources>,
+    ) -> bool {
+        self.0.value.same(binding) && Arc::ptr_eq(self.0.resources(), resources)
+    }
+    pub(in crate::voice_v2) fn live(&self) -> bool {
+        self.0.value.live() && self.0.transition.epoch_is_live()
+    }
+    pub(in crate::voice_v2) fn current_at(&self, mono: u64) -> bool {
+        self.live() && self.until().is_some_and(|until| mono < until)
+    }
+    pub(in crate::voice_v2) fn until(&self) -> Option<u64> {
+        self.0.transition.original_until()
+    }
+    pub(in crate::voice_v2) fn drained(&self) -> bool {
+        self.0.workflow_drained.load(Ordering::Acquire)
+    }
+}
+pub(in crate::voice_v2) struct TransferredParts {
+    pub resources: Arc<Resources>,
+    pub reserve: Arc<Reservation>,
+    pub lowers: Arc<GroupForwardLanes>,
+    pub slots: Arc<slots::ReservedSlots>,
+    pub proof: SuccessorProof,
+    pub lane: Arc<WorkLane>,
+    pub metadata: Credit,
+}
+
+impl PreparedSdpCapacity {
+    pub(in crate::voice_v2) fn current_at(&self, mono: u64) -> bool {
+        self.inner.binding.live()
+            && self
+                .inner
+                .binding
+                .transition
+                .original_until()
+                .is_some_and(|until| mono < until)
+    }
+}
+
+impl PreparedChain {
+    pub(in crate::voice_v2) fn successor_actor_matches(
+        &self,
+        actor: &super::super::runtime::ActorOwner,
+        context: &super::super::Context,
+    ) -> Result<bool, VoiceError> {
+        Ok(self
+            .binding
+            .transition
+            .same_epoch(&actor.observe_epoch(context)?))
+    }
+    /// Actual high-side Finish-open history, not a public marker or low-side local seal.
+    pub(in crate::voice_v2) fn high_successor_current(
+        &self,
+        binding: &Binding,
+        resources: &Arc<Resources>,
+        mono: u64,
+    ) -> bool {
+        !self.binding.low
+            && self.binding.value.same(binding)
+            && Arc::ptr_eq(self.binding.resources(), resources)
+            && self.binding.value.live()
+            && self.binding.transition.epoch_is_live()
+            && self
+                .binding
+                .transition
+                .original_until()
+                .is_some_and(|until| mono < until)
     }
 }
 impl Drop for TransferredSdpCapacity {
@@ -193,7 +300,7 @@ impl ConfirmationControl {
         drop(workflow);
         Ok(TransferredSdpCapacity {
             lane: Some(lane),
-            _prepared: prepared,
+            _prepared: Some(prepared),
             retirement,
         })
     }

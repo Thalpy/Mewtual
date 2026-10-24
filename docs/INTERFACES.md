@@ -1,5 +1,17 @@
 # Mewtual; Interfaces & Hooks Schema
 
+## Native high-side pending successor (24 October; unscheduled)
+
+`LocalJoin::prepare_high_sdp_successor` accepts only the original protected HIGH pair after
+native Finish-open. Exact actor/session/policy cells, call/pair allocations, protected epoch,
+binding and immutable native Finish window remain mandatory at the final native fence.
+Its sorted helper choice is immutable and checked against actual native Group membership.
+Reserved and Transferred live in Pair before a fallible return. Capacity retries preserve the
+same owner; End/expiry does not recreate it. Returned SdpSuccessor exposes only original
+confirmation drainage and first-window metadata, never Exchange, budgets, keys or RTC.
+It is no IPC command and application maintenance does not call it. Causal Ready, browser key
+phase transfer and activation are still missing. LOW has no equivalent extraction factory.
+
 ## SDP phase retention (24 October)
 
 `prepare_sdp_exchange` can reuse the exact live owner, but cannot replace a closed owner

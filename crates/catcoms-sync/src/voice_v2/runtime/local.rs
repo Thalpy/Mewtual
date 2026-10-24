@@ -95,6 +95,13 @@ impl LocalOrigin<'_> {
     pub(crate) fn epoch(&self) -> u64 {
         self.context.epoch
     }
+    /// Pure membership observation while the actual original Group/Policy guards are held.
+    /// This cannot prepay rows or grant helper forwarding; native Ready must do that separately.
+    pub(in crate::voice_v2) fn contains_members(&self, members: &[DeviceId]) -> bool {
+        members
+            .iter()
+            .all(|member| self._group.members.contains_key(member))
+    }
 
     /// All pair/room/candidate checks must already have passed. Atomic session revocation may
     /// win before it waits for Policy, so repeat that pure observation immediately before apply.

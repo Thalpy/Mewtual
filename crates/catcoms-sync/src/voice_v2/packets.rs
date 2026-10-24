@@ -600,6 +600,10 @@ impl PacketLedger {
     pub(super) fn pair_count_for_test(&self) -> usize {
         self.pairs.len()
     }
+    #[cfg(test)]
+    pub(super) fn has_sdp_for_test(&self) -> bool {
+        self.sdp.is_some()
+    }
     /// Protection is selected only before this exact pair has allocated or admitted any packet.
     /// Counters survive cache pruning, so an expired ordinary action cannot look pristine later.
     pub(super) fn confirmation_is_unused(
