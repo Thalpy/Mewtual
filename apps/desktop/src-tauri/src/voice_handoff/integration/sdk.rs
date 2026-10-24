@@ -3,11 +3,11 @@
 use super::*;
 use catcoms_sync::voice_v2::VoiceError;
 pub(super) struct Token {
-    session: Arc<channel::SessionIdentity>,
-    request: requests::sdk::Request,
-    body: Vec<u8>,
-    generation: u64,
-    proof: [u8; 32],
+    pub(super) session: Arc<channel::SessionIdentity>,
+    pub(super) request: requests::sdk::Request,
+    pub(super) body: Vec<u8>,
+    pub(super) generation: u64,
+    pub(super) proof: [u8; 32],
 }
 async fn exchange(
     state: &AppState,

@@ -680,3 +680,93 @@ fn current_one_shot_ready_cannot_treat_a_higher_signed_sequence_as_replacement_a
     let receipt = admit_ready(&mut p, &original).unwrap();
     assert_eq!(receipt.message, original.id());
 }
+
+#[test]
+fn initial_low_sdp_intent_uses_actual_signed_ready_after_verification_and_reply_drain() {
+    let (mut p, keys) = confirmed_with_low_keys();
+    let object = install(&mut p, &[]);
+    prepay(&mut p);
+    let envelope = Envelope::Direct(object.clone());
+    let ticket = p
+        .low
+        .admit_transport_verification(p.f.high.context.local, &envelope.encode())
+        .unwrap();
+    let reply = ticket.actual_work();
+    let receipt =
+        p.f.low
+            .join
+            .admit_protected_ready(
+                &p.low,
+                &ticket,
+                &envelope,
+                &room(&p.f.low),
+                &ca(&p.f.low.context, &p.f.low.lease),
+                |_, _| Ok(()),
+            )
+            .unwrap();
+    assert_eq!(advance(&mut p).err(), Some(VoiceError::Capacity));
+    drop(ticket);
+    assert_eq!(advance(&mut p).err(), Some(VoiceError::Capacity));
+    drop(reply);
+    let successor = advance(&mut p).unwrap();
+    assert!(successor.confirmation_drained());
+    let phase = keys.prepare_sdp_handoff().unwrap();
+    phase.arm().unwrap();
+    let intent =
+        p.f.low
+            .join
+            .prepare_initial_sdp_intent(
+                &p.low,
+                &room(&p.f.low),
+                p.f.id,
+                &keys,
+                phase.effect(),
+                1,
+                &ca(&p.f.low.context, &p.f.low.lease),
+            )
+            .unwrap();
+    assert!(intent.local_is_low());
+    assert_eq!(intent.round().ready, object.id());
+    assert_eq!(intent.round().profile, SdpProfile::CompleteSdpV1);
+    assert!(intent.current_at(1_000, 1_000));
+    let remaining = intent.remaining_at(1_000, 1_000).unwrap();
+    let foreign_phase = keys.prepare_sdp_handoff().unwrap();
+    foreign_phase.arm().unwrap();
+    assert_eq!(
+        p.f.low
+            .join
+            .prepare_initial_sdp_intent(
+                &p.low,
+                &room(&p.f.low),
+                p.f.id,
+                &keys,
+                foreign_phase.effect(),
+                1,
+                &ca(&p.f.low.context, &p.f.low.lease)
+            )
+            .err(),
+        Some(VoiceError::RetryMismatch)
+    );
+    assert!(Arc::ptr_eq(
+        &receipt,
+        &admit_ready(&mut p, &object).unwrap()
+    ));
+    p.f.clock.advance_ms(remaining);
+    let retry =
+        p.f.low
+            .join
+            .prepare_initial_sdp_intent(
+                &p.low,
+                &room(&p.f.low),
+                p.f.id,
+                &keys,
+                phase.effect(),
+                1,
+                &ca(&p.f.low.context, &p.f.low.lease),
+            )
+            .unwrap();
+    assert!(Arc::ptr_eq(&intent, &retry));
+    assert!(!retry.current_at(p.f.clock.now_ms(), p.f.clock.monotonic_ms()));
+    phase.close();
+    foreign_phase.close();
+}

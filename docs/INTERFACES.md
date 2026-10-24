@@ -1,5 +1,34 @@
 # Mewtual; Interfaces & Hooks Schema
 
+## Initial PC-intent Control14 (24 October; consumers not enabled)
+
+The original authenticated Header supplies the full parent RowId. Request version7 is:
+action serial/version(u64 BE each), inputTag32, handshake32, KeyClaim proof32, positive round
+sequence u64, storage proof32, SDK generation u64, SDK proof32, kind byte (0 Admit /1 Close).
+Both requests are194B; no renderer Ready/role/PC generation/time is accepted. Close needs no
+previous PC reply, allowing cleanup after lost admission. Current admission accepts round1
+and derives native PC generation1 from original Root evidence.
+
+Reply starts version7,state,identity-present. States0/1/2 mean Preparing/Admitted/Closed.
+Present identity appends generation1(u64 BE) and native proof32 (43B total). Admitted additionally
+requires profile1, LOW-role byte0/1, actual Ready ID32 and positive remaining-ms u64 (85B total,
+at most30,000ms). Closed may have absent identity (3B); Preparing and Admitted may not. Missing
+Ready is never encoded as zero; an actual zero-valued ID remains ordinary data in Admitted.
+Shared native/browser vectors:voice_handoff/requests/pc-vectors.json. Control256B and generic
+Data2048B bounds are unchanged. The browser applies request-start+remaining conservatively;
+a decoded observation alone is not RTC, key, action or delivery permission.
+
+`ServerActor::queue_voice_initial_sdp_intent` returns an opaque observer only after mailbox
+admission. One original prepaid Copy stays with Command/Pending/Completion through last Drop,
+including stopped/cancelled sends and synchronous reply consumption. Exact Root intent recovery
+still precedes new admission; Admitted requires current native UI/selection/SDK/phase/time.
+Browser ABI25 exposes prepareNativePcIntent(owner, originalChannel, originalChain):Promise<void>
+only after separate12/13 custody. It joins an attempted/coalesced flight, not a returned effect
+grant; a busy channel defers it. Refusal/lost replies preserve exact Close. Close authenticates
+original obligations without needing an admission reply, precedes SDK/storage/key release and
+must return version7 Closed. ABI24 is refused before wakes or a replacement pool. Actual SDP
+data/action/delivery endpoints and the browser RTC consumer remain unfinished.
+
 ## Native initial Ready progression (24 October)
 
 ServerActor::prepare_voice_high_ready_connected accepts only the original CallGrant/handshake.

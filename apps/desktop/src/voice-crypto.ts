@@ -16,6 +16,7 @@ import { VoiceKeyCustody } from "./voice-key-custody.ts";
 import { VoiceSdpSdkCustody, VOICE_SDP_SDK_BYTES } from "./voice-sdp-sdk-custody.ts";
 import { decodeVoiceSdpPhase, encodeVoiceSdpPhase, type VoiceSdpPhaseRequest } from "./voice-ipc-sdp.ts";
 import { decodeVoiceSdkCustody, encodeVoiceSdkCustody, type VoiceSdkRequest } from "./voice-ipc-sdk.ts";
+import { decodeVoicePcIntent, encodeVoicePcIntent } from "./voice-ipc-pc.ts";
 import { decodeVoiceWorkSnapshot, type VoiceWorkDescriptor } from "./voice-ipc-work.ts";
 import { NativeWorkPump, type VoiceNativeWorkObserver } from "./voice-ipc-pump.ts";
 import { decodeVoiceIpcActionReply, decodeVoiceIpcFinalReply, isVoiceIpcActionRow, type VoiceIpcActionReply } from "./voice-ipc-replies.ts";
@@ -434,7 +435,7 @@ function context(label: string, transcript: Uint8Array): Uint8Array<ArrayBuffer>
  * unsettled work. Revoking an owner never frees a running promise; only its real settlement does.
  * A derive pipeline uses one permit for sequential import/ECDH/HKDF work, never parallel calls. */
 export class VoiceCryptoBroker {
-  readonly version = 24;
+  readonly version = 25;
   readonly subtle: SubtleCrypto;
   private readonly native: VoiceCryptoAdmission;
   private active = 0;
@@ -670,6 +671,17 @@ export class VoiceCryptoBroker {
     // intent; remounts cannot allocate a second subtree or another admission flight.
     const phase = new VoiceSdpSdkCustody(); chain.sdp = phase; this.progress.set(owner.group, phase);
     return channel.startSdp(chain);
+  }
+
+  /** Attempt the original native PC intent only after separate SDK/storage custody.
+   * Returns no effect capability or RTC object. Like prepareNativeSdpHandoff, this joins
+   * an attempted/coalesced flight; a busy channel defers it. Unknown replies remain on
+   * the same paid subtree and must be closed before SDK/storage/key release. */
+  prepareNativePcIntent(owner: VoiceCryptoOwner, handle: VoiceIpcChannel, plan: VoiceCryptoChain): Promise<void> {
+    const channel = this.ipcChannels.get(owner.token), chain = this.chains.get(plan);
+    if (!channel || channel.handle !== handle || !channel.owns(owner) || !chain || chain.owner !== owner ||
+        chain.channel !== channel || !chain.sdp) throw new Error("original native PC custody required");
+    return channel.startPc(chain);
   }
 
   /** Start one retained serial consumer after the original channel's authenticated Ready.
@@ -2298,6 +2310,24 @@ class RetainedIpcChannel {
       .finally(() => { this.sdpFlight = null; this.actionBusy = false; this.endActivity(); this.collect(); });
     this.sdpFlight = pending; return pending;
   }
+  /** The existing separately prepaid SDK subtree pays this fixed intent and IO graph.
+   * It uses the SAME physical execution position and original channel counters. No RTC
+   * promise/provider can enter here or hold that lane while waiting for native effects. */
+  startPc(chain: BrowserChain): Promise<void> {
+    if (this.sdpFlight) return this.sdpFlight;
+    const phase = chain.sdp;
+    if (this.linked !== chain || !phase || phase.closed || chain.closed || !this.live() ||
+        phase.storage?.state !== "funded" || phase.sdk?.state !== "held" ||
+        this.actionBusy || this.request || this.historyRequest || this.driving) return Promise.resolve();
+    this.actionBusy = true; this.beginActivity();
+    const pending = Promise.resolve().then(() => this.execution.run(async () => {
+      if (phase.closed || chain.closed || !this.live()) return;
+      phase.beginPc(); // BEFORE any encoding/clock/crypto/fetch callback can reenter or fail.
+      await this.pcRpc(chain, "admit");
+    })).catch(() => { /* Ambiguous/refused admission still owes exact Close, never a new PC. */ })
+      .finally(() => { this.sdpFlight = null; this.actionBusy = false; this.endActivity(); this.collect(); });
+    this.sdpFlight = pending; return pending;
+  }
   private sdpIdentity(chain: BrowserChain) {
     const original = this.terminalAction, key = chain.custody?.keyReceipt;
     if (this.linked !== chain || !chain.sdp || !original || !key || !this.keys || !this.bootstrap) throw new Error("original SDP custody required");
@@ -2341,12 +2371,34 @@ class RetainedIpcChannel {
         });
     } finally { encoded.body.fill(0); }
   }
+  private async pcRpc(chain: BrowserChain, request: "admit" | "close"): Promise<void> {
+    const phase = chain.sdp!, storage = phase.storage, sdk = phase.sdk;
+    if (!storage || !sdk) throw new Error("original native PC custody required");
+    const requestStarted = this.clock.now();
+    // Clock and owner predicates are callback seams. End here leaves the latched cleanup
+    // duty, but must not submit a fresh admission. Close remains available after End.
+    if (request === "admit" && (phase.closed || chain.closed || !this.live())) throw new Error("voice PC intent is closed");
+    const encoded = encodeVoicePcIntent({ ...this.sdpIdentity(chain), storage: storage.proof,
+      sdkGeneration: sdk.generation, sdkProof: sdk.proof, request });
+    try {
+      await this.framed(encoded.operation, encoded.kind, encoded.logical, encoded.body, request === "close",
+        (kind, length) => kind === 0 && (length === 19 || length === 59 || length === 101), opened => {
+          // A refusal may follow actual native intent/Actor publication. Only version7
+          // Closed proves this effect fence; never infer absence from Unauthorized.
+          const receipt = decodeVoicePcIntent(opened);
+          if (receipt.state === "admitted" && receipt.localIsLow !== chain.binding.localIsLow) throw new Error("native PC role changed");
+          if (request === "close" && receipt.state !== "closed") throw new Error("native PC close unresolved");
+          phase.pc.observe(receipt, requestStarted, this.clock.now());
+        });
+    } finally { encoded.body.fill(0); }
+  }
   /** Only after actual local admission/SDK/IO finally; this method already owns the lane. */
   private async cleanupSdp(chain: BrowserChain): Promise<void> {
     const phase = chain.sdp; if (!phase) return;
     phase.close();
     if (phase.needsStorageRecovery) await this.sdpRpc(chain, { kind: "prepare" });
     if (phase.needsSdkRecovery) await this.sdkRpc(chain, { kind: "admit" });
+    if (phase.pc.needsClose) await this.pcRpc(chain, "close");
     if (phase.needsSdkRelease) await this.sdkRpc(chain, { kind: "release", generation: phase.sdk!.generation, proof: phase.sdk!.proof });
     if (phase.needsStorageRelease) await this.sdpRpc(chain, { kind: "release", proof: phase.storage!.proof });
     if (!phase.nativeReleased) throw new Error("native SDK cleanup unresolved");
@@ -2909,7 +2961,7 @@ export function windowVoiceCryptoBroker(
   const host = window as Record<symbol, unknown>;
   const previous = host[BROKER] as VoiceCryptoBroker | undefined;
   if (previous) {
-    if (previous.version !== 24 || typeof previous.prepareNativeSdpHandoff !== "function" || typeof previous.observeNativeWork !== "function" || typeof previous.returnNativeDerivation !== "function" || typeof previous.nativeConfirmationFromChannel !== "function" || typeof previous.nativeDerivationFromChannel !== "function" || typeof previous.recoverChannelHistory !== "function" || typeof previous.prepareChainFromChannel !== "function" || typeof previous.nativeChannel !== "function" || typeof previous.run !== "function" || typeof previous.selectJoinKey !== "function" || typeof previous.retrySelectedJoinKeys !== "function" ||
+    if (previous.version !== 25 || typeof previous.prepareNativePcIntent !== "function" || typeof previous.prepareNativeSdpHandoff !== "function" || typeof previous.observeNativeWork !== "function" || typeof previous.returnNativeDerivation !== "function" || typeof previous.nativeConfirmationFromChannel !== "function" || typeof previous.nativeDerivationFromChannel !== "function" || typeof previous.recoverChannelHistory !== "function" || typeof previous.prepareChainFromChannel !== "function" || typeof previous.nativeChannel !== "function" || typeof previous.run !== "function" || typeof previous.selectJoinKey !== "function" || typeof previous.retrySelectedJoinKeys !== "function" ||
         typeof previous.registerProtectedConfirmation !== "function" ||
         typeof previous.registerProtectedDerivation !== "function" || typeof previous.registerConfirmation !== "function" || typeof previous.createPair !== "function") {
       throw new Error("voice crypto broker version changed; reload required");

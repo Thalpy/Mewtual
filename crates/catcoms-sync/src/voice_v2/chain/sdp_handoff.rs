@@ -18,6 +18,9 @@ const METADATA: usize = 4096;
 /// measured graph must include both that candidate and its affine preparation wrapper.
 /// This allowance grants no SDK/RTC authority and does not increase the64KiB envelope.
 pub const NATIVE_SDK_METADATA_BYTES: usize = 512;
+/// Candidate whole native PC-intent graph, including its Root fixed observation. The
+/// complete native/Root layout tests must pin this within the unchanged4KiB metadata.
+pub const NATIVE_PC_METADATA_BYTES: usize = 1024;
 // Actual Buffer/Copy/Credit graph plus128B caller bookkeeping is264B on the
 // supported layout. Round its payment to32B; keep the whole64KiB envelope unchanged.
 const COPY_METADATA: usize = 288;
@@ -61,6 +64,14 @@ struct EffectOwner {
 pub struct EffectObserver(Arc<EffectOwner>);
 redacted_debug!(Phase, EffectObserver, Copy, Buffer);
 impl EffectObserver {
+    /// Allocation identity, not authority. Exact native recovery compares the original
+    /// phase; a new phase with equal scope labels is a different preparation.
+    pub fn is_same(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.0, &other.0)
+    }
+    pub(in crate::voice_v2) fn belongs_to(&self, key: &super::EstablishedKeyCustody) -> bool {
+        key.belongs_to(&self.0.original)
+    }
     pub fn is_live(&self) -> bool {
         self.0.gate.load(Ordering::Acquire) == 1
             && original_current(&self.0.original)
@@ -98,6 +109,16 @@ impl Buffer {
     }
 }
 impl Copy {
+    /// Exact phase identity for an affine Actor command owner. This proves payment
+    /// provenance only; current Root/native effect admission remains independently required.
+    pub fn matches_effect(&self, effect: &EffectObserver) -> bool {
+        self.phase.contains_effect(effect)
+    }
+    /// Backing allowance of this same affine contribution. Public typed RPCs must reject
+    /// underpayment before allocating their mailbox/result graph, not only match identity.
+    pub fn covers_work(&self, bytes: usize) -> bool {
+        bytes <= self.capacity
+    }
     /// Only adopt storage for which this SAME contribution was reserved before allocation
     /// or provider entry. Backing capacity, rather than visible length, is the bound.
     pub fn adopt(self, mut bytes: Vec<u8>) -> Result<Buffer, VoiceError> {
@@ -183,6 +204,9 @@ impl Phase {
             }
             Err(_) => Err(VoiceError::Unauthorized),
         }
+    }
+    pub fn contains_effect(&self, effect: &EffectObserver) -> bool {
+        Arc::ptr_eq(&self.effect, &effect.0)
     }
     pub fn effect(&self) -> EffectObserver {
         EffectObserver(self.effect.clone())
@@ -363,7 +387,7 @@ mod tests {
             + size_of::<EffectOwner>() + 2 * size_of::<usize>()
             // Actual independent effect-lease/watch and conservative complete map node.
             // The original call/pool already have their own payments.
-            + 256 + 512 + NATIVE_SDK_METADATA_BYTES;
+            + 256 + 512 + NATIVE_SDK_METADATA_BYTES + NATIVE_PC_METADATA_BYTES;
         assert!(fixed <= METADATA, "SDP fixed graph {fixed}");
         let copy = size_of::<Buffer>() + 128;
         assert!(copy <= COPY_METADATA, "SDP copy graph {copy}");

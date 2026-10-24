@@ -1,5 +1,24 @@
 # Mewtual; Architecture
 
+## First SDP intent and queued work (24 October; integration in progress)
+
+The original protected Pair can retain one fixed `InitialSdpIntent`. It observes the exact
+original key/phase and native HIGH marker or LOW Ready receipt; it owns no Exchange or native
+row. Its generation is1, its deadline is the original Ready deadline, and exact recovery
+cannot change either. The effect-credit anchor drops last, after retained Ready observations.
+
+Control14 attaches this original Root observation to the same native KeyClaim/storage/SDK
+records. Its permanent identity does not mean a worker is still running. Each actual RPC
+prepays one Phase Copy before its Actor future, then shares that same custodian through the
+bounded Command, receiver and completion. Closure fences effects before reserve retirement;
+only actual last Drop can release queued/result custody. A synchronous receiver cannot refund
+an active sender. Browser ABI25 tracks its exact intent inside the separate64KiB SDK subtree,
+not old chain metadata. A latched attempt survives all failures until authenticated PC Close.
+One actual coalesced flight shares the existing IPC lane; End joins it outside that lane before
+PC Close, SDK Release, storage Release and key Release. New fixed and transient graph terms fit
+the existing phase4KiB and Control8KiB allowances. Native/browser SDP action and RTC consumers
+remain unfinished and disabled.
+
 ## Initial Ready application scheduling (24 October)
 
 Actual KeyClaim adoption latches Pending on its original native parent. The existing paid

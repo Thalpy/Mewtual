@@ -25,6 +25,7 @@ mod input;
 pub(crate) mod integration;
 mod key_session;
 pub(crate) mod ledger;
+mod pc;
 mod pending_close;
 mod plan_final;
 mod replies;

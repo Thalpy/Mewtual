@@ -1,5 +1,30 @@
 # Threat model; client integrity & enforcement boundaries
 
+## Initial SDP-intent closure and lost replies (24 October; consumers pending)
+
+Control14 authenticates original Session, full parent/action, handshake, key, storage and exact
+SDK generation/proof before returning history or closing. Root derives Ready and role from its
+actual original protected Pair; matching serialized labels cannot adopt another key or phase.
+A current/expired historical intent cannot create a fresh generation or renew its first deadline.
+Every eventual SDP/RTC effect still needs its own current native admission; none is exposed yet.
+
+PC Close persists Phase closure even if an Actor reply is unknown. SDK Release and fresh PC
+begin share the same row fence: Release-first refuses later admission; PC-first closes the
+original phase before Released. Closure does not prove actual worker/SDK/engine/Copy drainage.
+One shared original Copy pays queued Command, receiver and completion until both channel sides
+are destroyed, including synchronous receiver finish before Sender::send returns. The fixed
+Root intent has no Phase/row backedge and cannot retain a variable custody cycle. Native TCP,
+whole-graph and browser RTC evidence remain separate required acceptance boundaries.
+
+Browser ABI25 latches the PC duty before any admission callback, including Clock/crypto/fetch.
+Any refusal may follow native publication and is never absence/release evidence. Only exact
+authenticated version7 Closed clears the duty; unknown admission can close without a PC proof.
+Admit rechecks owner currency through the original framed path; Close is cleanup after End.
+End joins actual IO before PC/SDK/storage/key cleanup. Identity/Ready/role/profile observations
+cannot replace one another and retries only shorten the conservative request-start deadline.
+No effect/grant accessor or RTC constructor is exposed. Fixed history stays on the separately
+paid64KiB subtree, and incompatible retained ABI24 cannot spawn a second execution pool.
+
 ## Ready scheduling and release ordering (24 October)
 
 A renderer cannot turn Current key retention or local old-work drainage into early64KiB SDP

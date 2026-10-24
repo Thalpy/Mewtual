@@ -1,5 +1,62 @@
 # Mewtual; Handover
 
+## Initial SDP handoff in progress (24 October)
+
+The reviewed Ready checkpoint `fc8ed136` is pushed to `communication-native-live` / draft
+PR53. Its complete Root/native suites still run against that immutable snapshot. New SDP
+work is isolated in `target/communication-sdp-effects-worktree` (`communication-sdp-effects`)
+and is not yet a completed or enabled V2 call implementation.
+
+Root now derives one original first-round intent from the actual HIGH Ready marker or LOW
+signed Ready admission, the same established-key allocation and the exact armed storage phase.
+Exact recovery retains the same intent and finite deadline; another phase/generation refuses.
+The intent retains no Exchange, Workflow, native row, SDP bytes or engine. Its paid effect
+anchor drops after Ready observations. Generic inactive SDP lenders stay closed.
+
+Native Control14/version7 binds original Session/parent action/key/storage/SDK obligations.
+Preparing identity is distinct from actual worker drainage. Close persists the original Phase
+closure even with an unknown Root reply; SDK Release closes it whenever PC preparation exists.
+Queued commands, receiver and completions share one actual prepaid Copy, including failed or
+cancelled sends and a receiver completing synchronously inside Sender::send.
+
+Current focused evidence:110 Root Ready tests (including six new HIGH/LOW intent/lifetime/
+final-clock cases),10 storage-phase tests, the atomic issuance regression and both relevant
+Root layout guards pass in an isolated current-source test binary against exact cached Cargo
+dependencies. Six actual generic RPC-wrapper tests pass; removing sender-local ownership in a
+negative control makes the synchronous-receiver regression fail. Seventeen frontend framing/
+Control12/13/14 codec tests pass. Current native source also compiles against exact cached
+native-profile dependencies; all323 native handoff tests pass (53.38s). Two blocked-TCP PC
+lifecycle scenarios pass (20.78s), covering actual queued/returned Actor work, both SDK-release
+orderings and a lost waiter. These isolated checks do not replace the required Cargo gates.
+
+Browser ABI25 now retains the same first PC intent under the separately paid64KiB subtree.
+An attempted admission owes exact Close even after refusal/lost reply. Only authenticated
+version7 Closed resolves it; Close after an unknown reply needs no PC identity. End joins the
+actual flight outside the IPC lane, then closes PC before SDK/storage/key release. Fixed
+proof/Ready/role/profile observations cannot change, a retry cannot extend the first browser
+deadline, and ClosedNone cannot acquire a later identity. Funded ABI24 is refused before any
+wake or replacement pool. This adds no RTC constructor or standing effect permission.
+
+The actual Node/browser -> HTTP14 -> native -> Actor -> Root path passes at both endpoints
+in the automatic Ready A-B-C scenario (16.00s): A-C is forbidden and B joins nothing. Native
+asserts intent absence before the call and the actual original Phase/generation/profile/current
+Root intent after it. A browser Promise<void> or queued job alone cannot satisfy that oracle.
+Normal close then drains actual retained browser owners through the same service. This proves
+PC custody composition, not browser WebView policy or SDP/ICE/RTC/media operation. The existing
+post-authentication framed fixture now starts/drains the real production service: one adoption
+nudge can refuse Capacity, so setup ACK alone without maintenance did not progress Ready.
+
+The current full2735-test frontend suite, Svelte check (0 errors/warnings), production frontend
+build, browser flow gate, both formatting checks, ambient gate and diff checks pass. Strict
+Cargo lint/check and full backend suites for this SDP increment remain pending;
+the earlier Ready all-target Clippy/check passes must not be relabelled as this source's gates.
+The existing complete Ready Root/native pipeline still uses its immutable checkpoint. Its
+fixture-only maintenance correction is isolated as `a55ccf18`; do not edit that running source.
+After the run finishes, apply that reviewed native-test-only correction and rerun native
+validation. Root production files are unchanged by that fixture correction. Typed SDP seal/open, fresh native commit/delivery, complete ICE/
+RTC, renewed rounds, multi-peer composition, media relay and combined acceptance remain open.
+Only one desktop is available; independent physical two-device/network acceptance is still open.
+
 ## Operational initial Ready (24 October; validation in progress)
 
 Native key adoption now latches a finite Ready intent on the original KeyClaim and nudges

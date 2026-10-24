@@ -33,6 +33,8 @@ pub(super) use key_session::KeySessionReceipt;
 pub(in crate::voice_handoff) use ready::{ReadyContinuation, ReadyProgress};
 pub(super) use sdk::Receipt as SdkReceipt;
 pub(super) use sdp::Receipt as SdpReceipt;
+mod pc;
+pub(super) use pc::{Receipt as PcReceipt, State as PcState};
 mod plan;
 mod projection;
 mod transition;

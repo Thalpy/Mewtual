@@ -771,8 +771,8 @@ impl ActionQueue {
         input: Input,
         authority: CryptoAuthority,
     ) -> Arc<CryptoAction> {
-        let (key, action, issue) = Self::build(prepared, input, authority);
-        if let Some(issue) = issue {
+        let (key, action, mut issue) = Self::build(prepared, input, authority);
+        if let Some(issue) = issue.as_mut() {
             issue.publish();
         }
         assert!(

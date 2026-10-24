@@ -11,7 +11,7 @@ use super::resources::{
 };
 use super::{CallLease, EncryptedKind, Scope, VoiceError, MAX_SDP_PLAINTEXT, ROUTE_METADATA_BYTES};
 use catcoms_crypto::DeviceId;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex};
 
 pub const EXCHANGE_BYTES: usize = 192 * 1024;
@@ -82,7 +82,6 @@ struct State {
     // Issuance is irreversible at publication. Actual input occupancy can drain without
     // permitting a second seal/open identity to steal the opposite direction's reserved row.
     action_preparing: [bool; 2],
-    action_issued: [bool; 2],
 }
 pub(super) struct Binding {
     pub scope: Scope,
@@ -100,6 +99,9 @@ pub struct Exchange {
     reserve: Arc<Reservation>,
     lane: Arc<WorkLane>,
     state: Mutex<State>,
+    // Permanent per-direction issuance. Publication must be pure under the eventual
+    // Group/Policy tail; the affine issue itself remains owned outside those guards.
+    action_issued: AtomicU8,
     binding: Option<Binding>,
     live: CallLease,
     action_slots: Arc<super::crypto_actions::slots::ReservedSlots>,
@@ -137,22 +139,19 @@ pub(super) struct ActionIssue {
     unpublished: bool,
 }
 impl ActionIssue {
-    pub(super) fn publish(mut self) {
-        let mut state = self
-            .exchange
-            .state
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
+    /// Pure issuance tail, not round/effect authorization. The caller MUST validate
+    /// original authority immediately before this step and retain this SAME affine issue
+    /// outside all final guards; its unpublished Drop may lock accounting State.
+    pub(super) fn publish(&mut self) {
         assert!(
-            state.action_preparing[self.direction],
-            "prepared action direction"
+            self.unpublished,
+            "one publication of this affine direction issue"
         );
-        assert!(
-            !state.action_issued[self.direction],
-            "one issued action per direction"
-        );
-        state.action_preparing[self.direction] = false;
-        state.action_issued[self.direction] = true;
+        let bit = 1 << self.direction;
+        let previous = self.exchange.action_issued.fetch_or(bit, Ordering::AcqRel);
+        assert_eq!(previous & bit, 0, "one issued action per direction");
+        // Preparing remains latched conservatively once published. The irreversible mask
+        // rejects new issues even after payload occupancy and fixed history both drain.
         self.unpublished = false;
     }
 }
@@ -258,8 +257,8 @@ impl Exchange {
                 lower_lanes: Some(lowers),
                 used: [0; STAGES],
                 action_preparing: [false; 2],
-                action_issued: [false; 2],
             }),
+            action_issued: AtomicU8::new(0),
             binding: Some(binding),
             live: CallLease::default(),
             action_slots: slots,
@@ -403,8 +402,8 @@ impl Exchange {
                 lower_lanes: Some(lower_lanes),
                 used: [0; STAGES],
                 action_preparing: [false; 2],
-                action_issued: [false; 2],
             }),
+            action_issued: AtomicU8::new(0),
             binding,
             live: CallLease::default(),
             _metadata: metadata,
@@ -545,7 +544,7 @@ impl Exchange {
         if state.closed
             || !self.is_live()
             || state.action_preparing[direction]
-            || state.action_issued[direction]
+            || self.action_issued.load(Ordering::Acquire) & (1 << direction) != 0
             || state.used[index] != 0
         {
             return Err(VoiceError::Capacity);
@@ -672,6 +671,58 @@ mod tests {
     use super::*;
     mod registry;
     #[test]
+    fn action_issue_final_publication_does_not_lock_state_or_drop_its_owner() {
+        let resources = Arc::new(Resources::default());
+        let exchange = Exchange::new(resources.clone(), [1; 32]).unwrap();
+        let (record, input, mut issue) = exchange
+            .prepare_action_credits(Stage::EncryptAction, 1536, 128)
+            .unwrap();
+        fn publish_while_state_is_held(exchange: &Arc<Exchange>, issue: &mut ActionIssue) {
+            let owners = Arc::strong_count(exchange);
+            let state = exchange.state.lock().unwrap();
+            std::thread::scope(|scope| {
+                let (sent, received) = std::sync::mpsc::channel();
+                let worker = scope.spawn(move || {
+                    issue.publish();
+                    sent.send(()).unwrap();
+                });
+                // This timeout only bounds a broken blocking implementation. The real
+                // mutex, not elapsed time, controls the tested publication ordering.
+                let result = received.recv_timeout(std::time::Duration::from_secs(5));
+                assert_eq!(Arc::strong_count(exchange), owners);
+                drop(state); // Release before join/panic, so regression cannot hang the suite.
+                worker.join().unwrap();
+                result.expect("final publication waited for the accounting mutex");
+            });
+        }
+        let owners = Arc::strong_count(&exchange);
+        publish_while_state_is_held(&exchange, &mut issue);
+        assert_eq!(exchange.action_issued.load(Ordering::Acquire), 1);
+        drop(issue);
+        assert_eq!(Arc::strong_count(&exchange), owners - 1);
+        drop((record, input));
+        assert!(exchange
+            .prepare_action_credits(Stage::EncryptAction, 1536, 128)
+            .is_err());
+        // The other direction retains its original independent opportunity.
+        let (record, input, issue) = exchange
+            .prepare_action_credits(Stage::DecryptAction, 1536, 128)
+            .unwrap();
+        drop((issue, input, record));
+        let (record, input, mut issue) = exchange
+            .prepare_action_credits(Stage::DecryptAction, 1536, 128)
+            .unwrap();
+        publish_while_state_is_held(&exchange, &mut issue);
+        assert_eq!(exchange.action_issued.load(Ordering::Acquire), 3);
+        drop((issue, input, record));
+        assert!(exchange
+            .prepare_action_credits(Stage::DecryptAction, 1536, 128)
+            .is_err());
+        drop(exchange);
+        assert_eq!(resources.counts(), (0, 0));
+    }
+
+    #[test]
     fn successor_retained_rust_graph_fits_original_metadata_allowance() {
         use std::mem::size_of;
         // Structural growth guard for our owners, not allocator slack/Tokio watch heap/RSS.
@@ -761,10 +812,11 @@ mod tests {
             )
             .unwrap();
         let outgoing = exchange.charge(Stage::LocalPacket, PACKET_BYTES).unwrap();
-        let (encrypt_history, encrypt_input, encrypt_issue) = exchange
+        let (encrypt_history, encrypt_input, mut encrypt_issue) = exchange
             .prepare_action_credits(Stage::EncryptAction, 1536, ACTION_BYTES - 1536)
             .unwrap();
         encrypt_issue.publish();
+        drop(encrypt_issue);
         let engine = exchange.charge(Stage::Crypto, ENGINE_BYTES).unwrap();
         assert!(exchange.charge(Stage::Crypto, 1).is_err());
         drop(engine);
@@ -781,10 +833,11 @@ mod tests {
             .unwrap();
         let incoming = exchange.charge(Stage::RemotePacket, PACKET_BYTES).unwrap();
         drop(verification);
-        let (decrypt_history, decrypt_input, decrypt_issue) = exchange
+        let (decrypt_history, decrypt_input, mut decrypt_issue) = exchange
             .prepare_action_credits(Stage::DecryptAction, 1536, ACTION_BYTES - 1536)
             .unwrap();
         decrypt_issue.publish();
+        drop(decrypt_issue);
         let engine = Arc::new(exchange.charge(Stage::Crypto, ENGINE_BYTES).unwrap());
         let result = SdpResult::new(&exchange, &vec![b'a'; MAX_SDP_PLAINTEXT]).unwrap();
         assert_eq!(result.bytes().len(), MAX_SDP_PLAINTEXT);

@@ -49,6 +49,7 @@ pub(super) async fn exercise(
     key: [u8; 32],
     attach: bool,
     sdk_race: bool,
+    pc_case: Option<u8>,
 ) -> Option<super::sdk::Token> {
     let prepare = body(parent, key, None);
     let request = requests::sdp::Request::decode(parent.id().logical(), &prepare).unwrap();
@@ -86,6 +87,12 @@ pub(super) async fn exercise(
         );
         let proof = first[138..170].try_into().unwrap();
         let phase = parent.sdp_test_phase().unwrap();
+        if let Some(case) = pc_case {
+            let token = super::sdk::start(state, public, route, parent, &prepare, proof).await;
+            super::pc::exercise(state, public, route, parent, token, case).await;
+            assert!(parent.sdp_test_whole_drained());
+            return None;
+        }
         let mut copy = Some(phase.copy(8192).unwrap().adopt(vec![17; 8192]).unwrap());
         let sdk = if sdk_race {
             // Isolate SDK preparation custody: no native copy may mask a missing

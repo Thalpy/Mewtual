@@ -25,6 +25,7 @@ mod protected;
 mod ready;
 mod response;
 mod result;
+mod sdp;
 mod start;
 mod successor;
 pub(crate) use derivation::{ProtectedDerivation, ProtectedDerivationResult};
@@ -77,6 +78,9 @@ pub(super) struct Pair {
     // One fixed LOW admission, independent of the live successor. No progress backedge.
     ready_admission: Option<Arc<crate::voice_v2::ready::admission::ReadyAdmission>>,
     sdp_input: Option<Box<InboundPacket>>,
+    // Fixed first-PC identity only; no Exchange/Workflow/native-row backedge. Never reset
+    // on expiry, Close or payload collection to make the same first preparation issuable.
+    sdp_intent: Option<Arc<crate::voice_v2::sdp::InitialSdpIntent>>,
     _credit: Credit,
 }
 struct Action {
@@ -1051,6 +1055,7 @@ impl LocalJoin {
                 first_offer: None,
                 ready_admission: None,
                 sdp_input: None,
+                sdp_intent: None,
                 _credit: credit,
             },
         );

@@ -16,6 +16,10 @@ pub(super) struct Claim {
     effect: EffectObserver,
 }
 impl Claim {
+    /// Exact installed SDK obligation, independent of permission/currentness.
+    pub(super) fn matches(&self, generation: u64, proof: [u8; 32]) -> bool {
+        self.generation == generation && self.proof == proof
+    }
     pub(super) fn released(&self) -> bool {
         self.released.load(Ordering::Acquire)
     }
@@ -284,17 +288,43 @@ impl ResolvedRow {
         generation: u64,
         proof: [u8; 32],
     ) -> Result<Receipt, VoiceError> {
-        let _index = self.transition_index()?;
-        let state = try_lock(&self.row.state)?;
-        let sdk = storage(self, &state, session, request)?
-            .sdk
-            .as_ref()
-            .ok_or(VoiceError::Unauthorized)?;
-        if sdk.generation != generation || sdk.proof != proof {
-            return Err(VoiceError::Unauthorized);
-        }
-        sdk.released.store(true, Ordering::Release);
-        Ok(snapshot(self.row.id, request, sdk))
+        let (receipt, close) = {
+            let _index = self.transition_index()?;
+            let mut state = try_lock(&self.row.state)?;
+            let stored = storage(self, &state, session, request)?;
+            let sdk = stored.sdk.as_ref().ok_or(VoiceError::Unauthorized)?;
+            if !sdk.matches(generation, proof) {
+                return Err(VoiceError::Unauthorized);
+            }
+            // PC-before-Release closes the SAME persisted phase, even when Root's
+            // reply is unknown. Release-before-PC makes begin_pc reject released SDK.
+            // This shared row fence orders both paths; Released never precedes closure.
+            let close = if stored.pc.is_some() {
+                state
+                    .plan_mut()
+                    .unwrap()
+                    .transition
+                    .as_mut()
+                    .unwrap()
+                    .key
+                    .as_mut()
+                    .unwrap()
+                    .sdp
+                    .as_mut()
+                    .unwrap()
+                    .request_close()
+            } else {
+                None
+            };
+            let sdk = storage(self, &state, session, request)?
+                .sdk
+                .as_ref()
+                .unwrap();
+            sdk.released.store(true, Ordering::Release);
+            (snapshot(self.row.id, request, sdk), close)
+        };
+        drop(close);
+        Ok(receipt)
     }
 }
 #[cfg(test)]

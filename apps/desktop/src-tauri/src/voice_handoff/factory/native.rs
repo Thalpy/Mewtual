@@ -343,7 +343,7 @@ async fn execute_confirmation(
 
 /// Resolve only the genuine original Actor/grant for a non-effect observation. Do not
 /// hold an upgraded mounted store, server map, or Coordinator over the Actor RPC.
-fn observation_actor(
+pub(in crate::voice_handoff) fn observation_actor(
     context: &Context,
     route: &Route,
 ) -> Result<(ServerActor, Arc<CallGrant>), Refused> {

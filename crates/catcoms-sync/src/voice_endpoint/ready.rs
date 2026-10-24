@@ -6,7 +6,7 @@ use voice_v2::packets::Authority;
 /// Snapshot only identities this factory can query, from the already-paid exact Actor
 /// roster. Never allocate a full MLS Vec/HashSet on the small native producer payment.
 /// This is not an epoch lease; original/final Actor gates still validate the current view.
-fn ready_member_snapshot(
+pub(super) fn ready_member_snapshot(
     actor: &voice_v2::runtime::ActorOwner,
     context: &voice_v2::Context,
     peer: DeviceId,

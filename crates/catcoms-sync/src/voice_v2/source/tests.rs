@@ -1265,7 +1265,7 @@ fn maximum_sdp_reply_and_declared_engine_result_fit_with_two_lowers_under_unrela
         _slot: super::super::crypto_actions::slots::Slot,
     }
     let retain = |stage| {
-        let (record, payload, issue) = owner
+        let (record, payload, mut issue) = owner
             .prepare_action_credits(stage, 1536, 10_286 - 1536)
             .unwrap();
         let slot = owner.action_slot(&action_pool).unwrap();

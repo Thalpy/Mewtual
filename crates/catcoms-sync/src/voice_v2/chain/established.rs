@@ -15,6 +15,12 @@ pub struct EstablishedKeyCustody {
 redacted_debug!(EstablishedKeyCustody);
 
 impl EstablishedKeyCustody {
+    pub(in crate::voice_v2) fn observed_by(
+        &self,
+        original: &super::OriginalPlanObservation,
+    ) -> bool {
+        original.belongs_to(&self.binding)
+    }
     /// Retention snapshot only. Normal phase extraction closes the old Finish window; that
     /// must not erase already adopted keys. Whole-plan retirement, original call/pair or
     /// actor/session/policy/epoch revocation does end custody irreversibly. A caller must

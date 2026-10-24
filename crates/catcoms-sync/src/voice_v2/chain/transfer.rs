@@ -107,6 +107,9 @@ pub(in crate::voice_v2) struct SuccessorProof(Arc<PlanBinding>);
 /// authority: its caller must also check the actual room/epoch and immutable receipt times.
 pub(in crate::voice_v2) struct OriginalPlanObservation(Arc<PlanBinding>);
 impl OriginalPlanObservation {
+    pub(in crate::voice_v2) fn belongs_to(&self, binding: &Arc<PlanBinding>) -> bool {
+        Arc::ptr_eq(&self.0, binding)
+    }
     pub(in crate::voice_v2) fn binding(&self) -> &Binding {
         &self.0.value
     }

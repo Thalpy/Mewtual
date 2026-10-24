@@ -104,7 +104,7 @@ type Step =
   | { tag: "step"; name: "derive"; purpose: VoiceIpcPurpose }
   | { tag: "step"; name: "sdp-custody"; purpose: VoiceIpcPurpose; row: string; identity: VoiceIpcActionIdentity }
   | { tag: "step"; name: "child"; request: VoiceIpcConfirmationPurpose["request"] }
-  | { tag: "step"; name: "pump" | "close" | "wedge" };
+  | { tag: "step"; name: "pump" | "close" | "wedge" | "pc-custody" };
 async function step(value: Step): Promise<unknown> {
   switch (value.name) {
     case "pump": {
@@ -233,6 +233,7 @@ async function step(value: Step): Promise<unknown> {
       if (ready.kind !== "ready") throw new Error("original browser chain unavailable");
       assert.equal(providerCalls, calls, "cached intake recovery must not reconstruct keys");
       assert.equal(ready.derivation.inspect(), "accepted");
+      chain = ready.chain;
       const before = broker.counts().bytes;
       assert.ok(before < 96 * 1024, "actual old browser variable envelope returned");
       const deadline = performance.now() + 5000;
@@ -248,6 +249,22 @@ async function step(value: Step): Promise<unknown> {
       } while (capacityRefusals > observed);
       assert.equal(broker.counts().bytes, before + 64 * 1024);
       return { kind: "custody-attempted", bytes: 64 * 1024 };
+    }
+    case "pc-custody": {
+      const before = broker.counts().bytes;
+      const deadline = performance.now() + 5000;
+      let observed: number;
+      do {
+        assert.ok(performance.now() < deadline, "original PC intent stayed busy");
+        observed = capacityRefusals;
+        await broker.prepareNativePcIntent(owner, channel, chain);
+        await idle();
+        if (capacityRefusals > observed) await new Promise<void>(yes => setTimeout(yes, 25));
+      } while (capacityRefusals > observed);
+      // This Promise<void> is deliberately not the success oracle. Rust independently
+      // requires an original Root intent attached by the actual HTTP14 dispatch below.
+      assert.equal(broker.counts().bytes, before);
+      return { kind: "pc-attempted" };
     }
     case "close": {
       owner.retire(); broker.retrySelectedJoinKeys();

@@ -44,3 +44,17 @@ test("an authenticated first-admission refusal creates no invented native releas
   assert.equal(phase.nativeReleased, true, "original native Final is still required by the channel");
   assert.throws(() => phase.beginSdk(), /closed/);
 });
+
+
+test("SDK/storage drainage cannot erase an unknown PC Close obligation", () => {
+  const phase = new VoiceSdpSdkCustody();
+  assert.throws(() => phase.beginPc(), /closed/);
+  phase.observeStorage(storage("funded")); phase.beginSdk();
+  assert.throws(() => phase.beginPc(), /closed/);
+  phase.observeSdk(sdk("held")); phase.beginPc(); phase.close();
+  phase.observeSdk(sdk("released")); phase.observeStorage(storage("drained"));
+  assert.equal(phase.nativeReleased, false); assert.equal(phase.pc.needsClose, true);
+  phase.pc.observe({ state: "closed", identity: null }, 0, 1);
+  assert.equal(phase.nativeReleased, true);
+  assert.throws(() => phase.beginPc(), /closed/);
+});

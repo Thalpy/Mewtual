@@ -40,7 +40,8 @@ mod member_maintenance;
 mod member_reconnect;
 mod voice_endpoint;
 pub use voice_endpoint::{
-    VoiceConfirmationBody, VoiceConfirmationCompletion, VoiceEndpointCommand, VoiceEndpointError,
+    InitialSdpCompletion, InitialSdpPending, VoiceConfirmationBody, VoiceConfirmationCompletion,
+    VoiceEndpointCommand, VoiceEndpointError, INITIAL_SDP_RPC_BYTES,
     VOICE_CONFIRMATION_BODY_METADATA_BYTES,
 };
 

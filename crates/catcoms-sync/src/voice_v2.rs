@@ -61,6 +61,7 @@ pub(crate) use ready::admission::ReadyAdmission;
 pub use ready::ReadyHeader;
 pub mod resources;
 pub mod runtime;
+pub mod sdp;
 mod sdp_profile;
 pub mod source;
 pub use sdp_profile::{SdpProfile, SdpRound};

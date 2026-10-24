@@ -4,6 +4,7 @@ use super::*;
 use rand_core::{CryptoRng, Error, RngCore};
 use std::cell::Cell;
 mod admission;
+mod intent;
 mod low;
 mod receive;
 mod source;

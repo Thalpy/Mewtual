@@ -75,6 +75,11 @@ pub(super) async fn respond(
     if incoming.operation() == Operation::Status {
         return status(route, incoming);
     }
+    if incoming.operation() == Operation::PcIntent {
+        return crate::voice_handoff::pc::apply(context, route, incoming)
+            .await
+            .map_err(|_| Refused::Body);
+    }
     if incoming.operation() == Operation::SdkCustody {
         return crate::voice_handoff::sdk::apply(context, route, incoming)
             .await

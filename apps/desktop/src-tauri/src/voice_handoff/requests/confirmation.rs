@@ -31,6 +31,7 @@ impl<'a> Request<'a> {
                 | Operation::KeySession
                 | Operation::SdpPhase
                 | Operation::SdkCustody
+                | Operation::PcIntent
         ) || body_kind
             != if operation == Operation::Result {
                 BodyKind::Data

@@ -184,6 +184,9 @@ async fn native_webcrypto_cycle(
                 // Actual browser64KiB custody uses HTTP12/13 and independently checks the
                 // installed native SDK records; no RTC/SDP effect permission is fabricated.
                 tokio::join!(a.sdp_custody(&ap), c.sdp_custody(&cp));
+                // Original PC identity now traverses real HTTP14 and the retained broker.
+                // This still creates no RTCPeerConnection or SDP/ICE/media effect.
+                tokio::join!(a.pc_custody(&ap), c.pc_custody(&cp));
             }
             scenario.rules.assert_graph();
             return;
@@ -489,27 +492,36 @@ async fn native_v2_discovers_blocked_endpoints_through_unjoined_tcp_bridge_then_
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn native_v2_confirmation_child_uses_the_returned_actual_parent_over_blocked_tcp_discovery() {
-    confirmation_over_blocked_tcp(false, false, false, false).await;
+    confirmation_over_blocked_tcp(false, false, false, false, None).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn native_v2_confirmation_framed_result_uses_actual_actor_body_and_original_phase() {
-    confirmation_over_blocked_tcp(true, false, false, false).await;
+    confirmation_over_blocked_tcp(true, false, false, false, None).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn native_v2_confirmation_rejected_result_remains_original_history_after_return() {
-    confirmation_over_blocked_tcp(true, true, false, false).await;
+    confirmation_over_blocked_tcp(true, true, false, false, None).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn native_v2_confirmation_known_incoming_retry_survives_permanent_input_loss() {
-    confirmation_over_blocked_tcp(true, false, true, false).await;
+    confirmation_over_blocked_tcp(true, false, true, false, None).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn native_v2_abandoned_custody_needs_exact_physical_collection_dead_lease_and_root_drain() {
-    confirmation_over_blocked_tcp(true, false, false, true).await;
+    confirmation_over_blocked_tcp(true, false, false, true, None).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn native_v2_pc_intent_close_and_sdk_release_order_actual_queued_and_returned_actor_work() {
+    confirmation_over_blocked_tcp(true, false, false, false, Some(false)).await;
+}
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn native_v2_pc_intent_sdk_release_before_begin_and_lost_queued_waiter_never_revive() {
+    confirmation_over_blocked_tcp(true, false, false, false, Some(true)).await;
 }
 
 async fn confirmation_over_blocked_tcp(
@@ -517,6 +529,7 @@ async fn confirmation_over_blocked_tcp(
     reject: bool,
     known_incoming: bool,
     orphan: bool,
+    pc_cases: Option<bool>,
 ) {
     let mut scenario = Scenario::new(false, isolate().await);
     scenario.admit().await;
@@ -589,6 +602,7 @@ async fn confirmation_over_blocked_tcp(
                 &c,
                 &cp,
                 orphan,
+                pc_cases,
             )
             .await;
         } else {
@@ -631,6 +645,7 @@ async fn confirmation_over_blocked_tcp(
             &a,
             &ap,
             orphan,
+            pc_cases,
         )
         .await;
     } else {

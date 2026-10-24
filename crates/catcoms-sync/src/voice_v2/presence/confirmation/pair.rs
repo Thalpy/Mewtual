@@ -240,6 +240,7 @@ impl LocalJoin {
             first_offer: None,
             ready_admission: None,
             sdp_input: None,
+            sdp_intent: None,
             _credit: credit,
         };
         let receipt = PairReceipt {

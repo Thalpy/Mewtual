@@ -69,6 +69,7 @@ async fn exchange(
 pub(super) enum Cleanup {
     Live,
     SdkAdmissionRace,
+    Pc(u8),
     Ended,
     Orphan,
 }
@@ -79,7 +80,10 @@ pub(super) async fn custody_cycle(
     cleanup: Cleanup,
     peer_ready: &tokio::sync::Barrier,
 ) {
-    let end_before_recovery = !matches!(cleanup, Cleanup::Live | Cleanup::SdkAdmissionRace);
+    let end_before_recovery = !matches!(
+        cleanup,
+        Cleanup::Live | Cleanup::SdkAdmissionRace | Cleanup::Pc(_)
+    );
     let bootstrap::Status::Ready(public) = bootstrap::ensure(
         state,
         selected.id(),
@@ -141,7 +145,13 @@ pub(super) async fn custody_cycle(
         }
     })
     .await
-    .expect("actual automatic native Ready/core drainage stalled");
+    .unwrap_or_else(|_| {
+        panic!(
+            "automatic Ready/core stalled: (LOW, progress, released, current)={:?}; resources={:?}",
+            parent.ready_test_observation(),
+            selected.resources().counts()
+        )
+    });
     // Both native Ready consumers must finish before either endpoint intentionally releases
     // its key in this cleanup fixture. No synthetic Ready/CoreDrained flag is installed.
     peer_ready.wait().await;
@@ -153,8 +163,18 @@ pub(super) async fn custody_cycle(
         key_proof,
         !matches!(cleanup, Cleanup::Ended),
         matches!(cleanup, Cleanup::SdkAdmissionRace),
+        if let Cleanup::Pc(case) = cleanup {
+            Some(case)
+        } else {
+            None
+        },
     )
     .await;
+    if matches!(cleanup, Cleanup::Pc(_)) {
+        // Both live-peer PC scenarios finish before either endpoint intentionally Ends.
+        // The earlier barrier established Ready only; it was not SDP/PC completion.
+        peer_ready.wait().await;
+    }
     assert!(
         matches!(parent.retire_plan(), Err(VoiceError::Capacity)),
         "browser key custody must precede normal whole-plan retirement"

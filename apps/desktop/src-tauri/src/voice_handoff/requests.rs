@@ -10,6 +10,7 @@ use catcoms_sync::voice_v2::presence::PairSelector;
 use catcoms_sync::voice_v2::VoiceError;
 use sha2::{Digest, Sha256};
 pub(super) mod key_session;
+pub(super) mod pc;
 pub(super) mod sdk;
 pub(super) mod sdp;
 pub(super) mod transition;
@@ -53,6 +54,9 @@ pub(super) fn wire_shape(
     {
         return false;
     }
+    if operation == Operation::PcIntent {
+        return plain_bytes == pc::BYTES;
+    }
     if operation == Operation::SdkCustody {
         return plain_bytes == sdk::ADMIT_BYTES || plain_bytes == sdk::RELEASE_BYTES;
     }
@@ -86,7 +90,8 @@ pub(super) fn wire_shape(
             | Operation::ChainTransition
             | Operation::KeySession
             | Operation::SdpPhase
-            | Operation::SdkCustody => false,
+            | Operation::SdkCustody
+            | Operation::PcIntent => false,
         }
     })
 }
@@ -212,7 +217,8 @@ fn decode_kind(operation: Operation, bytes: &[u8]) -> Result<Kind<'_>, VoiceErro
         | Operation::ChainTransition
         | Operation::KeySession
         | Operation::SdpPhase
-        | Operation::SdkCustody => return Err(VoiceError::Malformed),
+        | Operation::SdkCustody
+        | Operation::PcIntent => return Err(VoiceError::Malformed),
     };
     if !cursor.0.is_empty() {
         return Err(VoiceError::Malformed);

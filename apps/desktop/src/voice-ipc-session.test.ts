@@ -1,3 +1,4 @@
+import { encodeVoicePcIntent } from "./voice-ipc-pc.ts";
 import { encodeVoiceSdpPhase } from "./voice-ipc-sdp.ts";
 import { encodeVoiceSdkCustody } from "./voice-ipc-sdk.ts";
 import { encodeVoiceKeySession } from "./voice-ipc-key-session.ts";
@@ -336,7 +337,7 @@ async function framedDerivation(f: Awaited<ReturnType<typeof fixture>>) {
   };
   f.cleanup(() => { finalPending = false; loseIssuance = false; loseFinalAck = false; settleHold?.release(); returnHold?.release(); f.native.settleSetup = nativeSettle; });
   f.actions(async (header, opened) => {
-    if (header.operation >= 10 && header.operation <= 13) {
+    if (header.operation >= 10 && header.operation <= 14) {
       assert.ok(transitionResponder, "unexpected custody operation");
       return transitionResponder(header, opened);
     }
@@ -564,7 +565,10 @@ function custodyReplies(f: Awaited<ReturnType<typeof fixture>>, child: Awaited<R
   let releaseHold: ReturnType<typeof gate> | null = null;
   let keyAdoptions = 0, keyReleases = 0, keyAdopted = false, keyReleased = false, loseAdoption = false;
   let keyHold: ReturnType<typeof gate> | null = null, endOnKeyReply = false;
-  const storageProof = hash(100), sdkProof = hash(101);
+  const storageProof = hash(100), sdkProof = hash(101), pcProof = hash(102);
+  let pcAdmits = 0, pcCloses = 0, pcPrepared = false, pcClosed = false;
+  let losePc = false, losePcClose = false, refusePc = false, preparingPc = false;
+  let pcHold: ReturnType<typeof gate> | null = null, pcCloseHold: ReturnType<typeof gate> | null = null;
   let storagePrepared = false, storageReleased = false, sdkAdmitted = false, sdkReleased = false;
   let storagePrepares = 0, storageReleases = 0, sdkAdmissions = 0, sdkReleases = 0;
   let loseStorage = false, loseSdk = false, loseSdkRelease = false;
@@ -572,17 +576,42 @@ function custodyReplies(f: Awaited<ReturnType<typeof fixture>>, child: Awaited<R
   const effectOrder: string[] = [];
   const keyProof = hash(99);
   const proof = hash(96);
-  f.cleanup(() => { releaseHold?.release(); keyHold?.release(); sdkHold?.release(); });
+  f.cleanup(() => { releaseHold?.release(); keyHold?.release(); sdkHold?.release(); pcHold?.release(); pcCloseHold?.release(); });
   child.parent.beforeFinal(() => {
     assert.ok(!claimed || released, "parent final cannot overtake native Release");
     assert.ok(!keyAdopted || keyReleased, "parent final cannot overtake separate native key Release");
     assert.ok(!storagePrepared || storageReleased, "Final cannot overtake storage Release");
     assert.ok(!sdkAdmitted || sdkReleased, "Final cannot overtake SDK Release");
+    assert.ok(!pcPrepared || pcClosed, "Final cannot overtake PC Close");
   });
   child.parent.transitionReplies(async (header, opened) => {
     const base = { parentRow: child.parent.row, identity: child.parent.identity, handshake: child.parent.binding.handshake, key: keyProof, sequence: "1" };
     const prefix = () => [Buffer.from(base.parentRow, "hex"), integer(BigInt(base.identity.action), 8), integer(BigInt(base.identity.version), 8),
       Buffer.from(base.identity.inputTag, "hex"), Buffer.from(base.handshake, "hex"), Buffer.from(base.key, "hex"), integer(1n, 8)];
+    if (header.operation === 14) {
+      assert.ok(storagePrepared && !storageReleased && sdkAdmitted && !sdkReleased);
+      const closing = opened[193] === 1;
+      assert.deepEqual(opened, encodeVoicePcIntent({ ...base, storage: storageProof, sdkGeneration: "1", sdkProof,
+        request: closing ? "close" : "admit" }).body);
+      if (closing) {
+        pcCloses++; pcClosed = true; effectOrder.push("pc-close");
+        if (pcCloseHold) await pcCloseHold.promise;
+        if (losePcClose) { losePcClose = false; throw new Error("native PC Close reply lost"); }
+      } else {
+        pcAdmits++;
+        if (!pcPrepared && !f.owner.isCurrent()) return { kind: 0, body: new Uint8Array([7, 2, 0]) };
+        pcPrepared = true; effectOrder.push("pc-admit");
+        if (pcHold) await pcHold.promise;
+        if (losePc) { losePc = false; throw new Error("native PC Admit reply lost"); }
+        // This models a failure AFTER the native Claim/Actor boundary. Refusal is not
+        // evidence of absence and must retain the exact Close obligation.
+        if (refusePc) return { kind: 0, body: new Uint8Array([1, 3, 5]) };
+      }
+      if (!pcPrepared) return { kind: 0, body: new Uint8Array([7, 2, 0]) };
+      const state = pcClosed ? 2 : preparingPc ? 0 : 1;
+      return { kind: 0, body: Buffer.concat([Buffer.from([7, state, 1]), integer(1n, 8), Buffer.from(pcProof, "hex"),
+        ...(state === 1 ? [Buffer.from([1, child.parent.binding.localIsLow ? 1 : 0]), Buffer.from(hash(103), "hex"), integer(10_000n, 8)] : [])]) };
+    }
     if (header.operation === 12) {
       assert.ok(keyAdopted && !keyReleased, "storage cleanup precedes KeyRelease");
       const releasing = opened[121] === 1;
@@ -604,6 +633,7 @@ function custodyReplies(f: Awaited<ReturnType<typeof fixture>>, child: Awaited<R
       assert.deepEqual(opened, encodeVoiceSdkCustody({ ...base, storage: storageProof,
         request: releasing ? { kind: "release", generation: "1", proof: sdkProof } : { kind: "admit" } }).body);
       if (releasing) {
+        assert.ok(!pcPrepared || pcClosed, "PC Close must precede SDK Release");
         sdkReleases++; assert.ok(sdkAdmitted); sdkReleased = true; effectOrder.push("sdk-release");
         if (loseSdkRelease) { loseSdkRelease = false; throw new Error("native SDK Release reply lost"); }
       } else {
@@ -673,6 +703,10 @@ function custodyReplies(f: Awaited<ReturnType<typeof fixture>>, child: Awaited<R
     effectOrder: () => [...effectOrder],
     loseStorage() { loseStorage = true; }, loseSdk() { loseSdk = true; }, loseSdkRelease() { loseSdkRelease = true; },
     holdSdk() { sdkHold = gate(); return sdkHold; },
+    pcCounts: () => ({ pcAdmits, pcCloses, pcPrepared, pcClosed }),
+    losePc() { losePc = true; }, losePcClose() { losePcClose = true; }, refusePc() { refusePc = true; },
+    preparingPc() { preparingPc = true; },
+    holdPc() { pcHold = gate(); return pcHold; }, holdPcClose() { pcCloseHold = gate(); return pcCloseHold; },
   };
 }
 
@@ -2107,9 +2141,21 @@ test("Derive intake and terminal Control payload graphs fit their separate origi
   assert.ok(sdkDecoded <= decoded, `SDK custody transient graph ${sdkDecoded}/${decoded}`);
   const sdkControl = sdkBuffers + descriptor + sdkDecoded + wrappers + ordinaryReturn;
   assert.ok(sdkControl <= 8 * 1024, `SDK custody Control graph ${sdkControl}/8192`);
+  // Control14 uses the same original194B obligations; its largest reply is85B.
+  // The decoded identity+admission and compact retained PC records coexist, so count
+  // both rather than moving new PC history into the old nearly-full8KiB chain budget.
+  const pcBuffers = 2 * (194 + 16) + 2 * (85 + 16) + 144 + 288 + 4 * 40 + 2 * 32 + 2 * 12 + 1;
+  const pcDecoded = 2 * ("admitted".length + 1 + 64 + "complete-sdp-v1".length + 64) + 512;
+  assert.ok(pcDecoded <= decoded, `PC intent transient decode ${pcDecoded}/${decoded}`);
+  const pcControl = pcBuffers + descriptor + pcDecoded + wrappers + ordinaryReturn;
+  assert.ok(pcControl <= 8 * 1024, `PC intent Control graph ${pcControl}/8192`);
   const sdkCompactStrings = 2 * (7 + 64 + 8 + 20 + 64);
-  const sdkPhase = sdkCompactStrings + 512 + 512 + 512 + 128;
-  assert.ok(sdkPhase <= 4096, `independently prepaid SDP phase/flight graph ${sdkPhase}/4096`);
+  const pcCompactStrings = 2 * (1 + 64 + "complete-sdp-v1".length + 64);
+  // Class, immutable identity/admission wrappers, finite deadline and cleanup scalars.
+  // startPc shares the existing sdpFlight/lane/finally, counted once in sdkPhase below.
+  const pcFixed = pcCompactStrings + 256 + 128 + 128 + 64;
+  const sdkPhase = sdkCompactStrings + 512 + 512 + 512 + 128 + pcFixed;
+  assert.ok(sdkPhase <= 4096, `independently prepaid SDP/PC phase/flight graph ${sdkPhase}/4096`);
   // This fixed subtree is part of the new64KiB, never the nearly-full old chain8KiB.
   // Future SDK/SDP/UTF16/crypto owners still need a complete coexistence inventory.
 });
@@ -2540,12 +2586,85 @@ test("lost SDK Release preserves payment and exact proof before storage/key rele
   assert.equal(custody.effectCounts().sdkReleases, 2); assert.equal(f.broker.counts().bytes, 0);
 });
 
-test("HMR refuses fully shaped funded broker23 without waking or replacing its outstanding pool", async t => {
+test("HMR refuses fully shaped funded broker24 without waking or replacing its outstanding pool", async t => {
   const { f, child, prepare } = await establishedSdpFixture(t); await prepare();
-  const previous = Object.create(f.broker); Object.defineProperty(previous, "version", { value: 23 });
+  const previous = Object.create(f.broker); Object.defineProperty(previous, "version", { value: 24 });
   let wakes = 0; previous.retrySelectedJoinKeys = () => { wakes++; };
   const key = Symbol.for("mewtual.voice.crypto-broker.v2"), host = { [key]: previous }, bytes = f.broker.counts().bytes;
   assert.throws(() => windowVoiceCryptoBroker({ async admit() { return ""; }, async settle() {}, async commitInbound() {} }, host, real), /reload required/);
   assert.equal(host[key], previous); assert.equal(wakes, 0); assert.equal(f.broker.counts().bytes, bytes);
   f.owner.retire(); await child.channel.close();
+});
+
+
+async function establishedPcFixture(t: TestContext) {
+  const fixture = await establishedSdpFixture(t); await fixture.prepare();
+  const { f, child } = fixture;
+  return { ...fixture, admitPc: () => f.broker.prepareNativePcIntent(f.owner, child.channel, child.ready.chain) };
+}
+
+test("PC admission retains the original paid subtree and Close precedes SDK/storage/key release", async t => {
+  const { f, child, custody, admitPc } = await establishedPcFixture(t);
+  const funding = f.broker.counts().bytes;
+  const first = admitPc(); assert.equal(admitPc(), first); await first; await admitPc();
+  assert.equal(f.broker.counts().bytes, funding, "fixed PC graph uses the existing64KiB subtree");
+  assert.deepEqual(custody.pcCounts(), { pcAdmits: 2, pcCloses: 0, pcPrepared: true, pcClosed: false });
+  f.owner.retire(); await child.channel.close();
+  assert.deepEqual(custody.effectOrder(), ["storage-prepare", "sdk-admit", "pc-admit", "pc-admit", "pc-close", "sdk-release", "storage-release", "key-release"]);
+  assert.equal(f.broker.counts().bytes, 0);
+});
+
+for (const outcome of ["lost", "refused", "preparing"] as const) test(`PC ${outcome} admission requires exact Close before SDK release`, async t => {
+  const { f, child, custody, admitPc } = await establishedPcFixture(t);
+  if (outcome === "lost") custody.losePc();
+  else if (outcome === "refused") custody.refusePc();
+  else custody.preparingPc();
+  await admitPc(); assert.equal(custody.pcCounts().pcAdmits, 1);
+  f.owner.retire(); await child.channel.close();
+  assert.deepEqual(custody.pcCounts(), { pcAdmits: 1, pcCloses: 1, pcPrepared: true, pcClosed: true });
+  assert.equal(f.broker.counts().bytes, 0);
+});
+
+test("End during real PC admission IO waits for finally before exact Close and refunds", async t => {
+  const { f, child, custody, admitPc } = await establishedPcFixture(t);
+  const held = custody.holdPc(), pending = admitPc();
+  await until(() => custody.pcCounts().pcAdmits === 1);
+  const payment = f.broker.counts().bytes; let closed = false;
+  f.owner.retire(); const closing = child.channel.close().then(() => { closed = true; });
+  await new Promise<void>(yes => setImmediate(yes));
+  assert.equal(closed, false); assert.equal(custody.pcCounts().pcCloses, 0);
+  assert.equal(custody.effectCounts().sdkReleases, 0); assert.equal(f.broker.counts().bytes, payment);
+  held.release(); await pending; await closing;
+  assert.equal(custody.pcCounts().pcCloses, 1); assert.equal(f.broker.counts().bytes, 0);
+});
+
+test("End inside PC request encryption closes unknown intent without submitting fresh admission", async t => {
+  const { f, child, custody, admitPc } = await establishedPcFixture(t);
+  const held = f.holdWhen((name, args) => name === "encrypt" && new Uint8Array((args[0] as AesGcmParams).additionalData as ArrayBuffer)[6] === 14);
+  const pending = admitPc(); await until(held.entered);
+  const payment = f.broker.counts().bytes; f.owner.retire(); const closing = child.channel.close();
+  assert.equal(custody.pcCounts().pcAdmits, 0); assert.equal(f.broker.counts().bytes, payment);
+  held.release(); await pending; await closing;
+  assert.deepEqual(custody.pcCounts(), { pcAdmits: 0, pcCloses: 1, pcPrepared: false, pcClosed: true });
+  assert.equal(f.broker.counts().bytes, 0);
+});
+
+test("lost PC Close preserves its original payment and prevents later releases until retry", async t => {
+  const { f, child, custody, admitPc } = await establishedPcFixture(t);
+  await admitPc(); custody.losePcClose();
+  f.owner.retire(); const closing = child.channel.close();
+  await until(() => custody.pcCounts().pcCloses === 1 && f.timers().delays.includes(1000));
+  assert.equal(custody.effectCounts().sdkReleases, 0); assert.equal(custody.effectCounts().storageReleases, 0);
+  assert.ok(f.broker.counts().bytes >= 64 * 1024);
+  f.advance(1000); await closing;
+  assert.equal(custody.pcCounts().pcCloses, 2); assert.equal(f.broker.counts().bytes, 0);
+});
+
+test("PC custody never starts on copied handles, foreign chains or a closed original channel", async t => {
+  const { f, child, custody, admitPc } = await establishedPcFixture(t);
+  assert.throws(() => f.broker.prepareNativePcIntent(f.owner, { ...child.channel }, child.ready.chain), /original native PC custody/);
+  assert.throws(() => f.broker.prepareNativePcIntent(f.owner, child.channel, { ...child.ready.chain }), /original native PC custody/);
+  f.owner.retire(); await admitPc(); await child.channel.close();
+  assert.equal(custody.pcCounts().pcAdmits, 0); assert.equal(custody.pcCounts().pcCloses, 0);
+  assert.equal(f.broker.counts().bytes, 0);
 });

@@ -1,5 +1,28 @@
 # Next voice milestone: native result recovery
 
+## Current SDP substep (24 October; not live V2 completion)
+
+The original Root first-round intent and native Control14 are implemented in the isolated
+`communication-sdp-effects` worktree, with current focused results and pending gates recorded
+at the top of HANDOVER. Root Ready110, storage10, atomic issuance1 and two layout guards pass;
+RPC wrapper6 and frontend framing/codecs17 pass. Native handoff323 and two blocked-TCP PC
+lifecycle cases pass; actual Node/browser HTTP14 composition passes at both endpoints (16.00s).
+The native oracle requires an actual original Root intent absent before dispatch. HANDOVER
+records focused/current full frontend results and the remaining Cargo gates. The Ready
+checkpoint `fc8ed136` is pushed; its complete suites keep their separate frozen source.
+
+Browser ABI25 retains exact PC custody, latches Close before its first admission callback,
+joins actual IO finally and closes PC before SDK/storage/key release. All refusals/lost replies
+retain Close; only authenticated version7 Closed resolves it. Deadlines never extend. The
+new fixed graph and transient maximum are counted inside the existing paid phase/Control
+allowances; ABI24 cannot be upgraded in place. No RTC constructor or effect accessor exists.
+
+Control14 chooses no browser keys or PC itself. Next implement typed SDP seal/open, native
+commit/delivery and actual complete-ICE/RTC. The
+reviewed causal design below remains binding: preserve original counters and payments, close
+unknown work durably, and never use an old receipt as standing effect authority. Fresh rounds,
+multi-peer composition, relay and combined/physical acceptance still remain after that vertical.
+
 ## Operational initial Ready (24 October; validation in progress)
 
 Native key adoption now latches a finite Ready intent on the original KeyClaim and nudges
@@ -128,6 +151,43 @@ HMR/component remount already retains the same broker. Until this is implemented
 fixed custody remains bounded until process exit; live V2 must not promise general reload
 recovery from these storage/custody leaves. A real realm-gone proof could retire fixed SDK
 custody, never fabricate authenticated Release or erase actual native owners/provider/OS heaps.
+
+## Reviewed PC-intent boundary for the next SDP vertical (24 October; not implemented)
+
+A new closed Control14 must use the original Session, parent action, KeyClaim, storage and
+SDK proofs. The caller supplies no PC generation or Ready identity. Native latches one
+fixed Preparing identity before the Actor wait. Root derives HIGH publication or LOW
+accepted Ready, original role, native generation and the unchanged finite deadline; exact
+retry returns the same original candidate. The proposed fixed graph payment must count
+native preparation/Claim wrappers, Root Arc/header and retained observers before allocation.
+It must be measured against the existing 4 KiB storage metadata and native row/future guards.
+
+Root's opaque intent owns fixed original-plan/effect/Ready observations, never Exchange,
+Workflow, plaintext or a parent Row. Scope labels are insufficient: compare the actual
+EstablishedKeyCustody/PlanBinding and exact original Phase effect allocation. Final mint,
+native attachment and every SDK/action/result/delivery repeat original currency. An old
+Current receipt supplies no indefinite effect permission or renewed clock window.
+
+For this one-shot phase, PC Close must persist Claim.request_close under native guards,
+then complete its affine CloseTicket outside them. This closes the already-known SAME
+Phase effect even when the Actor has not minted yet or its reply was lost. Never report
+permission Closed while an unknown late mint can still authorize effects. SDK13 Release
+must close that same effect gate before reporting Released too. Neither close proves actual
+SDK promise, input, HTTP, engine or Lower drainage; independent original duties remain.
+
+For the full SDP vertical, HIGH must finish native64 KiB and browser SDK custody before
+operational Ready Source queuing: core/marker and CoreDrained -> broker12/13 -> original
+PC intent -> Ready Source. LOW accepts Ready/extracts, then completes12/13/PC intent before
+its PC, complete gathering and Offer. The current initial-Ready checkpoint does not claim
+this operational SDP order. Its TCP custody fixture must become automatic on both browser
+sides rather than waiting for both Ready flags before requesting12/13.
+
+Initial LOW packet/action admission needs a private affine preparation path while Exchange
+is inactive; generic lenders stay Active-only. Publish role, draft, action and activation as
+one native transaction. ActionIssue publication must not acquire Exchange State under final
+Group/Policy: an irreversible atomic issued mask with an affine issue retained outside
+those guards is the reviewed direction. It is an issuance record, not a closure/authority
+fence. Whole graph tests and exact Close/SDKRelease/lost-reply barriers remain mandatory.
 
 ## Next operational Ready implementation: reviewed constraints (24 October)
 

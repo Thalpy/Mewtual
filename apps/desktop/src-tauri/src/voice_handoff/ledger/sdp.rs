@@ -17,6 +17,7 @@ pub(super) struct Claim {
     pub(super) phase: Option<Arc<Phase>>,
     pub(super) sdk_preparing: bool,
     pub(super) sdk: Option<Arc<super::sdk::Claim>>,
+    pub(super) pc: Option<super::pc::Claim>,
 }
 /// Move only OUT of native guards. Actual notifications/reserve retirement run on Drop,
 /// including abandonment/unwind immediately after the irreversible close publication.
@@ -40,6 +41,7 @@ impl Claim {
     /// drainage and cannot release this distinct installed obligation.
     pub(super) fn whole_drained(&self) -> bool {
         self.storage_drained()
+            && self.pc.as_ref().is_none_or(|pc| !pc.worker())
             && !self.sdk_preparing
             && self.sdk.as_ref().is_none_or(|sdk| sdk.released())
     }
@@ -228,6 +230,7 @@ impl ResolvedRow {
                 phase: None,
                 sdk_preparing: false,
                 sdk: None,
+                pc: None,
             });
         }
         key.sdp.as_mut().unwrap().worker = true;

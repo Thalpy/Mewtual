@@ -436,6 +436,32 @@ impl Endpoint {
         assert_eq!(parent.sdk_test_released(), Some(false));
     }
 
+    /// Actual retained browser -> framed HTTP14 -> native -> queued Actor -> Root.
+    /// No PC proof, Ready/role or admission bool is supplied by this test control pipe.
+    pub(crate) async fn pc_custody(&mut self, parent: &ledger::ResolvedRow) {
+        assert!(
+            parent.pc_test_intent().is_none(),
+            "no preinstalled native PC intent"
+        );
+        assert_eq!(
+            self.step(json!({"tag":"step", "name":"pc-custody"})).await,
+            json!({"kind":"pc-attempted"})
+        );
+        let intent = parent
+            .pc_test_intent()
+            .expect("actual HTTP14 must attach Root's original intent");
+        let phase = parent.sdp_test_phase().unwrap();
+        let clock = crate::voice_runtime(&self.state).clock();
+        assert!(intent.uses_phase(&phase));
+        assert_eq!(intent.generation(), 1);
+        assert_eq!(
+            intent.round().profile,
+            catcoms_sync::voice_v2::SdpProfile::CompleteSdpV1
+        );
+        assert!(intent.current_at(clock.now_ms(), clock.monotonic_ms()));
+        assert_eq!(parent.sdk_test_released(), Some(false));
+    }
+
     pub(crate) async fn close(mut self) -> Result<(), Failure> {
         let closed =
             catch_fixture(async {

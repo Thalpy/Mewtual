@@ -39,6 +39,7 @@ pub(in crate::voice_handoff) enum Operation {
     KeySession = 11,
     SdpPhase = 12,
     SdkCustody = 13,
+    PcIntent = 14,
 }
 impl Operation {
     fn parse(value: u8) -> Result<Self, Refused> {
@@ -56,6 +57,7 @@ impl Operation {
             11 => Ok(Self::KeySession),
             12 => Ok(Self::SdpPhase),
             13 => Ok(Self::SdkCustody),
+            14 => Ok(Self::PcIntent),
             _ => Err(Refused::Header),
         }
     }

@@ -37,6 +37,61 @@ pub use body::{
     VoiceConfirmationBody, VoiceConfirmationCompletion, VOICE_CONFIRMATION_BODY_METADATA_BYTES,
 };
 
+/// Actual queued/result ownership for one initial SDP-intent RPC. A lost observer or
+/// closed reply does not refund its phase contribution before Root and the reply retire.
+/// It never enters the retained Pair/intent, so it cannot create a Phase custody cycle.
+pub struct InitialSdpCompletion {
+    result: Result<Arc<catcoms_sync::voice_v2::sdp::InitialSdpIntent>, VoiceError>,
+    // LAST: the whole command/result graph must die before actual phase drainage.
+    _work: Arc<InitialSdpWork>,
+}
+impl std::fmt::Debug for InitialSdpCompletion {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        // Neither protocol identities nor a historical result are diagnostic authority.
+        f.write_str("InitialSdpCompletion { .. }")
+    }
+}
+impl InitialSdpCompletion {
+    pub fn result(
+        &self,
+    ) -> Result<&Arc<catcoms_sync::voice_v2::sdp::InitialSdpIntent>, VoiceError> {
+        self.result.as_ref().map_err(|error| *error)
+    }
+}
+
+/// Observation of one already queued original request. Dropping this receiver does not
+/// cancel/refund the Command's real Copy. It may still publish and must be recoverable.
+pub struct InitialSdpPending(
+    sdp_rpc::Pending<Result<InitialSdpCompletion, VoiceError>, InitialSdpWork>,
+);
+impl std::fmt::Debug for InitialSdpPending {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("InitialSdpPending { .. }")
+    }
+}
+impl InitialSdpPending {
+    pub async fn complete(self) -> Result<InitialSdpCompletion, VoiceEndpointError> {
+        self.0
+            .receive()
+            .await
+            .map_err(|_| VoiceEndpointError::Stopped)?
+            .map_err(VoiceEndpointError::Protocol)
+    }
+}
+
+// Keep both channel sides and completions on one affine contribution. The generic
+// wrapper's destructor tests exercise the exact production field and cancellation order.
+mod sdp_rpc;
+type InitialSdpWork = catcoms_sync::voice_v2::chain::sdp_handoff::Copy;
+struct InitialSdpMessage {
+    grant: Arc<CallGrant>,
+    handshake: Nonce,
+    key: catcoms_sync::voice_v2::chain::EstablishedKeyCustody,
+    effect: catcoms_sync::voice_v2::chain::sdp_handoff::EffectObserver,
+    generation: u64,
+    reply: Reply<InitialSdpCompletion>,
+}
+
 /// Opaque envelope required by the public AppCommand type. Its private variants have no public
 /// constructors or serialization; trusted native callers use the typed ServerActor methods.
 pub struct VoiceEndpointCommand(Command);
@@ -110,6 +165,7 @@ enum Command {
         helpers: [Option<DeviceId>; 2],
         reply: Reply<bool>,
     },
+    InitialSdpIntent(sdp_rpc::Command<InitialSdpMessage, InitialSdpWork>),
     HighReadyConnected {
         grant: Arc<CallGrant>,
         handshake: Nonce,
@@ -287,6 +343,41 @@ impl Command {
                         [None, Some(_)] => Err(VoiceError::Malformed),
                     };
                     let _ = reply.send(result);
+                }
+            }
+            Self::InitialSdpIntent(command) => {
+                if command.message.reply.is_closed() {
+                    // Whole-wrapper Drop destroys grant/key/effect/reply before last work.
+                    // This same path is exercised by the closed-receiver sentinel test.
+                    drop(command);
+                } else {
+                    let sdp_rpc::Command { message, work } = command;
+                    let InitialSdpMessage {
+                        grant,
+                        handshake,
+                        key,
+                        effect,
+                        generation,
+                        reply,
+                    } = message;
+                    let result = if work.matches_effect(&effect)
+                        && work.covers_work(INITIAL_SDP_RPC_BYTES)
+                    {
+                        server.sync.prepare_voice_initial_sdp_intent(
+                            &grant, handshake, key, effect, generation,
+                        )
+                    } else {
+                        Err(VoiceError::Unauthorized)
+                    };
+                    drop(grant);
+                    // No final Group/Policy guard survives this completion move, including
+                    // rejection or a receiver disappearing during the Root publication.
+                    sdp_rpc::complete(reply, work, |work| {
+                        Ok(InitialSdpCompletion {
+                            result,
+                            _work: work,
+                        })
+                    });
                 }
             }
             Self::HighReadyConnected {
@@ -512,6 +603,56 @@ impl ServerActor {
         })
         .await
     }
+    /// Native-only original phase/PC intent. The adapter must bind its actual key,
+    /// storage and SDK owners before submitting; the result is not a serialized grant.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn prepare_voice_initial_sdp_intent(
+        &self,
+        grant: Arc<CallGrant>,
+        handshake: Nonce,
+        key: catcoms_sync::voice_v2::chain::EstablishedKeyCustody,
+        effect: catcoms_sync::voice_v2::chain::sdp_handoff::EffectObserver,
+        generation: u64,
+        work: catcoms_sync::voice_v2::chain::sdp_handoff::Copy,
+    ) -> Result<InitialSdpCompletion, VoiceEndpointError> {
+        self.queue_voice_initial_sdp_intent(grant, handshake, key, effect, generation, work)
+            .await?
+            .complete()
+            .await
+    }
+
+    /// Enqueue with its same prepaid contribution before returning an observer. This is
+    /// distinct from a possibly unpolled future and gives cancellation a precise boundary.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn queue_voice_initial_sdp_intent(
+        &self,
+        grant: Arc<CallGrant>,
+        handshake: Nonce,
+        key: catcoms_sync::voice_v2::chain::EstablishedKeyCustody,
+        effect: catcoms_sync::voice_v2::chain::sdp_handoff::EffectObserver,
+        generation: u64,
+        work: catcoms_sync::voice_v2::chain::sdp_handoff::Copy,
+    ) -> Result<InitialSdpPending, VoiceEndpointError> {
+        if !work.matches_effect(&effect) || !work.covers_work(INITIAL_SDP_RPC_BYTES) {
+            return Err(VoiceEndpointError::Protocol(VoiceError::Capacity));
+        }
+        let (command, pending) = sdp_rpc::request(work, |reply| InitialSdpMessage {
+            grant,
+            handshake,
+            key,
+            effect,
+            generation,
+            reply,
+        });
+        self.cmd_tx
+            .send(AppCommand::VoiceEndpoint(VoiceEndpointCommand(
+                Command::InitialSdpIntent(command),
+            )))
+            .await
+            .map_err(|_| VoiceEndpointError::Stopped)?;
+        Ok(InitialSdpPending(pending))
+    }
+
     /// Select authenticated connected member helpers inside Root, then recover/prepare the
     /// same immutable HIGH Ready. The caller supplies no helper or version-compatibility hint.
     pub async fn prepare_voice_high_ready_connected(
@@ -773,3 +914,13 @@ impl ServerActor {
 
 #[cfg(test)]
 mod tests;
+
+/// Fixed queued command, outer App envelope, completion and bounded oneshot bookkeeping.
+/// Native adds the actual calling future before admitting its original phase Copy.
+pub const INITIAL_SDP_RPC_BYTES: usize = std::mem::size_of::<Command>()
+    + std::mem::size_of::<AppCommand>()
+    + std::mem::size_of::<InitialSdpCompletion>()
+    + std::mem::size_of::<InitialSdpPending>()
+    + std::mem::size_of::<InitialSdpWork>()
+    + 2 * std::mem::size_of::<usize>()
+    + 512;

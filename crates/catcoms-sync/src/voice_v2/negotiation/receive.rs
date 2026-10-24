@@ -72,6 +72,49 @@ pub(in crate::voice_v2) struct AdmittedOfferParts {
 redacted_debug!(HighReceive, PreparedOffer, RetainedOffer);
 
 impl Exchange {
+    /// Capture first-round identity without retaining this Exchange in permanent/native
+    /// intent history. Caller must already own the original paid native handoff phase.
+    pub(in crate::voice_v2) fn initial_sdp_metadata(
+        &self,
+        wall: u64,
+        mono: u64,
+    ) -> Result<crate::voice_v2::sdp::InitialSdpMetadata, VoiceError> {
+        use crate::voice_v2::sdp::{InitialSdpMetadata, ReadyEvidence};
+        let proof = self.successor.as_ref().ok_or(VoiceError::Unauthorized)?;
+        if !proof.drained() {
+            return Err(VoiceError::Capacity);
+        }
+        if !proof.current_at(mono) || self.activated.load(Ordering::Acquire) {
+            return Err(VoiceError::Unauthorized);
+        }
+        let ready = if proof.binding().low {
+            let receipt = self.low_ready.as_ref().ok_or(VoiceError::Unauthorized)?;
+            if !self.low_ready_retry_open() || !receipt.authorized_at(wall, mono) {
+                return Err(VoiceError::Unauthorized);
+            }
+            ReadyEvidence::Low(receipt.clone())
+        } else {
+            if !self.ready_publication_current_at(wall, mono) {
+                return Err(VoiceError::Unauthorized);
+            }
+            let marker = self
+                .ready_publication
+                .get()
+                .ok_or(VoiceError::Unauthorized)?;
+            ReadyEvidence::High {
+                live: marker.live.clone(),
+                issued: marker.issued,
+                expires: marker.expires,
+                first_mono: marker.first_mono,
+                deadline: marker.deadline,
+            }
+        };
+        Ok(InitialSdpMetadata {
+            original: proof.original_observation(),
+            round: self.sdp_round().ok_or(VoiceError::Unauthorized)?,
+            ready,
+        })
+    }
     pub(in crate::voice_v2) fn ready_source_call(&self, call: &CallLease) -> bool {
         self.successor
             .as_ref()

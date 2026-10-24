@@ -1,5 +1,28 @@
 # Chat, files and voice implementation evidence
 
+## Original PC intent composition (24 October; live V2 still incomplete)
+
+Root's original HIGH/LOW Ready evidence now produces one fixed first-round intent on the
+exact established-key/storage phase. Control14/version7 attaches that intent to the original
+native Session/storage/SDK obligations. Browser ABI25 retains its fixed history inside the
+already prepaid64KiB subtree. End/lost/refused admission retains exact PC Close before SDK,
+storage and key release; no receipt becomes standing RTC permission.
+
+Focused evidence: Root Ready110, storage10, atomic issuance1 and two Root layout guards;
+RPC lifetime6 with a failing sender-retention negative control; native handoff323; two actual
+blocked-TCP PC lifetime/SDK orderings (20.78s). The automatic A-B-C Node/HTTP scenario now also
+performs HTTP14 at both endpoints and independently requires the actual native Root intent
+(absent before, same original Phase/generation/profile/current after); it passes in16.00s.
+A-C remains forbidden and B joins nothing. Actual normal browser cleanup must then complete.
+These current-source binaries use exact cached Cargo dependencies; complete Cargo gates remain
+required. HANDOVER tracks full frontend/gate results and the separate immutable Ready run.
+Read-only review found no B/H/M; explicit PC graph accounting and current docs address its lows.
+
+This does not establish typed SDP seal/open/private native delivery, complete ICE/RTC, fresh
+rounds, multi-peer operation, member media relay, combined rollout or physical audio/network
+acceptance. Operational Ready/PC ordering still needs the complete consumer, rather than the
+test waiting for both Ready flags before12/13/14. The one-desktop hardware limit is unchanged.
+
 ## Operational initial Ready (24 October; validation in progress)
 
 Native key adoption now latches a finite Ready intent on the original KeyClaim and nudges
