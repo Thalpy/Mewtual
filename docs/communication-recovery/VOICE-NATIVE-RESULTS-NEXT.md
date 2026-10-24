@@ -1,5 +1,39 @@
 # Next voice milestone: native result recovery
 
+## Reviewed next transport boundary (24 October; not yet implemented)
+
+The concrete original-paid Actor Buffer/Command/Pending/Completion bridge is implemented in
+communication-sdp-actor; current evidence belongs at the top of HANDOVER. Next wire it to
+closed SDP-only framing and the private browser producer. Preserve these reviewed constraints:
+
+- Authenticate canonical Header MAC, then resolve the actual MAC-owning Session, indexed
+  original parent/action row, selection and stored key/storage/SDK/PC/purpose BEFORE body
+  allocation or directional counter debit. Header cannot validate encrypted repeats yet;
+  check those after AEAD. Add an opaque SDP admission permit, not another optional legacy Phase.
+- Keep generic Data2048/confirmation528 closed. New SDP request/response opcodes and body
+  class need exact shape tables. The absolute HTTP ceiling is not authority to widen old classes.
+- Share the existing32 native row slots with separate SDP Pending/Live/Drained variants.
+  Do not reuse PreparedPhase::try_bind or Plan::capture: they retain the old confirmation
+  Workflow. Prepay plain independently retained fixed history before Row/Actor allocation.
+  Bound it to the original Seal/Open purposes; variable Phase Copies cannot fund history.
+- Persist Pending before Actor handoff, and capture every returned original Root Action in
+  Pending BEFORE current/fallible attachment, including after End. HTTP/waiter loss cannot
+  discard a possibly published Action or admit another factory. Recover exact retained work.
+- Per-action Return must not close the shared SDP phase and revoke the opposite action.
+  Each Copy releases its publication keepalive reference before its credit/copy-count
+  return; a worker may retain publication longer on separate TaskCopy payment. Publication
+  destruction alone cannot prove row IO drainage. Fixed history keeps no Body/Copy/Publication/Work owners.
+- Control-sized terminal/history recovery, ACK/settle/close stay reachable after storage
+  closes; never reopen it or require a new large result body to recover history after End.
+- Measure both fixed row fees, phase4KiB metadata, actual Task/Actor/body/response graphs,
+  max8192/8208 bytes plus579B AAD and actual backing capacities inside64KiB/16 copies.
+  Remeasure service32KiB worker/dispatcher graphs; large inline awaited futures also count.
+
+Require real valid-MAC wrong-session/parent/purpose/class/length tests before allocation,
+unchanged counters on local capacity refusal, bad-AEAD one-time counter consumption, queued
+HTTP-loss/End races, same Action recovery and independent action Return/whole-phase close.
+This design review is not evidence that those endpoints, SDK/RTC or relay already exist.
+
 ## Current Root SDP path and next integration (24 October)
 
 Checkpoint `13891350` is pushed on `communication-sdp-effects`. Continuing work is isolated
@@ -21,7 +55,7 @@ internally. Its monotone completion history cannot be downgraded by a delayed ad
 generic protected-round reservation refuses bypass. Root signed two-way exchange and pressure
 regressions pass, with SDK success/AEAD mocked. This does not establish the actual SDK producer.
 
-Next implement paid typed Actor command/result custody; closed native SDP request/body grammar authenticated
+The paid typed Actor bridge now exists. Next implement closed native SDP request/body grammar authenticated
 against original Session/key/storage/SDK/PC/action BEFORE allocation/counter debit; and private
 browser original-key seal/open plus complete-ICE RTC. Keep confirmation Data2048/result528
 unchanged. Native must recover the exact registered result before current Actor checks after

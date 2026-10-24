@@ -1,5 +1,23 @@
 # Mewtual; Architecture
 
+## Concrete paid SDP Actor transport (24 October; endpoint integration pending)
+
+Typed Rust-only SDP commands now carry one original Buffer/Copy into the bounded Actor
+mailbox without copying its payload. Body construction validates range, actual backing
+capacity, original PC-intent/Phase identity and the extra4KiB RPC payment before allocating.
+Refusal returns the SAME Buffer. A single busy flight shares paid work through Command,
+Pending and Completion; observing a result does not collect it or permit another claim.
+
+The Copy can retain method-free native publication custody. That custody owns the actual
+UI commit, unique physical position and a separate original TaskCopy. TaskCopy cannot adopt
+bytes or receive a keepalive, preventing the direct self-funding cycle. Bytes zeroize and
+deallocate before their Copy releases its keepalive reference, then its own credit. The
+publication's actual last Drop remains paid by its separate TaskCopy; Phase drainage waits
+for every actual Copy, including a worker which outlives its body.
+All handlers retire argument owners before their final shared RPC work, including abandoned
+waiters. Root still repeats current authority. This supplies no native wire endpoint or SDK
+producer: their complete worker/dispatcher/response graphs still require measurement.
+
 ## Root Answer production after applied Open (24 October)
 
 The original fixed delivery is a monotone Prepared/Admitted/Applied cell. Root's separate
@@ -7,8 +25,8 @@ completion API requires the exact original accepted Open and current native owne
 Answer resolves that SAME applied record and derives Offer/round internally. It borrows the
 existing Active packet/action claims and publishes action, draft and global counter together.
 Generic protected-round reservation is forbidden, including after header admission/Applied.
-This adds no permanent allocation or progress backedge. Native/browser SDK success, paid
-Actor transport, complete ICE/RTC and later operational rounds still need integration; the
+This adds no permanent allocation or progress backedge. Native/browser SDK success and its
+paid Actor producers, complete ICE/RTC and later operational rounds still need integration; the
 Root Applied marker establishes causal ordering and exact recovery, not SDK execution.
 
 ## Root SDP commit and delivery (24 October; native/browser integration pending)

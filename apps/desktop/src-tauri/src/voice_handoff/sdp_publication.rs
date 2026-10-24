@@ -1,0 +1,70 @@
+//! Native lifetime custody for original SDP work, separate from the drained confirmation
+//! Workflow. A queued Actor command must keep publication ordered against UI lock even if
+//! its submitting task disappears. This wrapper grants no crypto/RTC authority: native final
+//! admission and Root current-owner checks still apply independently.
+use super::channel::{PhysicalHold, Session};
+use catcoms_sync::voice_v2::chain::sdp_handoff::TaskCopy;
+use catcoms_sync::voice_v2::sdp::InitialSdpIntent;
+use catcoms_sync::voice_v2::VoiceError;
+use std::sync::Arc;
+
+// Measure actual detached-worker/custodian/future storage before worker entry. Body/RPC
+// metadata has a separate ORIGINAL Copy. Both come from the SAME 64KiB phase, not a new pool.
+pub(super) const TASK_BYTES: usize = 4096;
+
+pub(super) struct Publication {
+    commit: Option<tokio::sync::OwnedMutexGuard<()>>,
+    _physical: PhysicalHold,
+    // LAST. TaskCopy cannot adopt bytes, retain a keepalive or expose its underlying Copy.
+    // Thus Publication cannot retain itself through its own funding owner.
+    _payment: TaskCopy,
+}
+impl std::fmt::Debug for Publication {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("SdpPublication { .. }")
+    }
+}
+impl Publication {
+    /// Outside every native/Root/Phase guard, BEFORE constructing a detached future or
+    /// lending custody to an Actor body. Both inputs are affine original native owners.
+    pub(super) fn preparing(
+        physical: PhysicalHold,
+        session: &Arc<Session>,
+        intent: &Arc<InitialSdpIntent>,
+        payment: TaskCopy,
+    ) -> Result<Self, VoiceError> {
+        // Put the affine arguments into their final field order even on local refusal.
+        // Payment then outlives physical destruction instead of relying on parameter order.
+        let owner = Self {
+            commit: None,
+            _physical: physical,
+            _payment: payment,
+        };
+        if !owner._physical.belongs_to(session) || !owner._payment.uses_intent(intent) {
+            return Err(VoiceError::Unauthorized);
+        }
+        if !owner._payment.covers_work(TASK_BYTES) {
+            return Err(VoiceError::Capacity);
+        }
+        Ok(owner)
+    }
+    /// Only the unique pre-publication worker may install the actual admitted UI guard.
+    /// Clones given to bytes/RPCs must always contain Some. No native row retains this owner.
+    pub(super) fn admit(&mut self, commit: tokio::sync::OwnedMutexGuard<()>) {
+        assert!(
+            self.commit.is_none(),
+            "one original SDP publication admission"
+        );
+        self.commit = Some(commit);
+    }
+}
+
+// Arc counters, alignment, and the whole inline custodian are paid before Arc allocation.
+#[repr(C)]
+struct ArcAllocation<T> {
+    strong: std::sync::atomic::AtomicUsize,
+    weak: std::sync::atomic::AtomicUsize,
+    value: T,
+}
+pub(super) const FIXED_BYTES: usize = std::mem::size_of::<ArcAllocation<Publication>>();
+const _: () = assert!(FIXED_BYTES <= TASK_BYTES);

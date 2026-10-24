@@ -1,5 +1,42 @@
 # Mewtual; Handover
 
+## Paid SDP Actor bridge (25 October; endpoint/browser implementation continues)
+
+`communication-sdp-actor` / `target/communication-sdp-actor-worktree` extends pushed HIGH
+Answer checkpoint `30a97e20`. Rust-only typed SDP body/metadata RPCs now preserve the actual
+original Buffer, native publication keepalive and affine phase payment through queued
+Command, Pending and returned Completion. Same-body concurrent claims refuse until actual
+collection. Constructor refusal returns the identical Buffer, including its keepalive.
+Action result/delivery commands also verify the SAME original PC intent allocation.
+
+Native publication owns the actual UI commit, unique physical request hold and a separate
+original TaskCopy. TaskCopy cannot adopt bytes/attach custody/export its inner Copy, so the
+direct self-funding cycle is unavailable. Each body Copy releases its keepalive reference
+before its own credit. A worker retaining publication longer stays paid by its TaskCopy;
+actual last-copy destruction, rather than a receipt/timeout, permits Phase drainage.
+
+Current focused checks pass:12 Root SDP custody tests,39 Actor voice tests (all eight queue
+and four completion future layouts included),323 native handoff tests, both actual blocked-TCP
+PC/Actor lifecycle cases (19.53s), and the complete2,735 frontend tests (95.90s). Native tests
+exercise stopped Actor, actual queued/waiter loss, uncollected completion, same-key foreign
+Phase identity and underpaid exact-buffer refusal. The expanded nested stopped-Actor fixture
+initially overflowed the Windows test stack; boxing only its test construction/helper fixes
+that without increasing the stack or changing assertions/production payment.
+
+Formal native Cargo check passes (94s); strict Root all-target/all-feature Clippy and strict
+native all-target Clippy pass, as do formatting, ambient and diff checks. Complete current
+Root/native suites are queued on this frozen source before publishing this checkpoint;
+earlier full-suite results below remain separate. The inherited cargo-deny advisory is not
+fixed or ignored by this change. No dependency change is included.
+
+No new native SDP opcode/body class or private browser SDP/RTC producer exists yet. Their
+complete worker/dispatcher/input/response graph must still fit the original budgets. The
+reviewed next transport constraints are at the top of VOICE-NATIVE-RESULTS-NEXT.md: separate
+SDP rows sharing32 slots, independent plain history funding, actual Session/header checks
+before allocation/counter debit, and per-action IO collection separate from whole-phase close.
+Fresh rounds, multi-peer composition, member media relay, combined and physical acceptance
+remain unfinished. External download resume stays outside this implementation area.
+
 ## Root HIGH Answer ordering (24 October; browser/native producer still pending)
 
 `communication-sdp-answer` / `target/communication-sdp-answer-worktree` extends the pushed

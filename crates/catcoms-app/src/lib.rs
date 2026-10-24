@@ -71,8 +71,10 @@ pub mod studio_exchange;
 pub use actor::{
     spawn, AppCommand, AppEvent, DownloadReady, Envelope, InitialSdpCompletion, InitialSdpPending,
     ServerActor, Trace, TracedEvent, VoiceConfirmationBody, VoiceConfirmationCompletion,
-    VoiceEndpointCommand, VoiceEndpointError, INITIAL_SDP_RPC_BYTES,
-    VOICE_CONFIRMATION_BODY_METADATA_BYTES,
+    VoiceEndpointCommand, VoiceEndpointError, VoiceSdpBody, VoiceSdpBodyRefusal,
+    VoiceSdpCompletion, VoiceSdpPending, INITIAL_SDP_RPC_BYTES,
+    VOICE_CONFIRMATION_BODY_METADATA_BYTES, VOICE_SDP_RPC_FIXED_BYTES,
+    VOICE_SDP_RPC_METADATA_BYTES,
 };
 pub use moderation::{
     ModerationEvent, ModerationState, ModerationVote, MAX_MOD_EVIDENCE_BYTES, MAX_MOD_EVIDENCE_IDS,

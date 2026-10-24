@@ -41,8 +41,10 @@ mod member_reconnect;
 mod voice_endpoint;
 pub use voice_endpoint::{
     InitialSdpCompletion, InitialSdpPending, VoiceConfirmationBody, VoiceConfirmationCompletion,
-    VoiceEndpointCommand, VoiceEndpointError, INITIAL_SDP_RPC_BYTES,
-    VOICE_CONFIRMATION_BODY_METADATA_BYTES,
+    VoiceEndpointCommand, VoiceEndpointError, VoiceSdpBody, VoiceSdpBodyRefusal,
+    VoiceSdpCompletion, VoiceSdpPending, INITIAL_SDP_RPC_BYTES,
+    VOICE_CONFIRMATION_BODY_METADATA_BYTES, VOICE_SDP_RPC_FIXED_BYTES,
+    VOICE_SDP_RPC_METADATA_BYTES,
 };
 
 /// Per drive: how long to wait for a discovered record before concluding the queue is drained.

@@ -1237,6 +1237,8 @@ pub(crate) async fn confirmation_round_trip(
 }
 /// Full native framed Input/admit/result/ACK/settle/Return, with explicit test-only AES keys.
 /// This is not browser key derivation, production effect dispatch or RTC acceptance.
+// Both endpoints' actual state/selection/parent owners stay explicit in this test fixture.
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn confirmation_framed_round_trip(
     low_state: &AppState,
     low: &Arc<SelectedHandoffOwner>,

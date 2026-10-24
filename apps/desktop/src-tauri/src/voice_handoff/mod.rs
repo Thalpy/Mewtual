@@ -32,6 +32,7 @@ mod replies;
 mod requests;
 mod sdk;
 mod sdp;
+mod sdp_publication;
 mod service;
 mod settlement;
 mod transition;

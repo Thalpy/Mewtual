@@ -1,5 +1,24 @@
 # Threat model; client integrity & enforcement boundaries
 
+## SDP Actor publication lifetime (24 October; no new renderer endpoint)
+
+A submitting worker, waiter or socket can disappear while an independent Actor still owns
+its command. Actual SDP body/metadata Copies therefore retain the original native publication
+guard, not a copied session/open flag. The actual UI commit and physical position survive
+queued work and uncollected results. They grant no effect authority. Every typed command
+checks actual intent provenance and Root repeats current Actor/room/epoch/call/PC checks.
+
+The publication custodian owns a separate original TaskCopy which cannot receive a keepalive:
+the direct Publication -> funding Copy -> Publication cycle is unrepresentable through this
+API. Body/RPC Copies may retain the custodian, which must not own those bytes/RPCs in return.
+Permanent native history must retain neither. Destruction stays outside native/Root/Phase
+guards; publication Drop may enter native locks. Bytes disappear before their Copy releases
+its keepalive reference and own credit. Actual last publication destruction may happen later,
+covered by its separate TaskCopy; Phase drainage waits for every actual Copy. A result
+observation or timeout proves none of
+these. The future native SDK producer and its complete worker graph remain unimplemented;
+this custody mechanism alone is not authenticated admission or proof an RTC SDK ran.
+
 ## Applied delivery and HIGH Answer (24 October; no SDK attestation)
 
 Signed Offer header admission alone cannot issue an Answer. The private HIGH factory requires

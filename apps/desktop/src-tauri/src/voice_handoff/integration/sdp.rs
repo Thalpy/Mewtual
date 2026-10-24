@@ -41,6 +41,8 @@ async fn exchange(
     .unwrap();
     opened_reply(public, header, body, &reply)
 }
+// Keep original endpoint/parent/proof owners explicit across these independent race modes.
+#[allow(clippy::too_many_arguments)]
 pub(super) async fn exercise(
     state: &AppState,
     public: &bootstrap::SetupOutput,

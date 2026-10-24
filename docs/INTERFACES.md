@@ -1,5 +1,26 @@
 # Mewtual; Interfaces & Hooks Schema
 
+## Rust-only SDP Actor bodies and RPCs (24 October; native producer pending)
+
+VoiceSdpBody::from_buffer consumes the original sdp_handoff::Buffer, a bounded range and
+actual InitialSdpIntent. Every refusal returns that same Buffer through into_parts. Native
+must include backing capacity plus VOICE_SDP_RPC_METADATA_BYTES4096 in the original Copy
+before allocation and install actual publication custody before queueing. One body funds
+one actual flight through returned completion collection. There is no Clone/raw Vec export.
+
+ServerActor queue_voice_sdp_offer/answer/open, sealed_result/opened_result,
+authentication_failed and delivery_admission/completion call the existing typed Root APIs.
+The returned VoiceSdpPending exists only after successful mailbox enqueue. complete() returns
+an opaque VoiceSdpCompletion whose result() borrows metadata; it retains the original work
+until Drop. Metadata-only commands need their own original intent-matching Copy,4KiB payment
+and publication keepalive. Action result/delivery commands also require actual intent identity.
+
+VOICE_SDP_RPC_FIXED_BYTES models aligned Body/Work Arc allocations, actual Actor/App envelopes,
+pending/completion values and bounded oneshot bookkeeping. Native adds its ACTUAL calling
+future before admission. Independent TaskCopy pays its own native publication/worker graph;
+it cannot attach a keepalive or turn into a body Copy. No native wire opcode/body class,
+browser ABI change or live voice enablement is added by this Actor increment.
+
 ## Protected HIGH Answer completion (24 October; Root-only integration)
 
 complete_voice_sdp_delivery takes the actual registered Open action and SAME SdpDelivery.

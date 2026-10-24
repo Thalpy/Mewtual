@@ -11,6 +11,7 @@ mod key_session;
 mod pc;
 mod sdk;
 mod sdp;
+mod sdp_actor;
 mod transition;
 pub(crate) mod webcrypto;
 pub(crate) use confirmation::{

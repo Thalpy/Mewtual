@@ -25,7 +25,9 @@ async fn exchange(
     .unwrap();
     opened_reply(public, header, body, &reply)
 }
-async fn park(actor: &catcoms_app::ServerActor) -> catcoms_app::durable_chat::DurableSendReady {
+pub(super) async fn park(
+    actor: &catcoms_app::ServerActor,
+) -> catcoms_app::durable_chat::DurableSendReady {
     let expected_context = actor.durable_send_context().await.unwrap();
     actor
         .prepare_durable_send(catcoms_app::durable_chat::DurableSendRequest {
@@ -180,7 +182,7 @@ pub(super) async fn exercise(
     };
     let pending = actor
         .queue_voice_initial_sdp_intent(
-            grant,
+            grant.clone(),
             request.base.handshake,
             custody,
             phase.effect(),
@@ -194,6 +196,23 @@ pub(super) async fn exercise(
     if case == 1 {
         let completion = pending.complete().await.unwrap();
         assert!(completion.result().is_ok());
+        // A new authenticated frame supplies its own physical hold for actual typed SDP
+        // RPC tests. The original PC-intent request is already collected here.
+        drop(physical);
+        drop(incoming);
+        // Keep the test-only nested stopped-Actor setup out of every ancestor TCP future.
+        // This is fixture heap storage, not production task payment or a larger stack.
+        let held = Box::pin(super::sdp_actor::exercise(
+            state,
+            public,
+            route,
+            parent,
+            &body,
+            &actor,
+            &grant,
+            completion.result().unwrap(),
+        ))
+        .await;
         let proof = parent
             .close_pc(route.session().identity(), &request)
             .unwrap()
@@ -203,6 +222,18 @@ pub(super) async fn exercise(
         assert_eq!(phase.status(), Status::Closing);
         assert!(!completion.result().unwrap().current_at(1_000, 1_000));
         drop(completion);
+        assert_eq!(
+            phase.status(),
+            Status::Closing,
+            "actual SDP body/result still owns publication"
+        );
+        drop(held.0);
+        assert_eq!(
+            phase.status(),
+            Status::Closing,
+            "returned SDP completion is still uncollected"
+        );
+        drop(held.1);
     } else {
         let proof = parent
             .close_pc(route.session().identity(), &request)
@@ -236,6 +267,8 @@ pub(super) async fn exercise(
             assert_eq!(phase.status(), Status::Closing);
             drop(late);
         }
+        drop(physical);
+        drop(incoming);
     }
     assert_eq!(phase.status(), Status::Drained);
     if preparation.is_some() {
@@ -243,6 +276,4 @@ pub(super) async fn exercise(
     }
     drop(preparation); // Actual native finally, distinct from queued/result Copy drainage.
     assert!(parent.sdp_test_whole_drained());
-    drop(physical);
-    drop(incoming);
 }

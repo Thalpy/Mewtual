@@ -28,7 +28,7 @@ pub const NATIVE_PC_ADAPTER_METADATA_BYTES: usize = 288;
 const _: () = assert!(
     NATIVE_PC_ROOT_METADATA_BYTES + NATIVE_PC_ADAPTER_METADATA_BYTES <= NATIVE_PC_METADATA_BYTES
 );
-// Actual Buffer/Copy/Credit graph plus128B caller bookkeeping is264B on the
+// Actual Buffer/Copy/Credit/keepalive graph plus128B caller bookkeeping is280B on the
 // supported layout. Round its payment to32B; keep the whole64KiB envelope unchanged.
 const COPY_METADATA: usize = 288;
 const COPIES: usize = 16;
@@ -69,7 +69,7 @@ struct EffectOwner {
 /// outlive the Phase payment. This observer retains that exact fixed payment to last Drop.
 /// It owns no phase, buffer, SDK promise, crypto lane or native parent row.
 pub struct EffectObserver(Arc<EffectOwner>);
-redacted_debug!(Phase, EffectObserver, Copy, Buffer);
+redacted_debug!(Phase, EffectObserver, Copy, Buffer, TaskCopy);
 impl EffectObserver {
     /// Allocation identity, not authority. Exact native recovery compares the original
     /// phase; a new phase with equal scope labels is a different preparation.
@@ -104,6 +104,31 @@ pub struct Copy {
     credit: Option<Credit>,
     phase: Arc<Phase>,
     capacity: usize,
+    // Method-free native lifetime custody, never effect authority. Actual SDP RPCs use
+    // this to retain their admitted UI commit + unique physical request through queued
+    // Actor work and returned results after the submitting worker disappears. A separate
+    // task Copy pays that native wrapper; NEVER attach the wrapper to its own funding Copy
+    // (Publication -> funding Copy -> Publication would prevent every last Drop).
+    keepalive: Option<catcoms_rt::SharedRequestKeepalive>,
+}
+/// Separate native publication/task funding. Unlike an RPC/body Copy, this owner cannot
+/// adopt a payload or attach a keepalive: the native publication wrapper may own it without
+/// being able to create a Publication -> funding Copy -> Publication self-cycle.
+///
+/// ```compile_fail
+/// use catcoms_sync::voice_v2::chain::sdp_handoff::TaskCopy;
+/// fn attach(payment: &mut TaskCopy, custody: catcoms_rt::SharedRequestKeepalive) {
+///     payment.attach_keepalive(custody).unwrap();
+/// }
+/// ```
+pub struct TaskCopy(Copy);
+impl TaskCopy {
+    pub fn uses_intent(&self, intent: &crate::voice_v2::sdp::InitialSdpIntent) -> bool {
+        self.0.uses_intent(intent)
+    }
+    pub fn covers_work(&self, bytes: usize) -> bool {
+        self.0.covers_work(bytes)
+    }
 }
 pub struct Buffer {
     bytes: Vec<u8>,
@@ -122,8 +147,51 @@ impl Buffer {
     pub fn bytes_mut(&mut self) -> &mut [u8] {
         &mut self.bytes
     }
+    /// Original backing capacity, not just the visible decoded slice. Native Actor wrappers
+    /// must include their separately measured metadata in this same Copy before allocation.
+    pub fn capacity(&self) -> usize {
+        self.bytes.capacity()
+    }
+    pub fn covers_work(&self, bytes: usize) -> bool {
+        self._copy.covers_work(bytes)
+    }
+    pub fn uses_intent(&self, intent: &crate::voice_v2::sdp::InitialSdpIntent) -> bool {
+        self._copy.uses_intent(intent)
+    }
+    pub fn has_keepalive(&self) -> bool {
+        self._copy.has_keepalive()
+    }
+    /// Attach only while this affine buffer is uniquely owned, before lending it to Actor
+    /// work. It cannot be replaced/removed by a retry. No callback is invoked here; failed
+    /// attachment and eventual destruction must still run outside native/Root guards.
+    pub fn attach_keepalive(
+        &mut self,
+        keepalive: catcoms_rt::SharedRequestKeepalive,
+    ) -> Result<(), VoiceError> {
+        self._copy.attach_keepalive(keepalive)
+    }
 }
 impl Copy {
+    /// Allocation identity only, even after Close. This grants no fresh SDK/packet/RTC use.
+    pub fn uses_intent(&self, intent: &crate::voice_v2::sdp::InitialSdpIntent) -> bool {
+        intent.uses_phase(&self.phase)
+    }
+    pub fn has_keepalive(&self) -> bool {
+        self.keepalive.is_some()
+    }
+    /// Native supplies an actual independently paid publication custodian, not a renderer
+    /// descriptor. This is a one-way drain edge, never proof of current authorization. The
+    /// custodian's own funding Copy MUST NOT receive this same custodian as its keepalive.
+    pub fn attach_keepalive(
+        &mut self,
+        keepalive: catcoms_rt::SharedRequestKeepalive,
+    ) -> Result<(), VoiceError> {
+        if self.keepalive.is_some() {
+            return Err(VoiceError::RetryMismatch);
+        }
+        self.keepalive = Some(keepalive);
+        Ok(())
+    }
     /// Exact phase identity for an affine Actor command owner. This proves payment
     /// provenance only; current Root/native effect admission remains independently required.
     pub fn matches_effect(&self, effect: &EffectObserver) -> bool {
@@ -147,6 +215,11 @@ impl Copy {
 }
 impl Drop for Copy {
     fn drop(&mut self) {
+        // Buffer's bytes have already zeroized and deallocated. Releasing this keepalive
+        // reference can run its last native Drop and enter Row locks, so do it while this
+        // credit is paid, outside Phase/Root/native guards. If a worker still owns that
+        // publication, its separate TaskCopy pays the later last Drop and blocks drainage.
+        drop(self.keepalive.take());
         // Never publish drainage before this actual reservation loan and its pool credit
         // return. Drop may enter Pool, so do it outside the phase state mutex.
         drop(self.credit.take());
@@ -248,6 +321,11 @@ impl Phase {
     }
     /// Charge before allocating a body or constructing a worker. There is no raw Vec
     /// export or refund/reacquisition path: transfer the SAME owner through the pipeline.
+    /// Independent task/publication payment, deliberately unable to retain its own native
+    /// publication wrapper. It consumes the same original byte/count allowance as any Copy.
+    pub fn task_copy(self: &Arc<Self>, bytes: usize) -> Result<TaskCopy, VoiceError> {
+        self.copy(bytes).map(TaskCopy)
+    }
     pub fn copy(self: &Arc<Self>, bytes: usize) -> Result<Copy, VoiceError> {
         if bytes == 0 {
             return Err(VoiceError::Bounds);
@@ -275,6 +353,7 @@ impl Phase {
             credit: Some(credit),
             phase: self.clone(),
             capacity: bytes,
+            keepalive: None,
         })
     }
     /// Close effects first and return ONLY unused capacity outside native/phase guards.
@@ -406,6 +485,104 @@ mod tests {
         assert!(fixed <= METADATA, "SDP fixed graph {fixed}");
         let copy = size_of::<Buffer>() + 128;
         assert!(copy <= COPY_METADATA, "SDP copy graph {copy}");
+    }
+    #[test]
+    fn original_sdp_publication_custody_drops_before_credit_and_last_phase_drainage() {
+        use std::sync::atomic::{AtomicBool, AtomicUsize};
+        #[derive(Debug)]
+        struct Publication {
+            phase: std::sync::Weak<Phase>,
+            resources: Arc<Resources>,
+            expected: Arc<AtomicUsize>,
+            dropped: Arc<AtomicBool>,
+            // Separate payment. Attaching this Publication to THIS task Copy would make
+            // a cycle; only the distinct body/RPC Copy holds the Publication keepalive.
+            _task: TaskCopy,
+        }
+        impl Drop for Publication {
+            fn drop(&mut self) {
+                let phase = self.phase.upgrade().unwrap();
+                assert!(
+                    phase.state.try_lock().is_ok(),
+                    "publication Drop beneath Phase"
+                );
+                assert_eq!(
+                    phase.status(),
+                    Status::Closing,
+                    "native custody precedes Drained"
+                );
+                assert_eq!(
+                    self.resources.counts().0,
+                    self.expected.load(Ordering::Acquire),
+                    "actual native custody destruction must remain paid"
+                );
+                self.dropped.store(true, Ordering::Release);
+            }
+        }
+        for worker_first in [false, true] {
+            let (resources, _, _, phase, _alive) = fixture();
+            phase.arm().unwrap();
+            let expected = Arc::new(AtomicUsize::new(0));
+            let dropped = Arc::new(AtomicBool::new(false));
+            let task = phase.task_copy(1024).unwrap();
+            assert!(task.covers_work(1024));
+            let publication = Arc::new(Publication {
+                phase: Arc::downgrade(&phase),
+                resources: resources.clone(),
+                expected: expected.clone(),
+                dropped: dropped.clone(),
+                _task: task,
+            });
+            let mut buffer = phase.copy(8192).unwrap().adopt(vec![3; 8192]).unwrap();
+            buffer.attach_keepalive(publication.clone()).unwrap();
+            assert!(buffer.has_keepalive());
+            phase.close();
+            assert_eq!(phase.status(), Status::Closing);
+            if worker_first {
+                drop(publication);
+                assert!(!dropped.load(Ordering::Acquire));
+                expected.store(resources.counts().0, Ordering::Release);
+                drop(buffer);
+            } else {
+                drop(buffer);
+                assert!(!dropped.load(Ordering::Acquire));
+                assert_eq!(phase.status(), Status::Closing);
+                expected.store(resources.counts().0, Ordering::Release);
+                drop(publication);
+            }
+            assert!(dropped.load(Ordering::Acquire));
+            assert_eq!(phase.status(), Status::Drained);
+            assert_eq!(resources.counts().0, METADATA + _alive.baseline);
+        }
+    }
+    #[test]
+    fn original_sdp_copy_cannot_replace_its_publication_custodian() {
+        use std::sync::atomic::AtomicBool;
+        #[derive(Debug)]
+        struct Witness(Arc<AtomicBool>);
+        impl Drop for Witness {
+            fn drop(&mut self) {
+                self.0.store(true, Ordering::Release);
+            }
+        }
+        let (_, _, _, phase, _alive) = fixture();
+        phase.arm().unwrap();
+        let first = Arc::new(AtomicBool::new(false));
+        let other = Arc::new(AtomicBool::new(false));
+        let mut copy = phase.copy(1024).unwrap();
+        copy.attach_keepalive(Arc::new(Witness(first.clone())))
+            .unwrap();
+        assert_eq!(
+            copy.attach_keepalive(Arc::new(Witness(other.clone()))),
+            Err(VoiceError::RetryMismatch)
+        );
+        assert!(!first.load(Ordering::Acquire));
+        assert!(other.load(Ordering::Acquire));
+        phase.close();
+        assert_eq!(phase.status(), Status::Closing);
+        drop(copy);
+        assert!(first.load(Ordering::Acquire));
+        assert_eq!(phase.status(), Status::Drained);
     }
     #[test]
     fn original_sdp_buffers_remain_paid_after_close_until_their_actual_last_drop() {
