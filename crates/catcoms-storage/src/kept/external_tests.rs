@@ -33,6 +33,36 @@ pub(in crate::kept) fn link_directory(target: &Path, link: &Path) -> bool {
 }
 
 #[test]
+fn a_held_folder_reads_names_inside_itself_and_never_takes_a_link_for_ours() {
+    // The coordinator's review L1 and its review (HIGH): the name check reads inside the held
+    // folder; our own file is ours there, nothing at the name or a link (a junction on Windows, a
+    // symbolic link on Unix) is not, and no handle stays open afterwards (fs_at's no-follow
+    // `open_at` leaked one on a link, so the folder could not be renamed until the app exited).
+    let dir = tempfile::tempdir().unwrap();
+    let folder = dir.path().join("Folder");
+    fs::create_dir(&folder).unwrap();
+    let target = dir.path().join("Target");
+    fs::create_dir(&target).unwrap();
+    let ours = create_leaf(&folder.join("ours")).unwrap();
+    let id = session_id(&ours).unwrap();
+    let folder_id = folder_identity(&folder).unwrap();
+    assert!(folder_holds_session(&folder, folder_id, "ours", id).unwrap());
+    assert!(!folder_holds_session(&folder, folder_id, "missing", id).unwrap());
+    if link_directory(&target, &folder.join("linked")) {
+        assert!(!folder_holds_session(&folder, folder_id, "linked", id).unwrap());
+    } else {
+        eprintln!("skipped the link case: this host cannot create a directory link");
+    }
+    // Another folder at the path is not the held one, whatever it contains.
+    let other = dir.path().join("Other");
+    fs::create_dir(&other).unwrap();
+    assert!(!folder_holds_session(&other, folder_id, "ours", id).unwrap());
+    drop(ours);
+    fs::rename(&folder, dir.path().join("Renamed"))
+        .expect("no handle inside the folder was left open");
+}
+
+#[test]
 fn identity_follows_the_object_not_the_name_and_counts_hard_links() {
     let dir = tempfile::tempdir().unwrap();
     let first = dir.path().join("first.bin");

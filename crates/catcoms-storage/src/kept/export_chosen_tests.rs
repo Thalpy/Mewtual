@@ -629,8 +629,10 @@ fn a_swap_and_swap_back_around_creation_with_nothing_planted_writes_nothing() {
 
 /// Run both writers' creation at a fresh chosen place with a third swap at `third`, and require
 /// the changed-folder refusal with no plaintext anywhere: the real folder (renamed aside by the
-/// third swap) is empty and nothing in the decoy holds a byte.
-fn a_third_swap_is_refused(third: ThirdSwap) {
+/// third swap) is empty and nothing in the decoy holds a byte. `fires` says whether the third
+/// swap's hook must have run (it renames the real folder to "Original"), so a test cannot pass
+/// because its interleaving point was never reached.
+fn a_third_swap_is_refused(third: ThirdSwap, fires: bool) {
     for journaled in [true, false] {
         let fx = fixture();
         let folder = chosen_folder(&fx);
@@ -654,6 +656,7 @@ fn a_third_swap_is_refused(third: ThirdSwap) {
         // The real folder sits at `folder` again when the third swap never ran (refused before
         // it), or under "Original" when it did.
         let original = folder.with_file_name("Original");
+        assert_eq!(original.exists(), fires, "the third swap's hook ran");
         let real = if original.exists() {
             &original
         } else {
@@ -679,7 +682,7 @@ fn a_third_swap_before_the_name_check_is_refused() {
     // passes), then swapped for the decoy again before the name check. Two path-based reads would
     // each have been answered by a different folder; the held-folder check reads the identity and
     // the name through one handle and refuses.
-    a_third_swap_is_refused(ThirdSwap::BeforeNameCheck);
+    a_third_swap_is_refused(ThirdSwap::BeforeNameCheck, true);
 }
 
 #[cfg(not(unix))]
@@ -688,10 +691,65 @@ fn a_junction_retargeted_before_the_link_probe_is_refused() {
     // The coordinator's review L1: on Windows the probe used to be the only name check, and it
     // resolves the folder by path. Retargeting the path (a junction) to the decoy just before the
     // probe made it link our own partial there, so creation succeeded with the journal bound to the
-    // real folder and every plaintext byte written into the decoy, which Remove could not clean.
-    // The held-folder name check in `confirm_folder` now refuses before the probe runs (the probe
-    // also checks its own name through a held handle).
-    a_third_swap_is_refused(ThirdSwap::BeforeProbe);
+    // real folder and every plaintext byte written into the decoy, which Remove could not clean
+    // (break-checked: with the held-folder checks ignored this creation returns `Ok`). The
+    // held-folder name check in `confirm_folder` now refuses before the probe runs, so the hook
+    // must not fire.
+    a_third_swap_is_refused(ThirdSwap::BeforeProbe, false);
+}
+
+#[cfg(not(unix))]
+#[test]
+fn a_path_retargeted_after_the_recheck_is_reported_as_changed() {
+    // Review of the L1 fix, LOW 1: the chosen folder is reached through a junction, and that
+    // junction is retargeted to an empty decoy after `confirm_folder` passed, just before the
+    // probe. Our partial is in the real folder, so nothing is misplaced, but the probe's verdict
+    // would describe the decoy (its link fails there, which used to read as a folder without
+    // links). It is now the changed-folder refusal, for both writers.
+    for journaled in [true, false] {
+        let fx = fixture();
+        let real = chosen_folder(&fx);
+        let path = real.with_file_name("Chosen link");
+        let decoy = real.with_file_name("Decoy");
+        fs::create_dir(&decoy).unwrap();
+        if !external::tests::link_directory(&real, &path) {
+            eprintln!("skipped: this host cannot create a directory link");
+            return;
+        }
+        let choice = ChosenDestination::validate(&path.join("report.bin")).unwrap();
+        let fired = std::rc::Rc::new(std::cell::Cell::new(false));
+        let (link, target, seen) = (path.clone(), decoy.clone(), fired.clone());
+        external::BEFORE_PROBE.with(|hook| {
+            *hook.borrow_mut() = Some(Box::new(move |_| {
+                if !seen.replace(true) {
+                    fs::remove_dir(&link)
+                        .or_else(|_| fs::remove_file(&link))
+                        .unwrap();
+                    assert!(external::tests::link_directory(&target, &link));
+                }
+            }))
+        });
+        let created = if journaled {
+            ExportFile::create_chosen(&choice, export_plan(), &mut rng()).map(drop)
+        } else {
+            choice.create_unjournaled(&mut rng()).map(drop)
+        };
+        external::BEFORE_PROBE.with(|hook| *hook.borrow_mut() = None);
+        assert!(fired.get(), "the retarget ran before the probe");
+        assert!(
+            matches!(
+                created,
+                Err(ExportError::Refused(ChoiceRefusal::FolderChanged))
+            ),
+            "journaled: {journaled}, got {created:?}"
+        );
+        assert!(holds_no_plaintext(&real), "journaled: {journaled}");
+        assert_eq!(
+            fs::read_dir(&decoy).unwrap().count(),
+            0,
+            "nothing in the decoy"
+        );
+    }
 }
 
 #[test]

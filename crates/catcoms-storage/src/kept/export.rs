@@ -661,7 +661,8 @@ impl ChosenDestination {
             )?,
             None => file,
         };
-        let file = confirm_staging_links(file, &self.folder, &staging_leaf, rng)?;
+        let file =
+            confirm_staging_links_in(file, &self.folder, self.folder_id, &staging_leaf, rng)?;
         Ok((file, staging, final_path))
     }
 }
@@ -687,11 +688,25 @@ pub fn confirm_staging_links(
     staging_leaf: &str,
     rng: &mut dyn CryptoRngCore,
 ) -> Result<File, ExportError> {
-    // No folder identity here (native's Downloads reservation; a chosen place that had one has
-    // already passed `confirm_folder`), so the probe holds the folder by path.
-    let failure = match links_supported(folder, staging_leaf, &file, None, rng) {
+    // Native's Downloads reservation has no folder identity: the probe holds the folder by path
+    // and cannot tell a retargeted path, so `FolderChanged` never comes back here.
+    confirm_staging_links_in(file, folder, None, staging_leaf, rng)
+}
+
+/// [`confirm_staging_links`] with the folder identity captured at a chosen place, so the Windows
+/// probe holds that very folder and reports a path retargeted since `confirm_folder` as the
+/// changed-folder refusal (review of the L1 fix, LOW 1).
+fn confirm_staging_links_in(
+    file: File,
+    folder: &Path,
+    folder_id: Option<FileIdentity>,
+    staging_leaf: &str,
+    rng: &mut dyn CryptoRngCore,
+) -> Result<File, ExportError> {
+    let failure = match links_supported(folder, staging_leaf, &file, folder_id, rng) {
         LinkProbe::Works if staging_holds(&file, folder, staging_leaf) => return Ok(file),
         LinkProbe::Refused => ExportError::NoLinks,
+        LinkProbe::FolderChanged => ExportError::Refused(ChoiceRefusal::FolderChanged),
         // Windows: a probe name may still point at this file; never fill it with plaintext. The
         // abandoned file is empty, so a leftover probe name discloses nothing.
         // Re-review LOW B: also reached when the probe name is not provably our own file (a
@@ -1740,6 +1755,12 @@ enum LinkProbe {
     /// through it (PR51 M1), so no save can finish here safely.
     #[cfg_attr(not(unix), allow(dead_code))]
     NoDescriptor,
+    /// Windows, with a captured folder identity: the folder's path no longer leads to that folder
+    /// (a junction on the way retargeted after `confirm_folder` passed), so the probe's verdict
+    /// would describe another folder. The caller refuses as for any changed folder, instead of
+    /// reporting a folder without links or quietly switching writers (review of the L1 fix, LOW 1).
+    #[cfg_attr(unix, allow(dead_code))]
+    FolderChanged,
 }
 
 /// Publication needs a no-replace hard link. FAT and exFAT give a usable-looking file index and
@@ -1797,7 +1818,15 @@ fn links_supported(
         };
         let held = match external::hold_folder(folder, folder_id) {
             Ok(Some(held)) => held,
-            _ => return LinkProbe::Inconclusive,
+            // Only with an identity: the path leads elsewhere since `confirm_folder`.
+            Ok(None) => return LinkProbe::FolderChanged,
+            Err(_) => return LinkProbe::Inconclusive,
+        };
+        // Whether the path has stopped leading to the identified folder, asked only once the
+        // probe failed, so that a retargeted path is reported as such rather than as a folder
+        // without links or an inconclusive probe. Without an identity nothing can say.
+        let moved = || {
+            folder_id.is_some() && !matches!(external::hold_folder(folder, folder_id), Ok(Some(_)))
         };
         let source_path = folder.join(staging);
         for attempt in 0..4 {
@@ -1814,9 +1843,11 @@ fn links_supported(
             match external::link(&source_path, &folder.join(&probe)) {
                 Ok(()) => {}
                 Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
+                Err(_) if moved() => return LinkProbe::FolderChanged,
                 Err(_) => return LinkProbe::Refused,
             }
-            // The link must have been made in the held folder and name our own file.
+            // The link must have been made in the held folder and name our own file. After
+            // `confirm_folder` this is defense in depth: our file is already proven to be there.
             let landed = matches!(held.holds_session(&probe, id), Ok(true));
             // Only our just-made second name for our own file is removed here, wherever the path
             // leads now (a name that is not ours is left alone).
@@ -1824,6 +1855,7 @@ fn links_supported(
                 external::remove_verified(folder, None, &probe, Expected::Session(id), rng);
             return match removed {
                 Ok(Verified::Removed { .. }) if landed => LinkProbe::Works,
+                _ if moved() => LinkProbe::FolderChanged,
                 _ => LinkProbe::Inconclusive,
             };
         }
@@ -1925,19 +1957,21 @@ impl ExportFile {
                 Err(error) => return Err(local(error)),
             };
             // Picker review L4: Downloads swapped between the identity read and the create.
+            let changed = || ExportError::Local {
+                retryable: true,
+                reason: "the folder changed while the save was starting".into(),
+            };
             let file = confirm_folder(
                 folder,
                 folder_id,
                 file,
                 &folder.join(&staging),
-                ExportError::Local {
-                    retryable: true,
-                    reason: "the folder changed while the save was starting".into(),
-                },
+                changed(),
                 rng,
             )?;
             let leaves = (staging, final_leaf);
-            return Self::adopt_created(file, folder, encoded, folder_id, leaves, plan, rng);
+            let bound = (folder_id, changed());
+            return Self::adopt_created(file, folder, encoded, bound, leaves, plan, rng);
         }
         Err(ExportError::Local {
             retryable: false,
@@ -2005,19 +2039,21 @@ impl ExportFile {
             rng,
         )?;
         let leaves = (staging, name.to_owned());
-        Self::adopt_created(file, folder, encoded, captured, leaves, plan, rng)
+        let bound = (captured, ExportError::Refused(ChoiceRefusal::FolderChanged));
+        Self::adopt_created(file, folder, encoded, bound, leaves, plan, rng)
     }
 
     /// Shared tail of both creations: prove identity and hard-link support on the file this call
     /// just created exclusively, then build the Writing(0) journal for the caller to persist. Both
     /// callers have already run [`confirm_folder`], which also proved, through one held handle of
     /// the captured folder, that the staging name holds this file; the Windows link probe here
-    /// holds the folder again against the same identity.
+    /// holds the folder again against the same identity, and a path that no longer leads to it is
+    /// refused with the caller's `changed` error (the same one `confirm_folder` uses).
     fn adopt_created(
         file: File,
         folder: &Path,
         encoded: Vec<u8>,
-        folder_id: FileIdentity,
+        (folder_id, changed): (FileIdentity, ExportError),
         (staging, final_leaf): (String, String),
         plan: ExportPlan,
         rng: &mut dyn CryptoRngCore,
@@ -2037,6 +2073,8 @@ impl ExportFile {
                     LinkProbe::Works => Ok(observed),
                     // No writer could publish here: refuse before any plaintext exists.
                     LinkProbe::Refused => Err(ExportError::NoLinks),
+                    // Never `Unsupported`: a detected change must not quietly switch writers.
+                    LinkProbe::FolderChanged => Err(changed),
                     LinkProbe::Inconclusive | LinkProbe::NoDescriptor => {
                         Err(ExportError::Unsupported)
                     }

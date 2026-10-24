@@ -2113,27 +2113,28 @@ impl HeldFolder {
     /// nothing at the name, a link, or another object; an error when it could not be read.
     ///
     /// Unix opens relative to the descriptor (`openat`, no follow). Windows opens relative to the
-    /// handle with `fs_at::OpenOptions::open_at` (`NtCreateFile` with this handle as its root
-    /// directory, `FILE_OPEN`, follow off, read access only): a link at the name is refused there
-    /// as `ERROR_CANT_RESOLVE_FILENAME`, which counts as not ours. Its share mode lets everyone
-    /// read, write and delete, which is fine for a check that holds nothing; `FILE_OPEN` returns
-    /// only `FILE_OPENED` on success, so fs_at's unimplemented information paths are not reached.
+    /// handle with `fs_at::OpenOptions::open_path_at`: `NtCreateFile` with this handle as its root
+    /// directory, `FILE_OPEN`, `FILE_OPEN_REPARSE_POINT` (a link or junction at the name is opened
+    /// as itself, and [`verify`] then finds it is not a regular file, so never ours) and only
+    /// `FILE_READ_ATTRIBUTES` access, which takes part in no share-mode check, so another
+    /// program's hold on the file cannot make it read as changed. Not `open_at` with follow off:
+    /// fs_at then queries the reparse point of every opened name and, when that query fails (FAT
+    /// and exFAT do not implement it) or finds a link, returns an error without closing the handle
+    /// it opened, which turned FAT folders into "folder changed" and kept files undeletable (review
+    /// of the L1 fix, HIGH). `open_path_at` wraps the handle at once, so every path closes it.
+    /// `FILE_OPEN` returns only `FILE_OPENED` on success, so fs_at's unimplemented information
+    /// paths are not reached.
     pub(super) fn holds_session(&self, leaf: &str, id: SessionId) -> io::Result<bool> {
         #[cfg(unix)]
         let opened = open_at_nofollow(&self.dir, leaf);
         #[cfg(windows)]
         let opened = {
-            // ERROR_CANT_RESOLVE_FILENAME: fs_at's report of a link at the name with follow off.
-            const LINK_AT_NAME: i32 = 1921;
-            match fs_at::OpenOptions::default()
-                .read(true)
-                .follow(false)
-                .open_at(&self.dir, leaf)
-            {
-                Ok(found) => Ok(Some(found)),
-                Err(error) if error.raw_os_error() == Some(LINK_AT_NAME) => Ok(None),
-                Err(error) => Err(error),
-            }
+            use fs_at::os::windows::OpenOptionsExt;
+            const FILE_READ_ATTRIBUTES: u32 = 0x0080;
+            fs_at::OpenOptions::default()
+                .desired_access(FILE_READ_ATTRIBUTES)
+                .open_path_at(&self.dir, leaf)
+                .map(Some)
         };
         #[cfg(not(any(windows, unix)))]
         let opened: io::Result<Option<File>> = {
