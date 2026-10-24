@@ -418,8 +418,10 @@ async fn three_bubbles(admission: FixtureAdmission) {
 async fn three_chat_bubbles_merge_edits_deletes_and_removed_author_history_through_a_replacement_bridge(
 ) {
     let admission = isolate().await;
-    tokio::select! {
-        _ = three_bubbles(admission) => {},
-        _ = SystemClock.sleep(Duration::from_secs(600)) => panic!("three-bubble chat acceptance exceeded its total bound"),
-    }
+    scenario_bounded(
+        three_bubbles(admission),
+        SystemClock.sleep(Duration::from_secs(600)),
+        "three-bubble chat acceptance exceeded its total bound",
+    )
+    .await;
 }

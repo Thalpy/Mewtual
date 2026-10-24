@@ -350,17 +350,21 @@ async fn missed_membership_bridge_scenario(admission: FixtureAdmission) {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn new_channel_is_discovered_served_without_ui_open_and_sealed_by_every_recipient() {
     let admission = isolate().await;
-    tokio::select! {
-        _ = new_channel_bridge_scenario(admission) => {},
-        _ = SystemClock.sleep(Duration::from_secs(300)) => panic!("new-channel bridge matrix exceeded its total bound"),
-    }
+    scenario_bounded(
+        new_channel_bridge_scenario(admission),
+        SystemClock.sleep(Duration::from_secs(300)),
+        "new-channel bridge matrix exceeded its total bound",
+    )
+    .await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn missed_membership_recovers_before_chat_through_non_founder_and_replacement_bridge() {
     let admission = isolate().await;
-    tokio::select! {
-        _ = missed_membership_bridge_scenario(admission) => {},
-        _ = SystemClock.sleep(Duration::from_secs(300)) => panic!("membership bridge matrix exceeded its total bound"),
-    }
+    scenario_bounded(
+        missed_membership_bridge_scenario(admission),
+        SystemClock.sleep(Duration::from_secs(300)),
+        "membership bridge matrix exceeded its total bound",
+    )
+    .await;
 }

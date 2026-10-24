@@ -11,6 +11,7 @@ use std::collections::{BTreeMap, BTreeSet};
 mod chat_bubbles;
 mod chat_matrix;
 mod files;
+mod isolation;
 mod runtime;
 mod signed_history;
 mod transport;
@@ -76,6 +77,31 @@ async fn bounded<F: Future>(label: &str, future: F) -> F::Output {
     }
 }
 
+/// Keep ownership outside select's branches: on timeout, unwind starts before the unfinished
+/// Scenario drops. Otherwise its strict teardown assertion would hide the original timeout.
+async fn scenario_bounded<F: Future>(
+    future: F,
+    timeout: impl Future<Output = ()>,
+    failure: &str,
+) -> F::Output {
+    tokio::pin!(future);
+    tokio::select! {
+        result = &mut future => result,
+        _ = timeout => panic!("{failure}"),
+    }
+}
+
+async fn close_driver(driver: &mut Option<watch::Receiver<MeshObservationSnapshot>>) {
+    // Keep the pending marker indexed across cancellation/timeout. Only observed closure
+    // allows release, even if Running already completed its own actor/save barrier.
+    bounded("TCP transport shutdown", async {
+        let receiver = driver.as_mut().expect("original driver lifetime");
+        while receiver.changed().await.is_ok() {}
+    })
+    .await;
+    driver.take();
+}
+
 // Automatic recovery can start just after an empty exchange and just after a cadence tick.
 // Account for the released source cooldown, worst-case discovery interval/start spread and
 // four bounded transport stages. Command responsiveness keeps its independent 30-second bound.
@@ -115,6 +141,7 @@ impl Drop for Client {
             // A failed fixture aborts tasks but cannot claim they synchronously drained.
             // Preserve its vault until those actual owners disappear rather than deleting
             // storage ahead of their asynchronous shutdown and obscuring the original error.
+            // This preserves the failed vault for later inspection/explicit cleanup.
             self.root.disable_cleanup(true);
         }
     }
@@ -502,11 +529,9 @@ impl Scenario {
             // This existing watch receiver carries no command sender. Closure proves the real
             // driver dropped its swarm; unlike a plain socket bind probe it does not mistake
             // TIME_WAIT for a live product listener on platforms with different reuse flags.
-            let mut driver = self.clients[*index].driver.take().unwrap();
-            bounded("TCP transport shutdown", async {
-                while driver.changed().await.is_ok() {}
-            })
-            .await;
+            // Keep the actual pending receiver indexed until shutdown is OBSERVED. A timeout
+            // must not make Scenario::Drop mistake a taken-but-still-live driver for closure.
+            close_driver(&mut self.clients[*index].driver).await;
         }
     }
 
@@ -875,17 +900,21 @@ async fn six_client_scenario(hostile: bool, admission: FixtureAdmission) {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn six_client_native_restart_and_partition_recovery() {
     let admission = isolate().await;
-    tokio::select! {
-        _ = six_client_scenario(false, admission) => {},
-        _ = SystemClock.sleep(Duration::from_secs(600)) => panic!("six-client baseline exceeded its total bound"),
-    }
+    scenario_bounded(
+        six_client_scenario(false, admission),
+        SystemClock.sleep(Duration::from_secs(600)),
+        "six-client baseline exceeded its total bound",
+    )
+    .await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn six_client_native_reversed_reopen_gossip_loss_and_command_load() {
     let admission = isolate().await;
-    tokio::select! {
-        _ = six_client_scenario(true, admission) => {},
-        _ = SystemClock.sleep(Duration::from_secs(600)) => panic!("six-client hostile variant exceeded its total bound"),
-    }
+    scenario_bounded(
+        six_client_scenario(true, admission),
+        SystemClock.sleep(Duration::from_secs(600)),
+        "six-client hostile variant exceeded its total bound",
+    )
+    .await;
 }
