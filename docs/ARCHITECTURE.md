@@ -1,5 +1,15 @@
 # Mewtual; Architecture
 
+## Automatic browser work consumption (24 October; validation in progress)
+
+The retained Broker21 can explicitly observe an authenticated Ready channel using its actual
+accepted selected key. One prepaid serial pump consumes native metadata and original action
+handles, preserving keys/counters/deadlines through Derive Return and confirmation. It pins
+one parent; historical results never reconstruct browser keys. End irreversibly stops adoption,
+joins actual metadata/attempt work outside the shared lane, clears its projections, and then
+drains original SDK/settlement owners before cleanup. Metadata/payment phases do not overlap.
+This is a single-pair work consumer, not the complete call/events/SDP/ICE/RTC adapter or relay.
+
 ## Native close-first cleanup continuation (24 October; validation in progress)
 
 Channel first effects and final Control closure have separate irreversible fences. Native
@@ -8,12 +18,13 @@ the ledger; Capacity leaves cleanup routable. Automatic maintenance cannot creat
 after that fence. Normal closure requires an attached parent's actual issued/ACKed final
 delivery even when Root has already retired its plan.
 
-After known browser SDK/RPC drainage, Broker20 uses original public metadata and authenticated
+After known browser SDK/RPC drainage, Broker21 retains Broker20's original public metadata and authenticated
 Begin(false) to discover unseen work, closes children before parent Plan-final2, and retains
 one deferred parent plus the current cleanup descriptor through uncertainty. It performs no
 Input, new admission or crypto. Metadata16KiB is prepaid before setup ACK, separately from
 encrypted control8KiB; native Session prepays the matching24KiB browser custody. Full gates
-are recorded in HANDOVER. Automatic browser execution, SDP/ICE/RTC and relay remain unfinished.
+are recorded in HANDOVER. Single-pair automatic consumption is implemented above; complete
+events/multi-peer orchestration, SDP/ICE/RTC and relay remain unfinished.
 
 ## Application handoff dispatch and native production (24 October; validation in progress)
 
@@ -38,7 +49,7 @@ settlement/Return under the original channel while preserving keys/counters/dead
 drains that admitted flight outside its execution lane before final cleanup. Automatic new
 confirmation candidates are deliberately not inferred from delayed delivery or local sealing.
 
-Automatic browser work orchestration, SDP/ICE factories and RTC authorization, causal
+Complete browser events/multi-peer orchestration, SDP/ICE factories and RTC authorization, causal
 Finish-to-SDP key/phase transfer, multi-peer history reclamation and member media relay remain
 unfinished. Earlier dated inactive-dispatch descriptions below are historical checkpoints.
 HANDOVER records the exact source/test scope; no physical two-device claim follows here.

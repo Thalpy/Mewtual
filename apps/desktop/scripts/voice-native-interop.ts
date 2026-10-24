@@ -26,6 +26,9 @@ let availability: ReturnType<typeof setInterval> | null = null;
 // A closed native refusal code is metadata; every other crypto result contributes length.
 const stages: string[] = [];
 let capacityRefusals = 0;
+// Test control only: Rust stops a long-lived automatic cycle after independently observing
+// actual native receipts/ACKs/Returns. No row, role, input or key is passed into this step.
+let stopPump: (() => void) | null = null;
 function stage(value: string): void { if (stages.length === 8) stages.shift(); stages.push(value); }
 const provider = new Proxy(webcrypto.subtle as unknown as SubtleCrypto, { get(target, name) {
   const value = Reflect.get(target, name);
@@ -99,9 +102,18 @@ type Step =
   | { tag: "step"; name: "prepare"; owner: string; group: string }
   | { tag: "step"; name: "derive"; purpose: VoiceIpcPurpose }
   | { tag: "step"; name: "child"; request: VoiceIpcConfirmationPurpose["request"] }
-  | { tag: "step"; name: "close" | "wedge" };
+  | { tag: "step"; name: "pump" | "close" | "wedge" };
 async function step(value: Step): Promise<unknown> {
   switch (value.name) {
+    case "pump": {
+      assert.equal(stopPump, null);
+      let stop!: () => void;
+      const stopped = new Promise<void>(yes => { stop = yes; });
+      stopPump = stop;
+      const observer = broker.observeNativeWork(owner, channel, key);
+      try { await stopped; await observer.close(); await idle(); return { kind: "observed" }; }
+      finally { stopPump = null; }
+    }
     case "prepare": {
       assert.equal(owner, undefined, "one actual native owner per endpoint");
       owner = createVoiceCryptoOwner(value.owner, value.group, () => true);
@@ -222,6 +234,10 @@ function accept(value: unknown): void {
   if (frame.tag === "reply") {
     assert.ok(callback, "unsolicited native control response");
     const pending = callback; callback = null;
+    if (frame.stopPump === true) {
+      assert.ok(stopPump, "only a running automatic step accepts its native observation stop");
+      stopPump();
+    }
     if (frame.ok === true) pending.resolve(frame.value);
     else pending.reject(new Error("native metadata callback refused"));
   } else {

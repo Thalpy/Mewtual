@@ -9,15 +9,20 @@ use catcoms_sync::voice_v2::{Body, CallGrant};
 /// proves a single-pair Node/native cycle; it does not establish WebView policy or live RTC.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn native_webcrypto_confirmation_uses_real_http_and_blocked_tcp_member_bridge() {
-    native_webcrypto_cycle(false).await;
+    native_webcrypto_cycle(false, false).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn native_webcrypto_end_closes_automatic_work_before_first_browser_input() {
-    native_webcrypto_cycle(true).await;
+    native_webcrypto_cycle(true, false).await;
 }
 
-async fn native_webcrypto_cycle(end_before_input: bool) {
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn native_and_browser_automatically_confirm_over_blocked_tcp_member_bridge() {
+    native_webcrypto_cycle(false, true).await;
+}
+
+async fn native_webcrypto_cycle(end_before_input: bool, automatic_browser: bool) {
     use crate::voice_handoff::integration::webcrypto::{catch_fixture, Endpoint, Failure};
     async fn observation(
         actor: &catcoms_app::ServerActor,
@@ -103,6 +108,51 @@ async fn native_webcrypto_cycle(end_before_input: bool) {
             assert!(!ap.status().unwrap().engine.settled && !cp.status().unwrap().engine.settled);
             // Neither Node has received a Derive/child control step. The normal close
             // below must discover native work and use original authenticated cleanup only.
+            return;
+        }
+        if automatic_browser {
+            // Only start the original consumers. Neither endpoint receives parent/child
+            // identities or a scripted role sequence; native maintenance and broker work
+            // discovery must compose independently through the real unjoined helper.
+            tokio::join!(a.automatic_confirmation(), c.automatic_confirmation());
+            let ap = scenario
+                .online(1)
+                .state
+                .voice_handoff
+                .lookup_original(
+                    &a_selected,
+                    crate::voice_handoff::ledger::Purpose::Derive(discovered[0].1),
+                )
+                .unwrap();
+            let cp = scenario
+                .online(2)
+                .state
+                .voice_handoff
+                .lookup_original(
+                    &c_selected,
+                    crate::voice_handoff::ledger::Purpose::Derive(discovered[1].1),
+                )
+                .unwrap();
+            let a_clock = crate::voice_runtime(&scenario.online(1).state).clock();
+            let c_clock = crate::voice_runtime(&scenario.online(2).state).clock();
+            let (a_state, c_state) = tokio::join!(
+                observation(
+                    &scenario.online(1).actor,
+                    a_clock.as_ref(),
+                    &ag,
+                    discovered[0].1,
+                    ap.confirmation_handshake().unwrap()
+                ),
+                observation(
+                    &scenario.online(2).actor,
+                    c_clock.as_ref(),
+                    &cg,
+                    discovered[1].1,
+                    cp.confirmation_handshake().unwrap()
+                )
+            );
+            assert_eq!([a_state, c_state], [VoicePairConfirmation::Established; 2]);
+            scenario.rules.assert_graph();
             return;
         }
         let (ap, cp) = tokio::join!(a.derive(discovered[0].1), c.derive(discovered[1].1));

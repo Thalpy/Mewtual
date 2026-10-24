@@ -1,5 +1,41 @@
 # Mewtual; Handover
 
+## Automatic browser work continuation (24 October; validation in progress)
+
+Published checkpoint `8d8a58c0` contains ordinary authenticated native effects, automatic
+Derive/confirmation maintenance, paid peer snapshots, unseen-work cleanup and reconnect
+capture serialization. Its real startup, build/check/strict Clippy, browser2656, focused
+native302, capture2, TCP8 and browser flows10 passed. Complete current Root/native suites
+are running serially; earlier full-native failures remain recorded below.
+
+The next increment adds Broker21 `observeNativeWork` on the exact selected key/channel,
+after authenticated Ready. Remounts coalesce one irreversible consumer. It scans up to32
+existing rows per turn, pins one attached parent, uses its exact original intake/chain,
+waits for actual Derive Return, and retains one child until that exact handle Returned.
+Pending slots are never marked complete. There is one bounded timer/wake and no missed-tick
+burst; metadata grants no action, pair or RTC authority. Closing/End joins the actual read/
+attempt outside the shared execution lane, clears the pump's graphs, then drains original
+SDK/settlement owners before existing cleanup. The original16KiB metadata prepayment covers
+the mutually exclusive live/cleanup phases; structural accounting is not a JS/SDK heap proof.
+
+Read-only review found and corrected callback-reentrant duplicate publication, stopped-pump
+reference retention and latest-child-pointer starvation. Current focused browser170 pass,
+including real broker startup/End reentry, held metadata, A-returned/B-adopted and End during
+actual held child settlement. Complete frontend2,671, Svelte zero errors/warnings, production
+frontend build and strict Node interoperability TypeScript pass. The new TCP
+scenario starts both consumers without row/purpose/role steps, services bounded metadata
+callbacks throughout, and stops only after independent actual native receipts/ACKs/settlement/
+Returns. The new actual blocked-TCP scenario passes19.42s, with both independent native pair
+observations Established. Current native handoff302 (25.90s), all11 TCP voice regressions
+(155.56s under concurrent Root load), formatting and all ten browser flows pass. Native
+strict Clippy also passes. Complete Root/native checks are in progress.
+Logs use `target/production-handoff-pump-*`.
+
+This consumer is still explicitly single-pair and not the complete `VoiceV2Native.events`
+adapter. Causal Finish-to-SDP key/phase transfer, typed SDP/ICE/RTC, safe multi-peer histories,
+media relay and combined/physical acceptance remain open. UI activation remains unavailable.
+External download resume belongs to the other session and is excluded.
+
 ## Cleanup and reconnect capture continuation (24 October; validation in progress)
 
 This continuation on `communication-native-production-handoff` follows

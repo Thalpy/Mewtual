@@ -71,7 +71,10 @@ async function fixture(t: TestContext, sharedBroker?: VoiceCryptoBroker, identit
       return value.apply(target, args);
     };
   } });
-  const owner = createVoiceCryptoOwner(`voice-${identitySeed.toString(16).padStart(16, "0")}`, hash(identitySeed), () => true);
+  let ownerHook: (() => void) | null = null;
+  const owner = createVoiceCryptoOwner(`voice-${identitySeed.toString(16).padStart(16, "0")}`, hash(identitySeed), () => {
+    const hook = ownerHook; ownerHook = null; hook?.(); return true;
+  });
   const admission = { async admit() { ordinary++; return "ordinary"; }, async settle() {}, async commitInbound() {} };
   const broker = sharedBroker ?? new VoiceCryptoBroker(admission, engine, () => now, {
     now: () => now, schedule(run, ms) {
@@ -199,6 +202,7 @@ async function fixture(t: TestContext, sharedBroker?: VoiceCryptoBroker, identit
   });
   return {
     owner, broker, native, transport, key: selected.key, admission,
+    onOwnerCheck(hook: () => void) { ownerHook = hook; },
     cleanup(work: () => void) { cleanups.push(work); },
     channel() { return broker.nativeChannel(owner, selected.key, native, transport); },
     counts: () => ({ ordinary, setups, settlements, collections, steps: [...engineSteps], tx: [...requestSequences], reads: bodyReads.length }),
@@ -2042,7 +2046,140 @@ test("deferred parent, current cleanup descriptor and serial projection fit the 
   const wrappers = 4096, originalPurposeAndProof = (3 * 64 + 20 + 32 + 64) * 2;
   assert.ok(JSON.stringify(largest).length <= json);
   assert.ok(stringAndGraphs + wrappers + originalPurposeAndProof <= 16 * 1024);
+  // Live pumping and cleanup do not overlap. Live scan can retain one decoded parent
+  // while reading raw+decoded child metadata; opaque handles share the paid chain graph.
+  const liveParent = { ...largest.work, purpose: largest.work.purpose.parentPurpose };
+  const livePump = json * 2 + 2 * strings(largest) + strings(liveParent) + wrappers + 1024;
+  assert.ok(livePump <= 16 * 1024, `serial live metadata/parent/handle inventory ${livePump}/16384`);
   assert.ok(json < stringAndGraphs);
   const source = readFileSync(new URL("./voice-crypto.ts", import.meta.url), "utf8");
   assert.match(source, /const IPC_WORK_BYTES = 16 \* 1024;/);
+});
+
+test("native work observation requires exact selected key and authenticated Ready and coalesces irreversibly", async t => {
+  const f = await fixture(t), channel = f.channel();
+  assert.throws(() => f.broker.observeNativeWork(f.owner, channel, f.key), /authenticated ready/);
+  await channel.status();
+  assert.throws(() => f.broker.observeNativeWork(f.owner, channel, { publicKey: () => f.key.publicKey() }), /original selected/);
+  assert.throws(() => f.broker.observeNativeWork(f.owner, { ...channel }, f.key), /original selected/);
+  const observer = f.broker.observeNativeWork(f.owner, channel, f.key);
+  assert.equal(f.broker.observeNativeWork(f.owner, channel, f.key), observer);
+  await observer.close(); const reads = f.bodyReads().length;
+  assert.equal(f.broker.observeNativeWork(f.owner, channel, f.key), observer);
+  f.advance(5000); await new Promise<void>(yes => setImmediate(yes));
+  assert.equal(f.bodyReads().length, reads); assert.equal(f.timers().pending, 0);
+});
+
+test("actual channel pump consumes native Derive without caller row/purpose and preserves original Return", async t => {
+  const f = await fixture(t), channel = f.channel(); await channel.status();
+  const parent = await framedDerivation(f);
+  const before = f.counts().steps.filter(step => step === "deriveBits").length;
+  f.native.readWork = async (owner, executor, fromSlot) => ({ kind: "snapshot", owner, executor,
+    nextSlot: fromSlot === 0 ? 1 : 32, work: fromSlot === 0 ? {
+      row: parent.row, purpose: { kind: "derive", ...historyPurpose }, state: "attached", actorHandoff: null, identity: parent.identity,
+    } : null });
+  const observer = f.broker.observeNativeWork(f.owner, channel, f.key);
+  await until(() => f.timers().delays.includes(250)); f.advance(250);
+  await until(parent.wasReturned); await observer.close();
+  assert.deepEqual(parent.counts(), { inputReads: 1, admissions: 1, commits: 1, acknowledgements: 1, settlements: 2 });
+  assert.equal(f.counts().steps.filter(step => step === "deriveBits").length, before + 1, "exactly one original pair derivation");
+  f.native.readWork = async (owner, executor) => ({ kind: "snapshot", owner, executor, nextSlot: 32, work: null });
+  f.owner.retire(); await channel.close();
+});
+
+test("channel End waits for a held pump metadata read before starting cleanup or collecting", async t => {
+  const f = await fixture(t), channel = f.channel(); await channel.status();
+  const held = gate(); f.cleanup(held.release); let reads = 0, closed = false;
+  f.native.readWork = async (owner, executor) => { reads++; if (reads === 1) await held.promise;
+    return { kind: "snapshot", owner, executor, nextSlot: 32, work: null }; };
+  f.broker.observeNativeWork(f.owner, channel, f.key); await until(() => reads === 1);
+  const funding = f.broker.counts().bytes;
+  f.owner.retire(); const closing = channel.close().then(() => { closed = true; });
+  await new Promise<void>(yes => setImmediate(yes));
+  assert.equal(closed, false); assert.equal(f.counts().settlements, 0); assert.equal(f.counts().collections, 0);
+  assert.equal(f.broker.counts().bytes, funding);
+  held.release(); await closing; await until(() => f.broker.counts().active === 0);
+  assert.equal(f.broker.counts().bytes, 0);
+});
+
+for (const end of [false, true]) test(`pump admission rechecks owner reentry; End=${end}`, async t => {
+  const f = await fixture(t), channel = f.channel(); await channel.status();
+  let nested: ReturnType<typeof f.broker.observeNativeWork> | null = null, reads = 0;
+  const original = f.native.readWork;
+  f.native.readWork = async (...args) => { reads++; return original(...args); };
+  // Two predicates are sampled during admission. Reenter the LAST one to pin the
+  // check-then-publish boundary rather than merely exercising an earlier Ready check.
+  f.onOwnerCheck(() => f.onOwnerCheck(() => {
+    if (end) void channel.close();
+    else nested = f.broker.observeNativeWork(f.owner, channel, f.key);
+  }));
+  if (end) {
+    assert.throws(() => f.broker.observeNativeWork(f.owner, channel, f.key), /authenticated ready/);
+    f.owner.retire(); await channel.close(); await until(() => f.broker.counts().active === 0);
+    assert.equal(reads, 0);
+  } else {
+    const outer = f.broker.observeNativeWork(f.owner, channel, f.key);
+    assert.equal(outer, nested);
+    await until(() => reads > 0); assert.equal(reads, 1);
+    await outer.close(); assert.equal(f.timers().pending, 0);
+  }
+});
+
+test("pump observes A's exact Return after a remounted caller has adopted B", async t => {
+  const f = await fixture(t), child = await framedConfirmation(f);
+  assert.equal((await child.derive()).kind, "accepted");
+  let reads = 0;
+  const parentWork = { row: child.parent.row, purpose: { kind: "derive", ...historyPurpose },
+    state: "attached", actorHandoff: null, identity: child.parent.identity };
+  const childWork = { row: child.row, purpose: { kind: "confirmation", parent: child.parent.row,
+    parentPurpose: parentWork.purpose, request: "start", predecessor: null },
+    state: "attached", actorHandoff: null, identity: child.identity };
+  f.native.readWork = async (owner, executor, fromSlot) => { reads++;
+    return { kind: "snapshot", owner, executor, nextSlot: fromSlot < 2 ? fromSlot + 1 : 32,
+      work: fromSlot === 0 ? parentWork : fromSlot === 1 ? childWork : null }; };
+  const observer = f.broker.observeNativeWork(f.owner, child.channel, f.key);
+  await until(() => f.timers().delays.includes(250)); f.advance(250);
+  // Read-only observation places the other caller exactly after pump adoption but
+  // before its next attempt. The original production handles perform all actual work.
+  const internals = f.broker as unknown as { ipcChannels: Map<string, { workPump: { child: { handle: unknown } | null } }> };
+  await until(() => internals.ipcChannels.get(f.owner.token)?.workPump.child !== null &&
+    f.timers().delays.includes(250));
+  const a = child.handle(); assert.equal((await a.attempt()).kind, "accepted");
+  const b = child.nextHistorical(); assert.notEqual(a, b);
+  const before = reads; f.advance(250);
+  await until(() => reads > before);
+  assert.equal(internals.ipcChannels.get(f.owner.token)?.workPump.child, null,
+    "latest B cannot hide the retained A completion");
+  await observer.close();
+  f.native.readWork = async (owner, executor) => ({ kind: "snapshot", owner, executor, nextSlot: 32, work: null });
+  f.owner.retire(); await child.channel.close();
+});
+
+test("End during an automatically consumed child waits for its actual held settlement", async t => {
+  const f = await fixture(t), child = await framedConfirmation(f);
+  assert.equal((await child.derive()).kind, "accepted");
+  const held = child.holdSettlement();
+  const parentWork = { row: child.parent.row, purpose: { kind: "derive", ...historyPurpose },
+    state: "attached", actorHandoff: null, identity: child.parent.identity };
+  const childWork = { row: child.row, purpose: { kind: "confirmation", parent: child.parent.row,
+    parentPurpose: parentWork.purpose, request: "start", predecessor: null },
+    state: "attached", actorHandoff: null, identity: child.identity };
+  f.native.readWork = async (owner, executor, fromSlot) => ({ kind: "snapshot", owner, executor,
+    // Known-child drainage must work without discovery supplying another descriptor.
+    // The separate unseen-work tests cover post-End snapshots and late attachments.
+    nextSlot: f.owner.isCurrent() && fromSlot < 2 ? fromSlot + 1 : 32,
+    work: !f.owner.isCurrent() ? null : fromSlot === 0 ? parentWork : fromSlot === 1 ? childWork : null });
+  f.broker.observeNativeWork(f.owner, child.channel, f.key);
+  await until(() => f.timers().delays.includes(250)); f.advance(250);
+  await until(() => child.parent.wasReturned() && f.timers().delays.includes(250)); f.advance(250);
+  await until(() => child.counts().settlements > 0);
+  const payment = f.broker.counts().bytes, unusedRows = f.rowBudget().reserved; let closed = false;
+  f.owner.retire(); const closing = child.channel.close().then(() => { closed = true; });
+  await new Promise<void>(yes => setImmediate(yes));
+  assert.equal(closed, false); assert.equal(f.counts().settlements, 0); assert.equal(f.counts().collections, 0);
+  // End may refund never-used row claims. The actual running child, chain variable
+  // envelope and original channel/control owners must remain charged through settlement.
+  assert.equal(f.broker.counts().bytes, payment - unusedRows * 2048);
+  held.release(); await closing; await until(() => f.broker.counts().active === 0);
+  assert.equal(f.broker.counts().bytes, 0);
 });

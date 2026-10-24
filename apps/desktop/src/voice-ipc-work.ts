@@ -1,7 +1,8 @@
 /** Bounded public native work observations. This is a scan, not VoiceV2Native.events and
  * not an action admission. Empty/Pending never prove absence, success or actual drainage.
  * Byte-bearing work must still use the original authenticated channel and native receipts.
- * No production broker or RTC activation is wired by this decoder. */
+ * The explicit single-pair broker consumer uses this decoder; it does not wire the complete
+ * production events adapter or RTC activation. */
 import type { VoiceIpcActionIdentity, VoiceIpcPurpose } from "./voice-ipc-actions.ts";
 
 export type VoiceWorkPurpose =

@@ -1,5 +1,20 @@
 # Chat, files and voice implementation evidence
 
+## Automatic browser consumer (24 October; validation in progress)
+
+The first ordinary native-effects/cleanup checkpoint is pushed at `8d8a58c0`. Broker21 now
+adds explicit serial existing-work consumption after exact authenticated Ready. Focused
+browser170 pass, including reentrant startup/End, retained metadata, exact-child completion
+after another caller adopts the next child, and End during held actual child settlement.
+Complete frontend2,671, Svelte zero errors/warnings, production frontend build and strict
+Node interoperability TypeScript pass. The new automatic blocked-TCP confirmation passes19.42s;
+both native pair observations are Established and all original native terminal actions have
+actual receipt/ACK/settlement/Return. Current native handoff302 and all11 TCP voice regressions
+pass, as do all ten browser flows, formatting and native strict Clippy. Complete current
+Root/native validation remains in progress. The prior
+manual held-Finish TCP scenario remains; no scripted browser role is needed by the new scenario.
+This does not complete SDP/ICE/RTC, multi-peer composition, media relay or physical acceptance.
+
 ## Production handoff continuation (24 October; validation in progress)
 
 Application-bound authenticated effects and native Derive/confirmation maintenance are now

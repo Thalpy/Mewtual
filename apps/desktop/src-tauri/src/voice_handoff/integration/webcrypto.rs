@@ -232,6 +232,13 @@ impl Endpoint {
         .await
         .0
     }
+    /// No public row/purpose/role is supplied. Keep servicing the one metadata callback
+    /// until actual native history independently establishes all four completed actions.
+    pub(crate) async fn automatic_confirmation(&mut self) {
+        let answer = self.step(json!({"tag":"step", "name":"pump"})).await;
+        assert_eq!(answer, json!({"kind":"observed"}));
+        assert!(automatic_terminal(&self.state, &self.selected()));
+    }
     pub(crate) async fn derive(&mut self, selector: PairSelector) -> ledger::ResolvedRow {
         let selected = self.selected();
         let bootstrap::Status::Ready(public) = bootstrap::ensure(
@@ -551,9 +558,15 @@ async fn drive_streams_inner(
     callbacks: &mut Callbacks,
     step: Value,
 ) -> (Value, Option<[u8; 32]>) {
+    let automatic = step["name"] == "pump";
     write(input, step).await;
     let mut published_executor = None;
-    for _ in 0..32 {
+    // One callback owner spans the automatic step, rather than returning while a
+    // background Node readWork waits forever. The bound follows the pump's minimum50ms
+    // cadence, maximum32-slot scan and unchanged30s outer harness bound. Ordinary steps
+    // retain32. No budget, timeout or protocol attempt is renewed by this fixture.
+    let callbacks_bound = if automatic { 32 * (30_000 / 50) } else { 32 };
+    for _ in 0..callbacks_bound {
         let length = output
             .read_u32()
             .await
@@ -569,6 +582,20 @@ async fn drive_streams_inner(
             Frame::Failed { reason } => panic!("actual native/WebCrypto step failed: {reason}"),
             Frame::Blocked => panic!("unexpected blocked-step acknowledgement"),
             Frame::Call { method, args } => {
+                let stop_pump = automatic
+                    && matches!(method, Method::ReadWork)
+                    && hex::decode(&args.executor)
+                        .ok()
+                        .and_then(|bytes| bytes.try_into().ok())
+                        .and_then(|executor| {
+                            state
+                                .voice_authority
+                                .lock()
+                                .unwrap()
+                                .selected_handoff_owner(owner, executor)
+                                .ok()
+                        })
+                        .is_some_and(|selected| automatic_terminal(state, &selected));
                 let refuse = match method {
                     Method::PublishKey => {
                         callbacks.publish_calls += 1;
@@ -609,7 +636,9 @@ async fn drive_streams_inner(
                 // The actual public projection/payment survives serialization AND actual
                 // control-pipe write, rather than being dropped at reply construction.
                 let envelope = match &reply {
-                    Ok(reply) => json!({"tag":"reply", "ok":true, "value":reply.value}),
+                    Ok(reply) => {
+                        json!({"tag":"reply", "ok":true, "value":reply.value, "stopPump":stop_pump})
+                    }
                     // Retryable native pressure/closure is a real adapter rejection. Let
                     // the SAME retained broker decide recovery; never panic or dump input.
                     Err(()) => json!({"tag":"reply", "ok":false}),
@@ -620,6 +649,62 @@ async fn drive_streams_inner(
         }
     }
     panic!("endpoint exceeded its bounded callback count");
+}
+
+/// Independent original native history, not the pump's public metadata or JS progress.
+/// Both endpoints must retain exactly one Derived parent and three original confirmation
+/// actions, with actual terminal receipt, exact ACK, settlement and ordinary Return.
+fn automatic_terminal(state: &AppState, selected: &SelectedHandoffOwner) -> bool {
+    use catcoms_sync::voice_v2::crypto_actions::CryptoOutcome;
+    let mut from = 0;
+    let mut parent = None;
+    let mut children = 0;
+    while from < 32 {
+        let projection = state.voice_handoff.project_work(selected, from).unwrap();
+        from = projection.next_slot;
+        let Some(metadata) = projection.metadata.as_ref() else {
+            continue;
+        };
+        let row = state
+            .voice_handoff
+            .resolve(selected, metadata.purpose, metadata.row)
+            .unwrap();
+        let status = row.status().unwrap();
+        if !status.acknowledged || !status.drained || !status.engine.settled {
+            return false;
+        }
+        let Some(receipt) = &status.engine.receipt else {
+            return false;
+        };
+        match metadata.purpose {
+            ledger::Purpose::Derive(_) => {
+                if parent.replace(metadata.row).is_some()
+                    || receipt.outcome != CryptoOutcome::Derived
+                {
+                    return false;
+                }
+            }
+            ledger::Purpose::Confirmation {
+                parent: original,
+                request,
+            } => {
+                if parent != Some(original) {
+                    return false;
+                }
+                let valid = match request {
+                    ledger::ConfirmationPurpose::Incoming(_) => {
+                        receipt.outcome == CryptoOutcome::Opened
+                    }
+                    _ => matches!(receipt.outcome, CryptoOutcome::Sealed { .. }),
+                };
+                if !valid {
+                    return false;
+                }
+                children += 1;
+            }
+        }
+    }
+    parent.is_some() && children == 3
 }
 
 struct MetadataReply {

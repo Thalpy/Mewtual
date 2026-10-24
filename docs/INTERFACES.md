@@ -1,8 +1,19 @@
 # Mewtual; Interfaces & Hooks Schema
 
+## Serial native work consumer (24 October; validation in progress)
+
+Broker21 adds `observeNativeWork(owner, channel, selectedKey)`. The exact accepted selected
+key and original broker/channel allocations plus authenticated Ready are required. Repeated
+observation returns the same retained observer; `close()` is irreversible. It consumes existing
+public descriptors through strict validation and original authenticated Input/admission/results,
+without fresh factory requests or inferred pair readiness. Only one parent and current child
+are supported. Child completion resolves its exact retained intake, not the latest continuation.
+End joins the actual metadata/attempt owner outside the execution lane before SDK drainage and
+serial cleanup. This is not replayable `VoiceV2Native.events`, SDP/ICE or UI activation.
+
 ## Original work cleanup contract (24 October; validation in progress)
 
-Broker20 requires metadata adapter2, including `readWork(owner, executor, fromSlot)` mapped
+Broker21 retains Broker20's metadata adapter2 contract, including `readWork(owner, executor, fromSlot)` mapped
 to existing main-window `read_voice_channel_work`. This public metadata remains available
 after End/lock and never grants an action or RTC effect. Close-first `settleSetup` now stops
 first effects under the native UI commit even if outstanding work returns Capacity; cleanup
@@ -32,7 +43,7 @@ Those8KiB workers retain their original UI commit through shared Actor publicati
 remains observation only; Input/admission/result/ACK/settlement/Return authenticate separately.
 `VoiceCryptoBroker.returnNativeDerivation(owner, channel, chain)` requires those exact retained
 allocations, coalesces actual settlement/Return and preserves keys. New flights are refused
-after retirement; End drains existing ones before final cleanup. Broker20 rejects incompatible
+after retirement; End drains existing ones before final cleanup. Broker21 rejects incompatible
 retained older brokers. This is not `VoiceV2Native.events`, SDP/ICE or live RTC activation.
 
 ## Existing native work snapshots (24 October; inactive integration)
@@ -58,8 +69,8 @@ owners remain paid until serialization; the reply does not retain the process le
 `nextSlot` is a scan hint, not `VoiceV2Native.events(lease, after)`. Pending may become attached
 without changing RowId, so callers must rescan. Empty is not absence or drainage evidence;
 cleanup must first drain admitted production, then recover/close actual Pending or attached
-rows before channel settlement. Broker20 implements that cleanup; automatic forward work
-delivery and the complete production events adapter remain unimplemented.
+rows before channel settlement. Broker21 implements cleanup and explicit single-pair forward
+consumption. The complete production events/multi-peer adapter remains unimplemented.
 
 ## Native pair confirmation observation (23 October; inactive integration)
 
@@ -87,7 +98,7 @@ This adds no Tauri command, serialized byte path, wire or persistence format.
 null. Caller-supplied continuation hints never authenticate that value. An authenticated
 Begin/Input/history response may establish the original row; Pending establishes lookup
 identity only, not action admission or pair readiness. Native Respond still independently
-requires its original same-parent accepted Opened action. Broker20 refuses older retained
+requires its original same-parent accepted Opened action. Broker21 refuses older retained
 HMR shapes rather than adopting an incompatible handle.
 
 A normal application-bound listener selects exact v1/v2 native adapters only after real Header

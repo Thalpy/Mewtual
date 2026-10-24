@@ -1,5 +1,14 @@
 # Next voice milestone: native result recovery
 
+## Automatic browser consumption (24 October; validation in progress)
+
+Broker21 now implements an explicit single-pair existing-work consumer on the exact Ready
+channel/selected key. It pins original Derive/confirmation handles through actual Return and
+joins metadata/attempt work before End cleanup. Focused browser170 and strict Node TypeScript
+pass, as do complete frontend2,671, Svelte checks and production frontend build;
+automatic blocked-TCP passes19.42s and complete current Root/native suites remain in progress. Replayable native
+events, causal Finish-to-SDP transfer and all later integration listed below remain open.
+
 ## Current production continuation (24 October; validation in progress)
 
 Application-bound authenticated v1/v2 effects and bounded native maintenance now exist in
@@ -16,7 +25,7 @@ Children close before a retained parent retries; stored final proofs survive los
 Normal attached-parent closure requires actual issued/ACKed final delivery, independently
 of Root End. HANDOVER records reviewed boundaries and pending current native/full gates.
 
-Remaining implementation order: automatic browser work execution and replayable native events;
+Remaining implementation order after the single-pair consumer: complete browser orchestration and replayable native events;
 explicit causal Finish-to-SDP transfer; separate typed SDP/ICE factories and byte grammar;
 exact native receipt commit plus fresh RTC dispatch authority; measured browser/RTC custody;
 serial multi-peer progress and terminal-history reclamation; scoped media relay and combined
@@ -27,6 +36,32 @@ pair/direction/generation before publishing replay/token work. The current singl
 separate-network audible acceptance is still unavailable from the one desktop.
 
 ### Reviewed SDP transition design (not implemented)
+
+The follow-up review identifies two additional prerequisites. `Source::finish` currently
+retires targeted retries on `EndpointAdmitted`; Ready instead needs an internally selected
+causal-completion policy, retaining its original allowance until the authenticated exact
+Offer witness. Do not renew the finite Source budget. Its verification can borrow only the
+exact activated Exchange lane, with independent Ready byte payment and real custody.
+
+Move the original Workflow Crypto lane affinely rather than close/re-reserve it: freeze old
+confirmation adoption/effects, require the actual lane borrower to be idle, take it from
+protected Workflow state, and install it into a separately prepared Exchange. Old inputs,
+SDK/IPC and Lower owners remain charged; later Workflow close must not close the moved lane.
+Prepared Exchange cannot lend verification/crypto or admit SDP before explicit activation.
+The existing confirmation deadline remains unchanged. A separately bounded transition must
+preserve the confirmed pair while old owners drain, because late Finish plus actual Lower
+retirement can outlast that deadline. Capture this phase deadline once, without new Finish
+attempts. Browser key transfer requires the same explicit lifetime treatment.
+
+Ready uses closed Body tag5 while preserving tags1–4 and signing domains. Bind the original
+protected epoch, both endpoints/joins/key references, handshake, and native signed Finish
+message ID/object hash (not the WebCrypto output fingerprint). Require high-to-low direction.
+Helper selection needs one immutable compatible canonical list, at most two members, rather
+than independent endpoint choices. The exact accepted Finish and prepaid Ready intent must
+commit atomically; signing/RNG/payment remain outside that irreversible transaction. Incoming
+Ready uses a shared immutable message identity namespace and exact synchronous pair admission,
+not a queued public ACK. A protected AwaitReady peek selects capacity only; normal signature,
+requester, policy/rate/freshness checks remain. These changes are not implemented by the pump.
 
 The next increment should give high a small independently prepaid Ready/control Source
 owner, prepared before irreversible Finish-open publication. Finish history and one Ready

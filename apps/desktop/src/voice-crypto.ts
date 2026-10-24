@@ -11,6 +11,7 @@ import { encodeVoiceIpcAction, encodeVoiceIpcConfirmationAction, type VoiceIpcPu
 import { decodeVoiceIpcDerivationInput, decodeVoiceIpcPermit } from "./voice-ipc-input.ts";
 import { decodeVoiceIpcConfirmationInput } from "./voice-ipc-confirmation-input.ts";
 import { decodeVoiceWorkSnapshot, type VoiceWorkDescriptor } from "./voice-ipc-work.ts";
+import { NativeWorkPump, type VoiceNativeWorkObserver } from "./voice-ipc-pump.ts";
 import { decodeVoiceIpcActionReply, decodeVoiceIpcFinalReply, isVoiceIpcActionRow, type VoiceIpcActionReply } from "./voice-ipc-replies.ts";
 // The broker survives HMR, so new module instances must use its original owner brand.
 // This is lifecycle bookkeeping within one trusted window, not a security capability.
@@ -196,8 +197,10 @@ const SELECTED_KEY_BYTES = 4096;
 // These browser-side charges cover application-owned copies, not opaque SDK/GC heaps.
 const IPC_SETUP_BYTES = 8 * 1024;
 const IPC_CONTROL_BYTES = 8 * 1024;
-// Serial public metadata read/parse plus one retained cleanup descriptor/proof. Reserve
-// before setup ACK can enable native maintenance, including when End precedes first Input.
+// Serial public metadata read/parse plus the live parent's/current child's fixed handles,
+// OR the deferred parent/current cleanup descriptor and proof. End joins the live driver
+// and clears its graphs before cleanup uses this SAME payment. Reserve before setup ACK
+// can enable native maintenance, including when End precedes first Input.
 // This bounds application-owned graphs, not the framework/SDK/GC heaps.
 const IPC_WORK_BYTES = 16 * 1024;
 // Only exact, already-started cleanup is retried automatically. A completed refusal starts
@@ -422,7 +425,7 @@ function context(label: string, transcript: Uint8Array): Uint8Array<ArrayBuffer>
  * unsettled work. Revoking an owner never frees a running promise; only its real settlement does.
  * A derive pipeline uses one permit for sequential import/ECDH/HKDF work, never parallel calls. */
 export class VoiceCryptoBroker {
-  readonly version = 20;
+  readonly version = 21;
   readonly subtle: SubtleCrypto;
   private readonly native: VoiceCryptoAdmission;
   private active = 0;
@@ -626,6 +629,17 @@ export class VoiceCryptoBroker {
       throw new Error("original native derivation required");
     }
     return channel.finishDerivation(chain);
+  }
+
+  /** Start one retained serial consumer after the original channel's authenticated Ready.
+   * Remounts share it; closing it or ending the channel is irreversible. Public metadata
+   * cannot mint a factory, reconstruct keys, select another parent or authorize RTC. */
+  observeNativeWork(owner: VoiceCryptoOwner, handle: VoiceIpcChannel, key: VoiceJoinKeyHandle): VoiceNativeWorkObserver {
+    const channel = this.ipcChannels.get(owner.token), selected = this.selectedKeys.get(owner.token);
+    if (!channel || channel.handle !== handle || !channel.owns(owner) || !selected ||
+        selected.owner !== owner || selected.outcome?.kind !== "accepted" || selected.outcome.key !== key ||
+        this.joinKeys.get(key) !== selected.key) throw new Error("original selected voice channel required");
+    return channel.observeWork(this, key);
   }
 
   /** Reserve the original group/row/variable position BEFORE Input fetch or materialization.
@@ -1681,6 +1695,8 @@ function ipcBytes(hex: string): Uint8Array<ArrayBuffer> {
  * No ordinary native.admit or generic queue is used: terminal control must remain executable
  * when a protected chain holds the other existing position while waiting for this channel. */
 class RetainedIpcChannel {
+  private workPump: NativeWorkPump | null = null;
+  private readyAcknowledged = false;
   readonly handle: VoiceIpcChannel;
   private readonly selected: SelectedKeyRecord;
   private readonly native: VoiceIpcNative;
@@ -1753,6 +1769,46 @@ class RetainedIpcChannel {
     return this.selected === selected && this.native === native && this.transport === transport;
   }
   owns(owner: VoiceCryptoOwner): boolean { return this.selected.owner === owner; }
+  private retainedWorkPump(): NativeWorkPump | null { return this.workPump; }
+  observeWork(broker: VoiceCryptoBroker, key: VoiceJoinKeyHandle): VoiceNativeWorkObserver {
+    const reentrant = this.retainedWorkPump();
+    if (reentrant) return reentrant.handle;
+    if (!this.live() || !this.readyAcknowledged || !this.keys || !this.bootstrap) throw new Error("authenticated ready voice channel required");
+    this.check();
+    // Owner predicates can synchronously reenter observation or close this channel.
+    // Coalesce the reentrant publication, then recheck callback-free flags after the LAST
+    // predicate. No callback occurs between here and installing the original pump.
+    if (this.workPump) return this.workPump.handle;
+    if (this.retired || this.drained || !this.readyAcknowledged || !this.keys || !this.bootstrap) throw new Error("authenticated ready voice channel required");
+    const owner = this.selected.owner;
+    const pump = new NativeWorkPump({ owner: owner.token, executor: this.selected.executor,
+      live: () => this.live(),
+      read: fromSlot => this.native.readWork(owner.token, this.selected.executor, fromSlot),
+      derive: work => {
+        if (work.purpose.kind !== "derive") throw new Error("native derivation required");
+        return broker.nativeDerivationFromChannel(owner, this.handle, key, work.purpose, work.row, work.identity);
+      },
+      returnDerivation: chain => broker.returnNativeDerivation(owner, this.handle, chain),
+      confirmation: (chain, work) => {
+        const p = work.purpose;
+        if (p.kind !== "confirmation") throw new Error("native confirmation required");
+        const request: VoiceIpcConfirmationPurpose["request"] = p.request === "start" ? { kind: "start", predecessor: p.predecessor }
+          : p.request === "respond" ? { kind: "respond", triggerRow: p.trigger } : { kind: "incoming", role: p.role };
+        return broker.nativeConfirmationFromChannel(owner, this.handle, chain,
+          { parent: p.parentPurpose, parentRow: p.parent, request }, work.row, work.identity);
+      },
+      returned: (chain, handle) => {
+        // A remounted/manual caller may adopt B after A Returned but before the pump
+        // observes A. The latest continuation pointer is not A's completion witness.
+        if (this.linked?.handle !== chain) return false;
+        for (const intake of this.linked.confirmations.values()) {
+          if (intake.handle === handle) return intake.returned && !intake.running;
+        }
+        return false;
+      },
+    }, this.clock);
+    this.workPump = pump; pump.start(); return pump.handle;
+  }
   history(purpose: VoiceIpcPurpose, expectedRow: string | null): Promise<VoiceIpcHistoryOutcome> {
     if (!this.live()) return Promise.resolve(Object.freeze({ kind: "retired" }));
     if (expectedRow !== null && !isVoiceIpcActionRow(expectedRow)) throw new Error("invalid voice history row");
@@ -2110,6 +2166,7 @@ class RetainedIpcChannel {
   }
   wake(): void {
     this.wakeIdentity = {}; this.retry?.resolve();
+    this.workPump?.wake();
     // Availability is one bounded wake for retained rows, never a new computation or timer.
     if (this.linked) for (const record of this.linked.records.values()) record.retry?.resolve();
   }
@@ -2117,6 +2174,7 @@ class RetainedIpcChannel {
   private check(): void { if (!this.live()) throw new Error("voice channel closed"); }
   private retire(): void {
     if (!this.retired) { this.retired = true; this.controller?.abort(); }
+    void this.workPump?.close();
     this.wake();
     // Retire the original prepaid intake even while its owner remains current. The broker
     // retains running SDK/read custody until its finally; an idle claim needs no expiry wait.
@@ -2171,6 +2229,9 @@ class RetainedIpcChannel {
         // Otherwise child settle/Return refuses actionRpc while this driver waits on that
         // very child's drainage. End already excludes any new live history request.
         if (history && this.historyRequest === history) { this.historyRequest = null; this.wake(); }
+        // The metadata lane is shared with cleanup. Join its real outstanding read/attempt
+        // OUTSIDE execution: original handles may still need the same physical lane.
+        if (this.workPump) await this.workPump.close();
         this.linked?.handle.close();
         // Release the physical lane BEFORE waiting for linked SDK/settlement. A provider
         // may already be queued behind our aborting read and still need this SAME position.
@@ -2265,6 +2326,7 @@ class RetainedIpcChannel {
         if (opened.length !== 3 || opened[0] !== 1 || (opened[1] !== 1 && opened[1] !== 2) || opened[2] > 1) throw new Error("voice status refused");
         this.custody.setupDrained();
         const outcome = Object.freeze({ kind: opened[1] === 1 ? "ready" as const : "closed" as const, nativeSetupDrained: opened[2] === 1 });
+        if (outcome.kind === "ready") this.readyAcknowledged = true;
         if (outcome.kind === "closed") { this.terminal = outcome; this.retired = true; }
         return outcome;
       });
@@ -2585,7 +2647,7 @@ export function windowVoiceCryptoBroker(
   const host = window as Record<symbol, unknown>;
   const previous = host[BROKER] as VoiceCryptoBroker | undefined;
   if (previous) {
-    if (previous.version !== 20 || typeof previous.returnNativeDerivation !== "function" || typeof previous.nativeConfirmationFromChannel !== "function" || typeof previous.nativeDerivationFromChannel !== "function" || typeof previous.recoverChannelHistory !== "function" || typeof previous.prepareChainFromChannel !== "function" || typeof previous.nativeChannel !== "function" || typeof previous.run !== "function" || typeof previous.selectJoinKey !== "function" || typeof previous.retrySelectedJoinKeys !== "function" ||
+    if (previous.version !== 21 || typeof previous.observeNativeWork !== "function" || typeof previous.returnNativeDerivation !== "function" || typeof previous.nativeConfirmationFromChannel !== "function" || typeof previous.nativeDerivationFromChannel !== "function" || typeof previous.recoverChannelHistory !== "function" || typeof previous.prepareChainFromChannel !== "function" || typeof previous.nativeChannel !== "function" || typeof previous.run !== "function" || typeof previous.selectJoinKey !== "function" || typeof previous.retrySelectedJoinKeys !== "function" ||
         typeof previous.registerProtectedConfirmation !== "function" ||
         typeof previous.registerProtectedDerivation !== "function" || typeof previous.registerConfirmation !== "function" || typeof previous.createPair !== "function") {
       throw new Error("voice crypto broker version changed; reload required");

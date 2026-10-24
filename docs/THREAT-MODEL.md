@@ -1,5 +1,19 @@
 # Threat model; client integrity & enforcement boundaries
 
+## Automatic original-work consumption (24 October; validation in progress)
+
+Broker21's consumer requires the actual accepted key/channel and authenticated Ready. Native
+metadata remains untrusted selection data: closed decoding and original authenticated action
+adapters independently enforce purpose/parent/input identity. It pins one parent and exact
+child handles; historical receipts never recreate keys or confer RTC permission. Admission
+rechecks non-callback state after potentially reentrant owner predicates. One paid scan/parent/
+child/task/wake replaces queues; Pending slots cannot enter the completed bitmap. End stops
+adoption synchronously, joins actual read/attempt outside the physical lane, then uses original
+SDK/cleanup custody. Stopped observers drop their callback/descriptor graph before close resolves.
+Structural16KiB metadata accounting excludes opaque JS/SDK/GC allocations. Background timer
+throttling and the original pair deadline remain live integration constraints; no deadline or
+attempt budget is renewed to hide them. SDP/RTC/multi-peer/relay activation is still unavailable.
+
 ## Unseen native work at End (24 October; validation in progress)
 
 Independent native production can create work before a browser descriptor exists. End alone
