@@ -683,6 +683,9 @@ impl fmt::Debug for ServerGroup {
 mod own_echo_tests;
 
 #[cfg(test)]
+mod suite_refusal_tests;
+
+#[cfg(test)]
 mod m1_tests {
     use super::*;
 

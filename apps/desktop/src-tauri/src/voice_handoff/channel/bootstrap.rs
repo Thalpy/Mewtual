@@ -109,8 +109,9 @@ impl Prepared {
             return Err(Refused::Binding);
         }
         let browser = PublicKey::from_sec1_bytes(&point).map_err(|_| Refused::Binding)?;
-        // Only `generate_from_rng` with the injected adapter: `Generate::generate()` would draw
-        // from the OS (`SysRng`) behind the catcoms-rt seam.
+        // Only `generate_from_rng` with the injected adapter: the argument-less `Generate`
+        // constructor would draw from the operating-system RNG behind the catcoms-rt seam
+        // (scripts/check-no-ambient.sh refuses its spellings).
         let ephemeral = EphemeralSecret::generate_from_rng(&mut BorrowedRng(rng));
         let encoded = ephemeral.public_key().to_sec1_point(false);
         let native: [u8; 65] = encoded

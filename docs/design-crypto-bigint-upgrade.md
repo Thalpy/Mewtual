@@ -1,6 +1,24 @@
 # Design: RUSTSEC-2026-0387 (crypto-bigint timing variability)
 
-Status: design for owner decision (Phase 1). Nothing here is implemented. Base commit `2f08bde0`
+Status: **implemented** in the update PR on branch `crypto-bigint-upgrade`. Sections 0 to 12 below are
+the Phase 1 analysis, taken on Rust 1.89, and are kept as written except where marked. The owner
+then asked for one PR that goes step by step:
+
+1. tokio 1.53.3;
+2. openmls 0.8.3;
+3. native p256 0.14;
+4. Rust 1.91, then openmls 0.9.2, then portmapper 0.19;
+5. Rust 1.94;
+6. the fenced exception for what is left.
+
+At Rust 1.94 there is still no released openmls backend on p256 0.14 (rechecked 2026-10-24), so
+step 6 is option A. The live fence is `deny.toml`. It follows section 8 with the reviewed versions
+updated to the openmls 0.9.2 graph: p384 0.13 has three backend parents there, and ecdsa 0.16 has
+two curve parents. The MLS refusal tests are `crates/catcoms-mls/src/group/suite_refusal_tests.rs`.
+Section 5.3 records the measured openmls 0.8.1 <-> 0.9.2 results, including the one downgrade that
+fails.
+
+Original status: design for owner decision (Phase 1). Base commit `2f08bde0`
 (`origin/chat-update-implementation`, merge of PR #50). Investigated 2026-10-24 on Rust 1.89.0.
 Owner constraint received during the investigation: the Rust 1.91 bump waits until PR #54 and
 PR #26 are merged (`docs/PENDING-ACTIONS.md` on `main`, commit `e6f1d13e`).

@@ -1,5 +1,29 @@
 # Mewtual; Handover
 
+## Toolchain and crypto dependency update (24 October, branch `crypto-bigint-upgrade`)
+
+One PR, one commit per step, based on `chat-update-implementation`. Merge it only after PR #54 and
+PR #26 are in `main`. The steps:
+
+1. tokio 1.53.3 (RUSTSEC-2026-0386);
+2. openmls 0.8.3 (GHSA fixes), with stored-state fixtures frozen first on 0.8.1;
+3. native voice bootstrap on p256 0.14 (0387's only secret path);
+4. Rust 1.91, then openmls 0.9.2, then portmapper 0.19.3;
+5. Rust 1.94;
+6. the fenced 0387 exception.
+
+The fenced exception covers crypto-bigint 0.5.5, which remains inside openmls's RustCrypto backend
+because every release of it is still on p256 0.13. Root `cargo deny check` now passes. The
+desktop workspace's bans pass, and CI now checks them. Its advisory list keeps the unrelated
+findings it already had, minus tokio. Details, compatibility results and the exit condition are
+in `docs/design-crypto-bigint-upgrade.md` and the THREAT-MODEL section of the same date.
+
+Known limitation: a group created or joined under openmls 0.9.2 does not load in older alphas.
+Downgrading a tester's build strands those servers until a rejoin.
+
+Focused checks for each step are listed in the commit messages. The complete root, native and
+frontend suites have not yet been run on the final commit.
+
 ## Validated proof retention and automatic cleanup retry (22 October)
 
 Frozen runtime `edf923c107f3d11bf635a3e58a04e0b673edd7c1` passed the current native/frontend/static/build gates.

@@ -15,6 +15,15 @@ patterns=(
   'rand::random'
   'thread_rng'
   'OsRng'
+  # rand_core 0.10 / crypto-common 0.2 spell OS randomness differently: `SysRng`, direct
+  # `getrandom::` calls, and `Generate::generate()` (which uses SysRng). The native p256 0.14
+  # bootstrap must keep using `generate_from_rng` with the injected seam. A bare `::generate()`
+  # would also match `MlsDevice::generate()`, so only the secret-key types are named.
+  'SysRng'
+  'getrandom::'
+  'EphemeralSecret::generate()'
+  'NonZeroScalar::generate()'
+  'SecretKey::generate()'
 )
 
 # Files/dirs allowed to use the primitives above (the seam implementations).

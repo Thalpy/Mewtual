@@ -44,6 +44,17 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: EmbarkStudios/cargo-deny-action@v2
+      # The desktop workspace holds the only secret P-256 path, so the RUSTSEC-2026-0387 fence in
+      # deny.toml must be enforced there too. Bans only: that workspace's advisory list has
+      # unrelated open findings. The config is passed explicitly so a deny.toml placed under
+      # apps/desktop could never silently replace the root one.
+      - name: Desktop workspace bans (RUSTSEC-2026-0387 fence)
+        uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          manifest-path: apps/desktop/src-tauri/Cargo.toml
+          arguments: --config=deny.toml
+          command: check
+          command-arguments: bans
 
   linux-desktop:
     name: Linux frontend & Tauri
