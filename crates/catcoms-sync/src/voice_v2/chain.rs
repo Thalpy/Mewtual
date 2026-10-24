@@ -21,12 +21,15 @@ const ROWS: usize = 12;
 const NO_ROW: u8 = u8::MAX;
 mod admission;
 mod derivation;
+mod lifecycle;
 mod outgoing;
 mod start;
 mod transfer;
 mod transition;
 pub(crate) use admission::ConfirmationAdmission;
 pub(super) use admission::ConfirmationConsent;
+pub use lifecycle::PlanRetirement;
+pub(in crate::voice_v2) use lifecycle::SuccessorCustody;
 pub(in crate::voice_v2) use start::{StartAdmission, StartCandidate};
 pub use transfer::{PreparedSdpCapacity, TransferredSdpCapacity};
 pub(in crate::voice_v2) use transfer::{SuccessorProof, TransferredParts};
@@ -86,6 +89,9 @@ pub(super) struct PlanBinding {
     // Original fixed history already owns this paid allocation without owning Workflow.
     // Only Workflow's LAST field publisher can establish variable-capacity retirement.
     workflow_drained: AtomicBool,
+    // Distinct from old-Workflow retirement: a prepared/ticket/Exchange can survive it.
+    successor_closed: AtomicBool,
+    successor_busy: AtomicBool,
     _metadata: Credit,
 }
 impl PlanBinding {
@@ -488,6 +494,8 @@ impl PreparedChain {
             value: binding,
             transition: transition::FinishWindow::default(),
             workflow_drained: AtomicBool::new(false),
+            successor_closed: AtomicBool::new(false),
+            successor_busy: AtomicBool::new(false),
         });
         let history = Arc::new(HistoryPlan {
             binding: binding.clone(),

@@ -187,6 +187,35 @@ async fn returned_and_root_retired_parent_cannot_close_control_before_its_actual
 }
 
 #[tokio::test]
+async fn original_parent_final_waits_for_actual_successor_preparation_after_old_workflow_drains() {
+    let mut case = Case::new();
+    case.returned();
+    let prepared = case.row.successor_before_retirement_for_test();
+    case.coordinator.end(case.selected.id());
+    let context = Context::new(&case.state);
+    let pending = request(&context, &case.route, &case.row).await.unwrap();
+    assert_eq!(pending.kind, FinalKind::Plan);
+    assert!(pending.proof.is_none());
+    assert!(matches!(
+        case.finish(false).await,
+        Err(channel::Refused::Capacity)
+    ));
+    drop(prepared);
+    let final_receipt = request(&context, &case.route, &case.row).await.unwrap();
+    assert_eq!(final_receipt.kind, FinalKind::Plan);
+    case.row
+        .acknowledge_final(
+            case.route.session().identity(),
+            final_receipt.proof.unwrap(),
+        )
+        .unwrap();
+    assert!(matches!(
+        case.finish(false).await,
+        Ok(bootstrap::Status::Closed { .. })
+    ));
+}
+
+#[tokio::test]
 async fn encrypted_plan_intent_lost_results_and_exact_ack_use_the_original_session_after_end_and_lock(
 ) {
     let mut case = Case::new();

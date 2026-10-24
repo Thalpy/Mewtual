@@ -3,7 +3,7 @@
 //! late child/history replies and final channel collection. No Action or Workflow is retained.
 use super::*;
 use catcoms_sync::voice_v2::crypto_actions::{
-    ConfirmationControl, ConfirmationRetirement, ProtectedCryptoPlan,
+    ConfirmationControl, PlanRetirement, ProtectedCryptoPlan,
 };
 
 pub(super) struct Plan {
@@ -12,7 +12,7 @@ pub(super) struct Plan {
     // selection must not guess orientation from renderer fields or retained public IDs.
     pub(super) local_is_low: bool,
     pub(super) control: Option<ConfirmationControl>,
-    retirement: Option<ConfirmationRetirement>,
+    retirement: Option<PlanRetirement>,
     pub(super) transition: Option<super::transition::Claim>,
 }
 impl Plan {
@@ -36,9 +36,9 @@ impl Plan {
             || {
                 self.control
                     .as_ref()
-                    .is_some_and(ConfirmationControl::is_drained)
+                    .is_some_and(ConfirmationControl::is_plan_drained)
             },
-            ConfirmationRetirement::is_drained,
+            PlanRetirement::is_drained,
         )
     }
 }
@@ -57,7 +57,7 @@ impl Drop for Retirement {
         let Some(control) = self.control.take() else {
             return;
         };
-        let witness = control.retire();
+        let witness = control.retire_all();
         {
             let mut state = self
                 .row
@@ -233,5 +233,23 @@ impl ResolvedRow {
         &self,
     ) -> Result<impl Send, VoiceError> {
         self.prepare_retirement()
+    }
+
+    /// Park the actual retirement ticket after native capture, then retain a genuine
+    /// trusted capacity preparation before its Root closure. All Root calls/Drop occur
+    /// outside native guards. This certifies no Finish, readiness or SDP activation.
+    #[cfg(test)]
+    pub(in crate::voice_handoff) fn successor_before_retirement_for_test(
+        &self,
+    ) -> catcoms_sync::voice_v2::chain::PreparedSdpCapacity {
+        let ticket = self.prepare_retirement().unwrap().unwrap();
+        let prepared = ticket
+            .control
+            .as_ref()
+            .unwrap()
+            .prepare_sdp_capacity()
+            .unwrap();
+        drop(ticket);
+        prepared
     }
 }

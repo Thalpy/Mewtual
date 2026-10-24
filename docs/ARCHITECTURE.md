@@ -1,5 +1,19 @@
 # Mewtual; Architecture
 
+## Whole original-plan retirement (24 October)
+
+The fixed original PlanBinding now separately records permanent successor closure and one
+affine successor-capacity owner. Preparation publishes that owner under the same Control
+fence used by retirement, before reserving bytes. It moves through preparation, extracted
+ticket and inactive Exchange, and publishes drainage only after their actual fields and
+credits drop. No parent retains an Exchange or a large weak Exchange allocation.
+
+`retire_all` closes successor admission before retiring the old Workflow. Native Parent
+Final and abandoned-owner collection observe the combined PlanRetirement. Existing
+ConfirmationRetirement remains old-Workflow-only: causal Ready will need that observation
+while successor custody is still retained. This closes a cleanup boundary, not Ready,
+SDP receive installation, action admission or RTC activation.
+
 ## High-side inert successor (24 October; not scheduled)
 
 After actual protected high-side Finish-open, LocalJoin can retain one original Reserved

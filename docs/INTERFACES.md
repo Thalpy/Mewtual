@@ -1,5 +1,20 @@
 # Mewtual; Interfaces & Hooks Schema
 
+## Whole-plan cleanup observation (24 October)
+
+`ConfirmationControl::retire_all` irreversibly fences successor preparation/lending and
+returns PlanRetirement. Its `is_drained` requires both actual old Workflow destruction and
+actual last successor-capacity destruction, including a preparation or extracted ticket
+which has not become an Exchange. `is_plan_drained` is the corresponding pure observation;
+before closure its caller must independently fence new admission. Native orphan collection
+already requires the original dead lease. Native Parent Final uses this combined witness.
+
+`ConfirmationRetirement::is_drained`, `ConfirmationControl::is_drained` and successor
+`confirmation_drained` retain their old-Workflow-only meaning. Do not substitute them for
+whole-plan cleanup or make them wait for the successor: that would deadlock causal Ready.
+Future Ready/Lower/ACK owners must retain the same Exchange one way through actual Drop,
+or explicitly extend the original lifetime count. No wire or persistence format changes.
+
 ## Original channel key custody (24 October; no SDP/RTC authority)
 
 Authenticated opcode10 uses a separate version3 Control body, exact parent RowId and
@@ -37,7 +52,8 @@ compares original allocation identity; copied FinishEvidence cannot construct th
 This trusted Rust API is not itself an authenticated browser receipt. The opcode10 adapter
 described above now supplies original parent/Session/UI admission, actual Return/children
 drainage, adoption freeze, retained uncertainty and Release-gated Plan-final. It does not
-provide the separate successor-close/drainage or Ready/SDP/RTC activation authority.
+provide Ready/SDP/RTC activation authority. Separate successor-close/drainage is implemented
+by the whole-plan API described above.
 
 ## Native high-side pending successor (24 October; unscheduled)
 

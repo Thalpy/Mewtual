@@ -1,5 +1,20 @@
 # Threat model; client integrity & enforcement boundaries
 
+## Successor custody cannot outlive reported parent cleanup (24 October)
+
+The original fixed binding closes successor admission before old Workflow retirement.
+Preparation publishes one affine busy guard under the same Control fence before any
+successor payment. Therefore a racing close cannot observe old Workflow drainage ahead
+of an in-progress preparation. Failed payment and unpublished abandonment return actual
+credits before releasing the guard; successful transfer carries it through the extracted
+ticket and Exchange. Its last-field publisher follows actual resource/metadata destruction.
+
+Native Parent Final and abandoned-browser GC use this combined witness independently of
+browser Claim Release. An idle original parent retains only its fixed binding, never a
+successor Arc/large weak allocation or a cycle. Old Workflow drainage is deliberately a
+different observation and grants no readiness or new work. Future Ready/network owners
+must preserve this same lifetime; they remain unimplemented.
+
 ## Original key custody cannot revive confirmation or authorize RTC (24 October)
 
 Opcode10's first Claim requires actual original Session/plan/action/Finish identity and
@@ -18,8 +33,9 @@ Claim. A local accepted receipt is not required to recover an ambiguous native F
 Native absolute time stays opaque; request-start plus remaining time only shrinks the
 first local ceiling. End/expiry drains real owners and exact original-session cleanup.
 No extra key derivation or SDK lane is created. Browser inventories bound application
-payloads/wrappers only, not JS/SDK heap or RSS. Successor cleanup, causal Ready, SDP/ICE/RTC,
-multi-peer and relay authorization remain separate unimplemented boundaries; UI V2 is off.
+payloads/wrappers only, not JS/SDK heap or RSS. Whole-plan successor cleanup is implemented
+above. Causal Ready, SDP/ICE/RTC, multi-peer and relay authorization remain unimplemented;
+UI V2 is off.
 
 ## Inactive high successor cannot authorize SDP (24 October)
 

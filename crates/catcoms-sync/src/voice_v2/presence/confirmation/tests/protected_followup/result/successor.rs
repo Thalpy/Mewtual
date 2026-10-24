@@ -41,6 +41,46 @@ fn pending(p: &ProtectedFixture) -> Arc<Exchange> {
 }
 
 #[test]
+fn sdp_successor_whole_retirement_fences_real_confirmed_owner_and_waits_for_its_last_drop() {
+    let mut p = confirmed_high();
+    let chain = p.f.high.join.confirmations.pairs[&p.f.id]
+        .chain
+        .clone()
+        .unwrap();
+    let control = chain.workflow().unwrap().confirmation_control();
+    let output = prepare(&mut p, |_, _| Ok(())).unwrap();
+    let pool = p._runtimes[1].resources();
+    let binding =
+        p.f.high
+            .join
+            .chain_binding(p.f.id, &ca(&p.f.high.context, &p.f.high.lease));
+    assert!(output.owner.successor_current_at(&binding, &pool, 1000));
+    let whole = control.retire_all();
+    assert!(
+        !output.owner.successor_current_at(&binding, &pool, 1000),
+        "whole parent closure immediately fences the identical confirmed successor"
+    );
+    assert!(!whole.is_drained());
+    // Actual old Source expiry plus permission-independent pending housekeeping, not a
+    // fabricated witness. The retained output still owns the actual successor envelope.
+    p.f.clock.advance_ms(20_001);
+    p.f.high.join.collect_expired(&p.f.clock);
+    assert!(p.f.high.join.confirmations.pairs[&p.f.id]
+        .sdp_successor
+        .is_none());
+    assert!(
+        output.confirmation_drained(),
+        "old Workflow has its separate drainage meaning"
+    );
+    assert!(
+        !whole.is_drained(),
+        "original successor output is still a real owner"
+    );
+    drop(output);
+    assert!(whole.is_drained());
+}
+
+#[test]
 fn sdp_successor_low_refusal_preserves_original_queued_finish_authority_without_payment() {
     let (mut p, finish) = super::transition::ready_to_finish();
     let (object, _) = protected_seal(&mut p.f.low, &p.low, &finish, &p.f.clock);

@@ -1,5 +1,17 @@
 # Chat, files and voice implementation evidence
 
+## Whole-plan cleanup continuation (24 October; focused checks)
+
+Native Parent Final and abandoned-owner collection now require actual old Workflow AND
+successor-capacity drainage. The same affine guard survives partial preparation, extraction
+and Exchange destruction; closure fences its birth before old retirement. All567 focused
+Root voice tests and306 native handoff tests pass. Read-only review found no blocker/high/
+medium; HANDOVER records a LOW deterministic-interleaving coverage limit. All ten native
+voice_live TCP/HTTP/Node scenarios pass (145.18s); separate native check/strict Clippy, Sync
+strict Clippy, formatting/diff/ambient checks pass. The dependency audit remains an open
+release gate. Ready/source/admission and SDP/ICE/RTC remain
+unimplemented; these checks do not establish combined, media relay or physical acceptance.
+
 ## Original channel Claim/Release continuation (24 October; focused checks)
 
 Opcode10 and Broker22 now retain original key custody through actual SDK/result/settlement/

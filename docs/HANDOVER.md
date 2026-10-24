@@ -1,5 +1,29 @@
 # Mewtual; Handover
 
+## Whole original-plan cleanup (24 October; integration continues)
+
+Original PlanBinding now carries permanent successor closure and one affine busy guard.
+The guard is published under Control before the first preparation payment and moves last
+through actual preparation, ticket and inactive Exchange destruction. Native Parent Final
+and orphan collection use the combined PlanRetirement. Old confirmation-only drainage keeps
+its original meaning, so future causal Ready can wait for it without waiting on itself.
+No successor Arc/large weak allocation or back-reference cycle is added to the parent.
+
+All567 focused Root voice tests pass (12.30s) and306 native handoff tests pass (9.14s).
+New coverage includes actual held preparation/ticket/Exchange, whole-close-before-construction,
+first and partial payment failures with exact rollback, concurrent prepare/close, native
+Parent Final pending behind genuine prepared capacity, and quiet original pair expiry.
+Read-only review found no blocker/high/medium. LOW: the simultaneous-start barrier test
+does not force the exact closed-check/busy-CAS interleaving; sequential orderings and the
+shared-Control locking argument cover that boundary. All ten voice_live TCP/HTTP/Node
+scenarios pass (145.18s), as do separate native cargo check and strict all-target/all-feature
+Clippy, strict Sync Clippy, both workspace formatting checks, diff and ambient-dependency
+checks. Full suites remain deferred during implementation; the dependency audit gate below
+remains open. These focused results do not establish live SDP/RTC or media acceptance.
+
+Ready receive installation, prepaid producer/admission, SDP/ICE/RTC, multi-peer composition,
+media relay and combined/physical acceptance remain open. External download resume is excluded.
+
 ## Original browser/native key custody (24 October; focused checks passed)
 
 Opcode10 now provides a closed version3 Claim/Release grammar on the original authenticated
@@ -39,11 +63,16 @@ the broader implementation continues. Earlier failed runs remain in ignored targ
 
 The current dependency audit fails: RUSTSEC-2026-0387 (published23 October) matches locked
 crypto-bigint0.5.5 through elliptic-curve0.13.8. The advisory lists patched>=0.7.6, beyond
-this transitive semver line. Reachability and a compatible correction are under review;
-neither an ignore nor a dependency change was added. Bans/licenses/sources pass. This is an
-open release gate, independent of the passing custody tests and lint checks.
+this transitive semver line. Review confirms native bootstrap uses P256 ECDH: random-secret
+scalar validation reaches the affected crypto-bigint comparison/subtraction operations.
+No practical key-recovery exploit on shipped x64 was established. Configured MLS uses the
+X25519 suite; generic pre-suite-rejection P256 validation may still process public inputs.
+Native-only published P2560.14 plus crypto-bigint>=0.7.6 is a possible isolated correction,
+but the published MLS provider graph still retains the old dependency and needs a reviewed
+compatible correction. No ignore, dependency change, forced semver override or MSRV bump
+was added. Bans/licenses/sources pass. This remains an open release gate.
 
-This is key custody only. Causal Ready/source/admission, successor cleanup binding, SDP/ICE/RTC,
+This is key custody only. Whole-plan successor cleanup is implemented above. Causal Ready/source/admission, SDP/ICE/RTC,
 multi-peer composition, member media relay and combined acceptance remain unfinished. UI V2
 stays unavailable. External download resume is excluded. One desktop cannot establish
 independent-device or separate-network audible acceptance.

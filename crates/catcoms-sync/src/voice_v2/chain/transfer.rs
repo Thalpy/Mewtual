@@ -19,8 +19,11 @@ struct PreparedCapacity {
     _slots: Arc<slots::ReservedSlots>,
     binding: Arc<PlanBinding>,
     _preparation: Preparation,
-    // Last: the prepared wrapper/subreservation graph stays paid through field destruction.
+    // All capacity fields precede their metadata credit; only the fixed-plan publisher
+    // follows it, so actual successor credits return before whole-plan drainage is visible.
     _metadata: Credit,
+    // Last publisher covers partial preparation, extraction and eventual Exchange fields.
+    custody: SuccessorCustody,
 }
 // A weak reference cannot pin variable capacity or delay its retirement publisher. Its
 // allocation/owner storage stays covered by the prepared metadata and fixed plan binding.
@@ -61,6 +64,8 @@ impl TransferredSdpCapacity {
     pub(in crate::voice_v2) fn into_parts(mut self) -> TransferredParts {
         let prepared = self._prepared.take().expect("one original preparation");
         let PreparedCapacity {
+            // Bind FIRST so this publisher drops LAST if decomposition ever unwinds.
+            custody,
             resources,
             _reserve: reserve,
             _lowers: lowers,
@@ -78,6 +83,7 @@ impl TransferredSdpCapacity {
             proof: SuccessorProof(binding),
             lane: self.lane.take().expect("one original idle lane"),
             metadata,
+            custody,
         }
     }
 }
@@ -98,7 +104,9 @@ impl SuccessorProof {
         self.0.value.same(binding) && Arc::ptr_eq(self.0.resources(), resources)
     }
     pub(in crate::voice_v2) fn live(&self) -> bool {
-        self.0.value.live() && self.0.transition.epoch_is_live()
+        self.0.value.live()
+            && self.0.transition.epoch_is_live()
+            && !self.0.successor_closed.load(Ordering::Acquire)
     }
     pub(in crate::voice_v2) fn current_at(&self, mono: u64) -> bool {
         self.live() && self.until().is_some_and(|until| mono < until)
@@ -118,11 +126,13 @@ pub(in crate::voice_v2) struct TransferredParts {
     pub proof: SuccessorProof,
     pub lane: Arc<WorkLane>,
     pub metadata: Credit,
+    pub custody: SuccessorCustody,
 }
 
 impl PreparedSdpCapacity {
     pub(in crate::voice_v2) fn current_at(&self, mono: u64) -> bool {
         self.inner.binding.live()
+            && !self.inner.binding.successor_closed.load(Ordering::Acquire)
             && self
                 .inner
                 .binding
@@ -151,6 +161,7 @@ impl PreparedChain {
         mono: u64,
     ) -> bool {
         !self.binding.low
+            && !self.binding.successor_closed.load(Ordering::Acquire)
             && self.binding.value.same(binding)
             && Arc::ptr_eq(self.binding.resources(), resources)
             && self.binding.value.live()
@@ -177,7 +188,7 @@ impl ConfirmationControl {
     /// Another control cannot create a competing envelope while this one is retained.
     pub fn prepare_sdp_capacity(&self) -> Result<PreparedSdpCapacity, VoiceError> {
         let chain = self.control.upgrade().ok_or(VoiceError::Unauthorized)?;
-        let (original_slots, preparation) = {
+        let (original_slots, preparation, custody) = {
             let control = chain.control.lock().unwrap_or_else(|e| e.into_inner());
             if control.closed
                 || !Arc::ptr_eq(&chain.binding, &self.binding)
@@ -190,10 +201,12 @@ impl ConfirmationControl {
             if state.closed || state.sdp_preparing {
                 return Err(VoiceError::Capacity);
             }
+            let custody = SuccessorCustody::begin(&chain.binding)?;
             state.sdp_preparing = true;
             (
                 chain.history.slots.clone(),
                 Preparation(Arc::downgrade(workflow)),
+                custody,
             )
         };
         let resources = self.binding.resources().clone();
@@ -218,6 +231,7 @@ impl ConfirmationControl {
                 binding: self.binding.clone(),
                 _preparation: preparation,
                 _metadata: metadata,
+                custody,
             }),
         };
         let open = {

@@ -96,6 +96,10 @@ pub struct Exchange {
     successor: Option<super::chain::SuccessorProof>,
     // Last: every enclosing owner/reservation/slot remains paid through field destruction.
     _metadata: Credit,
+    // MUST remain last. All actual successor fields/credits return before whole-plan
+    // drainage publishes. Future Ready Source/Lower/ACK owners must retain this Exchange
+    // (one way, no cycle) or a separately counted lifetime owner through their real Drop.
+    _successor_custody: Option<super::chain::SuccessorCustody>,
 }
 struct PhaseLoan {
     exchange: Arc<Exchange>,
@@ -170,6 +174,9 @@ impl Exchange {
         helpers: Vec<DeviceId>,
     ) -> Arc<Self> {
         let super::chain::TransferredParts {
+            // Bind FIRST for reverse local-drop order during constructor unwinding.
+            // Normal construction moves it to Exchange's LAST field unchanged.
+            custody,
             resources,
             reserve,
             lowers,
@@ -212,6 +219,7 @@ impl Exchange {
             activated: AtomicBool::new(false),
             successor: Some(proof),
             _metadata: metadata,
+            _successor_custody: Some(custody),
         })
     }
     pub(in crate::voice_v2) fn successor_current_at(
@@ -341,6 +349,7 @@ impl Exchange {
             action_slots,
             activated: AtomicBool::new(true),
             successor: None,
+            _successor_custody: None,
         }))
     }
     pub(crate) fn action_slot(

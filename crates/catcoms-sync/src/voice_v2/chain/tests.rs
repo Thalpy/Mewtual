@@ -125,6 +125,10 @@ fn fixed_metadata_allowance_covers_retained_owner_layouts() {
         ConfirmationRetirement::OBSERVER_MEMORY_BYTES
     );
     assert!(observer <= ConfirmationRetirement::OBSERVER_MEMORY_BYTES);
+    assert_eq!(
+        size_of::<PlanRetirement>(),
+        PlanRetirement::OBSERVER_MEMORY_BYTES
+    );
 }
 
 #[test]

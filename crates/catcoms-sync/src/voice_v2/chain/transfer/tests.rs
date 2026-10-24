@@ -71,6 +71,201 @@ fn fixture() -> (
 }
 
 #[test]
+fn whole_retirement_waits_for_original_preparation_after_old_workflow_really_drains() {
+    let (resources, chain, workflow, slots) = fixture();
+    let control = workflow.confirmation_control();
+    let prepared = control.prepare_sdp_capacity().unwrap();
+    let old = ConfirmationRetirement {
+        binding: chain.binding.clone(),
+    };
+    let whole = control.retire_all();
+    drop(workflow);
+    assert!(old.is_drained(), "old Workflow actually retired");
+    assert!(
+        !whole.is_drained(),
+        "prepared capacity is a distinct actual owner"
+    );
+    assert!(chain.binding.successor_closed.load(Ordering::Acquire));
+    drop(prepared);
+    assert!(whole.is_drained());
+    drop((old, whole, chain));
+    assert_eq!(resources.counts(), (0, 0));
+    drop(slots.charge(ROWS).unwrap());
+}
+
+#[test]
+fn extracted_ticket_survives_old_drain_and_cannot_publish_premature_whole_retirement() {
+    let (resources, chain, workflow, slots) = fixture();
+    let control = workflow.confirmation_control();
+    let prepared = control.prepare_sdp_capacity().unwrap();
+    let ticket = control.transfer_sdp_capacity(prepared).unwrap();
+    let whole = control.retire_all();
+    drop(workflow);
+    assert!(ticket.confirmation_drained());
+    assert!(
+        !whole.is_drained(),
+        "extracted lane/slots/reserve still exist before a constructor"
+    );
+    drop(ticket);
+    assert!(whole.is_drained());
+    drop((whole, chain));
+    assert_eq!(resources.counts(), (0, 0));
+    drop(slots.charge(ROWS).unwrap());
+}
+
+#[test]
+fn retained_exchange_and_its_real_last_owner_delay_whole_retirement_without_a_parent_cycle() {
+    let (resources, chain, workflow, slots) = fixture();
+    let control = workflow.confirmation_control();
+    let ticket = control
+        .transfer_sdp_capacity(control.prepare_sdp_capacity().unwrap())
+        .unwrap();
+    let exchange = super::super::super::negotiation::Exchange::from_transferred(ticket, Vec::new());
+    let actual_last_owner = exchange.clone();
+    let whole = control.retire_all();
+    drop(workflow);
+    exchange.close();
+    assert!(!whole.is_drained());
+    drop(exchange);
+    assert!(!whole.is_drained());
+    drop(actual_last_owner);
+    assert!(whole.is_drained());
+    drop((whole, chain));
+    assert_eq!(resources.counts(), (0, 0));
+    drop(slots.charge(ROWS).unwrap());
+}
+
+#[test]
+fn whole_close_before_exchange_construction_preserves_custody_but_refuses_successor_liveness() {
+    let (resources, chain, workflow, slots) = fixture();
+    let control = workflow.confirmation_control();
+    let ticket = control
+        .transfer_sdp_capacity(control.prepare_sdp_capacity().unwrap())
+        .unwrap();
+    let whole = control.retire_all();
+    drop(workflow);
+    let exchange = super::super::super::negotiation::Exchange::from_transferred(ticket, Vec::new());
+    assert!(chain.binding.successor_closed.load(Ordering::Acquire));
+    assert!(!whole.is_drained());
+    assert!(exchange.collect_pending_successor(1));
+    drop(exchange);
+    assert!(whole.is_drained());
+    drop((whole, chain));
+    assert_eq!(resources.counts(), (0, 0));
+    drop(slots.charge(ROWS).unwrap());
+}
+
+#[test]
+fn failed_preparation_releases_its_guard_and_unpublished_abandonment_allows_same_plan_retry() {
+    let (resources, chain, workflow, slots) = fixture();
+    let control = workflow.confirmation_control();
+    let group = chain.binding.scope.group;
+    let pressure = resources
+        .charge(
+            group,
+            super::super::super::resources::GROUP_BYTES - resources.counts().0,
+            ResourceKind::Retained,
+        )
+        .unwrap();
+    assert_eq!(
+        control.prepare_sdp_capacity().err(),
+        Some(VoiceError::Capacity)
+    );
+    assert!(!chain.binding.successor_busy.load(Ordering::Acquire));
+    drop(pressure);
+    let prepared = control.prepare_sdp_capacity().unwrap();
+    drop(prepared);
+    assert!(!chain.binding.successor_busy.load(Ordering::Acquire));
+    let prepared = control.prepare_sdp_capacity().unwrap();
+    let whole = control.retire_all();
+    drop(workflow);
+    assert!(!whole.is_drained());
+    drop(prepared);
+    assert!(whole.is_drained());
+    drop((whole, chain));
+    assert_eq!(resources.counts(), (0, 0));
+    drop(slots.charge(ROWS).unwrap());
+}
+
+#[test]
+fn partial_preparation_failure_after_payment_returns_all_credits_before_releasing_its_guard() {
+    let (resources, chain, workflow, slots) = fixture();
+    let control = workflow.confirmation_control();
+    // Actual original row loans leave only one of twelve slots. Reservation and metadata
+    // succeed first; the later two-slot child subreserve must then refuse without leaking
+    // credits or leaving sdp_preparing/busy latched. No slot limit is reduced for the test.
+    let held: Vec<_> = (0..ROWS - 1)
+        .map(|_| chain.history.slots.loan(&slots).unwrap())
+        .collect();
+    let before = resources.counts();
+    assert_eq!(
+        control.prepare_sdp_capacity().err(),
+        Some(VoiceError::Capacity)
+    );
+    assert_eq!(resources.counts(), before);
+    assert!(!chain.binding.successor_busy.load(Ordering::Acquire));
+    assert!(!workflow.state.lock().unwrap().sdp_preparing);
+    drop(held);
+    let prepared = control.prepare_sdp_capacity().unwrap();
+    let whole = control.retire_all();
+    drop(workflow);
+    assert!(!whole.is_drained());
+    drop(prepared);
+    assert!(whole.is_drained());
+    drop((whole, chain));
+    assert_eq!(resources.counts(), (0, 0));
+    drop(slots.charge(ROWS).unwrap());
+}
+
+#[test]
+fn whole_retirement_winning_first_never_allows_a_new_preparation_or_capacity_charge() {
+    let (resources, chain, workflow, slots) = fixture();
+    let left = workflow.confirmation_control();
+    let right = workflow.confirmation_control();
+    let whole = left.retire_all();
+    let before = resources.counts();
+    assert_eq!(
+        right.prepare_sdp_capacity().err(),
+        Some(VoiceError::Unauthorized)
+    );
+    assert_eq!(resources.counts(), before);
+    drop(workflow);
+    assert!(whole.is_drained());
+    drop((right, whole, chain));
+    assert_eq!(resources.counts(), (0, 0));
+    drop(slots.charge(ROWS).unwrap());
+}
+
+#[test]
+fn simultaneous_whole_retirement_and_real_preparation_never_outpace_actual_custody() {
+    let (resources, chain, workflow, slots) = fixture();
+    let left = workflow.confirmation_control();
+    let right = workflow.confirmation_control();
+    let barrier = std::sync::Barrier::new(2);
+    let (preparation, whole) = std::thread::scope(|scope| {
+        let prepare = scope.spawn(|| {
+            barrier.wait();
+            left.prepare_sdp_capacity()
+        });
+        barrier.wait();
+        let whole = right.retire_all();
+        (prepare.join().unwrap(), whole)
+    });
+    drop(workflow);
+    match preparation {
+        Ok(prepared) => {
+            assert!(!whole.is_drained());
+            drop(prepared);
+        }
+        Err(error) => assert_eq!(error, VoiceError::Unauthorized),
+    }
+    assert!(whole.is_drained());
+    drop((whole, left, chain));
+    assert_eq!(resources.counts(), (0, 0));
+    drop(slots.charge(ROWS).unwrap());
+}
+
+#[test]
 fn successor_moves_original_crypto_and_slots_under_full_ordinary_pressure() {
     let (resources, chain, workflow, slots) = fixture();
     let control = workflow.confirmation_control();
