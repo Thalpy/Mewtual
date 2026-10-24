@@ -1,6 +1,54 @@
 # Mewtual; Handover
 
-## Original key-custody proof continuation (24 October; channel work next)
+## Original browser/native key custody (24 October; focused checks passed)
+
+Opcode10 now provides a closed version3 Claim/Release grammar on the original authenticated
+channel. Native resolves the exact Derive parent/action/handshake and original Session;
+first Claim alone requires current original UI generation/selection and actual child Return.
+The retained opaque Root proof checks original native Finish, actor/call/pair/epoch and first
+window. First Claim freezes child adoption, clears old physical collection evidence and
+blocks normal Plan-final until exact Release. Same-session history recovers a lost Claim
+after End/lock with its original receipt and zero remaining time. Released cannot reopen.
+Independent abandoned-browser GC requires the actual original physical collection, dead
+lease, no surviving row owner and actual Root drainage; it fabricates neither Release nor ACK.
+
+Broker22 publishes provisional custody only from authenticated, fully bound Finish Input
+before SDK callbacks. It preserves the same keys, counters, payment and execution position.
+Original confirmation expiry still gates every old action. After actual SDK/result/settlement/
+Return drainage, the same channel claims native custody, even if a delayed accepted Finish
+reply crossed the old browser deadline. Native until is opaque clock identity; request-start
+plus authenticated remaining time can only shrink the first local ceiling. End transfers
+unknown Claim recovery/Release to the existing cleanup driver before parent finalization.
+The live pump freezes old child adoption and retries the same Claim after local pressure.
+
+Current focused browser263 pass, including delayed Finish, lost Claim/Release, rejected
+Finish, immutable custody, held SDK/Return across expiry and same-pump retry. Svelte reports
+zero errors/warnings and the production frontend build passes (existing chunk-size warning).
+Native305 handoff checks and all ten voice_live TCP/HTTP/Node scenarios pass, including actual six-flight
+Claim/Release, End/lock recovery, foreign Session/physical proof refusal and abandoned Claim
+collection. Unchanged Row2304 and native Control12KiB guards pass; new browser custody fits
+the separately paid chain8KiB metadata and serial Control8KiB inventories. These are structural
+application graphs, not allocator/SDK heap or RSS bounds. Automatic Node acceptance requires
+independent actual native receipts/ACK/settlement/Return and retained Claim at both endpoints;
+it does not rely on another old-work scan after Finish. The ten scenarios passed139.49s.
+All558 focused Root voice checks pass12.14s; strict Sync and separate native all-target/
+all-feature Clippy pass, native cargo check and standalone Node TypeScript pass. Formatting,
+diff and deterministic-dependency checks pass. Read-only re-review found no unresolved
+blocker/high/medium; stale documentation was corrected. Full suites remain deferred while
+the broader implementation continues. Earlier failed runs remain in ignored target logs.
+
+The current dependency audit fails: RUSTSEC-2026-0387 (published23 October) matches locked
+crypto-bigint0.5.5 through elliptic-curve0.13.8. The advisory lists patched>=0.7.6, beyond
+this transitive semver line. Reachability and a compatible correction are under review;
+neither an ignore nor a dependency change was added. Bans/licenses/sources pass. This is an
+open release gate, independent of the passing custody tests and lint checks.
+
+This is key custody only. Causal Ready/source/admission, successor cleanup binding, SDP/ICE/RTC,
+multi-peer composition, member media relay and combined acceptance remain unfinished. UI V2
+stays unavailable. External download resume is excluded. One desktop cannot establish
+independent-device or separate-network audible acceptance.
+
+## Original key-custody proof at463a4e1a (24 October; historical checkpoint)
 
 ProtectedCryptoPlan can now lend an opaque ConfirmationCustody through its actual original
 Control after native Finish. The private constructor compares PlanBinding allocation identity;
@@ -17,24 +65,11 @@ Sync Clippy passes, and formatting/diff checks pass. At9cecca96 the native hando
 all9 voice_live TCP scenarios (139.94s) and separate native cargo check passed. Complete
 newer-source suites remain pending; no physical acceptance follows.
 
-Next: opcode10 exact original-session Claim/Release in a separate bounded grammar, native
-parent obligation/freeze/finalization, and browser custody-versus-action lifetime split.
-Protect SAME keys before delayed Finish settlement crosses the original15s deadline; a
-local once-bounded custody-only state may start at authenticated Finish Input, while every
-old action still uses its original deadline. Initial LOW custody must not require SDP
-extraction or stop Finish retries. Later Ready/adoption must additionally install exact
-successor cleanup/drainage before any SDP activation. The old Workflow witness cannot
-establish that a new SDP owner has drained. No new channel wire operation exists yet.
-
-Claim integration review constraints: recover an EXISTING same-Session Claim after End/lock/
-expiry with its original receipt and zero remaining custody, so a lost initial reply cannot
-deadlock Release. Normal Plan-final/channel close must require Release, but independent
-dead-owner GC must still work after exact actual physical collection, dead original lease
-and real Root drainage; forced discard is not Release/ACK. Bind collected evidence to Claim's
-exact Session too, and reset old session_collected on first Claim. Keep any removed owners
-outside Index/Row guards and measure Claim plus coexisting final-delivery storage under the
-unchanged Row2304/Control12KiB payments. Pin lost Claim/End recovery, physical-proof mismatch,
-abandoned claimant GC and Release-versus-final races before enabling this command.
+The opcode10 and browser lifetime work proposed at this checkpoint is implemented above.
+Initial LOW custody does not extract SDP capacity or stop Finish retries. The next Ready/
+adoption step must bind exact successor closure and actual drainage to the native parent
+before any SDP activation: the old Workflow witness cannot establish that a new SDP owner
+has drained. Current Claim authorizes key custody only and cannot bypass that missing gate.
 
 ## High-side inert SDP successor (24 October; focused validation passed)
 

@@ -1,6 +1,30 @@
 # Mewtual; Interfaces & Hooks Schema
 
-## Original native key-custody proof (24 October; channel Claim/Release pending)
+## Original channel key custody (24 October; no SDP/RTC authority)
+
+Authenticated opcode10 uses a separate version3 Control body, exact parent RowId and
+original selector/action/handshake. Claim186B and Release218B accept no renderer clock,
+Finish evidence or claimed confirmation boolean. The214B reply binds original parent,
+action, handshake, epoch, native signed Finish ID/hash, first native until, remaining time
+and one original-session receipt. Borrowed has1..30000ms; Closing/Released have zero.
+The existing fail-closed opcode/version/class/length/header checks precede counter debit.
+
+First Claim resolves the actual indexed original plan/Control after child Return and holds
+the actual UI commit, Coordinator and Route admission through the final nonblocking latch.
+It freezes confirmation adoption and creates one retained Release obligation. Recovery of
+an existing Claim and exact Release work after End/lock/expiry without a current grant;
+neither can create a replacement Claim. Normal Plan-final/closure requires Release and
+actual Root drainage independently. Physical abandoned-owner GC is separate and requires
+the exact collected Session, dead lease and actual last-owner/Root drainage evidence.
+
+Broker22 keeps custody separate from old confirmation admission. Only authenticated Finish
+Input arms its once-bounded provisional ceiling before SDK callbacks. Actual SDK/result/
+settlement/Return precedes Claim. Request-start plus native remaining time only shrinks local
+custody; native until is never compared with JS time. Cleanup retains original framing keys,
+counters and receipts through lost Claim/Release replies and releases before Plan-final.
+This command carries no SDP/ICE plaintext and issues no successor/RTC or activation authority.
+
+## Original native key-custody proof at463a4e1a (historical checkpoint)
 
 `ProtectedCryptoPlan::confirmation_custody(control, native_mono)` returns an opaque fixed
 ConfirmationCustody only for the identical original plan/Control allocation after actual
@@ -10,10 +34,10 @@ its own Clock outside gates; renderer time is not accepted. Old phase Closed aft
 extraction is expected and grants no renewed confirmation authority. `contains_custody`
 compares original allocation identity; copied FinishEvidence cannot construct this proof.
 
-This trusted Rust API is not an authenticated browser receipt. A channel Claim must still
-bind the same original parent/Session/UI admission, wait for actual Return/children drainage,
-freeze child adoption, retain one obligation through uncertainty and block Plan-final until
-exact Release. That adapter and browser custody/action lifetime split remain unimplemented.
+This trusted Rust API is not itself an authenticated browser receipt. The opcode10 adapter
+described above now supplies original parent/Session/UI admission, actual Return/children
+drainage, adoption freeze, retained uncertainty and Release-gated Plan-final. It does not
+provide the separate successor-close/drainage or Ready/SDP/RTC activation authority.
 
 ## Native high-side pending successor (24 October; unscheduled)
 

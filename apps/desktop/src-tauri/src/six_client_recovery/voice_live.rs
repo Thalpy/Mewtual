@@ -456,25 +456,35 @@ async fn native_v2_discovers_blocked_endpoints_through_unjoined_tcp_bridge_then_
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn native_v2_confirmation_child_uses_the_returned_actual_parent_over_blocked_tcp_discovery() {
-    confirmation_over_blocked_tcp(false, false, false).await;
+    confirmation_over_blocked_tcp(false, false, false, false).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn native_v2_confirmation_framed_result_uses_actual_actor_body_and_original_phase() {
-    confirmation_over_blocked_tcp(true, false, false).await;
+    confirmation_over_blocked_tcp(true, false, false, false).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn native_v2_confirmation_rejected_result_remains_original_history_after_return() {
-    confirmation_over_blocked_tcp(true, true, false).await;
+    confirmation_over_blocked_tcp(true, true, false, false).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn native_v2_confirmation_known_incoming_retry_survives_permanent_input_loss() {
-    confirmation_over_blocked_tcp(true, false, true).await;
+    confirmation_over_blocked_tcp(true, false, true, false).await;
 }
 
-async fn confirmation_over_blocked_tcp(framed: bool, reject: bool, known_incoming: bool) {
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn native_v2_abandoned_custody_needs_exact_physical_collection_dead_lease_and_root_drain() {
+    confirmation_over_blocked_tcp(true, false, false, true).await;
+}
+
+async fn confirmation_over_blocked_tcp(
+    framed: bool,
+    reject: bool,
+    known_incoming: bool,
+    orphan: bool,
+) {
     let mut scenario = Scenario::new(false, isolate().await);
     scenario.admit().await;
     scenario.close(&[3, 4, 5]).await;
@@ -533,6 +543,7 @@ async fn confirmation_over_blocked_tcp(framed: bool, reject: bool, known_incomin
                 &scenario.online(2).state,
                 &c,
                 &cp,
+                orphan,
             )
             .await;
         } else {
@@ -574,6 +585,7 @@ async fn confirmation_over_blocked_tcp(framed: bool, reject: bool, known_incomin
             &scenario.online(1).state,
             &a,
             &ap,
+            orphan,
         )
         .await;
     } else {
@@ -589,9 +601,40 @@ async fn confirmation_over_blocked_tcp(framed: bool, reject: bool, known_incomin
     }
     crate::end_voice_owner_inner(&scenario.online(1).state, a.id()).await;
     crate::end_voice_owner_inner(&scenario.online(2).state, c.id()).await;
-    ap.retire_plan().unwrap();
-    cp.retire_plan().unwrap();
+    let purposes = [
+        crate::voice_handoff::ledger::Purpose::Derive(discovered[0].1),
+        crate::voice_handoff::ledger::Purpose::Derive(discovered[1].1),
+    ];
+    if orphan {
+        assert_ne!(
+            ap.retire_plan().is_ok(),
+            cp.retire_plan().is_ok(),
+            "only the abandoned Borrowed Claim refuses ordinary retirement"
+        );
+    } else {
+        ap.retire_plan().unwrap();
+        cp.retire_plan().unwrap();
+    }
     drop((ap, cp, ag, cg));
+    if orphan {
+        let low = if scenario.clients[1].identity.as_ref().unwrap().1
+            < scenario.clients[2].identity.as_ref().unwrap().1
+        {
+            1
+        } else {
+            2
+        };
+        let selected = if low == 1 { &a } else { &c };
+        let state = &scenario.online(low).state;
+        state.voice_channels.collect_retired(&state.voice_handoff);
+        assert!(
+            state
+                .voice_handoff
+                .lookup_original(selected, purposes[low - 1])
+                .is_none(),
+            "dead original history collects only after its actual last row owner drops"
+        );
+    }
     scenario.close(&[0, 1, 2]).await;
     scenario.rules.assert_graph();
 }

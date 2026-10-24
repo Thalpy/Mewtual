@@ -27,10 +27,12 @@ mod children;
 mod continuation;
 mod plan;
 mod projection;
+mod transition;
 pub(super) use children::ConfirmationPurpose;
 pub(super) use continuation::Continuation;
 use plan::Plan;
 pub(super) use projection::{WorkMetadata, WorkProjection};
+pub(super) use transition::TransitionReceipt;
 
 #[cfg(test)]
 pub(super) fn retirement_layout_bytes() -> usize {
@@ -605,7 +607,13 @@ impl Ledger {
     /// The retained cleanup driver must recheck this snapshot: Root has no notification
     /// into Row's existing Notify, so a prior Pending observation is not a final answer.
     fn final_retirement_ready(state: &State) -> bool {
-        state.plan().is_none_or(Plan::is_drained)
+        state.plan().is_none_or(Plan::is_drained) && Self::root_retirement_ready(state)
+    }
+    // Independent dead-owner GC has actual physical collection and a dead original lease.
+    // It may discard an abandoned Claim, never fabricate Release/final issuance/ACK. Normal
+    // finalization MUST continue using final_retirement_ready, including its Release gate.
+    fn root_retirement_ready(state: &State) -> bool {
+        state.plan().is_none_or(Plan::root_drained)
             && state
                 .final_phase
                 .as_ref()
@@ -627,7 +635,15 @@ impl Ledger {
                         collected
                             .identity()
                             .is_some_and(|identity| Arc::ptr_eq(identity, &delivery.session))
-                    }) {
+                    }) && state
+                        .plan()
+                        .and_then(|plan| plan.transition.as_ref())
+                        .is_none_or(|claim| {
+                            collected
+                                .identity()
+                                .is_some_and(|identity| Arc::ptr_eq(identity, &claim.session))
+                        })
+                    {
                         state.session_collected = true;
                     }
                 }
@@ -656,7 +672,7 @@ impl Ledger {
                     let state = row.state.lock().unwrap_or_else(|error| error.into_inner());
                     state.session_collected
                         && matches!(state.body, Body::Drained(..) | Body::ClosedPending)
-                        && Self::final_retirement_ready(&state)
+                        && Self::root_retirement_ready(&state)
                 });
                 if reclaim {
                     *retired = slot.take();

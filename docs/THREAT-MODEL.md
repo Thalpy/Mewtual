@@ -1,5 +1,26 @@
 # Threat model; client integrity & enforcement boundaries
 
+## Original key custody cannot revive confirmation or authorize RTC (24 October)
+
+Opcode10's first Claim requires actual original Session/plan/action/Finish identity and
+current native UI/selection/epoch admission. Clock sampling precedes only try-lock final
+gates; native does not wait with an aging remaining-time sample. A borrowed Claim freezes
+new confirmation children and blocks normal final delivery until exact Release. A lost
+reply after End remains recoverable as Closing history, never renewed custody. Equal
+public Session fields do not substitute for its original allocation. Independent forced
+GC requires exact physical collection, dead lease and actual Root/last-owner drainage;
+it does not fabricate browser Release, terminal proof issuance or ACK.
+
+Only fully authenticated native Finish Input can arm Broker22's provisional key custody.
+The original confirmation deadline remains immutable and gates all old SDK/admission work.
+Keys/counters/payment are retained once through actual SDK/IO/result/Return and native
+Claim. A local accepted receipt is not required to recover an ambiguous native Finish.
+Native absolute time stays opaque; request-start plus remaining time only shrinks the
+first local ceiling. End/expiry drains real owners and exact original-session cleanup.
+No extra key derivation or SDK lane is created. Browser inventories bound application
+payloads/wrappers only, not JS/SDK heap or RSS. Successor cleanup, causal Ready, SDP/ICE/RTC,
+multi-peer and relay authorization remain separate unimplemented boundaries; UI V2 is off.
+
 ## Inactive high successor cannot authorize SDP (24 October)
 
 Original HIGH Finish-open may prepare and extract only its own affine capacity. LOW local

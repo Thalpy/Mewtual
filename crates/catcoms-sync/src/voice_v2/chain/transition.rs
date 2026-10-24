@@ -65,7 +65,9 @@ impl ConfirmationCustody {
             return Err(VoiceError::Unauthorized);
         }
         let until = self.record().until;
-        if mono >= until {
+        // A different/rolled-back monotonic origin cannot manufacture more than the one
+        // original window. Native adapters must use the SAME Runtime Clock that armed it.
+        if mono < until - AWAIT_READY_MS || mono >= until {
             return Err(VoiceError::Freshness);
         }
         Ok(until - mono)

@@ -63,6 +63,23 @@ test("Pending slot reuse remains visible and does not enter completed bitmap", a
   assert.equal(f.counts().derived, 1); assert.equal(f.counts().returns, 1); await f.close();
 });
 
+test("Finish custody retries local Claim pressure on the same pump without scanning or adopting old work", async () => {
+  const f = fixture(); let requested = false, claims = 0;
+  Object.assign(f.actions, { async transition(actual: VoiceCryptoChain) {
+    assert.equal(actual, f.chain);
+    if (!requested) return false;
+    claims++;
+    if (claims === 1) throw new Error("native Claim capacity");
+    return true;
+  } });
+  f.start(); await flush(); await f.tick(); await f.tick();
+  f.returned(); requested = true; const reads = f.reads.length;
+  await f.tick(); await f.tick();
+  assert.equal(claims, 2); assert.equal(f.reads.length, reads);
+  assert.equal(f.counts().derived, 1); assert.equal(f.counts().children, 1);
+  await f.close(); assert.equal(f.counts().timers, 0);
+});
+
 for (const kind of ["status", "retired"] as const) test(`historical/terminal Derive ${kind} never adopts another parent`, async () => {
   const f = fixture(); f.deriveOutcome(kind === "status" ? { kind: "status" } as never : { kind });
   f.start(); await flush(); await f.tick();

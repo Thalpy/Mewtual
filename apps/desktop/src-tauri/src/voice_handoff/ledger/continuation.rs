@@ -76,7 +76,7 @@ impl Ledger {
                     {
                         continue;
                     }
-                    let Some(plan) = state.plan().filter(|plan| plan.control.is_some()) else {
+                    let Some(plan) = state.plan().filter(|plan| plan.can_adopt_child()) else {
                         continue;
                     };
                     let mut request = None;
@@ -184,7 +184,7 @@ impl Ledger {
                 || state.final_delivery().is_some()
                 || !state
                     .plan()
-                    .is_some_and(|plan| plan.control.is_some() && plan.identity.contains(action))
+                    .is_some_and(|plan| plan.can_adopt_child() && plan.identity.contains(action))
             {
                 continue;
             }

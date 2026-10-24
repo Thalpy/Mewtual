@@ -65,6 +65,7 @@
 !apps/desktop/src-tauri/src/voice_handoff/channel/vectors.json
 !apps/desktop/src-tauri/src/voice_handoff/requests/vectors.json
 !apps/desktop/src-tauri/src/voice_handoff/requests/confirmation/vectors.json
+!apps/desktop/src-tauri/src/voice_handoff/requests/transition/vectors.json
 !apps/desktop/src-tauri/src/voice_handoff/replies/vectors.json
 !apps/desktop/src-tauri/tauri.conf.json
 !apps/desktop/src-tauri/tauri.official.conf.json

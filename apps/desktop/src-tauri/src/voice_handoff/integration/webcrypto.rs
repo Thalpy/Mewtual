@@ -43,6 +43,7 @@ enum Method {
     SettleSetup,
     CollectChannel,
     ReadWork,
+    ObserveTerminal,
 }
 #[derive(Deserialize, Clone, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
@@ -583,7 +584,7 @@ async fn drive_streams_inner(
             Frame::Blocked => panic!("unexpected blocked-step acknowledgement"),
             Frame::Call { method, args } => {
                 let stop_pump = automatic
-                    && matches!(method, Method::ReadWork)
+                    && matches!(method, Method::ObserveTerminal)
                     && hex::decode(&args.executor)
                         .ok()
                         .and_then(|bytes| bytes.try_into().ok())
@@ -680,6 +681,7 @@ fn automatic_terminal(state: &AppState, selected: &SelectedHandoffOwner) -> bool
             ledger::Purpose::Derive(_) => {
                 if parent.replace(metadata.row).is_some()
                     || receipt.outcome != CryptoOutcome::Derived
+                    || !row.has_transition_claim()
                 {
                     return false;
                 }
@@ -806,6 +808,10 @@ async fn metadata(
                 .map_err(|_| ())?;
             Value::Null
         }
+        // Test-only bounded observation. Its exact selected owner is validated above and
+        // the caller independently inspects actual native histories + original Claim.
+        // It creates no work, grant, token, key, adoption or SDK/RTC authority.
+        Method::ObserveTerminal => Value::Null,
     };
     Ok(MetadataReply {
         value,

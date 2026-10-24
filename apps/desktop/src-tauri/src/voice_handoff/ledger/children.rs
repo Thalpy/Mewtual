@@ -263,7 +263,7 @@ impl Ledger {
             || parent_state.final_delivery().is_some()
             || parent_state
                 .plan()
-                .is_none_or(|plan| plan.control.is_none())
+                .is_none_or(|plan| !plan.can_adopt_child())
         {
             return Err(VoiceError::Capacity);
         }
@@ -408,7 +408,7 @@ impl Registration {
         let parent_state = parent.state.lock().unwrap_or_else(|e| e.into_inner());
         if !parent_state
             .plan()
-            .is_some_and(|plan| plan.control.is_some() && plan.identity.contains(action))
+            .is_some_and(|plan| plan.can_adopt_child() && plan.identity.contains(action))
         {
             return Err(VoiceError::Unauthorized);
         }

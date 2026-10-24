@@ -87,6 +87,7 @@ fn native_key_custody_requires_actual_finish_and_retains_exact_window_without_re
         (object.id(), object.hash(), p.f.low.context.epoch, 31_000)
     );
     assert_eq!(custody.remaining_at(1_000), Ok(30_000));
+    assert_eq!(custody.remaining_at(999), Err(VoiceError::Freshness));
     assert_eq!(
         pool.counts(),
         before,

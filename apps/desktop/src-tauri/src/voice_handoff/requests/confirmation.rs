@@ -23,13 +23,15 @@ impl<'a> Request<'a> {
         logical: [u8; 16],
         bytes: &'a [u8],
     ) -> Result<Self, VoiceError> {
-        if matches!(operation, Operation::Status | Operation::FinalAck)
-            || body_kind
-                != if operation == Operation::Result {
-                    BodyKind::Data
-                } else {
-                    BodyKind::Control
-                }
+        if matches!(
+            operation,
+            Operation::Status | Operation::FinalAck | Operation::ChainTransition
+        ) || body_kind
+            != if operation == Operation::Result {
+                BodyKind::Data
+            } else {
+                BodyKind::Control
+            }
         {
             return Err(VoiceError::Unauthorized);
         }

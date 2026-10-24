@@ -22,6 +22,9 @@ export type NativeWorkActions = Readonly<{
   returnDerivation(chain: VoiceCryptoChain): Promise<void>;
   confirmation(chain: VoiceCryptoChain, work: Attached): VoiceChannelConfirmationHandle;
   returned(chain: VoiceCryptoChain, child: VoiceChannelConfirmationHandle): boolean;
+  /** True freezes old confirmation adoption after authenticated Finish Input. This
+   * observes/retries the same custody Claim; it grants no SDP/RTC scheduling authority. */
+  transition?(chain: VoiceCryptoChain): Promise<boolean>;
 }>;
 
 /** One prepaid metadata graph, parent and current child, one task and one wake/timer.
@@ -107,6 +110,7 @@ export class NativeWorkPump {
       if (!actions.returned(this.parent!.ready!.chain, child.handle)) return;
       this.complete(child.work); this.child = null;
     }
+    if (this.parent?.ready && await actions.transition?.(this.parent.ready.chain)) return;
     let fromSlot = 0;
     while (fromSlot < 32 && this.live()) {
       const raw = await actions.read(fromSlot);

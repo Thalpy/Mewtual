@@ -58,7 +58,7 @@ function send(value: unknown): void {
   const head = Buffer.alloc(4); head.writeUInt32BE(body.length);
   process.stdout.write(head); process.stdout.write(body);
 }
-type Method = "admitKey" | "publishKey" | "settleKey" | "setup" | "settleSetup" | "collectChannel" | "readWork";
+type Method = "admitKey" | "publishKey" | "settleKey" | "setup" | "settleSetup" | "collectChannel" | "readWork" | "observeTerminal";
 async function rpc<T>(method: Method, args: Record<string, string | number>): Promise<T> {
   assert.equal(callback, null, "only one native metadata call may be outstanding");
   const answer = new Promise<unknown>((resolve, reject) => { callback = { resolve, reject }; });
@@ -107,11 +107,19 @@ async function step(value: Step): Promise<unknown> {
   switch (value.name) {
     case "pump": {
       assert.equal(stopPump, null);
-      let stop!: () => void;
-      const stopped = new Promise<void>(yes => { stop = yes; });
-      stopPump = stop;
+      let stopped = false;
+      stopPump = () => { stopped = true; };
       const observer = broker.observeNativeWork(owner, channel, key);
-      try { await stopped; await observer.close(); await idle(); return { kind: "observed" }; }
+      try {
+        // Production correctly stops old-work scans at Finish custody. Test completion
+        // must not depend on another readWork callback. One independent bounded metadata
+        // observer waits for actual native receipts/Returns AND Claim; it adopts nothing.
+        while (!stopped) {
+          if (callback === null) await rpc("observeTerminal", { owner: owner.token, executor: channelExecutor! });
+          if (!stopped) await new Promise<void>(yes => setTimeout(yes, 50));
+        }
+        await observer.close(); await idle(); return { kind: "observed" };
+      }
       finally { stopPump = null; }
     }
     case "prepare": {

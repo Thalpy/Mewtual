@@ -147,5 +147,22 @@ pub(super) fn layout_bytes() -> usize {
         + 256 // synchronous resolver, exact proof hashing and response wrappers
 }
 
+/// Exercise the row's independent original-Session check even if a future canonical
+/// Registry implementation accidentally admits another actual channel allocation.
+#[cfg(test)]
+pub(super) async fn assert_foreign_session_after_release(
+    context: &Context,
+    route: &Route,
+    row: &ResolvedRow,
+    foreign: &Route,
+) {
+    let mut admission = admit(context, route).await.unwrap();
+    admission.session = foreign.session().clone();
+    assert!(matches!(
+        row.request_plan_final(&admission),
+        Err(catcoms_sync::voice_v2::VoiceError::Unauthorized)
+    ));
+}
+
 #[cfg(test)]
 mod tests;

@@ -75,6 +75,11 @@ pub(super) async fn respond(
     if incoming.operation() == Operation::Status {
         return status(route, incoming);
     }
+    if incoming.operation() == Operation::ChainTransition {
+        return crate::voice_handoff::transition::apply(context, route, incoming)
+            .await
+            .map_err(|_| Refused::Body);
+    }
     let version = incoming
         .plain()
         .map_err(|_| Refused::Body)?

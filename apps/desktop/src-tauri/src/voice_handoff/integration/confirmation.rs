@@ -1206,7 +1206,7 @@ pub(crate) async fn confirmation_round_trip(
         high_state,
         high,
         high_parent,
-        false,
+        ConfirmationMode::Legacy,
     )
     .await;
 }
@@ -1219,6 +1219,7 @@ pub(crate) async fn confirmation_framed_round_trip(
     high_state: &AppState,
     high: &Arc<SelectedHandoffOwner>,
     high_parent: &ledger::ResolvedRow,
+    orphan_low: bool,
 ) {
     confirmation_round_trip_inner(
         low_state,
@@ -1227,7 +1228,11 @@ pub(crate) async fn confirmation_framed_round_trip(
         high_state,
         high,
         high_parent,
-        true,
+        if orphan_low {
+            ConfirmationMode::Orphan
+        } else {
+            ConfirmationMode::Framed
+        },
     )
     .await;
 }
@@ -1391,6 +1396,11 @@ pub(crate) async fn confirmation_known_incoming_retry(
     .await;
 }
 
+enum ConfirmationMode {
+    Legacy,
+    Framed,
+    Orphan,
+}
 async fn confirmation_round_trip_inner(
     low_state: &AppState,
     low: &Arc<SelectedHandoffOwner>,
@@ -1398,8 +1408,9 @@ async fn confirmation_round_trip_inner(
     high_state: &AppState,
     high: &Arc<SelectedHandoffOwner>,
     high_parent: &ledger::ResolvedRow,
-    framed_results: bool,
+    mode: ConfirmationMode,
 ) {
+    let framed_results = !matches!(mode, ConfirmationMode::Legacy);
     let hello = outgoing(
         low_state,
         low,
@@ -1538,4 +1549,26 @@ async fn confirmation_round_trip_inner(
             .is_none(),
         "terminal Finish must refuse before reserving uncertain native history"
     );
+    if framed_results {
+        // Only actual application-framed Finish results arm native custody. The legacy
+        // test-only result path deliberately cannot manufacture this transition proof.
+        super::transition::custody_cycle(
+            high_state,
+            high,
+            high_parent,
+            super::transition::Cleanup::Live,
+        )
+        .await;
+        super::transition::custody_cycle(
+            low_state,
+            low,
+            low_parent,
+            if matches!(mode, ConfirmationMode::Orphan) {
+                super::transition::Cleanup::Orphan
+            } else {
+                super::transition::Cleanup::Ended
+            },
+        )
+        .await;
+    }
 }

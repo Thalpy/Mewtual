@@ -10,6 +10,8 @@ import { readVoiceIpcResponse } from "./voice-ipc-body.ts";
 import { encodeVoiceIpcAction, encodeVoiceIpcConfirmationAction, type VoiceIpcPurpose, type VoiceIpcActionIdentity, type VoiceIpcActionRequest, type VoiceIpcConfirmationPurpose, type VoiceIpcConfirmationRequest } from "./voice-ipc-actions.ts";
 import { decodeVoiceIpcDerivationInput, decodeVoiceIpcPermit } from "./voice-ipc-input.ts";
 import { decodeVoiceIpcConfirmationInput } from "./voice-ipc-confirmation-input.ts";
+import { decodeVoiceTransition, encodeVoiceTransition, type VoiceTransitionRequest } from "./voice-ipc-transition.ts";
+import { VoiceKeyCustody } from "./voice-key-custody.ts";
 import { decodeVoiceWorkSnapshot, type VoiceWorkDescriptor } from "./voice-ipc-work.ts";
 import { NativeWorkPump, type VoiceNativeWorkObserver } from "./voice-ipc-pump.ts";
 import { decodeVoiceIpcActionReply, decodeVoiceIpcFinalReply, isVoiceIpcActionRow, type VoiceIpcActionReply } from "./voice-ipc-replies.ts";
@@ -258,6 +260,8 @@ type BrowserChain = {
   // A channel-linked chain lends its original physical position; logical row serialization
   // remains separate so admission/result/settlement RPCs can use that SAME channel.
   channel: RetainedIpcChannel | null; drained: Signal<void>;
+  // Same keys/payment; no effect, admission, SDP or RTC authority lives in this metadata.
+  custody: VoiceKeyCustody | null;
 };
 type ConfirmationIntake = {
   chain: BrowserChain; purpose: VoiceIpcConfirmationPurpose; row: string | null; identity: VoiceIpcActionIdentity | null;
@@ -425,7 +429,7 @@ function context(label: string, transcript: Uint8Array): Uint8Array<ArrayBuffer>
  * unsettled work. Revoking an owner never frees a running promise; only its real settlement does.
  * A derive pipeline uses one permit for sequential import/ECDH/HKDF work, never parallel calls. */
 export class VoiceCryptoBroker {
-  readonly version = 21;
+  readonly version = 22;
   readonly subtle: SubtleCrypto;
   private readonly native: VoiceCryptoAdmission;
   private active = 0;
@@ -599,6 +603,8 @@ export class VoiceCryptoBroker {
         // reference. Owner End alone cannot release these still-retained fixed objects.
         if (!chain.owner.isCurrent()) this.releaseChainHistory(chain);
       },
+      finishInput: chain => this.retainFinishCustody(chain),
+      transitionUpdated: chain => { if (this.chainCurrent(chain)) this.armChain(chain); },
     });
     this.ipcChannels.set(owner.token, channel);
     try { channel.observe(); }
@@ -918,7 +924,7 @@ export class VoiceCryptoBroker {
       variable: true, fixedBytes: fixed, record: null, unsubscribe: () => {}, handle: null!, timer: null,
       records: new Map(), queue: [], retainedBytes: 130 + setup.transcript.length, enginePeak: 0,
       continuation: null, confirmations: new Map(),
-      channel, drained: signal<void>(),
+      channel, drained: signal<void>(), custody: null,
     };
     chain.handle = Object.freeze({ close: () => this.closeChain(chain), isCurrent: () => this.chainCurrent(chain) });
     if (intake) { intake.transferred = true; intake.rows = 0; intake.fixedBytes = 0; intake.variable = false; }
@@ -936,14 +942,27 @@ export class VoiceCryptoBroker {
   }
   private armChain(chain: BrowserChain): void {
     if (chain.closed) return;
+    if (chain.timer !== null) clearTimeout(chain.timer);
     chain.timer = setTimeout(() => {
       chain.timer = null;
       if (this.chainCurrent(chain)) this.armChain(chain);
-    }, Math.max(1, Math.ceil(chain.expires - this.now())));
+    }, Math.max(1, Math.ceil((chain.custody?.expires ?? chain.expires) - this.now())));
   }
   private chainCurrent(chain: BrowserChain): boolean {
-    if (!chain.closed && (!chain.owner.isCurrent() || this.now() >= chain.expires)) this.closeChain(chain);
+    if (!chain.closed && (!chain.owner.isCurrent() || (chain.custody
+      ? !chain.custody.current(this.now()) : this.now() >= chain.expires))) this.closeChain(chain);
     return !chain.closed;
+  }
+  /** Custody can survive the old deadline; it never admits another old confirmation. */
+  private confirmationCurrent(chain: BrowserChain): boolean {
+    return this.chainCurrent(chain) && this.now() < chain.expires && !chain.custody?.receipt;
+  }
+  private retainFinishCustody(chain: BrowserChain): void {
+    if (chain.custody) return;
+    const now = this.now();
+    if (!chain.channel || !this.chainCurrent(chain) || now >= chain.expires || chain.closed) throw new Error("voice Finish expired");
+    chain.custody = new VoiceKeyCustody(chain.expires, now);
+    this.armChain(chain);
   }
   /** Collection is bounded by retained keys/stamps. It starts no native RPC and never treats
    * deadline/End as settlement of an actual WebCrypto or IPC promise. */
@@ -962,6 +981,9 @@ export class VoiceCryptoBroker {
     // A known native child can exist before its Input was read. Publish cleanup ownership
     // synchronously, before drainChain can refund the envelope or channel cleanup can run.
     if (chain.continuation && !chain.continuation.returned) this.startConfirmation(chain.continuation);
+    // Local expiry must still release any possibly accepted native Claim through the
+    // original channel. Its actual SDK/RPC owners keep their existing payments meanwhile.
+    if (chain.custody) chain.channel?.closeLinked(chain);
     if (!chain.running) this.drainChain(chain);
   }
   private drainChain(chain: BrowserChain): void {
@@ -1012,7 +1034,7 @@ export class VoiceCryptoBroker {
   registerProtectedDerivation(owner: VoiceCryptoOwner, plan: VoiceCryptoChain, native: VoiceDerivationNative, input: VoiceDerivationInput): VoiceDerivationHandle {
     current(owner);
     const chain = this.chains.get(plan);
-    if (!chain || chain.owner !== owner || !this.chainCurrent(chain) ||
+    if (!chain || chain.owner !== owner || !this.confirmationCurrent(chain) ||
         !exactKeys(input, ["owner", "action", "version", "inputTag", "binding", "localPublicKey", "peerPublicKey", "transcript", "engineBytes"]) ||
         input.owner !== owner.token || !validBinding(input.binding) || !sameBinding(chain.binding, input.binding) ||
         !(input.localPublicKey instanceof Uint8Array) || !(input.peerPublicKey instanceof Uint8Array) || !(input.transcript instanceof Uint8Array) ||
@@ -1062,7 +1084,7 @@ export class VoiceCryptoBroker {
     input: VoiceProtectedConfirmationInput, intake: ConfirmationIntake | null): VoiceConfirmationHandle {
     current(owner);
     const chain = this.chains.get(plan);
-    if (!chain || chain.owner !== owner || !this.chainCurrent(chain) ||
+    if (!chain || chain.owner !== owner || !this.confirmationCurrent(chain) ||
         !exactKeys(input, ["owner", "action", "version", "inputTag", "binding", "row", "operation", "kind", "sequence", "aad", "body", "engineBytes"]) ||
         input.owner !== owner.token || !validBinding(input.binding) || !sameBinding(chain.binding, input.binding) ||
         typeof input.inputTag !== "string" || !/^[0-9a-f]{64}$/.test(input.inputTag) ||
@@ -1150,7 +1172,7 @@ export class VoiceCryptoBroker {
       return previous;
     };
     current(owner); let previous = prior(); if (previous) return previous.handle;
-    if (!this.chainCurrent(chain) || !chain.record?.pair || chain.record.outcome?.kind !== "accepted") throw new Error("original derived pair required");
+    if (!this.confirmationCurrent(chain) || !chain.record?.pair || chain.record.outcome?.kind !== "accepted") throw new Error("original derived pair required");
     // Recheck after caller predicates/Clock. One descriptor can hold read/cancel/cleanup
     // ownership. Completed descriptors retain their fixed original identity, not an intake.
     current(owner); previous = prior(); if (previous) return previous.handle;
@@ -1207,7 +1229,7 @@ export class VoiceCryptoBroker {
         if (!("binding" in answer)) { outcome = answer; cleanup = answer.kind === "status"; }
         else {
           input = answer;
-          if (this.chainCurrent(chain)) {
+          if (this.confirmationCurrent(chain)) {
             const handle = this.registerProtectedConfirmationInner(chain.owner, chain.handle, intake.native!, input, intake);
             intake.record = this.actions.get(chain.owner.token + "/" + input.action)!;
             // The decoder's temporary owned arrays end BEFORE computation; registration
@@ -1256,6 +1278,9 @@ export class VoiceCryptoBroker {
       // waiting for this actual SDK/I/O drainage. Fixed metadata/row claims remain retained.
       if (chain.closed && !intake.identity) intake.outcome = Object.freeze({ kind: "retired" });
       intake.running = false;
+      // Native may have accepted Finish before its delayed reply crossed the old deadline.
+      // Actual Return, rather than a browser-local accepted outcome, permits Claim recovery.
+      if (intake.returned && chain.custody && !chain.closed) void channel.startTransition(chain);
       this.observeConfirmation(intake, intake.outcome ?? outcome);
       this.drainChain(chain);
     }
@@ -1400,6 +1425,9 @@ export class VoiceCryptoBroker {
       this.retireAction(record); return Promise.resolve(Object.freeze({ kind: "retired" }));
     }
     if (record.outcome) return Promise.resolve(record.outcome);
+    if (record.chain && !this.confirmationCurrent(record.chain)) {
+      this.retireAction(record); return Promise.resolve(Object.freeze({ kind: "retired" }));
+    }
     // Publish before queue/retry signalling. Every concurrent observer shares this one flight;
     // abandoning a Promise affects no underlying admission, engine or commit lifetime.
     if (record.attempt) return record.attempt.promise;
@@ -1443,7 +1471,7 @@ export class VoiceCryptoBroker {
   }
 
   private pumpProtected(chain: BrowserChain): void {
-    if (chain.running || !this.chainCurrent(chain)) return;
+    if (chain.running || !this.confirmationCurrent(chain)) return;
     const record = chain.queue.shift();
     if (!record) return;
     if (record.retired || !record.job) { this.pumpProtected(chain); return; }
@@ -1463,6 +1491,7 @@ export class VoiceCryptoBroker {
 
   private async uncertainAction(record: ActionRecord): Promise<void> {
     if (record.retired || !record.owner.isCurrent()) return;
+    if (record.chain && !this.confirmationCurrent(record.chain)) { this.retireAction(record); return; }
     record.status = "uncertain";
     record.retry = signal<void>();
     record.attempt?.resolve(Object.freeze({ kind: "uncertain" })); record.attempt = null;
@@ -1477,7 +1506,7 @@ export class VoiceCryptoBroker {
     // A shared owner records provider output before any later check/await can throw. Its
     // finally clears that actual buffer even when computation never reaches the commit loop.
     const output: { plaintext: Uint8Array<ArrayBuffer> | null; resultTag: string | null } = { plaintext: null, resultTag: null };
-    const live = () => !record.retired && record.owner.isCurrent() && (!record.chain || this.chainCurrent(record.chain));
+    const live = () => !record.retired && record.owner.isCurrent() && (!record.chain || this.confirmationCurrent(record.chain));
     try {
       while (live() && !admitted) {
         record.status = "admitting"; attemptedAdmission = true;
@@ -1515,7 +1544,7 @@ export class VoiceCryptoBroker {
           if (record.operation === "derive") {
             const input = record.derivation!, chain = record.chain!;
             record.pair = await computeVoicePair(this, record.owner, chain.key.privateKey!,
-              input.peerPublicKey, input.transcript, input.binding.localIsLow, () => live(), true);
+              input.peerPublicKey, input.transcript, input.binding.localIsLow, () => this.chainCurrent(chain), true);
             // Native derivation commits an empty closed marker, never a key export.
             output.plaintext = new Uint8Array();
           } else if (record.operation === "protected") {
@@ -1576,7 +1605,10 @@ export class VoiceCryptoBroker {
           try { await native.settleAction(record.identity); } catch { /* Native uncertainty stays charged. */ }
         }
       }
-      if (record.retired || !record.owner.isCurrent()) this.retireAction(record);
+      // Crossing the old admission deadline must resolve its observer without closing
+      // provisional pair custody. Real SDK/result/settlement drainage still runs first.
+      if (record.retired || !record.owner.isCurrent() ||
+          (record.chain && !record.outcome && !this.confirmationCurrent(record.chain))) this.retireAction(record);
     }
   }
 
@@ -1683,6 +1715,8 @@ type IpcKeys = Readonly<{ requestMac: CryptoKey; requestBody: CryptoKey; respons
 type IpcCustody = Readonly<{
   begin(): void; end(): void; setupDrained(): void; closed(): void; collected(): void;
   unlinked(chain: BrowserChain): void;
+  finishInput(chain: BrowserChain): void;
+  transitionUpdated(chain: BrowserChain): void;
 }>;
 function ipcBytes(hex: string): Uint8Array<ArrayBuffer> {
   const bytes = new Uint8Array(hex.length / 2);
@@ -1713,6 +1747,7 @@ class RetainedIpcChannel {
   // manufacture final proof or authorize closing the native channel.
   private terminalAction: Readonly<Pick<ChainIntake, "purpose" | "row" | "identity">> | null = null;
   private derivationReturn: Promise<void> | null = null;
+  private transitionFlight: Promise<void> | null = null;
   private derivationReturned = false;
   // One current metadata cleanup intent survives lost history/final replies, plus at most
   // one waiting parent below. Never retain a32-row queue or reconstruct browser keys.
@@ -1805,6 +1840,10 @@ class RetainedIpcChannel {
           if (intake.handle === handle) return intake.returned && !intake.running;
         }
         return false;
+      },
+      transition: async chain => {
+        if (this.linked?.handle !== chain || !this.linked.custody) return false;
+        await this.startTransition(this.linked); return true;
       },
     }, this.clock);
     this.workPump = pump; pump.start(); return pump.handle;
@@ -1943,6 +1982,9 @@ class RetainedIpcChannel {
       // Publish only after the original authenticated response has passed its exact row
       // and input/identity checks. Generic refusal does not authenticate a supplied hint.
       if ("binding" in reply || reply.kind === "status") intake.rowAuthenticated = true;
+      // Only fully authenticated native Finish Input arms provisional key custody.
+      // Publish before any subsequent SDK/cancellation callback; direct hints cannot do it.
+      if ("binding" in reply && reply.kind === "finish") this.custody.finishInput(intake.chain);
       return reply;
     }, intake.purpose);
   }
@@ -2106,6 +2148,48 @@ class RetainedIpcChannel {
   }
   /** Provider+digest only. Do not wrap the action pump: its RPCs need this same lane. */
   compute(work: () => Promise<void>): Promise<void> { return this.execution.run(work); }
+  closeLinked(chain: BrowserChain): void { if (this.linked === chain) this.retire(); }
+  /** One bounded observer flight. End joins actual IO and transfers any ambiguous
+   * receipt to the existing cleanup driver; no task waits here on parent finalization. */
+  startTransition(chain: BrowserChain): Promise<void> {
+    if (this.transitionFlight) return this.transitionFlight;
+    if (this.linked !== chain || !chain.custody?.needsClaim || chain.closed || !this.live() ||
+        this.actionBusy || this.request || this.historyRequest || this.driving) return Promise.resolve();
+    this.actionBusy = true; this.beginActivity();
+    const pending = Promise.resolve().then(() => this.execution.run(() => this.transitionRpc(chain, { kind: "claim" })))
+      .catch(() => { /* Keep the original unknown Claim for exact recovery. */ })
+      .finally(() => { this.transitionFlight = null; this.actionBusy = false; this.endActivity(); this.collect(); });
+    this.transitionFlight = pending; return pending;
+  }
+  /** Caller already owns the physical lane. Claim also recovers history after End;
+   * native independently enforces first-Claim admission against its actual UI/plan. */
+  private async transitionRpc(chain: BrowserChain, request: VoiceTransitionRequest["request"]): Promise<void> {
+    const original = this.terminalAction, custody = chain.custody;
+    if (this.linked !== chain || !original || !custody || !this.keys || !this.bootstrap) throw new Error("original voice custody required");
+    const expected = { parentRow: original.row, purpose: original.purpose, identity: original.identity, handshake: chain.binding.handshake };
+    const encoded = encodeVoiceTransition({ ...expected, request });
+    const started = this.clock.now();
+    try {
+      await this.framed(encoded.operation, encoded.kind, encoded.logical, encoded.body, true,
+        (kind, length) => kind === 0 && (length === 19 || length === 230), opened => {
+          if (opened.length === 3) {
+            const refusal = decodeVoiceIpcActionReply(opened, original.row);
+            if (refusal.kind !== "refused") throw new Error("native custody unresolved");
+            if (request.kind === "release" || refusal.code === "capacity" || refusal.code === "stopped") throw new Error("native custody unresolved");
+            custody.refuse(); // parent-final still independently proves cleanup
+          } else {
+            const receipt = decodeVoiceTransition(opened, expected);
+            if (request.kind === "release" && (receipt.state !== "released" || receipt.receipt !== request.receipt)) throw new Error("native Release unresolved");
+            // Fixed chain metadata pays the retained receipt. Reuse original identities
+            // rather than retaining a second decoded selector/action/handshake graph;
+            // the raw decoded reply ends in this Control flight's synchronous callback.
+            custody.observe(Object.freeze({ ...receipt, parentRow: original.row,
+              identity: original.identity, handshake: chain.binding.handshake, epoch: chain.binding.epoch }), started);
+          }
+          this.custody.transitionUpdated(chain);
+        });
+    } finally { encoded.body.fill(0); }
+  }
   wakeToken(): object { return this.wakeIdentity; }
   async waitWake(observed: object): Promise<void> {
     if (this.wakeIdentity !== observed) return;
@@ -2245,6 +2329,7 @@ class RetainedIpcChannel {
         if (this.derivationReturn) {
           try { await this.derivationReturn; } catch { /* exact final cleanup resolves uncertainty */ }
         }
+        if (this.transitionFlight) await this.transitionFlight;
         await this.execution.run(() => this.cleanup());
       }
       if (this.terminal) outcome = this.terminal;
@@ -2418,6 +2503,11 @@ class RetainedIpcChannel {
         }
         const discovered = this.keys && this.bootstrap ? await this.cleanupUnseenWork() : false;
         await this.cleanupConfirmationIntents();
+        if (this.linked?.custody) {
+          const chain = this.linked, custody = chain.custody!;
+          if (custody.needsClaim) await this.transitionRpc(chain, { kind: "claim" });
+          if (custody.needsRelease) await this.transitionRpc(chain, { kind: "release", receipt: custody.receipt!.receipt });
+        }
         if (this.terminalAction && !this.finalAcknowledged) await this.retireOriginalAction();
         // With no actual cleanup work, a lost close reply waits for the existing cadence
         // rather than immediately issuing a second close in the same driver turn.
@@ -2647,7 +2737,7 @@ export function windowVoiceCryptoBroker(
   const host = window as Record<symbol, unknown>;
   const previous = host[BROKER] as VoiceCryptoBroker | undefined;
   if (previous) {
-    if (previous.version !== 21 || typeof previous.observeNativeWork !== "function" || typeof previous.returnNativeDerivation !== "function" || typeof previous.nativeConfirmationFromChannel !== "function" || typeof previous.nativeDerivationFromChannel !== "function" || typeof previous.recoverChannelHistory !== "function" || typeof previous.prepareChainFromChannel !== "function" || typeof previous.nativeChannel !== "function" || typeof previous.run !== "function" || typeof previous.selectJoinKey !== "function" || typeof previous.retrySelectedJoinKeys !== "function" ||
+    if (previous.version !== 22 || typeof previous.observeNativeWork !== "function" || typeof previous.returnNativeDerivation !== "function" || typeof previous.nativeConfirmationFromChannel !== "function" || typeof previous.nativeDerivationFromChannel !== "function" || typeof previous.recoverChannelHistory !== "function" || typeof previous.prepareChainFromChannel !== "function" || typeof previous.nativeChannel !== "function" || typeof previous.run !== "function" || typeof previous.selectJoinKey !== "function" || typeof previous.retrySelectedJoinKeys !== "function" ||
         typeof previous.registerProtectedConfirmation !== "function" ||
         typeof previous.registerProtectedDerivation !== "function" || typeof previous.registerConfirmation !== "function" || typeof previous.createPair !== "function") {
       throw new Error("voice crypto broker version changed; reload required");

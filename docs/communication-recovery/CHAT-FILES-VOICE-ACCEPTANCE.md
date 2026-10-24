@@ -1,5 +1,22 @@
 # Chat, files and voice implementation evidence
 
+## Original channel Claim/Release continuation (24 October; focused checks)
+
+Opcode10 and Broker22 now retain original key custody through actual SDK/result/settlement/
+Return and authenticated native Claim. They keep old confirmation admission expiry,
+native Finish window and Release/Root drainage independent. Current browser263 focused
+tests pass; native305 handoff checks and all ten voice_live TCP/HTTP/Node scenarios pass, including
+lost Claim→End/lock→Closing→Release, foreign Session/physical-proof refusal, irreversible
+Release and abandoned-browser GC. Automatic acceptance independently requires both native
+Claims as well as the actual six-flight receipts/ACK/settlement/Return. All558 Root voice
+checks, strict Sync/native Clippy, native check, Svelte, frontend build and strict Node
+TypeScript pass. Read-only re-review has no unresolved blocker/high/medium. Full newer-source
+suites remain deferred during the broader implementation.
+Dependency acceptance is open: the current audit fails RUSTSEC-2026-0387 for locked
+crypto-bigint0.5.5; reachability/correction is under review and no ignore was added.
+HANDOVER records source scope and limitations. No SDP/ICE/RTC, multi-peer composition,
+media relay, combined or physical acceptance follows. External download resume is excluded.
+
 ## Native Finish and inert successor continuation (24 October)
 
 Finish now records the original native signed ID/hash and one immutable30-second transfer

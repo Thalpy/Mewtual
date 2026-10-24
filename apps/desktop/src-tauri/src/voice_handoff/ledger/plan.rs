@@ -13,6 +13,7 @@ pub(super) struct Plan {
     pub(super) local_is_low: bool,
     pub(super) control: Option<ConfirmationControl>,
     retirement: Option<ConfirmationRetirement>,
+    pub(super) transition: Option<super::transition::Claim>,
 }
 impl Plan {
     pub(super) fn capture(action: &CryptoAction) -> Result<Self, VoiceError> {
@@ -21,9 +22,16 @@ impl Plan {
             local_is_low: action.protected_binding()?.local_is_low,
             control: Some(action.confirmation_control()?),
             retirement: None,
+            transition: None,
         })
     }
     pub(super) fn is_drained(&self) -> bool {
+        self.transition.as_ref().is_none_or(|claim| claim.released) && self.root_drained()
+    }
+    pub(super) fn can_adopt_child(&self) -> bool {
+        self.control.is_some() && self.transition.is_none()
+    }
+    pub(super) fn root_drained(&self) -> bool {
         self.retirement.as_ref().map_or_else(
             || {
                 self.control
@@ -111,6 +119,22 @@ impl ResolvedRow {
                 };
             }
             let plan = state.plan().ok_or(VoiceError::Unauthorized)?;
+            // A released key-custody obligation remains bound to its actual original
+            // Session allocation, even before the first final-delivery latch exists.
+            if plan
+                .transition
+                .as_ref()
+                .is_some_and(|claim| !Arc::ptr_eq(&claim.session, admission.session()))
+            {
+                return Err(VoiceError::Unauthorized);
+            }
+            if plan
+                .transition
+                .as_ref()
+                .is_some_and(|claim| !claim.released)
+            {
+                return Err(VoiceError::Capacity);
+            }
             if plan.control.is_none() && plan.retirement.is_none() {
                 // The existing Retirement ticket is between native publication and Root
                 // witness installation. Its missing control is not retirement evidence.
@@ -151,7 +175,7 @@ impl ResolvedRow {
             .unwrap_or_else(|error| error.into_inner());
         Ok(state
             .plan()
-            .is_some_and(|plan| plan.control.is_some() && plan.identity.contains(action)))
+            .is_some_and(|plan| plan.can_adopt_child() && plan.identity.contains(action)))
     }
 
     /// Trusted whole-plan cleanup AFTER the selected browser/provider/Phase has drained.
@@ -187,6 +211,13 @@ impl ResolvedRow {
             return Err(VoiceError::Capacity);
         }
         let plan = state.plan_mut().ok_or(VoiceError::Unauthorized)?;
+        if plan
+            .transition
+            .as_ref()
+            .is_some_and(|claim| !claim.released)
+        {
+            return Err(VoiceError::Capacity);
+        }
         if plan.retirement.is_some() {
             return Ok(None);
         }
