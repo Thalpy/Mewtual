@@ -90,6 +90,41 @@ impl ServerGroup {
         })
     }
 
+    /// Test-only: [`ServerGroup::create`] with an explicit founder-leaf lifetime (frozen fixtures).
+    #[cfg(test)]
+    pub(crate) fn create_with_lifetime(
+        device: &MlsDevice,
+        lifetime: Lifetime,
+    ) -> Result<Self, MlsError> {
+        let group = MlsGroup::new(
+            device.provider(),
+            device.signer(),
+            &crate::config::create_config_with_lifetime(lifetime),
+            device.credential(),
+        )
+        .map_err(proto)?;
+        Ok(Self {
+            group,
+            catalog: Default::default(),
+        })
+    }
+
+    /// Test-only: `not_after` of every KeyPackage-sourced leaf in the tree. openmls checks these
+    /// lifetimes against the wall clock when a Welcome is joined or an Add is processed.
+    #[cfg(test)]
+    pub(crate) fn key_package_leaf_not_after(&self) -> Vec<u64> {
+        self.group
+            .members()
+            .filter_map(|m| self.group.public_group().leaf(m.index))
+            .filter_map(|leaf| match leaf.leaf_node_source() {
+                openmls::treesync::LeafNodeSource::KeyPackage(lifetime) => {
+                    Some(lifetime.not_after())
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
     /// Join an existing group from a serialized Welcome (as produced by
     /// [`ServerGroup::add_member`]).
     pub fn join(device: &MlsDevice, welcome_bytes: &[u8]) -> Result<Self, MlsError> {

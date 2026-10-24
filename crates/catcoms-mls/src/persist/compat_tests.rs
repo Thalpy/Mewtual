@@ -2,12 +2,15 @@
 //! in the v0.3.0-alpha builds) must keep loading and working under whatever openmls this crate
 //! is built with now.
 //!
-//! The fixtures in `fixtures/openmls-0.8.1/` were produced once, through this crate's own
-//! production API (`snapshot_server`, `stage_add`, `stage_remove`, invite-bound KeyPackages),
-//! by [`generate_openmls_0_8_1_fixtures`] at commit `a026070f` (openmls 0.8.1,
-//! `openmls_rust_crypto` 0.5.1, `openmls_basic_credential` 0.5.0). They are **frozen**: never
-//! regenerate them with a newer openmls, or they stop testing anything. They hold private keys
-//! of throwaway test identities and no real user data.
+//! The fixtures in `fixtures/openmls-0.8.1/` were produced by [`generate_openmls_0_8_1_fixtures`]
+//! on the openmls 0.8.1 lockfile of commit `1be214fe` (`openmls_rust_crypto` 0.5.1,
+//! `openmls_basic_credential` 0.5.0), through this crate's own production API (`snapshot_server`,
+//! `stage_add`, `stage_remove`, invite-bound membership credentials). One deliberate deviation:
+//! every KeyPackage and the founder's leaf use a never-expiring lifetime. openmls checks leaf
+//! lifetimes against the wall clock when a Welcome is joined or an Add is processed, so the
+//! production default (84 days) would make these frozen files fail on a calendar date. They are
+//! **frozen**: never regenerate them with a newer openmls, or they stop testing anything. They hold
+//! private keys of throwaway test identities and no real user data.
 //!
 //! What each test pins, and why it matters for an upgrade:
 //! - a founder's and a member's sealed-snapshot payload restore (signer entry, group, epoch);
@@ -23,13 +26,49 @@
 use std::collections::HashMap;
 
 use catcoms_wire::{Decoder, DocType, Encoder};
+use openmls::prelude::{KeyPackage, Lifetime};
 use openmls_rust_crypto::OpenMlsRustCrypto;
 use openmls_traits::OpenMlsProvider;
 
 use super::{deserialize_map, restore_server, serialize_map, snapshot_server};
-use crate::{Incoming, MlsDevice, ServerGroup};
+use crate::{Incoming, MembershipCredential, MlsDevice, ServerGroup};
 
 const DOC: u128 = 7;
+
+/// 2100-01-01T00:00:00Z. Every fixture leaf must stay valid well past any CI run.
+const FAR_FUTURE: u64 = 4_102_444_800;
+
+/// The fixtures' leaf lifetime: valid from the epoch to the end of time.
+fn forever() -> Lifetime {
+    Lifetime::init(0, u64::MAX)
+}
+
+/// [`MlsDevice::key_package_for_invite`] with [`forever`] as its lifetime. Same credential, same
+/// capabilities, same storage of the private bundle; only the lifetime differs.
+fn invite_key_package(device: &MlsDevice, group_id: &[u8], invite_nonce: [u8; 16]) -> KeyPackage {
+    use openmls::prelude::{BasicCredential, CredentialWithKey};
+    let membership = MembershipCredential {
+        device_id: device.device_id(),
+        group_id: group_id.to_vec(),
+        invite_nonce,
+    };
+    let credential = CredentialWithKey {
+        credential: BasicCredential::new(membership.encode()).into(),
+        signature_key: device.public_key_bytes().into(),
+    };
+    KeyPackage::builder()
+        .leaf_node_capabilities(crate::config::capabilities())
+        .key_package_lifetime(forever())
+        .build(
+            crate::CIPHERSUITE,
+            device.provider(),
+            device.signer(),
+            credential,
+        )
+        .unwrap()
+        .key_package()
+        .clone()
+}
 
 /// One fixture file, embedded at compile time.
 macro_rules! fixture {
@@ -110,6 +149,40 @@ fn openmls_0_8_1_founder_snapshot_restores_identity_group_and_secrets() {
     assert_eq!(secret(&group, &alice), expect.secret);
     assert_eq!(alice.device_id().as_bytes().as_slice(), expect.device);
     assert!(alice.sign(b"after restore").is_ok());
+}
+
+#[test]
+fn frozen_fixture_leaf_lifetimes_cannot_expire_under_ci() {
+    // openmls validates KeyPackage-leaf lifetimes against the wall clock on Welcome joins and on
+    // processed Adds. If a fixture leaf could expire, these tests would start failing on a date.
+    let snapshots = [
+        fixture!("founder.snapshot"),
+        fixture!("member.snapshot"),
+        fixture!("staged_add.snapshot"),
+        fixture!("staged_remove.snapshot"),
+    ];
+    let mut checked = 0;
+    for snapshot in snapshots {
+        let (_, group) = restore_server(snapshot).unwrap();
+        for not_after in group.key_package_leaf_not_after() {
+            assert!(
+                not_after > FAR_FUTURE,
+                "fixture leaf expires at {not_after}"
+            );
+            checked += 1;
+        }
+    }
+    // The KeyPackage carol joins with, through the Welcome.
+    let carol = decode_prejoin(fixture!("carol_prejoin.storage"));
+    let joined = ServerGroup::join(&carol, fixture!("carol.welcome")).unwrap();
+    for not_after in joined.key_package_leaf_not_after() {
+        assert!(
+            not_after > FAR_FUTURE,
+            "fixture leaf expires at {not_after}"
+        );
+        checked += 1;
+    }
+    assert!(checked >= 8, "every member leaf was checked ({checked})");
 }
 
 #[test]
@@ -213,7 +286,7 @@ fn generate_openmls_0_8_1_fixtures() {
     };
 
     let alice = MlsDevice::generate().unwrap();
-    let mut group = ServerGroup::create(&alice).unwrap();
+    let mut group = ServerGroup::create_with_lifetime(&alice, forever()).unwrap();
     let gid = group.group_id();
     let bob = MlsDevice::generate().unwrap();
     let dave = MlsDevice::generate().unwrap();
@@ -221,11 +294,11 @@ fn generate_openmls_0_8_1_fixtures() {
     let eve = MlsDevice::generate().unwrap();
 
     let to_bob = group
-        .add_member(&alice, bob.key_package_for_invite(&gid, [1; 16]).unwrap())
+        .add_member(&alice, invite_key_package(&bob, &gid, [1; 16]))
         .unwrap();
     let mut bob_group = ServerGroup::join(&bob, &to_bob.welcome).unwrap();
     let to_dave = group
-        .add_member(&alice, dave.key_package_for_invite(&gid, [2; 16]).unwrap())
+        .add_member(&alice, invite_key_package(&dave, &gid, [2; 16]))
         .unwrap();
     bob_group.process_incoming(&bob, &to_dave.commit).unwrap();
     let m1 = group
@@ -262,7 +335,7 @@ fn generate_openmls_0_8_1_fixtures() {
     let m2 = group
         .create_application_message(&alice, b"written by openmls 0.8.1")
         .unwrap();
-    let carol_kp = carol.key_package_for_invite(&gid, [3; 16]).unwrap();
+    let carol_kp = invite_key_package(&carol, &gid, [3; 16]);
     write("carol_prejoin.storage", &encode_prejoin(&carol));
     let to_carol = group.add_member(&alice, carol_kp).unwrap();
     write("member_app.msg", &m2);
@@ -290,7 +363,7 @@ fn generate_openmls_0_8_1_fixtures() {
         secret(&group, &alice),
     );
     group
-        .stage_add(&alice, eve.key_package_for_invite(&gid, [4; 16]).unwrap())
+        .stage_add(&alice, invite_key_package(&eve, &gid, [4; 16]))
         .unwrap();
     write(
         "staged_add.snapshot",
