@@ -687,7 +687,9 @@ pub fn confirm_staging_links(
     staging_leaf: &str,
     rng: &mut dyn CryptoRngCore,
 ) -> Result<File, ExportError> {
-    let failure = match links_supported(folder, staging_leaf, &file, rng) {
+    // No folder identity here (native's Downloads reservation; a chosen place that had one has
+    // already passed `confirm_folder`), so the probe holds the folder by path.
+    let failure = match links_supported(folder, staging_leaf, &file, None, rng) {
         LinkProbe::Works if staging_holds(&file, folder, staging_leaf) => return Ok(file),
         LinkProbe::Refused => ExportError::NoLinks,
         // Windows: a probe name may still point at this file; never fill it with plaintext. The
@@ -749,13 +751,14 @@ fn staging_holds(file: &File, folder: &Path, leaf: &str) -> bool {
 /// A swap before the create and a swap back before this recheck passes the identity read, so the
 /// recheck must also prove that the name `created` holds our handle's object (picker re-review
 /// LOW 2): otherwise our handle is a partial in the other folder and every byte would go there.
-/// Unix proves both here, through one descriptor of the folder (`external::folder_holds_session`),
-/// so a third swap between the two reads cannot pass either. PR51 M3 had dropped the Unix name
-/// check together with the Unix link probe; Linux CI caught it. Windows still proves the name with
-/// the link probe that follows (`links_supported`), which resolves the folder by path again, so the
-/// third swap remains a Windows residual. A name that is not provably ours is a refusal with
-/// `changed`, never `Unsupported`: a detected swap must not quietly hand the save to the
-/// non-resumable writer (review of the Linux CI fix, MEDIUM 1).
+/// Both are proven here through one handle of the folder ([`external::folder_holds_session`]), so
+/// a third swap between the two reads cannot pass either: on Unix a descriptor and `openat`; on
+/// Windows a directory handle and a handle-relative open, so retargeting a junction on the way
+/// between the recheck and the link probe no longer binds the journal to this folder while our
+/// handle and all the plaintext live in another (the coordinator's review L1). PR51 M3 had dropped
+/// the Unix name check together with the Unix link probe; Linux CI caught it. A name that is not
+/// provably ours is a refusal with `changed`, never `Unsupported`: a detected swap must not
+/// quietly hand the save to the non-resumable writer (review of the Linux CI fix, MEDIUM 1).
 fn confirm_folder(
     folder: &Path,
     captured: FileIdentity,
@@ -765,7 +768,6 @@ fn confirm_folder(
     rng: &mut dyn CryptoRngCore,
 ) -> Result<File, ExportError> {
     let same = matches!(external::folder_identity(folder), Ok(id) if id == captured);
-    #[cfg(unix)]
     let same = same
         && created
             .file_name()
@@ -1758,20 +1760,27 @@ enum LinkProbe {
 /// The staging name must also hold the object behind `source` right now (picker re-review LOW 2:
 /// a folder swapped before the exclusive create and swapped back, perhaps with a file planted at
 /// our name, passes a path-based folder identity recheck while our handle is a file in the other
-/// folder). On Windows the probe proves that (it links whatever is at the staging name). On Unix
-/// the caller proves it: [`confirm_folder`] for a creation with a captured folder identity, and
-/// [`confirm_staging_links`] with a path-based check otherwise. PR51 had dropped that check on Unix
-/// together with the probe; Linux CI caught it.
+/// folder). With a captured folder identity, [`confirm_folder`] has already proven that through
+/// one held folder handle on both platforms. Without one, [`confirm_staging_links`] relies on the
+/// probe on Windows (it links whatever is at the staging name) and on a path-based check on Unix.
+///
+/// Windows holds the folder before probing (checked against `folder_id` when the caller has one)
+/// and requires the probe name inside that held folder to be our file, so a path retargeted
+/// between holding and probing (a junction on the way) makes the probe inconclusive instead of
+/// measuring another folder (the coordinator's review L1). The probe link itself stays
+/// path-based: no vetted safe crate makes a hard link relative to a handle. Unix classifies the
+/// filesystem through `source`'s own descriptor, never the folder's path again (review L2).
 fn links_supported(
     folder: &Path,
     staging: &str,
     source: &File,
+    folder_id: Option<FileIdentity>,
     rng: &mut dyn CryptoRngCore,
 ) -> LinkProbe {
     #[cfg(unix)]
     {
-        let _ = (staging, &rng);
-        match external::fs_class(folder) {
+        let _ = (folder, staging, folder_id, &rng);
+        match external::fs_class_of_open(source) {
             Ok(external::FsClass::NoLinks) => LinkProbe::Refused,
             // PR51 M1: Linux and Android publish every save by linking the open descriptor through
             // /proc (`external::publish_session`, `link_open`). Without /proc no save could finish
@@ -1786,21 +1795,35 @@ fn links_supported(
         let Ok(id) = external::session_id(source) else {
             return LinkProbe::Inconclusive;
         };
+        let held = match external::hold_folder(folder, folder_id) {
+            Ok(Some(held)) => held,
+            _ => return LinkProbe::Inconclusive,
+        };
         let source_path = folder.join(staging);
         for attempt in 0..4 {
             let probe = format!("{staging}-probe{attempt}");
             if !external::valid_leaf(&probe) {
                 return LinkProbe::Inconclusive;
             }
+            #[cfg(test)]
+            external::BEFORE_PROBE.with(|hook| {
+                if let Some(hook) = hook.borrow_mut().as_mut() {
+                    hook(&source_path);
+                }
+            });
             match external::link(&source_path, &folder.join(&probe)) {
                 Ok(()) => {}
                 Err(error) if error.kind() == io::ErrorKind::AlreadyExists => continue,
                 Err(_) => return LinkProbe::Refused,
             }
-            // Only our just-made second name for our own file is removed here.
-            return match external::remove_verified(folder, None, &probe, Expected::Session(id), rng)
-            {
-                Ok(Verified::Removed { .. }) => LinkProbe::Works,
+            // The link must have been made in the held folder and name our own file.
+            let landed = matches!(held.holds_session(&probe, id), Ok(true));
+            // Only our just-made second name for our own file is removed here, wherever the path
+            // leads now (a name that is not ours is left alone).
+            let removed =
+                external::remove_verified(folder, None, &probe, Expected::Session(id), rng);
+            return match removed {
+                Ok(Verified::Removed { .. }) if landed => LinkProbe::Works,
                 _ => LinkProbe::Inconclusive,
             };
         }
@@ -1987,8 +2010,9 @@ impl ExportFile {
 
     /// Shared tail of both creations: prove identity and hard-link support on the file this call
     /// just created exclusively, then build the Writing(0) journal for the caller to persist. Both
-    /// callers have already run [`confirm_folder`], which on Unix also proved that the staging name
-    /// holds this file in the captured folder; on Windows the link probe here proves the name.
+    /// callers have already run [`confirm_folder`], which also proved, through one held handle of
+    /// the captured folder, that the staging name holds this file; the Windows link probe here
+    /// holds the folder again against the same identity.
     fn adopt_created(
         file: File,
         folder: &Path,
@@ -2009,7 +2033,7 @@ impl ExportFile {
                 Err(ExportError::Unsupported)
             }
             Ok(observed) if observed.regular && observed.links == 1 => {
-                match links_supported(folder, &staging, &file, rng) {
+                match links_supported(folder, &staging, &file, Some(folder_id), rng) {
                     LinkProbe::Works => Ok(observed),
                     // No writer could publish here: refuse before any plaintext exists.
                     LinkProbe::Refused => Err(ExportError::NoLinks),
@@ -2382,14 +2406,17 @@ impl ExportFile {
         // `prepare_publication` and `accept`). Only a definite refusal leaves it private.
         // PR51 M1: on Linux the final name is linked from this session's own descriptor, so a
         // swapped staging name can never become the final name; elsewhere see `link_open`.
-        match external::link_open(
+        let linked_in = match external::link_open(
             &self.file,
             &self.folder,
             Some(self.journal.folder_id),
             &self.journal.staging,
             &self.journal.final_leaf,
         ) {
-            Ok(()) => self.linked = true,
+            Ok(linked_in) => {
+                self.linked = true;
+                linked_in
+            }
             // The name was taken: no link was made, so the retry may choose a numbered name.
             Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
                 return Err(ExportError::Local {
@@ -2412,9 +2439,12 @@ impl ExportFile {
                 self.linked = true;
                 return Err(local(error));
             }
-        }
+        };
+        // Read the final name where the link was made (Linux and Android: the pinned folder
+        // descriptor), so a folder swapped at the path right after a real link cannot make it read
+        // as Changed while the saved copy sits in the moved folder (the coordinator's review L2).
         let checked = external::inject(external::Effect::Check)
-            .and_then(|()| external::open_leaf(&target, false));
+            .and_then(|()| linked_in.open_leaf(&self.journal.final_leaf));
         match checked {
             Ok(Leaf::Opened(_, observed)) if observed.identity == self.journal.file_id => {}
             // Someone swapped the staging name between our check and the link. The new name is

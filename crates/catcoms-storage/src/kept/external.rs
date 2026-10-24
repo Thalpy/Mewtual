@@ -48,10 +48,12 @@
 //! landed in a swapped folder. A swap and swap-back that both fall between the two checks still
 //! puts an empty partial in the other folder; creation then requires the partial's name to hold
 //! our own handle's object (whenever the filesystem reports identities), so it refuses and no
-//! plaintext is ever written there, even if a file was planted at our name meanwhile. Unix reads
-//! the folder identity and the name through one folder descriptor (`folder_holds_session`), so a
-//! third swap cannot pass either; Windows proves the name with the link probe (`links_supported` in
-//! `export.rs`), which resolves the folder by path again.
+//! plaintext is ever written there, even if a file was planted at our name meanwhile. Both
+//! platforms read the folder identity and the name through one handle of the folder
+//! ([`folder_holds_session`]: a descriptor and `openat` on Unix, a directory handle and fs_at's
+//! `NtCreateFile`-relative open on Windows), so a third swap, or a junction retargeted on the way,
+//! cannot pass either. The Windows link probe that follows also checks its probe name through a
+//! held folder handle.
 use std::ffi::{OsStr, OsString};
 use std::fs::{self, File, OpenOptions};
 use std::io;
@@ -713,11 +715,22 @@ thread_local! {
     /// re-review LOW 2): a test swaps the folder back and plants a file at our name.
     pub(in crate::kept) static AFTER_CREATE: std::cell::RefCell<LinkHook> =
         const { std::cell::RefCell::new(None) };
-    /// Test-only interleaving point in Unix `folder_holds_session`, after creation's path-based
-    /// folder identity recheck and before the pinned name check: a test swaps the folder a third
-    /// time there. The hook gets the partial's path.
-    #[cfg(unix)]
+    /// Test-only interleaving point in [`folder_holds_session`], after creation's path-based
+    /// folder identity recheck and before the held-folder name check: a test swaps the folder a
+    /// third time there. The hook gets the partial's path.
     pub(in crate::kept) static BEFORE_NAME_CHECK: std::cell::RefCell<LinkHook> =
+        const { std::cell::RefCell::new(None) };
+    /// Test-only interleaving point in the Windows link probe (`links_supported` in `export.rs`),
+    /// after the folder is held and just before the path-based probe link (the coordinator's
+    /// review L1): a test retargets the folder's path there. The hook gets the partial's path.
+    #[cfg(not(unix))]
+    pub(in crate::kept) static BEFORE_PROBE: std::cell::RefCell<LinkHook> =
+        const { std::cell::RefCell::new(None) };
+    /// Test-only interleaving point on Linux and Android right after a successful publication
+    /// link, before the caller's post-link check (the coordinator's review L2): a test swaps the
+    /// folder at its path there. The hook gets the final name's path.
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    pub(in crate::kept) static AFTER_LINK: std::cell::RefCell<LinkHook> =
         const { std::cell::RefCell::new(None) };
     /// Test-only interleaving point in [`remove_verified`], after the identity was verified and
     /// before the delete (PR51 H1): a test replaces the name with someone else's file there. The
@@ -844,6 +857,15 @@ fn fs_class_of_dir(dir: &File) -> io::Result<FsClass> {
             Ok(FsClass::Unknown)
         }
     }
+}
+
+/// Unix: [`fs_class`] of the filesystem holding an open file (`fstatfs` on its descriptor). The
+/// creation check classifies the partial it just created this way instead of resolving the
+/// folder's path again (the coordinator's review L2); a file and the folder it was created in are
+/// on one filesystem. The test seam is the same as for a folder.
+#[cfg(unix)]
+pub(super) fn fs_class_of_open(file: &File) -> io::Result<FsClass> {
+    fs_class_of_dir(file)
 }
 
 /// Linux `statfs.f_type` to a class. Pure, tested on every platform.
@@ -1462,9 +1484,11 @@ fn nss_services(sources: &str) -> Option<Vec<&str>> {
 /// - Exactly one `group` entry has `gid`, and its supplementary member list names nobody but us.
 ///
 /// A group whose name equals the user name is only a supporting signal and is not required: the
-/// proof is the membership itself. Not readable from files (residual, THREAT-MODEL): `gshadow`
-/// members, group credentials granted by privileged launchers, and sessions that kept a group
-/// after an account was removed from it.
+/// proof is the membership itself. Not readable from files (residual, THREAT-MODEL; all
+/// configured by root): `gshadow` members, group credentials granted by privileged launchers,
+/// groups granted at login by `pam_group` (`/etc/security/group.conf`), musl's `nscd` fallback
+/// (musl ignores `nsswitch.conf`, so a missing one is read here as files only although `nscd` may
+/// answer there), and sessions that kept a group after an account was removed from it.
 #[cfg_attr(not(any(target_os = "linux", target_os = "android")), allow(dead_code))]
 pub(super) fn group_is_private(files: &AccountFiles, gid: u32, me: u32) -> bool {
     if !files.host_namespace {
@@ -1846,13 +1870,16 @@ pub(super) fn linkat_error(errno: rustix::io::Errno) -> io::Error {
 /// - Elsewhere: the path-based no-replace hard link from `staging` (Windows callers hold the
 ///   delete-denying pin across it; macOS has no link by descriptor, so the post-link check is its
 ///   only guarantee).
+///
+/// Returns where the link was made ([`Linked`]); the caller's post-link check reads the final name
+/// there, never through the folder's path again on Linux and Android.
 pub(super) fn link_open(
     file: &File,
     folder: &Path,
     folder_id: Option<FileIdentity>,
     staging: &str,
     final_leaf: &str,
-) -> io::Result<()> {
+) -> io::Result<Linked> {
     #[cfg(any(target_os = "linux", target_os = "android"))]
     {
         use std::os::unix::io::AsRawFd;
@@ -1902,15 +1929,80 @@ pub(super) fn link_open(
             Ok(()) => {}
             Err(errno) => return Err(linkat_error(errno)),
         }
+        #[cfg(test)]
+        AFTER_LINK.with(|hook| {
+            if let Some(hook) = hook.borrow_mut().as_mut() {
+                hook(&folder.join(final_leaf));
+            }
+        });
         // Review L-1: no folder flush here. This runs under the session commit guard; the
         // journaled sequence flushes the folder after releasing it (PR51 M2), and the writers
         // without a journal flush it when they settle their staging name.
-        inject(Effect::LinkReport)
+        inject(Effect::LinkReport)?;
+        Ok(Linked { dir: pinned.dir })
     }
     #[cfg(not(any(target_os = "linux", target_os = "android")))]
     {
         let _ = (file, folder_id);
-        link(&folder.join(staging), &folder.join(final_leaf))
+        link(&folder.join(staging), &folder.join(final_leaf))?;
+        Ok(Linked {
+            folder: folder.to_owned(),
+        })
+    }
+}
+
+/// Where [`link_open`] made the final name, for the post-link check. Linux and Android keep the
+/// pinned folder descriptor the link went into, so a folder swapped at the path right after a
+/// real link cannot make it read as changed or failed while the copy sits in the moved folder (the
+/// coordinator's review L2). Elsewhere the link was made by path, so the check reads the path too
+/// (Windows callers still hold their delete-denying pin on the staging name across it).
+pub(super) struct Linked {
+    #[cfg(any(target_os = "linux", target_os = "android"))]
+    dir: File,
+    #[cfg(not(any(target_os = "linux", target_os = "android")))]
+    folder: std::path::PathBuf,
+}
+
+impl Linked {
+    /// The object at `leaf` where the link was made, opened read-only without following a link.
+    fn open_name(&self, leaf: &str) -> io::Result<AtName> {
+        #[cfg(any(target_os = "linux", target_os = "android"))]
+        {
+            match open_at_nofollow(&self.dir, leaf) {
+                Ok(Some(found)) => Ok(AtName::Object(found)),
+                Ok(None) => Ok(AtName::Foreign),
+                Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(AtName::Missing),
+                Err(error) => Err(error),
+            }
+        }
+        #[cfg(not(any(target_os = "linux", target_os = "android")))]
+        {
+            open_nofollow(&self.folder.join(leaf), false)
+        }
+    }
+
+    /// [`open_leaf`] (read access) of `leaf` where the link was made: the journaled session's
+    /// post-link check, which compares the persisted identity.
+    pub(super) fn open_leaf(&self, leaf: &str) -> io::Result<Leaf> {
+        #[cfg(any(target_os = "linux", target_os = "android"))]
+        {
+            match self.open_name(leaf)? {
+                AtName::Object(found) => {
+                    let observed = observe(&found)?;
+                    Ok(if observed.regular {
+                        Leaf::Opened(found, observed)
+                    } else {
+                        Leaf::Foreign
+                    })
+                }
+                AtName::Missing => Ok(Leaf::Missing),
+                AtName::Foreign => Ok(Leaf::Foreign),
+            }
+        }
+        #[cfg(not(any(target_os = "linux", target_os = "android")))]
+        {
+            open_leaf(&self.folder.join(leaf), false)
+        }
     }
 }
 
@@ -1970,17 +2062,105 @@ pub(super) fn holds_session(path: &Path, id: SessionId) -> io::Result<Option<boo
     }
 }
 
-/// Unix, read-only: whether the folder at `folder` is still the one with `folder_id` and holds the
-/// object with `id` at `leaf`, both read through one descriptor of that folder.
+/// A destination folder held open, so that names are read inside this very directory however its
+/// path is changed meanwhile (renamed, or a junction or symbolic link on the way retargeted).
+pub(super) struct HeldFolder {
+    #[cfg_attr(not(any(windows, unix)), allow(dead_code))]
+    dir: File,
+}
+
+/// Open `folder` for name checks relative to it, following a folder-level junction or symbolic
+/// link exactly as [`folder_identity`] does, and when `expected` is known require the opened
+/// directory to be that folder. `Ok(None)`: not the expected folder (or no identity to compare).
+/// Reads nothing about accounts or ACLs and never deletes.
+pub(super) fn hold_folder(
+    folder: &Path,
+    expected: Option<FileIdentity>,
+) -> io::Result<Option<HeldFolder>> {
+    #[cfg(unix)]
+    {
+        Ok(pin_folder(folder, expected, false)?.map(|pinned| HeldFolder { dir: pinned.dir }))
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        // The same open as `folder_identity` (a directory handle needs backup semantics; the
+        // default share mode pins nothing and excludes no user action). The handle itself names
+        // the directory from here on, so a later junction retarget cannot change what it reads.
+        let dir = OpenOptions::new()
+            .read(true)
+            .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
+            .open(folder)?;
+        if let Some(expected) = expected {
+            match observe(&dir) {
+                Ok(observed) if observed.directory && observed.identity == expected => {}
+                Ok(_) => return Ok(None),
+                Err(error) if error.kind() == io::ErrorKind::Unsupported => return Ok(None),
+                Err(error) => return Err(error),
+            }
+        }
+        Ok(Some(HeldFolder { dir }))
+    }
+    #[cfg(not(any(windows, unix)))]
+    {
+        let _ = (folder, expected);
+        Err(io::Error::from(io::ErrorKind::Unsupported))
+    }
+}
+
+impl HeldFolder {
+    /// Read-only: whether `leaf` inside this folder holds the object with `id`. `false` for
+    /// nothing at the name, a link, or another object; an error when it could not be read.
+    ///
+    /// Unix opens relative to the descriptor (`openat`, no follow). Windows opens relative to the
+    /// handle with `fs_at::OpenOptions::open_at` (`NtCreateFile` with this handle as its root
+    /// directory, `FILE_OPEN`, follow off, read access only): a link at the name is refused there
+    /// as `ERROR_CANT_RESOLVE_FILENAME`, which counts as not ours. Its share mode lets everyone
+    /// read, write and delete, which is fine for a check that holds nothing; `FILE_OPEN` returns
+    /// only `FILE_OPENED` on success, so fs_at's unimplemented information paths are not reached.
+    pub(super) fn holds_session(&self, leaf: &str, id: SessionId) -> io::Result<bool> {
+        #[cfg(unix)]
+        let opened = open_at_nofollow(&self.dir, leaf);
+        #[cfg(windows)]
+        let opened = {
+            // ERROR_CANT_RESOLVE_FILENAME: fs_at's report of a link at the name with follow off.
+            const LINK_AT_NAME: i32 = 1921;
+            match fs_at::OpenOptions::default()
+                .read(true)
+                .follow(false)
+                .open_at(&self.dir, leaf)
+            {
+                Ok(found) => Ok(Some(found)),
+                Err(error) if error.raw_os_error() == Some(LINK_AT_NAME) => Ok(None),
+                Err(error) => Err(error),
+            }
+        };
+        #[cfg(not(any(windows, unix)))]
+        let opened: io::Result<Option<File>> = {
+            let _ = leaf;
+            Err(io::Error::from(io::ErrorKind::Unsupported))
+        };
+        match opened {
+            Ok(Some(found)) => Ok(verify(&found, Expected::Session(id))?.is_some()),
+            // A link, or (Unix) a FIFO, at the name.
+            Ok(None) => Ok(false),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
+            Err(error) => Err(error),
+        }
+    }
+}
+
+/// Read-only: whether the folder at `folder` is still the one with `folder_id` and holds the
+/// object with `id` at `leaf`, both read through one handle of that folder ([`hold_folder`]).
 ///
 /// Creation checks this right after its exclusive create (picker re-review LOW 2, restored after
 /// the Linux CI failures at `516ab8d0`; `confirm_folder` in `export.rs`). Reading the identity and
-/// the name through the same descriptor is what makes the answer about one directory: two
-/// path-based reads (an identity read, then a name check) can each be answered by a different
-/// folder if someone swaps the path between them, which let a third swap pass the check (review of
-/// that fix, MEDIUM 2). `false` means not provably ours: a different or identity-less folder at
+/// the name through the same handle is what makes the answer about one directory: two path-based
+/// reads (an identity read, then a name check or a link probe) can each be answered by a different
+/// folder if someone swaps the path between them, which let a third swap pass the check (review
+/// of that fix, MEDIUM 2 on Unix; the coordinator's review L1 on Windows, where retargeting a
+/// junction does it). `false` means not provably ours: a different or identity-less folder at
 /// the path, nothing at the name, or another object there. An error means it could not be read.
-#[cfg(unix)]
 pub(super) fn folder_holds_session(
     folder: &Path,
     folder_id: FileIdentity,
@@ -1993,16 +2173,9 @@ pub(super) fn folder_holds_session(
             hook(&folder.join(leaf));
         }
     });
-    // Never deletes: no account or ACL reads.
-    let Some(pinned) = pin_folder(folder, Some(folder_id), false)? else {
-        return Ok(false);
-    };
-    match open_at_nofollow(&pinned.dir, leaf) {
-        Ok(Some(found)) => Ok(verify(&found, Expected::Session(id))?.is_some()),
-        // A link or a FIFO at our name.
-        Ok(None) => Ok(false),
-        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
-        Err(error) => Err(error),
+    match hold_folder(folder, Some(folder_id))? {
+        Some(held) => held.holds_session(leaf, id),
+        None => Ok(false),
     }
 }
 
@@ -2036,8 +2209,8 @@ fn session_changed() -> io::Error {
 /// Errors: `AlreadyExists` (the final name is taken; nothing was linked), `NotFound` (the staging
 /// name is gone or the folder changed; nothing was linked), `Unsupported` (no file number to check
 /// against, or on Linux and Android a definite no-link from the descriptor, see `linkat_error`),
-/// `InvalidData` (a name holds another object; nothing of
-/// ours is reported published), or the link's own error.
+/// `InvalidData` (a name holds another object; nothing of ours is reported published), or the
+/// link's own error.
 pub(super) fn publish_session(
     file: &File,
     folder: &Path,
@@ -2056,9 +2229,10 @@ pub(super) fn publish_session(
         }
         _ => return Err(session_changed()),
     };
-    link_open(file, folder, None, staging, final_leaf)?;
-    let checked =
-        inject(Effect::Check).and_then(|()| open_nofollow(&folder.join(final_leaf), false));
+    let linked = link_open(file, folder, None, staging, final_leaf)?;
+    // Read where the link was made (Linux and Android: the pinned descriptor), so a folder swapped
+    // at the path right after the link cannot make a real publication read as changed.
+    let checked = inject(Effect::Check).and_then(|()| linked.open_name(final_leaf));
     let verified = match checked {
         Ok(AtName::Object(found)) => verify(&found, Expected::Session(id)).map(|v| v.is_some()),
         Ok(_) => Ok(false),

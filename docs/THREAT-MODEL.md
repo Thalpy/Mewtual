@@ -628,8 +628,10 @@ writer keeps those properties.
   ACL (whose mask the group bits would then be), and the local account files prove that group has
   no other member, user decision of 23 October; membership that cannot be proven, as with
   directory services, systemd userdb or homed records, containers, user namespaces or on macOS,
-  stays shared; `gshadow` members and group credentials granted by privileged launchers or kept by
-  existing sessions are not visible and remain a residual) and on any network, FUSE or
+  stays shared; `gshadow` members, group credentials granted by privileged launchers, `pam_group`
+  (`/etc/security/group.conf`) or musl's `nscd` fallback (musl ignores `nsswitch.conf`), and
+  groups kept by existing sessions are not visible and remain a root-configured residual) and on
+  any network, FUSE or
   unrecognized filesystem (whose
   permissions this kernel does not decide; ACLs are not read), nothing is deleted automatically and
   the user is told to delete the leftover, but only after a read-only check that it still holds
@@ -652,7 +654,8 @@ writer keeps those properties.
   a journal have none, so they first check that the staging name inside the pinned folder holds
   their object, and a folder put at the path before publication gets nothing (the first PR51 M1
   change allowed that; the review of the Linux CI fix caught it). A staging name swapped after that
-  check still cannot become the final name.
+  check still cannot become the final name. The post-link check reads the final name through that
+  same descriptor, so a folder swapped right after a real link does not make it read as changed.
   Windows holds a delete-denying pin on the staging name, checked to be our object, across the
   path-based link, which also blocks renaming its folders (but not retargeting a junction among
   its ancestors, which someone with write access to that junction could do; the save then halts,
@@ -665,14 +668,17 @@ writer keeps those properties.
   re-reads it afterwards and removes (verified as above) and refuses a partial that landed in a
   swapped folder; a swap and swap-back inside that window leaves at most an empty partial there,
   because creation then requires the partial's name to hold our own handle's object and refuses
-  otherwise, even if a file was planted at our name. On Unix the recheck reads the folder identity
-  and the name through one folder descriptor, so a third swap cannot pass it, and a failed check is
-  the same refusal as a changed folder (never a quiet switch to the non-resumable writer). On
-  Windows the link probe makes the name check by path, so a third swap timed between the recheck
-  and the probe is a residual there. The Unix name check was lost when PR51 M3 replaced the Unix
-  link probe with `fstatfs` and was restored after Linux CI caught it. Without a captured folder
-  identity (an identity-less chosen folder, native's one-click Downloads reservation) only the
-  path-based name check stands.
+  otherwise, even if a file was planted at our name. The recheck reads the folder identity and the
+  name through one held folder handle (Unix: a descriptor and `openat`; Windows: a directory handle
+  and fs_at's handle-relative open), so a third swap, or a junction retargeted on the way, cannot
+  pass it, and a failed check is the same refusal as a changed folder (never a quiet switch to the
+  non-resumable writer). Before that, the Windows name check was the path-based link probe alone:
+  retargeting a junction to another folder just before it let the whole plaintext be written into
+  that folder, with publication then halting and Remove unable to clean it there (the
+  coordinator's review L1). The Unix name check was lost when PR51 M3 replaced the Unix link probe
+  with `fstatfs` and was restored after Linux CI caught it. Without a captured folder identity (an
+  identity-less chosen folder, native's one-click Downloads reservation) only the path-based name
+  check stands.
 - **Filesystem support (PR51 M3, fail closed).** Unix journals only on filesystems `fstatfs`
   identifies as local with stable identities (ext2/3/4, xfs, btrfs, f2fs, tmpfs, each only when it
   reports birth times; APFS and HFS+ that are `MNT_LOCAL`); FAT, vfat and exFAT are refused before

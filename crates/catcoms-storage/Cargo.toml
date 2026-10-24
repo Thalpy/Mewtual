@@ -26,8 +26,12 @@ winapi-util = "0.1.11"
 # (`fs_at::os::windows::FileExt::delete_by_handle`: SetFileInformationByHandle with POSIX
 # semantics, falling back to classic disposition, never re-resolving a name). The workspace
 # denies `unsafe_code`; this is the vetted safe wrapper (Robert Collins, the remove_dir_all and
-# rustup maintainer). Apache-2.0. Pinned exactly: only `FileExt` is used (its `open_at` shares
-# everything and has unimplemented paths). Windows-only, so Unix builds do not compile it.
+# rustup maintainer). Apache-2.0. Pinned exactly. `FileExt` deletes; since the coordinator's
+# review L1 `OpenOptions::open_at` (NtCreateFile relative to a held folder handle) also opens a
+# name read-only, with `FILE_OPEN` and follow off, only to compare its identity: its fixed share
+# mode (read, write and delete for everyone) is harmless for a check that holds nothing, and
+# `FILE_OPEN` succeeds only with `FILE_OPENED`, so its unimplemented information paths are not
+# reached. Never used to create, write or pin. Windows-only, so Unix builds do not compile it.
 fs_at = "=0.2.1"
 
 [target.'cfg(unix)'.dependencies]

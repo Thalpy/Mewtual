@@ -412,8 +412,8 @@ fn a_swap_and_swap_back_around_creation_with_a_planted_file_writes_nothing() {
     // Picker re-review LOW 2: the folder is swapped before the create (our partial lands in the
     // other folder), then restored with a file planted at our name before the recheck. The
     // identity recheck passes; creation must still refuse, because the name is not our handle's
-    // object (Unix: the pinned name check in `confirm_folder`; Windows: the link probe names the
-    // planted file), and the planted file must be left alone.
+    // object (the held-folder name check in `confirm_folder`, on both platforms since the
+    // coordinator's review L1), and the planted file must be left alone.
     // The swapped-in folder is a link (junction on Windows) to a decoy directory: Windows refuses
     // to rename a directory while our new file inside it is open, but removing a link is allowed.
     let fx = fixture();
@@ -450,17 +450,11 @@ fn a_swap_and_swap_back_around_creation_with_a_planted_file_writes_nothing() {
     let created = choice.create_unjournaled(&mut rng());
     external::BEFORE_CREATE.with(|hook| *hook.borrow_mut() = None);
     external::AFTER_CREATE.with(|hook| *hook.borrow_mut() = None);
-    #[cfg(unix)]
     assert!(
         matches!(
             created,
             Err(ExportError::Refused(ChoiceRefusal::FolderChanged))
         ),
-        "the planted file is never adopted"
-    );
-    #[cfg(not(unix))]
-    assert!(
-        matches!(created, Err(ExportError::Local { .. })),
         "the planted file is never adopted"
     );
     assert_eq!(
@@ -475,18 +469,30 @@ fn a_swap_and_swap_back_around_creation_with_a_planted_file_writes_nothing() {
     );
 }
 
+/// Where [`with_swaps_around_creation`] swaps the folder for the decoy a third time.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ThirdSwap {
+    /// No third swap.
+    Never,
+    /// Just before the held-folder name check, after the path-based identity recheck passed.
+    BeforeNameCheck,
+    /// Windows: just before the path-based link probe (the coordinator's review L1).
+    #[cfg(not(unix))]
+    BeforeProbe,
+}
+
 /// Picker re-review LOW 2: run `create` while the chosen `folder` is swapped for a directory link
 /// to a fresh decoy just before the exclusive create (so our partial lands in the decoy) and
 /// swapped back right after it, planting a file named `plant` in the restored folder when given.
-/// With `third_swap` (Unix only) the folder is swapped for the decoy once more just before the
-/// pinned name check, after the path-based identity recheck has passed. Returns the result and the
-/// decoy, or `None` when this host cannot create directory links. The swapped-in folder is a link
-/// (a junction on Windows) because Windows refuses to rename a directory while our new file inside
-/// it is open, but removing a link is allowed.
+/// With `third`, the folder is swapped for the decoy once more at that point. Returns the result
+/// and the decoy, or `None` when this host cannot create directory links. The swapped-in folder
+/// is a link (a junction on Windows) because Windows refuses to rename a directory while our new
+/// file inside it is open, but removing a link is allowed; a third swap renames the restored real
+/// folder, which holds nothing open, and points a link at the decoy again.
 fn with_swaps_around_creation<T>(
     folder: &Path,
     plant: Option<&str>,
-    third_swap: bool,
+    third: ThirdSwap,
     create: impl FnOnce() -> T,
 ) -> Option<(T, PathBuf)> {
     let original = folder.with_file_name("Original");
@@ -524,21 +530,23 @@ fn with_swaps_around_creation<T>(
             }
         }))
     });
-    #[cfg(unix)]
-    if third_swap {
-        let third = swap_in(folder.to_owned(), original.clone(), decoy.clone());
-        external::BEFORE_NAME_CHECK.with(|hook| *hook.borrow_mut() = Some(third));
+    let third_hook = swap_in(folder.to_owned(), original.clone(), decoy.clone());
+    match third {
+        ThirdSwap::Never => {}
+        ThirdSwap::BeforeNameCheck => {
+            external::BEFORE_NAME_CHECK.with(|hook| *hook.borrow_mut() = Some(third_hook));
+        }
+        #[cfg(not(unix))]
+        ThirdSwap::BeforeProbe => {
+            external::BEFORE_PROBE.with(|hook| *hook.borrow_mut() = Some(third_hook));
+        }
     }
-    #[cfg(not(unix))]
-    assert!(
-        !third_swap,
-        "Windows has no pinned name check to interleave with"
-    );
     let result = create();
     external::BEFORE_CREATE.with(|hook| *hook.borrow_mut() = None);
     external::AFTER_CREATE.with(|hook| *hook.borrow_mut() = None);
-    #[cfg(unix)]
     external::BEFORE_NAME_CHECK.with(|hook| *hook.borrow_mut() = None);
+    #[cfg(not(unix))]
+    external::BEFORE_PROBE.with(|hook| *hook.borrow_mut() = None);
     Some((result, decoy))
 }
 
@@ -559,26 +567,19 @@ fn a_swap_and_swap_back_around_a_journaled_creation_starts_no_journal() {
     let choice = ChosenDestination::validate(&folder.join("report.bin")).unwrap();
     let staging_name = external::staging_for("report.bin");
     let Some((created, decoy)) =
-        with_swaps_around_creation(&folder, Some(&staging_name), false, || {
+        with_swaps_around_creation(&folder, Some(&staging_name), ThirdSwap::Never, || {
             ExportFile::create_chosen(&choice, export_plan(), &mut rng())
         })
     else {
         return;
     };
-    // Unix: a detected swap is a refusal, never `Unsupported`, which would quietly hand the save
-    // to the non-resumable writer (review of the Linux CI fix, MEDIUM 1). Windows: the link probe
-    // names the planted file and is inconclusive; native's fallback then checks the folder again.
-    #[cfg(unix)]
+    // A detected swap is a refusal, never `Unsupported`, which would quietly hand the save to the
+    // non-resumable writer (review of the Linux CI fix, MEDIUM 1).
     assert!(
         matches!(
             created,
             Err(ExportError::Refused(ChoiceRefusal::FolderChanged))
         ),
-        "no journal starts on a planted name"
-    );
-    #[cfg(not(unix))]
-    assert!(
-        matches!(created, Err(ExportError::Unsupported)),
         "no journal starts on a planted name"
     );
     assert_eq!(
@@ -601,28 +602,24 @@ fn a_swap_and_swap_back_around_creation_with_nothing_planted_writes_nothing() {
         let fx = fixture();
         let folder = chosen_folder(&fx);
         let choice = ChosenDestination::validate(&folder.join("report.bin")).unwrap();
-        let Some((created, decoy)) = with_swaps_around_creation(&folder, None, false, || {
-            if journaled {
-                ExportFile::create_chosen(&choice, export_plan(), &mut rng()).map(drop)
-            } else {
-                choice.create_unjournaled(&mut rng()).map(drop)
-            }
-        }) else {
+        let Some((created, decoy)) =
+            with_swaps_around_creation(&folder, None, ThirdSwap::Never, || {
+                if journaled {
+                    ExportFile::create_chosen(&choice, export_plan(), &mut rng()).map(drop)
+                } else {
+                    choice.create_unjournaled(&mut rng()).map(drop)
+                }
+            })
+        else {
             return;
         };
-        #[cfg(unix)]
+        // Before the coordinator's review L1, Windows read this as a folder without links (the
+        // probe found nothing to link); the held-folder name check now says what happened.
         assert!(
             matches!(
                 created,
                 Err(ExportError::Refused(ChoiceRefusal::FolderChanged))
             ),
-            "journaled: {journaled}"
-        );
-        // Windows: the probe finds nothing to link at our name, which reads as a folder without
-        // links. Misleading but safe (recorded in the design doc).
-        #[cfg(not(unix))]
-        assert!(
-            matches!(created, Err(ExportError::NoLinks)),
             "journaled: {journaled}"
         );
         assert_eq!(fs::read_dir(&folder).unwrap().count(), 0, "the real folder");
@@ -630,18 +627,15 @@ fn a_swap_and_swap_back_around_creation_with_nothing_planted_writes_nothing() {
     }
 }
 
-#[cfg(unix)]
-#[test]
-fn a_third_swap_before_the_name_check_is_refused() {
-    // Review of the Linux CI fix, MEDIUM 2: swapped before the create, swapped back before the
-    // path-based identity recheck (which passes), then swapped for the decoy again before the name
-    // check. Two path-based reads would each have been answered by a different folder; the pinned
-    // check reads the identity and the name through one descriptor and refuses.
+/// Run both writers' creation at a fresh chosen place with a third swap at `third`, and require
+/// the changed-folder refusal with no plaintext anywhere: the real folder (renamed aside by the
+/// third swap) is empty and nothing in the decoy holds a byte.
+fn a_third_swap_is_refused(third: ThirdSwap) {
     for journaled in [true, false] {
         let fx = fixture();
         let folder = chosen_folder(&fx);
         let choice = ChosenDestination::validate(&folder.join("report.bin")).unwrap();
-        let Some((created, decoy)) = with_swaps_around_creation(&folder, None, true, || {
+        let Some((created, decoy)) = with_swaps_around_creation(&folder, None, third, || {
             if journaled {
                 ExportFile::create_chosen(&choice, export_plan(), &mut rng()).map(drop)
             } else {
@@ -655,16 +649,49 @@ fn a_third_swap_before_the_name_check_is_refused() {
                 created,
                 Err(ExportError::Refused(ChoiceRefusal::FolderChanged))
             ),
-            "journaled: {journaled}"
+            "journaled: {journaled}, got {created:?}"
         );
+        // The real folder sits at `folder` again when the third swap never ran (refused before
+        // it), or under "Original" when it did.
         let original = folder.with_file_name("Original");
+        let real = if original.exists() {
+            &original
+        } else {
+            &folder
+        };
+        assert!(
+            fs::symlink_metadata(real).unwrap().is_dir(),
+            "the real folder itself"
+        );
         assert_eq!(
-            fs::read_dir(&original).unwrap().count(),
+            fs::read_dir(real).unwrap().count(),
             0,
-            "the real folder"
+            "nothing in the real folder"
         );
         assert!(holds_no_plaintext(&decoy), "journaled: {journaled}");
     }
+}
+
+#[test]
+fn a_third_swap_before_the_name_check_is_refused() {
+    // Review of the Linux CI fix, MEDIUM 2 (Unix) and the coordinator's review L1 (Windows):
+    // swapped before the create, swapped back before the path-based identity recheck (which
+    // passes), then swapped for the decoy again before the name check. Two path-based reads would
+    // each have been answered by a different folder; the held-folder check reads the identity and
+    // the name through one handle and refuses.
+    a_third_swap_is_refused(ThirdSwap::BeforeNameCheck);
+}
+
+#[cfg(not(unix))]
+#[test]
+fn a_junction_retargeted_before_the_link_probe_is_refused() {
+    // The coordinator's review L1: on Windows the probe used to be the only name check, and it
+    // resolves the folder by path. Retargeting the path (a junction) to the decoy just before the
+    // probe made it link our own partial there, so creation succeeded with the journal bound to the
+    // real folder and every plaintext byte written into the decoy, which Remove could not clean.
+    // The held-folder name check in `confirm_folder` now refuses before the probe runs (the probe
+    // also checks its own name through a held handle).
+    a_third_swap_is_refused(ThirdSwap::BeforeProbe);
 }
 
 #[test]
@@ -677,7 +704,7 @@ fn a_swap_and_swap_back_around_an_identityless_reservation_writes_nothing() {
     let folder = chosen_folder(&fx);
     let choice = identityless(&folder, "report.bin");
     let Some((created, decoy)) =
-        with_swaps_around_creation(&folder, Some("report.bin.part"), false, || {
+        with_swaps_around_creation(&folder, Some("report.bin.part"), ThirdSwap::Never, || {
             choice.create_unjournaled(&mut rng()).map(drop)
         })
     else {

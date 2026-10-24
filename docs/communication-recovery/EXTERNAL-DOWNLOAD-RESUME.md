@@ -536,18 +536,21 @@ A swap and swap-back that both fall between the two identity reads still leaves 
 in the other folder; creation then refuses, because it requires the partial's name to hold our own
 handle's object whenever the filesystem reports identities (re-review LOW 2 added this to
 `create_unjournaled`), so no plaintext is written there even if a file was planted at our name.
-On Unix, where creation makes no link (PR51 M3), the recheck itself (`confirm_folder`) reads the
-folder identity and the name through one folder descriptor (`external::folder_holds_session`), so
-a third swap between the reads cannot pass either, and a name that is not provably ours is the
-same refusal as a changed folder, never a quiet switch to the non-resumable writer (both added
-after the Linux CI failures at 516ab8d0, see below). On Windows the link probe that follows makes
-the name check; it resolves the folder by path again, so a third swap timed between the recheck and
-the probe remains a Windows residual, and a probe that names another file is inconclusive
-(`Unsupported` for the journaled writer, whose native fallback then checks the folder again). An
-identity-less chosen folder (and native's one-click Downloads reservation) has no folder identity
-to recheck; there the staging name must still hold our new file (`confirm_staging_links`:
-path-based on Unix, the probe on Windows), which catches a swap and swap-back but not a swap timed
-around that check. The proven removal leaves a just-created partial in place when its name cannot
+The recheck itself (`confirm_folder`) reads the folder identity and the name through one held
+handle of the folder (`external::folder_holds_session`): a descriptor and `openat` on Unix, a
+directory handle and fs_at's handle-relative `NtCreateFile` open on Windows. So a third swap
+between the reads, or a junction retargeted on the way, cannot pass either, and a name that is not
+provably ours is the same refusal as a changed folder, never a quiet switch to the non-resumable
+writer (Unix after the Linux CI failures at 516ab8d0, Windows after the coordinator's review L1;
+see below). Before L1, the Windows check was the link probe alone, which resolves the folder by
+path: retargeting a junction to the other folder just before the probe let creation succeed with
+the journal bound to the identified folder while our handle, and so the whole plaintext, was in
+the other one, where publication then halted and Remove (which verifies in the identified folder)
+could not clean it. The probe now also holds the folder against the same identity and requires its
+probe name inside that handle to be our file. An identity-less chosen folder (and native's
+one-click Downloads reservation) has no folder identity to recheck; there the staging name must
+still hold our new file (`confirm_staging_links`: path-based on Unix, the held-folder probe on
+Windows), which catches a swap and swap-back but not a swap timed around that check. The proven removal leaves a just-created partial in place when its name cannot
 be opened right then (for example another program holding it); that empty file then blocks a
 remembered choice with `PartialExists` until the user deletes it.
 
@@ -1246,8 +1249,11 @@ Implemented:
   Services, so membership is never provable there and `staff` (gid 20) stays shared; Android has
   no `/etc/passwd`, so it fails closed too. World-writable stays shared unless sticky. Not readable
   (residual): `gshadow` members and group passwords, group credentials granted by privileged
-  launchers (systemd `SupplementaryGroups=`, set-group-id programs), and sessions that kept a
-  group after an account left it. Classification (and its reads) happens only where deletion is
+  launchers (systemd `SupplementaryGroups=`, set-group-id programs), groups that `pam_group`
+  grants at login (`/etc/security/group.conf`), musl's lookups, which ignore `nsswitch.conf` and
+  fall back to `nscd` (so a directory service can answer there even with no `nsswitch.conf`, which
+  this check reads as files only), and sessions that kept a group after an account left it. All of
+  these are configured by root. Classification (and its reads) happens only where deletion is
   decided, never under the session commit guard of the publication link.
   Tests inject the account files (`ACCOUNT_FILES` in tests; production reads the real files):
   `a_group_writable_folder_is_private_only_for_a_proven_user_private_group`,
@@ -1373,14 +1379,24 @@ Adversarial review of `bbdbdf99` and dispositions (no blocker or high finding):
 | Finding | Disposition |
 | --- | --- |
 | MEDIUM 1: a detected swap became `Unsupported`, so native quietly switched to the non-resumable writer, whose Linux publication pins the folder by path without its identity (`link_open(.., None, ..)`): renaming the chosen folder aside and putting another at its path before publication, with no race, gives the final name in that folder | Fixed for creation: a name that is not provably ours is now the changed-folder refusal, never `Unsupported`. Fixed for publication too (re-review recommendation): the gap was introduced by PR51 M1 (at `86664d94` the non-resumable writer linked by path from its staging name, which a swapped-in folder does not hold, so the link failed) and also reached the Downloads fallback, the GIF export and folders that always use the non-resumable writer (CIFS, FUSE). On Linux and Android, `link_open` without a folder identity now pins the folder, checks that the staging name inside that descriptor holds our object (`NotFound` when it is not there, `InvalidData` when another object is), and only then links our descriptor into the same descriptor. The check sits before the link window, so a staging swap after it still publishes our own file and PR51 M1's contract (`an_unjournaled_save_publishes_only_its_own_open_file`) is unchanged; only the test hook moved after the check. The journaled path keeps its identity-bound pin. Test: `an_unjournaled_save_is_published_only_beside_its_partial` (Linux and Android; break-checked). |
-| MEDIUM 2: the third swap, between the path-based identity recheck and a path-based name check | Fixed on Unix: `confirm_folder` reads both through one folder descriptor. Test: `a_third_swap_before_the_name_check_is_refused` (break-checked). Windows keeps the residual (its probe resolves the folder by path; a folder-relative probe needs `fs_at`); recorded. |
+| MEDIUM 2: the third swap, between the path-based identity recheck and a path-based name check | Fixed on Unix: `confirm_folder` reads both through one folder descriptor. Test: `a_third_swap_before_the_name_check_is_refused` (break-checked). Windows was left as a residual here and closed after the coordinator's review (L1, below). |
 | LOW 3: tests asserted only `is_err()`, no case without a planted file, `EACCES`/`EROFS` not pinned | Fixed: exact refusals per platform, the nothing-planted test for both writers, the identity-less test, and `EACCES`/`EROFS` in the mapping test. A swap test through Downloads `create` was not added (same `confirm_folder` path, which maps to its retryable local failure). |
 | LOW 4: doc and comment drift (`LinkProbe` and `confirm_staging_links` docs, the original test's comment, `link_open`'s "a writer without a journal has none", `EPERM` and "a security module", THREAT-MODEL silent on the fallback) | Fixed. |
 | Re-review LOW-A: the docs said the storage-only publication fix would reverse PR51 M1's contract | Moot: taken with the check before the link window, which keeps the contract. |
 | Re-review LOW-B: THREAT-MODEL's Publication bullet did not mention the identity gap | Fixed with the gap: the bullet now says how each writer binds the folder. |
 | Re-review LOW-C: transient failures of the Unix name check (session number, descriptor exhaustion, I/O, the umask case) read as "the folder changed" | Recorded: fails safe and matches the existing handling of a failed folder identity read in the same recheck; the wording is not evidence of an attack. |
 | Re-review of `74b9dfe4`, LOW-1 and LOW-2 | Recorded below (a planted hard link also passes the publication check); the `NotFound` message now adds that the partial may still be in a folder that was moved or renamed. |
-| Residuals (no fix): a hard link to our partial planted at the staging name passes the name check, and one placed in a swapped-in folder passes the publication check of the writers without a journal (other accounts are stopped by `protected_hardlinks`, and the journal's single-link check catches it while writing); native's Downloads fallback has no folder identity check; on Windows a swap and swap-back with nothing planted reports `NoLinks` (misleading but safe); a umask that removes the owner's read bit would make the read-only name check refuse | Recorded. |
+| Residuals (no fix): a hard link to our partial planted at the staging name passes the name check, and one placed in a swapped-in folder passes the publication check of the writers without a journal (other accounts are stopped by `protected_hardlinks`, and the journal's single-link check catches it while writing); native's Downloads fallback has no folder identity check; a umask that removes the owner's read bit would make the read-only name check refuse | Recorded. (On Windows a swap and swap-back with nothing planted used to report `NoLinks`; since L1 below it is `FolderChanged`.) |
+
+## Coordinator review of `516ab8d0..b3f918af`: dispositions
+
+No blocker, high or medium. Three LOWs, all fixed:
+
+| Finding | Disposition |
+| --- | --- |
+| L1: on Windows `confirm_folder` read the folder identity by path and the link probe, the only name check there, probed by path again. Retargeting a junction to another folder (which holds our new partial) between the two let the probe pass there, so the journal bound the identified folder while our handle, and every plaintext byte, lived in the other one; publication then refused and Remove, verifying in the identified folder, could not clean it. The docs had understated this as "at most an empty partial" plus a residual | Fixed, the `fs_at` path (no `unsafe`): `external::hold_folder` opens the folder handle on Windows exactly as `folder_identity` does and checks its identity on that handle; `HeldFolder::holds_session` opens the name relative to it with `fs_at::OpenOptions::open_at` (read-only, `FILE_OPEN`, follow off; a link at the name is refused as `ERROR_CANT_RESOLVE_FILENAME` and counts as not ours) and compares our in-session number. `confirm_folder` now runs this held-folder check on both platforms, and the Windows link probe holds the folder against the same identity and requires its probe name inside that handle to be our file (the probe link itself stays path-based: no vetted safe crate makes a handle-relative hard link). The `fs_at` comment in `Cargo.toml` records why `open_at`'s fixed share mode and unimplemented information paths do not matter for this read-only `FILE_OPEN`. Tests: `a_junction_retargeted_before_the_link_probe_is_refused` (Windows: the third swap at a new `BEFORE_PROBE` hook), and `a_third_swap_before_the_name_check_is_refused`, the nothing-planted and both planted swap tests now expect `FolderChanged` on Windows too. Break-checks on Windows: ignoring the held-folder name check turned all five swap tests red; ignoring it and the probe's held check made the probe test show creation succeeding (`Ok(())`, the reported behavior); holding the folder without its identity made the third-swap test succeed too (`Ok(())`). |
+| L2: post-link checks resolved the folder by path again (`ExportFile::link` reopened the target by path, `publish_session` reopened `folder/final`, and the Unix creation check classified the filesystem by the folder's path), so a folder swapped right after a real link made the publication read as Changed or failed while the copy sat in the moved folder | Fixed: `link_open` returns where it linked (`Linked`: the pinned descriptor on Linux and Android, the path elsewhere, where the link was by path too) and both post-link checks read the final name there; `links_supported` on Unix classifies with `fstatfs` on the new partial's own descriptor (`external::fs_class_of_open`). Test: `a_folder_swapped_right_after_the_link_does_not_unsay_the_publication` (Linux and Android, a new `AFTER_LINK` hook; break-checked in WSL for both writers: by path the journaled link reads `Halted(Changed)` and the writer without a journal "a different file appeared"). The `fstatfs` change has no dedicated test: a swap after the held-folder check could only make a path-based classification describe another filesystem (a wrong journal-or-fallback choice, or a wrong `NoLinks`), never move the plaintext, and the test host cannot put a different filesystem type behind a swapped path. |
+| L3: two root-configured membership sources were missing from the private-group residual list | Fixed: `pam_group` (`/etc/security/group.conf`) and musl's `nscd` fallback (musl ignores `nsswitch.conf`, which this check reads as files only when it is missing) are listed beside the privileged launchers here, in THREAT-MODEL and in the `group_is_private` doc. |
 
 ## Ledger (23 October, PR51 review rounds)
 

@@ -1132,6 +1132,64 @@ fn linux_links_the_open_download_even_if_its_name_was_swapped() {
     );
 }
 
+/// Arm `AFTER_LINK` to rename `folder` aside to `aside` and put an empty folder at its path, right
+/// after a publication link succeeded and before the post-link check.
+#[cfg(any(target_os = "linux", target_os = "android"))]
+fn swap_folder_after_link(folder: &Path, aside: &Path) {
+    let (path, moved) = (folder.to_owned(), aside.to_owned());
+    external::AFTER_LINK.with(|hook| {
+        *hook.borrow_mut() = Some(Box::new(move |_| {
+            fs::rename(&path, &moved).unwrap();
+            fs::create_dir(&path).unwrap();
+        }))
+    });
+}
+
+#[cfg(any(target_os = "linux", target_os = "android"))]
+#[test]
+fn a_folder_swapped_right_after_the_link_does_not_unsay_the_publication() {
+    // The coordinator's review L2: the post-link check reads the final name through the folder
+    // descriptor the link went into. Reading it by path again made a real publication read as
+    // Changed (journaled) or as a different file (without a journal) when the folder was swapped
+    // right after the link, while the complete copy sat in the moved folder.
+    let fx = fixture();
+    let mut store = open(&fx.vault);
+    let (_id, lease) = completed(&mut store);
+    let mut file = started(&mut store, &lease, &fx.downloads);
+    write_all(&mut file);
+    let Publication::Ready(journal) = file.prepare_publication().unwrap() else {
+        panic!();
+    };
+    store
+        .checkpoint_download_export(&lease, file.journal(), &journal)
+        .unwrap();
+    file.checkpointed(journal);
+    let aside = fx.downloads.with_file_name("Downloads moved");
+    swap_folder_after_link(&fx.downloads, &aside);
+    let linked = file.link();
+    external::AFTER_LINK.with(|hook| *hook.borrow_mut() = None);
+    linked.expect("the link was made and checked where it was made");
+    assert_eq!(fs::read(aside.join("notes.txt")).unwrap(), CHUNKS.concat());
+    assert_eq!(fs::read_dir(&fx.downloads).unwrap().count(), 0);
+
+    // The writers without a journal.
+    let dir = tempfile::tempdir().unwrap();
+    let folder = dir.path().join("Chosen place");
+    fs::create_dir(&folder).unwrap();
+    let (file, staging, final_path) = unjournaled_staging(&folder, b"verified bytes");
+    let aside = dir.path().join("Moved away");
+    swap_folder_after_link(&folder, &aside);
+    let published = publish_unjournaled(&file, &staging, &final_path);
+    external::AFTER_LINK.with(|hook| *hook.borrow_mut() = None);
+    published.expect("the link was made and checked where it was made");
+    assert_eq!(
+        fs::read(aside.join("notes.txt")).unwrap(),
+        b"verified bytes"
+    );
+    assert_eq!(fs::read_dir(&folder).unwrap().count(), 0);
+    drop(file);
+}
+
 /// A native writer's staging file without a journal: created exclusively and held open, as the
 /// non-resumable writer and the GIF export do.
 fn unjournaled_staging(folder: &Path, bytes: &[u8]) -> (File, PathBuf, PathBuf) {
