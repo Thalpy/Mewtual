@@ -1,5 +1,27 @@
 # Mewtual; Architecture
 
+## Closed complete-SDP round grammar (24 October; runtime activation pending)
+
+Protected preparation now irreversibly selects CompleteSdpV1 in the native pair before
+capacity acquisition. Round retirement/refusal cannot restore ordinary SDP/ICE/Bye writers.
+A new signed Ready body6 carries that closed profile and a positive u64 native round sequence.
+Current factories fix/admit1 only; higher numbers cannot replace current one-shot custody. Its original native message ID becomes
+the round echo in new encrypted Offer8/Answer9 headers and AAD. Old body5 and kinds1-7 keep
+their original bytes; helpers may relay either Ready form, but protected endpoints require6.
+Only the original HIGH publication or actual LOW admission provides the expected round.
+Ordinary verification cannot bypass that comparison or spend the reserved Root namespace row.
+
+The maximum AAD is579B, with37B of new round/profile metadata. The complete declared exchange
+peak is188,521/196,608B, including two Lower owners, retained action inputs and maximum engine.
+Ready's maximum signed object is692B and declared peak32,644/32,768B. No group, row, action,
+reserve or stage-count limit increased. Confirmation history stores only its three-case role,
+so unrelated SDP enum payloads do not consume the original1536B confirmation row.
+
+This establishes wire/admission isolation only. Fresh rounds after old Finish expiry, typed
+native/browser SDP/RTC, operational scheduling, compaction, relay and acceptance remain open.
+Earlier size/status sections are historical checkpoints superseded by this section.
+
+
 ## Retained original keys, separate from progress (24 October)
 
 EstablishedKeyCustody converts exact original native Finish custody while its finite window

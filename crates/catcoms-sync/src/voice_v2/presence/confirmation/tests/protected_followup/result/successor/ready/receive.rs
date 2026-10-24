@@ -31,7 +31,10 @@ fn offer(p: &ProtectedFixture, edit: impl FnOnce(&mut EncryptedHeader)) -> Signe
         target_key_ref: p.f.high.join.key.key_ref,
         handshake: p.f.id,
         low_to_high: true,
-        kind: EncryptedKind::Offer,
+        kind: EncryptedKind::OfferRound(crate::voice_v2::SdpRound {
+            ready: cache(p).artifact_for_test().unwrap().0.id(),
+            profile: crate::voice_v2::SdpProfile::CompleteSdpV1,
+        }),
         sequence: 4,
         offer: Some(OfferId {
             issuer: p.f.low.context.local,
@@ -74,6 +77,7 @@ fn ready_receive_requires_actual_inbox_and_final_marker_before_restricted_verifi
     install(&mut p, &[], &signer, &mut rng, |_, _| Ok(())).unwrap();
     assert!(Arc::ptr_eq(&original, &cache(&p).receive_for_test()));
     assert!(owner.lends_ready_offer_verification(p.f.low.context.local, &frame, 1000, 1000));
+    owner.assert_inactive_round_lenders_for_test(p.f.high.join.ledger.packet_slots());
     let ticket = p
         .high
         .admit_transport_verification(p.f.low.context.local, &frame)

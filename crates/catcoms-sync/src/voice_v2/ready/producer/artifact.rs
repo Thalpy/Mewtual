@@ -33,6 +33,8 @@ pub(super) struct ArtifactState {
 /// Affine artifact provenance. Only this module can construct it from the original signed
 /// cache; a native caller cannot substitute an ID/hash/deadline while installing receive.
 pub(in crate::voice_v2) struct SignedReadyStamp {
+    sequence: u64,
+    profile: crate::voice_v2::SdpProfile,
     exchange: Arc<Exchange>,
     id: MessageId,
     hash: [u8; 32],
@@ -52,6 +54,8 @@ impl SignedReadyStamp {
         }
         Ok(crate::voice_v2::negotiation::receive::ReadyPublication {
             id: self.id,
+            sequence: self.sequence,
+            profile: self.profile,
             hash: self.hash,
             first_mono: self.first_mono,
             deadline: self.deadline,
@@ -123,6 +127,8 @@ impl CacheCapacity {
             .as_ref()
             .ok_or(VoiceError::Unauthorized)?
             .prepare_publication(SignedReadyStamp {
+                sequence: 1,
+                profile: crate::voice_v2::SdpProfile::CompleteSdpV1,
                 exchange: self.producer.exchange.clone(),
                 id: stamp.id,
                 hash: artifact._hash,
@@ -203,8 +209,10 @@ impl CacheCapacity {
             stamp.id,
             stamp.issued,
             stamp.expires,
-            Body::PairReady {
+            Body::PairReadyRound {
+                sequence: 1,
                 header: stamp.header.clone(),
+                profile: crate::voice_v2::SdpProfile::CompleteSdpV1,
             },
         )?;
         // issue() verifies the supplied signer against ITSELF. Bind the returned identity

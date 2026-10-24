@@ -202,8 +202,25 @@ struct Pair {
     status: Status,
     live: CallLease,
     confirmation_claimed: bool,
+    // Irreversible before protected capacity admission. Never clear this when a round
+    // retires: ordinary old SDP/ICE/Bye must not become fallback writers afterward.
+    sdp_profile: Option<super::SdpProfile>,
     next: u64,
     replay: Replay,
+}
+impl Pair {
+    fn check_profile(&self, kind: EncryptedKind) -> Result<(), VoiceError> {
+        let confirmation = matches!(
+            kind,
+            EncryptedKind::ConfirmHello
+                | EncryptedKind::ConfirmProof
+                | EncryptedKind::ConfirmFinish
+        );
+        if !confirmation && self.sdp_profile != kind.round().map(|round| round.profile) {
+            return Err(VoiceError::Unauthorized);
+        }
+        Ok(())
+    }
 }
 struct Outgoing {
     draft: PacketDraft,
@@ -822,6 +839,18 @@ impl PacketLedger {
         let pair = self.pair(&handshake, authority)?;
         Ok(pair.status == Status::Confirming && pair.next == 0 && pair.replay.highest == 0)
     }
+    pub(super) fn select_complete_sdp_profile(
+        &mut self,
+        handshake: Nonce,
+        authority: &Authority<'_>,
+    ) -> Result<(), VoiceError> {
+        self.pair(&handshake, authority)?;
+        self.pairs
+            .get_mut(&handshake)
+            .expect("same exclusive pair")
+            .sdp_profile = Some(super::SdpProfile::CompleteSdpV1);
+        Ok(())
+    }
     pub fn new(
         context: &Context,
         join: Nonce,
@@ -956,22 +985,31 @@ impl PacketLedger {
         header: &EncryptedHeader,
         incoming: bool,
     ) -> Result<Option<Arc<Exchange>>, VoiceError> {
-        if !matches!(header.kind, EncryptedKind::Offer | EncryptedKind::Answer) {
+        if !header.kind.is_sdp() {
             return Ok(None);
         }
         let sdp = self.sdp.as_ref().ok_or(VoiceError::Capacity)?;
-        if sdp.handshake != header.handshake || !sdp.owner.is_live() {
+        if sdp.handshake != header.handshake
+            || !sdp.owner.is_live()
+            || !sdp.owner.accepts_sdp_kind(header.kind)
+        {
             return Err(VoiceError::Unauthorized);
         }
         if (incoming && sdp.remote.is_some()) || (!incoming && sdp.local.is_some()) {
             return Err(VoiceError::Capacity);
         }
         let permitted = match (incoming, header.kind, sdp.role) {
-            (_, EncryptedKind::Offer, SdpRole::Ready) => true,
-            (true, EncryptedKind::Answer, SdpRole::Initiator(offer))
-            | (false, EncryptedKind::Answer, SdpRole::Responder(offer)) => {
-                header.offer == Some(offer)
-            }
+            (_, EncryptedKind::Offer | EncryptedKind::OfferRound(_), SdpRole::Ready) => true,
+            (
+                true,
+                EncryptedKind::Answer | EncryptedKind::AnswerRound(_),
+                SdpRole::Initiator(offer),
+            )
+            | (
+                false,
+                EncryptedKind::Answer | EncryptedKind::AnswerRound(_),
+                SdpRole::Responder(offer),
+            ) => header.offer == Some(offer),
             _ => false,
         };
         if !permitted {
@@ -986,7 +1024,7 @@ impl PacketLedger {
         incoming: bool,
         mono: u64,
     ) {
-        if !matches!(header.kind, EncryptedKind::Offer | EncryptedKind::Answer) {
+        if !header.kind.is_sdp() {
             return;
         }
         let sdp = self
@@ -997,7 +1035,7 @@ impl PacketLedger {
         // first admitted SDP, so waiting before an Offer cannot shorten its fresh reply.
         sdp.retire
             .get_or_insert(mono.saturating_add(MAX_PACKET_LIFETIME_MS + CLOCK_SKEW_MS));
-        if header.kind == EncryptedKind::Offer {
+        if header.kind.is_offer() {
             let offer = header.offer.expect("validated OfferId");
             sdp.role = if incoming {
                 SdpRole::Responder(offer)
@@ -1079,6 +1117,7 @@ impl PacketLedger {
                 status: Status::Confirming,
                 live,
                 confirmation_claimed: false,
+                sdp_profile: None,
                 next: 0,
                 replay: Replay::default(),
             },
@@ -1142,6 +1181,7 @@ impl PacketLedger {
             status: Status::Confirming,
             live,
             confirmation_claimed: true,
+            sdp_profile: None,
             next: 0,
             replay: Replay::default(),
         }))
@@ -1492,6 +1532,7 @@ impl PacketLedger {
             return Err(VoiceError::Malformed);
         };
         let pair = self.pair(&header.handshake, authority)?;
+        pair.check_profile(header.kind)?;
         if object.issuer != pair.binding.peer
             || header.target != self.local
             || header.target_join != self.join

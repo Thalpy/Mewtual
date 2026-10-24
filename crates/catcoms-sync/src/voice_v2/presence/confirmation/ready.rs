@@ -171,7 +171,12 @@ impl LocalJoin {
             return Err(VoiceError::Unauthorized);
         }
         let object = envelope.object();
-        let Body::PairReady { header } = object.body() else {
+        let Body::PairReadyRound {
+            sequence: 1,
+            header,
+            profile: crate::voice_v2::SdpProfile::CompleteSdpV1,
+        } = object.body()
+        else {
             return Err(VoiceError::Unauthorized);
         };
         self.owned(authority)?;

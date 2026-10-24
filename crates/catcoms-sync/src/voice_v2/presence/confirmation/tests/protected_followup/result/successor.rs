@@ -197,10 +197,10 @@ fn ready_producer_full_peak_uses_original_shared_lanes_and_independent_stage_quo
     for (stage, maximum) in [
         (Stage::LocalPacket, 2048),
         // Ready now pays its actual retained Packet and standalone map/set leaf graph.
-        (Stage::Source, 683 + 512 + 3072),
+        (Stage::Source, 692 + 512 + 3072),
         (
             Stage::Lower,
-            2 * (683 + 512) + 4096 + crate::voice_v2::ROUTE_METADATA_BYTES,
+            2 * (692 + 512) + 4096 + crate::voice_v2::ROUTE_METADATA_BYTES,
         ),
         (Stage::Crypto, 6656),
     ] {
@@ -239,13 +239,13 @@ fn ready_producer_full_peak_uses_original_shared_lanes_and_independent_stage_quo
         "native Pair already owns sole cache claim"
     );
     let source = producer
-        .charge(&pool, group, Stage::Source, 683 + 512 + 3072)
+        .charge(&pool, group, Stage::Source, 692 + 512 + 3072)
         .unwrap();
     assert_eq!(
         producer.charge(&pool, group, Stage::Source, 1).err(),
         Some(VoiceError::Capacity)
     );
-    let lower_bytes = 2 * (683 + 512) + 4096 + crate::voice_v2::ROUTE_METADATA_BYTES;
+    let lower_bytes = 2 * (692 + 512) + 4096 + crate::voice_v2::ROUTE_METADATA_BYTES;
     let first = producer
         .charge(&pool, group, Stage::Lower, lower_bytes)
         .unwrap();

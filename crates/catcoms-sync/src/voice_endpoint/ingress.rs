@@ -175,7 +175,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         // public control intake bypass encrypted replay/confirmation/negotiation ownership.
         if matches!(
             envelope.object().body(),
-            Body::Encrypted { .. } | Body::PairReady { .. }
+            Body::Encrypted { .. } | Body::PairReady { .. } | Body::PairReadyRound { .. }
         ) {
             return Err(VoiceError::Unauthorized);
         }
@@ -255,7 +255,9 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
                 }
                 Targets::Join(participant.watch.id, participant.lease.clone())
             }
-            Body::Encrypted { .. } | Body::PairReady { .. } => unreachable!(),
+            Body::Encrypted { .. } | Body::PairReady { .. } | Body::PairReadyRound { .. } => {
+                unreachable!()
+            }
         };
         if !targets.live() || room.scope != context.scope || !room.lease.is_live() {
             return Err(VoiceError::Unauthorized);
@@ -537,7 +539,9 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
                     participant.join.source_activity(&authority)?,
                 )))
             }
-            Body::Encrypted { .. } | Body::PairReady { .. } => Err(VoiceError::Unauthorized),
+            Body::Encrypted { .. } | Body::PairReady { .. } | Body::PairReadyRound { .. } => {
+                Err(VoiceError::Unauthorized)
+            }
         }
     }
     pub fn voice_watch_peers(

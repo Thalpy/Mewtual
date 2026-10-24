@@ -20,11 +20,11 @@ const STAGES: usize = 8;
 // Maximum policy- and OfferId-bound native encoding sizes. Composition regressions must compare
 // these with actual encoded packets; changing the wire encoding requires revisiting this peak.
 const CIPHERTEXT: usize = MAX_SDP_PLAINTEXT + 16;
-pub const MAX_AAD: usize = 542;
-const PACKET_BYTES: usize = 2 * CIPHERTEXT + 1340;
+pub const MAX_AAD: usize = 579;
+const PACKET_BYTES: usize = 2 * CIPHERTEXT + 1414;
 // Canonical signed object plus Source's existing512-byte wire/identity allowance. Source
 // metadata adds1024; Lower borrows that original object rather than cloning its ciphertext.
-const SOURCE_WIRE_BYTES: usize = CIPHERTEXT + 1130;
+const SOURCE_WIRE_BYTES: usize = CIPHERTEXT + 1167;
 const SOURCE_BYTES: usize = SOURCE_WIRE_BYTES + 1024;
 const LOWER_BYTES: usize = 2 * SOURCE_WIRE_BYTES + 4096 + ROUTE_METADATA_BYTES;
 const ACTION_BYTES: usize = CIPHERTEXT + MAX_AAD + 1536;
@@ -470,7 +470,8 @@ impl Exchange {
             && header.source_key_ref == binding.peer.key_ref
             && header.target_key_ref == binding.key_ref
             && header.handshake == binding.peer.handshake
-            && matches!(header.kind, EncryptedKind::Offer | EncryptedKind::Answer)
+            && header.kind.is_sdp()
+            && self.accepts_sdp_kind(header.kind)
             && ((peek.envelope_kind == 1 && requester == peek.issuer)
                 || (peek.envelope_kind == 3 && binding.helpers.contains(&requester)))
     }
@@ -746,7 +747,7 @@ mod tests {
             + 2 * ACTION_BYTES
             + ENGINE_BYTES
             + RESULT_BYTES;
-        assert_eq!(declared, 187_966);
+        assert_eq!(declared, 188_521);
         assert!(declared <= EXCHANGE_BYTES);
         let resources = Arc::new(Resources::default());
         let exchange = Exchange::new(resources.clone(), [1; 32]).unwrap();

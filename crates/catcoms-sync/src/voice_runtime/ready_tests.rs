@@ -230,7 +230,7 @@ async fn root_low_ready_shared_namespace_actual_success_retry_collision_and_dela
         .unwrap();
     let object = jobs
         .iter()
-        .find(|job| matches!(job.object().body(), Body::PairReady { .. }))
+        .find(|job| matches!(job.object().body(), Body::PairReadyRound { .. }))
         .expect("native queued Ready")
         .object()
         .clone();

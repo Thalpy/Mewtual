@@ -8,7 +8,19 @@ fn unpaid_ready_peek_has_exact_native_fields_hash_and_fixed_helpers_with_no_trai
         DeviceKeypair::from_seed(&[4; 32]).device_id(),
     ];
     header.helpers.sort();
-    let object = issue(&high, scope, header.clone()).unwrap();
+    let object = SignedObject::issue(
+        scope,
+        &high,
+        [18; 32],
+        1000,
+        16000,
+        Body::PairReadyRound {
+            sequence: 1,
+            header: header.clone(),
+            profile: SdpProfile::CompleteSdpV1,
+        },
+    )
+    .unwrap();
     let direct = Envelope::Direct(object.clone());
     let peek = Envelope::peek_ready(&direct.encode()).unwrap();
     assert_eq!(
@@ -36,7 +48,7 @@ fn unpaid_ready_peek_has_exact_native_fields_hash_and_fixed_helpers_with_no_trai
     assert!(Envelope::peek_ready(&trailing).is_err());
     // Change the declared count without constructing any Vec in the unpaid parser.
     let mut unsigned = object.unsigned();
-    let count = unsigned.len() - 2 * (4 + 32) - 1;
+    let count = unsigned.len() - 2 * (4 + 32) - 10;
     assert_eq!(unsigned[count], 2);
     for value in [3, 255] {
         unsigned[count] = value;
@@ -247,4 +259,109 @@ fn every_ready_field_and_helper_is_signed_and_decoder_bounds_count_before_alloca
     assert_eq!(OBJECT_DOMAIN, "mewtual/voice/object/v2");
     assert_eq!(VERSION, 2);
     assert_eq!(super::super::tests::announcement(&high, 1).body.kind(), 1);
+}
+
+#[test]
+fn new_ready_profile_is_closed_and_preserves_legacy_header_bytes_and_frozen_helper_route() {
+    let (low, high, scope, mut header) = fixture();
+    let helper = DeviceKeypair::from_seed(&[3; 32]).device_id();
+    let other = DeviceKeypair::from_seed(&[4; 32]).device_id();
+    header.helpers = vec![helper];
+    let old = issue(&high, scope, header.clone()).unwrap();
+    let new = SignedObject::issue(
+        scope,
+        &high,
+        old.id(),
+        old.issued(),
+        old.expires(),
+        Body::PairReadyRound {
+            sequence: 1,
+            header: header.clone(),
+            profile: SdpProfile::CompleteSdpV1,
+        },
+    )
+    .unwrap();
+    assert_eq!(new.body.kind(), 6);
+    assert_eq!(new.encode().len(), old.encode().len() + 9);
+    assert_eq!(SignedObject::decode(&new.encode()).unwrap(), new);
+    // Tag5 still decodes but cannot select the protected native readiness verifier.
+    assert!(Envelope::peek_ready(&Envelope::Direct(old.clone()).encode()).is_err());
+    let mut legacy = Encoder::new();
+    old.body.put_header(&mut legacy);
+    let mut round = Encoder::new();
+    new.body.put_header(&mut round);
+    let mut expected = legacy.finish();
+    expected.extend_from_slice(&1u64.to_be_bytes());
+    expected.push(1);
+    assert_eq!(round.finish(), expected);
+    // Every byte, including mode, remains signed. Unknown profile fails parsing, rather
+    // than silently interpreting this body as the older tag5 form.
+    for mode in [0, 2, 255] {
+        let mut unsigned = new.unsigned();
+        *unsigned.last_mut().unwrap() = mode;
+        let mut encoded = Encoder::new();
+        fixed(&mut encoded, &unsigned);
+        fixed(&mut encoded, &new.signature);
+        assert!(matches!(
+            SignedObject::decode(&encoded.finish()),
+            Err(VoiceError::Malformed)
+        ));
+    }
+    let context = context(scope, low.device_id());
+    for (candidate, admitted) in [(helper, true), (other, false)] {
+        let forwarded = Envelope::HelperDelivery {
+            object: new.clone(),
+            permit: RoutePermit::issue(&high, &new, candidate, 1000, 16000).unwrap(),
+        };
+        assert_eq!(
+            forwarded.authorize(candidate, &context, |_| true).is_ok(),
+            admitted
+        );
+    }
+    let mut unsigned = new.unsigned();
+    unsigned.push(0);
+    let mut encoded = Encoder::new();
+    fixed(&mut encoded, &unsigned);
+    fixed(&mut encoded, &new.signature);
+    assert!(SignedObject::decode(&encoded.finish()).is_err());
+}
+
+#[test]
+fn ready_sequence_has_full_u64_closed_encoding_and_zero_never_signs() {
+    let (_, high, scope, header) = fixture();
+    assert_eq!(
+        SignedObject::issue(
+            scope,
+            &high,
+            [81; 32],
+            1000,
+            16000,
+            Body::PairReadyRound {
+                header: header.clone(),
+                sequence: 0,
+                profile: SdpProfile::CompleteSdpV1
+            }
+        ),
+        Err(VoiceError::Malformed)
+    );
+    for sequence in [1, 2, u64::MAX] {
+        let body = Body::PairReadyRound {
+            header: header.clone(),
+            sequence,
+            profile: SdpProfile::CompleteSdpV1,
+        };
+        let object = SignedObject::issue(scope, &high, [81; 32], 1000, 16000, body).unwrap();
+        assert_eq!(SignedObject::decode(&object.encode()).unwrap(), object);
+        assert_eq!(
+            Envelope::peek_ready(&Envelope::Direct(object.clone()).encode())
+                .unwrap()
+                .sequence,
+            sequence
+        );
+        let unsigned = object.unsigned();
+        assert_eq!(
+            &unsigned[unsigned.len() - 9..unsigned.len() - 1],
+            &sequence.to_be_bytes()
+        );
+    }
 }

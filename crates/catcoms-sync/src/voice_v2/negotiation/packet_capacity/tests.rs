@@ -145,6 +145,22 @@ fn abandoned_extracted_ticket_closes_unused_original_claims_before_a_delayed_old
 }
 
 pub(super) fn assert_inactive_lenders(owner: &Arc<Exchange>, tables: &PacketSlots) {
+    assert_inactive_headers(owner, tables);
+    // Rejection must leave both original positions available. This capacity-only fixture
+    // has no actual HIGH inbox; tests with that real owner call only the header checks.
+    let ordinary = tables.fill_unreserved_for_test();
+    let additional = tables.fill_unreserved_for_test();
+    assert!(additional.0.is_empty() && additional.1.is_empty());
+    {
+        let state = owner.state.lock().unwrap();
+        let claims = state.packet_claims.as_ref().unwrap();
+        let incoming = claims.incoming_slot(tables).unwrap();
+        let outgoing = claims.outgoing_slot(tables).unwrap();
+        drop((incoming, outgoing));
+    }
+    drop(ordinary);
+}
+pub(super) fn assert_inactive_headers(owner: &Arc<Exchange>, tables: &PacketSlots) {
     let low = owner.successor.as_ref().unwrap().binding().low;
     let binding = owner.successor.as_ref().unwrap().binding();
     for incoming in [false, true] {
@@ -176,10 +192,11 @@ pub(super) fn assert_inactive_lenders(owner: &Arc<Exchange>, tables: &PacketSlot
                 binding.peer_key
             },
             handshake: binding.handshake,
-            kind: if offer {
-                EncryptedKind::Offer
-            } else {
-                EncryptedKind::Answer
+            kind: match (owner.sdp_round(), offer) {
+                (Some(round), true) => EncryptedKind::OfferRound(round),
+                (Some(round), false) => EncryptedKind::AnswerRound(round),
+                (None, true) => EncryptedKind::Offer,
+                (None, false) => EncryptedKind::Answer,
             },
             low_to_high: offer,
             sequence: 1,
@@ -195,17 +212,4 @@ pub(super) fn assert_inactive_lenders(owner: &Arc<Exchange>, tables: &PacketSlot
         };
         assert_eq!(result.err(), Some(VoiceError::Unauthorized));
     }
-    // Bypass authorization ONLY in this capacity fixture: rejection must leave both
-    // original positions available, even when an ordinary table is already full.
-    let ordinary = tables.fill_unreserved_for_test();
-    let additional = tables.fill_unreserved_for_test();
-    assert!(additional.0.is_empty() && additional.1.is_empty());
-    {
-        let state = owner.state.lock().unwrap();
-        let claims = state.packet_claims.as_ref().unwrap();
-        let incoming = claims.incoming_slot(tables).unwrap();
-        let outgoing = claims.outgoing_slot(tables).unwrap();
-        drop((incoming, outgoing));
-    }
-    drop(ordinary);
 }

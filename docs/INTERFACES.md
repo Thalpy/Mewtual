@@ -1,5 +1,26 @@
 # Mewtual; Interfaces & Hooks Schema
 
+## Ready and SDP round wire forms (24 October; closed initial profile)
+
+`Body::PairReadyRound` has body tag6: the unchanged ReadyHeader, a positive big-endian u64 native round sequence, then one profile byte.
+Profile1 means CompleteSdpV1; unknown values and zero sequences refuse. Current one-shot native
+factories issue and admit only sequence1. A larger signed number cannot replace a round or renew work. Body5 remains byte compatible but cannot
+satisfy protected native readiness. Both forms remain excluded from generic public intake.
+
+Encrypted OfferRound8/AnswerRound9 preserve the common header through optional OfferId, then
+append profile1 and the length-prefixed32-byte native HIGH Ready message ID (37B total).
+Kinds1-7 have no suffix and retain exact original grammar. OfferRound requires LOW to HIGH;
+AnswerRound requires HIGH to LOW and the original LOW OfferId. Expected round/profile comes
+from native publication/admission, never an IPC selector. Wrong-round/legacy input refuses
+before replay/token/origin publication, including use of ordinary verification capacity.
+Protected mode is pinned before reservation and cannot fall back to separate ICE or old Bye
+when capacity is unavailable or a round retires.
+
+Maximum AAD579B, exchange188,521/196,608B, signed Ready692B and Ready peak32,644/32,768B are
+measured by focused composition/encoding guards. This is not a native/browser SDK interface;
+SDP input/result/RTC grants and automatic application progression remain unimplemented.
+
+
 ## Established-key retention opcode11 (24 October)
 
 The authenticated local channel adds operation11/version4 alongside unchanged operation10.

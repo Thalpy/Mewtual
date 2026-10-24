@@ -44,52 +44,61 @@ async fn causal_ready_never_enters_queued_public_intake_or_produces_generic_rece
     let runtime = Runtime::new(clock);
     attach(&mut low, &runtime);
     let grant = low.start_voice_watch(1, CallLease::default()).unwrap();
-    let envelope = Envelope::Direct(
-        SignedObject::issue(
-            grant.scope(),
-            &high.device,
-            [71; 32],
-            1000,
-            16_000,
-            Body::PairReady {
-                header: voice_v2::ReadyHeader {
-                    epoch: low.group.epoch(),
-                    target: low.device_id(),
-                    source_join: [1; 32],
-                    target_join: [2; 32],
-                    source_key_ref: [3; 32],
-                    target_key_ref: [4; 32],
-                    handshake: [5; 32],
-                    finish_message: [6; 32],
-                    finish_object_hash: [7; 32],
-                    helpers: vec![],
-                },
-            },
-        )
-        .unwrap(),
-    );
-    let context = low.voice_v2_context(grant.scope().room).unwrap();
-    assert_eq!(
-        envelope.authorize(high.device_id(), &context, |_| true),
-        Ok(voice_v2::Disposition::Deliver)
-    );
-    for public_only in [false, true] {
-        let room = low.voice_room_authority(context.scope.room).unwrap();
-        let ticket = low
-            .voice_transport_actor()
-            .unwrap()
-            .admit_transport_verification(high.device_id(), &envelope.encode())
-            .unwrap();
-        let error = if public_only {
-            low.admit_voice_endpoint_public(ticket, envelope.clone(), &context, room)
-                .err()
-        } else {
-            low.admit_voice_endpoint(ticket, envelope.clone(), &context, room)
-                .err()
+    for modern in [false, true] {
+        let header = voice_v2::ReadyHeader {
+            epoch: low.group.epoch(),
+            target: low.device_id(),
+            source_join: [1; 32],
+            target_join: [2; 32],
+            source_key_ref: [3; 32],
+            target_key_ref: [4; 32],
+            handshake: [5; 32],
+            finish_message: [6; 32],
+            finish_object_hash: [7; 32],
+            helpers: vec![],
         };
-        assert_eq!(error, Some(VoiceError::Unauthorized));
-        let inbox = &low.voice_runtime.as_ref().unwrap().endpoints.public;
-        assert!(inbox.packets.is_empty() && inbox.encrypted.is_empty());
+        let envelope = Envelope::Direct(
+            SignedObject::issue(
+                grant.scope(),
+                &high.device,
+                [71; 32],
+                1000,
+                16_000,
+                if modern {
+                    Body::PairReadyRound {
+                        sequence: 1,
+                        header,
+                        profile: voice_v2::SdpProfile::CompleteSdpV1,
+                    }
+                } else {
+                    Body::PairReady { header }
+                },
+            )
+            .unwrap(),
+        );
+        let context = low.voice_v2_context(grant.scope().room).unwrap();
+        assert_eq!(
+            envelope.authorize(high.device_id(), &context, |_| true),
+            Ok(voice_v2::Disposition::Deliver)
+        );
+        for public_only in [false, true] {
+            let room = low.voice_room_authority(context.scope.room).unwrap();
+            let ticket = low
+                .voice_transport_actor()
+                .unwrap()
+                .admit_transport_verification(high.device_id(), &envelope.encode())
+                .unwrap();
+            let error = if public_only {
+                low.admit_voice_endpoint_public(ticket, envelope.clone(), &context, room)
+                    .err()
+            } else {
+                low.admit_voice_endpoint(ticket, envelope.clone(), &context, room)
+                    .err()
+            };
+            assert_eq!(error, Some(VoiceError::Unauthorized));
+            let inbox = &low.voice_runtime.as_ref().unwrap().endpoints.public;
+            assert!(inbox.packets.is_empty() && inbox.encrypted.is_empty());
+        }
     }
 }
 

@@ -14,6 +14,8 @@ use std::sync::OnceLock;
 /// Exact immutable promise. Exchange stores only this small observer, never the inbox Arc
 /// or its credited payload; retaining either there would form a self-custody cycle.
 pub(in crate::voice_v2) struct ReadyPublication {
+    pub(in crate::voice_v2) sequence: u64,
+    pub(in crate::voice_v2) profile: crate::voice_v2::SdpProfile,
     pub(in crate::voice_v2) id: MessageId,
     pub(in crate::voice_v2) hash: [u8; 32],
     pub(in crate::voice_v2) first_mono: u64,
@@ -247,7 +249,30 @@ impl Exchange {
                 || (peek.envelope_kind == 3 && self.allows_helper(requester)))
     }
 
-    fn matches_first_offer(
+    /// Metadata only. The HIGH value comes from its original native signed publication;
+    /// LOW's comes from its actual admitted tag6 receipt, never a browser/caller label.
+    pub(in crate::voice_v2) fn sdp_round(&self) -> Option<crate::voice_v2::SdpRound> {
+        self.low_ready
+            .as_ref()
+            .map(|receipt| receipt.sdp_round())
+            .or_else(|| {
+                self.ready_publication
+                    .get()
+                    .map(|ready| crate::voice_v2::SdpRound {
+                        ready: ready.id,
+                        profile: ready.profile,
+                    })
+            })
+    }
+    pub(in crate::voice_v2) fn accepts_sdp_kind(&self, kind: EncryptedKind) -> bool {
+        if self.successor.is_some() {
+            self.sdp_round()
+                .is_some_and(|round| kind.round() == Some(round))
+        } else {
+            matches!(kind, EncryptedKind::Offer | EncryptedKind::Answer)
+        }
+    }
+    pub(in crate::voice_v2) fn matches_first_offer(
         &self,
         scope: Scope,
         issuer: DeviceId,
@@ -260,7 +285,7 @@ impl Exchange {
         !binding.low
             && scope == binding.scope
             && issuer == binding.peer
-            && header.kind == EncryptedKind::Offer
+            && matches!(header.kind, EncryptedKind::OfferRound(round) if Some(round) == self.sdp_round())
             && header.target == binding.local
             && header.source_join == binding.peer_join
             && header.target_join == binding.local_join
@@ -362,7 +387,9 @@ impl HighReceive {
 }
 impl ReadyPublication {
     fn same(&self, other: &Self) -> bool {
-        self.id == other.id
+        self.sequence == other.sequence
+            && self.profile == other.profile
+            && self.id == other.id
             && self.hash == other.hash
             && self.first_mono == other.first_mono
             && self.deadline == other.deadline

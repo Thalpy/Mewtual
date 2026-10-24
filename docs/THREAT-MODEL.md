@@ -1,5 +1,22 @@
 # Threat model; client integrity & enforcement boundaries
 
+## Authenticated SDP round/profile isolation (24 October)
+
+A delayed authenticated offer must not enter a replacement native receive promise. Protected
+Ready now uses explicit body6/profile1 and a positive native u64 round number (initial1 only); Offer8/Answer9 authenticate its exact native Ready ID
+in signature and AAD. A peer-supplied round is only a label until compared with the original
+HIGH native publication or LOW native admission. Helpers enforce the same frozen helper list
+and cannot upgrade old body5 to6. Old grammar still decodes for compatibility, but protected
+endpoint admission refuses it. Unknown profiles are closed parse failures.
+
+Native protected selection pins the pair's complete-SDP profile before capacity admission.
+Retirement or memory pressure does not restore ordinary ICE/SDP/Bye writers. Wrong rounds
+cannot use prepaid receive verification or the reserved Root namespace exemption, nor consume
+replay/token/origin/receive state through ordinary verification. Original keys, sequence and
+replay domains are unchanged. This leaf does not authorize browser SDK effects, renewed rounds
+or media forwarding. Those integration boundaries and physical acceptance remain outstanding.
+
+
 ## Retention-only original key adoption (24 October)
 
 Copied Finish metadata, a local Established boolean or a Current key receipt cannot authorize

@@ -28,7 +28,12 @@ impl ActorOwner {
             Err(std::sync::TryLockError::Poisoned(error)) => error.into_inner(),
             Err(std::sync::TryLockError::WouldBlock) => return Err(VoiceError::Capacity),
         };
-        let super::super::Body::PairReady { header } = object.body() else {
+        let super::super::Body::PairReadyRound {
+            sequence: 1,
+            header,
+            profile: crate::voice_v2::SdpProfile::CompleteSdpV1,
+        } = object.body()
+        else {
             return Err(VoiceError::Unauthorized);
         };
         self.current()?;

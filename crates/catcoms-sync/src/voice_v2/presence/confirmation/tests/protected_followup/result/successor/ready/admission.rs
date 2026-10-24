@@ -39,7 +39,10 @@ pub(super) fn offer(p: &ProtectedFixture, message: u8, sequence: u64) -> SignedO
                 target_key_ref: p.f.high.join.key.key_ref,
                 handshake: p.f.id,
                 low_to_high: true,
-                kind: EncryptedKind::Offer,
+                kind: EncryptedKind::OfferRound(crate::voice_v2::SdpRound {
+                    ready: cache(p).artifact_for_test().unwrap().0.id(),
+                    profile: crate::voice_v2::SdpProfile::CompleteSdpV1,
+                }),
                 sequence,
                 offer: Some(OfferId {
                     issuer: p.f.low.context.local,
@@ -449,4 +452,70 @@ fn native_first_offer_empty_ready_helper_selection_refuses_even_valid_member_per
             Some(VoiceError::Unauthorized)
         );
     }
+}
+
+#[test]
+fn native_first_offer_wrong_round_and_legacy_mode_with_ordinary_verification_spend_nothing() {
+    let mut p = confirmed_high();
+    let room = room(&p.f.high);
+    install(&mut p, &room);
+    let original = offer(&p, 221, 4);
+    let Body::Encrypted { header, ciphertext } = original.body() else {
+        panic!("Offer")
+    };
+    let mut wrong = header.kind.round().unwrap();
+    wrong.ready[0] ^= 1;
+    let before = p.f.pool.counts();
+    for kind in [
+        EncryptedKind::Offer,
+        EncryptedKind::OfferRound(wrong),
+        EncryptedKind::Ice,
+    ] {
+        let mut changed = header.clone();
+        changed.kind = kind;
+        let object = SignedObject::issue(
+            original.scope(),
+            &p.f.low.signer,
+            original.id(),
+            original.issued(),
+            original.expires(),
+            Body::Encrypted {
+                header: changed,
+                ciphertext: ciphertext
+                    .iter()
+                    .copied()
+                    .take(kind.max_plaintext() + 16)
+                    .collect(),
+            },
+        )
+        .unwrap();
+        let frame = Envelope::Direct(object.clone()).encode();
+        assert!(!pending(&p).lends_ready_offer_verification(
+            p.f.low.context.local,
+            &frame,
+            1000,
+            1000
+        ));
+        // This goes through the ordinary authenticated verifier. It cannot borrow Ready
+        // capacity, nor consume its single inbox, replay bit, token or origin admission.
+        assert_eq!(
+            admit(&mut p, &object, &room, |_, _| panic!(
+                "refusal must precede final origin"
+            ))
+            .err(),
+            Some(VoiceError::Unauthorized)
+        );
+        assert_eq!(p.f.pool.counts(), before);
+        assert!(!pending(&p).is_live());
+        assert!(p.f.high.join.confirmations.pairs[&p.f.id]
+            .first_offer
+            .is_none());
+    }
+    // Same identity/sequence must still work, so none of the refused variants consumed it.
+    let first = admit(&mut p, &original, &room, |_, _| Ok(())).unwrap();
+    assert_eq!(Some(first.round), header.kind.round());
+    assert!(Arc::ptr_eq(
+        &first,
+        &admit(&mut p, &original, &room, |_, _| Ok(())).unwrap()
+    ));
 }

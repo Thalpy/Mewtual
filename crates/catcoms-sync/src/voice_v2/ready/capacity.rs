@@ -9,7 +9,7 @@ pub(in crate::voice_v2) const BYTES: usize = 32 * 1024;
 pub(in crate::voice_v2) const METADATA: usize = 4096;
 // Closed two-helper, policy-pinned Ready encoding. A regression pins this against actual
 // SignedObject encoding, not size_of a Vec or a renderer-provided serialized length.
-pub(in crate::voice_v2) const MAX_WIRE: usize = 683;
+pub(in crate::voice_v2) const MAX_WIRE: usize = 692;
 pub(in crate::voice_v2) const CACHE: usize = 2048;
 pub(in crate::voice_v2) const RECEIPT: usize = 1536;
 // Actual Ready Source owns a full native Packet/activity/effect and bounded map/set nodes.

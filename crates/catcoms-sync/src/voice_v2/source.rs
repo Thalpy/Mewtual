@@ -200,8 +200,15 @@ impl SourceActivity {
         let Some(ready) = self.ready() else {
             return Err(VoiceError::Unauthorized);
         };
-        let (Incarnation::Joined(key), ActivityLease::Joined(call), Body::PairReady { header }) =
-            (&self.incarnation, &self.lease, object.body())
+        let (
+            Incarnation::Joined(key),
+            ActivityLease::Joined(call),
+            Body::PairReadyRound {
+                sequence: 1,
+                header,
+                profile: super::SdpProfile::CompleteSdpV1,
+            },
+        ) = (&self.incarnation, &self.lease, object.body())
         else {
             return Err(VoiceError::Unauthorized);
         };
@@ -310,7 +317,7 @@ impl SourceActivity {
                             ActivityLease::Watching(_) => false,
                         })
             }
-            (Incarnation::Joined(_), Body::PairReady { .. }) => {
+            (Incarnation::Joined(_), Body::PairReady { .. } | Body::PairReadyRound { .. }) => {
                 let Some(ready) = self.ready() else {
                     return Err(VoiceError::Unauthorized);
                 };

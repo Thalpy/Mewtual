@@ -61,7 +61,9 @@ pub(crate) use ready::admission::ReadyAdmission;
 pub use ready::ReadyHeader;
 pub mod resources;
 pub mod runtime;
+mod sdp_profile;
 pub mod source;
+pub use sdp_profile::{SdpProfile, SdpRound};
 
 /// Field-level custody: moving other fields out of a record still retires this exact pending
 /// operation on consume, replacement or cache collection. Never move it into historical receipts.
@@ -437,9 +439,40 @@ pub enum EncryptedKind {
     Answer = 5,
     Ice = 6,
     Bye = 7,
+    /// Explicit complete-SDP forms. Kinds1-7 retain their exact original bytes.
+    OfferRound(SdpRound) = 8,
+    AnswerRound(SdpRound) = 9,
 }
 impl EncryptedKind {
-    fn get(value: u8) -> Result<Self, VoiceError> {
+    pub(crate) fn tag(self) -> u8 {
+        match self {
+            Self::ConfirmHello => 1,
+            Self::ConfirmProof => 2,
+            Self::ConfirmFinish => 3,
+            Self::Offer => 4,
+            Self::Answer => 5,
+            Self::Ice => 6,
+            Self::Bye => 7,
+            Self::OfferRound(_) => 8,
+            Self::AnswerRound(_) => 9,
+        }
+    }
+    pub(crate) fn is_offer(self) -> bool {
+        matches!(self, Self::Offer | Self::OfferRound(_))
+    }
+    pub(crate) fn is_answer(self) -> bool {
+        matches!(self, Self::Answer | Self::AnswerRound(_))
+    }
+    pub(crate) fn is_sdp(self) -> bool {
+        self.is_offer() || self.is_answer()
+    }
+    pub(crate) fn round(self) -> Option<SdpRound> {
+        match self {
+            Self::OfferRound(round) | Self::AnswerRound(round) => Some(round),
+            _ => None,
+        }
+    }
+    fn get(value: u8, d: &mut Decoder<'_>) -> Result<Self, VoiceError> {
         match value {
             1 => Ok(Self::ConfirmHello),
             2 => Ok(Self::ConfirmProof),
@@ -448,12 +481,16 @@ impl EncryptedKind {
             5 => Ok(Self::Answer),
             6 => Ok(Self::Ice),
             7 => Ok(Self::Bye),
+            8 => Ok(Self::OfferRound(SdpRound::get(d)?)),
+            9 => Ok(Self::AnswerRound(SdpRound::get(d)?)),
             _ => Err(VoiceError::Malformed),
         }
     }
     fn max_plaintext(self) -> usize {
         match self {
-            Self::Offer | Self::Answer => MAX_SDP_PLAINTEXT,
+            Self::Offer | Self::Answer | Self::OfferRound(_) | Self::AnswerRound(_) => {
+                MAX_SDP_PLAINTEXT
+            }
             Self::Ice => 2 * 1024,
             Self::Bye => 128,
             _ => 512,
@@ -485,11 +522,16 @@ impl EncryptedHeader {
         e.put_u8(SUITE);
         fixed(e, &self.handshake);
         e.put_u8(u8::from(self.low_to_high));
-        e.put_u8(self.kind as u8);
+        e.put_u8(self.kind.tag());
         e.put_u64(self.sequence);
         e.put_u8(u8::from(self.offer.is_some()));
         if let Some(offer) = self.offer {
             offer.put(e);
+        }
+        // Only the new kinds carry a round suffix. Never append an option flag to old
+        // signed/AAD encodings: their exact canonical grammar remains unchanged.
+        if let Some(round) = self.kind.round() {
+            round.put(e);
         }
     }
     fn get(d: &mut Decoder<'_>) -> Result<Self, VoiceError> {
@@ -503,13 +545,14 @@ impl EncryptedHeader {
         }
         let handshake = array(d)?;
         let low_to_high = boolean(d)?;
-        let kind = EncryptedKind::get(d.get_u8()?)?;
+        let kind_tag = d.get_u8()?;
         let sequence = d.get_u64()?;
         let offer = match d.get_u8()? {
             0 => None,
             1 => Some(OfferId::get(d)?),
             _ => return Err(VoiceError::Malformed),
         };
+        let kind = EncryptedKind::get(kind_tag, d)?;
         Ok(Self {
             source_join,
             target,
@@ -535,6 +578,16 @@ impl EncryptedHeader {
                 Ok(())
             }
             (EncryptedKind::Answer, Some(offer)) if offer.issuer == self.target => Ok(()),
+            (EncryptedKind::OfferRound(_), Some(offer))
+                if self.low_to_high && offer.issuer == issuer && offer.message == id =>
+            {
+                Ok(())
+            }
+            (EncryptedKind::AnswerRound(_), Some(offer))
+                if !self.low_to_high && offer.issuer == self.target =>
+            {
+                Ok(())
+            }
             (EncryptedKind::Ice, Some(offer))
                 if offer.issuer == issuer || offer.issuer == self.target =>
             {
@@ -581,6 +634,16 @@ pub enum Body {
     /// Signed causal readiness metadata. Codec/route validity is not exact native pair
     /// admission, and this public control can never supply SDP plaintext or RTC authority.
     PairReady { header: ReadyHeader },
+    /// Authenticated closed mode evidence; old tag5 remains a distinct unsupported form
+    /// at protected endpoint admission. Helpers may relay either without upgrading it.
+    PairReadyRound {
+        header: ReadyHeader,
+        /// Positive native HIGH round counter, independent of wall time and message ID.
+        /// Current one-shot endpoint factories issue/admit1 only; this field alone does
+        /// not authorize replacement, renewed attempts, or disposal of a busy round.
+        sequence: u64,
+        profile: SdpProfile,
+    },
 }
 impl Body {
     fn kind(&self) -> u8 {
@@ -590,6 +653,7 @@ impl Body {
             Self::JoinProof { .. } => 3,
             Self::Encrypted { .. } => 4,
             Self::PairReady { .. } => 5,
+            Self::PairReadyRound { .. } => 6,
         }
     }
     pub fn target(&self) -> Option<DeviceId> {
@@ -598,7 +662,7 @@ impl Body {
             Self::WatchChallenge { target, .. } => Some(*target),
             Self::JoinProof { watcher, .. } => Some(*watcher),
             Self::Encrypted { header, .. } => Some(header.target),
-            Self::PairReady { header } => Some(header.target),
+            Self::PairReady { header } | Self::PairReadyRound { header, .. } => Some(header.target),
         }
     }
     fn put_header(&self, e: &mut Encoder) {
@@ -642,6 +706,15 @@ impl Body {
             }
             Self::Encrypted { header, .. } => header.put(e),
             Self::PairReady { header } => header.put(e),
+            Self::PairReadyRound {
+                header,
+                sequence,
+                profile,
+            } => {
+                header.put(e);
+                e.put_u64(*sequence);
+                profile.put(e);
+            }
         }
     }
     fn get(kind: u8, d: &mut Decoder<'_>) -> Result<Self, VoiceError> {
@@ -679,6 +752,11 @@ impl Body {
             }
             5 => Self::PairReady {
                 header: ReadyHeader::get(d)?,
+            },
+            6 => Self::PairReadyRound {
+                header: ReadyHeader::get(d)?,
+                sequence: d.get_u64()?,
+                profile: SdpProfile::get(d)?,
             },
             _ => return Err(VoiceError::Malformed),
         })
@@ -762,6 +840,9 @@ impl SignedObject {
         if self.body.target() == Some(self.issuer) {
             return Err(VoiceError::Malformed);
         }
+        if matches!(&self.body, Body::PairReadyRound { sequence: 0, .. }) {
+            return Err(VoiceError::Malformed);
+        }
         match &self.body {
             Body::Announcement { key, renewal, .. } => {
                 key.validate()?;
@@ -775,7 +856,9 @@ impl SignedObject {
                     return Err(VoiceError::Bounds);
                 }
             }
-            Body::PairReady { header } => header.validate(self.issuer, self.scope)?,
+            Body::PairReady { header } | Body::PairReadyRound { header, .. } => {
+                header.validate(self.issuer, self.scope)?
+            }
             _ => {}
         }
         Ok(())
@@ -1202,6 +1285,7 @@ struct UnverifiedEncrypted {
     header: EncryptedHeader,
 }
 struct UnverifiedReady {
+    sequence: u64,
     envelope_kind: u8,
     scope: Scope,
     issuer: DeviceId,
@@ -1277,7 +1361,7 @@ impl Envelope {
         let _: [u8; 64] = array(&mut signed)?;
         signed.finish()?;
         let mut d = Decoder::new(unsigned);
-        if d.get_str()? != OBJECT_DOMAIN || d.get_u8()? != VERSION || d.get_u8()? != 5 {
+        if d.get_str()? != OBJECT_DOMAIN || d.get_u8()? != VERSION || d.get_u8()? != 6 {
             return Err(VoiceError::Malformed);
         }
         let scope = Scope::get(&mut d)?;
@@ -1287,6 +1371,11 @@ impl Envelope {
         d.get_u64()?;
         d.get_u64()?;
         let header = ready::ReadyPeek::get(&mut d)?;
+        let sequence = d.get_u64()?;
+        if sequence == 0 {
+            return Err(VoiceError::Malformed);
+        }
+        let _profile = SdpProfile::get(&mut d)?; // only closed CompleteSdpV1 can select this loan
         d.finish()?;
         if issuer <= header.target
             || (scope.policy.is_none() && header.helpers[0].is_some())
@@ -1300,6 +1389,7 @@ impl Envelope {
             return Err(VoiceError::Malformed);
         }
         Ok(UnverifiedReady {
+            sequence,
             envelope_kind,
             scope,
             issuer,
@@ -1488,7 +1578,7 @@ impl EnvelopeRef<'_> {
         if matches!(object.body, Body::Announcement { epoch, .. } if epoch > context.epoch) {
             return Err(VoiceError::Freshness);
         }
-        if let Body::PairReady { header } = &object.body {
+        if let Body::PairReady { header } | Body::PairReadyRound { header, .. } = &object.body {
             // Ready protects an exact original epoch, unlike renewable discovery. Verify
             // every named helper now; native pair admission repeats this at final commit.
             if header.epoch != context.epoch
@@ -1514,7 +1604,7 @@ impl EnvelopeRef<'_> {
                 if !context.indirect || context.scope.policy.is_none() || !member(permit.helper) {
                     return Err(VoiceError::Unauthorized);
                 }
-                if matches!(&object.body, Body::PairReady { header } if !header.helpers.contains(&permit.helper))
+                if matches!(&object.body, Body::PairReady { header } | Body::PairReadyRound { header, .. } if !header.helpers.contains(&permit.helper))
                 {
                     return Err(VoiceError::Unauthorized);
                 }

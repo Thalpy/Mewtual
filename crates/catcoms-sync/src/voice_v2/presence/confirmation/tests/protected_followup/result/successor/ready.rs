@@ -262,10 +262,12 @@ fn native_ready_maximum_two_helper_cache_prepares_under_full_ordinary_pressure_a
     let mut rng = Rng::new();
     prepare_artifact(&mut p, &helpers, &signer, &mut rng, |_, _| Ok(())).unwrap();
     let (object, hash, first, until) = cache(&p).artifact_for_test().unwrap();
-    assert_eq!(object.encode().len(), 683);
+    assert_eq!(object.encode().len(), 692);
     assert_eq!(hash, object.hash());
     assert_eq!(until - first, 15000);
-    assert!(matches!(object.body(), Body::PairReady { header } if header.helpers == helpers));
+    assert!(
+        matches!(object.body(), Body::PairReadyRound { header, .. } if header.helpers == helpers)
+    );
     assert_eq!(pool.counts(), full);
     assert_eq!(
         prepare_artifact(&mut p, &helpers[..1], &signer, &mut rng, |_, _| Ok(())),

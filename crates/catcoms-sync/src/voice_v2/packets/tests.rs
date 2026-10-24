@@ -137,7 +137,7 @@ fn sdp_from(
                 sequence,
                 offer: Some(offer),
             },
-            ciphertext: vec![5; MAX_SDP_PLAINTEXT + 16],
+            ciphertext: vec![5; kind.max_plaintext() + 16],
         },
     )
     .unwrap()
@@ -186,7 +186,8 @@ fn sdp_without_prepaid_readiness_and_crossed_offer_refuse_without_nonce_or_repla
     a.prepare_sdp(&clock).unwrap();
     let local = reserve(&mut a, &mut rng).unwrap();
     assert_eq!(local.sequence, 1);
-    assert_eq!(local.aad.len(), super::super::negotiation::MAX_AAD);
+    // Legacy headers retain their original canonical bytes; only round headers grow.
+    assert_eq!(local.aad.len(), 542);
     let offer = OfferId {
         issuer: a.context.local,
         message: local.id,
@@ -1959,4 +1960,90 @@ fn final_submit_and_delivery_repeat_future_time_checks_without_consuming_valid_t
     assert!(f.a.submit(&reservation, &[42; 32], &f.clock).unwrap() == signed);
     assert!(f.a.submit(&pending, &[42; 32], &f.clock).is_ok());
     assert!(f.c.commit(&incoming, &f.clock).is_ok());
+}
+
+#[test]
+fn selected_complete_sdp_mode_never_falls_back_to_ordinary_packets_after_round_close() {
+    let mut f = fixture();
+    f.a.establish();
+    f.c.establish();
+    // Give the legacy exchange a real owner first, then select the protected mode as the
+    // production confirmation preparation does. Dropping that round must not reset mode.
+    let owner = f.a.prepare_sdp(&f.clock).unwrap();
+    f.a.ledger
+        .select_complete_sdp_profile(HANDSHAKE, &authority(&f.a.context, &f.a.lease))
+        .unwrap();
+    let mut rng = ChaCha20Rng::seed_from_u64(59);
+    let round = SdpRound {
+        ready: [66; 32],
+        profile: SdpProfile::CompleteSdpV1,
+    };
+    for closed in [false, true] {
+        if closed {
+            owner.close();
+            f.a.ledger.prune(&f.clock);
+        }
+        for kind in [
+            EncryptedKind::Offer,
+            EncryptedKind::Answer,
+            EncryptedKind::Ice,
+            EncryptedKind::Bye,
+            EncryptedKind::OfferRound(round),
+            EncryptedKind::AnswerRound(round),
+        ] {
+            let next = f.a.ledger.pairs[&HANDSHAKE].next;
+            let serial = f.a.ledger.serial;
+            let bytes = f.resources.counts();
+            let slots = (f.a.ledger.outgoing.len(), f.a.ledger.incoming.len());
+            let request = ReserveRequest {
+                handshake: HANDSHAKE,
+                kind,
+                offer: if kind.is_offer() || kind == EncryptedKind::Bye {
+                    None
+                } else {
+                    Some(OfferId {
+                        issuer: f.a.context.local,
+                        message: [71; 32],
+                    })
+                },
+                ciphertext_bytes: 32,
+            };
+            assert_eq!(
+                f.a.ledger
+                    .reserve(
+                        f.a.signer.verifying_key().to_bytes(),
+                        request,
+                        &authority(&f.a.context, &f.a.lease),
+                        &f.clock,
+                        &mut rng
+                    )
+                    .err(),
+                Some(VoiceError::Unauthorized)
+            );
+            assert_eq!(f.a.ledger.pairs[&HANDSHAKE].next, next);
+            assert_eq!(f.a.ledger.serial, serial);
+            assert_eq!(f.resources.counts(), bytes);
+            assert_eq!(
+                (f.a.ledger.outgoing.len(), f.a.ledger.incoming.len()),
+                slots
+            );
+        }
+        // An otherwise authentic old ICE cannot enter through the ordinary inbound path.
+        let ice = sdp_from(
+            &f.c,
+            &f.a,
+            EncryptedKind::Ice,
+            [72; 32],
+            OfferId {
+                issuer: f.c.context.local,
+                message: [73; 32],
+            },
+            1,
+        );
+        assert_eq!(
+            f.a.admit(ice, &f.clock).err(),
+            Some(VoiceError::Unauthorized)
+        );
+        assert_eq!(f.a.ledger.pairs[&HANDSHAKE].replay.highest, 0);
+    }
 }

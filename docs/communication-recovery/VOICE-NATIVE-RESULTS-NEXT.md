@@ -1,5 +1,79 @@
 # Next voice milestone: native result recovery
 
+## Round wire isolation implemented; SDP effects still next (24 October)
+
+New Ready body6/profile1 and Offer8/Answer9 authenticate the actual native Ready message ID.
+Original body5 and encrypted kinds1-7 retain their exact bytes. Protected mode is pinned before
+capacity admission and survives round cleanup; ordinary verifier/namespace paths cannot admit
+old/wrong-round SDP or separate ICE. See INTERFACES for the exact closed grammar.
+
+Current maxima: AAD579B, exchange188,521/192KiB, signed Ready692B, Ready peak32,644/32KiB.
+The original one-shot Finish/Ready deadlines are unchanged. This completes wire/admission
+isolation, not fresh long-lived round creation, browser SDK prepayment, seal/open, remote-SDP
+delivery tickets, automatic application scheduling, multi-peer compaction or member media relay.
+Those remain the next implementation work. Older status/size sections below are historical.
+
+
+## Reviewed operational handoff implementation (24 October; design, not code)
+
+The next implementation uses separate prepaid native SdpHandoffPhase and browser SdpSdkPhase
+subtrees, with64KiB each as measured candidates. Native group cap is512KiB; the separate browser
+broker cap is256KiB. Do not assume256KiB native or spend the existing8087B core slack on a16KiB
+UTF16 string. Do not multiplex the Crypto stage in the first integration: result HTTP/actor
+commit still overlaps the actual AEAD engine owner. Any new limit must be pinned to the whole
+largest graph, including real two-Lower custody, old fixed history, channel/row payments,
+plaintext, sealed request, BYOB body, opened reply, UTF16 strings and SDK continuation objects.
+
+A fixed native KeyEffectState belongs under the original KeyClaim. It owns closure/drain
+state and native round/PC-generation counters, with no strong parent Row or Exchange backedge.
+Begin/recovery binds the same authenticated Session, parent RowId/action, key receipt,
+SelectedHandoffOwner and UI generation. Final admission follows UI -> Coordinator -> Route ->
+try-Index/row. Key Release closes effects first; it does not refund actual owners. Preserve a
+possibly admitted intent across lost replies/capacity refusals. Plan::can_adopt_child remains
+confirmation-only; add a distinct SDP purpose rather than weakening that existing boundary.
+
+For the first operational round, retain the current finite contract. HIGH prepays its sidecar
+after actual old Workflow drainage and before operational Ready; LOW may record Ready first,
+then transfer/drain and prepay before any PC/SDK effect. Later prepare_established_round needs
+the exact original EstablishedKeyCustody plus a native KeyClaim effect lease and exact native
+intent. Its EstablishedRoundProof is distinct from finite SuccessorProof. Do not update old
+Claim/Finish/Ready deadlines or issuance bits. A single atomic lifecycle fences preparation
+against closure, with actual last-owner publication included in whole-plan retirement.
+
+Add closed versioned SDP Data operations and a funded phase lookup after Header MAC but BEFORE
+body allocation/counter debit. Existing v1/v2 Input/Result2048B and fixed12KiB Control handling
+stay unchanged. A separate boxed funded worker owns the new maximum8192B body plus AAD579B
+and exact descriptor. Native body ownership must move into Action/Packet/Result without a
+refund/reacquisition gap. No generic Data fallback or JSON plaintext SDP command is permitted.
+
+Typed seal/open inputs bind Session/key receipt, Ready ID/sequence/profile, OfferId,
+PC generation, action serial/version/tag and exact incoming token/AAD/sequence/ciphertext.
+LOW first receives InitiatorPendingOffer before its OfferId exists. Gather complete ICE, freeze
+one exact bounded UTF8 owner, then mint one native packet/action; exact retry recovers it.
+HIGH plaintext stays private until native open commit and a fresh exact delivery permission.
+Ordinary protected-key encrypt/open still refuse; add a module-private SDP computation seam.
+The RTC driver must obtain its native PC-generation permit before constructing the PC, build
+its intended audio/jam/drawing topology before gathering, wait for actual ICE completion and
+check8192 UTF8 bytes without truncation. SDK helpers return Promise<void> and affine results;
+never cache a resolved SDP-bearing promise/string and then refund it. End/timeout/PC close is
+not proof that a still-pending SDK promise drained.
+
+Repeated rounds need actual prior input/SDK/Lower/result drainage, the same key/nonce/replay
+domain, and authenticated compaction beyond32 native/browser actions. HIGH issues explicit
+positive monotone sequences, refuses wrap and preserves the same intent through failure. LOW
+retains a paid committed sequence/ID/hash floor: lower and equal-different input refuses;
+equal-exact recovers; higher cannot discard still-busy work. LOW recovery/ICE restart also
+needs a bounded signed request with its own serial and last Ready identity; duplicates recover
+the same HIGH intent. Post-Workflow control verification needs its own explicit funding.
+Pump completion must compare full RowId/serial, not slot bits. Do not evict unresolved history.
+
+Acceptance must hold SDK work over End/Release, lose every intent/data/result/delivery reply,
+reorder old/new Ready, use exact UTF8 boundaries, run more than32 actions without resetting
+packet counters, preserve another peer/group's progress and refuse an old funded broker on
+HMR after any ABI version change. Separate native/browser phase accounting and real WebView
+RTC/audio still need implementation and evidence. Physical two-device/network testing remains
+unavailable with the single desktop; synthetic/local media evidence must be labelled honestly.
+
 ## Original key adoption now implemented (24 October)
 
 Distinct Root EstablishedKeyCustody, exact authenticated opcode11 native adoption/recovery/
@@ -10,7 +84,7 @@ The reviewed design below is partly historical: actual captured opaque Finish pr
 the need for another Finish-proof lookup in key retention. Normal Actor context preflight
 still awaits Root before final synchronous admission. No SDP/RTC permission follows from this leaf.
 
-NEXT: native long-lived key-session/round admission and explicit closed complete-SDP profile;
+NEXT: native long-lived key-session/round admission;
 prepaid native/browser SDK/IPC/UTF16 coexistence before any receive promise; typed seal/open and
 private decrypted-result commit; fresh exact round/Offer/PC-generation RTC delivery; old-round
 compaction after real custody drainage. Then multi-peer scheduling, member media relay and
@@ -32,8 +106,7 @@ phase adoption. That proof must bind the actual original Claim/session/parent ac
 native LOW Ready or HIGH Offer, without extending old Claim/action authority. It must prepay
 HTTP/IPC/body/UTF16 SDK strings before SDK awaits, keep actual owners through lost replies/End,
 and issue typed SDP/result/RTC permissions. Current528/2048-byte confirmation data grammar and
-192KiB SDP accounting do not establish that composition. The complete-SDP/non-trickle initial
-profile remains unimplemented. Multi-peer, member relay, combined and physical acceptance follow.
+192KiB SDP accounting do not establish that composition. The complete-SDP wire profile is implemented; browser gathering and RTC delivery remain open. Multi-peer, member relay, combined and physical acceptance follow.
 Older sections below describe their checkpoints; they are not a claim of live availability.
 
 ### Reviewed adoption/round dependencies (design only; not implemented)

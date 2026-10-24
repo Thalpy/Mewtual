@@ -83,8 +83,13 @@ impl ReadySourceAuthority {
         wall: u64,
         mono: u64,
     ) -> bool {
-        matches!(object.body(), Body::PairReady { .. })
-            && object.id() == self.id
+        matches!(
+            object.body(),
+            Body::PairReadyRound {
+                profile: crate::voice_v2::SdpProfile::CompleteSdpV1,
+                ..
+            }
+        ) && object.id() == self.id
             && object.signature == self.signature
             && self.authorized_at(wall, mono)
     }

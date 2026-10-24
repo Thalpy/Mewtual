@@ -82,7 +82,7 @@ impl LocalJoin {
             return Err(VoiceError::Unauthorized);
         }
         let pending = pair.action.as_ref().ok_or(VoiceError::Unauthorized)?;
-        let current_trigger = match (pair.low, input.kind, pending.kind) {
+        let current_trigger = match (pair.low, input.kind(), pending.kind) {
             (false, EncryptedKind::ConfirmHello, EncryptedKind::ConfirmProof) => {
                 pair.accepted_hello
             }

@@ -70,7 +70,12 @@ fn changed(
     object: &SignedObject,
     edit: impl FnOnce(&mut ReadyHeader),
 ) -> SignedObject {
-    let Body::PairReady { header } = object.body() else {
+    let Body::PairReadyRound {
+        header,
+        sequence,
+        profile,
+    } = object.body()
+    else {
         panic!("Ready")
     };
     let mut header = header.clone();
@@ -81,7 +86,11 @@ fn changed(
         object.id(),
         object.issued(),
         object.expires(),
-        Body::PairReady { header },
+        Body::PairReadyRound {
+            sequence: *sequence,
+            header,
+            profile: *profile,
+        },
     )
     .unwrap()
 }
@@ -119,6 +128,12 @@ fn low_ready_actual_ticket_and_actual_reply_work_each_delay_original_lane_transf
     drop(reply_work);
     let successor = advance(&mut p).unwrap();
     assert!(successor.confirmation_drained());
+    successor
+        .owner
+        .assert_inactive_round_lenders_for_test(p.f.low.join.ledger.packet_slots());
+    successor
+        .owner
+        .assert_inactive_packet_lenders_for_test(p.f.low.join.ledger.packet_slots());
     assert!(
         !successor.owner.is_live(),
         "Ready admission does not activate generic SDP/RTC"
@@ -554,4 +569,38 @@ async fn low_ready_stops_real_finish_source_without_tick_but_actual_lower_delays
     );
     drop(authority);
     assert!(successor.confirmation_drained());
+}
+
+#[test]
+fn current_one_shot_ready_cannot_treat_a_higher_signed_sequence_as_replacement_authority() {
+    let mut p = confirmed_high();
+    let original = install(&mut p, &[]);
+    let Body::PairReadyRound {
+        header, profile, ..
+    } = original.body()
+    else {
+        panic!("Ready")
+    };
+    for sequence in [2, u64::MAX] {
+        let changed = SignedObject::issue(
+            original.scope(),
+            &p.f.high.signer,
+            original.id(),
+            original.issued(),
+            original.expires(),
+            Body::PairReadyRound {
+                header: header.clone(),
+                sequence,
+                profile: *profile,
+            },
+        )
+        .unwrap();
+        // Ordinary authenticated verification still cannot advance or consume the one-shot.
+        assert!(admit_ready(&mut p, &changed).is_err());
+        assert!(p.f.low.join.confirmations.pairs[&p.f.id]
+            .ready_admission
+            .is_none());
+    }
+    let receipt = admit_ready(&mut p, &original).unwrap();
+    assert_eq!(receipt.message, original.id());
 }

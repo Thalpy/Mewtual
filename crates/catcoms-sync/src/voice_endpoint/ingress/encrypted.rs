@@ -128,7 +128,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         // public queue admission: its original native LOW pair must accept causally.
         if !matches!(
             envelope.object().body(),
-            Body::Encrypted { .. } | Body::PairReady { .. }
+            Body::Encrypted { .. } | Body::PairReady { .. } | Body::PairReadyRound { .. }
         ) {
             return self
                 .admit_voice_endpoint_public(ticket, envelope, context, room)
@@ -158,9 +158,11 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             .participant
             .as_mut()
             .ok_or(VoiceError::Unauthorized)?;
-        let reserved_offer = matches!(envelope.object().body(), Body::Encrypted { header, .. }
-            if header.kind == voice_v2::EncryptedKind::Offer
-            && participant.join.has_ready_position(header.handshake, voice.endpoints.public.namespace()));
+        // Only the exact original native Ready round can spend its prepaid namespace
+        // position. A delayed legacy/wrong-round offer gets no full-table exemption.
+        let reserved_offer = participant
+            .join
+            .has_ready_offer_position(envelope.object(), voice.endpoints.public.namespace());
         if existing.is_none() && voice.endpoints.public.full() && !reserved_offer {
             return Err(VoiceError::Capacity);
         }
@@ -200,7 +202,10 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
                 Err(VoiceError::Unauthorized)
             }
         };
-        if matches!(envelope.object().body(), Body::PairReady { .. }) {
+        if matches!(
+            envelope.object().body(),
+            Body::PairReady { .. } | Body::PairReadyRound { .. }
+        ) {
             let admission = participant.join.admit_protected_ready(
                 actor,
                 &ticket,
@@ -227,7 +232,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             voice.endpoints.changed();
             return Ok(EndpointReceipt::Ready(admission));
         }
-        if matches!(envelope.object().body(), Body::Encrypted { header, .. } if header.kind == voice_v2::EncryptedKind::Offer)
+        if matches!(envelope.object().body(), Body::Encrypted { header, .. } if header.kind.is_offer())
         {
             let admission = participant.join.admit_protected_first_offer(
                 actor,

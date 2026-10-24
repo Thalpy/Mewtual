@@ -135,6 +135,26 @@ async fn confirmed_in(mut f: Fixture) -> (Fixture, voice_v2::Nonce) {
 }
 
 fn offer(f: &Fixture, handshake: voice_v2::Nonce, id: u8) -> SignedObject {
+    let round = f
+        .receiver
+        .voice_runtime
+        .as_ref()
+        .unwrap()
+        .endpoints
+        .participant
+        .as_ref()
+        .unwrap()
+        .join
+        .sdp_round_for_test(handshake)
+        .unwrap();
+    offer_in_round(f, handshake, id, round)
+}
+fn offer_in_round(
+    f: &Fixture,
+    handshake: voice_v2::Nonce,
+    id: u8,
+    round: voice_v2::SdpRound,
+) -> SignedObject {
     let context = f.receiver.voice_v2_context(1).unwrap();
     let remote = f.remote.key();
     let local = f
@@ -164,7 +184,7 @@ fn offer(f: &Fixture, handshake: voice_v2::Nonce, id: u8) -> SignedObject {
                 target_key_ref: local.key_ref,
                 handshake,
                 low_to_high: true,
-                kind: EncryptedKind::Offer,
+                kind: EncryptedKind::OfferRound(round),
                 sequence: 4,
                 offer: Some(voice_v2::OfferId {
                     issuer: f.sender.device_id(),
@@ -302,7 +322,15 @@ async fn root_first_offer_full_table_before_ready_refuses_without_abandoning_pai
             .prepare_voice_high_ready(&f.grant, handshake, &[]),
         Err(VoiceError::Capacity)
     );
-    let object = offer(&f, handshake, 213);
+    let object = offer_in_round(
+        &f,
+        handshake,
+        213,
+        voice_v2::SdpRound {
+            ready: [201; 32],
+            profile: voice_v2::SdpProfile::CompleteSdpV1,
+        },
+    );
     assert_eq!(admit(&mut f, object).err(), Some(VoiceError::Capacity));
     assert_eq!(
         positions(&f),

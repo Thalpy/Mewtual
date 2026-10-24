@@ -1,5 +1,21 @@
 # Chat, files and voice implementation evidence
 
+## Current round-profile checkpoint (24 October; integration incomplete)
+
+Protected native Ready now uses explicit body6/profile1; Offer8/Answer9 echo its original native
+Ready ID in signature/AAD. Old wire forms remain unchanged and cannot enter the protected path.
+This checkpoint adds codec/admission isolation and bounded-size regressions. It does not close
+live V2, browser/RTC handoff, multi-peer composition, member media relay or combined/physical
+acceptance. Only one physical desktop is available. Full acceptance remains deferred while
+integration is unfinished; a dependency advisory also remains an open release gate.
+
+Focused evidence on the final sequence-bearing form:662 Root voice (13.17s),308 native handoff
+(7.02s),11 native TCP/HTTP/Node voice scenarios (149.14s), strict Sync Clippy (22.50s), native
+check (41.31s), strict native Clippy (56.87s), formatting/diff/ambient checks all pass. Read-only
+review and sequence re-review found no remaining blocker/high/medium. These are focused
+checks, not complete workspace, packaged WebView RTC, audible or physical-network acceptance.
+
+
 ## Original key-domain adoption (24 October; SDP/RTC still pending)
 
 Root now supplies a distinct retention-only EstablishedKeyCustody from the SAME opaque finite

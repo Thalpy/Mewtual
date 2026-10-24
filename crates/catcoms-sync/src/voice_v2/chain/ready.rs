@@ -28,6 +28,7 @@ impl PlanBinding {
     fn matches_low_ready_peek(&self, p: &UnverifiedReady, mono: u64) -> bool {
         let h = &p.header;
         self.low
+            && p.sequence == 1
             && self.live()
             && !self.successor_closed.load(Ordering::Acquire)
             && self.transition.epoch_is_live()
@@ -105,7 +106,12 @@ impl PreparedChain {
         object: &SignedObject,
         room: &RoomAuthority,
     ) -> Result<Arc<ReadyAdmission>, VoiceError> {
-        let Body::PairReady { header } = object.body() else {
+        let Body::PairReadyRound {
+            sequence: 1,
+            header,
+            profile: crate::voice_v2::SdpProfile::CompleteSdpV1,
+        } = object.body()
+        else {
             return Err(VoiceError::Unauthorized);
         };
         let (wall, mono) = actor.preparation_time()?;

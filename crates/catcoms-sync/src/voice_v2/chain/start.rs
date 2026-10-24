@@ -72,7 +72,7 @@ impl PreparedChain {
         &self,
         trigger: &ConfirmationAdmission,
     ) -> Result<Option<Arc<StartAdmission>>, VoiceError> {
-        response_column(self.binding.low, trigger.kind)?;
+        response_column(self.binding.low, trigger.kind())?;
         let state = self.history.state.lock().unwrap_or_else(|e| e.into_inner());
         let lane = usize::from(trigger.candidate());
         if state.closed
@@ -81,7 +81,7 @@ impl PreparedChain {
             || lane >= 3
             || !Arc::ptr_eq(&trigger.binding, &self.binding)
             || !state
-                .incoming_at(self.binding.low, trigger.kind, lane)?
+                .incoming_at(self.binding.low, trigger.kind(), lane)?
                 .is_some_and(|original| std::ptr::eq(original.as_ref(), trigger))
         {
             return Err(VoiceError::Unauthorized);
@@ -104,7 +104,7 @@ impl PreparedChain {
         expires: u64,
         consent: ConfirmationConsent,
     ) -> Result<(PreparedHistory, Arc<StartAdmission>, Arc<Workflow>), VoiceError> {
-        let column = response_column(self.binding.low, trigger.kind)?;
+        let column = response_column(self.binding.low, trigger.kind())?;
         if !trigger.same_room(&consent.room) {
             return Err(VoiceError::Unauthorized);
         }
@@ -230,7 +230,7 @@ impl RowIssue {
             Err(std::sync::TryLockError::WouldBlock) => return Err(VoiceError::Capacity),
         };
         let lane = usize::from(trigger.candidate());
-        let column = response_column(self.plan.binding.low, trigger.kind)?;
+        let column = response_column(self.plan.binding.low, trigger.kind())?;
         if lane >= 3
             || receipt.candidate != trigger.candidate()
             || receipt.predecessor != Some(trigger.message)
@@ -244,7 +244,7 @@ impl RowIssue {
             || !Arc::ptr_eq(&trigger.binding, &self.plan.binding)
             || !trigger.same_room(&receipt.consent.room)
             || !state
-                .incoming_at(self.plan.binding.low, trigger.kind, lane)?
+                .incoming_at(self.plan.binding.low, trigger.kind(), lane)?
                 .is_some_and(|original| Arc::ptr_eq(original, trigger))
             || !receipt.authorized_at(origin.epoch(), time.0, time.1)
         {

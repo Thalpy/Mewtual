@@ -12,6 +12,18 @@ impl Exchange {
     ) {
         tests::assert_inactive_lenders(self, tables);
     }
+    /// Real Ready metadata, with its genuine inbox still held, must not imply activation.
+    #[cfg(test)]
+    pub(in crate::voice_v2) fn assert_inactive_round_lenders_for_test(
+        self: &Arc<Self>,
+        tables: &PacketSlots,
+    ) {
+        assert!(
+            self.sdp_round().is_some(),
+            "requires actual Ready publication/admission"
+        );
+        tests::assert_inactive_headers(self, tables);
+    }
     pub(in crate::voice_v2) fn uses_successor_packet_claims(&self) -> bool {
         self.successor.is_some()
     }
@@ -65,10 +77,11 @@ impl Exchange {
         let proof = self.successor.as_ref().ok_or(VoiceError::Scope)?;
         let binding = proof.binding();
         let offer = if incoming { !binding.low } else { binding.low };
+        let round = self.sdp_round().ok_or(VoiceError::Unauthorized)?;
         let expected = if offer {
-            EncryptedKind::Offer
+            EncryptedKind::OfferRound(round)
         } else {
-            EncryptedKind::Answer
+            EncryptedKind::AnswerRound(round)
         };
         let (source_join, source_key, target, target_join, target_key) = if incoming {
             (

@@ -1,5 +1,43 @@
 # Mewtual; Handover
 
+## Native SDP round/profile admission (24 October; live integration still open)
+
+New Ready body6 explicitly selects CompleteSdpV1 and signs a positive u64 round number.
+The current one-shot native factory issues and admits only1; larger numbers cannot replace it.
+The field prepares explicit future ordering; random IDs/wall time never order replacements.
+New Offer8/Answer9 authenticate that original native Ready ID/profile in their signed header and AAD. Original body5 and kinds1-7
+retain their bytes. Protected endpoints require6 and exact native round metadata; frozen
+helper forwarding cannot upgrade or substitute it. Wrong-round/legacy input cannot consume
+replay, native token, receive position, origin admission or the reserved Root namespace row,
+including when ordinary verification capacity is available. Protected selection precedes
+capacity admission and survives round retirement; old SDP/ICE/Bye cannot become fallback.
+
+Measured maxima are AAD579B, exchange188,521/196,608B with two actual Lower owners, signed
+Ready692B and Ready peak32,644/32,768B. No limit increased. Confirmation receipts now store
+only their three possible roles, preserving the original1536B row despite the larger SDP enum.
+The separate native group cap is512KiB; browser broker group cap is256KiB. They must not be
+confused when designing the next handoff allocation. One active native SDP exchange remains
+more restrictive than the shared native resource pool's four crypto lane ceiling.
+
+Focused validation:662 Root voice checks pass (13.17s),308 native handoff checks pass (7.02s),
+and all11 native real TCP/HTTP/Node voice scenarios pass (149.14s), including actual tag6 Ready
+through a permitted unjoined bridge with A-C forbidden. Tests pin the old header grammar,
+closed/unknown profiles, maximum new AAD, actual HIGH/LOW inactive lenders, ordinary-verifier
+wrong-round rejection with same-sequence recovery, persistent profile after round cleanup,
+and public-queue exclusion for both Ready forms. Read-only adversarial review found no
+remaining blocker/high/medium; low fixture and inactive-lender coverage findings were fixed.
+Formatting/diff/ambient checks pass. Strict all-target/all-feature Sync Clippy (22.50s),
+native check (41.31s) and strict all-target native Clippy (56.87s) pass on the final wire form.
+Full-u64/zero-sequence and signed higher-sequence replacement rejection are also pinned.
+
+This is a wire/admission checkpoint, not operational V2 or RTC completion. Automatic fresh
+round/Ready progression, typed native/browser SDP seal/open and delivery/SDK grants, actual
+complete-SDP gathering/RTC, repeated-round/multi-peer compaction, member media relay and
+combined/physical acceptance remain open. Full suites remain deferred during whole-integration
+work; the dependency audit is still an open release gate. Only one physical desktop is
+available. External download resume remains separate; earlier sections are historical.
+
+
 ## Original key-domain adoption (24 October; SDP/RTC still pending)
 
 Root now supplies a distinct retention-only EstablishedKeyCustody from the SAME opaque finite

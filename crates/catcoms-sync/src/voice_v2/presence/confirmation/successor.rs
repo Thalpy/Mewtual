@@ -87,6 +87,7 @@ impl LocalJoin {
             .get(&handshake)
             .is_some_and(|pair| pair.first_offer.is_some())
     }
+    /// Capacity-only query used while installing the native receiver, before a packet exists.
     pub(crate) fn has_ready_position(
         &self,
         handshake: Nonce,
@@ -102,6 +103,44 @@ impl LocalJoin {
                 ready: Some(ready), ..
             }) => ready.has_position(namespace),
             _ => false,
+        }
+    }
+    pub(crate) fn has_ready_offer_position(
+        &self,
+        object: &SignedObject,
+        namespace: &crate::voice_v2::negotiation::namespace::ReceiptNamespace,
+    ) -> bool {
+        let Body::Encrypted { header, .. } = object.body() else {
+            return false;
+        };
+        match self
+            .confirmations
+            .pairs
+            .get(&header.handshake)
+            .and_then(|pair| pair.sdp_successor.as_ref())
+        {
+            Some(Preparation::Transferred {
+                owner,
+                ready: Some(ready),
+            }) => {
+                owner.matches_first_offer(object.scope(), object.issuer(), header)
+                    && ready.has_position(namespace)
+            }
+            _ => false,
+        }
+    }
+    /// Test-only observation of the actual installed native publication, never a factory.
+    #[cfg(test)]
+    pub(crate) fn sdp_round_for_test(&self, handshake: Nonce) -> Option<crate::voice_v2::SdpRound> {
+        match self
+            .confirmations
+            .pairs
+            .get(&handshake)?
+            .sdp_successor
+            .as_ref()?
+        {
+            Preparation::Transferred { owner, .. } => owner.sdp_round(),
+            _ => None,
         }
     }
     pub(crate) fn attach_ready_position(

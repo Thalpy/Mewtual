@@ -54,13 +54,18 @@ impl PacketLedger {
         let Body::Encrypted { header, .. } = object.body() else {
             return Err(VoiceError::Unauthorized);
         };
+        // Reject delayed old/unprofiled SDP BEFORE even proposing a replay bit or token.
+        // Ordinary verification capacity must not bypass the exact original Ready echo.
+        let owner = receive.exchange();
+        if !owner.matches_first_offer(object.scope(), object.issuer(), header) {
+            return Err(VoiceError::Unauthorized);
+        }
         let mut replay = pair.replay.clone();
         replay.admit(header.sequence)?;
         let pair = pair.live.clone();
         if self.incoming.len() >= RESERVATIONS {
             return Err(VoiceError::Capacity);
         }
-        let owner = receive.exchange();
         if !owner.uses_resources(&self.resources, self.scope.group) {
             return Err(VoiceError::Scope);
         }

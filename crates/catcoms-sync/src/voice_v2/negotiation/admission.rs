@@ -26,6 +26,7 @@ pub(crate) struct FirstOfferAdmission {
     pub(crate) sequence: u64,
     pub(crate) token: u64,
     pub(crate) offer: OfferId,
+    pub(crate) round: crate::voice_v2::SdpRound,
     // Exact original Ready choice survives progress drainage without retaining Exchange.
     helpers: [Option<DeviceId>; 2],
     issued: u64,
@@ -78,6 +79,11 @@ impl FirstOfferAdmission {
             sequence: header.sequence,
             token,
             offer: header.offer.ok_or(VoiceError::Unauthorized)?,
+            round: header
+                .kind
+                .round()
+                .filter(|round| Some(*round) == exchange.sdp_round())
+                .ok_or(VoiceError::Unauthorized)?,
             helpers: std::array::from_fn(|i| exchange.helpers().get(i).copied()),
             issued: object.issued(),
             expires: object.expires(),

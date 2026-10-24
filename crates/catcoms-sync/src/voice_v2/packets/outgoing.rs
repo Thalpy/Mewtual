@@ -152,6 +152,7 @@ impl PacketLedger {
             return Err(VoiceError::Unauthorized);
         }
         let pair = self.pair(&request.handshake, authority)?;
+        pair.check_profile(request.kind)?;
         let confirmation = matches!(
             request.kind,
             EncryptedKind::ConfirmHello
@@ -166,11 +167,16 @@ impl PacketLedger {
         }
         // Preserve ordinary refusal before RNG. A protected row instead loans the actual
         // matching workflow position after its native header has been formed below.
-        let successor_sdp = matches!(request.kind, EncryptedKind::Offer | EncryptedKind::Answer)
+        let successor_sdp = request.kind.is_sdp()
             && self
                 .sdp
                 .as_ref()
                 .is_some_and(|sdp| sdp.owner.uses_successor_packet_claims());
+        if request.kind.round().is_some() && !successor_sdp {
+            // New mode never borrows an ordinary table/byte position if its exact
+            // original successor has not been registered; wait for native preparation.
+            return Err(VoiceError::Unauthorized);
+        }
         let ordinary_slot = if workflow.is_none() && !successor_sdp {
             Some(self.packet_slots.outgoing.charge(1)?)
         } else {
@@ -189,7 +195,7 @@ impl PacketLedger {
         if self.outgoing.contains_key(&id) {
             return Err(VoiceError::Reservation);
         }
-        let offer = if request.kind == EncryptedKind::Offer {
+        let offer = if request.kind.is_offer() {
             if request.offer.is_some() {
                 return Err(VoiceError::Malformed);
             }

@@ -29,7 +29,7 @@ impl LocalJoin {
         let Body::Encrypted { header, .. } = object.body() else {
             return Err(VoiceError::Unauthorized);
         };
-        if header.kind != EncryptedKind::Offer {
+        if !matches!(header.kind, EncryptedKind::OfferRound(_)) {
             return Err(VoiceError::Unauthorized);
         }
         self.pair_current(header.handshake, authority, clock.as_ref())?;
@@ -47,6 +47,7 @@ impl LocalJoin {
                 || receipt.message != object.id()
                 || receipt.hash != object.hash()
                 || receipt.sequence != header.sequence
+                || Some(receipt.round) != header.kind.round()
             {
                 return Err(VoiceError::RetryMismatch);
             }

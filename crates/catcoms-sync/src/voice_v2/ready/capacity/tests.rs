@@ -20,7 +20,9 @@ fn ready_peak_uses_actual_maximum_wire_and_fits_beside_both_actual_lowers() {
         [9; 32],
         1000,
         16000,
-        Body::PairReady {
+        Body::PairReadyRound {
+            sequence: 1,
+            profile: SdpProfile::CompleteSdpV1,
             header: ReadyHeader {
                 epoch: u64::MAX,
                 target: signers[0].device_id(),
@@ -39,7 +41,7 @@ fn ready_peak_uses_actual_maximum_wire_and_fits_beside_both_actual_lowers() {
     assert_eq!(object.encode().len(), MAX_WIRE);
     assert_eq!(
         METADATA + CACHE + RECEIPT + SOURCE + 2 * LOWER + ACK_CRYPTO,
-        32599
+        32644
     );
 
     let pool = Arc::new(Resources::default());

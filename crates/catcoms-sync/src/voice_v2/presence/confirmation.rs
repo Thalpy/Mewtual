@@ -195,7 +195,7 @@ fn plaintext(kind: EncryptedKind, handshake: Nonce, low: Nonce, high: Option<Non
     let mut e = Encoder::new();
     e.put_str(CONFIRM_DOMAIN).expect("constant");
     e.put_u8(VERSION);
-    e.put_u8(kind as u8);
+    e.put_u8(kind.tag());
     fixed(&mut e, &handshake);
     fixed(&mut e, &low);
     if let Some(high) = high {
@@ -214,7 +214,7 @@ fn decode(
     let mut d = Decoder::new(bytes);
     if d.get_str()? != CONFIRM_DOMAIN
         || d.get_u8()? != VERSION
-        || d.get_u8()? != kind as u8
+        || d.get_u8()? != kind.tag()
         || array::<32>(&mut d)? != handshake
     {
         return Err(VoiceError::Malformed);
@@ -431,6 +431,8 @@ impl LocalJoin {
             }
             // No fallback to ordinary factories after a valid selection, even if any of the
             // following capacity reservations refuse. An exact protected retry may continue.
+            self.ledger
+                .select_complete_sdp_profile(handshake, authority)?;
             self.confirmations
                 .pairs
                 .get_mut(&handshake)

@@ -10,6 +10,8 @@ use futures::FutureExt;
 use std::sync::Arc;
 
 pub(crate) struct ReadyAdmission {
+    profile: SdpProfile,
+    sequence: u64,
     pub(crate) issuer: DeviceId,
     pub(crate) message: MessageId,
     pub(crate) hash: [u8; 32],
@@ -49,6 +51,14 @@ mod tests {
 }
 redacted_debug!(ReadyAdmission);
 impl ReadyAdmission {
+    pub(in crate::voice_v2) fn sdp_round(&self) -> SdpRound {
+        // This receipt can ONLY be constructed from tag6/CompleteSdpV1 above.
+        SdpRound {
+            ready: self.message,
+            profile: self.profile,
+        }
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub(in crate::voice_v2) fn prepare(
         original: OriginalPlanObservation,
@@ -61,7 +71,12 @@ impl ReadyAdmission {
         clock: Arc<dyn Clock>,
         fee: Credit,
     ) -> Result<Arc<Self>, VoiceError> {
-        let Body::PairReady { header } = object.body() else {
+        let Body::PairReadyRound {
+            sequence: 1,
+            header,
+            profile: crate::voice_v2::SdpProfile::CompleteSdpV1,
+        } = object.body()
+        else {
             return Err(VoiceError::Unauthorized);
         };
         object.check_freshness(wall)?;
@@ -72,6 +87,8 @@ impl ReadyAdmission {
             return Err(VoiceError::Unauthorized);
         }
         Ok(Arc::new(Self {
+            profile: SdpProfile::CompleteSdpV1,
+            sequence: 1,
             original,
             issuer: object.issuer(),
             message: object.id(),
@@ -135,7 +152,8 @@ impl ReadyAdmission {
         wall: u64,
         mono: u64,
     ) -> bool {
-        self.issuer == p.issuer
+        self.sequence == p.sequence
+            && self.issuer == p.issuer
             && self.message == p.message
             && self.hash == p.hash
             && self.authorized_at(wall, mono)
