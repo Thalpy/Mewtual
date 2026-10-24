@@ -241,6 +241,9 @@ impl LocalJoin {
             ready_admission: None,
             sdp_input: None,
             sdp_intent: None,
+            sdp_seal: None,
+            answer_position: None,
+            answer_receipt: None,
             _credit: credit,
         };
         let receipt = PairReceipt {

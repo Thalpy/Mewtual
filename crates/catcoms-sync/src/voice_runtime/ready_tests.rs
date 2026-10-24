@@ -82,7 +82,20 @@ async fn incoming(
     }
     panic!("actual Root {at} never received {kind:?}");
 }
+#[path = "ready_tests/sdp.rs"]
+mod sdp;
+
 async fn confirmed() -> (BridgeFixture, [Arc<CallGrant>; 2], [u8; 32], usize) {
+    let (fixture, grants, handshake, low, _) = confirmed_with_custody().await;
+    (fixture, grants, handshake, low)
+}
+async fn confirmed_with_custody() -> (
+    BridgeFixture,
+    [Arc<CallGrant>; 2],
+    [u8; 32],
+    usize,
+    [voice_v2::chain::EstablishedKeyCustody; 2],
+) {
     let mut f = BridgeFixture::new().await;
     let grants = [
         Arc::new(f.a.voice_call_grant(1).unwrap()),
@@ -121,6 +134,8 @@ async fn confirmed() -> (BridgeFixture, [Arc<CallGrant>; 2], [u8; 32], usize) {
     let handshake = pairs[0].handshake;
     derive(&mut f.a, &grants[0], handshake);
     derive(&mut f.c, &grants[1], handshake);
+    let mut custody: [Option<voice_v2::chain::EstablishedKeyCustody>; 2] =
+        std::array::from_fn(|_| None);
     let low = usize::from(!pairs[0].local_is_low);
     let high = 1 - low;
     let low_node = if low == 0 { &mut f.a } else { &mut f.c };
@@ -142,11 +157,23 @@ async fn confirmed() -> (BridgeFixture, [Arc<CallGrant>; 2], [u8; 32], usize) {
     let finish = low_node
         .respond_voice_confirmation(&grants[low], handshake, &action)
         .unwrap();
+    let plan = finish.protected_plan().unwrap();
+    let control = finish.confirmation_control().unwrap();
     let plain = seal(low_node, &grants[low], finish);
+    let mono = f.clock.monotonic_ms();
+    let finite = plan.confirmation_custody(&control, mono).unwrap();
+    custody[low] = Some(plan.established_key_custody(&finite, mono).unwrap());
+    drop((finite, control, plan));
     drop(action);
     let action = incoming(&mut f, &grants, high, EncryptedKind::ConfirmFinish).await;
     let high_node = if high == 0 { &mut f.a } else { &mut f.c };
+    let plan = action.protected_plan().unwrap();
+    let control = action.confirmation_control().unwrap();
     open(high_node, &grants[high], &action, &plain);
+    let mono = f.clock.monotonic_ms();
+    let finite = plan.confirmation_custody(&control, mono).unwrap();
+    custody[high] = Some(plan.established_key_custody(&finite, mono).unwrap());
+    drop((finite, control, plan));
     drop(action);
     f.tick(8).await;
     assert_eq!(
@@ -175,7 +202,13 @@ async fn confirmed() -> (BridgeFixture, [Arc<CallGrant>; 2], [u8; 32], usize) {
         ),
         Ok(VoicePairConfirmation::Established)
     );
-    (f, grants, handshake, low)
+    (
+        f,
+        grants,
+        handshake,
+        low,
+        [custody[0].take().unwrap(), custody[1].take().unwrap()],
+    )
 }
 fn admit(node: &mut VoiceTestNode, envelope: Envelope) -> Result<EndpointReceipt, VoiceError> {
     let context = node.voice_v2_context(1)?;

@@ -120,6 +120,9 @@ impl OriginalPlanObservation {
     }
 }
 impl SuccessorProof {
+    pub(in crate::voice_v2) fn observed_by(&self, original: &OriginalPlanObservation) -> bool {
+        original.belongs_to(&self.0)
+    }
     pub(in crate::voice_v2) fn original_observation(&self) -> OriginalPlanObservation {
         OriginalPlanObservation(self.0.clone())
     }

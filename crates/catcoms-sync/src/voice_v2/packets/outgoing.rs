@@ -13,15 +13,18 @@ pub(in crate::voice_v2) struct PreparedOutgoing {
 
 /// Original native owners and time bounds, never reconstructed from a caller's reservation.
 pub(in crate::voice_v2) struct OutgoingAdmission {
-    resources: Arc<Resources>,
-    local: CallLease,
-    pair: CallLease,
-    chain: Option<CallLease>,
-    epoch: u64,
-    issued: u64,
-    expires: u64,
-    deadline: u64,
-    exchange: Option<Arc<Exchange>>,
+    pub(super) resources: Arc<Resources>,
+    pub(super) local: CallLease,
+    pub(super) pair: CallLease,
+    pub(super) chain: Option<CallLease>,
+    pub(super) epoch: u64,
+    pub(super) issued: u64,
+    pub(super) expires: u64,
+    pub(super) deadline: u64,
+    pub(super) exchange: Option<Arc<Exchange>>,
+    // Present only on the private inert LOW Offer preparation. Generic callers cannot
+    // mint it, and final publication repeats the exact native PC/Ready identity.
+    pub(super) initial: Option<Arc<super::super::sdp::InitialSdpIntent>>,
 }
 impl OutgoingAdmission {
     /// Pure final observation: no Clock, callbacks or ledger reentry under a producer fence.
@@ -35,7 +38,13 @@ impl OutgoingAdmission {
             || !self.local.is_live()
             || !self.pair.is_live()
             || self.chain.as_ref().is_some_and(|chain| !chain.is_live())
-            || self.exchange.as_ref().is_some_and(|owner| !owner.is_live())
+            || self
+                .exchange
+                .as_ref()
+                .is_some_and(|owner| match &self.initial {
+                    Some(intent) => !owner.initial_offer_current_at(intent, wall, mono),
+                    None => !owner.is_live(),
+                })
         {
             return Err(VoiceError::Unauthorized);
         }
@@ -51,10 +60,10 @@ impl OutgoingAdmission {
 /// sequence/SDP state before the infallible publish. The reserved AAD is returned separately
 /// for an inactive action; its byte credit remains owned by this unpublished outgoing row.
 pub(in crate::voice_v2) struct PreparedOutgoingPublication<'a> {
-    ledger: &'a mut PacketLedger,
-    outgoing: Outgoing,
-    admission: OutgoingAdmission,
-    started: u64,
+    pub(super) ledger: &'a mut PacketLedger,
+    pub(super) outgoing: Outgoing,
+    pub(super) admission: OutgoingAdmission,
+    pub(super) started: u64,
 }
 impl PreparedOutgoingPublication<'_> {
     pub(in crate::voice_v2) fn started(&self) -> u64 {
@@ -63,6 +72,16 @@ impl PreparedOutgoingPublication<'_> {
 
     pub(in crate::voice_v2) fn admission(&self) -> &OutgoingAdmission {
         &self.admission
+    }
+    /// Bind packet and future Source to the SAME fixed record used by the original
+    /// native action. Only a closed SDP factory may call this before final publication.
+    pub(in crate::voice_v2) fn bind_sdp(
+        &mut self,
+        binding: Arc<super::super::sdp::action::ActionBinding>,
+    ) {
+        assert!(self.outgoing.sdp_binding.is_none());
+        assert!(binding.is_seal());
+        self.outgoing.sdp_binding = Some(binding);
     }
 
     /// Observe the actual unpublished packet owner. No ordinary ledger lookup or post-publish
@@ -89,6 +108,32 @@ impl PreparedOutgoingPublication<'_> {
     /// admission.check_at under its current native actor/epoch/room/History transaction first.
     pub(in crate::voice_v2) fn publish(self) {
         self.publish_replacing(None);
+    }
+
+    /// Only the private LOW factory supplies an inert original preparation. Install the
+    /// ledger identity first; activate LAST, after its caller has published the action,
+    /// reserved Answer namespace and PC binding in the same infallible native tail.
+    pub(in crate::voice_v2) fn publish_initial_offer(self) {
+        assert!(self.ledger.sdp.is_none());
+        let owner = self
+            .admission
+            .exchange
+            .as_ref()
+            .expect("original inert lane")
+            .clone();
+        assert!(self.admission.initial.is_some(), "original LOW intent");
+        let deadline = self.outgoing.source_deadline;
+        self.ledger.sdp = Some(SdpExchange {
+            owner: owner.clone(),
+            handshake: self.outgoing.draft.header.handshake,
+            role: SdpRole::Ready,
+            local: None,
+            remote: None,
+            ready_until: deadline,
+            retire: Some(deadline),
+        });
+        self.publish();
+        owner.publish_first_offer(deadline);
     }
 
     /// The producer has validated the exact previous pair action before lending this exclusive
@@ -282,6 +327,7 @@ impl PacketLedger {
                 workflow,
                 _credit: credit,
                 exchange: exchange.clone(),
+                sdp_binding: None,
                 _slot: slot,
             },
             reservation: ReservedPacket {
@@ -300,6 +346,7 @@ impl PacketLedger {
                 expires,
                 deadline: deadline.min(construction).min(confirmation_deadline),
                 exchange,
+                initial: None,
             },
             started: mono,
         })

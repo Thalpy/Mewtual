@@ -459,7 +459,9 @@ async fn publish(
                 .commit_voice_confirmation_result(grant, work.action().clone(), body, tag)
                 .await
         }
-        CryptoOperation::Derive => {
+        // Complete SDP has a separate funded endpoint and native result transaction.
+        // It must never inherit the smaller confirmation body's admission contract.
+        CryptoOperation::Derive | CryptoOperation::SealSdp | CryptoOperation::OpenSdp => {
             unreachable!("child operation checked before ownership transfer")
         }
     };

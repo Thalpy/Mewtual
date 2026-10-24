@@ -1,4 +1,4 @@
-//! Fixed first-Offer admission history. History retains no live input, receiver, Exchange
+//! Fixed Offer/Answer admission history. History retains no live input, receiver, Exchange
 //! or progress-backed credit. Those owners must drain before the next peer uses the lane.
 use super::*;
 use crate::voice_v2::chain::OriginalPlanObservation;
@@ -18,7 +18,7 @@ impl ReceiptFunding {
         Arc::new(Self { _credit: credit })
     }
 }
-pub(crate) struct FirstOfferAdmission {
+pub(crate) struct SdpAdmission {
     original: OriginalPlanObservation,
     pub(crate) issuer: DeviceId,
     pub(crate) message: MessageId,
@@ -36,6 +36,10 @@ pub(crate) struct FirstOfferAdmission {
     room: RoomAuthority,
     effect: Arc<EffectAuthority>,
     clock: Arc<dyn Clock>,
+    // Answer admission additionally observes the already issued local PC. This is fixed
+    // independently paid identity, never Exchange/Phase/engine or plaintext custody.
+    pc: Option<Arc<crate::voice_v2::sdp::InitialSdpIntent>>,
+    // Last: fixed history remains paid through destruction of the PC/Ready observers.
     _funding: Arc<ReceiptFunding>,
 }
 pub(in crate::voice_v2) struct ReceiptConsent {
@@ -43,8 +47,8 @@ pub(in crate::voice_v2) struct ReceiptConsent {
     pub effect: Arc<EffectAuthority>,
     pub clock: Arc<dyn Clock>,
 }
-redacted_debug!(FirstOfferAdmission, ReceiptFunding);
-impl FirstOfferAdmission {
+redacted_debug!(SdpAdmission, ReceiptFunding);
+impl SdpAdmission {
     #[allow(clippy::too_many_arguments)]
     pub(in crate::voice_v2) fn prepare(
         exchange: &Arc<Exchange>,
@@ -54,6 +58,7 @@ impl FirstOfferAdmission {
         deadline: u64,
         funding: Arc<ReceiptFunding>,
         consent: ReceiptConsent,
+        pc: Option<Arc<crate::voice_v2::sdp::InitialSdpIntent>>,
     ) -> Result<Arc<Self>, VoiceError> {
         let proof = exchange
             .successor
@@ -68,6 +73,9 @@ impl FirstOfferAdmission {
             || !prepared.belongs_to(exchange)
             || deadline <= first_mono
             || deadline > proof.until().ok_or(VoiceError::Unauthorized)?
+            || pc
+                .as_ref()
+                .is_some_and(|intent| !intent.matches_successor(proof) || intent.local_is_low())
         {
             return Err(VoiceError::Unauthorized);
         }
@@ -93,6 +101,58 @@ impl FirstOfferAdmission {
             effect: consent.effect,
             clock: consent.clock,
             _funding: funding,
+            pc,
+        }))
+    }
+
+    /// The active LOW ledger has already prepared its exact Answer token and immutable
+    /// input. This constructor only prepares fixed history before final origin admission.
+    #[allow(clippy::too_many_arguments)]
+    pub(in crate::voice_v2) fn prepare_answer(
+        exchange: &Arc<Exchange>,
+        object: &crate::voice_v2::SignedObject,
+        event: &crate::voice_v2::packets::InboundPacket,
+        first_mono: u64,
+        deadline: u64,
+        intent: &Arc<crate::voice_v2::sdp::InitialSdpIntent>,
+        funding: Arc<ReceiptFunding>,
+        consent: ReceiptConsent,
+    ) -> Result<Arc<Self>, VoiceError> {
+        let proof = exchange
+            .successor
+            .as_ref()
+            .ok_or(VoiceError::Unauthorized)?;
+        let header = &event.header;
+        if !proof.binding().low
+            || !intent.matches_successor(proof)
+            || !exchange.is_live()
+            || consent.room.scope != proof.binding().scope
+            || header.kind != crate::voice_v2::EncryptedKind::AnswerRound(intent.round())
+            || event.object_hash() != object.hash()
+            || event.issuer != object.issuer()
+            || deadline <= first_mono
+        {
+            return Err(VoiceError::Unauthorized);
+        }
+        Ok(Arc::new(Self {
+            original: proof.original_observation(),
+            issuer: object.issuer(),
+            message: object.id(),
+            hash: object.hash(),
+            sequence: header.sequence,
+            token: event.token,
+            offer: header.offer.ok_or(VoiceError::Unauthorized)?,
+            round: intent.round(),
+            helpers: std::array::from_fn(|i| exchange.helpers().get(i).copied()),
+            issued: object.issued(),
+            expires: object.expires(),
+            first_mono,
+            deadline,
+            room: consent.room,
+            effect: consent.effect,
+            clock: consent.clock,
+            _funding: funding,
+            pc: Some(intent.clone()),
         }))
     }
     pub(crate) fn same_call(&self, call: &CallLease) -> bool {
@@ -125,6 +185,10 @@ impl FirstOfferAdmission {
     }
     pub(crate) fn authorized_at(&self, wall: u64, mono: u64) -> bool {
         self.original.current()
+            && self
+                .pc
+                .as_ref()
+                .is_none_or(|intent| intent.current_at(wall, mono))
             && self.room.lease.is_live()
             && self.effect.authorized_at(wall, mono)
             && mono >= self.first_mono
@@ -142,7 +206,7 @@ impl FirstOfferAdmission {
             return;
         }
         let binding = self.original.binding();
-        futures::future::select_all(vec![
+        let mut waits = vec![
             binding.call.wait_revoked().boxed(),
             binding.pair.wait_revoked().boxed(),
             self.room.lease.wait_revoked().boxed(),
@@ -152,8 +216,11 @@ impl FirstOfferAdmission {
                     self.deadline.saturating_sub(self.clock.monotonic_ms()),
                 ))
                 .boxed(),
-        ])
-        .await;
+        ];
+        if let Some(pc) = &self.pc {
+            waits.push(pc.pc_closed().boxed());
+        }
+        futures::future::select_all(waits).await;
     }
 }
 #[cfg(test)]
@@ -164,7 +231,7 @@ mod tests {
         use std::mem::size_of;
         // Room/Clock/PlanBinding already have independent native payments. The plain
         // Reservation allocation survives Ready closure, so include it in this fee too.
-        let bytes = size_of::<FirstOfferAdmission>()
+        let bytes = size_of::<SdpAdmission>()
             + size_of::<ReceiptFunding>()
             + size_of::<EffectAuthority>()
             + size_of::<Reservation>()

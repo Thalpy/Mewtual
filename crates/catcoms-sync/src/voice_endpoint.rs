@@ -80,6 +80,18 @@ impl Default for EndpointOwners {
     }
 }
 impl EndpointOwners {
+    #[cfg(test)]
+    pub(crate) fn participant_join_for_test(&self) -> Option<&LocalJoin> {
+        self.participant
+            .as_ref()
+            .map(|participant| &participant.join)
+    }
+    #[cfg(test)]
+    pub(crate) fn participant_join_mut_for_test(&mut self) -> Option<&mut LocalJoin> {
+        self.participant
+            .as_mut()
+            .map(|participant| &mut participant.join)
+    }
     pub(super) fn collect_expired(&mut self, clock: &dyn Clock) {
         self.prune();
         self.public.prune(clock);

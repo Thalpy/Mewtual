@@ -1,5 +1,38 @@
 # Threat model; client integrity & enforcement boundaries
 
+## Typed SDP action and Answer boundaries (24 October; Root integration only)
+
+Original PC/Ready/round/Offer identity is attached to typed SDP actions and their outgoing
+packet/Source authority. A direction issue can allocate only one fixed binding, and builders
+must consume that exact binding. Changed Seal plaintext cannot recover the original action
+after input compaction. Neither PC closure nor engine settlement re-arms a direction.
+
+LOW cannot issue its first Offer through generic inactive lenders. A private affine loan
+uses the original prepaid claims; final origin admission publishes role/sequence/action and
+future Answer namespace before activation. Protected Answer intake validates the original
+signed peer/Offer/round and frozen direct/helper route. Exact receipts precede replay/token
+checks and retain no Exchange, Workflow or plaintext. Installed HIGH PC closure also refuses
+first-Offer admission. Actual phase-close notifications and original Ready deadlines bound
+receipt waits; closure never refunds held packet/engine/transport work.
+
+The native protected-pair transaction selects its PacketLedger CompleteSdpV1 profile together
+with LocalJoin.protected_epoch. Otherwise confirmation/Ready could succeed while SDP retained
+the old mode. Compatibility registration remains distinct. Root integration tests exercise
+this real creation path, not a manually profiled pair.
+
+The new SDP result transaction captures original Clock observations before Engine, then uses
+only try-locks and pure current-owner checks through Group/Policy. Both terminal recovery and
+new receipts use those captured samples. Root Open separately records closed authentication
+failure or invalid UTF8 as immutable Rejected without delivery; successful Open consumes the
+original token and publishes one fixed delivery observation atomically. No plaintext is retained
+by Root. Recovery returns the same observation after consumption/compaction and cannot restore
+current permission. Fresh Root delivery admission requires the original Actor, room incarnation,
+epoch, call, admission and PC. Its idempotent historical latch cannot enforce one SDK invocation
+alone: the original native row and browser inbox must retain one SDK-started state across lost
+replies and remounts. Their implementation remains open. Neither PC.close nor a terminal receipt
+proves that SDK strings, descriptions, continuations or retained PC references drained. No
+operational voice/relay or native/browser SDP-body authorization follows from this Root slice.
+
 ## Initial SDP-intent closure and lost replies (24 October; consumers pending)
 
 Control14 authenticates original Session, full parent/action, handshake, key, storage and exact

@@ -3,6 +3,7 @@
 use super::*;
 use crate::voice_v2::ready::admission::ReadyAdmission;
 use futures::FutureExt;
+mod offer;
 
 fn install(p: &mut ProtectedFixture, helpers: &[DeviceId]) -> SignedObject {
     let signer = Signer::original(p);

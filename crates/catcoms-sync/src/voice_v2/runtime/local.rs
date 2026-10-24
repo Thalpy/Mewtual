@@ -41,6 +41,26 @@ impl EpochObservation {
     }
 }
 
+/// One original Actor clock observation, captured before Engine/native guards. This is
+/// stack-only preparation, not authority; consumption repeats current route/session/view
+/// under nonblocking Group/Policy fences and never invokes a Clock or arbitrary provider.
+pub(in crate::voice_v2) struct PreparedLocalOrigin<'a> {
+    actor: &'a ActorOwner,
+    peer: DeviceId,
+    context: &'a super::super::Context,
+    wall: u64,
+    mono: u64,
+}
+impl PreparedLocalOrigin<'_> {
+    pub(in crate::voice_v2) fn with_origin(
+        self,
+        publish: impl FnOnce(u64, u64, LocalOrigin<'_>) -> Result<(), VoiceError>,
+    ) -> Result<(), VoiceError> {
+        self.actor
+            .with_local_origin_at(self.peer, self.context, self.wall, self.mono, publish)
+    }
+}
+
 impl ActorOwner {
     /// Preserve the exact native monotonic origin that stamped a Ready. A later Source
     /// ledger may use another clock domain; callers must convert durations, not deadlines.
@@ -280,9 +300,37 @@ impl ActorOwner {
         context: &super::super::Context,
         publish: impl FnOnce(u64, u64, LocalOrigin<'_>) -> Result<(), VoiceError>,
     ) -> Result<(), VoiceError> {
+        self.prepare_local_origin(peer, context)?
+            .with_origin(publish)
+    }
+
+    /// Capture the actual Actor origin before an outer Engine fence. Callers must prepare
+    /// all fallible bodies/signatures first and consume this synchronously without awaiting.
+    pub(in crate::voice_v2) fn prepare_local_origin<'a>(
+        &'a self,
+        peer: DeviceId,
+        context: &'a super::super::Context,
+    ) -> Result<PreparedLocalOrigin<'a>, VoiceError> {
         self.current()?;
         let wall = self.clock.now_ms();
         let mono = self.clock.monotonic_ms();
+        Ok(PreparedLocalOrigin {
+            actor: self,
+            peer,
+            context,
+            wall,
+            mono,
+        })
+    }
+
+    fn with_local_origin_at(
+        &self,
+        peer: DeviceId,
+        context: &super::super::Context,
+        wall: u64,
+        mono: u64,
+        publish: impl FnOnce(u64, u64, LocalOrigin<'_>) -> Result<(), VoiceError>,
+    ) -> Result<(), VoiceError> {
         let state = match self.group.state.try_lock() {
             Ok(state) => state,
             Err(std::sync::TryLockError::Poisoned(error)) => error.into_inner(),

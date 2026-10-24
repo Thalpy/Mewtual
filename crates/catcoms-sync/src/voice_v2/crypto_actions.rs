@@ -40,6 +40,10 @@ pub enum CryptoOperation {
     Derive,
     EncryptConfirmation,
     DecryptConfirmation,
+    /// Closed complete-SDP seal on the original native PC/Ready/Offer identity.
+    SealSdp,
+    /// Closed complete-SDP open; acceptance does not authorize RTC delivery.
+    OpenSdp,
 }
 
 /// Borrowed immutable input. An adapter must separately charge any serialized/pulled copies;
@@ -48,6 +52,8 @@ pub enum CryptoInput<'a> {
     Derive(&'a PairSetup),
     EncryptConfirmation(&'a CryptoFlight),
     DecryptConfirmation(&'a InboundPacket),
+    SealSdp(&'a CryptoFlight),
+    OpenSdp(&'a InboundPacket),
 }
 
 /// Owned capacity lease for borrowed native input. Compaction can remove the action's own
@@ -100,6 +106,8 @@ impl CryptoInputLease {
             Input::Derive(input) => CryptoInput::Derive(input),
             Input::Encrypt(input) => CryptoInput::EncryptConfirmation(input),
             Input::Decrypt(input) => CryptoInput::DecryptConfirmation(input),
+            Input::SealSdp(input) => CryptoInput::SealSdp(input),
+            Input::OpenSdp(input) => CryptoInput::OpenSdp(input),
         }
     }
 }
@@ -112,6 +120,8 @@ enum Input {
     Derive(PairSetup),
     Encrypt(CryptoFlight),
     Decrypt(Box<InboundPacket>),
+    SealSdp(CryptoFlight),
+    OpenSdp(Arc<InboundPacket>),
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -119,6 +129,8 @@ pub(super) enum Key {
     Derive(Nonce),
     Encrypt(Nonce, u64, Nonce),
     Decrypt(u64),
+    SdpSeal(Nonce, Nonce),
+    SdpOpen(u64),
 }
 
 #[derive(Default)]
@@ -133,7 +145,16 @@ struct Engine {
     lender: Option<ByteBudget>,
     permit: Option<Credit>,
     terminal: Option<results::RecordedResult>,
+    // Published atomically with Opened and original token consumption. This fixed observer
+    // retains no Action/Exchange/Phase; native lost-reply recovery returns this SAME record.
+    sdp_delivery: Option<Arc<super::sdp::delivery::SdpDelivery>>,
     acknowledged: bool,
+}
+
+/// Plain retained history funding. Sharing this fixed fee with the delivery observation must
+/// never retain a progress-backed PhaseLoan or the action itself. Keep it last in observers.
+pub(in crate::voice_v2) struct RecordFunding {
+    _credit: Credit,
 }
 
 #[must_use = "retain the preparation loan until all actual work and copies have drained"]
@@ -172,7 +193,6 @@ pub struct CryptoAction {
     // Identity only, never progress custody. The pending authority independently observes this
     // irreversible chain lease; fixed historical results do not own a live Workflow.
     chain: Option<CallLease>,
-    chain_epoch: Option<u64>,
     // Fixed identity shares the existing paid plan object. It must never retain Workflow:
     // terminal action history is independent of variable progress/IPC capacity.
     binding: Option<Arc<super::chain::PlanBinding>>,
@@ -184,12 +204,15 @@ pub struct CryptoAction {
     // releasing BOTH locks, so downstream destructors cannot reenter an action fence.
     input: Mutex<Option<Arc<ActionPayload>>>,
     operation: CryptoOperation,
-    output_bytes: usize,
+    // Closed native outputs are at most8208 bytes. Keep this scalar narrow so shared
+    // history funding/delivery bookkeeping also fits the original confirmation split row.
+    output_bytes: u16,
     resources: Arc<Resources>,
     engine_bytes: usize,
     engine: Mutex<Engine>,
-    _record: Credit,
     _slot: slots::Slot,
+    // Last: fixed action/delivery history stays paid through destruction of every observer.
+    _record: Arc<RecordFunding>,
 }
 redacted_debug!(
     CryptoAction,
@@ -208,6 +231,15 @@ impl CryptoAction {
     }
     pub fn input_tag(&self) -> [u8; 32] {
         self.input_tag
+    }
+    pub(super) fn sdp_binding(&self) -> Option<&Arc<super::sdp::action::ActionBinding>> {
+        self.authority.sdp_binding()
+    }
+    pub(in crate::voice_v2) fn history_funding(&self) -> Arc<RecordFunding> {
+        self._record.clone()
+    }
+    pub(crate) fn sdp_peer(&self) -> Option<catcoms_crypto::DeviceId> {
+        self.sdp_binding().map(|binding| binding.peer())
     }
     pub fn operation(&self) -> CryptoOperation {
         self.operation
@@ -237,7 +269,13 @@ impl CryptoAction {
             .is_some_and(|original| original.is_same(chain))
     }
     pub(super) fn check_chain_epoch(&self, epoch: u64) -> Result<(), VoiceError> {
-        if self.chain_epoch.is_none_or(|original| original == epoch) {
+        // The exact PlanBinding already owns this immutable epoch. Keeping a second
+        // Option<u64> on every action duplicated both identity and retained metadata.
+        if self
+            .binding
+            .as_ref()
+            .is_none_or(|original| original.epoch == epoch)
+        {
             Ok(())
         } else {
             Err(VoiceError::Unauthorized)
@@ -490,6 +528,9 @@ pub(super) struct PreparedAction {
     slot: slots::Slot,
     issue: Option<super::negotiation::ActionIssue>,
     chain_issue: Option<super::chain::RowIssue>,
+    // One separately paid PC direction record per affine issue. Builders cannot adopt
+    // another issue's equal-labelled record. This owner never escapes into history.
+    sdp_binding: Option<Arc<super::sdp::action::ActionBinding>>,
     chain: Option<CallLease>,
     chain_epoch: Option<u64>,
     binding: Option<Arc<super::chain::PlanBinding>>,
@@ -512,6 +553,42 @@ pub(super) struct InactiveAction {
     action: Arc<CryptoAction>,
 }
 
+impl PreparedAction {
+    pub(super) fn serial(&self) -> u64 {
+        self.serial
+    }
+    pub(super) fn sdp_binding(
+        &mut self,
+        intent: Arc<super::sdp::InitialSdpIntent>,
+        header: &super::EncryptedHeader,
+        message: Nonce,
+        direction: super::sdp::action::Direction,
+        body_tag: [u8; 32],
+        wall: u64,
+        mono: u64,
+    ) -> Result<Arc<super::sdp::action::ActionBinding>, VoiceError> {
+        if self.sdp_binding.is_some() {
+            return Err(VoiceError::Unauthorized);
+        }
+        let binding = super::sdp::action::ActionBinding::prepare(
+            self.issue.as_mut().ok_or(VoiceError::Unauthorized)?,
+            intent,
+            header,
+            message,
+            direction,
+            body_tag,
+            wall,
+            mono,
+        )?;
+        self.sdp_binding = Some(binding.clone());
+        Ok(binding)
+    }
+}
+impl InactiveAction {
+    pub(super) fn check_pending_at(&self, mono: u64, wall: u64) -> Result<(), VoiceError> {
+        self.action.check_pending_at(mono, wall)
+    }
+}
 #[cfg(test)]
 pub(super) fn fixed_record_layout_bytes() -> usize {
     // Engine embeds terminal-result metadata; count it once through CryptoAction. Input/body
@@ -521,10 +598,54 @@ pub(super) fn fixed_record_layout_bytes() -> usize {
         + 2 * std::mem::size_of::<usize>()
         + std::mem::size_of::<Key>()
         + std::mem::size_of::<Arc<CryptoAction>>()
+        + std::mem::size_of::<RecordFunding>()
+        + 2 * std::mem::size_of::<usize>()
         + 128
 }
 
 impl ActionQueue {
+    /// Adopt the original inert LOW preparation, rather than making ordinary/Active-only
+    /// loans before the Offer's atomic publication. All capacity has already been paid.
+    pub(super) fn prepare_initial_sdp_seal(
+        &mut self,
+        key: Key,
+        resources: Arc<Resources>,
+        scope: Scope,
+        call: CallLease,
+        exchange: Arc<super::negotiation::Exchange>,
+        original: super::negotiation::initial_offer::InitialOfferAction,
+    ) -> Result<PreparedAction, VoiceError> {
+        if !matches!(key, Key::SdpSeal(_, _)) || !exchange.uses_resources(&resources, scope.group) {
+            return Err(VoiceError::Unauthorized);
+        }
+        if self.actions.len() >= ACTIONS {
+            return Err(VoiceError::Capacity);
+        }
+        let serial = self.serial.checked_add(1).ok_or(VoiceError::Capacity)?;
+        self.serial = serial;
+        Ok(PreparedAction {
+            key,
+            serial,
+            scope,
+            call,
+            resources,
+            budget: ByteBudget::Exchange {
+                exchange,
+                stage: super::negotiation::Stage::EncryptAction,
+            },
+            engine_bytes: original.engine_bytes,
+            record: original.history,
+            payload: original.payload,
+            slot: original.slot,
+            issue: Some(original.issue),
+            chain_issue: None,
+            sdp_binding: None,
+            chain: None,
+            chain_epoch: None,
+            binding: None,
+            protected_row: None,
+        })
+    }
     /// Prepare the same native derive row/input as compatibility publication, without issuing
     /// it. Root borrows the outer issue into its final origin fence; no action escapes early.
     pub(super) fn build_chain_derive(
@@ -563,6 +684,63 @@ impl ActionQueue {
             exchange.is_none(),
             "confirmation history cannot adopt an SDP issue"
         );
+        Ok((issue, InactiveAction { key, action }))
+    }
+    /// Build outside the final origin fence. The original direction issue remains an
+    /// affine outer owner; only the same final packet/role transaction may publish it.
+    pub(super) fn build_sdp_seal(
+        mut prepared: PreparedAction,
+        input: CryptoFlight,
+        binding: Arc<super::sdp::action::ActionBinding>,
+        authority: CryptoAuthority,
+    ) -> Result<(super::negotiation::ActionIssue, InactiveAction), VoiceError> {
+        if !prepared
+            .sdp_binding
+            .as_ref()
+            .is_some_and(|original| Arc::ptr_eq(original, &binding))
+        {
+            return Err(VoiceError::Unauthorized);
+        }
+        if !binding.matches_plaintext(&input.plaintext)
+            || !matches!(prepared.key, Key::SdpSeal(_, _))
+            || input.plaintext.len() > super::MAX_SDP_PLAINTEXT
+            || input.reservation.aad.len() > super::negotiation::MAX_AAD
+            || std::str::from_utf8(&input.plaintext).is_err()
+        {
+            return Err(VoiceError::Bounds);
+        }
+        let issue = prepared.issue.take().ok_or(VoiceError::Unauthorized)?;
+        let authority = authority.with_sdp(binding)?;
+        let (key, action, other) = Self::build(prepared, Input::SealSdp(input), authority);
+        assert!(other.is_none());
+        Ok((issue, InactiveAction { key, action }))
+    }
+    /// Share the SAME paid admitted payload. A final-fence refusal must leave its original
+    /// native inbox reference intact; dropping a preparation cannot lose a committed token.
+    pub(super) fn build_sdp_open(
+        mut prepared: PreparedAction,
+        input: Arc<InboundPacket>,
+        binding: Arc<super::sdp::action::ActionBinding>,
+        authority: CryptoAuthority,
+    ) -> Result<(super::negotiation::ActionIssue, InactiveAction), VoiceError> {
+        if !prepared
+            .sdp_binding
+            .as_ref()
+            .is_some_and(|original| Arc::ptr_eq(original, &binding))
+        {
+            return Err(VoiceError::Unauthorized);
+        }
+        if !binding.matches_packet(&input)
+            || !matches!(prepared.key, Key::SdpOpen(_))
+            || !(16..=super::MAX_SDP_PLAINTEXT + 16).contains(&input.ciphertext().len())
+            || input.aad().len() > super::negotiation::MAX_AAD
+        {
+            return Err(VoiceError::Bounds);
+        }
+        let issue = prepared.issue.take().ok_or(VoiceError::Unauthorized)?;
+        let authority = authority.with_sdp(binding)?;
+        let (key, action, other) = Self::build(prepared, Input::OpenSdp(input), authority);
+        assert!(other.is_none());
         Ok((issue, InactiveAction { key, action }))
     }
     /// Called only in the infallible part of the native origin/History transaction.
@@ -706,6 +884,7 @@ impl ActionQueue {
             slot,
             issue,
             chain_issue,
+            sdp_binding: None,
             chain,
             chain_epoch,
             binding,
@@ -727,6 +906,10 @@ impl ActionQueue {
             "chain row commits through its own publication fence"
         );
         let input_tag = tag(&prepared, &input);
+        debug_assert_eq!(
+            prepared.chain_epoch,
+            prepared.binding.as_ref().map(|binding| binding.epoch)
+        );
         let (operation, output_bytes) = match &input {
             Input::Derive(_) => (CryptoOperation::Derive, 0),
             Input::Encrypt(flight) => (
@@ -737,6 +920,8 @@ impl ActionQueue {
                 CryptoOperation::DecryptConfirmation,
                 packet.ciphertext().len() - 16,
             ),
+            Input::SealSdp(flight) => (CryptoOperation::SealSdp, flight.plaintext.len() + 16),
+            Input::OpenSdp(packet) => (CryptoOperation::OpenSdp, packet.ciphertext().len() - 16),
         };
         let action = Arc::new(CryptoAction {
             serial: prepared.serial,
@@ -745,7 +930,6 @@ impl ActionQueue {
             call: prepared.call,
             authority,
             chain: prepared.chain,
-            chain_epoch: prepared.chain_epoch,
             binding: prepared.binding,
             protected_row: prepared.protected_row,
             input: Mutex::new(Some(Arc::new(ActionPayload {
@@ -753,15 +937,17 @@ impl ActionQueue {
                 _credit: prepared.payload,
             }))),
             operation,
-            output_bytes,
+            output_bytes: u16::try_from(output_bytes).expect("closed native output ceiling"),
             resources: prepared.resources,
             engine_bytes: prepared.engine_bytes,
             engine: Mutex::new(Engine {
                 lender: Some(prepared.budget),
                 ..Engine::default()
             }),
-            _record: prepared.record,
             _slot: prepared.slot,
+            _record: Arc::new(RecordFunding {
+                _credit: prepared.record,
+            }),
         });
         (prepared.key, action, prepared.issue)
     }
@@ -838,6 +1024,9 @@ fn tag(prepared: &PreparedAction, input: &Input) -> [u8; 32] {
     if let Input::Decrypt(packet) = input {
         return packet.object_hash();
     }
+    if matches!(input, Input::SealSdp(_) | Input::OpenSdp(_)) {
+        return sdp_tag(prepared, input);
+    }
     let mut e = Encoder::new();
     e.put_str("mewtual/voice/native-crypto-action/v1")
         .expect("constant");
@@ -869,11 +1058,36 @@ fn tag(prepared: &PreparedAction, input: &Input) -> [u8; 32] {
             tag_bytes(&mut hash, &flight.reservation.aad);
             tag_bytes(&mut hash, &flight.plaintext);
         }
-        Input::Decrypt(_) => unreachable!(),
+        Input::Decrypt(_) | Input::SealSdp(_) | Input::OpenSdp(_) => unreachable!(),
     }
     *hash.finalize().as_bytes()
 }
 
+/// Separate native action domain. The wire key/nonce domain and original ledger counter
+/// remain unchanged; this fingerprint only binds an exact native SDK/result transaction.
+fn sdp_tag(prepared: &PreparedAction, input: &Input) -> [u8; 32] {
+    let mut hash = blake3::Hasher::new();
+    hash.update(b"mewtual/voice/native-sdp-action/v1\0");
+    hash.update(&prepared.serial.to_be_bytes());
+    match input {
+        Input::SealSdp(flight) => {
+            hash.update(&[1]);
+            hash.update(&flight.handshake);
+            hash.update(&flight.reservation.id);
+            tag_bytes(&mut hash, &flight.reservation.aad);
+            tag_bytes(&mut hash, &flight.plaintext);
+        }
+        Input::OpenSdp(packet) => {
+            hash.update(&[2]);
+            hash.update(&packet.token.to_be_bytes());
+            hash.update(&packet.object_hash());
+            tag_bytes(&mut hash, packet.aad());
+            tag_bytes(&mut hash, packet.ciphertext());
+        }
+        _ => unreachable!("closed SDP input"),
+    }
+    *hash.finalize().as_bytes()
+}
 fn tag_bytes(hash: &mut blake3::Hasher, bytes: &[u8]) {
     hash.update(
         &u32::try_from(bytes.len())
@@ -901,6 +1115,17 @@ pub(super) fn confirmation_bytes(
     Ok((
         aad + ciphertext,
         4 * (aad + ciphertext) + 3 * CONFIRM_BYTES + 2048,
+    ))
+}
+pub(super) fn sdp_bytes(aad: usize, ciphertext: usize) -> Result<(usize, usize), VoiceError> {
+    if aad > super::negotiation::MAX_AAD
+        || !(16..=super::MAX_SDP_PLAINTEXT + 16).contains(&ciphertext)
+    {
+        return Err(VoiceError::Bounds);
+    }
+    Ok((
+        aad + ciphertext,
+        4 * (aad + ciphertext) + 3 * super::MAX_SDP_PLAINTEXT + 2048,
     ))
 }
 pub(super) fn is_confirmation(kind: EncryptedKind) -> bool {

@@ -1,5 +1,22 @@
 # Mewtual; Architecture
 
+## Root SDP commit and delivery (24 October; native/browser integration pending)
+
+The original PC intent now binds typed SealSdp/OpenSdp actions and exact Offer/Answer
+admission. LOW uses a private original inactive preparation and reserves its future Answer
+position before activation. Root result transactions prepare copies/signatures outside
+Engine and capture native Clock observations before acquiring Engine -> try Group/Policy.
+Seal publishes the original signed cache and terminal before later Source work may run.
+Open consumes the original token and publishes terminal history plus one fixed delivery
+observation atomically. Rejected AEAD/UTF8 results retain history without delivery.
+
+Root retains no decrypted SDP. The future browser inbox keeps its separately paid bytes;
+native must retain the SAME delivery record and request fresh current admission before
+RTC. Admission is idempotent for one logical effect, so the original browser broker must
+also preserve one SDK-started latch across lost replies/remounts. The fixed record retains
+actual admission/PC provenance with a plain shared history fee, never Action/Exchange/Phase.
+Actual native SDP bodies/SDK/RTC consumers, HIGH Answer creation and later rounds remain open.
+
 ## First SDP intent and queued work (24 October; integration in progress)
 
 The original protected Pair can retain one fixed `InitialSdpIntent`. It observes the exact

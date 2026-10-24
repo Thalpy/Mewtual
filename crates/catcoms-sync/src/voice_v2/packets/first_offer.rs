@@ -1,19 +1,17 @@
 //! Restricted first-Offer transaction. Generic Active-only token/action lenders stay closed.
 //! Every fallible check precedes one EndpointOrigin debit; publication only moves paid owners.
 use super::*;
-use crate::voice_v2::negotiation::admission::{
-    FirstOfferAdmission, ReceiptConsent, ReceiptFunding,
-};
+use crate::voice_v2::negotiation::admission::{ReceiptConsent, ReceiptFunding, SdpAdmission};
 use crate::voice_v2::negotiation::receive::{HighReceive, PreparedOffer};
 
 pub(in crate::voice_v2) struct FirstOfferPublication<'a> {
     ledger: &'a mut PacketLedger,
-    receipt: Arc<FirstOfferAdmission>,
+    receipt: Arc<SdpAdmission>,
     replay: Replay,
     pair: CallLease,
     pending: Option<RevocationOwner>,
     // This second payload drops BEFORE PreparedOffer returns its original receive slot.
-    event: Option<Box<InboundPacket>>,
+    event: Option<Arc<InboundPacket>>,
     prepared: Option<PreparedOffer>,
 }
 #[cfg(test)]
@@ -24,10 +22,12 @@ pub(in crate::voice_v2) fn admission_metadata_bytes() -> usize {
     // receiver, byte-credit and slot ancestors belong to the enclosing Exchange graph.
     let preparing = size_of::<FirstOfferPublication<'static>>()
         + size_of::<InboundPacket>()
+        + 2 * size_of::<usize>() // actual shared event Arc header
         + size_of::<super::super::LeaseState>()
         + 2 * size_of::<usize>();
     let committed = size_of::<Incoming>()
         + size_of::<InboundPacket>()
+        + 2 * size_of::<usize>() // event Arc header remains paid through the last borrower
         + size_of::<SdpExchange>()
         + size_of::<u64>()
         + 512
@@ -43,6 +43,7 @@ impl PacketLedger {
         object: &SignedObject,
         funding: Arc<ReceiptFunding>,
         consent: ReceiptConsent,
+        pc: Option<Arc<crate::voice_v2::sdp::InitialSdpIntent>>,
         authority: &Authority<'_>,
         clock: &dyn Clock,
     ) -> Result<FirstOfferPublication<'_>, VoiceError> {
@@ -77,8 +78,14 @@ impl PacketLedger {
         }
         let token = self.serial.checked_add(1).ok_or(VoiceError::Reservation)?;
         let deadline = owner.first_offer_deadline(object.expires(), wall, mono)?;
-        let receipt = FirstOfferAdmission::prepare(
-            &owner, &prepared, token, mono, deadline, funding, consent,
+        // PC/Ready was issued before the Offer. Its earlier immutable window must also
+        // bound the receipt wait and activated lane; an ACK cannot linger after authority.
+        let deadline = match &pc {
+            Some(pc) => deadline.min(mono.saturating_add(pc.remaining_at(wall, mono)?)),
+            None => deadline,
+        };
+        let receipt = SdpAdmission::prepare(
+            &owner, &prepared, token, mono, deadline, funding, consent, pc,
         )?;
         let pending = RevocationOwner::default();
         let event = prepared.prepare_event(token)?;
@@ -94,7 +101,7 @@ impl PacketLedger {
     }
 }
 impl FirstOfferPublication<'_> {
-    pub(in crate::voice_v2) fn receipt(&self) -> Arc<FirstOfferAdmission> {
+    pub(in crate::voice_v2) fn receipt(&self) -> Arc<SdpAdmission> {
         self.receipt.clone()
     }
     /// Pure checks inside Group/Policy. EndpointOrigin independently checks actual native
@@ -112,7 +119,7 @@ impl FirstOfferPublication<'_> {
         }
         Ok(())
     }
-    pub(in crate::voice_v2) fn publish(mut self, store: impl FnOnce(Box<InboundPacket>)) {
+    pub(in crate::voice_v2) fn publish(mut self, store: impl FnOnce(Arc<InboundPacket>)) {
         let parts = self
             .prepared
             .take()

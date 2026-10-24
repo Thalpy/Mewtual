@@ -7,6 +7,231 @@ use voice_v2::packets::Authority;
 use voice_v2::sdp::InitialSdpIntent;
 
 impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
+    /// Commit the actual private SDK Open output. Root keeps only terminal metadata and an
+    /// opaque delivery identity; plaintext remains in its separately paid browser inbox.
+    pub fn submit_voice_sdp_open_result(
+        &mut self,
+        grant: &Arc<CallGrant>,
+        action: &Arc<voice_v2::crypto_actions::CryptoAction>,
+        output: voice_v2::sdp::SdpOpenOutput<'_>,
+    ) -> Result<voice_v2::sdp::SdpOpenResult, VoiceError> {
+        self.validate_current_voice_call_grant(grant)?;
+        let context = self.voice_v2_context(grant.scope().room)?;
+        let clock = self.voice_v2_clock();
+        let voice = self
+            .voice_runtime
+            .as_mut()
+            .ok_or(VoiceError::Unauthorized)?;
+        voice.endpoints.prune();
+        let actor = voice.current.as_ref().ok_or(VoiceError::Unauthorized)?;
+        let room = voice.directory.authority(context.scope)?;
+        let participant = voice
+            .endpoints
+            .participant
+            .as_mut()
+            .ok_or(VoiceError::Unauthorized)?;
+        if !std::sync::Weak::ptr_eq(&participant.grant, &Arc::downgrade(grant))
+            || participant.watch.scope != context.scope
+            || !participant.watch.is_live()
+        {
+            return Err(VoiceError::Unauthorized);
+        }
+        let peer = action.sdp_peer().ok_or(VoiceError::Unauthorized)?;
+        let members = super::ready::ready_member_snapshot(actor, &context, peer, &[])?;
+        let call = participant.lease.clone();
+        let watch = participant.watch.lease.clone();
+        let result = participant.join.submit_sdp_open_result(
+            actor,
+            &room,
+            action,
+            output,
+            &Authority {
+                context: &context,
+                lease: &call,
+                member: &|id| members.contains(&Some(id)),
+            },
+            clock.as_ref(),
+            |_, _| {
+                if call.is_live() && watch.is_live() {
+                    Ok(())
+                } else {
+                    Err(VoiceError::Unauthorized)
+                }
+            },
+        )?;
+        voice.endpoints.changed();
+        Ok(result)
+    }
+
+    /// Separate current admission before the browser applies the exact accepted SDP to its
+    /// original PC. Repeated replies name one logical effect; SDK-started is latched there.
+    pub fn admit_voice_sdp_delivery(
+        &mut self,
+        grant: &Arc<CallGrant>,
+        action: &Arc<voice_v2::crypto_actions::CryptoAction>,
+        delivery: &Arc<voice_v2::sdp::SdpDelivery>,
+    ) -> Result<(), VoiceError> {
+        self.validate_current_voice_call_grant(grant)?;
+        let context = self.voice_v2_context(grant.scope().room)?;
+        let voice = self
+            .voice_runtime
+            .as_mut()
+            .ok_or(VoiceError::Unauthorized)?;
+        voice.endpoints.prune();
+        let actor = voice.current.as_ref().ok_or(VoiceError::Unauthorized)?;
+        let room = voice.directory.authority(context.scope)?;
+        let participant = voice
+            .endpoints
+            .participant
+            .as_ref()
+            .ok_or(VoiceError::Unauthorized)?;
+        if !std::sync::Weak::ptr_eq(&participant.grant, &Arc::downgrade(grant))
+            || participant.watch.scope != context.scope
+            || !participant.watch.is_live()
+        {
+            return Err(VoiceError::Unauthorized);
+        }
+        let peer = action.sdp_peer().ok_or(VoiceError::Unauthorized)?;
+        let members = super::ready::ready_member_snapshot(actor, &context, peer, &[])?;
+        participant.join.admit_sdp_delivery(
+            actor,
+            &room,
+            action,
+            delivery,
+            &Authority {
+                context: &context,
+                lease: &participant.lease,
+                member: &|id| members.contains(&Some(id)),
+            },
+            |_, _| {
+                if participant.lease.is_live() && participant.watch.is_live() {
+                    Ok(())
+                } else {
+                    Err(VoiceError::Unauthorized)
+                }
+            },
+        )
+    }
+
+    /// Submit only the original native SDP seal result. The packet stays in its original
+    /// cache; Source queues it after real crypto settlement, using the same PC authority.
+    pub fn submit_voice_sdp_result(
+        &mut self,
+        grant: &Arc<CallGrant>,
+        action: &Arc<voice_v2::crypto_actions::CryptoAction>,
+        ciphertext: &[u8],
+        claimed_tag: [u8; 32],
+    ) -> Result<voice_v2::crypto_actions::CryptoResultReceipt, VoiceError> {
+        self.validate_current_voice_call_grant(grant)?;
+        let context = self.voice_v2_context(grant.scope().room)?;
+        let clock = self.voice_v2_clock();
+        let voice = self
+            .voice_runtime
+            .as_mut()
+            .ok_or(VoiceError::Unauthorized)?;
+        voice.endpoints.prune();
+        let actor = voice.current.as_ref().ok_or(VoiceError::Unauthorized)?;
+        let room = voice.directory.authority(context.scope)?;
+        let participant = voice
+            .endpoints
+            .participant
+            .as_mut()
+            .ok_or(VoiceError::Unauthorized)?;
+        if !std::sync::Weak::ptr_eq(&participant.grant, &Arc::downgrade(grant))
+            || participant.watch.scope != context.scope
+            || !participant.watch.is_live()
+        {
+            return Err(VoiceError::Unauthorized);
+        }
+        let peer = action.sdp_peer().ok_or(VoiceError::Unauthorized)?;
+        let members = super::ready::ready_member_snapshot(actor, &context, peer, &[])?;
+        let call = participant.lease.clone();
+        let watch = participant.watch.lease.clone();
+        let receipt = participant.join.submit_sdp_sealed_result(
+            voice_v2::presence::ProtectedSealedResult {
+                actor,
+                room: &room,
+                action,
+                ciphertext,
+                claimed_tag,
+            },
+            &self.device,
+            &Authority {
+                context: &context,
+                lease: &call,
+                // Preparation only needs membership of the exact original endpoints.
+                // Never copy the whole MLS roster onto this bounded SDP worker's payment.
+                member: &|id| members.contains(&Some(id)),
+            },
+            clock.as_ref(),
+            |_, _| {
+                if call.is_live() && watch.is_live() {
+                    Ok(())
+                } else {
+                    Err(VoiceError::Unauthorized)
+                }
+            },
+        )?;
+        voice.endpoints.changed();
+        Ok(receipt)
+    }
+
+    /// Native adapter's original LOW PC is the authority for the first complete Offer.
+    /// Reserve the future Answer's shared Root namespace position before issuing any
+    /// nonce/action. Exact action recovery remains possible when that namespace is full.
+    pub fn prepare_voice_low_sdp_offer(
+        &mut self,
+        grant: &Arc<CallGrant>,
+        handshake: voice_v2::Nonce,
+        intent: &Arc<InitialSdpIntent>,
+        plaintext: &[u8],
+    ) -> Result<Arc<voice_v2::crypto_actions::CryptoAction>, VoiceError> {
+        self.validate_current_voice_call_grant(grant)?;
+        let context = self.voice_v2_context(grant.scope().room)?;
+        let clock = self.voice_v2_clock();
+        let voice = self
+            .voice_runtime
+            .as_mut()
+            .ok_or(VoiceError::Unauthorized)?;
+        voice.endpoints.prune();
+        let actor = voice.current.as_ref().ok_or(VoiceError::Unauthorized)?;
+        let room = voice.directory.authority(context.scope)?;
+        let participant = voice
+            .endpoints
+            .participant
+            .as_mut()
+            .ok_or(VoiceError::Unauthorized)?;
+        if !std::sync::Weak::ptr_eq(&participant.grant, &Arc::downgrade(grant))
+            || !participant.watch.is_live()
+        {
+            return Err(VoiceError::Unauthorized);
+        }
+        let peer = participant.join.protected_ready_peer(handshake)?;
+        let members = super::ready::ready_member_snapshot(actor, &context, peer, &[])?;
+        let position = if participant.join.has_initial_sdp_seal(handshake) {
+            None
+        } else {
+            Some(voice.endpoints.public.reserve_position()?)
+        };
+        participant.join.prepare_low_sdp_offer(
+            actor,
+            &room,
+            handshake,
+            intent,
+            plaintext,
+            position,
+            voice.endpoints.public.namespace(),
+            &Authority {
+                context: &context,
+                lease: &participant.lease,
+                member: &|id| members.contains(&Some(id)),
+            },
+            clock,
+            &mut self.rng,
+            |_, _| Ok(()),
+        )
+    }
+
     /// Mint/recover the exact original first intent. Revalidate the current MLS/Actor and
     /// room issuer before entering LocalJoin; its own final origin transaction repeats
     /// original key/phase/Ready currency after all fallible preparation.
@@ -51,6 +276,72 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
                 lease: &participant.lease,
                 member: &|id| members.contains(&Some(id)),
             },
+        )
+    }
+}
+
+impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
+    /// Trusted native adapter only: resolve the current original grant and opaque PC intent.
+    /// No token/header/SDP bytes from a renderer may choose the already admitted HIGH input.
+    pub fn prepare_voice_high_sdp_open(
+        &mut self,
+        grant: &Arc<CallGrant>,
+        handshake: voice_v2::Nonce,
+        intent: &Arc<InitialSdpIntent>,
+    ) -> Result<Arc<voice_v2::crypto_actions::CryptoAction>, VoiceError> {
+        if intent.local_is_low() {
+            return Err(VoiceError::Unauthorized);
+        }
+        self.prepare_voice_sdp_open(grant, handshake, intent)
+    }
+
+    /// Resolve either original admitted Offer or Answer using the PC's native role.
+    pub fn prepare_voice_sdp_open(
+        &mut self,
+        grant: &Arc<CallGrant>,
+        handshake: voice_v2::Nonce,
+        intent: &Arc<InitialSdpIntent>,
+    ) -> Result<Arc<voice_v2::crypto_actions::CryptoAction>, VoiceError> {
+        self.validate_current_voice_call_grant(grant)?;
+        let context = self.voice_v2_context(grant.scope().room)?;
+        let clock = self.voice_v2_clock();
+        let voice = self
+            .voice_runtime
+            .as_mut()
+            .ok_or(VoiceError::Unauthorized)?;
+        voice.endpoints.prune();
+        let actor = voice.current.as_ref().ok_or(VoiceError::Unauthorized)?;
+        let room = voice.directory.authority(context.scope)?;
+        let participant = voice
+            .endpoints
+            .participant
+            .as_mut()
+            .ok_or(VoiceError::Unauthorized)?;
+        if !std::sync::Weak::ptr_eq(&participant.grant, &Arc::downgrade(grant))
+            || !participant.watch.is_live()
+        {
+            return Err(VoiceError::Unauthorized);
+        }
+        let peer = participant.join.protected_ready_peer(handshake)?;
+        let members = super::ready::ready_member_snapshot(actor, &context, peer, &[])?;
+        let prepare = if intent.local_is_low() {
+            voice_v2::presence::LocalJoin::prepare_low_sdp_open
+        } else {
+            voice_v2::presence::LocalJoin::prepare_high_sdp_open
+        };
+        prepare(
+            &mut participant.join,
+            actor,
+            &room,
+            handshake,
+            intent,
+            &Authority {
+                context: &context,
+                lease: &participant.lease,
+                member: &|id| members.contains(&Some(id)),
+            },
+            clock,
+            |_, _| Ok(()),
         )
     }
 }

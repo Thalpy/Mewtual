@@ -1,5 +1,36 @@
 # Next voice milestone: native result recovery
 
+## Current Root SDP path and next integration (24 October)
+
+Checkpoint `13891350` is pushed on `communication-sdp-effects`. Continuing work is isolated
+in `target/communication-sdp-rtc-worktree` / `communication-sdp-rtc`; HANDOVER records current
+checks and the outstanding full gates. The older Ready full run finished, then fixture-only
+`a55ccf18` was applied as `9b59c812`: its original failed native case and all11 affected voice
+scenarios pass. This does not turn the earlier failed full native run into a green result.
+
+Root now implements original typed SealSdp/OpenSdp actions, private inert LOW Offer issuance,
+reserved protected Answer admission, exact seal/Open terminal recovery and separate current
+Root delivery admission. Signatures/copies/Clock observations precede Engine/Group/Policy;
+Source waits for actual crypto settlement. Open retains no plaintext, and atomically installs
+the SAME fixed delivery observation with token consumption and Opened. Closed authentication
+failure and invalid UTF8 retain Rejected without delivery. Shared fixed funding is last and
+fits the existing original confirmation rows and SDP history allowance.
+
+Next implement HIGH Answer creation after the original accepted Offer/remote description;
+paid typed Actor command/result custody; closed native SDP request/body grammar authenticated
+against original Session/key/storage/SDK/PC/action BEFORE allocation/counter debit; and private
+browser original-key seal/open plus complete-ICE RTC. Keep confirmation Data2048/result528
+unchanged. Native must recover the exact registered result before current Actor checks after
+End, but every fresh delivery must pass the current native/Root gates. Repeated admission
+names one logical effect: the original inbox must retain SDK-started before invoking its exact
+PC and never repeat it on an ACK/lost-reply retry. Count both local and remote UTF16 SDP,
+actual engine/HTTP/Actor copies and retained closed-PC references in the original custody;
+PC.close does not itself prove those owners drained. Fresh rounds, serial multi-peer,
+member media relay, combined and physical acceptance remain separate unfinished work.
+
+Older dated sections below retain their historical checkpoint/design context; current status
+and evidence are at the top of HANDOVER.
+
 ## Current SDP substep (24 October; not live V2 completion)
 
 The original Root first-round intent and native Control14 are implemented in the isolated
@@ -587,7 +618,7 @@ preserve the confirmed pair while old owners drain, because late Finish plus act
 retirement can outlast that deadline. Capture this phase deadline once, without new Finish
 attempts. Browser key transfer requires the same explicit lifetime treatment.
 
-Ready uses closed Body tag5 while preserving tags1–4 and signing domains. Bind the original
+Ready uses closed Body tag5 while preserving tags1Ã¢â‚¬â€œ4 and signing domains. Bind the original
 protected epoch, both endpoints/joins/key references, handshake, and native signed Finish
 message ID/object hash (not the WebCrypto output fingerprint). Require high-to-low direction.
 Helper selection needs one immutable compatible canonical list, at most two members, rather
@@ -1970,7 +2001,7 @@ through explicit post-invoke retirement, independently of the serialized DTO: Ta
 serialized String into HTTP/Channel ownership after serialization returns. End, timeout, a lost
 callback and serialization are not retirement. Overlapping recovery attempts need separate paid
 lanes; an uncertain reply cannot make its lane reusable. History collection additionally waits
-for all actual reply owners, and retired browser cleanup needs status→exact ACK without plaintext.
+for all actual reply owners, and retired browser cleanup needs statusÃ¢â€ â€™exact ACK without plaintext.
 
 Encrypted endpoint intake currently refuses encrypted bodies, and action factories cover only
 derivation and confirmation, not SDP. Activation needs prepaid inbox/token/action publication,

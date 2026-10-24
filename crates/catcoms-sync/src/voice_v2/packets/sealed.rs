@@ -64,6 +64,10 @@ impl PreparedSealedPublication<'_> {
                 .exchange
                 .as_ref()
                 .is_some_and(|exchange| !exchange.is_live())
+            || outgoing
+                .sdp_binding
+                .as_ref()
+                .is_some_and(|binding| !binding.current_at(wall, mono))
         {
             return Err(VoiceError::Unauthorized);
         }

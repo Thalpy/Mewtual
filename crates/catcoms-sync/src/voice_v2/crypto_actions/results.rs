@@ -72,6 +72,80 @@ pub(crate) struct TerminalResult {
     pub outcome: CryptoOutcome,
 }
 
+/// Exact bounded output and ORIGINAL clock observations, captured before Engine. New
+/// SDP transactions use this instead of invoking callbacks while holding their result
+/// fence. It grants no first effect until actual current authority is checked again.
+pub(in crate::voice_v2) struct ObservedSdpResult<'a> {
+    action: &'a CryptoAction,
+    output_tag: [u8; 32],
+    mono: u64,
+    wall: u64,
+}
+impl ObservedSdpResult<'_> {
+    pub(in crate::voice_v2) fn recover(&self) -> Result<Option<CryptoResultReceipt>, VoiceError> {
+        let engine = self.try_engine()?;
+        match &engine.terminal {
+            Some(recorded) if recorded.output_tag == self.output_tag => {
+                Ok(Some(recorded.receipt_at(self.action, self.mono, self.wall)))
+            }
+            Some(_) => Err(VoiceError::RetryMismatch),
+            None => Ok(None),
+        }
+    }
+    fn try_engine(&self) -> Result<std::sync::MutexGuard<'_, Engine>, VoiceError> {
+        match self.action.engine.try_lock() {
+            Ok(engine) => Ok(engine),
+            Err(std::sync::TryLockError::Poisoned(error)) => Ok(error.into_inner()),
+            Err(std::sync::TryLockError::WouldBlock) => Err(VoiceError::Capacity),
+        }
+    }
+    /// Terminal lookup precedes pending token/settlement checks. The callback must only
+    /// consume an already prepared native origin and perform a pure infallible apply tail.
+    /// Every actual input/Phase/slot/result destructor stays in the caller's outer scope.
+    pub(in crate::voice_v2) fn commit(
+        self,
+        apply: impl FnOnce(u64, u64) -> Result<TerminalResult, VoiceError>,
+    ) -> Result<CryptoResultReceipt, VoiceError> {
+        self.commit_with_delivery(|mono, wall| Ok((apply(mono, wall)?, None)))
+    }
+    /// Publish an already prepared fixed delivery identity with the terminal. No delivery
+    /// allocation after Opened is allowed: a lost reply must never strand a consumed token.
+    pub(in crate::voice_v2) fn commit_with_delivery(
+        self,
+        apply: impl FnOnce(
+            u64,
+            u64,
+        ) -> Result<
+            (TerminalResult, Option<Arc<super::super::sdp::SdpDelivery>>),
+            VoiceError,
+        >,
+    ) -> Result<CryptoResultReceipt, VoiceError> {
+        let mut engine = self.try_engine()?;
+        if let Some(recorded) = &engine.terminal {
+            if recorded.output_tag != self.output_tag {
+                return Err(VoiceError::RetryMismatch);
+            }
+            return Ok(recorded.receipt_at(self.action, self.mono, self.wall));
+        }
+        if engine.settled || engine.permit.is_none() {
+            return Err(VoiceError::Unauthorized);
+        }
+        self.action.check_pending_at(self.mono, self.wall)?;
+        let (result, delivery) = apply(self.mono, self.wall)?;
+        debug_assert!(delivery.is_none() || result.outcome == CryptoOutcome::Opened);
+        engine.sdp_delivery = delivery;
+        engine.terminal = Some(RecordedResult {
+            output_tag: self.output_tag,
+            result,
+        });
+        Ok(engine
+            .terminal
+            .as_ref()
+            .expect("one exact SDP terminal")
+            .receipt_at(self.action, self.mono, self.wall))
+    }
+}
+
 impl RecordedResult {
     fn receipt(&self, action: &CryptoAction) -> CryptoResultReceipt {
         let (monotonic, wall) = action.authority.history_time();
@@ -92,6 +166,10 @@ impl RecordedResult {
                     .attempt
                     .as_ref()
                     .is_some_and(|attempt| !attempt.is_live())
+                || action
+                    .authority
+                    .sdp_binding()
+                    .is_some_and(|sdp| !sdp.current_at(wall, monotonic))
                 || monotonic >= binding.deadline
                 || wall > binding.expires,
         }
@@ -99,6 +177,95 @@ impl RecordedResult {
 }
 
 impl CryptoAction {
+    /// Closed AEAD failure has its own output identity. It is never represented by invented
+    /// expected-length plaintext, and cannot collide with the tag of a successful byte result.
+    pub(in crate::voice_v2) fn observe_sdp_open_output(
+        &self,
+        output: super::super::sdp::SdpOpenOutput<'_>,
+    ) -> Result<ObservedSdpResult<'_>, VoiceError> {
+        if self.operation != CryptoOperation::OpenSdp {
+            return Err(VoiceError::Unauthorized);
+        }
+        match output {
+            super::super::sdp::SdpOpenOutput::Plaintext { bytes, claimed_tag } => {
+                self.observe_sdp_result(bytes, claimed_tag)
+            }
+            super::super::sdp::SdpOpenOutput::AuthenticationFailed => {
+                let mut hash = Sha256::new();
+                hash.update(b"mewtual/voice/native-sdp-aead-failure/v1\0");
+                hash.update(self.input_tag);
+                let (mono, wall) = self.authority.history_time();
+                Ok(ObservedSdpResult {
+                    action: self,
+                    output_tag: hash.finalize().into(),
+                    mono,
+                    wall,
+                })
+            }
+        }
+    }
+    /// Exact native recovery after input compaction, token consumption, End or a lost reply.
+    /// This reports one historical result and the SAME fixed observer, never fresh RTC use.
+    pub fn recover_sdp_open_result(
+        &self,
+        output: super::super::sdp::SdpOpenOutput<'_>,
+    ) -> Result<Option<super::super::sdp::SdpOpenResult>, VoiceError> {
+        let observed = self.observe_sdp_open_output(output)?;
+        let engine = observed.try_engine()?;
+        match &engine.terminal {
+            Some(recorded) if recorded.output_tag == observed.output_tag => {
+                Ok(Some(super::super::sdp::SdpOpenResult {
+                    receipt: recorded.receipt_at(self, observed.mono, observed.wall),
+                    delivery: engine.sdp_delivery.clone(),
+                }))
+            }
+            Some(_) => Err(VoiceError::RetryMismatch),
+            None => Ok(None),
+        }
+    }
+    pub(in crate::voice_v2) fn owns_sdp_delivery(
+        &self,
+        delivery: &Arc<super::super::sdp::SdpDelivery>,
+    ) -> Result<bool, VoiceError> {
+        // Sample no Clock while Engine is held. Original current-owner/time checks belong
+        // to the separate native delivery transaction, not this historical identity check.
+        let engine = match self.engine.try_lock() {
+            Ok(engine) => engine,
+            Err(std::sync::TryLockError::Poisoned(error)) => error.into_inner(),
+            Err(std::sync::TryLockError::WouldBlock) => return Err(VoiceError::Capacity),
+        };
+        Ok(engine
+            .terminal
+            .as_ref()
+            .is_some_and(|r| r.result.outcome == CryptoOutcome::Opened)
+            && engine
+                .sdp_delivery
+                .as_ref()
+                .is_some_and(|same| Arc::ptr_eq(same, delivery)))
+    }
+    pub(in crate::voice_v2) fn observe_sdp_result(
+        &self,
+        bytes: &[u8],
+        claimed_tag: [u8; 32],
+    ) -> Result<ObservedSdpResult<'_>, VoiceError> {
+        if !matches!(
+            self.operation,
+            CryptoOperation::SealSdp | CryptoOperation::OpenSdp
+        ) {
+            return Err(VoiceError::Unauthorized);
+        }
+        let output_tag = self.output_tag(bytes)?;
+        if output_tag != claimed_tag {
+            return Err(VoiceError::RetryMismatch);
+        }
+        let (mono, wall) = self.authority.history_time();
+        Ok(ObservedSdpResult {
+            action: self,
+            output_tag,
+            mono,
+            wall,
+        })
+    }
     /// Acknowledge the immutable terminal result independently of actual engine settlement.
     /// Only when BOTH have occurred may native discard its input reference. Already borrowed
     /// input leases retain their own bytes/credit; separately held IPC/result copies require
@@ -162,6 +329,14 @@ impl CryptoAction {
         bytes: &[u8],
         claimed_tag: [u8; 32],
     ) -> Result<Option<CryptoResultReceipt>, VoiceError> {
+        if matches!(
+            self.operation,
+            CryptoOperation::SealSdp | CryptoOperation::OpenSdp
+        ) {
+            // SDP callers may recover without a surviving Root. Preserve the same
+            // callback-free Engine rule on this public historical seam too.
+            return self.observe_sdp_result(bytes, claimed_tag)?.recover();
+        }
         // Hash the actual bounded output even for historical retries: trusting the claimed
         // digest alone would allow changed bytes to masquerade as an accepted past transition.
         let output_tag = self.output_tag(bytes)?;
@@ -179,7 +354,16 @@ impl CryptoAction {
     /// SHA-256 of the bounded, native-input-selected output. Input identity remains an independent
     /// check; a caller's claimed digest cannot substitute for hashing the actual returned bytes.
     pub fn output_tag(&self, bytes: &[u8]) -> Result<[u8; 32], VoiceError> {
-        if bytes.len() != self.output_bytes || bytes.len() > CONFIRM_BYTES + 16 {
+        // Select the bound from the actual native operation; larger SDP must never widen
+        // confirmation acceptance or let an invented output length choose another contract.
+        let maximum = match self.operation {
+            CryptoOperation::Derive => 0,
+            CryptoOperation::EncryptConfirmation => CONFIRM_BYTES + 16,
+            CryptoOperation::DecryptConfirmation => CONFIRM_BYTES,
+            CryptoOperation::SealSdp => super::super::MAX_SDP_PLAINTEXT + 16,
+            CryptoOperation::OpenSdp => super::super::MAX_SDP_PLAINTEXT,
+        };
+        if bytes.len() != usize::from(self.output_bytes) || bytes.len() > maximum {
             return Err(VoiceError::Bounds);
         }
         Ok(Sha256::digest(bytes).into())

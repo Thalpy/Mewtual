@@ -7,6 +7,9 @@ use super::chain::{EstablishedKeyCustody, OriginalPlanObservation};
 use super::ready::admission::ReadyAdmission;
 use super::*;
 use std::sync::Arc;
+pub(in crate::voice_v2) mod action;
+pub(crate) mod delivery;
+pub use delivery::{SdpDelivery, SdpOpenOutput, SdpOpenResult};
 
 /// The exact first native PC generation and actual Ready, rather than renderer labels.
 /// Retaining this proof does not renew the original finite Ready window. A fresh operational
@@ -130,10 +133,21 @@ impl InitialSdpIntent {
         }))
     }
 
+    pub(in crate::voice_v2) fn matches_successor(
+        &self,
+        original: &super::chain::SuccessorProof,
+    ) -> bool {
+        original.observed_by(&self.original)
+    }
     /// Current effect observation on ORIGINAL native clock samples. A historical receipt
     /// or fabricated timestamp must never replace the adapter's actual operation admission.
     pub fn current_at(&self, wall: u64, mono: u64) -> bool {
         self.original.current() && self.effect.is_live() && self.ready.current_at(wall, mono)
+    }
+    /// Actual original PC close notification, independent of the shared call/pair.
+    /// Native's pure gate refuses first; its affine close worker notifies outside guards.
+    pub(in crate::voice_v2) async fn pc_closed(&self) {
+        self.effect.closed().await;
     }
     pub fn remaining_at(&self, wall: u64, mono: u64) -> Result<u64, VoiceError> {
         if !self.current_at(wall, mono) {
@@ -143,6 +157,9 @@ impl InitialSdpIntent {
     }
     pub fn generation(&self) -> u64 {
         self.generation
+    }
+    pub(in crate::voice_v2) fn handshake(&self) -> Nonce {
+        self.original.binding().handshake
     }
     pub fn round(&self) -> SdpRound {
         self.round
@@ -175,7 +192,9 @@ mod tests {
         // Count the complete separately retained HIGH lease/watch allowance, not only
         // the Arc pointer in ReadyEvidence. LOW's receipt already retains its own fee.
         let root = std::mem::size_of::<InitialSdpIntent>() + 2 * std::mem::size_of::<usize>() + 256;
-        let root_share = crate::voice_v2::chain::sdp_handoff::NATIVE_PC_METADATA_BYTES / 2;
+        let root = root
+            + 2 * (std::mem::size_of::<action::ActionBinding>() + 2 * std::mem::size_of::<usize>());
+        let root_share = crate::voice_v2::chain::sdp_handoff::NATIVE_PC_ROOT_METADATA_BYTES;
         assert!(
             root <= root_share,
             "initial SDP Root fixed graph {root}/{root_share}"

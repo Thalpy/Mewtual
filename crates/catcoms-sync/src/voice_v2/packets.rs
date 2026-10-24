@@ -12,7 +12,9 @@ use futures::FutureExt;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
+mod answer;
 mod first_offer;
+mod initial_offer;
 #[cfg(test)]
 pub(in crate::voice_v2) use first_offer::admission_metadata_bytes;
 mod outgoing;
@@ -241,6 +243,8 @@ struct Outgoing {
     // Native table custody, separate from retained bytes and actual transport copies.
     _slot: PacketSlot,
     exchange: Option<Arc<Exchange>>,
+    // Fixed PC/Ready/Offer provenance; a live Exchange does not imply a live PC.
+    sdp_binding: Option<Arc<super::sdp::action::ActionBinding>>,
 }
 #[derive(Clone)]
 pub(super) enum PendingConfirmation {
@@ -575,6 +579,7 @@ pub(super) struct SourcePacketAuthority {
     clock: Arc<dyn Clock>,
     deadline: u64,
     exchange: Option<Arc<Exchange>>,
+    sdp_binding: Option<Arc<super::sdp::action::ActionBinding>>,
     expires: u64,
 }
 impl SourcePacketAuthority {
@@ -606,6 +611,10 @@ impl SourcePacketAuthority {
                 .exchange
                 .as_ref()
                 .is_none_or(|exchange| exchange.is_live())
+            && self
+                .sdp_binding
+                .as_ref()
+                .is_none_or(|binding| binding.current_at(wall, mono))
     }
     pub(super) fn exchange(&self) -> Option<Arc<Exchange>> {
         self.exchange.clone()
@@ -658,6 +667,11 @@ impl SourcePacketAuthority {
                 (Some(first), Some(second)) => Arc::ptr_eq(first, second),
                 _ => false,
             }
+            && match (&self.sdp_binding, &other.sdp_binding) {
+                (None, None) => true,
+                (Some(first), Some(second)) => Arc::ptr_eq(first, second),
+                _ => false,
+            }
     }
 }
 #[async_trait::async_trait]
@@ -683,6 +697,9 @@ impl catcoms_rt::RequestAuthority for SourcePacketAuthority {
         ];
         if let Some(exchange) = &self.exchange {
             waits.push(exchange.revoked().boxed());
+        }
+        if let Some(binding) = &self.sdp_binding {
+            waits.push(binding.closed().boxed());
         }
         if let Some(chain) = &self.chain {
             waits.push(chain.wait_revoked().boxed());
@@ -718,6 +735,16 @@ redacted_debug!(
 );
 
 impl PacketLedger {
+    #[cfg(test)]
+    pub(in crate::voice_v2) fn initial_offer_state_for_test(
+        &self,
+        handshake: Nonce,
+    ) -> (u64, Option<MessageId>) {
+        (
+            self.pairs[&handshake].next,
+            self.sdp.as_ref().and_then(|sdp| sdp.local),
+        )
+    }
     /// Only exact committed native Ready makes LOW's old Finish obsolete. Closing the
     /// whole chain here would also close the verifier lane before its reply can drain.
     pub(in crate::voice_v2) fn retire_low_confirmation_cache(
@@ -1181,7 +1208,11 @@ impl PacketLedger {
             status: Status::Confirming,
             live,
             confirmation_claimed: true,
-            sdp_profile: None,
+            // This constructor is exclusively the native protected-pair transaction.
+            // LocalJoin publishes protected_epoch in the SAME tail, so select the packet
+            // profile here too. Waiting for prepare_crypto_chain would skip selection
+            // because that original epoch is already latched, and native SDP would fail.
+            sdp_profile: Some(super::SdpProfile::CompleteSdpV1),
             next: 0,
             replay: Replay::default(),
         }))
@@ -1475,6 +1506,7 @@ impl PacketLedger {
                 .min(self.sdp_deadline(outgoing.exchange.as_ref())?),
             expires: object.expires(),
             exchange: outgoing.exchange.clone(),
+            sdp_binding: outgoing.sdp_binding.clone(),
             clock,
         })
     }

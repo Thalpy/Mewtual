@@ -76,6 +76,8 @@ pub struct CryptoAuthority {
     // opening uses at most two leases plus its accepted-sequence gate, within the same bound.
     pending: [Option<CallLease>; 3],
     hello: Option<SequenceAuthority>,
+    // Fixed independently paid PC/Ready provenance, never a Phase/Exchange owner.
+    sdp: Option<Arc<super::sdp::action::ActionBinding>>,
     clock: Arc<dyn Clock>,
     deadline: u64,
     expires: u64,
@@ -95,6 +97,10 @@ impl CryptoAuthority {
                 .hello
                 .as_ref()
                 .is_none_or(SequenceAuthority::authorized)
+            && self
+                .sdp
+                .as_ref()
+                .is_none_or(|binding| binding.current_at(wall, mono))
             && mono < self.deadline
             && wall <= self.expires
     }
@@ -115,6 +121,7 @@ impl CryptoAuthority {
             pair,
             pending: [None, None, None],
             hello: None,
+            sdp: None,
             clock,
             deadline,
             expires,
@@ -123,6 +130,23 @@ impl CryptoAuthority {
             return Err(VoiceError::Unauthorized);
         }
         Ok(authority)
+    }
+    pub(super) fn with_sdp(
+        mut self,
+        binding: Arc<super::sdp::action::ActionBinding>,
+    ) -> Result<Self, VoiceError> {
+        if self.sdp.is_some() {
+            return Err(VoiceError::Unauthorized);
+        }
+        self.deadline = self.deadline.min(binding.deadline());
+        self.sdp = Some(binding);
+        if !self.authorized() {
+            return Err(VoiceError::Unauthorized);
+        }
+        Ok(self)
+    }
+    pub(super) fn sdp_binding(&self) -> Option<&Arc<super::sdp::action::ActionBinding>> {
+        self.sdp.as_ref()
     }
     pub(super) fn with_pending(mut self, lease: CallLease) -> Result<Self, VoiceError> {
         let slot = self
@@ -175,6 +199,9 @@ impl RequestAuthority for CryptoAuthority {
         ];
         for lease in self.pending.iter().flatten() {
             waits.push(lease.wait_revoked().boxed());
+        }
+        if let Some(sdp) = &self.sdp {
+            waits.push(sdp.closed().boxed());
         }
         if let Some(hello) = &self.hello {
             waits.push(hello.revoked().boxed());

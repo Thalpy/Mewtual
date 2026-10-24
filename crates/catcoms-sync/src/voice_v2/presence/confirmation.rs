@@ -18,6 +18,7 @@ const MAX_PAIRS: usize = 16;
 const MAX_CONFIRMING: usize = 8;
 const PAIR_BYTES: usize = 6144;
 const CONFIRM_DOMAIN: &str = "mewtual/voice/key-confirm/v2";
+mod answer;
 mod derivation;
 mod first_offer;
 mod pair;
@@ -26,6 +27,8 @@ mod ready;
 mod response;
 mod result;
 mod sdp;
+mod sdp_open_result;
+mod sdp_result;
 mod start;
 mod successor;
 pub(crate) use derivation::{ProtectedDerivation, ProtectedDerivationResult};
@@ -74,13 +77,18 @@ pub(super) struct Pair {
     sdp_successor: Option<successor::Preparation>,
     // Fixed history must not hold an Exchange/receiver/input. The actual event is separate
     // progress custody and is collected with its original successor on expiry/revocation.
-    first_offer: Option<Arc<crate::voice_v2::negotiation::admission::FirstOfferAdmission>>,
+    first_offer: Option<Arc<crate::voice_v2::negotiation::admission::SdpAdmission>>,
     // One fixed LOW admission, independent of the live successor. No progress backedge.
     ready_admission: Option<Arc<crate::voice_v2::ready::admission::ReadyAdmission>>,
-    sdp_input: Option<Box<InboundPacket>>,
+    sdp_input: Option<Arc<InboundPacket>>,
     // Fixed first-PC identity only; no Exchange/Workflow/native-row backedge. Never reset
     // on expiry, Close or payload collection to make the same first preparation issuable.
     sdp_intent: Option<Arc<crate::voice_v2::sdp::InitialSdpIntent>>,
+    // Fixed first seal history survives payload compaction for exact lost-reply recovery.
+    sdp_seal: Option<Arc<CryptoAction>>,
+    // Separate Root namespace reservation, not the incoming PacketSlot claim.
+    answer_position: Option<Box<crate::voice_v2::negotiation::answer::AnswerPosition>>,
+    answer_receipt: Option<Arc<crate::voice_v2::negotiation::admission::SdpAdmission>>,
     _credit: Credit,
 }
 struct Action {
@@ -945,6 +953,18 @@ impl LocalJoin {
             if pair.sdp_successor.is_none() {
                 drop(pair.sdp_input.take());
             }
+            let wall = clock.now_ms();
+            let mono = clock.monotonic_ms();
+            if pair
+                .sdp_intent
+                .as_ref()
+                .is_some_and(|intent| !intent.current_at(wall, mono))
+            {
+                // No Answer may consume this original round after PC/key/Ready closure.
+                // Return only its unused namespace/history reservation; actual packet,
+                // engine and transport owners keep their own charges through real Drop.
+                drop(pair.answer_position.take());
+            }
             if !pair.retired
                 && (!self.lease.is_live()
                     || !pair.pin.is_live()
@@ -1056,6 +1076,9 @@ impl LocalJoin {
                 ready_admission: None,
                 sdp_input: None,
                 sdp_intent: None,
+                sdp_seal: None,
+                answer_position: None,
+                answer_receipt: None,
                 _credit: credit,
             },
         );

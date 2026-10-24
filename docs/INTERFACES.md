@@ -1,5 +1,34 @@
 # Mewtual; Interfaces & Hooks Schema
 
+## Typed Root SDP actions (24 October; native/browser endpoint pending)
+
+Trusted Root APIs prepare_voice_low_sdp_offer, prepare_voice_sdp_open and
+submit_voice_sdp_result require the actual CallGrant and original InitialSdpIntent/action
+allocations. No renderer token/header/role may select an input. CryptoOperation adds
+SealSdp/OpenSdp with separately typed borrowed inputs and8208/8192 output ceilings.
+These additions do not widen generic Data2048 or confirmation528 endpoints; those endpoints
+explicitly exclude SDP. No new native/browser SDP grammar is exposed by this Root increment.
+
+LOW Offer publication reserves one future Answer position in the same Root256-identity
+namespace used by public/encrypted ingress. PacketSlot claims are separate. Protected Answer
+dispatch records SdpAdmission and recovers it before replay/token work; a receipt is not a
+decrypt result or delivery grant. Actual installed PC closure and its fixed Ready deadline
+bound both Offer and Answer receipts. Source requires the original packet's fixed PC binding.
+
+Root seal results prepare their signature outside Engine and publish signed cache plus exact
+terminal metadata before Source can queue it after real crypto settlement. Exact terminal
+lookup uses native original-clock observations and no callback under Engine/Group/Policy.
+Root submit_voice_sdp_open_result accepts a closed SdpOpenOutput: exact bounded plaintext plus
+its native-checked hash, or AuthenticationFailed with no fabricated plaintext. It publishes
+Opened/Rejected and original token consumption together. Opened also publishes a fixed
+SdpDelivery allocation; recover_sdp_open_result returns that SAME allocation before input/token
+checks, including after End through an independently authenticated native registered action.
+No Root plaintext result cache exists. admit_voice_sdp_delivery separately validates the current
+original grant/Actor/room/epoch/PC. Its idempotent reply names ONE logical effect, not another
+affine permit on every retry. Native must retain the original record, and the broker must latch
+SDK-started once before invoking the exact PC. was_admitted is history, never current permission.
+The native/browser SDP endpoints and RTC consumer remain unfinished.
+
 ## Initial PC-intent Control14 (24 October; consumers not enabled)
 
 The original authenticated Header supplies the full parent RowId. Request version7 is:

@@ -2,7 +2,7 @@
 //! Live kind28 dispatch remains disabled while SDP transfer and production IPC are incomplete.
 use super::*;
 use voice_v2::chain::ConfirmationAdmission;
-use voice_v2::negotiation::admission::FirstOfferAdmission;
+use voice_v2::negotiation::admission::SdpAdmission;
 use voice_v2::ReadyAdmission;
 
 #[cfg(test)]
@@ -40,14 +40,15 @@ impl ConfirmationReceipt {
 #[derive(Clone)]
 pub(super) enum EncryptedReceipt {
     Confirmation(ConfirmationReceipt),
-    FirstOffer(Arc<FirstOfferAdmission>),
+    FirstOffer(Arc<SdpAdmission>),
+    Answer(Arc<SdpAdmission>),
     Ready(Arc<ReadyAdmission>),
 }
 impl EncryptedReceipt {
     pub(super) fn retain(&self) -> bool {
         match self {
             Self::Confirmation(receipt) => receipt.retain(),
-            Self::FirstOffer(receipt) => {
+            Self::FirstOffer(receipt) | Self::Answer(receipt) => {
                 receipt.retains_identity() || Arc::strong_count(receipt) > 1
             }
             Self::Ready(receipt) => receipt.retains_identity() || Arc::strong_count(receipt) > 1,
@@ -56,14 +57,14 @@ impl EncryptedReceipt {
     pub(super) fn object_hash(&self) -> [u8; 32] {
         match self {
             Self::Confirmation(receipt) => receipt.object_hash(),
-            Self::FirstOffer(receipt) => receipt.hash,
+            Self::FirstOffer(receipt) | Self::Answer(receipt) => receipt.hash,
             Self::Ready(receipt) => receipt.hash,
         }
     }
     fn same_call(&self, call: &CallLease) -> bool {
         match self {
             Self::Confirmation(receipt) => receipt.0.admission.same_call(call),
-            Self::FirstOffer(receipt) => receipt.same_call(call),
+            Self::FirstOffer(receipt) | Self::Answer(receipt) => receipt.same_call(call),
             Self::Ready(receipt) => receipt.same_call(call),
         }
     }
@@ -71,7 +72,8 @@ impl EncryptedReceipt {
 pub(crate) enum EndpointReceipt {
     Public(PublicReceipt),
     Confirmation(ConfirmationReceipt),
-    FirstOffer(Arc<FirstOfferAdmission>),
+    FirstOffer(Arc<SdpAdmission>),
+    Answer(Arc<SdpAdmission>),
     Ready(Arc<ReadyAdmission>),
 }
 impl EndpointReceipt {
@@ -79,7 +81,7 @@ impl EndpointReceipt {
         match self {
             Self::Public(receipt) => receipt.authorized(),
             Self::Confirmation(receipt) => receipt.0.admission.authorized(),
-            Self::FirstOffer(receipt) => receipt.authorized(),
+            Self::FirstOffer(receipt) | Self::Answer(receipt) => receipt.authorized(),
             Self::Ready(receipt) => receipt.authorized(),
         }
     }
@@ -87,14 +89,14 @@ impl EndpointReceipt {
         match self {
             Self::Public(receipt) => receipt.object_hash(),
             Self::Confirmation(receipt) => receipt.object_hash(),
-            Self::FirstOffer(receipt) => receipt.hash,
+            Self::FirstOffer(receipt) | Self::Answer(receipt) => receipt.hash,
             Self::Ready(receipt) => receipt.hash,
         }
     }
     pub(crate) fn authorized_at(&self, wall: u64, mono: u64) -> bool {
         match self {
             Self::Public(receipt) => receipt.authorized_at(wall, mono),
-            Self::FirstOffer(receipt) => receipt.authorized_at(wall, mono),
+            Self::FirstOffer(receipt) | Self::Answer(receipt) => receipt.authorized_at(wall, mono),
             Self::Ready(receipt) => receipt.authorized_at(wall, mono),
             // Epoch currency is ALSO required from the original Root reply route. This fixed
             // metadata cannot inspect or recreate Root; direct recovery repeats current Context.
@@ -110,7 +112,7 @@ impl EndpointReceipt {
         match self {
             Self::Public(receipt) => receipt.revoked().await,
             Self::Confirmation(receipt) => receipt.0.admission.revoked().await,
-            Self::FirstOffer(receipt) => receipt.revoked().await,
+            Self::FirstOffer(receipt) | Self::Answer(receipt) => receipt.revoked().await,
             Self::Ready(receipt) => receipt.revoked().await,
         }
     }
@@ -163,7 +165,14 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         let reserved_offer = participant
             .join
             .has_ready_offer_position(envelope.object(), voice.endpoints.public.namespace());
-        if existing.is_none() && voice.endpoints.public.full() && !reserved_offer {
+        let reserved_answer = participant
+            .join
+            .has_answer_position(envelope.object(), voice.endpoints.public.namespace());
+        if existing.is_none()
+            && voice.endpoints.public.full()
+            && !reserved_offer
+            && !reserved_answer
+        {
             return Err(VoiceError::Capacity);
         }
         if existing
@@ -260,6 +269,36 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
                 .is_none());
             voice.endpoints.changed();
             return Ok(EndpointReceipt::FirstOffer(admission));
+        }
+        if matches!(envelope.object().body(), Body::Encrypted { header, .. } if matches!(header.kind, voice_v2::EncryptedKind::AnswerRound(_)))
+        {
+            let admission = participant.join.admit_protected_answer(
+                actor,
+                &ticket,
+                &envelope,
+                &room,
+                voice.endpoints.public.namespace(),
+                &authority,
+                clock,
+                final_owner,
+            )?;
+            if let Some(existing) = existing {
+                let EncryptedReceipt::Answer(existing) = existing else {
+                    return Err(VoiceError::RetryMismatch);
+                };
+                if !Arc::ptr_eq(&existing, &admission) {
+                    return Err(VoiceError::RetryMismatch);
+                }
+                return Ok(EndpointReceipt::Answer(existing));
+            }
+            assert!(voice
+                .endpoints
+                .public
+                .encrypted
+                .insert(key, EncryptedReceipt::Answer(admission.clone()))
+                .is_none());
+            voice.endpoints.changed();
+            return Ok(EndpointReceipt::Answer(admission));
         }
         let existing = match existing {
             Some(EncryptedReceipt::Confirmation(receipt)) => Some(receipt),

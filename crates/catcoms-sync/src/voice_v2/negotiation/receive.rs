@@ -489,7 +489,7 @@ impl PreparedOffer {
     pub(in crate::voice_v2) fn prepare_event(
         &mut self,
         token: u64,
-    ) -> Result<Box<InboundPacket>, VoiceError> {
+    ) -> Result<Arc<InboundPacket>, VoiceError> {
         if self.aad.is_empty() {
             return Err(VoiceError::Reservation);
         }
@@ -497,7 +497,7 @@ impl PreparedOffer {
         let Body::Encrypted { header, ciphertext } = object.body() else {
             unreachable!()
         };
-        Ok(Box::new(InboundPacket::from_first_offer(
+        Ok(Arc::new(InboundPacket::from_first_offer(
             token,
             object.issuer(),
             header.clone(),

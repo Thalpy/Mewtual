@@ -327,7 +327,7 @@ mod tests {
             + std::mem::size_of::<Preparation>()
             + std::mem::size_of::<Sha256>();
         assert!(
-            bytes <= sdp_handoff::NATIVE_PC_METADATA_BYTES / 2,
+            bytes <= sdp_handoff::NATIVE_PC_ADAPTER_METADATA_BYTES,
             "native initial PC fixed graph {bytes}"
         );
     }

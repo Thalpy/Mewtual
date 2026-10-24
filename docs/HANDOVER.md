@@ -1,10 +1,75 @@
 # Mewtual; Handover
 
+## Root SDP actions and protected Answer intake (24 October; integration continues)
+
+`communication-sdp-rtc` / `target/communication-sdp-rtc-worktree` continues from pushed
+`communication-sdp-effects` checkpoint `13891350`. This is still an unfinished V2 call
+implementation. Native/browser SDP Data and delivery integration, HIGH Answer production,
+RTC/complete ICE, fresh rounds, multi-peer composition and media relay are not complete.
+
+Root now prepares typed SealSdp/OpenSdp actions bound to the actual original PC intent,
+Ready/round, OfferId and affine direction issue. Maximum outputs are8208/8192 bytes; the
+old confirmation limits stay unchanged. HIGH Open retains the same paid admitted input
+across final refusal. LOW's first Offer privately borrows the original inert packet/action
+claims, reserves the future Answer's separate Root receipt position, and publishes action,
+sequence and role before activating last. Generic inactive lenders remain closed.
+
+Protected Answers now have their own real Root dispatch/receipt path, frozen route choice
+and actual PC check. Exact recovery precedes replay/token checks. An unused Answer position
+returns on PC close or End. Installed HIGH PC closure also fences first-Offer admission and
+cached replies. Receipt waits observe real PC close and the earlier original Ready deadline.
+Packet/Source authority retains the same fixed PC binding; a live Exchange alone is insufficient.
+
+The real Root regression found a missing profile selection in native pair creation: the
+LocalJoin epoch was protected but PacketLedger still selected legacy SDP. The native pair
+transaction now selects CompleteSdpV1 before any crypto capacity. Compatibility registration
+keeps its existing mode. Two actual Root namespace tests pass, including full-table admission,
+wrong-round/Offer/old-kind refusal, cross-kind collision, recovery after token consumption
+and close/End cleanup. Pressure is synthetic namespace occupancy, not256 paid packets.
+
+Root seal-result publication now keeps an inert signature across local Capacity and records
+terminal metadata before later Source pumping. Original-clock observations precede Engine;
+Engine and Group/Policy acquisition are nonblocking and final receipts use captured samples.
+The public SDP recovery API uses this callback-free path too. Root wrappers snapshot only
+the actual local/peer identities from the already-paid Actor and use the current original
+directory incarnation; they do not copy the full roster or reconcile a new view on retry.
+
+Root Open atomically consumes the original token and publishes immutable terminal history
+with one fixed delivery observation. Root retains no plaintext copy. Exact recovery returns
+the SAME observation after ACK, engine settlement, input compaction or PC close. Authentication
+failure has a closed, domain-separated result with no invented plaintext; it and invalid UTF8
+retain Rejected without a delivery. Fresh delivery separately checks the actual Actor, room
+incarnation, epoch, call and PC. Repeated admission describes one logical effect: the eventual
+native row/browser inbox must preserve the same record and one irreversible SDK-started latch.
+The record retains no Action/Exchange/Phase; its shared plain fee drops last. Compact action
+metadata preserves both original confirmation split-row limits without increasing any budget.
+
+Current focused evidence:78 affected Ready tests before the final two adversarial additions;
+six Open/delivery adversarial regressions; three seal-result regressions; two actual Root
+namespace/Open/delivery regressions under full ordinary-byte pressure; both original confirmation
+split-row guards; and the fixed action+delivery composition guard pass. The fixed-record selector
+also passes (it includes ownership/functional checks, not just layout tests). Actual Group and
+Policy contention preserve the token; room-lease incarnation replacement, actual epoch/policy
+replacement and session revocation refuse old delivery while exact history remains recoverable.
+Read-only reviews found no remaining blocker/high/medium in these Root slices. Sync/App/native
+current-source metadata compiles pass against exact cached dependencies. These are development
+checks, not full Cargo gates. All1,179 Sync tests passed in242.22s and all2,735 frontend
+tests passed in77.65s; the stronger last-owner test then also proved actual Phase and Exchange
+owners die while delivery remains. Remaining complete workspace/native suites and lint/build
+gates are pending for this increment.
+
+The older Ready checkpoint's full Root suite passed3,505 tests. Its full native run passed803
+and failed9: one fixture lacked continued production Ready maintenance, then the fixture's
+fail-closed shutdown guard refused the next eight scenarios. Fixture-only `a55ccf18` is already
+in the SDP branches; after that run finished it was applied as `9b59c812` to the Ready checkout.
+The original failing scenario then passed in9.26s, and all11 affected native voice scenarios
+passed in155.26s. The earlier full native result remains a failure until its full rerun passes.
+
 ## Initial SDP handoff in progress (24 October)
 
 The reviewed Ready checkpoint `fc8ed136` is pushed to `communication-native-live` / draft
-PR53. Its complete Root/native suites still run against that immutable snapshot. New SDP
-work is isolated in `target/communication-sdp-effects-worktree` (`communication-sdp-effects`)
+PR53. See the newer validation record above. Initial PC custody is pushed in
+`communication-sdp-effects`; subsequent Root SDP work is isolated in `communication-sdp-rtc`
 and is not yet a completed or enabled V2 call implementation.
 
 Root now derives one original first-round intent from the actual HIGH Ready marker or LOW

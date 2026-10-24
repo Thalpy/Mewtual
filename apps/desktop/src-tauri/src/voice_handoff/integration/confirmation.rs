@@ -402,7 +402,9 @@ async fn crypto_and_return(
                 .unwrap();
             (buffer, len)
         }
-        CryptoInput::Derive(_) => panic!("confirmation child"),
+        CryptoInput::Derive(_) | CryptoInput::SealSdp(_) | CryptoInput::OpenSdp(_) => {
+            panic!("confirmation child, never a complete SDP operation")
+        }
     };
     let mut buffer = buffer;
     if reject_opened {
@@ -1087,7 +1089,9 @@ async fn project_and_admit(
         CryptoInput::DecryptConfirmation(packet) => {
             (2, packet.header.sequence, packet.aad(), packet.ciphertext())
         }
-        CryptoInput::Derive(_) => panic!("actual child input"),
+        CryptoInput::Derive(_) | CryptoInput::SealSdp(_) | CryptoInput::OpenSdp(_) => {
+            panic!("actual confirmation child input")
+        }
     };
     assert_eq!(data[416], operation);
     assert_eq!(&data[418..426], &sequence.to_be_bytes());

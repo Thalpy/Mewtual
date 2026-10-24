@@ -31,6 +31,8 @@ const ACTION_BYTES: usize = CIPHERTEXT + MAX_AAD + 1536;
 const ENGINE_BYTES: usize = 4 * (CIPHERTEXT + MAX_AAD) + 3 * MAX_SDP_PLAINTEXT + 2048;
 const RESULT_BYTES: usize = MAX_SDP_PLAINTEXT + 1040;
 pub(crate) mod admission;
+pub(in crate::voice_v2) mod answer;
+pub(in crate::voice_v2) mod initial_offer;
 mod low_ready;
 pub(crate) mod namespace;
 mod packet_capacity;
@@ -137,8 +139,34 @@ pub(super) struct ActionIssue {
     exchange: Arc<Exchange>,
     direction: usize,
     unpublished: bool,
+    binding_issued: bool,
 }
 impl ActionIssue {
+    /// Affine fixed-record issuance, independent of eventual action publication. Even
+    /// another internal caller cannot allocate multiple paid records from a borrowed
+    /// direction issue. An abandoned whole preparation may retry the original capacity.
+    pub(in crate::voice_v2) fn claim_sdp_binding(&mut self) -> Result<(), VoiceError> {
+        if !self.unpublished || self.binding_issued {
+            return Err(VoiceError::Unauthorized);
+        }
+        self.binding_issued = true;
+        Ok(())
+    }
+    pub(in crate::voice_v2) fn covers_sdp_intent(
+        &self,
+        intent: &super::sdp::InitialSdpIntent,
+        sealing: bool,
+    ) -> bool {
+        self.unpublished
+            && self.direction == usize::from(!sealing)
+            && self.exchange.live.is_live()
+            && self.exchange.sdp_round() == Some(intent.round())
+            && self
+                .exchange
+                .successor
+                .as_ref()
+                .is_some_and(|proof| intent.matches_successor(proof))
+    }
     /// Pure issuance tail, not round/effect authorization. The caller MUST validate
     /// original authority immediately before this step and retain this SAME affine issue
     /// outside all final guards; its unpublished Drop may lock accounting State.
@@ -576,6 +604,7 @@ impl Exchange {
                 exchange: self.clone(),
                 direction,
                 unpublished: true,
+                binding_issued: false,
             },
         ))
     }

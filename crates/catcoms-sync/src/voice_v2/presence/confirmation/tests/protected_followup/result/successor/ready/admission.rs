@@ -59,7 +59,7 @@ pub(super) fn admit(
     object: &SignedObject,
     room: &RoomAuthority,
     final_owner: impl FnOnce(u64, u64) -> Result<(), VoiceError>,
-) -> Result<Arc<crate::voice_v2::negotiation::admission::FirstOfferAdmission>, VoiceError> {
+) -> Result<Arc<crate::voice_v2::negotiation::admission::SdpAdmission>, VoiceError> {
     let envelope = Envelope::Direct(object.clone());
     let ticket = p
         .high

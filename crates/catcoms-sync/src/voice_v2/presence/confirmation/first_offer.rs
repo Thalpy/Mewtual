@@ -2,7 +2,7 @@
 //! input custody, never successful AEAD, an RTC description or an audio connection.
 use super::*;
 use crate::voice_v2::helper::RoomAuthority;
-use crate::voice_v2::negotiation::admission::{FirstOfferAdmission, ReceiptConsent};
+use crate::voice_v2::negotiation::admission::{ReceiptConsent, SdpAdmission};
 use crate::voice_v2::runtime::{ActorOwner, IngressTicket};
 
 impl LocalJoin {
@@ -16,7 +16,7 @@ impl LocalJoin {
         authority: &Authority<'_>,
         clock: Arc<dyn Clock>,
         final_owner: impl FnOnce(u64, u64) -> Result<(), VoiceError>,
-    ) -> Result<Arc<FirstOfferAdmission>, VoiceError> {
+    ) -> Result<Arc<SdpAdmission>, VoiceError> {
         if room.scope != self.scope
             || !room.lease.is_live()
             || !actor.uses_resources(&self.resources)
@@ -103,11 +103,16 @@ impl LocalJoin {
             effect: actor.effect(object.issuer(), self.local, object.expires())?,
             clock: clock.clone(),
         };
+        // Standalone pre-PC Root fixtures admit input without a browser intent. Once a
+        // real intent exists its closure is irreversible: neither first admission nor
+        // cached recovery may fall back to the pre-PC path. Open always needs that intent.
+        let pc = pair.sdp_intent.clone();
         let publication = self.ledger.prepare_first_offer(
             &receive,
             object,
             funding,
             consent,
+            pc,
             authority,
             clock.as_ref(),
         )?;

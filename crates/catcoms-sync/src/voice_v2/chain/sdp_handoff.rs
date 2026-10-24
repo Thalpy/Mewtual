@@ -21,6 +21,13 @@ pub const NATIVE_SDK_METADATA_BYTES: usize = 512;
 /// Candidate whole native PC-intent graph, including its Root fixed observation. The
 /// complete native/Root layout tests must pin this within the unchanged4KiB metadata.
 pub const NATIVE_PC_METADATA_BYTES: usize = 1024;
+/// Partition the SAME fixed metadata: original Root intent plus its two direction records,
+/// and the complete native claim/preparation/hash graph. No envelope or group limit changes.
+pub const NATIVE_PC_ROOT_METADATA_BYTES: usize = 736;
+pub const NATIVE_PC_ADAPTER_METADATA_BYTES: usize = 288;
+const _: () = assert!(
+    NATIVE_PC_ROOT_METADATA_BYTES + NATIVE_PC_ADAPTER_METADATA_BYTES <= NATIVE_PC_METADATA_BYTES
+);
 // Actual Buffer/Copy/Credit graph plus128B caller bookkeeping is264B on the
 // supported layout. Round its payment to32B; keep the whole64KiB envelope unchanged.
 const COPY_METADATA: usize = 288;
@@ -71,6 +78,14 @@ impl EffectObserver {
     }
     pub(in crate::voice_v2) fn belongs_to(&self, key: &super::EstablishedKeyCustody) -> bool {
         key.belongs_to(&self.0.original)
+    }
+    /// Wait on this original phase's actual close notification. The pure request_close
+    /// gate refuses effects immediately; its affine native CloseTicket performs this
+    /// notification outside final guards. Retaining the observer keeps the watch paid.
+    pub(in crate::voice_v2) async fn closed(&self) {
+        if self.is_live() {
+            self.0.lease.wait_revoked().await;
+        }
     }
     pub fn is_live(&self) -> bool {
         self.0.gate.load(Ordering::Acquire) == 1
