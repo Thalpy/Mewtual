@@ -28,7 +28,8 @@ Copy Capacity/no-debit, held physical permit and bad-AEAD permanent debit. The f
 15 positive-size Copies plus the actual PC completion's sixteenth; zero-byte Copies refuse
 and cannot serve as a pressure oracle. Full frontend2,740 tests pass (73.63s), as do type
 checking and production build (46.97s). Read-only final review reports no remaining findings.
-Formal native check/strict native and Root Clippy are running; full Root/native gates remain
+Formal native Cargo check passes (59.94s), as do strict native all-target Clippy (1m52s)
+and strict Root all-target/all-feature Clippy (2m00s). Full Root/native gates remain
 separate/pending. No full-suite green claim follows from these focused checks.
 
 The capacity-only permit binds the entire canonical Header, actual physical position,
