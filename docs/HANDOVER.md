@@ -1,5 +1,28 @@
 # Mewtual; Handover
 
+## Corrected native media checkpoint validated (25 October)
+
+The corrected `communication-voice-media-custody` runtime at eb0be705 passes the complete
+native workspace:862 unit tests plus5 ACL tests,0failed/ignored, completing19:58:11UTC.
+The command took30m37s including4m54s compilation; unit runtime1540.23s. Both original
+2304B layout assertions now pass without changing their limits. The earlier860pass/2fail
+run is retained below as failed history, not current validation.
+
+Complete Root validation passes3,675 tests/24ignored; complete frontend passes2,856 tests,
+Svelte0errors/0warnings and production build. Root/native formatting, strict Root all-target/
+all-feature Clippy, strict native all-target Clippy, separate native check and ambient checks
+pass. `cargo deny check` still fails inherited crypto-bigint0.5.5/RUSTSEC-2026-0387; bans,
+licenses and sources pass. No dependency or advisory ignore was changed. Startup/flows were
+not applicable to these non-setup/non-UI changes. Independent adversarial review has no
+unresolved blocker/high/medium; the narrow dynamic sole-anchor drop-order regression remains
+a recorded follow-up, with declaration/lifetime order statically reviewed.
+
+This validates native admission/cleanup, not live V2 completion. The browser child branch
+adds inactive peer-transfer/status leaves and failed-close hardening; its own checks are
+recorded there. Actual op28 browser handoff/status driving, old negotiation retirement,
+supported multiparty/shared Session, App activation/tracks, relay and combined/physical
+acceptance remain open. Only one desktop is available.
+
 ## Native fixed-layout correction (25 October; final native rerun pending)
 
 The first X native full run finished860pass/2failed in1567.91s. Both failures were real
