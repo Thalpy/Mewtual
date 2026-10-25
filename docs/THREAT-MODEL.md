@@ -1,5 +1,21 @@
 # Threat model; client integrity & enforcement boundaries
 
+## Private round advancement and action-local return (25 October)
+
+An accepted receipt alone cannot advance Offer to Answer. The original browser executor must
+have completed its actual crypto SDK, settled and ACKed it, plus successful RTC/canonical
+Applied for Open; then the SAME action24 must prove localDrained. Historical-only recovery,
+rejection, no-terminal settlement and closed cleanup cannot substitute. The first Action/
+adapter/history frame ends before constructing its successor. Composite exclusion spans
+Return and Answer adoption; reentrant status cannot steal the prepared bytes or replace work.
+
+Live24 closes only its Action, preserving the actual PC. End still fences/closes/joins RTC
+before Return and shared native release. HIGH Answer's new14 and LOW Answer's fresh26 retain
+the original finite Ready/PC deadline. No new rows, keys, capacity or renewed round is implied.
+Tests control RTC/native providers; production15-27/App activation, real interoperability,
+multi-peer/media relay and physical acceptance remain open. Earlier Answer TODOs below are
+superseded only for this private single-round composer.
+
 ## Private first-Offer RTC effect ordering (25 October; production disabled)
 
 Native metadata is not a reusable SDK permit. LOW must join a new actual14 and repeat

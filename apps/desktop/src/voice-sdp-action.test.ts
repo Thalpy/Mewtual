@@ -193,7 +193,10 @@ test("serial browser stage inventory fits the original64KiB without retaining Be
   // one composite void flight and bounded gathering listener/timer wrappers. The concrete
   // SDK constructor retains no arbitrary caller-factory/retire closure graph.
   const rtcInventory = 256 + 4 * 128 + 3 * 128 + 128 + 256;
-  const fixedInventory = existingSdkPc + originalBindingStrings + 2 * historyStrings + callbacksAndFrames + rowClaimsAndLoans + rtcInventory;
+  // Serial composition adds only a fixed stage field and two void helper frames. The
+  // first Action/history/adapter graph ends before its successor is constructed.
+  const composition = 16 + 2 * 256;
+  const fixedInventory = existingSdkPc + originalBindingStrings + 2 * historyStrings + callbacksAndFrames + rowClaimsAndLoans + rtcInventory + composition;
   assert.ok(fixedInventory <= fixed, `complete fixed browser owner: ${fixedInventory}/${fixed}`);
   const begin = 8192 + 2 * 8419 + 2 * 8435 + 2 * 236 + 220 + wireScratch + fixed;
   const input = 2 * 66 + 2 * 82 + 2 * 9232 + 9216 + wireScratch + fixed;
@@ -207,4 +210,24 @@ test("serial browser stage inventory fits the original64KiB without retaining Be
   // Include the one owned UTF16 string AND a known RTC conversion snapshot; neither
   // survives into the60649B crypto Result stage. Opaque PC/GC heap is outside this proof.
   assert.ok(8192 + 2 * 16384 + fixed + 1024 <= 65536);
+});
+
+
+test("live action finish retries the same Return without repeating successful crypto", async () => {
+  const f = await fixture(); await f.owner.attempt(); assert.equal(f.owner.complete, true);
+  f.lose("returned"); await assert.rejects(f.owner.finish()); assert.equal(f.owner.returned, false);
+  await f.owner.finish(); assert.equal(f.owner.returned, true); assert.equal(f.counts.returned, 2);
+  assert.equal(f.counts.compute, 1); assert.equal(f.counts.result, 1); await f.owner.finish(); assert.equal(f.counts.returned, 2);
+});
+
+test("live action finish refuses unfinished, historical-only and unapplied Open work", async () => {
+  const waiting = await fixture(); assert.throws(() => waiting.owner.finish());
+  const opened = await fixture("open"); await opened.owner.attempt();
+  assert.equal(opened.owner.complete, false); assert.throws(() => opened.owner.finish());
+  const history = await fixture(); history.historical(); await history.owner.attempt();
+  assert.equal(history.owner.complete, false); assert.throws(() => history.owner.finish());
+  const rejected = await fixture("open", 10, true); await rejected.owner.attempt();
+  assert.equal(rejected.owner.complete, false); assert.throws(() => rejected.owner.finish());
+  history.oldExecutorSettled(); // Historical recovery cannot settle another executor's SDK.
+  for (const f of [waiting, opened, history, rejected]) { f.end(); await f.owner.cleanup(); }
 });

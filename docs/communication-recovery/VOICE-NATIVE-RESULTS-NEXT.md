@@ -1,5 +1,21 @@
 # Next voice milestone: native result recovery
 
+## 25 October: private Offer/Answer composer exists; connect real native dispatch next
+
+Both original endpoint roles now compose Offer/Answer with one RTC peer and one active
+Action graph. Actual executor success, settle/ACK, Open RTC/Applied and canonical24 precede
+the next Action. Live24 keeps the PC; End closes/joins it before shared release. HIGH Answer
+gets new actual14, LOW Answer gets fresh26, and neither renews the original Ready/deadline.
+HANDOVER records focused tests, review and full gates. This supersedes older Answer tasks.
+
+Next connect the closed native service's15-27 dispatch to the existing original-row intake
+permits/handlers and validate the complete two-process browser/native HTTP and blocked-TCP
+round. Preserve all caps and final authority checks; inventory the actual complete service
+future plus synchronous header admission, not only standalone adapters. App V2 activation
+stays separate until real RTC/media, operational renewed rounds and composition are ready.
+Then multi-peer, member media relay and combined acceptance. Actual stopped-Actor/End-lock26
+and independent physical audio/network evidence remain open; separate devices are unavailable.
+
 ## 25 October: private first-Offer RTC path exists; complete Answer next
 
 The original browser owner now prepares LOW's gathered Offer after a new actual14 and

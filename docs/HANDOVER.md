@@ -1,5 +1,40 @@
 # Mewtual; Handover
 
+## Private original Offer/Answer composition (25 October; validation in progress)
+
+`communication-sdp-answer-composition` adds `completeNativeSdpRtcRound` on the exact original
+owner/channel/chain. It composes one original Offer/Answer round using one actual PC and one
+active browser Action/adapter graph at a time. Successful live action finish requires this
+executor's actual crypto completion, accepted matching terminal, settlement and ACK; Open
+also requires actual RTC success and canonical Applied. It retries the SAME24 until native
+localDrained, then ends and clears its Action/history/adapter helper frame before constructing
+the opposite-purpose action. Native compaction preserves the original Action/delivery without
+closing the shared Phase. Historical-only, rejected, unfinished or unapplied work cannot advance.
+
+HIGH Answer obtains a new actual14 and joins its physical finally before local SDK work.
+LOW Answer Open joins fresh false26 before remote RTC and reports true26 only after success.
+Both retain the original Ready/PC/deadline, keys, storage/SDK and two reserved row claims.
+The composite exclusion covers Return and successor adoption. Live action Return preserves
+the peer; End synchronously closes it and joins actual SDK work before Return/shared release.
+Broker shape28 rejects older HMR state. Serial composition adds528B fixed bookkeeping within
+the unchanged16KiB book/64KiB browser phase, with no overlapping first Action graph.
+
+All270 focused tests pass. Maximum Offer/Answer both roles, lost first24 and Answer Result/
+Applied/24, held Return/Answer SDK across End, historical/rejected nonadvance, malformed or
+unavailable Answer with original-row recovery, deadline, reentrant status, copied owners and
+HMR refusal are covered. Read-only adversarial review found no remaining correctness/security
+findings; documentation prefixes are updated here. All2,849 frontend tests, Svelte checks (0errors/0warnings) and production build
+(49.58s) pass. Rust remains identical to `a0ef4cfa`. The first full Root run stopped without a final
+result after879 passing tests/0failures; a separate background restart is running. Full
+Root/native gates remain serial and pending. The inherited crypto-bigint RUSTSEC-2026-0387 dependency audit failure remains.
+
+These browser tests control native authority and the RTC provider; framing/WebCrypto are
+real. Actual native/browser full-round HTTP/TCP interoperability is the next boundary, along
+with real RTC/media, renewed rounds, production App activation, multi-peer, member relay and
+combined acceptance. Shipping15-27 are still refused. Independent physical audio/network
+acceptance remains unavailable with one desktop. Earlier Answer TODOs below are superseded
+by this private controlled-provider implementation, not a production-completion claim.
+
 ## Private first-Offer RTC consumer (25 October; validation in progress)
 
 `communication-sdp-browser-rtc` adds an original retained-channel RTC owner. LOW runs a

@@ -1,5 +1,20 @@
 # Chat, files and voice implementation evidence
 
+## 25 October: private Offer/Answer composition; real interoperability next
+
+The retained broker now composes one original round in both endpoint roles, with action-local
+live24 compaction before the opposite-purpose SDK/crypto stage. HIGH Answer uses new actual14;
+LOW Answer uses fresh26. Historical/rejected/unapplied work cannot advance, and End joins
+actual SDK work before shared release.270 focused tests pass, covering maximum directions,
+lost replies, End at transitions/SDK, malformed or unavailable Answer, expiry and callback
+reentry. Read-only review has no unresolved correctness/security findings. Full gates are
+recorded in HANDOVER; Rust is unchanged from the native-delivery checkpoint.
+
+RTC/native providers are controlled; authenticated framing/WebCrypto are real. This is not
+actual native/browser full-round or WebView/media acceptance. Shipping15-27 and App activation
+remain refused. Renewed rounds, tracks/TURN, multi-peer, member relay, combined and independent
+physical acceptance remain open. Only one desktop is available.
+
 ## 25 October: private first-Offer RTC consumer; activation remains closed
 
 LOW fresh14 -> concrete local RTC preparation/gathering -> affine UTF8 -> original crypto

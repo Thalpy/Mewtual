@@ -1,5 +1,21 @@
 # Mewtual; Architecture
 
+## Serial private Offer/Answer round (25 October)
+
+The retained channel now composes both directions on one original RTC peer. Before changing
+purpose it successfully finishes native24 for the first actual executor, clears that Action
+and ends its helper frame. The next Action reuses the existing paid rows/phase and original
+Ready/deadline; callback/buffer graphs do not overlap. HIGH Answer still needs new actual14,
+original applied Offer and same PC; LOW Answer still needs fresh false26 before RTC. Live
+Return preserves the PC, while End joins actual SDK work before shared release. Fixed serial
+composition fits the existing16KiB book/64KiB payment. Broker shape28 is incompatible with
+older retained HMR owners and refuses them.
+
+Controlled-provider tests establish both maximum-size directions and lifecycle/retry ordering.
+Actual full-round native/browser interoperability, renewed rounds, media tracks/TURN, App
+activation, multi-peer and relay remain open. Shipping15-27 stay refused. Older Answer TODOs
+below describe checkpoints and are superseded only by this private implementation.
+
 ## Private retained-channel first-Offer RTC owner (25 October)
 
 One concrete RTC owner now lives under the original paid SDP phase. The composite flight

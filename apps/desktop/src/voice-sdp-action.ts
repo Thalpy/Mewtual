@@ -66,8 +66,8 @@ export type VoiceSdpActionNative = Readonly<{
   applyRemote?(plaintext: Uint8Array<ArrayBuffer>): Promise<void>;
 }>;
 
-/** First LOW Seal or first HIGH Open only. Answer requires a separate fresh native RTC
- * admission and the original successfully applied Offer; this owner does not infer either.
+/** One original Seal/Open action. The channel selects Offer/Answer and obtains fresh
+ * authority separately; this owner never infers an Answer prerequisite from a receipt.
  * The two fixed browser row claims are reserved by the broker BEFORE constructing it. */
 export class VoiceSdpActionOwner {
   private beginBytes: Uint8Array<ArrayBuffer> | null;
@@ -92,6 +92,25 @@ export class VoiceSdpActionOwner {
   readonly purpose: "seal" | "open";
   constructor(native: VoiceSdpActionNative, plaintext: Uint8Array<ArrayBuffer> | null) {
     this.native = native; this.beginBytes = plaintext; this.purpose = plaintext === null ? "open" : "seal";
+  }
+  /** Successful live compaction releases only this action, never its original PC/phase.
+   * Native24 keeps immutable terminal/delivery history for the opposite-purpose action.
+   * No second Action is installed until this same Return is canonically drained. */
+  get complete(): boolean {
+    return !this.stopped && !this.failed && !this.historicalOnly && this.sdkDone &&
+      this.history?.settled === true && this.history.acknowledged &&
+      (this.purpose === "seal" ? this.history.receipt?.outcome.kind === "sealed" :
+        this.history.receipt?.outcome.kind === "opened" && this.rtcDone && this.history.delivery === "applied");
+  }
+  finish(): Promise<void> {
+    if (this.flight) return this.flight;
+    if (this.gone) return Promise.resolve();
+    if (!this.complete) return fail();
+    const flight = Promise.resolve().then(async () => {
+      if (!this.observe(await this.native.returned(this.row!))) return;
+      if (this.history?.localDrained) { this.forgetBegin(); this.gone = true; }
+    }).finally(() => { this.flight = null; });
+    this.flight = flight; return flight;
   }
   /** End latches synchronously. It never clears an SDK input/output before its real await. */
   close(): void { this.stopped = true; }

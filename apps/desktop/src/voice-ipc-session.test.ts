@@ -2635,42 +2635,45 @@ async function establishedPcFixture(t: TestContext, localIsLow = true) {
 /** Original broker and real channel/SDK crypto; native authority is still an independent
  * mock. The actual Rust TCP gates establish Root/native behavior separately, not a WebView
  * or an interoperating browser/native process. This fixture never grants RTC delivery. */
-async function framedSdpOffer(t: TestContext, localIsLow = true, plaintextLength = 8192, authenticationFails = false) {
-  const f = await establishedPcFixture(t, localIsLow); await f.admitPc();
+async function framedSdpOffer(t: TestContext, localIsLow = true, plaintextLength = 8192, authenticationFails = false,
+    shared: Awaited<ReturnType<typeof establishedPcFixture>> | null = null, answer = false) {
+  const f = shared ?? await establishedPcFixture(t, localIsLow); if (!shared) await f.admitPc();
+  const localSeal = answer ? !localIsLow : localIsLow;
   const { child, custody } = f;
-  const parentRow = child.parent.row, row = "00000000000000020000000000000001";
-  const identity = { action: "9007199254741101", version: "1", inputTag: hash(110) };
+  const parentRow = child.parent.row, row = answer ? "00000000000000030000000000000001" : "00000000000000020000000000000001";
+  const identity = { action: answer ? "9007199254741102" : "9007199254741101", version: "1", inputTag: hash(110) };
   const original = { parentRow, identity: child.parent.identity, handshake: child.parent.binding.handshake,
     key: hash(99), sequence: "1", storage: hash(100), sdkGeneration: "1", sdkProof: hash(101), pcProof: hash(102) };
-  const selector = { parentRow, row, purpose: localIsLow ? "seal" as const : "open" as const };
+  const selector = { parentRow, row, purpose: localSeal ? "seal" as const : "open" as const };
   const plaintext = new Uint8Array(plaintextLength).fill(115), aad = new Uint8Array(579).fill(4);
-  const incoming = localIsLow ? plaintext : await child.parent.incoming(plaintext, aad, 42n);
+  const incoming = localSeal ? plaintext : await child.parent.incoming(plaintext, aad, (answer ? 43n : 42n));
   if (authenticationFails) incoming[0] ^= 1;
-  const engineBytes = 4 * (aad.length + incoming.length + (localIsLow ? 16 : 0)) + 3 * 8192 + 2048;
+  const engineBytes = 4 * (aad.length + incoming.length + (localSeal ? 16 : 0)) + 3 * 8192 + 2048;
   const input = Buffer.alloc(277 + aad.length + incoming.length);
   input.set([8, 3]); Buffer.from(row, "hex").copy(input, 2); Buffer.from(parentRow, "hex").copy(input, 18);
   integer(BigInt(identity.action), 8).copy(input, 34); integer(1n, 8).copy(input, 42); Buffer.from(identity.inputTag, "hex").copy(input, 50);
   integer(1n, 8).copy(input, 82); Buffer.from(hash(103), "hex").copy(input, 90); input[122] = 1;
   Buffer.from(original.key, "hex").copy(input, 123); integer(1n, 8).copy(input, 155); Buffer.from(original.sdkProof, "hex").copy(input, 163);
   Buffer.from(original.storage, "hex").copy(input, 195); Buffer.from(original.pcProof, "hex").copy(input, 227);
-  integer(42n, 8).copy(input, 259); integer(BigInt(engineBytes), 4).copy(input, 267); input[271] = Number(!localIsLow);
+  integer((answer ? 43n : 42n), 8).copy(input, 259); integer(BigInt(engineBytes), 4).copy(input, 267); input[271] = Number(!localSeal); input[272] = Number(answer);
   integer(BigInt(aad.length), 2).copy(input, 273); integer(BigInt(incoming.length), 2).copy(input, 275); input.set(aad, 277); input.set(incoming, 277 + aad.length);
   const counts = { begin: 0, resolve: 0, input: 0, admit: 0, result: 0, settle: 0, ack: 0, returned: 0, deliveryAdmit: 0, deliveryApplied: 0 };
   let began = false, settled = false, acknowledged = false, returned = false, pendingBegin = false, attached = false;
   let output: Uint8Array | null = null, outputTag: string | null = null, resultRecorded = false;
   let deliveryState = 1, busyDelivery = false;
   let lose: keyof typeof counts | null = null, hold: keyof typeof counts | null = null, held = gate();
-  let onInput: (() => void) | null = null;
+  let onInput: (() => void) | null = null, onReturn: (() => void) | null = null;
+  let badInput = false, busyBegin = false;
   f.f.cleanup(() => held.release());
   const status = () => {
-    const bytes = Buffer.alloc(220); bytes.set([8, 0]); Buffer.from(row, "hex").copy(bytes, 2); Buffer.from(parentRow, "hex").copy(bytes, 18); bytes[34] = Number(!localIsLow);
+    const bytes = Buffer.alloc(220); bytes.set([8, 0]); Buffer.from(row, "hex").copy(bytes, 2); Buffer.from(parentRow, "hex").copy(bytes, 18); bytes[34] = Number(!localSeal);
     bytes[35] = attached ? 0 : 1; bytes[36] = Number(returned); bytes[37] = Number(attached);
     if (attached) { integer(BigInt(identity.action), 8).copy(bytes, 38); integer(1n, 8).copy(bytes, 46); Buffer.from(identity.inputTag, "hex").copy(bytes, 54); }
     bytes[86] = Number(settled); bytes[87] = Number(resultRecorded);
     if (resultRecorded) {
       Buffer.from(outputTag!, "hex").copy(bytes, 88);
       if (authenticationFails) { bytes[120] = 3; bytes[121] = 0; } // Root's closed rejection is Malformed.
-      else if (localIsLow) { bytes[120] = 1; Buffer.from(hash(111), "hex").copy(bytes, 121); Buffer.from(hash(112), "hex").copy(bytes, 153); }
+      else if (localSeal) { bytes[120] = 1; Buffer.from(hash(111), "hex").copy(bytes, 121); Buffer.from(hash(112), "hex").copy(bytes, 153); }
       else { bytes[120] = 2; bytes[219] = deliveryState; }
       bytes[185] = Number(settled && acknowledged); Buffer.from(hash(113), "hex").copy(bytes, 187);
     }
@@ -2680,21 +2683,24 @@ async function framedSdpOffer(t: TestContext, localIsLow = true, plaintextLength
     counts[name]++; if (hold === name) await held.promise;
     if (lose === name) { lose = null; throw new Error("native reply lost after effect"); }
   };
-  custody.sdpReplies(async (header, opened) => {
+  const respond: NonNullable<Parameters<typeof custody.sdpReplies>[0]> = async (header, opened) => {
     if (header.operation === 15 || header.operation === 16) {
       assert.deepEqual(f.f.rowBudget(), { reserved: 2, actions: 2 }, "both global rows precede unknown Begin");
-      assert.deepEqual(opened, encodeVoiceSdpBegin(original, localIsLow ? plaintext : null).body); began = true; attached = !pendingBegin; await step("begin"); return status();
+      assert.deepEqual(opened, encodeVoiceSdpBegin(original, localSeal ? plaintext : null).body);
+      if (busyBegin) { counts.begin++; return { kind: 0, body: new Uint8Array([8, 2, 2, 7]) }; }
+      began = true; attached = !pendingBegin; await step("begin"); return status();
     }
     if (header.operation === 27) {
       const close = opened[226] === 1;
       assert.deepEqual(opened, encodeVoiceSdpResolve(original, selector.purpose, close).body); await step("resolve");
-      assert.equal(began, true); return status();
+      if (!began) return { kind: 0, body: Buffer.concat([Buffer.from([8, 1]), Buffer.from(parentRow, "hex"), Buffer.from([Number(!localSeal), Number(close)])]) };
+      return status();
     }
     assert.equal(header.logical, row);
     if (header.operation === 17) {
       assert.deepEqual(opened, encodeVoiceSdpAction(selector, { kind: "input", identity }).body);
       onInput?.();
-      await step("input"); return { kind: 2, body: input };
+      await step("input"); const body = Buffer.from(input); if (badInput) body[227] ^= 1; return { kind: 2, body };
     }
     if (header.operation === 18) {
       assert.deepEqual(opened, encodeVoiceSdpAction(selector, { kind: "admit", identity, engineBytes }).body);
@@ -2703,9 +2709,9 @@ async function framedSdpOffer(t: TestContext, localIsLow = true, plaintextLength
     }
     if (header.operation === 19 || header.operation === 20) {
       const bytes = opened.subarray(100), tag = Buffer.from(opened.subarray(66, 98)).toString("hex");
-      assert.deepEqual(opened, encodeVoiceSdpAction(selector, { kind: localIsLow ? "sealed" : "opened", identity, bytes, tag }).body);
-      assert.equal(tag, createHash("sha256").update(bytes).digest("hex")); assert.equal(bytes.length, plaintextLength + (localIsLow ? 16 : 0));
-      if (!localIsLow) assert.deepEqual(bytes, plaintext);
+      assert.deepEqual(opened, encodeVoiceSdpAction(selector, { kind: localSeal ? "sealed" : "opened", identity, bytes, tag }).body);
+      assert.equal(tag, createHash("sha256").update(bytes).digest("hex")); assert.equal(bytes.length, plaintextLength + (localSeal ? 16 : 0));
+      if (!localSeal) assert.deepEqual(bytes, plaintext);
       if (output) assert.deepEqual(bytes, output); else { output = bytes.slice(); outputTag = tag; }
       resultRecorded = true;
       await step("result"); return status();
@@ -2724,7 +2730,7 @@ async function framedSdpOffer(t: TestContext, localIsLow = true, plaintextLength
       settled = true; await step("settle"); return status();
     }
     if (header.operation === 26) {
-      assert.ok(!localIsLow && resultRecorded && !authenticationFails);
+      assert.ok(!localSeal && resultRecorded && !authenticationFails);
       if (busyDelivery) return { kind: 0, body: new Uint8Array([8, 2, 2, 7]) };
       const applied = opened.at(-1) === 1;
       assert.deepEqual(opened, encodeVoiceSdpAction(selector, { kind: "delivery", identity, applied }).body);
@@ -2734,13 +2740,16 @@ async function framedSdpOffer(t: TestContext, localIsLow = true, plaintextLength
     }
     assert.equal(header.operation, 24); assert.ok(settled && (!resultRecorded || acknowledged));
     assert.deepEqual(opened, encodeVoiceSdpAction(selector, { kind: "return" }).body);
-    returned = true; await step("returned"); return status();
-  });
+    returned = true; onReturn?.(); await step("returned"); return status();
+  };
+  custody.sdpReplies(respond);
   const start = (text: string | null = null) => f.f.broker.prepareNativeSdpCrypto(f.f.owner, child.channel, child.ready.chain, text);
   const rtc = () => f.f.broker.prepareNativeSdpRtc(f.f.owner, child.channel, child.ready.chain);
-  return { ...f, counts, start, rtc, busyDelivery(value: boolean) { busyDelivery = value; }, lose(name: keyof typeof counts) { lose = name; },
+  return { ...f, counts, start, rtc, respond, busyDelivery(value: boolean) { busyDelivery = value; }, lose(name: keyof typeof counts) { lose = name; },
     pendingBegin(value: boolean) { pendingBegin = value; },
-    onInput(work: () => void) { onInput = work; },
+    onInput(work: () => void) { onInput = work; }, onReturn(work: () => void) { onReturn = work; },
+    malformedInput(value: boolean) { badInput = value; }, busyBegin(value: boolean) { busyBegin = value; },
+    historical() { attached = true; settled = true; acknowledged = true; resultRecorded = true; outputTag = hash(114); deliveryState = 3; },
     hold(name: keyof typeof counts) { hold = name; return held; },
     cryptoCount: () => f.f.counts().steps.filter(name => name === "encrypt").length - f.f.operations().length,
   };
@@ -2924,24 +2933,24 @@ test("PC custody never starts on copied handles, foreign chains or a closed orig
 function sdpRtcProvider(t: TestContext, localIsLow: boolean, onLocal: () => void = () => {}) {
   const old = globalThis.RTCPeerConnection;
   const calls = { created: 0, local: 0, remote: 0, closed: 0 };
-  let held: ReturnType<typeof gate> | null = null;
+  let held: ReturnType<typeof gate> | null = null, localHeld: ReturnType<typeof gate> | null = null;
   let descriptor: RTCSessionDescriptionInit | null = null;
   class Peer {
     constructor() { calls.created++; }
     iceGatheringState = "complete";
     get localDescription() { return { type: localIsLow ? "offer" : "answer", sdp: "s".repeat(8192) }; }
     addTransceiver() {}
-    async setLocalDescription() { calls.local++; onLocal(); }
+    async setLocalDescription() { calls.local++; onLocal(); if (localHeld) await localHeld.promise; }
     async setRemoteDescription(value: RTCSessionDescriptionInit) {
-      calls.remote++; descriptor = value; assert.equal(value.type, "offer"); assert.equal(value.sdp, "s".repeat(8192));
+      calls.remote++; descriptor = value; assert.equal(value.type, localIsLow ? "answer" : "offer"); assert.equal(value.sdp, "s".repeat(8192));
       if (held) await held.promise;
     }
     addEventListener() {} removeEventListener() {}
     close() { calls.closed++; }
   }
   globalThis.RTCPeerConnection = Peer as unknown as typeof RTCPeerConnection;
-  t.after(() => { globalThis.RTCPeerConnection = old; held?.release(); });
-  return { calls, descriptor: () => descriptor, hold() { held = gate(); return held; } };
+  t.after(() => { globalThis.RTCPeerConnection = old; held?.release(); localHeld?.release(); });
+  return { calls, descriptor: () => descriptor, hold() { held = gate(); return held; }, holdLocal() { localHeld = gate(); return localHeld; } };
 }
 
 test("LOW concrete RTC local preparation gets a fresh14 and retires getter text before maximum crypto", async t => {
@@ -3032,5 +3041,149 @@ test("LOW RTC transfer excludes reentrant status until its original UTF8 slot is
   assert.equal(sdk.calls.local, 1);
   assert.ok((await Promise.all(statuses)).every(value => (value as { kind: string }).kind === "uncertain"));
   await f.rtc(); assert.equal(sdk.calls.local, 1); assert.equal(f.counts.begin, 1);
+  f.f.owner.retire(); await f.child.channel.close(); assert.equal(f.f.broker.counts().bytes, 0);
+});
+
+
+async function framedSdpRound(t: TestContext, low: boolean, badOffer = false) {
+  const offer = await framedSdpOffer(t, low, 8192, badOffer);
+  const answer = await framedSdpOffer(t, low, 8192, false, offer, true);
+  let onAnswer: (() => void) | null = null;
+  offer.custody.sdpReplies(async (header, opened) => {
+    const seal = header.operation === 15 ? true : header.operation === 16 ? false :
+      (header.operation === 27 ? opened[225] : opened[17]) === 0;
+    const next = seal !== low;
+    if (next) {
+      assert.equal(offer.counts.returned > 0, true, "first action compacts before Answer admission");
+      onAnswer?.();
+    }
+    return (next ? answer : offer).respond(header, opened);
+  });
+  return { ...offer, offer, answer,
+    round: () => offer.f.broker.completeNativeSdpRtcRound(offer.f.owner, offer.child.channel, offer.child.ready.chain),
+    onAnswer(work: () => void) { onAnswer = work; },
+  };
+}
+
+for (const low of [true, false]) test(`complete original RTC round compacts Offer before Answer; LOW=${low}`, async t => {
+  const f = await framedSdpRound(t, low), sdk = sdpRtcProvider(t, low);
+  const paid = f.f.broker.counts().bytes;
+  await f.round();
+  assert.equal(f.offer.counts.result, 1); assert.equal(f.answer.counts.result, 1);
+  assert.equal(f.offer.counts.returned, 1); assert.equal(f.answer.counts.returned, 1);
+  assert.equal(sdk.calls.created, 1); assert.equal(sdk.calls.local, 1); assert.equal(sdk.calls.remote, 1);
+  assert.equal(sdk.calls.closed, 0, "live action-local compaction keeps the same PC alive");
+  assert.equal(f.f.broker.counts().bytes, paid); assert.equal(f.f.rowBudget().reserved, 2);
+  await f.round(); assert.equal(sdk.calls.local, 1); assert.equal(sdk.calls.remote, 1);
+  f.f.owner.retire(); await f.child.channel.close(); assert.equal(sdk.calls.closed, 1); assert.equal(f.f.broker.counts().bytes, 0);
+});
+
+
+for (const low of [true, false]) test(`lost Offer Return retains same owner before Answer; LOW=${low}`, async t => {
+  const f = await framedSdpRound(t, low), sdk = sdpRtcProvider(t, low);
+  f.offer.lose("returned"); await f.round();
+  assert.equal(f.answer.counts.begin, 0); assert.equal(f.offer.counts.returned, 1);
+  assert.equal(sdk.calls.local, Number(low)); assert.equal(sdk.calls.remote, Number(!low));
+  await f.round(); assert.equal(f.offer.counts.returned, 2); assert.equal(f.answer.counts.result, 1);
+  assert.equal(sdk.calls.local, 1); assert.equal(sdk.calls.remote, 1); assert.equal(sdk.calls.created, 1);
+  f.f.owner.retire(); await f.child.channel.close(); assert.equal(f.f.broker.counts().bytes, 0);
+});
+
+for (const [low, lost] of [[true, "result"], [false, "result"], [true, "deliveryApplied"],
+  [true, "returned"], [false, "returned"]] as const) test(`lost Answer ${lost} retries original work; LOW=${low}`, async t => {
+  const f = await framedSdpRound(t, low), sdk = sdpRtcProvider(t, low); f.answer.lose(lost);
+  await f.round(); await f.round();
+  assert.equal(f.offer.counts.result, 1); assert.equal(f.answer.counts.result, lost === "result" ? 2 : 1);
+  assert.equal(f.answer.counts.input, 1); assert.equal(f.answer.counts.admit, 1);
+  assert.equal(sdk.calls.created, 1); assert.equal(sdk.calls.local, 1); assert.equal(sdk.calls.remote, 1);
+  f.f.owner.retire(); await f.child.channel.close(); assert.equal(f.f.broker.counts().bytes, 0);
+});
+
+for (const low of [true, false]) test(`End during Offer compaction never admits Answer; LOW=${low}`, async t => {
+  const f = await framedSdpRound(t, low), sdk = sdpRtcProvider(t, low), held = f.offer.hold("returned");
+  const pending = f.round(); await until(() => f.offer.counts.returned === 1);
+  const paid = f.f.broker.counts().bytes; f.f.owner.retire(); let closed = false;
+  const closing = f.child.channel.close().then(() => { closed = true; });
+  await new Promise<void>(yes => setImmediate(yes)); assert.equal(closed, false);
+  assert.equal(f.f.broker.counts().bytes, paid); assert.equal(f.answer.counts.begin, 0);
+  held.release(); await pending; await closing; assert.equal(f.answer.counts.begin, 0);
+  assert.equal(sdk.calls.local, Number(low)); assert.equal(sdk.calls.remote, Number(!low));
+  assert.equal(sdk.calls.closed, 1); assert.equal(f.f.broker.counts().bytes, 0);
+});
+
+for (const low of [true, false]) test(`End joins held Answer SDK before Return/release; LOW=${low}`, async t => {
+  const f = await framedSdpRound(t, low), sdk = sdpRtcProvider(t, low);
+  const held = low ? sdk.hold() : sdk.holdLocal();
+  const pending = f.round(); await until(() => sdk.calls.local === 1 && sdk.calls.remote === 1);
+  const paid = f.f.broker.counts().bytes; f.f.owner.retire(); let closed = false;
+  const closing = f.child.channel.close().then(() => { closed = true; });
+  await new Promise<void>(yes => setImmediate(yes)); assert.equal(closed, false);
+  assert.equal(f.f.broker.counts().bytes, paid); assert.equal(f.answer.counts.returned, 0);
+  assert.equal(f.custody.effectCounts().sdkReleases, 0); held.release(); await pending; await closing;
+  assert.equal(sdk.calls.closed, 1); assert.equal(f.f.broker.counts().bytes, 0);
+});
+
+for (const low of [true, false]) test(`historical-only Offer cannot authorize Answer; LOW=${low}`, async t => {
+  const f = await framedSdpRound(t, low), sdk = sdpRtcProvider(t, low); f.offer.historical();
+  await f.round(); assert.equal(f.offer.counts.input, 0); assert.equal(f.answer.counts.begin, 0);
+  assert.equal(sdk.calls.remote, 0); f.f.owner.retire(); await f.child.channel.close(); assert.equal(f.f.broker.counts().bytes, 0);
+});
+
+test("rejected incoming Offer cannot authorize an Answer SDK", async t => {
+  const f = await framedSdpRound(t, false, true), sdk = sdpRtcProvider(t, false);
+  await f.round(); assert.equal(f.offer.counts.result, 1); assert.equal(f.answer.counts.begin, 0);
+  assert.equal(sdk.calls.local, 0); assert.equal(sdk.calls.remote, 0);
+  f.f.owner.retire(); await f.child.channel.close(); assert.equal(f.f.broker.counts().bytes, 0);
+});
+
+for (const low of [true, false]) test(`malformed Answer Input retries same native Action before crypto; LOW=${low}`, async t => {
+  const f = await framedSdpRound(t, low), sdk = sdpRtcProvider(t, low); f.answer.malformedInput(true);
+  await f.round(); assert.equal(f.answer.counts.begin, 1); assert.equal(f.answer.counts.result, 0);
+  assert.equal(f.answer.counts.admit, 0); f.answer.malformedInput(false); await f.round();
+  assert.equal(f.answer.counts.begin, 1); assert.equal(f.answer.counts.input, 2); assert.equal(f.answer.counts.result, 1);
+  assert.equal(sdk.calls.local, 1); assert.equal(sdk.calls.remote, 1);
+  f.f.owner.retire(); await f.child.channel.close(); assert.equal(f.f.broker.counts().bytes, 0);
+});
+
+for (const low of [true, false]) test(`unavailable Answer Begin recovers original purpose without new SDK; LOW=${low}`, async t => {
+  const f = await framedSdpRound(t, low), sdk = sdpRtcProvider(t, low); f.answer.busyBegin(true);
+  await f.round(); assert.equal(f.answer.counts.result, 0); f.answer.busyBegin(false); await f.round();
+  assert.equal(f.answer.counts.resolve, 1); assert.equal(f.answer.counts.begin, 2); assert.equal(f.answer.counts.result, 1);
+  assert.equal(sdk.calls.local, 1); assert.equal(sdk.calls.remote, 1);
+  f.f.owner.retire(); await f.child.channel.close(); assert.equal(f.f.broker.counts().bytes, 0);
+});
+
+test("HIGH delayed Answer14 cannot renew the original deadline or start local SDK", async t => {
+  const f = await framedSdpRound(t, false), sdk = sdpRtcProvider(t, false), held = f.custody.holdPc();
+  const pending = f.round(); await until(() => f.custody.pcCounts().pcAdmits === 2);
+  f.f.advance(10_000); held.release(); await pending;
+  assert.equal(sdk.calls.remote, 1); assert.equal(sdk.calls.local, 0); assert.equal(f.answer.counts.begin, 0);
+  f.f.owner.retire(); await f.child.channel.close(); assert.equal(f.f.broker.counts().bytes, 0);
+});
+
+
+test("reentrant status during Offer Return and Answer adoption stays outside the composite flight", async t => {
+  const f = await framedSdpRound(t, false), sdk = sdpRtcProvider(t, false);
+  const statuses: Promise<unknown>[] = []; let probes = 0;
+  const probe = () => {
+    if (f.answer.counts.begin > 0) return;
+    probes++; statuses.push(f.child.channel.status()); f.f.onOwnerCheck(probe);
+  };
+  f.offer.onReturn(() => f.f.onOwnerCheck(probe));
+  const pending = f.round(); assert.equal(f.round(), pending); await pending;
+  assert.ok(probes > 3); assert.ok((await Promise.all(statuses)).every(value => (value as { kind: string }).kind === "uncertain"));
+  assert.equal(f.answer.counts.result, 1); assert.equal(sdk.calls.created, 1);
+  f.f.owner.retire(); await f.child.channel.close(); assert.equal(f.f.broker.counts().bytes, 0);
+});
+
+test("round composer rejects copied channel/chain and broker27 without waking old custody", async t => {
+  const f = await framedSdpRound(t, true), sdk = sdpRtcProvider(t, true);
+  assert.throws(() => f.f.broker.completeNativeSdpRtcRound(f.f.owner, { ...f.child.channel }, f.child.ready.chain), /original native RTC/);
+  assert.throws(() => f.f.broker.completeNativeSdpRtcRound(f.f.owner, f.child.channel, { ...f.child.ready.chain }), /original native RTC/);
+  const previous = Object.create(f.f.broker); Object.defineProperty(previous, "version", { value: 27 });
+  const key = Symbol.for("mewtual.voice.crypto-broker.v2"), host = { [key]: previous };
+  let wakes = 0; previous.retrySelectedJoinKeys = () => { wakes++; };
+  assert.throws(() => windowVoiceCryptoBroker(f.f.admission, host, real), /reload required/);
+  assert.equal(wakes, 0); assert.equal(host[key], previous); assert.equal(sdk.calls.created, 0);
   f.f.owner.retire(); await f.child.channel.close(); assert.equal(f.f.broker.counts().bytes, 0);
 });

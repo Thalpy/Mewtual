@@ -1,5 +1,21 @@
 # Mewtual; Interfaces & Hooks Schema
 
+## Private original RTC round composition (25 October)
+
+`completeNativeSdpRtcRound(owner, channel, chain)` joins progress for the exact existing
+owner/channel/chain; repeat the same call after retryable refusal. It returns no description,
+peer or authority and does not promise connected media. One original PC/Ready/deadline/key/
+storage/SDK supports Offer and Answer with two pre-reserved rows. The first Action must reach
+actual accepted SDK completion, settle/ACK and canonical live24 before the next Action; Open
+also requires actual RTC success and canonical Applied. HIGH Answer uses new actual14;
+LOW Answer application uses fresh false26. Uncertain replies retain the original identities.
+
+Live24 closes only its Action, preserving the PC; End still closes/joins the real peer before
+Return and shared release. Broker28 rejects older HMR state. First-Offer leaf methods remain
+available before composition advances. Shipping15-27 and App V2 activation remain refused.
+Controlled RTC/native providers do not establish native/WebView interoperability or media.
+This supersedes the first-Offer-only limitation below for this private composition method.
+
 ## Private concrete first-Offer RTC interface (25 October)
 
 `prepareNativeSdpRtc(owner, channel, chain)` requires the exact retained owner/channel/chain
