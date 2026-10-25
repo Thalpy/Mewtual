@@ -248,6 +248,13 @@ impl CryptoAction {
         self.sdp_binding()
             .is_some_and(|binding| binding.belongs_to_intent(intent))
     }
+    /// Pure exact Seal-body binding for trusted native publication capture. This works
+    /// after input compaction/End and never creates an input lease or calls the Clock.
+    /// Open actions have a distinct packet commitment and always refuse this comparison.
+    pub fn matches_sdp_plaintext_commitment(&self, tag: &[u8; 32]) -> bool {
+        self.sdp_binding()
+            .is_some_and(|binding| binding.matches_plaintext_commitment(tag))
+    }
     pub fn operation(&self) -> CryptoOperation {
         self.operation
     }

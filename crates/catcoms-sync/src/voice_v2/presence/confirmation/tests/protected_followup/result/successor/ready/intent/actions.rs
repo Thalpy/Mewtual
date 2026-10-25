@@ -241,6 +241,11 @@ fn native_sdp_open_pc_close_in_final_fence_keeps_input_and_prevents_action_or_la
 fn native_sdp_open_maximum_output_and_real_engine_stay_bound_to_pc_closure() {
     let (mut p, phase, intent) = fixture();
     let action = open(&mut p, &intent, |_, _| Ok(())).unwrap();
+    let packet = action.sdp_binding().unwrap();
+    assert!(
+        !action.matches_sdp_plaintext_commitment(&packet.body_tag_for_test()),
+        "Open packet hash is not a Seal commitment"
+    );
     assert_eq!(
         action.output_tag(&vec![0; MAX_SDP_PLAINTEXT - 1]),
         Err(VoiceError::Bounds)

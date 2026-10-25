@@ -77,6 +77,7 @@ impl Serialize for PurposeMetadata {
                     }
                 }
             }
+            Purpose::Sdp { .. } => return Err(serde::ser::Error::custom(REFUSED)),
         }
         fields.end()
     }

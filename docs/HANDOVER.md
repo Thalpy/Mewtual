@@ -1,5 +1,56 @@
 # Mewtual; Handover
 
+## Native SDP action rows (25 October; production handlers still unfinished)
+
+`communication-sdp-native-rows` / `target/communication-sdp-native-rows-worktree` continues
+from intake checkpoint `ee88177a`. Separate SDP Pending/Live/Drained entries now share the
+existing32-slot native Index. One precomputed candidate borrows the exact original request
+and prepays its fixed history outside UI/Index/State guards. Installation allocates only
+after the uniqueness fence. Each original parent/PC/purpose has at most one entry; changed
+Seal input refuses. Root and native use the same exact bounded plaintext commitment.
+
+A per-purpose close is recorded on the parent even before a child RowId exists. Delayed
+installation cannot revive it. This absent-row record is close intent, never proof that
+unknown Actor work or browser work drained. A handed-off Pending with no recovered Action
+remains open. Closed capture can adopt an actual recovered Arc after worker/IO collection,
+including after parent closure, but an original Actor outcome/recovery mechanism is still
+required before live activation. End/prune may destroy Pair history; absence is inconclusive.
+
+Publication capture retains the same provenanced Root Action before fallible attachment,
+including after closure. An exact-body mismatch closes native IO, refuses SDK attachment and
+keeps the real publication for cleanup. Only Root's actual unstarted gate can retire it;
+admitted engines and terminal receipts retain their settlement/ACK duties. Per-action close
+never closes the shared PC phase. Compaction requires actual worker/observer completion,
+CLOSED+zero IO and genuine Root settlement/ACK where an Action exists. Drained direct fields
+hold no variable input/Copy/publication; Row.key.parent still retains the historical parent,
+whose own storage closure must independently return unused reserve and actual Copies.
+
+Current focused validation passes:613 Root voice-v2 tests;329 native handoff tests (20.03s);
+all five genuine blocked-TCP PC cases (56.85s); complete2,740 frontend tests (68.27s), Svelte
+checking and production build (38.78s). The tests cover late publication after Return, exact
+body mismatch with unstarted/admitted engines, actual retained unknown publication after
+all worker/IO objects retire, parent-close cleanup, foreign Session/retained-worker/open-IO
+rejection, and registered Notify delivery after closed capture. The fixture retries only
+an authenticated Capacity response, max32 attempts on the original Clock/request/deadline.
+No Unauthorized/closed result is retried. The final read-only review has no remaining findings.
+
+Native Cargo check passes (27.96s); strict Root all-target/all-feature Clippy passes (1m24s).
+The latest strict native all-target Clippy rerun passes (1m13s), including the final
+notification/negative tests. Formatting, ambient-dependency and diff checks pass.
+Full current G Root/native suites remain pending behind the frozen Actor native full suite;
+these focused checks do not establish a full G pass.
+
+The frozen Actor checkpoint completed its full Root suite:3,557 tests passed, including
+doctests. Its full separate native suite is now building/running. Those results do not
+establish a full G pass. Cargo-deny still fails on inherited RUSTSEC-2026-0387 for
+crypto-bigint0.5.5; bans/licenses/sources pass. No dependency or ignore change is included.
+
+Next implement authenticated SDP Input/engine/result/ACK/settlement/Return/delivery handlers,
+including an actual original Actor recovery/negative witness after IO closure, then the private
+original-key browser WebCrypto and complete-ICE/RTC path. Fresh rounds, multi-peer, member
+media relay and combined acceptance remain unfinished. Independent physical audio/network
+acceptance still needs another desktop/network. External download resume stays out of scope.
+
 ## Native SDP intake continuation (25 October; action/SDK integration unfinished)
 
 `communication-sdp-native-transport` / `target/communication-sdp-native-transport-worktree`
@@ -28,7 +79,8 @@ Copy Capacity/no-debit, held physical permit and bad-AEAD permanent debit. The f
 15 positive-size Copies plus the actual PC completion's sixteenth; zero-byte Copies refuse
 and cannot serve as a pressure oracle. Full frontend2,740 tests pass (73.63s), as do type
 checking and production build (46.97s). Read-only final review reports no remaining findings.
-Formal native check/strict native and Root Clippy are running; full Root/native gates remain
+Formal native Cargo check passes (59.94s), as do strict native all-target Clippy (1m52s)
+and strict Root all-target/all-feature Clippy (2m00s). Full Root/native gates remain
 separate/pending. No full-suite green claim follows from these focused checks.
 
 The capacity-only permit binds the entire canonical Header, actual physical position,
@@ -69,9 +121,9 @@ initially overflowed the Windows test stack; boxing only its test construction/h
 that without increasing the stack or changing assertions/production payment.
 
 Formal native Cargo check passes (94s); strict Root all-target/all-feature Clippy and strict
-native all-target Clippy pass, as do formatting, ambient and diff checks. Complete current
-Root/native suites are queued on this frozen source before publishing this checkpoint;
-earlier full-suite results below remain separate. The inherited cargo-deny advisory is not
+native all-target Clippy pass, as do formatting, ambient and diff checks. The complete frozen Root suite passes:3,557 tests including doctests. The separate
+native full suite is building/running on this same source; earlier full-suite results
+below remain separate. The inherited cargo-deny advisory is not
 fixed or ignored by this change. No dependency change is included.
 
 No new native SDP opcode/body class or private browser SDP/RTC producer exists yet. Their

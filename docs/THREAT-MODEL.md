@@ -3958,3 +3958,20 @@ no additional Phase loan/task or current grant. New result publication holds the
 through the actual actor turn after caller loss. Structured drop order keeps Work/task retirement
 ahead of physical idle; actor and Root remain responsible for current member/epoch/pair checks.
 Synthetic-pair rejection tests do not establish successful production ingress or browser keys.
+
+## Original SDP history and uncertain publication (25 October continuation)
+
+Separate SDP native rows cannot inherit confirmation plan(None) collection defaults. Their
+one-entry-per-original-parent/PC/purpose Index fence and original plain history fee bound
+retained state; duplicate candidates cannot each allocate a Row on the same fee. A close
+before RowId issuance permanently fences delayed fresh installation. The absence of a child
+entry or a lost Actor reply never establishes that publication did not happen.
+
+Native Seal capture compares Root's immutable exact-plaintext commitment, without an input
+lease or current Clock grant. If a producer returns a provenanced Action for different bytes,
+the adapter keeps that actual Action for cleanup but closes IO and refuses SDK attachment.
+Root can retire only actually unstarted work; an admitted engine/terminal remains charged
+until genuine settlement/ACK. Unknown handed-off Pending remains unresolved until a real
+original recovery/negative witness exists. This is deliberately not production activation:
+all staged SDP service operations still refuse before admission. No claim of functioning
+browser SDP/ICE/RTC, media relay or independent physical audio acceptance follows.

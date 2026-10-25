@@ -226,6 +226,10 @@ fn low_sdp_offer_recovers_same_fixed_action_after_input_compaction_without_new_n
     let mut namespace = ReceiptNamespace::default();
     let body = b"v=0\r\n";
     let action = offer(&mut p, &intent, &mut namespace, body, |_, _| Ok(())).unwrap();
+    let exact = crate::voice_v2::sdp::plaintext_commitment(body).unwrap();
+    let changed = crate::voice_v2::sdp::plaintext_commitment(b"v=1\r\n").unwrap();
+    assert!(action.matches_sdp_plaintext_commitment(&exact));
+    assert!(!action.matches_sdp_plaintext_commitment(&changed));
     action.settle_engine();
     assert!(
         action.input().is_err(),
@@ -252,4 +256,10 @@ fn low_sdp_offer_recovers_same_fixed_action_after_input_compaction_without_new_n
         Err(VoiceError::Unauthorized)
     );
     phase.close();
+    assert!(!intent.current_at(p.f.clock.now_ms(), p.f.clock.monotonic_ms()));
+    assert!(
+        action.matches_sdp_plaintext_commitment(&exact),
+        "pure history survives End and input compaction"
+    );
+    assert!(!action.matches_sdp_plaintext_commitment(&changed));
 }

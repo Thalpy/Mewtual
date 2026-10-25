@@ -33,6 +33,7 @@ impl Ledger {
             }
             let state = row.state.lock().unwrap_or_else(|error| error.into_inner());
             let candidate = match row.key.purpose {
+                Purpose::Sdp { .. } => continue, // Private v8 work never re-enters confirmation factories.
                 Purpose::Confirmation { request, .. } => {
                     let Body::Pending(pending) = &state.body else {
                         continue;

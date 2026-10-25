@@ -18,6 +18,9 @@ pub(super) struct Claim {
     pub(super) sdk_preparing: bool,
     pub(super) sdk: Option<Arc<super::sdk::Claim>>,
     pub(super) pc: Option<super::pc::Claim>,
+    // Fixed intent fences exist before a purpose has a RowId or a paid history fee. A
+    // lost-Begin Close must prevent a late worker from installing that purpose afterward.
+    pub(super) actions_closed: [bool; 2],
 }
 /// Move only OUT of native guards. Actual notifications/reserve retirement run on Drop,
 /// including abandonment/unwind immediately after the irreversible close publication.
@@ -54,6 +57,7 @@ impl Claim {
     }
     pub(super) fn request_close(&mut self) -> Option<CloseTicket> {
         self.closed = true;
+        self.actions_closed.fill(true);
         if let Some(phase) = &self.phase {
             phase.request_close();
         }
@@ -238,6 +242,7 @@ impl ResolvedRow {
                 sdk_preparing: false,
                 sdk: None,
                 pc: None,
+                actions_closed: [false; 2],
             });
         }
         key.sdp.as_mut().unwrap().worker = true;

@@ -6478,3 +6478,21 @@ until actual collection; Work/task custody drops before the physical Header. `in
 returns fixed result metadata plus the still-owned original request for its single Control reply.
 No timeout, caller cancellation, receipt or native task completion acknowledges browser drainage.
 This executor has no listener consumer and does not implement the seal/open result path.
+
+## Original SDP row custody (25 October; inactive native adapter)
+
+Native SDP action entries use the same bounded32-slot Index as confirmation entries, with
+separate Pending/Live/Drained bodies and one fixed2304B history fee per original Seal/Open.
+A borrowed candidate hashes bounded exact Seal bytes with Root's canonical BLAKE3 domain
+before native admission guards. Installation repeats original Session/parent/selection/
+KeyClaim/SDK/PC/purpose identities and current native/Root intent fences. Equal renderer
+labels cannot manufacture these original allocations. Generic confirmation work projection
+excludes SDP entries rather than treating plan(None) as obligation-free.
+
+Parent purpose closure is latched before lookup, including when no child entry exists.
+Resolve then reports identity/close intent only; absence is not a negative Actor publication
+witness. Exact late publication capture needs no current permission, but attachment checks
+the retained plaintext commitment. A mismatch retains the same original Action, closes IO
+and refuses SDK exposure. Known unstarted work may retire through Root's negative-only gate;
+unknown handed-off work cannot. Actual workers/observers/IO/engine/ACK still gate compaction.
+These Rust-only primitives do not dispatch opcodes15..27 or expose browser Input/RTC grants.

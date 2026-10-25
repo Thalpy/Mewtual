@@ -46,6 +46,7 @@ impl Ledger {
                 || transition.released
                 || key.released
                 || storage.closed
+                || storage.actions_closed[0]
                 || storage.worker()
                 || storage.sdk_preparing
                 || storage.sdk.as_ref().is_none_or(|sdk| sdk.released())

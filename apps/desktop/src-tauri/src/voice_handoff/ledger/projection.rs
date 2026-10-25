@@ -38,7 +38,12 @@ impl Ledger {
             .iter()
             .skip(usize::from(from))
             .flatten()
-            .find(|row| row.key.matches(selected, row.key.purpose));
+            // SDP is consumed only by the private original-key v8 broker, which is not
+            // installed yet. Never feed staged work into the confirmation/v1 public pump.
+            .find(|row| {
+                !matches!(row.key.purpose, Purpose::Sdp { .. })
+                    && row.key.matches(selected, row.key.purpose)
+            });
         let Some(row) = row else {
             return Ok(WorkProjection {
                 next_slot: ROWS as u8,
@@ -59,6 +64,7 @@ impl Ledger {
                 }
                 Some(selector)
             }
+            Purpose::Sdp { .. } => return Err(VoiceError::Unauthorized),
         };
         let metadata = WorkMetadata {
             row: row.id,

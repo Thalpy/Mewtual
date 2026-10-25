@@ -732,6 +732,9 @@ fn automatic_terminal(state: &AppState, selected: &SelectedHandoffOwner) -> bool
             return false;
         };
         match metadata.purpose {
+            ledger::Purpose::Sdp { .. } => {
+                panic!("private SDP rows must not appear in the confirmation public pump")
+            }
             ledger::Purpose::Derive(_) => {
                 if parent.replace(metadata.row).is_some()
                     || receipt.outcome != CryptoOutcome::Derived

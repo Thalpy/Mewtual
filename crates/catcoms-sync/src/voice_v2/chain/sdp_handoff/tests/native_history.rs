@@ -80,6 +80,7 @@ fn native_history_refuses_foreign_repeated_and_closed_binding_without_losing_ori
     assert_eq!(fee.in_flight(), 0);
     assert_eq!(foreign.in_flight(), 0);
     copy.bind_native_history(fee.clone()).unwrap();
+    assert!(!fee.is_closed());
     assert_eq!(
         copy.bind_native_history(fee.clone()),
         Err(VoiceError::RetryMismatch)
@@ -89,6 +90,8 @@ fn native_history_refuses_foreign_repeated_and_closed_binding_without_losing_ori
     task.bind_native_history(fee.clone()).unwrap();
     let mut late = phase.copy(32).unwrap();
     drop(fee.close_io());
+    assert!(fee.is_closed());
+    assert!(!fee.is_collected(), "closed still retains actual IO");
     assert_eq!(
         late.bind_native_history(fee.clone()),
         Err(VoiceError::Unauthorized)
@@ -107,6 +110,7 @@ fn native_history_refuses_foreign_repeated_and_closed_binding_without_losing_ori
     );
     drop(task);
     assert!(fee.is_collected());
+    assert!(fee.is_closed(), "collection cannot reopen admission");
     assert!(
         !open.is_collected(),
         "zero/open is not stable terminal collection"

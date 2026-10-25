@@ -1247,7 +1247,7 @@ pub(crate) async fn confirmation_framed_round_trip(
     high: &Arc<SelectedHandoffOwner>,
     high_parent: &ledger::ResolvedRow,
     orphan_low: bool,
-    pc_cases: Option<bool>,
+    pc_cases: Option<u8>,
 ) {
     confirmation_round_trip_inner(
         low_state,
@@ -1430,7 +1430,7 @@ enum ConfirmationMode {
     Legacy,
     Framed,
     Orphan,
-    Pc(bool),
+    Pc(u8),
 }
 async fn confirmation_round_trip_inner(
     low_state: &AppState,
@@ -1590,7 +1590,13 @@ async fn confirmation_round_trip_inner(
                 high,
                 high_parent,
                 if let ConfirmationMode::Pc(reverse) = mode {
-                    super::transition::Cleanup::Pc(if reverse { 0 } else { 1 })
+                    super::transition::Cleanup::Pc(if reverse >= 2 {
+                        reverse + 2
+                    } else if reverse == 1 {
+                        0
+                    } else {
+                        1
+                    })
                 } else if matches!(mode, ConfirmationMode::Orphan) {
                     super::transition::Cleanup::SdkAdmissionRace
                 } else {
@@ -1603,7 +1609,13 @@ async fn confirmation_round_trip_inner(
                 low,
                 low_parent,
                 if let ConfirmationMode::Pc(reverse) = mode {
-                    super::transition::Cleanup::Pc(if reverse { 3 } else { 2 })
+                    super::transition::Cleanup::Pc(if reverse >= 2 {
+                        reverse + 2
+                    } else if reverse == 1 {
+                        3
+                    } else {
+                        2
+                    })
                 } else if matches!(mode, ConfirmationMode::Orphan) {
                     super::transition::Cleanup::Orphan
                 } else {

@@ -11,6 +11,16 @@ pub(in crate::voice_v2) mod action;
 pub(crate) mod delivery;
 pub use delivery::{SdpDelivery, SdpOpenOutput, SdpOpenResult};
 
+/// Commit exact, bounded Seal input before entering native admission locks. This uses
+/// the same domain/length framing as the retained Root ActionBinding, without retaining
+/// plaintext or issuing any action authority. SDP is deliberately not normalized.
+pub fn plaintext_commitment(bytes: &[u8]) -> Result<[u8; 32], VoiceError> {
+    if bytes.is_empty() || bytes.len() > MAX_SDP_PLAINTEXT {
+        return Err(VoiceError::Bounds);
+    }
+    Ok(action::plaintext_tag(bytes))
+}
+
 /// The exact first native PC generation and actual Ready, rather than renderer labels.
 /// Retaining this proof does not renew the original finite Ready window. A fresh operational
 /// round needs a distinct constructor after actual previous-round drainage.
@@ -199,5 +209,29 @@ mod tests {
             root <= root_share,
             "initial SDP Root fixed graph {root}/{root_share}"
         );
+    }
+}
+
+#[cfg(test)]
+mod commitment_tests {
+    use super::*;
+    #[test]
+    fn canonical_plaintext_commitment_is_exact_bounded_and_uses_original_root_domain() {
+        assert_eq!(plaintext_commitment(b""), Err(VoiceError::Bounds));
+        assert_eq!(
+            plaintext_commitment(&vec![0; MAX_SDP_PLAINTEXT + 1]),
+            Err(VoiceError::Bounds)
+        );
+        for bytes in [&b"x"[..], &b"v=0\r\n"[..], &vec![0; MAX_SDP_PLAINTEXT][..]] {
+            assert_eq!(
+                plaintext_commitment(bytes).unwrap(),
+                action::plaintext_tag(bytes)
+            );
+        }
+        assert_ne!(
+            plaintext_commitment(b"v=0\r\n"),
+            plaintext_commitment(b"v=0\n")
+        );
+        assert_ne!(plaintext_commitment(b"ab"), plaintext_commitment(b"ab\0"));
     }
 }

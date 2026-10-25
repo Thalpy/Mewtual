@@ -10,20 +10,32 @@ async fn exchange(
     parent: &ledger::ResolvedRow,
     body: &[u8],
 ) -> Vec<u8> {
-    let header = (
-        route.session().fixture_counts().1 + 1,
-        14,
-        0,
-        parent.id().logical(),
-    );
-    let reply = crate::voice_handoff::pc::apply(
-        &context::Context::new(state),
-        route,
-        opened_frame(public, route, header, body, None),
-    )
-    .await
-    .unwrap();
-    opened_reply(public, header, body, &reply)
+    let clock = crate::voice_runtime(state).clock();
+    let capacity = replies::refused(factory::Refused::Protocol(VoiceError::Capacity));
+    for attempt in 0..32 {
+        let header = (
+            route.session().fixture_counts().1 + 1,
+            14,
+            0,
+            parent.id().logical(),
+        );
+        let reply = crate::voice_handoff::pc::apply(
+            &context::Context::new(state),
+            route,
+            opened_frame(public, route, header, body, None),
+        )
+        .await
+        .unwrap();
+        let opened = opened_reply(public, header, body, &reply);
+        if opened != capacity || attempt == 31 {
+            return opened;
+        }
+        // Maintenance can hold the same native current fence for an admitted turn.
+        // Retry ONLY its authenticated local Capacity, with the identical original PC
+        // request. Original Ready and the outer fixture deadline are never extended.
+        clock.sleep(std::time::Duration::from_millis(10)).await;
+    }
+    unreachable!("last bounded attempt returns its exact response")
 }
 pub(super) async fn park(
     actor: &catcoms_app::ServerActor,
@@ -123,12 +135,12 @@ pub(super) async fn exercise(
         return;
     }
     factory::preflight_binding(&context, route).await.unwrap();
-    if case == 1 {
+    if matches!(case, 1 | 4 | 5 | 6) {
         let first = exchange(state, public, route, parent, &body).await;
         assert_eq!(
             first.len(),
             85,
-            "actual native PC endpoint admits after genuine Ready"
+            "actual native PC endpoint admits after genuine Ready; response {first:?}"
         );
         assert_eq!(&first[..3], &[7, 1, 1]);
         let second = exchange(state, public, route, parent, &body).await;
@@ -155,7 +167,7 @@ pub(super) async fn exercise(
         None,
     );
     let physical = incoming.hold_position().unwrap();
-    let preparation = if case == 1 {
+    let preparation = if matches!(case, 1 | 4 | 5 | 6) {
         None
     } else {
         Some(
@@ -175,7 +187,7 @@ pub(super) async fn exercise(
             .unwrap()
     };
     let work = phase.copy(4096).unwrap();
-    let paused = if case >= 2 {
+    let paused = if matches!(case, 2 | 3) {
         Some(park(&actor).await)
     } else {
         None
@@ -191,9 +203,10 @@ pub(super) async fn exercise(
         )
         .await
         .unwrap();
+    let mut unstarted_sdp = None;
     // Successful queue return is the positive barrier: the original command, rather than
     // an unpolled future, owns the same phase contribution behind the paused actor.
-    if case == 1 {
+    if matches!(case, 1 | 4 | 5 | 6) {
         let completion = pending.complete().await.unwrap();
         assert!(completion.result().is_ok());
         // A new authenticated frame supplies its own physical hold for actual typed SDP
@@ -202,6 +215,25 @@ pub(super) async fn exercise(
         drop(incoming);
         // Keep the test-only nested stopped-Actor setup out of every ancestor TCP future.
         super::sdp_intake::exercise(state, public, route, parent, &body);
+        unstarted_sdp = Some(
+            Box::pin(super::sdp_rows::exercise(
+                state,
+                public,
+                route,
+                parent,
+                &body,
+                &actor,
+                &grant,
+                completion.result().unwrap(),
+                match case {
+                    4 => 1,
+                    5 => 2,
+                    6 => 3,
+                    _ => 0,
+                },
+            ))
+            .await,
+        );
         // This is fixture heap storage, not production task payment or a larger stack.
         let held = Box::pin(super::sdp_actor::exercise(
             state,
@@ -272,6 +304,14 @@ pub(super) async fn exercise(
         drop(incoming);
     }
     assert_eq!(phase.status(), Status::Drained);
+    if let Some(retained) = unstarted_sdp {
+        retained.after_parent_close(state, route, parent);
+        assert_eq!(
+            phase.status(),
+            Status::Drained,
+            "historical child must not retain variable reserve/Copies"
+        );
+    }
     if preparation.is_some() {
         assert!(!parent.sdp_test_whole_drained());
     }

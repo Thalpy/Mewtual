@@ -30,10 +30,13 @@ mod ready;
 mod sdk;
 mod sdp;
 mod sdp_intake;
+mod sdp_rows;
 pub(super) use key_session::KeySessionReceipt;
 pub(in crate::voice_handoff) use ready::{ReadyContinuation, ReadyProgress};
 pub(super) use sdk::Receipt as SdkReceipt;
 pub(super) use sdp::Receipt as SdpReceipt;
+#[cfg(test)]
+pub(in crate::voice_handoff) use sdp_rows::Begin as SdpBegin;
 mod pc;
 pub(super) use pc::{Receipt as PcReceipt, State as PcState};
 mod plan;
@@ -82,6 +85,10 @@ pub(crate) enum Purpose {
     Confirmation {
         parent: RowId,
         request: ConfirmationPurpose,
+    },
+    Sdp {
+        parent: RowId,
+        purpose: catcoms_sync::voice_v2::chain::sdp_handoff::NativeRowPurpose,
     },
 }
 /// Fixed historical evidence. It is neither permission to retry computation nor an RTC grant.
@@ -190,6 +197,9 @@ enum Body {
         Option<Plan>,
         Option<Arc<CryptoAction>>,
     ),
+    SdpPending(sdp_rows::Pending),
+    SdpLive(sdp_rows::Live),
+    SdpDrained(sdp_rows::Drained),
 }
 struct State {
     body: Body,
@@ -274,7 +284,14 @@ struct Row {
     state: Mutex<State>,
     changed: Notify,
     cleanup_waiter: AtomicBool,
-    _metadata: Credit,
+    _metadata: RowPayment,
+}
+/// Independently retained fixed funding. An SDP row never borrows the retired confirmation
+/// Workflow or keeps its shared Phase alive merely to pay historical metadata. The SAME
+/// fee also remains in each SDP body variant, while this final field pays Row destruction.
+enum RowPayment {
+    Ordinary(Credit),
+    Sdp(Arc<catcoms_sync::voice_v2::chain::sdp_handoff::NativeRowFunding>),
 }
 struct Index {
     serial: u64,
@@ -552,6 +569,9 @@ impl ResolvedRow {
             Body::Pending(_) | Body::ClosingPending | Body::ClosedPending => {
                 ConfirmationStatus::NotRequested
             }
+            Body::SdpPending(_) | Body::SdpLive(_) | Body::SdpDrained(_) => {
+                return Err(VoiceError::Unauthorized)
+            }
         })
     }
     pub(crate) fn acknowledge(&self, receipt: &CryptoResultReceipt) -> Result<(), VoiceError> {
@@ -602,6 +622,9 @@ impl Ledger {
                 return true;
             }
             let state = row.state.lock().unwrap_or_else(|error| error.into_inner());
+            if let Some(drained) = sdp_rows::locally_drained(&state) {
+                return drained;
+            }
             matches!(state.body, Body::Drained(..) | Body::ClosedPending)
                 && Self::final_retirement_ready(&state)
                 && ((state.final_phase.is_none()
@@ -624,6 +647,9 @@ impl Ledger {
     // It may discard an abandoned Claim, never fabricate Release/final issuance/ACK. Normal
     // finalization MUST continue using final_retirement_ready, including its Release gate.
     fn root_retirement_ready(state: &State) -> bool {
+        if let Some(drained) = sdp_rows::locally_drained(state) {
+            return drained;
+        }
         state.plan().is_none_or(Plan::root_drained)
             && state
                 .plan()
@@ -652,6 +678,10 @@ impl Ledger {
                         collected
                             .identity()
                             .is_some_and(|identity| Arc::ptr_eq(identity, &delivery.session))
+                    }) && sdp_rows::session(&state).is_none_or(|session| {
+                        collected
+                            .identity()
+                            .is_some_and(|actual| Arc::ptr_eq(actual, session))
                     }) && state
                         .plan()
                         .and_then(|plan| plan.transition.as_ref())
@@ -689,7 +719,8 @@ impl Ledger {
                     }
                     let state = row.state.lock().unwrap_or_else(|error| error.into_inner());
                     state.session_collected
-                        && matches!(state.body, Body::Drained(..) | Body::ClosedPending)
+                        && (matches!(state.body, Body::Drained(..) | Body::ClosedPending)
+                            || sdp_rows::locally_drained(&state) == Some(true))
                         && Self::root_retirement_ready(&state)
                 });
                 if reclaim {
@@ -729,9 +760,13 @@ impl Ledger {
         let state = row.state.lock().unwrap_or_else(|error| error.into_inner());
         match &state.body {
             Body::Live(live) => Ok(live.phase.clone()),
-            Body::Pending(_) | Body::ClosingPending | Body::ClosedPending | Body::Drained(..) => {
-                Err(VoiceError::Capacity)
-            }
+            Body::Pending(_)
+            | Body::ClosingPending
+            | Body::ClosedPending
+            | Body::Drained(..)
+            | Body::SdpPending(_)
+            | Body::SdpLive(_)
+            | Body::SdpDrained(_) => Err(VoiceError::Capacity),
         }
     }
     /// Recover a lost factory reply even when its caller never received a RowId. Search only
@@ -922,7 +957,7 @@ impl Ledger {
                     drained: false,
                 },
             }),
-            _metadata: metadata,
+            _metadata: RowPayment::Ordinary(metadata),
             changed: Notify::new(),
             cleanup_waiter: AtomicBool::new(false),
         });
@@ -988,7 +1023,11 @@ impl Ledger {
                 Body::ClosingPending => return Err(VoiceError::Capacity),
                 Body::Pending(pending) if !pending.worker && state.status.action.is_none() => {}
                 Body::Pending(_) => return Err(VoiceError::Capacity),
-                Body::Live(_) | Body::Drained(..) => return Err(VoiceError::Unauthorized),
+                Body::Live(_)
+                | Body::Drained(..)
+                | Body::SdpPending(_)
+                | Body::SdpLive(_)
+                | Body::SdpDrained(_) => return Err(VoiceError::Unauthorized),
             }
             state.status.pending = PendingStatus::Closing;
             let Body::Pending(pending) = std::mem::replace(&mut state.body, Body::ClosingPending)
@@ -1026,14 +1065,33 @@ impl Ledger {
     fn observe(row: &Arc<Row>, notify: bool) -> Result<Option<Observation>, VoiceError> {
         let action = {
             let mut state = row.state.lock().unwrap_or_else(|error| error.into_inner());
-            let Body::Live(live) = &mut state.body else {
-                return Ok(None);
-            };
-            if live.observer {
-                return Err(VoiceError::Capacity);
+            match &mut state.body {
+                Body::Live(live) => {
+                    if live.observer {
+                        return Err(VoiceError::Capacity);
+                    }
+                    live.observer = true;
+                    live.action.clone()
+                }
+                Body::SdpPending(p) if p.published.is_some() => {
+                    if p.observer {
+                        return Err(VoiceError::Capacity);
+                    }
+                    p.observer = true;
+                    p.published
+                        .as_ref()
+                        .expect("guarded published action")
+                        .clone()
+                }
+                Body::SdpLive(live) => {
+                    if live.observer {
+                        return Err(VoiceError::Capacity);
+                    }
+                    live.observer = true;
+                    live.action.clone()
+                }
+                _ => return Ok(None),
             }
-            live.observer = true;
-            live.action.clone()
         };
         Ok(Some(Observation {
             row: row.clone(),
@@ -1220,6 +1278,9 @@ impl Ledger {
                 Body::Drained(..) => None,
                 Body::Pending(_) | Body::ClosingPending => return Err(VoiceError::Capacity),
                 Body::ClosedPending => return Ok(state.status.clone()),
+                Body::SdpPending(_) | Body::SdpLive(_) | Body::SdpDrained(_) => {
+                    return Err(VoiceError::Unauthorized)
+                }
             }
         };
         if let Some(phase) = phase {
@@ -1549,6 +1610,12 @@ impl Drop for Observation {
             .lock()
             .unwrap_or_else(|error| error.into_inner());
         if let Body::Live(live) = &mut state.body {
+            live.observer = false;
+        }
+        if let Body::SdpPending(p) = &mut state.body {
+            p.observer = false;
+        }
+        if let Body::SdpLive(live) = &mut state.body {
             live.observer = false;
         }
         drop(state);

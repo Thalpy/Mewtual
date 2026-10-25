@@ -133,6 +133,13 @@ impl ActionBinding {
     pub(in crate::voice_v2) fn matches_plaintext(&self, bytes: &[u8]) -> bool {
         self.is_seal() && self.body_tag == plaintext_tag(bytes)
     }
+    #[cfg(test)]
+    pub(in crate::voice_v2) fn body_tag_for_test(&self) -> [u8; 32] {
+        self.body_tag
+    }
+    pub(in crate::voice_v2) fn matches_plaintext_commitment(&self, tag: &[u8; 32]) -> bool {
+        self.is_seal() && self.body_tag == *tag
+    }
     pub(in crate::voice_v2) fn belongs_to_intent(&self, intent: &Arc<InitialSdpIntent>) -> bool {
         Arc::ptr_eq(&self.intent, intent)
     }

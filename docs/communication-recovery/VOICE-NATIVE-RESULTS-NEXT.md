@@ -1,5 +1,20 @@
 # Next voice milestone: native result recovery
 
+## Current native row continuation (25 October; not enabled)
+
+The draft `communication-sdp-native-rows` checkpoint adds shared-index SDP row identity,
+canonical bounded plaintext commitments, close-before-Row intent and late Actor publication
+custody. HANDOVER records current checks. Per-action closure is distinct from whole-PC
+closure, and a known body mismatch retains real publication cleanup without SDK exposure.
+Unknown handed-off Pending still needs actual Root recovery/negative evidence; it cannot be
+compacted by timeout, worker loss or absence of an Action handle. Production rejects all SDP
+opcodes before admission. Closed positive capture adopts only the actual original Root Arc,
+not a claimed identifier. The next leaf is a fixed original per-invocation outcome slot,
+recorded in Root's publication tail and retained independently of Pair/LocalJoin teardown.
+An entered-but-ambiguous call must stay uncertain; only actual prepublication refusal or
+never-entered command destruction can establish a negative, and live Capacity must retain
+an exact retry path. Full endpoint/SDK/RTC integration follows that leaf.
+
 ## Current transport continuation (25 October; not live V2)
 
 `communication-sdp-native-transport` adds fixed Seal/Open history fees/IO counters, closed

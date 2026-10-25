@@ -349,8 +349,10 @@ impl Ledger {
             })
             .all(|row| {
                 let state = row.state.lock().unwrap_or_else(|e| e.into_inner());
-                matches!(state.body, Body::ClosedPending)
-                    || (matches!(state.body, Body::Drained(..)) && state.status.drained)
+                sdp_rows::locally_drained(&state).unwrap_or_else(|| {
+                    matches!(state.body, Body::ClosedPending)
+                        || (matches!(state.body, Body::Drained(..)) && state.status.drained)
+                })
             })
     }
 }

@@ -517,11 +517,27 @@ async fn native_v2_abandoned_custody_needs_exact_physical_collection_dead_lease_
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn native_v2_pc_intent_close_and_sdk_release_order_actual_queued_and_returned_actor_work() {
-    confirmation_over_blocked_tcp(true, false, false, false, Some(false)).await;
+    confirmation_over_blocked_tcp(true, false, false, false, Some(0)).await;
 }
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn native_v2_pc_intent_sdk_release_before_begin_and_lost_queued_waiter_never_revive() {
-    confirmation_over_blocked_tcp(true, false, false, false, Some(true)).await;
+    confirmation_over_blocked_tcp(true, false, false, false, Some(1)).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn native_v2_pc_intent_mismatched_sdp_publication_retains_exact_action_without_sdk_exposure()
+{
+    confirmation_over_blocked_tcp(true, false, false, false, Some(2)).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn native_v2_pc_intent_mismatched_sdp_keeps_admitted_engine_until_actual_settlement() {
+    confirmation_over_blocked_tcp(true, false, false, false, Some(3)).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn native_v2_pc_intent_unknown_publication_blocks_collection_until_actual_closed_capture() {
+    confirmation_over_blocked_tcp(true, false, false, false, Some(4)).await;
 }
 
 async fn confirmation_over_blocked_tcp(
@@ -529,7 +545,7 @@ async fn confirmation_over_blocked_tcp(
     reject: bool,
     known_incoming: bool,
     orphan: bool,
-    pc_cases: Option<bool>,
+    pc_cases: Option<u8>,
 ) {
     let mut scenario = Scenario::new(false, isolate().await);
     scenario.admit().await;

@@ -30,7 +30,7 @@ pub(in crate::voice_handoff) struct Receipt {
     pub proof: Option<[u8; 32]>,
     pub state: State,
 }
-fn storage<'a>(
+pub(super) fn storage<'a>(
     row: &ResolvedRow,
     state: &'a super::State,
     session: &Arc<SessionIdentity>,
@@ -48,7 +48,7 @@ fn storage<'a>(
     }
     Ok(storage)
 }
-fn mutable_storage(state: &mut super::State) -> &mut super::sdp::Claim {
+pub(super) fn mutable_storage(state: &mut super::State) -> &mut super::sdp::Claim {
     state
         .plan_mut()
         .unwrap()
@@ -97,6 +97,9 @@ impl Drop for Preparation {
     }
 }
 impl Claim {
+    pub(super) fn matches(&self, proof: [u8; 32]) -> bool {
+        self.proof == proof
+    }
     pub(super) fn intent(&self) -> Option<&Arc<InitialSdpIntent>> {
         self.intent.as_ref()
     }

@@ -59,6 +59,11 @@ impl NativeRowFunding {
     pub fn in_flight(&self) -> usize {
         self.state.load(Ordering::Acquire) & COUNT
     }
+    /// Irreversible admission fence, independently of outstanding concrete IO. Native row
+    /// installation must not mistake a closing nonzero counter for an open purpose.
+    pub fn is_closed(&self) -> bool {
+        self.state.load(Ordering::Acquire) & CLOSED != 0
+    }
     /// Stable local IO collection only AFTER its original admission closed. This is not
     /// engine/SDK/whole-phase drainage, actual native row issuance or fresh effect authority.
     pub fn is_collected(&self) -> bool {
