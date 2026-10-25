@@ -1,5 +1,17 @@
 # Next voice milestone: native result recovery
 
+## 25 October: browser Input format and reader exist; integrate original owner next
+
+The standalone op17 reader preserves authenticated class-specific ceilings and generic
+limits; the v8/tag3 decoder borrows AAD/body after exact original row/Action/Ready/SDK/PC
+checks. They are not connected to the retained channel. Before doing so, transfer its
+paid `opened` backing explicitly rather than letting framed finally clear borrowed views.
+Correct native opcode20 for successful empty plaintext from legal Open16; never replace
+that success with AuthenticationFailed. Then compose one original private owner through
+large Input, WebCrypto, exact Result retry, actual SDK settlement, ACK and Return, with
+the original one-execution latch/output across reply loss and complete measured64KiB
+stages. Fresh delivery/RTC, ICE/fresh rounds, multi-peer, relay and acceptance follow.
+
 ## 25 October: native Result is staged; browser execution is next
 
 The scoped Root/App/native19/20/21 path now handles the original paid output and canonical

@@ -1,5 +1,14 @@
 # Chat, files and voice implementation evidence
 
+## 25 October: browser SDP Input data boundary, integration still open
+
+The private opcode17 reader and v8/tag3 decoder now provide bounded authenticated
+large-Input intake and exact original binding checks without copying payload bytes.
+They do not enable production SDP or connect WebCrypto/RTC. Borrowed backing transfer,
+actual SDK execution/settlement, empty successful Open Result representation, fresh
+delivery/RTC, multi-peer, relay and combined/physical acceptance remain open. HANDOVER
+records current focused/full/static evidence; no physical acceptance has been added.
+
 ## 25 October original native Result checkpoint (full validation pending)
 
 The scoped Root/App/native Result path is implemented privately; production still refuses

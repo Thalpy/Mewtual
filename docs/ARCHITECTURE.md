@@ -1,5 +1,16 @@
 # Mewtual; Architecture
 
+## Separate browser SDP Input data boundary (25 October; not integrated)
+
+A dedicated opcode17 BYOB response reader admits only authenticated direction1/class2
+Input or fixed Control. It shares the existing read/cancellation implementation while
+keeping generic2,064B ceilings unchanged. The v8/tag3 descriptor decoder checks the exact
+original row/Action/PC/SDK/storage/Ready bindings and returns borrowed AAD/body views from
+one fixed exact backing. It does not normalize AAD or grant engine/SDK/RTC authority.
+A future consumer must explicitly transfer and retain its paid backing: the current
+retained channel's framed finally clears `opened`. Full64KiB composition and actual
+SDK/Result/settlement integration remain open; production SDP stays disabled.
+
 ## Original SDP Result publication (25 October; staged native path)
 
 Seal/Open prepare all fallible signature/hash/token/delivery work outside native guards,

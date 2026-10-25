@@ -1,5 +1,24 @@
 # Mewtual; Handover
 
+## Browser SDP Input reader (25 October; private consumer still pending)
+
+`communication-sdp-browser-input` builds on pushed Result checkpoint `b74804d6`.
+The separate opcode17 response reader authenticates its bounded prefix before allocating
+class2 Input (at most9,232B) or Control (at most272B); generic readers remain2,064B.
+The v8/tag3 decoder checks original row/parent/Action/Ready/key/SDK/storage/PC bindings,
+role, generation, full-u64 sequence, engine charge and exact lengths. AAD/body are views
+of one exact ordinary fixed backing, with no plaintext copy or caller-object retention.
+
+This is a standalone data boundary. The retained channel does not consume it yet:
+its existing framed cleanup clears `opened`, so integration must explicitly transfer the
+paid backing to one exclusive owner with one final clearer. Input Open16 is valid and
+successful AEAD may yield empty plaintext; native opcode20 currently refuses that result.
+Correct that mismatch before SDK integration, preserving exact success versus AEAD failure.
+No permission, quota or production dispatch was widened. Complete SDK/RTC ownership,
+settlement, fresh delivery, multi-peer, relay and physical acceptance remain outstanding.
+Current focused/frontend/static/full evidence is being collected; preceding Result gates
+remain recorded below. Independent physical testing still lacks a second desktop/network.
+
 ## Scoped native SDP Result checkpoint (25 October; production disabled)
 
 `communication-sdp-result` continues from pushed engine checkpoint `8348729b`.

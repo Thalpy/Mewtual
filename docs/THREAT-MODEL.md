@@ -1,5 +1,21 @@
 # Threat model; client integrity & enforcement boundaries
 
+## Browser SDP Input boundaries (25 October; no production consumer)
+
+The separate op17 reader cannot let a keyless stale loopback service select a large
+application body before exact channel authentication. Wrong direction/op/class/length,
+truncated/excess streams and cancellation reject under the original physical loan;
+metadata comes only from the authenticated callback, never unbounded HTTP values.
+
+The descriptor decoder binds the original native row/Action/PC/SDK/storage/Ready and
+checks exact role, sequence and charge. Shared/resizable/subview backings are refused;
+expected getters are snapshotted once and payload bytes are not copied. Borrowed views
+still require exclusive ownership and paid backing through actual async settlement.
+Neither decoding nor historical data grants engine/SDK/RTC/currentness. Existing framed
+cleanup cannot yet transfer that loan. Successful empty Open is not authentication
+failure; its native Result representation must be corrected before integration. No
+complete SDK/RTC memory proof or audible/physical acceptance is claimed.
+
 ## Native SDP Result ownership and uncertainty (25 October; disabled family)
 
 An authenticated header only admits bounded capacity for an existing original native row.

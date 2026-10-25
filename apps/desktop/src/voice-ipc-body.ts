@@ -3,7 +3,11 @@
  * The enclosing physical-flight loan must already cover this buffer and one EOF probe and
  * remain held through this promise (including read and actual cancellation settlement).
  * This helper supplies neither channel authentication nor a complete flight/copy budget. */
+import type { VoiceIpcHeader } from "./voice-ipc-frame.ts";
+
 export const VOICE_IPC_PILOT_CIPHER_MAX = 2048 + 16;
+/** Native opcode17 has its own authenticated class, not a generic Data fallback. */
+export const VOICE_IPC_SDP_INPUT_CIPHER_MAX = 8192 + 1024 + 16;
 type BodyFailure = "unsupported" | "metadata" | "truncated" | "excess" | "closed" | "reader";
 export class VoiceIpcBodyError extends Error {
   readonly code: BodyFailure;
@@ -21,7 +25,7 @@ export class VoiceIpcBodyError extends Error {
 export async function readVoiceIpcBody(
   response: Response, authenticatedBytes: number, signal: AbortSignal,
 ): Promise<Uint8Array<ArrayBuffer>> {
-  return readBody(response, authenticatedBytes, signal);
+  return readBody(response, authenticatedBytes, signal, VOICE_IPC_PILOT_CIPHER_MAX);
 }
 
 /** Authenticate an EXACT144-byte ASCII prefix from the bounded stream, then admit its body.
@@ -32,11 +36,38 @@ export async function readVoiceIpcBody(
 export async function readVoiceIpcResponse(
   response: Response, signal: AbortSignal, authenticate: (admission: string) => Promise<number>,
 ): Promise<Uint8Array<ArrayBuffer>> {
-  return readBody(response, null, signal, authenticate);
+  return readBody(response, null, signal, VOICE_IPC_PILOT_CIPHER_MAX, authenticate);
+}
+
+/** Separate original SDP Input intake. The caller must authenticate the exact response
+ * MAC, original request/session/position and replay counter BEFORE returning this header.
+ * Only opcode17's class2 Input or fixed Control history/refusal can select a length. No
+ * untrusted HTTP length, caller-selected ceiling or generic Data widening is accepted.
+ *
+ * The enclosing exclusive paid flight covers the complete ciphertext, prefix, EOF probe,
+ * WebCrypto copies and eventual decrypted backing; this reader does not fund those owners.
+ * Retain that loan through actual read/cancel settlement and then through the last use of
+ * the returned bytes. Production broker/SDP dispatch remains disabled. */
+export async function readVoiceIpcSdpInputResponse(
+  response: Response, signal: AbortSignal,
+  authenticate: (admission: string) => Promise<Readonly<Pick<VoiceIpcHeader, "direction" | "operation" | "kind" | "length">>>,
+): Promise<Uint8Array<ArrayBuffer>> {
+  return readBody(response, null, signal, VOICE_IPC_SDP_INPUT_CIPHER_MAX, async admission => {
+    const header = await authenticate(admission);
+    // Snapshot each field once: metadata supplied across an asynchronous callback must
+    // not change its class after the check and before the positive allocation.
+    if (!header) throw new VoiceIpcBodyError("metadata");
+    const direction = header.direction, operation = header.operation, kind = header.kind, length = header.length;
+    const limit = kind === 0 ? 272 : kind === 2 ? VOICE_IPC_SDP_INPUT_CIPHER_MAX : 0;
+    if (direction !== 1 || operation !== 17 || !Number.isSafeInteger(length) || length < 16 || length > limit) {
+      throw new VoiceIpcBodyError("metadata");
+    }
+    return length;
+  });
 }
 
 async function readBody(
-  response: Response, authenticatedBytes: number | null, signal: AbortSignal,
+  response: Response, authenticatedBytes: number | null, signal: AbortSignal, maximum: number,
   authenticate?: (admission: string) => Promise<number>,
 ): Promise<Uint8Array<ArrayBuffer>> {
   let reader: ReadableStreamBYOBReader | null = null;
@@ -65,7 +96,7 @@ async function readBody(
   try {
     closed();
     const validLength = (value: number | null): value is number => typeof value === "number" &&
-      Number.isSafeInteger(value) && value >= 16 && value <= VOICE_IPC_PILOT_CIPHER_MAX;
+      Number.isSafeInteger(value) && value >= 16 && value <= maximum;
     if ((authenticatedBytes !== null && !validLength(authenticatedBytes)) || response.status !== 200 ||
         response.headers.has("content-encoding")) {
       throw new VoiceIpcBodyError("metadata");

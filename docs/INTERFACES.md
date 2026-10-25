@@ -1,5 +1,21 @@
 # Mewtual; Interfaces & Hooks Schema
 
+## Private browser SDP Input reader/decoder (25 October; staged)
+
+`readVoiceIpcSdpInputResponse` requires the original authentication callback to verify
+the exact response/request/session/position MAC and replay counter before returning fixed
+header fields. Only direction1/op17 Control<=272B or class2<=9,232B can allocate a body.
+The prefix is144B, EOF probe1B, and actual cancellation is joined. Generic readers retain
+their original2,064B maximum; no public caller-selected ceiling was introduced.
+
+`decodeVoiceSdpInput` consumes exact v8/tag3 plaintext and expected original bindings.
+It validates purpose/role/profile/generations/u64 sequence/engine formula/lengths, and
+returns two borrowed views of the same exact non-shared, non-resizable ArrayBuffer.
+The caller owes exclusive paid custody through every async use and exactly one clearer;
+Readonly/frozen metadata does not make byte views immutable. This is not an engine or RTC
+permit and is not wired into the retained broker. Input Open16 remains legal; current
+native opcode20's nonempty output contract must be corrected before SDK integration.
+
 ## Scoped SDP Result contract (25 October; private opcodes19/20/21)
 
 `submit_voice_sdp_result_scoped` and `submit_voice_sdp_open_result_scoped` lend
