@@ -37,7 +37,7 @@ async fn exchange(
     }
     unreachable!("last bounded attempt returns its exact response")
 }
-pub(super) async fn park(
+pub(in crate::voice_handoff) async fn park(
     actor: &catcoms_app::ServerActor,
 ) -> catcoms_app::durable_chat::DurableSendReady {
     let expected_context = actor.durable_send_context().await.unwrap();
@@ -375,6 +375,13 @@ pub(super) async fn exercise(
         drop(physical);
         drop(incoming);
     }
+    // Collecting a completed receiver can beat the sender's synchronous send/Drop.
+    // The SAME Actor FIFO turn proves its previous command and sender work retired;
+    // owner collection alone is not that barrier. Keep the held-owner checks above.
+    actor
+        .voice_v2_context(route.selected().binding().scope.room)
+        .await
+        .unwrap();
     assert_eq!(phase.status(), Status::Drained);
     if let Some(retained) = unstarted_sdp {
         retained.after_parent_close(state, route, parent);

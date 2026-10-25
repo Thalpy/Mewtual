@@ -285,6 +285,12 @@ pub(super) async fn exercise(
             return (body, complete); // The caller closes PC/SDK while these real owners remain.
         }
         drop(complete);
+        // The receiver can collect before the sender returns from send(). Wait for a
+        // SAME Actor FIFO turn before asserting that its one RPC position is reusable.
+        actor
+            .voice_v2_context(route.selected().binding().scope.room)
+            .await
+            .unwrap();
         let pending = actor
             .queue_voice_sdp_offer(grant.clone(), absent, intent.clone(), &body)
             .await
@@ -295,6 +301,10 @@ pub(super) async fn exercise(
         assert_blocked(state, route);
         assert!(weak.upgrade().is_some());
         drop(retry);
+        actor
+            .voice_v2_context(route.selected().binding().scope.room)
+            .await
+            .unwrap();
         assert!(weak.upgrade().is_none());
         assert_collected(state, route);
 

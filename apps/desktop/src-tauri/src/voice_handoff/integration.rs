@@ -8,7 +8,7 @@ use sha2::{Digest, Sha256};
 use std::sync::Arc;
 mod confirmation;
 mod key_session;
-mod pc;
+pub(super) mod pc;
 mod sdk;
 mod sdp;
 mod sdp_actor;
