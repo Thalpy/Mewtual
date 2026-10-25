@@ -1,5 +1,18 @@
 # Next voice milestone: native result recovery
 
+## Paid producer continuation (25 October; current implementation under validation)
+
+`communication-sdp-native-worker` adds exact local retry, ordered construction and the
+private paid Actor submission worker; HANDOVER records current limits and pending evidence.
+Production still refuses every SDP operation. Next connect authenticated Begin/Resolve/
+History/Return to this producer, then original Input/engine/result/delivery/ACK/settlement.
+Before HIGH Seal, recover the same accepted Open delivery, including lost result replies
+without surviving plaintext. A narrow registered-Action metadata getter must return the
+existing receipt/delivery, never mint another delivery or grant fresh RTC permission.
+Then implement original-key private browser WebCrypto, complete ICE/RTC, fresh rounds and
+multi-peer/relay composition, followed by combined and independent physical acceptance.
+
+
 ## Canonical row/outcome continuation (25 October; HTTP vertical still pending)
 
 `communication-sdp-row-outcomes` integrates one original Root outcome into native rows,
