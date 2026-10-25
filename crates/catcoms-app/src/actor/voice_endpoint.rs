@@ -36,6 +36,7 @@ mod body;
 mod context;
 pub use context::{voice_context_queue_bytes, VoiceContextPending};
 mod sdp_body;
+mod sdp_delivery;
 mod sdp_engine;
 mod sdp_input;
 mod sdp_ops;
@@ -46,6 +47,10 @@ pub use body::{
 pub use sdp_body::{
     voice_sdp_rpc_bytes, VoiceSdpBody, VoiceSdpBodyRefusal, VoiceSdpCompletion, VoiceSdpPending,
     VOICE_SDP_RPC_FIXED_BYTES, VOICE_SDP_RPC_METADATA_BYTES,
+};
+pub use sdp_delivery::{
+    voice_sdp_delivery_rpc_bytes, VoiceSdpDeliveryPublisher, VoiceSdpDeliveryWork,
+    VOICE_SDP_DELIVERY_RPC_BYTES,
 };
 pub use sdp_engine::{
     voice_sdp_engine_rpc_bytes, VoiceSdpEnginePublisher, VoiceSdpEngineWork,
@@ -133,6 +138,7 @@ enum Command {
     SdpInput(sdp_input::Command),
     SdpEngine(sdp_engine::Command),
     SdpResult(sdp_result::Command),
+    SdpDelivery(sdp_delivery::Command),
     Stop {
         grant: Arc<CallGrant>,
         reply: Reply<()>,
@@ -255,6 +261,7 @@ impl Command {
             Self::SdpInput(command) => sdp_input::apply(command, server),
             Self::SdpEngine(command) => sdp_engine::apply(command, server),
             Self::SdpResult(command) => sdp_result::apply(command, server),
+            Self::SdpDelivery(command) => sdp_delivery::apply(command, server),
             Self::Stop { grant, reply } => {
                 // An admitted cleanup must run even if its reply is lost. Unlike a factory,
                 // this only retires the SAME original allocation and cannot create authority.

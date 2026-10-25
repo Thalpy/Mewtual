@@ -1,5 +1,19 @@
 # Mewtual; Interfaces & Hooks Schema
 
+## Private native SDP delivery26 (25 October)
+
+The existing version8 Control grammar selects the original Open row/parent/full Action and
+an applied boolean. false requests fresh current admission; true records the trusted original
+browser executor's successful RTC completion. Native cannot infer that completion from an
+Open receipt, SDK crypto settlement, a timeout or a lost reply. A first true requires prior
+admission and current authority; exact already-Applied true recovers history after closure.
+
+The public Root wrapper checks original lease/scope/group/local/resources before history;
+a fresh call also checks the exact current grant allocation. Native matches actual Action
+and delivery allocations plus selector before lexical final admission. Result is canonical
+fixed220B history or a fixed refusal, not a reusable RTC permit. Shipping15-27 remain refused.
+Browser RTC execution and its actual promise/string ownership are still pending.
+
 ## Private browser first-Offer SDK integration (25 October)
 
 `prepareNativeSdpCrypto` accepts the exact existing owner/channel/chain. LOW supplies its

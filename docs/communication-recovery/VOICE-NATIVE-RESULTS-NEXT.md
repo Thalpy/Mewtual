@@ -1,5 +1,21 @@
 # Next voice milestone: native result recovery
 
+## 25 October: scoped native delivery26 exists privately; connect RTC next
+
+Fresh actual-Actor admission and exact already-Applied metadata recovery are implemented
+behind the unchanged shipping refusal gate. HANDOVER records focused tests, review and
+pending final/full validation. The public wrapper now binds original lease/scope and stable
+Root group/local/resources before any history Clock. This supersedes the delivery26
+implementation task in older checkpoint sections below.
+
+Next consume the original paid browser Open inbox exactly once through actual RTC after
+fresh26 admission, join the real SDK promise, and record Applied only on successful completion.
+Keep native uncertainty separate from the SDK-started latch. Retain and inventory actual
+UTF16 descriptions, browser promises and IPC copies inside existing caps. Then implement
+HIGH Answer/LOW Answer Open, ICE/renewed rounds, multi-peer, member media relay and combined
+acceptance. Native stopped-Actor and End/lock26 coverage remain follow-ups. Independent
+physical audio/network acceptance still requires devices/networks unavailable here.
+
 ## 25 October: private first-Offer browser crypto is connected
 
 The retained broker now runs LOW Offer Seal and HIGH Offer Open through authenticated

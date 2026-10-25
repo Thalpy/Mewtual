@@ -106,6 +106,9 @@ impl ActionBinding {
     pub(in crate::voice_v2) fn peer(&self) -> DeviceId {
         self.intent.original.binding().peer
     }
+    pub(in crate::voice_v2) fn local(&self) -> DeviceId {
+        self.intent.original.binding().local
+    }
     pub(in crate::voice_v2) fn matches_answer(
         &self,
         handshake: Nonce,

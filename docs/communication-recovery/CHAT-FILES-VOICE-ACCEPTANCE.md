@@ -1,5 +1,18 @@
 # Chat, files and voice implementation evidence
 
+## 25 October: private native delivery26 validation in progress
+
+Scoped actual-Actor delivery controls now separate fresh native admission from immutable
+already-Applied recovery. Eleven focused Root tests pass, including original grant/group/
+local/resources checks before Clock, actual Group/Policy contention, late Clock revocation,
+no-op/unwind and End recovery. The maximum-size native TCP fixture passes after22/23 input
+compaction, including copy/mailbox pressure, UI/PC-close races, lost waiter and foreign
+Action/Session. Original Task/RPC/Control limits remain unchanged; HANDOVER records exact
+measurements and pending full gates. The corrected no-extra-custody post-send barrier
+and final maximum TCP case pass11.36s; final read-only review has no remaining findings. Production
+still refuses15-27. Actual browser RTC, Answer/ICE/renewed rounds, multi-peer, member media
+relay, combined and independent physical acceptance are not established by these tests.
+
 ## 25 October: first-Offer checkpoint full validation
 
 The final complete Root suite for native checkpoint 5779e23c passed 3,638 tests with 24 ignored (59 summaries). The separate native suite passed 852 unit tests plus 5 ACL tests, with no failures. Browser checkpoint 7804717a has identical Rust sources and separately passes all 2,804 frontend tests, Svelte checks (0 errors/0 warnings) and production build. Root/native formatting, ambient checks, Root strict all-target/all-feature Clippy, native check and strict all-target Clippy passed as recorded below. Dependency audit still fails inherited crypto-bigint0.5.5 advisory RUSTSEC-2026-0387; no dependency/ignore change was made.

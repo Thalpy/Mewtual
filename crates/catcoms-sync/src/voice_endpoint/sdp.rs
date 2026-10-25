@@ -397,7 +397,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         action: &Arc<voice_v2::crypto_actions::CryptoAction>,
         delivery: &Arc<voice_v2::sdp::SdpDelivery>,
     ) -> Result<(), VoiceError> {
-        self.transition_voice_sdp_delivery(grant, action, delivery, false)
+        self.with_voice_sdp_delivery_admission(grant, action, delivery, false, |step| step.commit())
     }
 
     /// Called only by the original private native/browser SDK completion path. This is
@@ -409,16 +409,67 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         action: &Arc<voice_v2::crypto_actions::CryptoAction>,
         delivery: &Arc<voice_v2::sdp::SdpDelivery>,
     ) -> Result<(), VoiceError> {
-        self.transition_voice_sdp_delivery(grant, action, delivery, true)
+        self.with_voice_sdp_delivery_admission(grant, action, delivery, true, |step| step.commit())
     }
 
-    fn transition_voice_sdp_delivery(
+    /// Lend one stack-only final delivery opportunity on the actual exclusively borrowed
+    /// Actor. Original Clock preparation precedes the native hook; only commit enters
+    /// current Group/Policy. Native must independently bind its original Session, registered
+    /// Action/delivery and applied selector before entering UI/Coordinator/route/row gates.
+    ///
+    /// Fresh admission always repeats current authority. Only exact already-Applied
+    /// completion may recover metadata after End, bypassing the unused hook successfully.
+    /// Neither recovery nor an Admitted observation grants a new RTC execution.
+    ///
+    /// ```compile_fail
+    /// use catcoms_rt::{CryptoRngCore, MeshTransport};
+    /// use catcoms_sync::{ChannelSync, voice_v2::{CallGrant, crypto_actions::CryptoAction, sdp::SdpDelivery}};
+    /// use std::sync::Arc;
+    /// fn escape<T: MeshTransport, R: CryptoRngCore>(sync: &mut ChannelSync<T, R>,
+    ///     grant: &Arc<CallGrant>, action: &Arc<CryptoAction>, delivery: &Arc<SdpDelivery>) {
+    ///     let mut escaped = None;
+    ///     let _ = sync.with_voice_sdp_delivery_admission(grant, action, delivery, false,
+    ///         |step| { escaped = Some(step); Ok(()) });
+    /// }
+    /// ```
+    pub fn with_voice_sdp_delivery_admission(
         &mut self,
         grant: &Arc<CallGrant>,
         action: &Arc<voice_v2::crypto_actions::CryptoAction>,
         delivery: &Arc<voice_v2::sdp::SdpDelivery>,
         applied: bool,
+        publish: impl FnOnce(voice_v2::sdp::SdpDeliveryAdmission<'_>) -> Result<(), VoiceError>,
     ) -> Result<(), VoiceError> {
+        // History is carried by the original Action, not a live participant registry. Bind
+        // its actual grant and stable group/local/process owners BEFORE history can sample
+        // a Clock. Do not use current-grant validation here: End revokes that same original
+        // lease, but cannot erase an already-Applied fact. A replacement grant, including an
+        // equal-scope foreign lease, must never be accepted as the original history owner.
+        // The directory captures this Root's immutable MLS group at attachment; its pure
+        // identity check does not hash or clone group bytes on this small RPC payment.
+        // Historical ownership binds the lease capability. Fresh admission below still
+        // requires the exact current grant allocation, participant and native row.
+        if !action.belongs_to(grant.scope(), &grant.lease())
+            || action.sdp_local() != Some(self.device.device_id())
+            || self.voice_runtime.as_ref().is_none_or(|voice| {
+                !voice.directory.owns_group(&grant.scope().group)
+                    || !action.uses_resources(&voice.resources)
+            })
+        {
+            return Err(VoiceError::Unauthorized);
+        }
+        // Native authenticates the actual row independently. This only recovers immutable
+        // completion of the SAME original accepted delivery; it cannot admit a new effect.
+        let original = action
+            .recover_sdp_open_history()?
+            .and_then(|history| history.delivery)
+            .ok_or(VoiceError::Unauthorized)?;
+        if !Arc::ptr_eq(&original, delivery) {
+            return Err(VoiceError::Unauthorized);
+        }
+        if applied && delivery.was_applied() {
+            return Ok(());
+        }
         self.validate_current_voice_call_grant(grant)?;
         let context = self.voice_v2_context(grant.scope().room)?;
         let voice = self
@@ -441,13 +492,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         }
         let peer = action.sdp_peer().ok_or(VoiceError::Unauthorized)?;
         let members = super::ready::ready_member_snapshot(actor, &context, peer, &[])?;
-        let transition = if applied {
-            voice_v2::presence::LocalJoin::complete_sdp_delivery
-        } else {
-            voice_v2::presence::LocalJoin::admit_sdp_delivery
-        };
-        transition(
-            &participant.join,
+        let result = participant.join.with_sdp_delivery_admission(
             actor,
             &room,
             action,
@@ -457,6 +502,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
                 lease: &participant.lease,
                 member: &|id| members.contains(&Some(id)),
             },
+            applied,
             |_, _| {
                 if participant.lease.is_live() && participant.watch.is_live() {
                     Ok(())
@@ -464,7 +510,12 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
                     Err(VoiceError::Unauthorized)
                 }
             },
-        )
+            publish,
+        );
+        if result.is_ok() {
+            voice.endpoints.changed();
+        }
+        result
     }
 
     /// Submit only the original native SDP seal result. The packet stays in its original

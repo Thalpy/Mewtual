@@ -68,6 +68,12 @@ impl Directory {
             faulted: true,
         }
     }
+    /// Immutable Root group identity captured by prepare_voice_actor. It is independent
+    /// of directory/room liveness, so historical capability checks can remain callback-
+    /// free without rehashing MLS bytes or rebuilding a current view after End.
+    pub(crate) fn owns_group(&self, group: &[u8; 32]) -> bool {
+        &self.group == group
+    }
     fn close(&mut self) {
         for room in self.rooms.values() {
             room.revoke();

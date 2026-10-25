@@ -1,5 +1,19 @@
 # Mewtual; Architecture
 
+## Private scoped native SDP delivery26 (25 October)
+
+The actual Actor now lends a lifetime-bound delivery step after original Clock preparation.
+Fresh native admission repeats original Session/selected row/Action/intent/SDK/PC and Root
+current authority under lexical native guards followed by try Group/Policy. The paid App
+RPC and native Task/physical owners survive callback/output collection independently.
+Canonical history is read only after the callback retires, outside native guards.
+
+Already-Applied completion is immutable metadata, recoverable after End/Return on the
+original capability; it never grants another RTC execution. Stable original lease/scope,
+Root directory group, local device and Resources checks precede history/Clock access.
+Fresh false26 still needs current authority even if old history says Applied. Browser RTC,
+Answer/ICE/renewed rounds, multi-peer and relay remain separate. Production stays disabled.
+
 ## Private first-Offer browser crypto owner (25 October)
 
 The retained encrypted channel now owns one serial first-Offer crypto job inside its

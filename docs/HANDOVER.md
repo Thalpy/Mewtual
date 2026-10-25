@@ -1,5 +1,51 @@
 # Mewtual; Handover
 
+## Scoped native SDP delivery (25 October; private, final validation in progress)
+
+`communication-sdp-delivery` follows the fully validated first-Offer checkpoint. Private
+native26 now queues a separately paid delivery command on the actual Actor. Fresh false26
+always repeats original Session/selected row/full Action/intent/SDK/PC and current Root
+MLS/room/watch/call/pair authority. Root prepares original Clock samples before lending a
+stack-only step; native holds lexical UI/Coordinator/route/index/parent/row gates through
+its consuming Group/Policy commit. A no-op hook refuses, and an actual committed effect
+cannot be contradicted by a subsequent hook error. No observer is an RTC execution token.
+
+Exact already-Applied true26 recovers metadata after closure/Return without reopening
+progress custody. Before any Root history/Clock read, the public wrapper binds the actual
+original call lease/scope, immutable Root directory group, local SDP device and Resources
+allocation. Historical recovery intentionally recognizes the original lease capability;
+fresh admission additionally requires the exact current grant allocation. False26 must
+never turn a current refusal into success from old Admitted/Applied history.
+
+The ordered App command retains its original RPC payment through callback return; native
+Task/physical custody remains separate through output collection. Canonical history waits
+for actual invocation retirement outside native guards. Eleven focused Root delivery tests
+pass, including real Group/Policy contention, injected Clock revocation, input compaction,
+no-op/refusal/unwind, original-owner rejection and metadata recovery after End. Maximum-size
+actual TCP native delivery passes after authenticated22/23 compact input, covering finite
+copy/mailbox pressure, UI/PC-close after enqueue, lost waiter, foreign Action/Session,
+Applied-after-admission and canonical retry after Return. The corrected post-send barrier
+parks inside the SAME actual Publisher with no extra custody owner. Immediate successful
+output/caller-Work destruction retains both original fees and physical custody until the
+callback returns, for fresh publication and the unused-hook Applied-history path. The final
+maximum TCP case passes11.36s. Final read-only review has no remaining findings.
+
+Final measurements including the test-only barrier: Task4,032/4,096B, App2,052/4,096B,
+physical adapter3,496B and unchanged whole Control12,279/12,288B. Full T Root/native gates
+and native check/Clippy are pending; Root strict all-target/all-feature Clippy passes3m15s.
+All2,804 frontend tests, Svelte checks and production build pass (53.24s). Dependency audit still fails the
+inherited crypto-bigint0.5.5 timing advisory RUSTSEC-2026-0387, with no dependency/ignore change.
+The preceding8047d749/5779e23c checkpoint full results below do not substitute for T gates.
+Startup/visual-flow gates are not repeated: no setup/runtime placement/UI/send/friend path changed.
+
+Production still refuses15-27. This slice provides private delivery controls, not browser
+RTC execution. Consume the same paid Open inbox once through actual RTC, report Applied only
+after its successful await, then implement HIGH Answer/LOW Answer Open, ICE/renewed rounds,
+multi-peer composition, member media relay and combined acceptance. Native stopped-Actor
+and End/lock26 integration deserve additional coverage; current tests separately exercise
+Root End, native UI contention and PC closure. Independent physical audio/network evidence
+remains unavailable with one desktop. External download resume is outside this scope.
+
 ## 25 October: first-Offer checkpoint full validation
 
 The final complete Root suite for native checkpoint 5779e23c passed 3,638 tests with 24 ignored (59 summaries). The separate native suite passed 852 unit tests plus 5 ACL tests, with no failures. Browser checkpoint 7804717a has identical Rust sources and separately passes all 2,804 frontend tests, Svelte checks (0 errors/0 warnings) and production build. Root/native formatting, ambient checks, Root strict all-target/all-feature Clippy, native check and strict all-target Clippy passed as recorded below. Dependency audit still fails inherited crypto-bigint0.5.5 advisory RUSTSEC-2026-0387; no dependency/ignore change was made.

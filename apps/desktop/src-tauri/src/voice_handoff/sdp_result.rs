@@ -450,6 +450,6 @@ pub(super) fn layout_bytes() -> usize {
     bytes
 }
 #[cfg(test)]
-mod tests;
+pub(super) mod tests;
 #[cfg(test)]
 pub(super) use tests::{exercise, exercise_open};

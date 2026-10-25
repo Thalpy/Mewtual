@@ -259,6 +259,11 @@ impl CryptoAction {
     pub(crate) fn sdp_peer(&self) -> Option<catcoms_crypto::DeviceId> {
         self.sdp_binding().map(|binding| binding.peer())
     }
+    /// Immutable original endpoint identity, including after input compaction or End.
+    /// This authenticates historical ownership only; it grants no current work authority.
+    pub(crate) fn sdp_local(&self) -> Option<catcoms_crypto::DeviceId> {
+        self.sdp_binding().map(|binding| binding.local())
+    }
     /// Original allocation identity only, never fresh work permission. Native/Actor SDP
     /// adapters must bind the actual action to the SAME funded PC intent before admitting
     /// a body or result; equal serialized round/Offer labels cannot fund another pair.

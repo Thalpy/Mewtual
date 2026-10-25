@@ -1,5 +1,21 @@
 # Threat model; client integrity & enforcement boundaries
 
+## Scoped SDP delivery and historical ownership (25 October; production disabled)
+
+An old Admitted/Applied observation cannot authorize another RTC execution. Fresh false26
+requires all original native row/Session/SDK/PC gates and current MLS/room/epoch/call/pair
+checks, even after a previous success. A refusal stays refused; canonical old history cannot
+mask it. Applied true is the original trusted executor's causal completion statement, not
+proof that native observed a browser SDK promise. First true requires prior admission;
+already-Applied true is metadata only and may recover after End/Return.
+
+Before callback-bearing history access, the public Root wrapper checks actual original call
+lease/scope, immutable Root group, local SDP device and resource allocation. Equal-scope
+foreign leases and unrelated Roots cannot claim that history. Stable checks allocate/hash
+nothing; native Clock/owner preparation precedes final guards. Task/RPC payment and physical
+custody outlive synchronous send/callback return and actual output destruction separately.
+Production SDP/RTC remain unavailable; no media/physical acceptance is implied.
+
 ## Browser first-Offer SDK ownership (25 October; production disabled)
 
 Authenticated native history cannot authorize a new SDK execution or RTC effect. The

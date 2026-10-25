@@ -219,6 +219,7 @@ impl LocalJoin {
     /// Fresh native RTC admission for the exact original accepted Open. It creates no new
     /// grant on retry; the adapter/browser must retain one SDK-started latch on this record.
     /// A historical receipt or a previously admitted record cannot bypass current ownership.
+    #[cfg(test)]
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn admit_sdp_delivery(
         &self,
@@ -229,12 +230,22 @@ impl LocalJoin {
         authority: &Authority<'_>,
         final_owner: impl FnOnce(u64, u64) -> Result<(), VoiceError>,
     ) -> Result<(), VoiceError> {
-        self.transition_sdp_delivery(actor, room, action, delivery, authority, false, final_owner)
+        self.with_sdp_delivery_admission(
+            actor,
+            room,
+            action,
+            delivery,
+            authority,
+            false,
+            final_owner,
+            |step| step.commit(),
+        )
     }
 
     /// Trusted native completion after the original private SDK has actually applied this
     /// remote description. Root records causal order only; browser/native actual promises,
     /// strings and IO remain independently paid until their real last-owner destruction.
+    #[cfg(test)]
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn complete_sdp_delivery(
         &self,
@@ -245,11 +256,20 @@ impl LocalJoin {
         authority: &Authority<'_>,
         final_owner: impl FnOnce(u64, u64) -> Result<(), VoiceError>,
     ) -> Result<(), VoiceError> {
-        self.transition_sdp_delivery(actor, room, action, delivery, authority, true, final_owner)
+        self.with_sdp_delivery_admission(
+            actor,
+            room,
+            action,
+            delivery,
+            authority,
+            true,
+            final_owner,
+            |step| step.commit(),
+        )
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn transition_sdp_delivery(
+    pub(crate) fn with_sdp_delivery_admission(
         &self,
         actor: &ActorOwner,
         room: &RoomAuthority,
@@ -258,19 +278,26 @@ impl LocalJoin {
         authority: &Authority<'_>,
         applied: bool,
         final_owner: impl FnOnce(u64, u64) -> Result<(), VoiceError>,
+        publish: impl FnOnce(crate::voice_v2::sdp::SdpDeliveryAdmission<'_>) -> Result<(), VoiceError>,
     ) -> Result<(), VoiceError> {
         if room.scope != self.scope
-            || !room.lease.is_live()
             || !actor.uses_resources(&self.resources)
             || !action.belongs_to(self.scope, &self.lease)
             || !action.owns_sdp_delivery(delivery)?
-            || (applied && !delivery.was_admitted())
         {
             return Err(VoiceError::Unauthorized);
         }
         let Some(Key::SdpOpen(_)) = self.actions.key_of(action) else {
             return Err(VoiceError::Unauthorized);
         };
+        // An exact already-recorded Applied observation is recoverable after End. This
+        // branch grants no new RTC admission and never invokes the unused native hook.
+        if applied && delivery.was_applied() {
+            return Ok(());
+        }
+        if !room.lease.is_live() || (applied && !delivery.was_admitted()) {
+            return Err(VoiceError::Unauthorized);
+        }
         let pc = action.sdp_binding().ok_or(VoiceError::Unauthorized)?;
         let pair = self
             .confirmations
@@ -296,19 +323,52 @@ impl LocalJoin {
         {
             return Err(VoiceError::Unauthorized);
         }
-        let origin = actor.prepare_local_origin(pair.binding.peer, authority.context)?;
-        origin.with_origin(|wall, mono, origin| {
-            final_owner(wall, mono)?;
-            if !room.lease.is_live() || !delivery.current_at(wall, mono) {
-                return Err(VoiceError::Unauthorized);
+        let mut origin = Some(actor.prepare_local_origin(pair.binding.peer, authority.context)?);
+        let (wall, mono) = origin
+            .as_ref()
+            .expect("original delivery origin")
+            .observed_time();
+        let mut final_owner = Some(final_owner);
+        let mut committed = None;
+        let result;
+        {
+            let mut commit = || {
+                let result = origin.take().ok_or(VoiceError::Unauthorized)?.with_origin(
+                    |wall, mono, origin| {
+                        final_owner.take().expect("one original delivery owner")(wall, mono)?;
+                        if !room.lease.is_live() || !delivery.current_at(wall, mono) {
+                            return Err(VoiceError::Unauthorized);
+                        }
+                        origin.publish(|| {
+                            if applied {
+                                delivery.applied()
+                            } else {
+                                delivery.admit()
+                            }
+                        })
+                    },
+                );
+                committed = Some(result);
+                result
+            };
+            // Native enters UI/Coordinator/route/row BEFORE commit enters Group/Policy.
+            // Prepared origin and all owned caller graphs remain in this outer frame.
+            result = publish(crate::voice_v2::sdp::SdpDeliveryAdmission::new(
+                action,
+                delivery,
+                applied,
+                wall,
+                mono,
+                &mut commit,
+            ));
+        }
+        match committed {
+            // A caller error after actual publication cannot contradict that transition.
+            Some(result) => result,
+            None => {
+                result?;
+                Err(VoiceError::Unauthorized) // A no-op hook cannot report admission.
             }
-            origin.publish(|| {
-                if applied {
-                    delivery.applied()
-                } else {
-                    delivery.admit()
-                }
-            })
-        })
+        }
     }
 }

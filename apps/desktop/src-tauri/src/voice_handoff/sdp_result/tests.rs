@@ -80,7 +80,7 @@ fn opened_operation(
 /// and action under one original intent deadline. Real maintenance may hold a short
 /// native gate; a legal refusal is not failed terminal acceptance or SDK reexecution.
 #[allow(clippy::too_many_arguments)]
-async fn exchange(
+pub(in crate::voice_handoff) async fn exchange(
     state: &crate::AppState,
     public: &super::super::bootstrap::SetupOutput,
     route: &Route,
@@ -90,7 +90,7 @@ async fn exchange(
     intent: &Arc<catcoms_sync::voice_v2::sdp::InitialSdpIntent>,
 ) -> Vec<u8> {
     let clock = crate::voice_runtime(state).clock();
-    let remaining = if matches!(operation, 22 | 23) {
+    let remaining = if matches!(operation, 22 | 23 | 26) {
         // Historical cleanup survives PC closure/expiry. This is only a broken-test
         // observer bound, never renewed protocol currentness or new action authority.
         15_000
@@ -117,6 +117,8 @@ async fn exchange(
             let context = Context::new(state);
             let reply = if operation == 18 {
                 super::super::sdp_engine::admit(&context, route, incoming).await
+            } else if operation == 26 {
+                super::super::sdp_delivery::apply(&context, route, incoming).await
             } else if matches!(operation, 22 | 23) {
                 super::super::sdp_http::apply(&context, route, incoming).await
             } else {
@@ -908,6 +910,28 @@ pub(in crate::voice_handoff) async fn exercise_open(
             ),
             "exact native retry returns SAME delivery allocation"
         );
+    }
+    if maximum && !authentication_failed {
+        // The largest accepted Open also drives delivery AFTER real ACK+settlement
+        // compact its input. This is native control evidence, never real RTC evidence.
+        finish_original(
+            state,
+            public,
+            route,
+            parent.id(),
+            child,
+            action,
+            &original,
+            &first.receipt,
+            &owners.intent,
+            true,
+        )
+        .await;
+        super::super::sdp_delivery::tests::exercise(
+            state, public, route, parent, pc_frame, child, action,
+        )
+        .await;
+        return;
     }
     // Close the actual native PC before HIGH's cleanup. Its same Session/Action ACK
     // and settlement remain available without granting or reviving SDK/RTC currentness.
