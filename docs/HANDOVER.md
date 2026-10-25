@@ -1,5 +1,39 @@
 # Mewtual; Handover
 
+## Private first-Offer RTC consumer (25 October; validation in progress)
+
+`communication-sdp-browser-rtc` adds an original retained-channel RTC owner. LOW runs a
+new actual same-original14 RPC, joins its physical finally, rechecks original Ready/proof/
+role/deadline, then creates one concrete `RTCPeerConnection` and prepares/gathers its Offer.
+The synchronous getter frame encodes at most8KiB into one private affine slot and ends
+before crypto Begin. Composite exclusion remains held through adoption; injected status
+callbacks cannot strand the sole description or start a second SDK attempt. HIGH consumes
+its retained Open inbox only after a fresh false26 RPC fully drains and current admission
+is checked. It joins actual `setRemoteDescription`, releases application description/text
+references, then records true26. Lost delivery replies retry metadata, never RTC execution.
+
+End fences/closes the original peer synchronously, then joins the real SDK promise outside
+the shared IPC lane before Action Return and native PC/SDK/storage release. Gathering uses
+the original absolute admission deadline, including registration/currentness callbacks;
+there is no early-ICE queue. Application buffers, known description/conversion copies and
+fixed RTC callbacks fit serial stages of the unchanged64KiB payment. This accounts for
+application-reachable data and outstanding SDK work, not opaque browser/OS heap or GC timing.
+
+All245 focused tests pass. The new reentrant-status regression failed before the fix with
+Begin0; original SDK output now reaches Begin once. Registration advancing the Clock before
+or beyond expiry, fresh14/26 held across End, actual held remote SDK, capacity and lost
+Applied replies are covered. RTC/native authority are controlled providers in these browser
+tests; WebCrypto and authenticated IPC framing are real. All2,824 frontend tests, Svelte checks (0errors/0warnings) and the production build
+(49.50s) pass. Final read-only re-review has no remaining findings. Rust sources are unchanged from `a0ef4cfa`; that
+stack's serial full Root/native suites remain in progress. Dependency audit still has the
+inherited crypto-bigint0.5.5 RUSTSEC-2026-0387 failure; no dependency/ignore changed here.
+
+This supersedes earlier first-Offer RTC TODOs below. Shipping15-27 and App V2 activation
+remain refused. HIGH Answer/LOW Answer Open, renewed rounds, production native/browser
+interoperability, media tracks/TURN, multi-peer composition, member media relay and combined
+acceptance remain open. Independent physical audio/network evidence cannot be produced
+with the single available desktop. No connected WebView/media result is claimed.
+
 ## Scoped native SDP delivery (25 October; private, final validation in progress)
 
 `communication-sdp-delivery` follows the fully validated first-Offer checkpoint. Private

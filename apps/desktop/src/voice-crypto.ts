@@ -13,6 +13,7 @@ import { decodeVoiceIpcConfirmationInput } from "./voice-ipc-confirmation-input.
 import { decodeVoiceTransition, encodeVoiceTransition, type VoiceTransitionRequest } from "./voice-ipc-transition.ts";
 import { decodeVoiceKeySession, encodeVoiceKeySession, type VoiceKeySessionRequest } from "./voice-ipc-key-session.ts";
 import { VoiceKeyCustody } from "./voice-key-custody.ts";
+import { VoiceSdpRtcOwner } from "./voice-sdp-rtc.ts";
 import { VoiceSdpSdkCustody, VOICE_SDP_SDK_BYTES } from "./voice-sdp-sdk-custody.ts";
 import { decodeVoiceSdpPhase, encodeVoiceSdpPhase, type VoiceSdpPhaseRequest } from "./voice-ipc-sdp.ts";
 import { decodeVoiceSdkCustody, encodeVoiceSdkCustody, type VoiceSdkRequest } from "./voice-ipc-sdk.ts";
@@ -442,7 +443,7 @@ function context(label: string, transcript: Uint8Array): Uint8Array<ArrayBuffer>
  * unsettled work. Revoking an owner never frees a running promise; only its real settlement does.
  * A derive pipeline uses one permit for sequential import/ECDH/HKDF work, never parallel calls. */
 export class VoiceCryptoBroker {
-  readonly version = 26;
+  readonly version = 27;
   readonly subtle: SubtleCrypto;
   private readonly native: VoiceCryptoAdmission;
   private active = 0;
@@ -693,6 +694,17 @@ export class VoiceCryptoBroker {
     if (!channel || channel.handle !== handle || !channel.owns(owner) || !chain || chain.owner !== owner ||
         chain.channel !== channel || !chain.sdp || chain.sdpRows !== 2) throw new Error("original native SDP custody required");
     return channel.startSdpCrypto(chain, description);
+  }
+
+  /** Private concrete first-Offer RTC path. Returns only a joined void attempt. The
+   * original retained channel owns one actual SDK peer; App V2 activation is still closed.
+   * LOW prepares its local gathered description after fresh14; HIGH applies Open after
+   * fresh26. No public description promise or reusable receipt permission is exposed. */
+  prepareNativeSdpRtc(owner: VoiceCryptoOwner, handle: VoiceIpcChannel, plan: VoiceCryptoChain): Promise<void> {
+    const channel = this.ipcChannels.get(owner.token), chain = this.chains.get(plan);
+    if (!channel || channel.handle !== handle || !channel.owns(owner) || !chain || chain.owner !== owner ||
+        chain.channel !== channel || !chain.sdp || chain.sdpRows !== 2) throw new Error("original native RTC custody required");
+    return channel.startRtc(chain);
   }
 
   /** Attempt the original native PC intent only after separate SDK/storage custody.
@@ -1831,6 +1843,9 @@ class RetainedIpcChannel {
   private derivationReturn: Promise<void> | null = null;
   private transitionFlight: Promise<void> | null = null;
   private sdpFlight: Promise<void> | null = null;
+  private rtcFlight: Promise<void> | null = null;
+  private rtcCreating = false;
+  private sdpRtc: VoiceSdpRtcOwner | null = null;
   private sdpAction: VoiceSdpActionOwner | null = null;
   private sdpCreating = false;
   private derivationReturned = false;
@@ -2352,17 +2367,74 @@ class RetainedIpcChannel {
       .finally(() => { this.sdpFlight = null; this.actionBusy = false; this.endActivity(); this.collect(); });
     this.sdpFlight = pending; return pending;
   }
+  /** The composite flight/activity is published BEFORE Clock or RTC/provider callbacks.
+   * The SDK owner itself is inert until its private native admission joins. Never retrofit
+   * an existing crypto-only job with a different RTC object or native PC generation. */
+  startRtc(chain: BrowserChain): Promise<void> {
+    if (this.rtcFlight) return this.rtcFlight;
+    const phase = chain.sdp;
+    if (this.rtcCreating || this.linked !== chain || !phase || phase.closed || chain.closed ||
+        this.retired || this.drained || this.actionBusy || this.sdpFlight ||
+        phase.storage?.state !== "funded" || phase.sdk?.state !== "held" ||
+        (this.sdpAction && !this.sdpRtc)) throw new Error("original RTC custody unavailable");
+    this.rtcCreating = true; this.actionBusy = true; this.beginActivity();
+    const flight = Promise.resolve().then(async () => {
+      const pc = phase.pc.cryptoBinding(this.clock.now());
+      const current = () => {
+        if (!this.live()) return false;
+        try {
+          const next = phase.pc.cryptoBinding(this.clock.now());
+          return !this.retired && !this.drained && this.linked === chain && chain.sdp === phase &&
+            !phase.closed && !chain.closed && next.proof === pc.proof && next.ready === pc.ready &&
+            next.generation === pc.generation && next.localIsLow === pc.localIsLow;
+        } catch { return false; }
+      };
+      if (!current()) throw new Error("original RTC custody unavailable");
+      const rtc = this.sdpRtc ??= new VoiceSdpRtcOwner(pc.localIsLow, current, this.clock);
+      if (pc.localIsLow && !this.sdpAction) {
+        await rtc.prepareLocal(async () => {
+          // This MUST be a new actual RPC, not startPc's coalesced/deferred observer.
+          await this.execution.run(() => this.pcRpc(chain, "admit"));
+          const now = this.clock.now(), next = phase.pc.cryptoBinding(now);
+          if (!current() || next.proof !== pc.proof || next.ready !== pc.ready) throw new Error("original RTC admission changed");
+          return phase.pc.localPreparationDeadline(now);
+        }, "offer");
+        if (!current()) throw new Error("original RTC preparation retired");
+        await this.runSdpCrypto(chain, null, rtc);
+      } else {
+        await this.runSdpCrypto(chain, null, rtc);
+      }
+    }).catch(() => {
+      // Keep exact native uncertainty for retry. A failed actual SDK peer cannot restart.
+      if (this.sdpRtc?.closed) phase.close();
+    }).finally(() => {
+      this.rtcFlight = null; this.rtcCreating = false; this.actionBusy = false;
+      this.endActivity(); this.collect();
+    });
+    this.rtcFlight = flight; return flight;
+  }
   /** One separately paid crypto owner; no awaited SDK holds the native-RPC lane. Only
    * the original private Pair can compute, and original native18 admits that one engine.
-   * The initial profile deliberately stops before HIGH Answer/fresh RTC delivery. */
+   * The initial profile stops before HIGH Answer and LOW Answer Open. */
   startSdpCrypto(chain: BrowserChain, description: string | null): Promise<void> {
+    return this.runSdpCrypto(chain, description, null);
+  }
+  /** The composite RTC flight keeps its exclusion through affine adoption. In particular,
+   * owner/Clock callbacks cannot enqueue status/history in the gap before Action publication.
+   * The SDK slot is taken only after fallible validation, immediately before the inert Action
+   * constructor. A retryable refusal therefore leaves the SAME original bytes with RTC. */
+  private runSdpCrypto(chain: BrowserChain, description: string | null, rtcOwner: VoiceSdpRtcOwner | null): Promise<void> {
+    const rtcTransfer = rtcOwner !== null;
+    if (rtcTransfer && (rtcOwner !== this.sdpRtc || !this.rtcCreating || !this.rtcFlight || !this.actionBusy)) {
+      throw new Error("original RTC transfer unavailable");
+    }
     if (this.sdpCreating) throw new Error("voice SDP creation is already in progress");
     const phase = chain.sdp;
     if (this.linked !== chain || !phase || phase.closed || chain.closed || !this.live() ||
         phase.storage?.state !== "funded" || phase.sdk?.state !== "held" ||
         this.request || this.historyRequest || this.driving) throw new Error("original SDP crypto custody unavailable");
     if (!this.sdpAction) {
-      if (this.sdpFlight || this.actionBusy) throw new Error("voice channel is busy");
+      if (this.sdpFlight || (this.actionBusy && !rtcTransfer)) throw new Error("voice channel is busy");
       // Clock/owner seams can synchronously reenter this method. Publish the creation
       // fence before either callback; no second owner/backing may replace the first.
       this.sdpCreating = true;
@@ -2370,8 +2442,9 @@ class RetainedIpcChannel {
         const pc = phase.pc.cryptoBinding(this.clock.now()), base = this.sdpIdentity(chain);
         const ownerCurrent = this.live();
         if (!ownerCurrent || this.retired || this.drained || this.linked !== chain || chain.sdp !== phase || phase.closed || chain.closed ||
-            this.sdpAction || this.sdpFlight || this.actionBusy) throw new Error("original SDP crypto custody unavailable");
-        if (pc.localIsLow !== (description !== null)) throw new Error("first SDP Offer role required");
+            this.sdpAction || this.sdpFlight || (this.actionBusy && !rtcTransfer)) throw new Error("original SDP crypto custody unavailable");
+        if (pc.localIsLow !== (description !== null || (rtcTransfer && pc.localIsLow))) throw new Error("first SDP Offer role required");
+        if (this.sdpRtc && description !== null) throw new Error("RTC description must come from the original SDK owner");
         const original = Object.freeze({ ...base, storage: phase.storage.proof, sdkGeneration: phase.sdk.generation,
           sdkProof: phase.sdk.proof, pcProof: pc.proof });
         const purpose = pc.localIsLow ? "seal" as const : "open" as const;
@@ -2403,8 +2476,10 @@ class RetainedIpcChannel {
           control(encodeVoiceSdpAction({ parentRow: base.parentRow, row, purpose }, request), row);
         // Consume the string synchronously. No async closure or completed observer retains
         // it; the one8KiB UTF8 backing releases only after native attaches the Action.
-        let plaintext = description === null ? null : voiceSdpUtf8(description);
+        let plaintext = rtcTransfer && pc.localIsLow ? rtcOwner.takeLocal()
+          : (description === null ? null : voiceSdpUtf8(description));
         description = null; // Do not depend on a VM's closure-environment liveness analysis.
+        const rtc = this.sdpRtc;
         this.sdpAction = new VoiceSdpActionOwner({ live,
           begin: bytes => control(encodeVoiceSdpBegin(original, bytes), null),
           resolve: close => control(encodeVoiceSdpResolve(original, purpose, close), null, close),
@@ -2446,13 +2521,17 @@ class RetainedIpcChannel {
             : { kind: purpose === "seal" ? "sealed" : "opened", identity, bytes: output, tag: tag! }),
           ack: (row, identity, digest) => action(row, { kind: "ack", identity, digest }),
           settle: (row, identity) => action(row, { kind: "settle", identity }),
-          returned: row => action(row, { kind: "return" }),
+          returned: async row => { await rtc?.drain(); return action(row, { kind: "return" }); },
+          ...(rtc ? {
+            delivery: (row: string, identity: VoiceIpcActionIdentity, applied: boolean) => action(row, { kind: "delivery", identity, applied }),
+            applyRemote: (bytes: Uint8Array<ArrayBuffer>) => rtc.applyRemote(bytes, pc.localIsLow ? "answer" : "offer"),
+          } : {}),
         }, plaintext);
         plaintext = null; // The job is the sole owner, including if this closure frame survives.
       } finally { this.sdpCreating = false; }
     } else if (description !== null) throw new Error("original SDP description already consumed; retry without it");
     if (this.sdpFlight) return this.sdpFlight;
-    if (this.actionBusy) throw new Error("voice channel is busy");
+    if (this.actionBusy && !rtcTransfer) throw new Error("voice channel is busy");
     this.actionBusy = true; this.beginActivity();
     const pending = this.sdpAction.attempt().catch(() => { /* Retain exact paid work/output for retry or End. */ })
       .finally(() => { this.sdpFlight = null; this.actionBusy = false; this.endActivity(); this.collect(); });
@@ -2601,6 +2680,7 @@ class RetainedIpcChannel {
   private check(): void { if (!this.live()) throw new Error("voice channel closed"); }
   private retire(): void {
     if (!this.retired) { this.retired = true; this.controller?.abort(); }
+    this.sdpRtc?.close();
     this.sdpAction?.close();
     void this.workPump?.close();
     this.wake();
@@ -2676,7 +2756,9 @@ class RetainedIpcChannel {
         if (this.transitionFlight) await this.transitionFlight;
         // Independent of old96KiB drainage. Join the actual SDK/IO admission finally
         // OUTSIDE the lane that its exact recovery/release calls require.
+        if (this.rtcFlight) await this.rtcFlight;
         if (this.sdpFlight) await this.sdpFlight;
+        await this.sdpRtc?.drain();
         // The original job's23/24 RPCs require this same physical lane. Join its SDK,
         // Result and close-first unknown Begin outside execution.run and before release.
         while (this.sdpAction && !this.sdpAction.returned) {
@@ -2684,7 +2766,7 @@ class RetainedIpcChannel {
           try { await this.sdpAction.cleanup(); }
           catch { await this.waitCleanupWake(observed); }
         }
-        this.sdpAction = null;
+        this.sdpAction = null; this.sdpRtc = null;
         const sdkChain = this.linked, sdkPhase = sdkChain?.sdp;
         await this.execution.run(() => this.cleanup());
         if (sdkChain && sdkPhase) this.custody.sdpUnlinked(sdkChain, sdkPhase);
@@ -3122,7 +3204,7 @@ export function windowVoiceCryptoBroker(
   const host = window as Record<symbol, unknown>;
   const previous = host[BROKER] as VoiceCryptoBroker | undefined;
   if (previous) {
-    if (previous.version !== 26 || typeof previous.prepareNativeSdpCrypto !== "function" || typeof previous.prepareNativePcIntent !== "function" || typeof previous.prepareNativeSdpHandoff !== "function" || typeof previous.observeNativeWork !== "function" || typeof previous.returnNativeDerivation !== "function" || typeof previous.nativeConfirmationFromChannel !== "function" || typeof previous.nativeDerivationFromChannel !== "function" || typeof previous.recoverChannelHistory !== "function" || typeof previous.prepareChainFromChannel !== "function" || typeof previous.nativeChannel !== "function" || typeof previous.run !== "function" || typeof previous.selectJoinKey !== "function" || typeof previous.retrySelectedJoinKeys !== "function" ||
+    if (previous.version !== 27 || typeof previous.prepareNativeSdpRtc !== "function" || typeof previous.prepareNativeSdpCrypto !== "function" || typeof previous.prepareNativePcIntent !== "function" || typeof previous.prepareNativeSdpHandoff !== "function" || typeof previous.observeNativeWork !== "function" || typeof previous.returnNativeDerivation !== "function" || typeof previous.nativeConfirmationFromChannel !== "function" || typeof previous.nativeDerivationFromChannel !== "function" || typeof previous.recoverChannelHistory !== "function" || typeof previous.prepareChainFromChannel !== "function" || typeof previous.nativeChannel !== "function" || typeof previous.run !== "function" || typeof previous.selectJoinKey !== "function" || typeof previous.retrySelectedJoinKeys !== "function" ||
         typeof previous.registerProtectedConfirmation !== "function" ||
         typeof previous.registerProtectedDerivation !== "function" || typeof previous.registerConfirmation !== "function" || typeof previous.createPair !== "function") {
       throw new Error("voice crypto broker version changed; reload required");

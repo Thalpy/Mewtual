@@ -1,5 +1,21 @@
 # Next voice milestone: native result recovery
 
+## 25 October: private first-Offer RTC path exists; complete Answer next
+
+The original browser owner now prepares LOW's gathered Offer after a new actual14 and
+applies HIGH's Open inbox after a fully drained fresh26. It joins actual SDK promises,
+keeps a separate SDK-started latch through lost native replies, and records Applied only
+after successful remote application. End closes synchronously and joins SDK work outside
+the shared native-RPC lane before Return/release. HANDOVER records tests and pending gates.
+
+Next implement HIGH Answer Seal and LOW Answer Open with the same original PC/Ready and
+fresh authority. Preserve two pre-reserved row claims, separate action histories, existing
+caps and application string/SDK ownership. Then renewed rounds/compaction, production
+native/browser integration, media tracks/TURN, supported multi-peer composition, relay and
+combined acceptance. Native stopped-Actor/End-lock26 coverage remains a follow-up. Do not
+activate15-27 or treat controlled SDK tests as native/WebView or physical media evidence.
+Independent desktops/networks for final physical acceptance are unavailable here.
+
 ## 25 October: scoped native delivery26 exists privately; connect RTC next
 
 Fresh actual-Actor admission and exact already-Applied metadata recovery are implemented

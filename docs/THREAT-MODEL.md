@@ -1,5 +1,21 @@
 # Threat model; client integrity & enforcement boundaries
 
+## Private first-Offer RTC effect ordering (25 October; production disabled)
+
+Native metadata is not a reusable SDK permit. LOW must join a new actual14 and repeat
+original-PC/Ready/deadline checks before creating/preparing its peer. HIGH must join fresh
+false26 and repeat current admission before consuming Open. A separate once-started latch
+prevents metadata retry from repeating RTC. True26 follows actual SDK success; syntax/provider
+errors cannot become AEAD failure or invented Applied. End fences/ closes the actual peer,
+then joins its actual promise before native release, even if the SDK hangs or rejects.
+
+Composite exclusion covers callback-bearing local-buffer adoption. Absolute gathering
+expiry includes provider registration time. Application text and known conversion copies
+are separate serial-stage terms within64KiB, not claims about opaque SDK/GC/OS heap. Tests
+control RTC/native providers; there is no physical media or complete native/WebView proof.
+Answer/rounds, production dispatch/legacy isolation activation, multi-peer and relay remain
+open. Shipping15-27 remain refused. Older first-Offer RTC TODOs below are superseded.
+
 ## Scoped SDP delivery and historical ownership (25 October; production disabled)
 
 An old Admitted/Applied observation cannot authorize another RTC execution. Fresh false26

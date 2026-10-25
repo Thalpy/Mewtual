@@ -1,5 +1,20 @@
 # Chat, files and voice implementation evidence
 
+## 25 October: private first-Offer RTC consumer; activation remains closed
+
+LOW fresh14 -> concrete local RTC preparation/gathering -> affine UTF8 -> original crypto
+and HIGH Open -> fully drained fresh26 -> one actual remote SDK await -> true26 are now
+connected in the retained private browser channel. End joins actual SDK work before Return
+and native release.245 focused tests pass, including a regression that failed before the
+reentrant-status transfer fix, absolute gathering expiry, capacity/lost replies and held
+SDK/admission across End. Full gates and final re-review are recorded in HANDOVER.
+
+These tests control native authority and the RTC provider; authenticated framing/WebCrypto
+are real. They establish lifecycle ordering, not interoperating native/WebView signalling,
+connected media or physical audio. Rust is identical to the native-delivery checkpoint.
+HIGH Answer/LOW Answer Open, later rounds, production activation, multi-peer/media relay
+and combined acceptance remain open. Only one physical desktop is available.
+
 ## 25 October: private native delivery26 validation in progress
 
 Scoped actual-Actor delivery controls now separate fresh native admission from immutable

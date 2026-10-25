@@ -1,5 +1,20 @@
 # Mewtual; Interfaces & Hooks Schema
 
+## Private concrete first-Offer RTC interface (25 October)
+
+`prepareNativeSdpRtc(owner, channel, chain)` requires the exact retained owner/channel/chain
+and returns only a joined void attempt. It never returns a description, SDK peer or receipt
+as effect permission. LOW obtains a fresh actual14 before one concrete local SDK attempt;
+its getter text becomes one private UTF8 slot before Begin. HIGH joins fresh false26 before
+one remote SDK attempt, then reports true26 only after success. Unknown replies retain the
+same action/peer/output; an old Applied observation cannot start RTC again. End joins the
+actual SDK promise before Return and native release. Broker shape27 rejects older HMR owners.
+
+This private interface covers the first Offer only. HIGH Answer/LOW Answer Open, later
+rounds and production App/native dispatch remain incomplete. Shipping15-27 stay refused.
+Controlled-provider browser tests do not establish native/WebView or physical acceptance.
+This section supersedes older first-Offer RTC TODOs below.
+
 ## Private native SDP delivery26 (25 October)
 
 The existing version8 Control grammar selects the original Open row/parent/full Action and

@@ -57,6 +57,12 @@ export class VoicePcCustody {
         this.deadline === null || !Number.isFinite(now) || now < 0 || now >= this.deadline) throw new Error("voice PC intent is closed");
     return Object.freeze({ generation: "1", proof: this.identity.proof, ready: this.admission.ready, localIsLow: this.admission.localIsLow });
   }
+  /** Historical timing only. A private local-RTC consumer must first join a NEW same-
+   * original14 admission RPC; this deadline never turns an old receipt into authority. */
+  localPreparationDeadline(now: number): number {
+    this.cryptoBinding(now);
+    return this.deadline!;
+  }
   // No public effect/grant accessor: a future RTC consumer must acquire its own exact
   // native effect permission. This historical record is insufficient even before expiry.
 }

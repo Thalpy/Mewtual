@@ -1,5 +1,22 @@
 # Mewtual; Architecture
 
+## Private retained-channel first-Offer RTC owner (25 October)
+
+One concrete RTC owner now lives under the original paid SDP phase. The composite flight
+is published before callback seams and excludes status/history through affine local-buffer
+adoption. Fresh actual14 and its physical finally precede LOW local SDK work; a void helper
+ends its UTF16 getter frame before crypto Begin. HIGH's fresh false26 similarly drains
+before consuming the private Open inbox. Actual SDK success is latched independently of
+uncertain true26 replies. End joins original SDK work outside SharedIpcExecution before
+Action/native custody release. CompleteSdpV1 uses bounded gathering at the original absolute
+deadline; no early-ICE queue is introduced.
+
+Serial local/remote stages inventory application buffers, UTF16 text, known SDK conversion
+copies and callbacks inside64KiB; opaque engine/OS heap remains outside this accounting.
+The first-Offer path has controlled RTC/native test providers. Answer, renewed rounds,
+production interoperability/activation, media tracks, multi-peer and relay remain open.
+Earlier sections describe checkpoints; their first-Offer RTC TODOs are superseded here.
+
 ## Private scoped native SDP delivery26 (25 October)
 
 The actual Actor now lends a lifetime-bound delivery step after original Clock preparation.

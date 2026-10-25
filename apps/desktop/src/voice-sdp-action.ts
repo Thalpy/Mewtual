@@ -60,6 +60,10 @@ export type VoiceSdpActionNative = Readonly<{
   ack(row: string, identity: VoiceIpcActionIdentity, digest: string): Promise<VoiceSdpReply>;
   settle(row: string, identity: VoiceIpcActionIdentity): Promise<VoiceSdpReply>;
   returned(row: string): Promise<VoiceSdpReply>;
+  /** Private original-RTC adapter only. Fresh false finishes physical finally before
+   * apply; true reports only actual successful SDK completion and retries metadata. */
+  delivery?(row: string, identity: VoiceIpcActionIdentity, applied: boolean): Promise<VoiceSdpReply>;
+  applyRemote?(plaintext: Uint8Array<ArrayBuffer>): Promise<void>;
 }>;
 
 /** First LOW Seal or first HIGH Open only. Answer requires a separate fresh native RTC
@@ -76,6 +80,8 @@ export class VoiceSdpActionOwner {
   private historicalOnly = false;
   private sdkStarted = false;
   private sdkDone = false;
+  private rtcStarted = false;
+  private rtcDone = false;
   private failed = false;
   private output: Uint8Array<ArrayBuffer> | null = null;
   private tag: string | null = null;
@@ -193,6 +199,26 @@ export class VoiceSdpActionOwner {
       }
       if (this.history?.receipt && !this.history.acknowledged) {
         if (!this.observe(await this.native.ack(this.row, this.identity!, this.history.receipt.digest))) return;
+      }
+      // AEAD Open and crypto settlement do not authorize RTC. A fresh same-original26
+      // read/cancel must finish before decoding the private paid inbox into an SDK string.
+      if (this.purpose === "open" && this.history?.receipt?.outcome.kind === "opened" &&
+          this.native.delivery && this.native.applyRemote && !this.historicalOnly) {
+        if (!this.rtcStarted && this.live() && this.history.delivery !== "applied") {
+          if (!this.observe(await this.native.delivery(this.row, this.identity!, false))) return;
+          if (!this.live() || this.history.delivery !== "admitted") return;
+          if (!this.output) return fail();
+          this.rtcStarted = true; // BEFORE SDK callbacks, never reset by an uncertain true26.
+          try { await this.native.applyRemote(this.output); this.rtcDone = true; }
+          catch { this.failed = true; }
+          finally { this.output.fill(0); this.output = null; }
+        }
+        if (this.rtcDone && this.history.delivery !== "applied") {
+          // Historical retry is legal after End. Native refuses a FIRST completion when
+          // current authority has gone; that refusal must not obstruct closed cleanup.
+          const reply = await this.native.delivery(this.row, this.identity!, true);
+          if (!this.observe(reply) && this.live()) return;
+        }
       }
       // Keep successful Open plaintext in its paid private inbox for a future fresh-delivery
       // owner. Seal ciphertext is no longer needed after canonical publication and ACK.

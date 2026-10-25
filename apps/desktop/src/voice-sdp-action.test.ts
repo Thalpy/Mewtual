@@ -189,7 +189,11 @@ test("serial browser stage inventory fits the original64KiB without retaining Be
   const callbacksAndFrames = 16 * 128 + 8 * 256; // adapter closures, current/expected/decode,
   // one coalesced public flight, nested void continuations, request/descriptor/history wrappers.
   const rowClaimsAndLoans = 2 * 512 + 1024;
-  const fixedInventory = existingSdkPc + originalBindingStrings + 2 * historyStrings + callbacksAndFrames + rowClaimsAndLoans;
+  // Concrete RTC owner: scalar/peer/promise/slot/observer fields, current/Clock closures,
+  // one composite void flight and bounded gathering listener/timer wrappers. The concrete
+  // SDK constructor retains no arbitrary caller-factory/retire closure graph.
+  const rtcInventory = 256 + 4 * 128 + 3 * 128 + 128 + 256;
+  const fixedInventory = existingSdkPc + originalBindingStrings + 2 * historyStrings + callbacksAndFrames + rowClaimsAndLoans + rtcInventory;
   assert.ok(fixedInventory <= fixed, `complete fixed browser owner: ${fixedInventory}/${fixed}`);
   const begin = 8192 + 2 * 8419 + 2 * 8435 + 2 * 236 + 220 + wireScratch + fixed;
   const input = 2 * 66 + 2 * 82 + 2 * 9232 + 9216 + wireScratch + fixed;
@@ -199,4 +203,8 @@ test("serial browser stage inventory fits the original64KiB without retaining Be
   // Original UTF16 is consumed before the async Begin frame; it cannot coexist with the
   // later Result frame. Input's descriptor scope ends before Result encoding starts.
   assert.ok(16384 + 8192 + fixed <= 65536);
+  // Remote application is serial AFTER fresh26 finally, before true26/Answer crypto.
+  // Include the one owned UTF16 string AND a known RTC conversion snapshot; neither
+  // survives into the60649B crypto Result stage. Opaque PC/GC heap is outside this proof.
+  assert.ok(8192 + 2 * 16384 + fixed + 1024 <= 65536);
 });
