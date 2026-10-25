@@ -1,5 +1,43 @@
 # Mewtual; Handover
 
+## Original SDP result history (25 October; private metadata path)
+
+`communication-sdp-http-adapter` continues from worker runtime `eab3da2b`. Root can recover
+an original Open terminal without caller plaintext/output: it returns the actual receipt
+and SAME fixed delivery observer after token consumption, ACK, settlement and End. It
+samples the original Clock before a nonblocking Engine lock; busy is Capacity, never absence.
+Opened requires the actual delivery, and Rejected has none. Exact-output retry is unchanged.
+
+Native `sdp_history` checks original Session and parent/purpose before Root lookup, repeats
+Action allocation/terminal identity afterward, and retains the paid Row through serialization.
+It takes no input loan and retains no process Ledger. Version8 has a separate220-byte history: published
+Pending, collected negative without invented engine settlement, and action history remain
+explicit. The separate browser decoder snapshots caller expectations once, binds parent/
+purpose/row and preserves u64 strings, with no response backing or caller graph retained.
+
+Root635 V2 tests pass (16.59s). All336 native handoff tests pass (20.49s); the two blocked-TCP
+original-worker scenarios pass (18.80s), now checking actual pending/collected native views.
+Six browser codec tests pass, including changing getters, shared native vectors, every
+truncation, padding, closed flags, purpose and full-u64 checks. All2,746 frontend tests pass (68.96s), Svelte checks have zero errors/warnings, and the
+production build passes (35.76s). Both formatting checks, ambient checks, strict Root all-target/
+all-feature Clippy (2m09s), native Cargo check (1m00s) and strict native all-target Clippy
+(1m55s) pass. The dependency set is unchanged;
+the current audit still reports inherited RUSTSEC-2026-0387 (bans/licenses/sources pass). Prior frozen row runtime41e17a71
+is still running complete Root/native validation sequentially; no current full pass is claimed.
+
+Read-only review resolved incomplete nested reconciliation/SHA accounting without raising
+limits, repeated expectation getters and missing Linux inputs. Six precise public JSON
+allow rules now have matching context-audit assertions, including five required earlier
+fixtures. A static audit checks12 literal JSON includes. Docker's daemon pipe is absent,
+so the actual container context build could not run.
+
+Production still refuses all SDP action operations before allocation/nonce debit. Native
+accepted/rejected Open through ACK/settlement/compaction, terminal-observation races and
+late Snapshot serialization after teardown still need vertical acceptance. Next implement
+HTTP Begin/Resolve/History/Return, then original Input/engine/result/delivery/ACK/settlement
+and original-key browser WebCrypto. Complete ICE/RTC, fresh rounds, multi-peer composition,
+member media relay and combined/physical acceptance remain open. No live V2 activation.
+
 ## Original paid SDP submission (25 October; focused checks pass, HTTP still closed)
 
 `communication-sdp-native-worker` continues from runtime `41e17a71`. The native adapter

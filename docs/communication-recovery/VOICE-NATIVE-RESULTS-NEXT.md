@@ -1,5 +1,17 @@
 # Next voice milestone: native result recovery
 
+## Original metadata continuation (25 October; HTTP handlers still pending)
+
+Worker runtime `eab3da2b` is pushed. The next slice adds Root metadata-only Open terminal
+recovery, a Session/Action-bound native Snapshot and a separate220-byte version8 history
+codec/browser decoder. HANDOVER records exact focused results and remaining gates.
+The native codec's complete nested reconciliation/SHA inventory fits the unchanged cap.
+Next connect original paid Begin/Resolve/History/Return, then Input/engine/result/delivery/
+ACK/settlement through real authenticated HTTP. Prove accepted/rejected Open terminal
+recovery across native compaction, terminal races and delayed serialization before relying
+on these leaves. All SDP action opcodes stay refused until the full private SDK vertical
+is coherent; WebCrypto/RTC/ICE/fresh rounds/multi-peer/relay acceptance remain subsequent.
+
 ## Paid producer continuation (25 October; current implementation under validation)
 
 `communication-sdp-native-worker` adds exact local retry, ordered construction and the

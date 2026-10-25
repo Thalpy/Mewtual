@@ -1,5 +1,18 @@
 # Mewtual; Interfaces & Hooks Schema
 
+## SDP terminal history without retained plaintext (25 October; staged)
+
+`CryptoAction::recover_sdp_open_history` accepts only the actual original Open Action and
+returns no input. It observes original time outside Engine, returns Capacity on lock
+contention, and yields the actual receipt plus original delivery Arc, or a snapshot miss.
+Only a separately authenticated native row may expose it; it grants no fresh RTC effect.
+Native `ResolvedRow::sdp_history` repeats original Session/Action and terminal identity,
+retaining the paid Row and its actual delivery through fixed metadata serialization.
+Version8 history is220 bytes, separate from v1: no-action negative collection does not
+invent engine settlement; Pending may already contain its actual published Action.
+The browser decoder validates a once-captured parent/purpose/row expectation and returns
+only bounded owned metadata. These leaves are not installed in production HTTP dispatch.
+
 ## Original native SDP submission (25 October; private producer)
 
 `ResolvedRow::resume_sdp_action` returns an affine Registration only for the same indexed

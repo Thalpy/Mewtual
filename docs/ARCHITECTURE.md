@@ -1,5 +1,16 @@
 # Mewtual; Architecture
 
+## Original SDP historical projection (25 October; private)
+
+Root exposes metadata-only Open recovery from the actual terminal Engine record. Native
+observes it outside Index/State/UI guards, repeats original Session/Action identity and
+uses the same delivery Arc. A historical Snapshot retains only its actual paid Row/parent
+and fixed delivery, not the whole Ledger or another variable input. A distinct v8 codec
+and browser decoder represent published Pending and no-action collection honestly. Their
+complete synchronous metadata/reconciliation/SHA graph stays within the existing Control
+allowance; a future HTTP producer must separately inventory its actual enclosing future.
+The action-family HTTP/SDK/RTC path remains disabled and incomplete.
+
 ## Paid original SDP producer (25 October; HTTP dispatch still closed)
 
 The native SDP producer now has an affine preparation and a separately paid detached task.

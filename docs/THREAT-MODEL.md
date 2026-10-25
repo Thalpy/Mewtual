@@ -1,5 +1,17 @@
 # Threat model; client integrity & enforcement boundaries
 
+## SDP metadata-only result recovery (25 October; inactive transport family)
+
+Original Open history requires no caller plaintext or reconstructed output. Root returns
+only its existing terminal receipt and same fixed delivery observer; accepted/rejected
+results cannot manufacture each other's delivery. Original time is sampled before Engine,
+and contention is Capacity rather than a false negative. Native authenticates the exact
+Session/parent/row before observation and rechecks Action allocation and receipt identity
+afterward. Historical Applied/Admitted observations never grant another RTC invocation.
+The separate v8 decoder snapshots expectation properties once, rejects noncanonical flags/
+padding/cross-purpose records and retains no caller object graph or response backing.
+Production SDP action admission remains refused pending the full HTTP/private SDK vertical.
+
 ## Native SDP producer cancellation and retry (25 October; inactive HTTP family)
 
 A lost waiter is not cancellation or no-publication evidence. The paid native producer
