@@ -30,6 +30,9 @@ mod ready;
 mod sdk;
 mod sdp;
 mod sdp_history;
+mod sdp_input;
+#[cfg(test)]
+pub(in crate::voice_handoff) use sdp_input::prepayment_layout_bytes as sdp_input_prepayment_layout_bytes;
 mod sdp_intake;
 mod sdp_rows;
 pub(super) use key_session::KeySessionReceipt;
@@ -40,6 +43,9 @@ pub(super) use sdp::Receipt as SdpReceipt;
 pub(in crate::voice_handoff) use sdp_history::layout_bytes as sdp_history_layout_bytes;
 pub(in crate::voice_handoff) use sdp_history::{
     DeliveryState as SdpDeliveryState, Snapshot as SdpHistory,
+};
+pub(in crate::voice_handoff) use sdp_input::{
+    Descriptor as SdpInputDescriptor, Target as SdpInputTarget,
 };
 #[cfg(test)]
 pub(in crate::voice_handoff) use sdp_rows::compaction_layout_bytes as sdp_compaction_layout_bytes;

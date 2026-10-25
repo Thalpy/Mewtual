@@ -860,6 +860,54 @@ impl Incoming {
             worker,
         })
     }
+
+    /// Consume this one authenticated Input request/response nonce with its separately
+    /// prepaid EXACT backing. The buffer's one-way keepalive retains the admitted input,
+    /// actual UI/physical custody and original RPC work through sealing/output collection.
+    /// This does not alter the common reply structs or borrow confirmation Data capacity.
+    pub(super) fn reply_sdp(
+        self,
+        buffer: catcoms_sync::voice_v2::chain::sdp_handoff::Buffer,
+    ) -> Result<PreparedReply, Refused> {
+        if self.body.plain_bytes.is_none()
+            || self.request.operation() != Operation::SdpInput
+            || self.request.kind() != BodyKind::Control
+            || !buffer.has_keepalive()
+            || !(16..=super::requests::sdp_action::INPUT_CIPHER_BYTES)
+                .contains(&buffer.bytes().len())
+        {
+            return Err(Refused::Binding);
+        }
+        let Self {
+            body,
+            request,
+            response_sequence,
+            worker,
+            ..
+        } = self;
+        drop(body);
+        let cipher_bytes = buffer.bytes().len();
+        let response = Header::new(
+            Direction::Response,
+            Operation::SdpInput,
+            BodyKind::Sdp,
+            request.slot(),
+            response_sequence,
+            request.logical(),
+            cipher_bytes,
+        )?;
+        Ok(PreparedReply {
+            body: Body {
+                storage: Storage::Sdp(buffer),
+                cipher_bytes,
+                plain_bytes: None,
+            },
+            input: None,
+            request,
+            response,
+            worker,
+        })
+    }
 }
 pub(super) struct PreparedReply {
     body: Body,

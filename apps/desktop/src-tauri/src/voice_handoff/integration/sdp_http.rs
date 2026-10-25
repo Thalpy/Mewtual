@@ -99,9 +99,13 @@ async fn exchange(
     } else {
         opened_frame(public, route, header, body, None)
     };
-    let reply = super::super::sdp_http::apply(&context::Context::new(state), route, incoming)
-        .await
-        .unwrap();
+    let context = context::Context::new(state);
+    let reply = if operation == 17 {
+        super::super::sdp_input::pull(&context, route, incoming).await
+    } else {
+        super::super::sdp_http::apply(&context, route, incoming).await
+    }
+    .unwrap();
     let result = opened_reply(public, header, body, &reply);
     drop(reply);
     // Other native maintenance may briefly own this same fence. A forgotten
@@ -269,6 +273,22 @@ pub(super) async fn exercise(
         )
         .await;
         assert_eq!(&unchanged[2..86], &first[2..86]);
+        // This staged slice exercises the actual Input queue/hook and class2 response;
+        // production SDP dispatch and browser/RTC execution are still disabled.
+        Box::pin(super::super::sdp_input::exercise(
+            state,
+            public,
+            route,
+            parent,
+            pc_frame,
+            ledger::RowId::from_logical(child).unwrap(),
+            requests::Action {
+                serial: u64::from_be_bytes(first[38..46].try_into().unwrap()),
+                version: u64::from_be_bytes(first[46..54].try_into().unwrap()),
+                input_tag: first[54..86].try_into().unwrap(),
+            },
+        ))
+        .await;
     }
     if !seal {
         if let Ok(clock) = EXPIRY_CLOCK.try_with(Arc::clone) {
@@ -292,6 +312,15 @@ pub(super) async fn exercise(
         u8::from(seal),
         "closed negative must not invent engine settlement"
     );
+    if seal {
+        let mut input = existing(parent, true);
+        input.extend_from_slice(&first[38..86]);
+        assert_eq!(
+            exchange(state, public, route, parent, child, 17, &input).await,
+            returned,
+            "settled Input recovers canonical history with no fresh Copy after PC/row close"
+        );
+    }
     let recovered = exchange(
         state,
         public,

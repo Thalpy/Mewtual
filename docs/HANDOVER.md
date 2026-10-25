@@ -1,5 +1,56 @@
 # Mewtual; Handover
 
+## Concrete native SDP Input (25 October; private, full validation pending)
+
+`communication-sdp-input-native` continues from `9ed07e44`. The staged Input handler now
+uses the actual Actor's scoped admission, original Session/row/Action/intent/SDK/PC and the
+same native row funding counter. Before queueing it pays separate Task, Actor and response
+contributions. Final admission tries the actual UI commit, rechecks mounted store/resumable
+state, then checks Coordinator/route/row and commits Root admission. No original Clock
+callback runs beneath those Input publication guards. Production Host still refuses every
+SDP operation before allocation or nonce debit; these handlers are not active ingress.
+
+A Data response keeps the original input loan, actual UI commit and physical request until
+HTTP collection. Its narrow owner retains no Ledger/Registry/Target, response buffer or
+funding Copy backedge. History waits for callback retirement and recovers canonical metadata
+outside publication guards, including after PC closure without new Phase admission. The
+private version8 Input codec is a fixed277-byte descriptor plus original AAD/input; the
+maximum encrypted reply is9,080 bytes within the existing9,232-byte payment. There is no
+browser Input consumer or engine/result/delivery/ACK/settlement integration yet.
+
+The concrete Input Task graph is3,000/4,096 bytes and its physical adapter3,728 bytes. The
+unchanged whole Control guard remains12,279/12,288 bytes; no capacity was raised. The actual
+blocked-TCP fixture exercises staged authenticated LOW Seal Input, held-output/Lock custody,
+full row-copy pressure, full Actor mailbox, lost waiter, mounted-store removal, resumable
+contention and PC-close-before-admission. It also recovers the original collected history
+through Input after closure. This is direct handler invocation after real transport setup,
+not production listener dispatch, native Open, negotiated SDP/ICE/RTC or physical audio.
+
+A separate producer race was fixed: RPC output can arrive before the sender drops its last
+Work/Copy. The worker now waits without Clock for all other original-counter IO to retire,
+retaining Registration, physical request and Task. Only then can its caller release the
+actual UI publication and observe callback-bearing history. Two deterministic Root tests
+pin payment/Phase/keepalive order and cancelled observers. Test fixtures use a same-Actor
+FIFO barrier where they previously assumed output delivery meant synchronous sender Drop.
+
+Current focused evidence: Root voice766 pass (35.76s), native handoff340 pass (22.55s),
+actual blocked-TCP Input scenario pass (10.85s), frontend2,750 pass (77.94s), strict Root
+Clippy, separate native Cargo check/strict all-target Clippy, final layout guards, both
+formatting gates, ambient and diff checks pass. The earlier changed-input/held-writer TCP
+scenario also passes after its actual FIFO retirement barrier (11.43s). Read-only final
+review has no new blocker/high/medium in this private slice. Complete current Root/native
+suites are running sequentially. The older frozen
+control-handler runtime `0bb2cf8f` has now passed its complete Root/native gates:3,590 Root
+passed/24 ignored and845 native passed/0 ignored. Those are not current-branch results.
+
+Activation blocker: the earlier Begin producer still retains UI publication while queued
+recorded Root factories invoke original Clock callbacks. The new sender-retirement fix
+closes the post-completion/history overlap only. Replace that earlier admission boundary
+before enabling SDP. Native Open/terminal races and teardown coverage, complete maximum-size
+SDK/engine composition, private browser WebCrypto, SDP/ICE/RTC, fresh rounds, multi-peer,
+media relay, combined and independent physical acceptance remain open. The inherited
+crypto-bigint0.5.5 advisory RUSTSEC-2026-0387 remains unresolved; no ignore was added.
+
 ## Scoped SDP input admission (25 October; native HTTP producer still pending)
 
 `communication-sdp-input` continues from control-handler runtime `0bb2cf8f`. Root now

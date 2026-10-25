@@ -16,6 +16,10 @@ pub(super) struct Claim {
     effect: EffectObserver,
 }
 impl Claim {
+    /// Original installed identity only; release/currentness are separate final gates.
+    pub(super) fn identity(&self) -> (u64, [u8; 32]) {
+        (self.generation, self.proof)
+    }
     /// Exact installed SDK obligation, independent of permission/currentness.
     pub(super) fn matches(&self, generation: u64, proof: [u8; 32]) -> bool {
         self.generation == generation && self.proof == proof

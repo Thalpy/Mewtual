@@ -67,6 +67,38 @@ fn position(purpose: NativeRowPurpose) -> usize {
         NativeRowPurpose::Open => 1,
     }
 }
+/// Borrowed original publication only. No observer, input loan, copy, or factory is
+/// manufactured. The caller must keep the actual State guard through these borrows.
+pub(super) struct InputOwners<'a> {
+    pub(super) selected: &'a Arc<SelectedHandoffOwner>,
+    pub(super) phase: &'a Arc<sdp_handoff::Phase>,
+    pub(super) intent: &'a Arc<InitialSdpIntent>,
+    pub(super) session: &'a Arc<SessionIdentity>,
+    pub(super) funding: &'a Arc<NativeRowFunding>,
+    pub(super) action: &'a Arc<CryptoAction>,
+    pub(super) closed: bool,
+}
+pub(super) fn input_owners(state: &State) -> Result<InputOwners<'_>, VoiceError> {
+    let (owners, action, closed) = match &state.body {
+        Body::SdpPending(value) if value.body_matches => (
+            &value.owners,
+            value.published.as_ref().ok_or(VoiceError::Capacity)?,
+            value.closed,
+        ),
+        Body::SdpLive(value) => (&value.owners, &value.action, value.closed),
+        // Drained is canonical history, never a reason to recreate a Phase/input.
+        _ => return Err(VoiceError::Unauthorized),
+    };
+    Ok(InputOwners {
+        selected: &owners.selected,
+        phase: &owners.phase,
+        intent: &owners.intent,
+        session: &owners.session,
+        funding: &owners.funding,
+        action,
+        closed,
+    })
+}
 /// Exact paid input is borrowed through installation, so a producer cannot swap a
 /// different request underneath a precomputed commitment. Hashing and fee preparation
 /// finish before the native UI/Index/State admission guards are entered.

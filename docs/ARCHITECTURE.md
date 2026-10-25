@@ -1,5 +1,26 @@
 # Mewtual; Architecture
 
+## Concrete original SDP Input publication (25 October; private)
+
+The native Input adapter binds its actual Actor RPC, Task and response to the same original
+row counter. A scoped Root admission finishes Clock callbacks first; the consuming native
+publisher then tries UI/Coordinator/route/row fences, repeats mounted-store state, and
+commits Root admission. A non-Clone input loan reaches only an authenticated fixed-format
+response. An ordered narrow owner keeps actual UI, physical request and paid custody through
+collection, without retaining a whole Ledger or creating a response/funding cycle.
+
+Producer output delivery is distinct from sender retirement. The original Task observes
+its bound counter until all other same-row IO has actually retired, without Clock, while
+Registration and the sole physical request exclude new same-purpose IO. No generic refund,
+new authority or drainage assertion follows. Historical recovery occurs after publication
+release. The earlier Begin/factory path still overlaps UI custody with Clock callbacks;
+that separate admission boundary must be replaced before production SDP is enabled.
+
+Existing64KiB phase,4KiB Task,9,232-byte response and12KiB Control limits are unchanged.
+The private Input adapter is3,728B; common Control remains12,279/12,288B. Production refuses
+the entire SDP family. Browser/engine/result/RTC integration and maximum-size composition
+are still pending; this is not a live negotiation or media-relay architecture claim.
+
 ## Scoped original SDP input reads (25 October; HTTP consumer pending)
 
 The actual ServerActor lends a synchronous Root input-admission step while ChannelSync

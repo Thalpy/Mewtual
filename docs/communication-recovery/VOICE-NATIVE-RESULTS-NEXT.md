@@ -1,5 +1,25 @@
 # Next voice milestone: native result recovery
 
+## 25 October: concrete Input exists; replace earlier Begin admission next
+
+The staged native Input publisher/codec now uses scoped Root admission and original paid
+UI/physical/output custody. HANDOVER records actual queue/cancellation/Lock evidence, bounded
+graph measurements and exact revision-specific test results. Production still refuses the
+whole SDP family. No private browser Input consumer or engine/result/RTC path exists yet.
+
+Next replace the earlier Begin producer's final admission: it currently installs UI custody
+before queued recorded factories invoke original Clock callbacks. Prepare all callback-bearing
+work before native final admission, then commit through an actual-Actor scoped hook with
+current Root checks and try-only native fences. Preserve the original recorded Writer,
+Registration and exact retry/uncertain semantics. Refusal must destroy prepared owners only
+after native guards release. Do not solve this by awaiting another Actor query under UI.
+
+Then complete engine/result/delivery/ACK/settlement and original-key browser WebCrypto,
+including native Open terminal recovery, cancellation/teardown tests and a complete maximum
+SDK/engine/RTC composition proof. Follow with ICE/RTC, fresh rounds, multi-peer and media relay,
+combined scenarios and physical testing on independent devices/networks. The newly fixed
+sender-retirement/history race addresses only the later completion boundary, not Begin.
+
 ## 25 October: scoped Input authority is implemented; native publication is next
 
 Root has a lifetime-bound input-read admission on the actual Actor, with terminal-first

@@ -1,5 +1,27 @@
 # Threat model; client integrity & enforcement boundaries
 
+## Concrete Input publication and sender retirement (25 October; disabled family)
+
+The native Input publisher repeats actual mounted-store and resumable state after its queued
+wait, inside the UI commit gate. Generation alone is insufficient: store removal without
+generation change must also refuse. It binds the same original Session, row, Action/intent,
+SDK/PC and funding counter; final Root checks still own current MLS/room/member/policy.
+Actual loan identity is rechecked after short guards, preventing an independently supplied
+same-intent Action from supplying different input. Data custody retains original bytes and
+UI/physical exclusion through HTTP collection; it contains no whole-ledger or payment cycle.
+
+An RPC reply may be collected before its sender retires. Historical Clock observations
+must not race the sender's retained actual UI guard. The original producer therefore waits
+on its SAME bound Task counter, without Clock or another Actor query, until other IO has
+retired. Registration and physical-request exclusion stay intact through that wait and
+unwind. The test-only FIFO barriers model actual Actor sender retirement, not a timeout.
+
+A separate earlier Begin boundary still acquires UI custody before queued Root factories
+observe Clock. This remains a pre-enable blocker; the new wait does not correct it. No
+production SDP ingress is enabled, no complete browser/engine/RTC ownership composition is
+claimed, and native Open/terminal/teardown adversarial coverage remains incomplete. Physical
+audio/network acceptance still requires independent devices/networks unavailable here.
+
 ## Scoped SDP input freshness and custody (25 October; staged)
 
 A retained PC/Ready intent alone cannot authorize SDP input. The new scoped Root admission

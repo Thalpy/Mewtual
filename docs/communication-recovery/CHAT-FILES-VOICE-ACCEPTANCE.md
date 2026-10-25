@@ -1,5 +1,28 @@
 # Chat, files and voice implementation evidence
 
+## 25 October concrete native Input checkpoint (not live V2 acceptance)
+
+The private Input adapter now publishes the actual original scoped Actor loan through an
+authenticated fixed-format Data response with actual UI/physical/payment custody. The
+unchanged common Control proof is12,279/12,288 bytes, with a3,728-byte Input adapter and
+3,000/4,096-byte concrete Task. The maximum encrypted response is9,080/9,232 paid bytes.
+No pool, limit, production opcode or browser/RTC path was enabled by this checkpoint.
+
+Focused results: Root voice766 pass (35.76s), native handoff340 pass (22.55s), real blocked-TCP
+LOW Seal Input/controls pass (10.85s), frontend2,750 pass (77.94s). Actual queue/full-mailbox,
+copy pressure, held output/Lock, lost waiter, store removal/resumable contention, PC-close
+refusal and closed canonical-history recovery are exercised in the staged native handler.
+Two Root counter tests pin sender keepalive/credit/Phase retirement independently of output
+delivery. Native Open and full terminal/teardown combinations are not covered by this test.
+
+Complete current Root/native gates remain pending. The older frozen runtime `0bb2cf8f`
+passed complete Root3,590/0 failed/24 ignored and native845/0 failed/0 ignored. Those
+results apply to that revision only. HANDOVER records the remaining strict checks and
+inherited dependency advisory. The earlier Begin/factory Clock-under-UI boundary is an
+explicit activation blocker, separate from the fixed post-completion sender/history race.
+Private browser/engine/result/ACK/settlement, SDP/ICE/RTC, multi-peer composition, media relay,
+combined scenarios and independent physical audio/network acceptance remain unfinished.
+
 ## 25 October scoped SDP Input checkpoint (not live V2 acceptance)
 
 The original Actor now lends a synchronous scoped input-admission step. Pending reads validate

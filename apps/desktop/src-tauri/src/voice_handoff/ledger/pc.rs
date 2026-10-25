@@ -97,6 +97,10 @@ impl Drop for Preparation {
     }
 }
 impl Claim {
+    /// Original immutable proof, not permission to use a live PC.
+    pub(super) fn proof(&self) -> [u8; 32] {
+        self.proof
+    }
     pub(super) fn matches(&self, proof: [u8; 32]) -> bool {
         self.proof == proof
     }

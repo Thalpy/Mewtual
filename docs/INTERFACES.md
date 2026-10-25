@@ -1,5 +1,28 @@
 # Mewtual; Interfaces & Hooks Schema
 
+## Private native Input descriptor (25 October; not enabled)
+
+The staged authenticated opcode17 Input adapter returns version8/tag3 Data: a fixed277-byte
+original-provenance descriptor followed by original AAD and input. It includes the native
+row/parent, Action tuple, intent round and Ready/key/SDK/storage/PC bindings, operation kind,
+sequence and exact engine requirement. The writer validates the affine loan against the
+actual target Action after all short guards release. CryptoFlight and CryptoAction serials
+are distinct; neither substitutes for the other. No browser decoder or SDK consumes this
+response yet. Production Host rejects opcode17 with the rest of the SDP family.
+
+A9,232-byte original response Copy covers the maximum9,080-byte encrypted frame. Data
+keeps the admitted loan, actual UI commit, physical position, Actor Work and separate Task
+through collection. History/refusal keep no new read authority. Known closed/settled rows
+recover canonical history without allocating a new Phase Copy, after actual callback
+retirement. Full mailbox/copy capacity is local retryable refusal; stale/closed provenance
+cannot gain another original input or cross a Session.
+
+TaskCopy::wait_other_native_io_collected is a trusted lifecycle observation on its own
+bound counter. Its caller must retain original Registration plus the exclusive physical
+request so no other same-purpose IO can enter. It retains its own payment, grants no current
+authority, and makes no refund/absence/whole-row-drainage claim. Every actual counter Drop
+notifies after original keepalive, credit and Phase retirement, including while still open.
+
 ## Scoped SDP Input admission (25 October; trusted Rust-only interface)
 
 `ChannelSync::with_voice_sdp_input_admission(grant, intent, action, publish)` invokes one
