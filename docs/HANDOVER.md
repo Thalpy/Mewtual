@@ -1,5 +1,30 @@
 # Mewtual; Handover
 
+## Native fixed-layout correction (25 October; final native rerun pending)
+
+The first X native full run finished860pass/2failed in1567.91s. Both failures were real
+layout-budget checks: the new inline media state enlarged the shared record to2352B,
+exceeding its existing2304B reservation. No runtime/acceptance failure was reported, but
+that run is NOT green. The original failed log/results remain in ignored target files.
+
+The media claim now lives in one fixed Box on the ORIGINAL phase's PC metadata payment.
+That stored heap is included in the unchanged288B PC inventory. Only its pointer remains
+in the2304B shared Row. A second candidate is prepared outside UI/Index/Row/Group guards;
+its heap and wrapper have separate Task/Control inventory. Final guards move it only into
+absent state and preserve competing closed/released/worker state. Unused preparation drops
+outside the guards. The stored Box drops before the original phase anchor, declared last;
+this order is statically reviewed. A dynamic sole-anchor drop observer remains a narrow
+follow-up. The Box cannot escape that anchor until future index migration prepays its own.
+
+Both previously failing assertions now pass unchanged, as do PC288B and task/Control
+layout gates. Measured task3568/4096B, Actor2060/4096B and Control2248B; no cap increases.
+All352 native handoff tests pass6.33s; five real native_browser/TCP tests pass36.89s. The
+actual queued-PC ordering scenario passes9.53s with new media Close/Release while Root
+PC intent is still Preparing, followed by the existing SDK/finalization checks. Read-only
+adversarial re-review has no blocker/high/medium. Native check passes26.07s; strict Clippy
+and the native full rerun continue serially. Record their actual result before sign-off.
+Root3,675 and frontend2,856 results below remain current for their unchanged source.
+
 ## Browser media ownership leaves (25 October; integration in progress)
 
 `communication-voice-browser-media` builds on pushed native checkpoint3b9a5192. The RTC

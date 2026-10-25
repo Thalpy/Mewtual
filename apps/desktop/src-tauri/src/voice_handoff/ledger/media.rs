@@ -12,8 +12,8 @@ use catcoms_sync::voice_v2::chain::sdp_handoff::{self, NativeRowFunding, NativeR
 use catcoms_sync::voice_v2::sdp::{InitialSdpIntent, MediaAdmission, SdpMedia};
 use sha2::{Digest, Sha256};
 
-/// Inline pre-candidate placeholder. The original parent/PC fee must pay this whole layout
-/// BEFORE the detached8KiB child exists. No Row/Session/Action/Phase/worker backedge lives here.
+/// Fixed pre-candidate record, boxed to keep the shared2304B Row unchanged. ORIGINAL PC
+/// metadata pays its heap BEFORE the detached8KiB child exists. No producer backedge lives here.
 pub(super) struct Claim {
     proof: [u8; 32],
     until: u64,
@@ -77,7 +77,35 @@ pub(super) fn negotiation_may_close(storage: &super::sdp::Claim) -> bool {
         .pc
         .as_ref()
         .and_then(|pc| pc.media.as_ref())
-        .is_none_or(Claim::negotiation_may_close)
+        .is_none_or(|media| media.negotiation_may_close())
+}
+
+/// Preallocated OUTSIDE final native guards. An unused second candidate is separately
+/// included in Task/Control construction payment. The original phase anchor is LAST so
+/// even failed/unattached allocation custody survives destruction of the candidate Box.
+pub(in crate::voice_handoff) struct Prepared {
+    candidate: Option<Box<Claim>>,
+    phase: Arc<sdp_handoff::Phase>,
+}
+impl Prepared {
+    fn take(
+        &mut self,
+        proof: [u8; 32],
+        phase: &Arc<sdp_handoff::Phase>,
+    ) -> Result<Box<Claim>, VoiceError> {
+        if !Arc::ptr_eq(&self.phase, phase)
+            || self
+                .candidate
+                .as_ref()
+                .is_none_or(|claim| claim.proof != proof)
+        {
+            return Err(VoiceError::Unauthorized);
+        }
+        Ok(self.candidate.take().expect("one prepared media claim"))
+    }
+    pub(in crate::voice_handoff) const fn heap_bytes() -> usize {
+        std::mem::size_of::<Claim>()
+    }
 }
 
 /// Privately prepared from the exact original authenticated native record, never wire IDs
@@ -429,6 +457,40 @@ impl Ledger {
 }
 
 impl ResolvedRow {
+    /// Funding/identity preparation only; negative commands also work before pc.intent
+    /// exists. The original64KiB metadata is already prepaid, independent of Root media.
+    fn prepare_media_claim(
+        &self,
+        session: &Arc<SessionIdentity>,
+        request: &Begin<'_>,
+        identity: &Identity,
+    ) -> Result<Prepared, VoiceError> {
+        let phase = {
+            let _index = self.transition_index()?;
+            let state = try_lock(&self.row.state)?;
+            original(self, &state, session, request)?;
+            if !identity.matches(self, session, request) {
+                return Err(VoiceError::Unauthorized);
+            }
+            super::pc::storage(self, &state, session, &request.pc)?
+                .phase
+                .as_ref()
+                .ok_or(VoiceError::Unauthorized)?
+                .clone()
+        };
+        Ok(Prepared {
+            candidate: Some(Box::new(Claim::new(identity))),
+            phase,
+        })
+    }
+    pub(in crate::voice_handoff) fn media_prepare_claim(
+        &self,
+        session: &Arc<SessionIdentity>,
+        request: &Begin<'_>,
+        identity: &Identity,
+    ) -> Result<Prepared, VoiceError> {
+        self.prepare_media_claim(session, request, identity)
+    }
     /// Fresh native currentness for an EXISTING admitted media claim. Old negotiation/key/
     /// Ready closure is intentionally not consulted. Actual UI/selection plus original
     /// Root call/pair/actor/session/policy/epoch and own media Close still revoke it.
@@ -629,6 +691,7 @@ impl ResolvedRow {
         physical: &super::super::channel::PhysicalHold,
         session: &Arc<super::super::channel::Session>,
         identity: &Identity,
+        prepared: &mut Prepared,
         wall: u64,
         mono: u64,
     ) -> Result<(Worker, Option<Arc<SdpMedia>>), VoiceError> {
@@ -674,7 +737,25 @@ impl ResolvedRow {
                 .remaining_at(wall, mono)?;
             admission.current()?;
             let pc = super::pc::mutable_storage(&mut state).pc.as_mut().unwrap();
-            let media = pc.media.get_or_insert_with(|| Claim::new(identity));
+            if pc.media.is_none() {
+                let phase = super::pc::storage(self, &state, admission.session(), &request.pc)?
+                    .phase
+                    .as_ref()
+                    .ok_or(VoiceError::Unauthorized)?;
+                let candidate = prepared.take(identity.proof, phase)?;
+                super::pc::mutable_storage(&mut state)
+                    .pc
+                    .as_mut()
+                    .unwrap()
+                    .media = Some(candidate);
+            }
+            let media = super::pc::mutable_storage(&mut state)
+                .pc
+                .as_mut()
+                .unwrap()
+                .media
+                .as_mut()
+                .unwrap();
             if media.proof != identity.proof {
                 return Err(VoiceError::Unauthorized);
             }
@@ -703,6 +784,13 @@ impl ResolvedRow {
             return Err(VoiceError::Unauthorized);
         }
         let identity = self.media_identity(session, request)?;
+        // Resolve creates nothing. Negative commands prepare outside all final guards,
+        // then preserve whichever permanent claim won before they acquired the row.
+        let mut prepared = if matches!(kind, OriginalKind::Close | OriginalKind::Release) {
+            Some(self.prepare_media_claim(session, request, &identity)?)
+        } else {
+            None
+        };
         let retired;
         let output;
         {
@@ -713,7 +801,28 @@ impl ResolvedRow {
             if pc.media.is_none() && kind == OriginalKind::Resolve {
                 return Ok(None);
             }
-            let media = pc.media.get_or_insert_with(|| Claim::new(&identity));
+            if pc.media.is_none() {
+                let phase = super::pc::storage(self, &state, session, &request.pc)?
+                    .phase
+                    .as_ref()
+                    .ok_or(VoiceError::Unauthorized)?;
+                let candidate = prepared
+                    .as_mut()
+                    .ok_or(VoiceError::Unauthorized)?
+                    .take(identity.proof, phase)?;
+                super::pc::mutable_storage(&mut state)
+                    .pc
+                    .as_mut()
+                    .unwrap()
+                    .media = Some(candidate);
+            }
+            let media = super::pc::mutable_storage(&mut state)
+                .pc
+                .as_mut()
+                .unwrap()
+                .media
+                .as_mut()
+                .unwrap();
             if media.proof != identity.proof {
                 return Err(VoiceError::Unauthorized);
             }
