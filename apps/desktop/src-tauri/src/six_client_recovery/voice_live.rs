@@ -525,18 +525,18 @@ async fn native_v2_pc_intent_sdk_release_before_begin_and_lost_queued_waiter_nev
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn native_v2_pc_intent_mismatched_sdp_publication_retains_exact_action_without_sdk_exposure()
+async fn native_v2_pc_intent_changed_sdp_input_refuses_before_publication_and_writer_blocks_close()
 {
     confirmation_over_blocked_tcp(true, false, false, false, Some(2)).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn native_v2_pc_intent_mismatched_sdp_keeps_admitted_engine_until_actual_settlement() {
+async fn native_v2_pc_intent_recorded_sdp_keeps_admitted_engine_until_actual_settlement() {
     confirmation_over_blocked_tcp(true, false, false, false, Some(3)).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn native_v2_pc_intent_unknown_publication_blocks_collection_until_actual_closed_capture() {
+async fn native_v2_pc_intent_lost_publication_recovers_original_outcome_after_parent_close() {
     confirmation_over_blocked_tcp(true, false, false, false, Some(4)).await;
 }
 

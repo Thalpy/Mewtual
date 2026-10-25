@@ -10,10 +10,9 @@ use catcoms_sync::voice_v2::{CallGrant, VoiceError};
 #[derive(Default)]
 pub(super) struct Retained {
     unstarted: Option<ledger::ResolvedRow>,
-    unresolved: Option<(
-        ledger::ResolvedRow,
-        Arc<catcoms_sync::voice_v2::crypto_actions::CryptoAction>,
-    )>,
+    // Intentionally retain NO Action or completion: only the row's original outcome
+    // can recover the publication after parent/SDK closure.
+    unreconciled: Option<ledger::ResolvedRow>,
 }
 impl Retained {
     pub(super) fn after_parent_close(
@@ -34,15 +33,18 @@ impl Retained {
                 "native absence cannot invent a Root engine"
             );
         }
-        if let Some((row, action)) = self.unresolved {
-            // Actual worker/body/completion are gone and parent storage is closed. None
-            // of those observations is evidence that this handed-off action was absent.
-            assert!(!row.try_compact_sdp().unwrap());
+        if let Some(row) = self.unreconciled {
+            // Actual worker/body/completion and every caller Action are gone. Only this
+            // row's SAME original outcome retains publication after parent/SDK close.
             assert!(!state.voice_handoff.channel_may_close(route.selected()));
             assert!(!state.voice_handoff.sdp_test_children_closed(parent));
             assert!(!row.status().unwrap().drained);
-            // The retained actual Root Arc is positive publication evidence. This proves
-            // the closed capture leaf, not a working Actor recovery/negative-witness RPC.
+            use catcoms_sync::voice_v2::sdp::publication::History;
+            let slot = row.sdp_test_outcome();
+            let History::Published(action) = slot.history() else {
+                panic!("original publication missing after actual parent close");
+            };
+            let identity = (action.serial(), action.version(), action.input_tag());
             let foreign = channel::tests::FixtureChannel::new(
                 route.selected().resources(),
                 route.selected().binding().scope.group,
@@ -53,23 +55,23 @@ impl Retained {
             );
             assert!(row.status().unwrap().action.is_none());
             drop(foreign);
+            drop(action);
+            drop(slot); // Native must recover it itself; no real Arc is supplied below.
             let changed = row.sdp_test_notification();
             tokio::pin!(changed);
             changed.as_mut().enable();
             let mut cx = std::task::Context::from_waker(std::task::Waker::noop());
             assert!(std::future::Future::poll(changed.as_mut(), &mut cx).is_pending());
-            row.capture_closed_sdp_publication(route.session().identity(), &action)
-                .unwrap();
+            assert!(row.try_compact_sdp().unwrap());
             assert!(
                 std::future::Future::poll(changed.as_mut(), &mut cx).is_ready(),
-                "actual historical capture wakes a registered observer"
+                "actual outcome recovery wakes a registered observer"
             );
-            assert_eq!(
-                row.status().unwrap().action,
-                Some((action.serial(), action.version(), action.input_tag()))
-            );
-            assert!(row.try_compact_sdp().unwrap());
+            assert_eq!(row.status().unwrap().action, Some(identity));
             assert!(row.status().unwrap().engine.settled);
+            let History::Published(action) = row.sdp_test_outcome().history() else {
+                panic!("compaction discarded original publication");
+            };
             let tag = catcoms_sync::voice_v2::sdp::plaintext_commitment(b"v=0").unwrap();
             assert!(action.matches_sdp_plaintext_commitment(&tag));
         }
@@ -124,7 +126,7 @@ pub(super) async fn exercise(
     intent: &Arc<InitialSdpIntent>,
     mismatch_mode: u8,
 ) -> Retained {
-    let mismatch = matches!(mismatch_mode, 1 | 2);
+    let mismatch = mismatch_mode == 1;
     let mut retained = Retained::default();
     let context = context::Context::new(state);
     let phase = parent.sdp_test_phase().unwrap();
@@ -183,21 +185,31 @@ pub(super) async fn exercise(
     .unwrap();
     let mut factory = None;
     let mut ids = Vec::new();
+    let mut outcomes = Vec::new();
     for begin in begins {
         match begin {
             ledger::SdpBegin::Factory(ticket) => {
+                outcomes.push(ticket.resolved().sdp_test_outcome());
                 ids.push(ticket.id());
                 assert!(
                     factory.replace(ticket).is_none(),
                     "one original Row allocation"
                 );
             }
-            ledger::SdpBegin::Existing(row) => ids.push(row.id()),
+            ledger::SdpBegin::Existing(row) => {
+                outcomes.push(row.sdp_test_outcome());
+                ids.push(row.id());
+            }
         }
     }
     let ticket = factory.expect("one Factory plus seven exact existing rows");
     assert_eq!(ids.len(), 8);
     assert!(ids.iter().all(|id| *id == ticket.id()));
+    assert!(
+        outcomes.iter().all(|slot| Arc::ptr_eq(slot, &outcomes[0])),
+        "every competing candidate observes the ONE actually installed outcome"
+    );
+    drop(outcomes);
     assert_eq!(
         state.voice_handoff.sdp_test_rows(parent.id()),
         before + 1,
@@ -258,6 +270,26 @@ pub(super) async fn exercise(
             task,
         )
         .unwrap();
+        let writer = ticket.publication_writer().unwrap();
+        // A real separately funded Root outcome for this same PC/intent is not this
+        // native row's canonical slot. No native Open row is installed here and this
+        // unused test-only outcome retires before the later Open-row exercise.
+        let foreign_outcome = if mismatch_mode == 2 {
+            Some(
+                catcoms_sync::voice_v2::sdp::publication::Prepared::new(
+                    intent.clone(),
+                    phase.native_history(NativeRowPurpose::Open).unwrap(),
+                    None,
+                )
+                .unwrap()
+                .install(),
+            )
+        } else {
+            None
+        };
+        let foreign_writer = foreign_outcome
+            .as_ref()
+            .map(|slot| slot.try_writer().unwrap());
         let paused = super::pc::park(actor).await;
         let mut buffer = phase
             .copy(3 + VOICE_SDP_RPC_METADATA_BYTES)
@@ -275,22 +307,32 @@ pub(super) async fn exercise(
             let authority = live.authority.try_lock().unwrap();
             let admission =
                 crate::voice_handoff::transition::Admission::new(&live, &authority, route, &commit);
+            if let Some(foreign) = &foreign_writer {
+                assert_eq!(
+                    route.try_with_open(|| ticket.mark_handoff(&admission, foreign, wall, mono)),
+                    Err(VoiceError::Unauthorized),
+                    "same-intent foreign slot is not admission"
+                );
+            }
             route
-                .try_with_open(|| ticket.mark_handoff(&admission, wall, mono))
+                .try_with_open(|| ticket.mark_handoff(&admission, &writer, wall, mono))
                 .unwrap();
         }
         drop(live);
+        drop(foreign_writer);
+        drop(foreign_outcome);
         publication.admit(commit);
         let publication = Arc::new(publication);
         buffer.attach_keepalive(publication.clone()).unwrap();
         let body = VoiceSdpBody::from_buffer(buffer, 0..3, intent.clone()).unwrap();
         drop(publication);
         let pending = actor
-            .queue_voice_sdp_offer(
+            .queue_voice_sdp_offer_recorded(
                 grant.clone(),
                 request.pc.base.handshake,
                 intent.clone(),
                 &body,
+                writer,
             )
             .await
             .unwrap();
@@ -319,94 +361,105 @@ pub(super) async fn exercise(
         );
         drop(paused);
         let completion = pending.complete().await.unwrap();
-        let action = Arc::clone(completion.result().unwrap());
-        let exact = catcoms_sync::voice_v2::sdp::plaintext_commitment(b"v=0").unwrap();
-        let wrong = catcoms_sync::voice_v2::sdp::plaintext_commitment(b"v=1").unwrap();
-        assert!(action.matches_sdp_plaintext_commitment(&exact));
-        assert!(!action.matches_sdp_plaintext_commitment(&wrong));
-        assert_eq!(
-            row.capture_closed_sdp_publication(route.session().identity(), &action),
-            Err(VoiceError::Unauthorized),
-            "retained worker forbids historical adoption"
-        );
-        assert!(row.status().unwrap().action.is_none());
-        if mismatch_mode == 3 {
-            let unresolved_row = ticket.resolved();
-            drop(ticket);
-            drop(body);
-            drop(completion);
-            assert!(!funding.is_closed());
-            assert_eq!(
-                row.capture_closed_sdp_publication(route.session().identity(), &action),
-                Err(VoiceError::Unauthorized),
-                "open IO forbids historical adoption"
-            );
+        if mismatch {
+            // The canonical Writer binds native's original v=1 body. A v=0 producer
+            // mixup is now refused BEFORE Root publication, rather than cleaned up after
+            // publishing a different Action. No synthetic engine/ACK may appear.
+            assert_eq!(completion.result().err(), Some(VoiceError::Unauthorized));
             assert!(row.status().unwrap().action.is_none());
-            state
-                .voice_handoff
-                .close_sdp_original(
-                    parent,
-                    route.selected(),
-                    route.session().identity(),
-                    &request,
-                    NativeRowPurpose::Seal,
-                )
-                .unwrap();
-            assert!(funding.is_collected());
-            assert!(row.status().unwrap().action.is_none());
-            assert!(
-                !row.try_compact_sdp().unwrap(),
-                "unknown handed-off is not unstarted"
-            );
-            assert!(!state.voice_handoff.channel_may_close(route.selected()));
-            assert!(!state.voice_handoff.sdp_test_children_closed(parent));
-            retained.unresolved = Some((unresolved_row, action));
-        } else {
-            if mismatch_mode == 2 {
-                // A real Root permit must survive native mismatch cleanup. No SDK result
-                // is fabricated here: the fixture reports settlement only after checking
-                // that negative-only native retirement cannot remove this actual permit.
-                action.admit_engine(action.engine_bytes()).unwrap();
-            }
-            if mismatch {
-                assert_eq!(ticket.capture(&action), Err(VoiceError::RetryMismatch));
-                assert_eq!(ticket.attach_published(), Err(VoiceError::Unauthorized));
-            } else {
-                ticket.capture(&action).unwrap();
-                ticket.attach_published().unwrap();
-            }
-            assert_eq!(
-                row.status().unwrap().action,
-                Some((action.serial(), action.version(), action.input_tag()))
-            );
-            if !mismatch {
-                action.settle_engine(); // This actual factory action never admitted an SDK engine.
-            }
+            assert!(!row.try_compact_sdp().unwrap());
             drop(ticket);
-            assert!(
-                !row.try_compact_sdp().unwrap(),
-                "actual body/completion/publication still held"
-            );
             drop(body);
             assert!(!row.try_compact_sdp().unwrap());
             drop(completion);
             assert!(funding.is_collected());
-            if mismatch_mode == 2 {
+            assert!(row.try_compact_sdp().unwrap());
+            let status = row.status().unwrap();
+            assert!(status.action.is_none() && !status.engine.settled && !status.acknowledged);
+        } else {
+            let action = Arc::clone(completion.result().unwrap());
+            let exact = catcoms_sync::voice_v2::sdp::plaintext_commitment(b"v=0").unwrap();
+            let wrong = catcoms_sync::voice_v2::sdp::plaintext_commitment(b"v=1").unwrap();
+            assert!(action.matches_sdp_plaintext_commitment(&exact));
+            assert!(!action.matches_sdp_plaintext_commitment(&wrong));
+            assert_eq!(
+                row.capture_closed_sdp_publication(route.session().identity(), &action),
+                Err(VoiceError::Unauthorized),
+                "retained worker forbids historical adoption"
+            );
+            assert!(row.status().unwrap().action.is_none());
+            if mismatch_mode == 3 {
+                let unreconciled_row = ticket.resolved();
+                drop(ticket);
+                drop(body);
+                drop(completion);
+                assert!(!funding.is_closed());
+                assert_eq!(
+                    row.capture_closed_sdp_publication(route.session().identity(), &action),
+                    Err(VoiceError::Unauthorized),
+                    "open IO forbids historical adoption"
+                );
+                assert!(row.status().unwrap().action.is_none());
+                state
+                    .voice_handoff
+                    .close_sdp_original(
+                        parent,
+                        route.selected(),
+                        route.session().identity(),
+                        &request,
+                        NativeRowPurpose::Seal,
+                    )
+                    .unwrap();
+                assert!(funding.is_collected());
+                assert!(row.status().unwrap().action.is_none());
+                // Do not reconcile yet: after parent close there must be no caller-owned
+                // Action/SDK/Actor reply left to supply the real publication.
+                assert!(!state.voice_handoff.channel_may_close(route.selected()));
+                assert!(!state.voice_handoff.sdp_test_children_closed(parent));
+                drop(action);
+                retained.unreconciled = Some(unreconciled_row);
+            } else {
+                if mismatch_mode == 2 {
+                    // A real Root permit must survive ordinary native row closure. No SDK result
+                    // is fabricated here: the fixture reports settlement only after checking
+                    // that negative-only native retirement cannot remove this actual permit.
+                    action.admit_engine(action.engine_bytes()).unwrap();
+                }
+                ticket.capture(&action).unwrap();
+                ticket.attach_published().unwrap();
+                assert_eq!(
+                    row.status().unwrap().action,
+                    Some((action.serial(), action.version(), action.input_tag()))
+                );
+                if mismatch_mode != 2 {
+                    action.settle_engine(); // This actual factory action never admitted an SDK engine.
+                }
+                drop(ticket);
                 assert!(
                     !row.try_compact_sdp().unwrap(),
-                    "admitted engine is not unstarted"
+                    "actual body/completion/publication still held"
                 );
-                assert!(!row.status().unwrap().engine.settled);
-                action.settle_engine();
+                drop(body);
+                assert!(!row.try_compact_sdp().unwrap());
+                drop(completion);
+                assert!(funding.is_collected());
+                if mismatch_mode == 2 {
+                    assert!(
+                        !row.try_compact_sdp().unwrap(),
+                        "admitted engine is not unstarted"
+                    );
+                    assert!(!row.status().unwrap().engine.settled);
+                    action.settle_engine();
+                }
+                assert!(row.try_compact_sdp().unwrap());
+                assert!(row.status().unwrap().engine.settled);
+                assert!(
+                    action.matches_sdp_plaintext_commitment(&exact),
+                    "survives actual input compaction"
+                );
+                assert!(!action.matches_sdp_plaintext_commitment(&wrong));
+                assert!(phase.effect().is_live());
             }
-            assert!(row.try_compact_sdp().unwrap());
-            assert!(row.status().unwrap().engine.settled);
-            assert!(
-                action.matches_sdp_plaintext_commitment(&exact),
-                "survives actual input compaction"
-            );
-            assert!(!action.matches_sdp_plaintext_commitment(&wrong));
-            assert!(phase.effect().is_live());
         }
     } else {
         // HIGH has no applied incoming Offer in this fixture. Close an actually unstarted
@@ -442,7 +495,7 @@ pub(super) async fn exercise(
     assert_eq!(recovered.id(), row.id());
     assert_eq!(
         recovered.status().unwrap().drained,
-        retained.unresolved.is_none()
+        retained.unreconciled.is_none()
     );
 
     // Close-before-install persists even when there is no child RowId. A retained already
@@ -452,7 +505,7 @@ pub(super) async fn exercise(
     let open_candidate = parent
         .sdp_action_candidate(route.session().identity(), &open)
         .unwrap();
-    if mismatch {
+    if matches!(mismatch_mode, 1 | 2) {
         // Retain a genuinely unstarted Open row through the parent PC/SDK close. Its
         // worker is gone, but open/zero IO is not terminal and cannot compact yet.
         let wall = clock.now_ms();
@@ -473,6 +526,22 @@ pub(super) async fn exercise(
             panic!("one original Open row");
         };
         let open_row = open_ticket.resolved();
+        if mismatch_mode == 1 {
+            let writer = open_ticket.publication_writer().unwrap();
+            open_row
+                .close_sdp_action(route.session().identity())
+                .unwrap();
+            drop(open_ticket);
+            assert!(
+                !open_row.try_compact_sdp().unwrap(),
+                "CLOSED+zero and worker retirement cannot overtake a real reserved Writer"
+            );
+            drop(writer);
+            assert!(open_row.try_compact_sdp().unwrap());
+            let status = open_row.status().unwrap();
+            assert!(status.action.is_none() && !status.engine.settled && !status.acknowledged);
+            return retained;
+        }
         drop(open_ticket);
         assert!(!open_row.try_compact_sdp().unwrap());
         retained.unstarted = Some(open_row);

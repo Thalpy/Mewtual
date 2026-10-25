@@ -8,6 +8,38 @@ use crate::voice_v2::sdp::{
 };
 
 #[test]
+fn canonical_preparation_and_writer_identity_survive_close_without_false_negative() {
+    let (_p, phase, intent, _) = fixture();
+    let (_other, other_phase, foreign, _) = fixture();
+    let fee = phase.native_history(NativeRowPurpose::Seal).unwrap();
+    let open_fee = phase.native_history(NativeRowPurpose::Open).unwrap();
+    let tag = Some(plaintext_commitment(b"v=0").unwrap());
+    let prepared = Prepared::new(intent.clone(), fee.clone(), tag).unwrap();
+    assert!(prepared.matches(&intent, &fee, tag));
+    assert!(!prepared.matches(&foreign, &fee, tag));
+    assert!(!prepared.matches(&intent, &open_fee, tag));
+    assert!(!prepared.matches(&intent, &fee, Some(plaintext_commitment(b"v=1").unwrap())));
+    let slot = prepared.install();
+    let other_slot = Prepared::new(intent.clone(), open_fee, None)
+        .unwrap()
+        .install();
+    let writer = slot.try_writer().unwrap();
+    assert!(writer.belongs_to(&slot));
+    assert!(!writer.belongs_to(&other_slot));
+    phase.close();
+    assert!(fee.is_collected());
+    assert!(!writer.belongs_to(&slot));
+    assert!(
+        !slot.is_proven_unpublished(),
+        "a real reserved Writer remains InFlight"
+    );
+    drop(writer);
+    assert!(slot.is_proven_unpublished());
+    assert_eq!(slot.try_writer().err(), Some(VoiceError::Unauthorized));
+    other_phase.close();
+}
+
+#[test]
 fn recorded_selection_defeats_prepared_unrecorded_tail_and_cached_recovery() {
     let (mut p, phase, intent, exchange) = fixture();
     let fee = phase.native_history(NativeRowPurpose::Seal).unwrap();
@@ -88,6 +120,10 @@ fn original_outcome_never_entered_and_entered_unwind_are_distinct_after_close() 
         .unwrap()
         .install();
     assert!(matches!(slot.history(), History::Idle));
+    assert!(
+        !slot.is_proven_unpublished(),
+        "open zero IO is not a stable negative"
+    );
     let writer = slot.try_writer().unwrap();
     assert_eq!(slot.try_writer().err(), Some(VoiceError::Capacity));
     drop(writer);
@@ -103,6 +139,10 @@ fn original_outcome_never_entered_and_entered_unwind_are_distinct_after_close() 
     phase.close();
     assert!(fee.is_collected());
     assert!(matches!(slot.history(), History::Uncertain));
+    assert!(
+        !slot.is_proven_unpublished(),
+        "closed uncertain work stays unresolved"
+    );
 }
 
 #[test]
@@ -131,6 +171,7 @@ fn explicit_capacity_retry_reuses_slot_without_old_writer_drop_corrupting_new_at
         History::Refused(VoiceError::Capacity)
     ));
     assert_eq!(slot.try_writer().err(), Some(VoiceError::Unauthorized));
+    assert!(slot.is_proven_unpublished());
 }
 
 #[test]
@@ -220,6 +261,10 @@ fn positive_original_slot_keeps_same_real_action_after_input_and_join_teardown()
     assert!(Arc::ptr_eq(&weak.upgrade().unwrap(), &recovered));
     assert!(recovered.matches_sdp_plaintext_commitment(&plaintext_commitment(body).unwrap()));
     assert_eq!(slot.try_writer().err(), Some(VoiceError::Unauthorized));
+    assert!(
+        !slot.is_proven_unpublished(),
+        "positive publication is never absence"
+    );
     drop(slot);
     assert!(weak.upgrade().is_some());
     drop(recovered);

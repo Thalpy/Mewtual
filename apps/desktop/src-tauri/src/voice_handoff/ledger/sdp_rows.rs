@@ -6,6 +6,7 @@ use super::*;
 use crate::voice_handoff::requests::sdp_action::Begin as Request;
 use crate::voice_handoff::transition::Admission;
 use catcoms_sync::voice_v2::chain::sdp_handoff::{self, NativeRowFunding, NativeRowPurpose};
+use catcoms_sync::voice_v2::sdp::publication::{History, Outcome, Prepared, Writer};
 use catcoms_sync::voice_v2::sdp::{InitialSdpIntent, SdpDelivery};
 
 pub(super) struct Owners {
@@ -13,6 +14,7 @@ pub(super) struct Owners {
     phase: Arc<sdp_handoff::Phase>,
     intent: Arc<InitialSdpIntent>,
     session: Arc<SessionIdentity>,
+    outcome: Arc<Outcome>,
     funding: Arc<NativeRowFunding>,
 }
 pub(super) struct Pending {
@@ -42,6 +44,7 @@ pub(super) struct Drained {
     delivery: Option<Arc<SdpDelivery>>,
     body_tag: Option<[u8; 32]>,
     session: Arc<SessionIdentity>,
+    outcome: Arc<Outcome>,
     funding: Arc<NativeRowFunding>,
 }
 pub(in crate::voice_handoff) enum Begin {
@@ -67,6 +70,7 @@ pub(in crate::voice_handoff) struct Candidate<'a> {
     request: &'a Request<'a>,
     funding: Arc<NativeRowFunding>,
     body_tag: Option<[u8; 32]>,
+    outcome: Prepared,
 }
 impl Candidate<'_> {
     pub(in crate::voice_handoff) fn funding(&self) -> &Arc<NativeRowFunding> {
@@ -118,6 +122,7 @@ pub(super) fn locally_drained(state: &State) -> Option<bool> {
         Body::SdpDrained(p) => Some(
             state.status.drained
                 && p.funding.is_collected()
+                && (p.action.is_some() || p.outcome.is_proven_unpublished())
                 && (p.action.is_none()
                     || (state.status.engine.settled
                         && (state.status.engine.receipt.is_none() || state.status.acknowledged))),
@@ -149,6 +154,7 @@ fn capture_locked(
     };
     if p.worker != worker
         || !p.handed_off
+        || !p.owners.outcome.owns_publication(action)
         || action.operation() != expected
         || !action.uses_sdp_intent(&p.owners.intent)
         || !action.belongs_to(p.owners.selected.binding().scope, p.owners.selected.lease())
@@ -180,6 +186,48 @@ fn capture_locked(
 }
 
 impl ResolvedRow {
+    #[cfg(test)]
+    pub(in crate::voice_handoff) fn sdp_test_outcome(&self) -> Arc<Outcome> {
+        let state = self.row.state.lock().unwrap();
+        match &state.body {
+            Body::SdpPending(p) => p.owners.outcome.clone(),
+            Body::SdpLive(p) => p.owners.outcome.clone(),
+            Body::SdpDrained(p) => p.outcome.clone(),
+            _ => panic!("actual SDP row"),
+        }
+    }
+    /// Recover ONLY the actual positive publication from this row's original slot. Read
+    /// its historical Arc outside native guards; no current grant, Pair lookup, clock or
+    /// new Copy is needed. Entered uncertainty is deliberately not converted to absence.
+    fn recover_sdp_publication(&self) -> Result<(), VoiceError> {
+        let outcome = {
+            let state = try_lock(&self.row.state)?;
+            match &state.body {
+                Body::SdpPending(p) if !p.worker && p.handed_off && p.published.is_none() => {
+                    p.owners.outcome.clone()
+                }
+                _ => return Ok(()),
+            }
+        };
+        let History::Published(action) = outcome.history() else {
+            return Ok(());
+        };
+        let closure = {
+            let _index = self.transition_index()?;
+            let mut state = try_lock(&self.row.state)?;
+            let Body::SdpPending(p) = &state.body else {
+                return Ok(());
+            };
+            if p.worker || !Arc::ptr_eq(&outcome, &p.owners.outcome) {
+                return Err(VoiceError::Unauthorized);
+            }
+            let (_, closure) = capture_locked(&self.row, &mut state, &action, false)?;
+            closure
+        };
+        drop(closure);
+        self.row.changed.notify_waiters();
+        Ok(())
+    }
     /// Prepay/recover the original fixed fee outside Index/Row/UI guards. This issues no
     /// Row or worker. Historical callers first use lookup_sdp_action without prepayment.
     pub(in crate::voice_handoff) fn sdp_action_candidate<'a>(
@@ -196,7 +244,7 @@ impl ResolvedRow {
         } else {
             NativeRowPurpose::Open
         };
-        let phase = {
+        let (phase, intent) = {
             let _index = self.transition_index()?;
             let state = try_lock(&self.row.state)?;
             let (storage, intent) = original(self, &state, session, request)?;
@@ -210,12 +258,15 @@ impl ResolvedRow {
             if !intent.uses_phase(phase) {
                 return Err(VoiceError::Unauthorized);
             }
-            phase.clone()
+            (phase.clone(), intent.clone())
         };
+        let funding = phase.native_history(purpose)?;
+        let outcome = Prepared::new(intent, funding.clone(), body_tag)?;
         Ok(Candidate {
             request,
-            funding: phase.native_history(purpose)?,
+            funding,
             body_tag,
+            outcome,
         })
     }
     /// Adopt an actual recovered Action after its original worker has disappeared and IO
@@ -304,6 +355,7 @@ impl ResolvedRow {
     /// Cache genuine Root engine/ACK history before entering the final compaction fence.
     /// Input/SDK/Actor owners MUST all have bound the original concrete counter first.
     pub(in crate::voice_handoff) fn try_compact_sdp(&self) -> Result<bool, VoiceError> {
+        self.recover_sdp_publication()?;
         self.reconcile()?;
         self.retire_closed_unstarted_sdp()?;
         let retired = {
@@ -325,7 +377,10 @@ impl ResolvedRow {
                         && (if p.published.is_some() {
                             engine_done
                         } else {
-                            !p.handed_off
+                            // This must be a FRESH check on the SAME installed slot after
+                            // CLOSED+zero, under this final Index/State fence. Worker loss
+                            // or an outside negative snapshot never authorizes compaction.
+                            p.owners.outcome.is_proven_unpublished()
                         })
                 }
                 Body::SdpLive(p) => {
@@ -342,25 +397,28 @@ impl ResolvedRow {
             }
             // Clone fixed fields only after all terminal gates. No speculative Action
             // observer or variable payload owner is hidden in an unsuccessful attempt.
-            let (action, delivery, body_tag, session, funding, handed_off) = match &state.body {
-                Body::SdpPending(p) => (
-                    p.published.clone(),
-                    None,
-                    p.body_tag,
-                    p.owners.session.clone(),
-                    p.owners.funding.clone(),
-                    p.handed_off,
-                ),
-                Body::SdpLive(p) => (
-                    Some(p.action.clone()),
-                    p.delivery.clone(),
-                    p.body_tag,
-                    p.owners.session.clone(),
-                    p.owners.funding.clone(),
-                    true,
-                ),
-                _ => unreachable!("checked SDP state"),
-            };
+            let (action, delivery, body_tag, session, outcome, funding, handed_off) =
+                match &state.body {
+                    Body::SdpPending(p) => (
+                        p.published.clone(),
+                        None,
+                        p.body_tag,
+                        p.owners.session.clone(),
+                        p.owners.outcome.clone(),
+                        p.owners.funding.clone(),
+                        p.handed_off,
+                    ),
+                    Body::SdpLive(p) => (
+                        Some(p.action.clone()),
+                        p.delivery.clone(),
+                        p.body_tag,
+                        p.owners.session.clone(),
+                        p.owners.outcome.clone(),
+                        p.owners.funding.clone(),
+                        true,
+                    ),
+                    _ => unreachable!("checked SDP state"),
+                };
             // These infallible moves retain SAME fixed history; the retired variable graph
             // drops only after every native guard has returned. No shared Phase close.
             let retired = std::mem::replace(
@@ -370,6 +428,7 @@ impl ResolvedRow {
                     delivery,
                     body_tag,
                     session,
+                    outcome,
                     funding,
                 }),
             );
@@ -530,7 +589,11 @@ impl Ledger {
         let state = try_lock(&parent.row.state)?;
         let (storage, intent) = original(parent, &state, admission.session(), request)?;
         let phase = storage.phase.as_ref().ok_or(VoiceError::Unauthorized)?;
-        if funding.purpose() != purpose || !funding.uses_phase(phase) || !intent.uses_phase(phase) {
+        if funding.purpose() != purpose
+            || !funding.uses_phase(phase)
+            || !intent.uses_phase(phase)
+            || !candidate.outcome.matches(intent, funding, body_tag)
+        {
             return Err(VoiceError::Unauthorized);
         }
         if let Some(row) = index
@@ -576,6 +639,9 @@ impl Ledger {
             .position(Option::is_none)
             .ok_or(VoiceError::Capacity)?;
         let serial = index.serial.checked_add(1).ok_or(VoiceError::Capacity)?;
+        // Exact uniqueness and all fallible/current gates precede BOTH allocations.
+        // Competing candidates must reuse this slot; no speculative Outcome is installed.
+        let outcome = candidate.outcome.install();
         let row = Arc::new(Row {
             id: RowId { slot, serial },
             key: Key {
@@ -592,6 +658,7 @@ impl Ledger {
                         phase: phase.clone(),
                         intent: intent.clone(),
                         session: admission.session().clone(),
+                        outcome,
                         funding: funding.clone(),
                     },
                     published: None,
@@ -629,6 +696,21 @@ impl Ledger {
     }
 }
 impl Registration {
+    /// Obtain an affine token only from this canonical row while its actual worker still
+    /// owns Registration. Allocation identity repeats at final native handoff admission.
+    pub(in crate::voice_handoff) fn publication_writer(&self) -> Result<Writer, VoiceError> {
+        let outcome = {
+            let state = try_lock(&self.row.state)?;
+            let Body::SdpPending(p) = &state.body else {
+                return Err(VoiceError::Unauthorized);
+            };
+            if !p.worker || p.closed || p.published.is_some() {
+                return Err(VoiceError::Unauthorized);
+            }
+            p.owners.outcome.clone()
+        };
+        outcome.try_writer()
+    }
     pub(in crate::voice_handoff) fn id(&self) -> RowId {
         self.row.id
     }
@@ -643,6 +725,7 @@ impl Registration {
     pub(in crate::voice_handoff) fn mark_handoff(
         &self,
         admission: &Admission<'_>,
+        writer: &Writer,
         wall: u64,
         mono: u64,
     ) -> Result<(), VoiceError> {
@@ -684,6 +767,7 @@ impl Registration {
             return Err(VoiceError::Unauthorized);
         };
         if !p.worker
+            || !writer.belongs_to(&p.owners.outcome)
             || p.closed
             || storage.closed
             || storage.actions_closed[position(purpose)]
@@ -809,6 +893,9 @@ mod tests {
         // native allocations. Variable SDK/IO/Actor graphs need separate original Copies.
         let bytes = std::mem::size_of::<ArcRow>()
             + NativeRowFunding::allocation_bytes()
+            + Outcome::allocation_bytes()
+            + std::mem::size_of::<Writer>()
+            + 2 * std::mem::size_of::<History>()
             + std::mem::size_of::<Registration>()
             + std::mem::size_of::<Begin>()
             + std::mem::size_of::<Candidate<'_>>()

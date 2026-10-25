@@ -66,6 +66,18 @@ pub enum History {
 redacted_debug!(Prepared, Outcome, Writer, History);
 
 impl Prepared {
+    /// Final native installation must repeat exact allocation/body provenance against
+    /// its stored parent. Sharing a Phase or serialized labels is insufficient.
+    pub fn matches(
+        &self,
+        intent: &Arc<InitialSdpIntent>,
+        funding: &Arc<NativeRowFunding>,
+        body: Option<[u8; 32]>,
+    ) -> bool {
+        Arc::ptr_eq(intent, &self.intent)
+            && Arc::ptr_eq(funding, &self.funding)
+            && body == self.body
+    }
     /// The exact body commitment must come from bounded original request bytes before
     /// native admission guards. This is payment/provenance, never current effect authority.
     pub fn new(
@@ -104,6 +116,24 @@ impl Prepared {
 }
 
 impl Outcome {
+    /// Pure positive provenance for native capture. It neither enters the engine nor
+    /// clones an input/Action owner under native guards.
+    pub fn owns_publication(&self, action: &Arc<CryptoAction>) -> bool {
+        self.published
+            .get()
+            .is_some_and(|original| Arc::ptr_eq(original, action))
+    }
+    /// Stable negative for the canonical native row ONLY after actual IO admission
+    /// closes and every bound Copy retires. Native must also hold its final Index/State
+    /// fence and prove worker/observer retirement. Read freshly there, never cache this.
+    pub fn is_proven_unpublished(&self) -> bool {
+        if !self.funding.is_collected() {
+            return false;
+        }
+        let state = self.state.load(Ordering::Acquire);
+        (matches!(state, IDLE | NEVER_ENTERED) || error(state).is_some())
+            && self.published.get().is_none()
+    }
     /// One exclusive publisher at a time. A proven prepublication Capacity refusal does
     /// not consume the original row forever: exact retry uses this SAME slot and deadline.
     /// Native must still repeat its own current/physical/final admission before queueing.
@@ -179,6 +209,14 @@ impl Outcome {
 }
 
 impl Writer {
+    /// Pure native final-admission identity; not Root entry or a new effect grant. The
+    /// affine token must still be owned by the original Registration's real worker.
+    pub fn belongs_to(&self, outcome: &Arc<Outcome>) -> bool {
+        Arc::ptr_eq(&self.outcome, outcome)
+            && self.stage == Stage::PreRoot
+            && self.outcome.state.load(Ordering::Acquire) == RESERVED
+            && !self.outcome.funding.is_closed()
+    }
     /// Root entry is irreversible uncertainty unless its final tail records publication
     /// or the ordinary return path proves prepublication refusal. Not exposed to App.
     pub(crate) fn enter(
