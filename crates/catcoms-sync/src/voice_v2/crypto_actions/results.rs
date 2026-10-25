@@ -152,7 +152,12 @@ impl RecordedResult {
         self.receipt_at(action, monotonic, wall)
     }
 
-    fn receipt_at(&self, action: &CryptoAction, monotonic: u64, wall: u64) -> CryptoResultReceipt {
+    pub(super) fn receipt_at(
+        &self,
+        action: &CryptoAction,
+        monotonic: u64,
+        wall: u64,
+    ) -> CryptoResultReceipt {
         let binding = &self.result.binding;
         CryptoResultReceipt {
             action: action.serial,

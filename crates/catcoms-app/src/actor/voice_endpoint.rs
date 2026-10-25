@@ -36,6 +36,7 @@ mod body;
 mod context;
 pub use context::{voice_context_queue_bytes, VoiceContextPending};
 mod sdp_body;
+mod sdp_input;
 mod sdp_ops;
 pub use body::{
     VoiceConfirmationBody, VoiceConfirmationCompletion, VOICE_CONFIRMATION_BODY_METADATA_BYTES,
@@ -43,6 +44,9 @@ pub use body::{
 pub use sdp_body::{
     voice_sdp_rpc_bytes, VoiceSdpBody, VoiceSdpBodyRefusal, VoiceSdpCompletion, VoiceSdpPending,
     VOICE_SDP_RPC_FIXED_BYTES, VOICE_SDP_RPC_METADATA_BYTES,
+};
+pub use sdp_input::{
+    voice_sdp_input_rpc_bytes, VoiceSdpInputPublisher, VoiceSdpInputWork, VOICE_SDP_INPUT_RPC_BYTES,
 };
 
 /// Actual queued/result ownership for one initial SDP-intent RPC. A lost observer or
@@ -116,6 +120,7 @@ impl VoiceEndpointCommand {
 
 enum Command {
     Sdp(sdp_ops::Command),
+    SdpInput(sdp_input::Command),
     Stop {
         grant: Arc<CallGrant>,
         reply: Reply<()>,
@@ -235,6 +240,7 @@ impl Command {
         // reply instead drops its affine grant and closes precisely that abandoned observer.
         match self {
             Self::Sdp(command) => sdp_ops::apply(command, server),
+            Self::SdpInput(command) => sdp_input::apply(command, server),
             Self::Stop { grant, reply } => {
                 // An admitted cleanup must run even if its reply is lost. Unlike a factory,
                 // this only retires the SAME original allocation and cannot create authority.

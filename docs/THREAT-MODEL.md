@@ -1,5 +1,23 @@
 # Threat model; client integrity & enforcement boundaries
 
+## Scoped SDP input freshness and custody (25 October; staged)
+
+A retained PC/Ready intent alone cannot authorize SDP input. The new scoped Root admission
+resolves the SAME registered Action and intent on the actual participant and compares the
+actual MLS context with the paid Actor view. Final Engine -> input -> Group/Policy admission
+uses only try-locks; terminal or settled history wins before current refusal. An unreconciled
+MLS epoch change, original room/call/pair revocation, PC closure or expired Action refuses Data.
+
+Original Action time is observed again after callback-bearing Actor preparation. A signed
+incoming packet can expire earlier than Ready; only checking Ready at the later time would
+admit expired input. Clocks remain outside native publication/Engine/Group/Policy guards.
+The immutable admitted loan retains original paid bytes, including through later End; it
+creates no crypto/RTC authority. Future native publication must keep the real UI commit,
+physical position, exact row counter and independently paid response through collection.
+App's ordered raw/queued aggregate keeps arguments paid even if Clock/refusal hooks unwind.
+Actual native publisher/queue/output/Lock integration is still unimplemented; the production
+SDP family remains refused. No wire, persistence or group/copy limit was widened.
+
 ## Staged SDP control boundary (25 October)
 
 Private framed SDP controls retain exact original Session/parent/PC/purpose/body bindings.

@@ -4,6 +4,8 @@
 use super::*;
 use voice_v2::chain::sdp_handoff::Phase;
 use voice_v2::sdp::InitialSdpIntent;
+#[path = "sdp/input.rs"]
+mod input;
 
 fn observations(node: &VoiceTestNode) -> (u64, u64) {
     let runtime = node.voice_runtime.as_ref().unwrap();
@@ -32,7 +34,11 @@ type SdpFixture = (
     SignedObject,
 );
 async fn sdp_fixture() -> SdpFixture {
-    let (mut f, grants, handshake, low, keys) = confirmed_with_custody().await;
+    let confirmed = Box::new(Box::pin(confirmed_with_custody()).await);
+    Box::pin(sdp_fixture_using(confirmed)).await
+}
+async fn sdp_fixture_using(confirmed: Box<ConfirmedFixture>) -> SdpFixture {
+    let (mut f, grants, handshake, low, keys) = *confirmed;
     let phases = std::array::from_fn(|i| {
         let phase = keys[i].prepare_sdp_handoff().unwrap();
         phase.arm().unwrap();

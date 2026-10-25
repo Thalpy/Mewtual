@@ -10,8 +10,11 @@ use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::Arc;
 pub(in crate::voice_v2) mod action;
 pub(crate) mod delivery;
+mod input;
 pub mod publication;
 pub use delivery::{SdpDelivery, SdpOpenOutput, SdpOpenResult};
+pub(crate) use input::InputCurrent;
+pub use input::{sdp_input_admission_bytes, SdpInputAdmission};
 
 /// Commit exact, bounded Seal input before entering native admission locks. This uses
 /// the same domain/length framing as the retained Root ActionBinding, without retaining

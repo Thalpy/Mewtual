@@ -88,6 +88,31 @@ fn generic(
 }
 
 #[test]
+fn sdp_input_maximum_seal_lends_exact_original_plaintext_without_an_engine_permit() {
+    let (mut p, phase, intent, open, delivery) = opened();
+    deliver(&p, &open, &delivery, |_, _| Ok(())).unwrap();
+    complete(&p, &open, &delivery, |_, _| Ok(())).unwrap();
+    let bytes = vec![b'a'; MAX_SDP_PLAINTEXT];
+    let action = answer(&mut p, &intent, &delivery, &bytes, |_, _| Ok(())).unwrap();
+    let crate::voice_v2::crypto_actions::SdpInputRead::Data(input) =
+        super::input::with_step(&p, &intent, &action, |step| step.commit()).unwrap()
+    else {
+        panic!("original Seal input")
+    };
+    let CryptoInput::SealSdp(flight) = input.input() else {
+        panic!("Seal input")
+    };
+    assert_eq!(flight.plaintext, bytes);
+    assert!(input.belongs_to(&action));
+    action.retire_if_unstarted();
+    assert!(action.handoff_status().engine.settled);
+    assert!(action.input().is_err());
+    assert!(matches!(input.input(), CryptoInput::SealSdp(_)));
+    drop(input);
+    phase.close();
+}
+
+#[test]
 fn high_answer_requires_applied_original_open_and_generic_reservation_always_refuses() {
     let (mut p, phase, intent, open, delivery) = opened();
     let before = p.f.high.join.ledger.initial_offer_state_for_test(p.f.id);

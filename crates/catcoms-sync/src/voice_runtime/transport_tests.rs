@@ -1144,6 +1144,12 @@ struct BridgeFixture {
 }
 impl BridgeFixture {
     async fn new() -> Self {
+        let clock = Arc::new(ManualClock::new(1000));
+        Box::pin(Self::new_with_clock(clock.clone(), clock)).await
+    }
+    /// Same fixture and monotonic origin, with an observable injected Actor clock.
+    /// Transport remains the existing in-memory fixture; no new production seam exists.
+    async fn new_with_clock(clock: Arc<ManualClock>, actor_clock: Arc<dyn Clock>) -> Self {
         let (hub, mut nodes, _) = crate::tests::build_members(4).await;
         crate::tests::converge_and_publish_test_routes(&mut nodes);
         nodes[0].initialize_group_policy(GroupMode::PeerToPeer).unwrap();
@@ -1152,8 +1158,7 @@ impl BridgeFixture {
         for node in nodes.iter_mut().skip(1) { node.on_group_policy(&policy); }
         let mut nodes = nodes.into_iter();
         let (mut a, mut b, mut c, mut d) = (nodes.next().unwrap(), nodes.next().unwrap(), nodes.next().unwrap(), nodes.next().unwrap());
-        let clock = Arc::new(ManualClock::new(1000));
-        let runtimes: Vec<_> = (0..4).map(|_| Runtime::new(clock.clone())).collect();
+        let runtimes: Vec<_> = (0..4).map(|_| Runtime::new(actor_clock.clone())).collect();
         for (node, runtime) in [&mut a, &mut b, &mut c, &mut d].into_iter().zip(&runtimes) {
             attach(node, runtime);
             // Service is off by default; this fixture models an explicit rollout to Forwarding.

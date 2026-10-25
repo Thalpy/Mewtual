@@ -27,6 +27,7 @@ mod local;
 mod ready_source;
 pub(in crate::voice_v2) use local::EpochObservation;
 pub(crate) use local::LocalOrigin;
+pub(in crate::voice_v2) use local::PreparedLocalOrigin;
 
 /// Affine final origin transaction lent only while the original Group -> Policy locks and
 /// native route/epoch/membership checks remain held. A protected row fence must perform every

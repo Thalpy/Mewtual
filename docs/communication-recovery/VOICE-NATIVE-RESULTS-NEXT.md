@@ -1,5 +1,28 @@
 # Next voice milestone: native result recovery
 
+## 25 October: scoped Input authority is implemented; native publication is next
+
+Root has a lifetime-bound input-read admission on the actual Actor, with terminal-first
+recovery and final current MLS/room/member/policy checks. Original clocks finish before the
+native callback; pending Action time is refreshed after Actor preparation. One affine loan
+retains original input and cannot admit WebCrypto/RTC. The App publisher seam has separate
+positive RPC payment and ordered argument destruction, including unwind. Work exposes a
+separate callback-retirement observation, independent of output collection. History must
+wait for that observation AND release its own native publication guards before invoking
+canonical recovery; neither step proves publication absence or whole-output drainage.
+
+Next implement the concrete native Input publisher and exact response codec. Bind all work
+to the SAME native row counter and original Session/SDK/PC/action/purpose; prepay the response
+before final commit. Keep the actual UI commit, physical position, admitted loan and separate
+payments through HTTP collection. Measure its complete boxed/oneshot/future/output graph and
+common service/Control peaks. Tests must exercise real queue/refusal/cancellation, Lock before
+admission and Lock waiting for held output, End/PC-close orderings and full copy pressure.
+The public Rust seam's aggregate witnesses alone do not establish those native paths.
+
+Then complete engine/result/delivery/ACK/settlement and the original-key private browser SDK,
+including a complete maximum-size composition proof before SDP/ICE/RTC or production dispatch
+is enabled. Fresh rounds, multi-peer/media relay and combined/physical acceptance remain open.
+
 ## Original controls continuation (25 October; private handlers under validation)
 
 Begin/Resolve/History/Return now use the canonical row/outcome and actual paid producer;

@@ -23,7 +23,10 @@ const CONFIRM_BYTES: usize = 512;
 const RECORD_BYTES: usize = 1024;
 mod handoff;
 mod results;
+mod sdp_input;
 mod snapshot;
+pub(crate) use sdp_input::ObservedSdpInput;
+pub use sdp_input::{SdpAdmittedInput, SdpInputRead};
 pub use snapshot::{CryptoActionSnapshot, CryptoActionSnapshotPermit, CryptoActionSnapshotWaiter};
 pub(crate) mod slots;
 pub use super::chain::{
@@ -101,6 +104,10 @@ impl CryptoEngineAdmission<'_> {
     }
 }
 impl CryptoInputLease {
+    #[cfg(test)]
+    pub(crate) fn references_for_test(&self) -> usize {
+        Arc::strong_count(&self.0)
+    }
     pub fn as_input(&self) -> CryptoInput<'_> {
         match &self.0.input {
             Input::Derive(input) => CryptoInput::Derive(input),

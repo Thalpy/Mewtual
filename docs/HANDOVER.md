@@ -1,5 +1,53 @@
 # Mewtual; Handover
 
+## Scoped SDP input admission (25 October; native HTTP producer still pending)
+
+`communication-sdp-input` continues from control-handler runtime `0bb2cf8f`. Root now
+lends a synchronous `SdpInputAdmission` while the actual ServerActor exclusively borrows
+ChannelSync. Original Clock callbacks finish before the native hook begins. Commit first
+recovers terminal/settled history under the same Engine fence; a pending read checks the
+registered Action, same stored intent, original call/pair/room and current Group/Policy
+against the actual MLS context. An unreconciled MLS epoch change refuses the old intent.
+Input, Engine and Group/Policy contention returns Capacity without waiting or starting work.
+
+Data returns one non-Clone owner of the original immutable input. It admits no engine,
+signing, token consumption or RTC effect. Already admitted bytes may finish through later
+End/epoch changes under their retained custody; subsequent reads need new admission.
+Root retains no extra plaintext allocation. A compile-fail example prevents a scoped
+admission escaping; an independent positive control compiles with committed owned output.
+
+App adds a bounded, paid consuming publisher hook. Its actual actor envelope has a separate
+positive 4KiB Copy, with a named Root inventory and no native-publication backedge. Both
+queued and raw intake arguments stay in the same payment-last aggregate across callback,
+refusal and unwind. A separate callback-retirement signal also covers never-applied
+command destruction; retained outputs do not prevent it. It grants no authority and
+proves no UI/physical/output drainage. Full mailbox is a proven local refusal. The concrete native publisher
+must still bind that Copy to the SAME native row counter, prepay/measure its entire boxed
+publisher, response and future, and retain actual UI/physical/input/output ownership.
+There is no HTTP Input producer or private browser consumer in this checkpoint. Production
+continues to refuse the entire SDP action family before allocation or nonce debit.
+
+Ten new input regressions pass, including maximum Seal/Open, actual Engine/input/Group/
+Policy locks, stale MLS epoch and a genuinely signed shorter-lived Offer crossing expiry
+plus the permitted clock skew during Actor preparation. The Action's clock is refreshed
+AFTER that preparation. Final commit retains Engine/input through every fallible current
+check and creates its loan only in the success tail; a refusal cannot drop a last loan
+beneath native guards. All 764 focused Root voice tests pass (48.47s). All 2,750
+frontend tests pass (72.45s). App's five ownership/lifecycle-witness tests pass; they exercise the
+actual ordered aggregate, not the actual queued publisher hooks. The next native fixture
+must pin real queue/refusal/cancellation and held-output/Lock orderings. Read-only review
+has no unresolved blocker/high/medium in this Root/App slice. Ambient checks pass.
+All 337 native handoff tests pass (27.64s), including the unchanged common Control/service
+composition guards. Strict Root all-target/all-feature Clippy, separate native Cargo
+check/all-target Clippy, both formatting checks, ambient and diff checks pass. Dependency
+audit still fails on inherited RUSTSEC-2026-0387 in crypto-bigint0.5.5; bans, licenses and
+sources pass. No dependency or ignore changed. Complete backend gates remain pending.
+Startup/visual-flow gates were not rerun: no setup, process launch, UI, send or friend-request
+path changed. Frozen runtime
+`0bb2cf8f` is running its complete Root/native gates sequentially; those are distinct from
+this newer source. No new full-suite pass, production SDP/ICE/RTC negotiation, multi-peer
+composition, media relay or physical audio/network result is claimed.
+
 ## Original SDP control handlers (25 October; private, validation in progress)
 
 `communication-sdp-begin-http` adds Begin, Resolve, History and Return adapters to the

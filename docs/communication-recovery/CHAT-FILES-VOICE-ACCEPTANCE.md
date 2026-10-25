@@ -1,5 +1,31 @@
 # Chat, files and voice implementation evidence
 
+## 25 October scoped SDP Input checkpoint (not live V2 acceptance)
+
+The original Actor now lends a synchronous scoped input-admission step. Pending reads validate
+registered Action/intent plus current actual MLS/room/call/pair/Group/Policy; terminal/settled
+history remains recoverable after End and input compaction. Original clocks precede native
+publication. A fresh Action sample after preparation closes a packet-expiry/Ready mismatch.
+One non-Clone input owner is publication custody only, not engine or RTC authority. A loan
+is cloned only after every fallible current check succeeds. Actor callback retirement has
+a separate paid observation; it proves no output/UI/physical drainage or current authority.
+
+Ten new Root regressions pass; all 764 focused Root voice tests pass (48.47s). Maximum Seal/Open and
+real Engine/input/Group/Policy contention are covered. The expiry regression reissues an actual
+signed Offer and crosses its accepted expiry/skew window at Actor preparation. An independent
+compile-fail check rejects escape of the scoped step and its committed-output control compiles.
+Five App aggregate-lifetime/retirement witness tests, all 337 native handoff tests (27.64s)
+and all 2,750 frontend tests pass. Strict Root Clippy, separate native Cargo check/Clippy,
+both formatting checks, ambient and diff checks pass. Read-only review has no unresolved
+blocker/high/medium for this slice. The dependency audit still fails inherited
+RUSTSEC-2026-0387; no dependency or ignore changed. Complete current backend gates remain
+pending; the older frozen control-handler runtime runs its suites separately.
+
+The concrete native publisher, actual queued/refusal/output/Lock evidence, Input response codec
+and original-key browser consumer remain unimplemented. No production HTTP SDP, SDP/ICE/RTC,
+multi-peer, relay or physical audio/network acceptance follows from this checkpoint. Production
+continues to refuse the whole SDP action family. Existing limits and wire formats are unchanged.
+
 ## Original paid SDP controls (25 October; not live V2 acceptance)
 
 Private Begin/Resolve/History/Return now use the original native row/outcome, actual paid

@@ -1,5 +1,28 @@
 # Mewtual; Interfaces & Hooks Schema
 
+## Scoped SDP Input admission (25 October; trusted Rust-only interface)
+
+`ChannelSync::with_voice_sdp_input_admission(grant, intent, action, publish)` invokes one
+synchronous hook on the actual Actor. Its lifetime-bound `SdpInputAdmission::commit` returns
+historical `CryptoHandoffStatus` or non-Clone `SdpAdmittedInput`. Current failure is deferred
+until commit so a terminal/settlement racing preparation can recover metadata first.
+All Clock callbacks run before the hook; commit only try-locks Engine/input/Group/Policy.
+It creates no engine permit, signed packet, token mutation or RTC permission. Native must
+check its actual original Session/row/SDK/PC and hold real UI publication custody at commit.
+
+`ServerActor::try_queue_voice_sdp_input` accepts one separately paid trusted publisher and
+original RPC Copy. It reserves the existing mailbox without waiting. Full invokes the same
+hook's Capacity refusal; stopped invokes Stopped. The consuming hook must retain returned
+`VoiceSdpInputWork` through actual output collection. `wait_retired()` separately observes
+that the actual scoped Actor callback returned, unwound, or its never-applied command was
+destroyed. This monotone lifecycle signal is not publication absence, output collection,
+UI/physical release or current authority. A History consumer must also release its own
+native publication guards before callback-bearing canonical recovery. Its concrete/native graph
+and response are separately funded, not justified by a trait-reported byte count. No native
+HTTP producer or browser Input grammar is connected by this checkpoint; SDP dispatch stays
+refused. An already admitted input owner may finish through later End/epoch changes and
+does not authorize a subsequent read or engine/RTC effect.
+
 ## Staged SDP controls (25 October)
 
 The private version8 SDP adapters implement original Begin/Resolve/History/Return only.

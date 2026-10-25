@@ -89,14 +89,18 @@ async fn confirmed() -> (BridgeFixture, [Arc<CallGrant>; 2], [u8; 32], usize) {
     let (fixture, grants, handshake, low, _) = confirmed_with_custody().await;
     (fixture, grants, handshake, low)
 }
-async fn confirmed_with_custody() -> (
+type ConfirmedFixture = (
     BridgeFixture,
     [Arc<CallGrant>; 2],
     [u8; 32],
     usize,
     [voice_v2::chain::EstablishedKeyCustody; 2],
-) {
-    let mut f = BridgeFixture::new().await;
+);
+async fn confirmed_with_custody() -> ConfirmedFixture {
+    let fixture = Box::new(Box::pin(BridgeFixture::new()).await);
+    Box::pin(confirmed_with_custody_using(fixture)).await
+}
+async fn confirmed_with_custody_using(mut f: Box<BridgeFixture>) -> ConfirmedFixture {
     let grants = [
         Arc::new(f.a.voice_call_grant(1).unwrap()),
         Arc::new(f.c.voice_call_grant(1).unwrap()),
@@ -203,7 +207,7 @@ async fn confirmed_with_custody() -> (
         Ok(VoicePairConfirmation::Established)
     );
     (
-        f,
+        *f,
         grants,
         handshake,
         low,

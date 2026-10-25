@@ -1,5 +1,19 @@
 # Mewtual; Architecture
 
+## Scoped original SDP input reads (25 October; HTTP consumer pending)
+
+The actual ServerActor lends a synchronous Root input-admission step while ChannelSync
+remains exclusively borrowed. All original Clock callbacks precede native publication.
+Final Engine admission recovers known terminal/settled history first, otherwise checks
+registered Action/intent/call/room and current Group/Policy against the actual MLS context.
+Input loans are affine publication custody; they grant no engine, token, signing or RTC use.
+
+App's separate positive 4KiB Copy pays the bounded queue/callback graph, including the named
+Root inventory. An ordered argument/payment aggregate survives callback/refusal unwind.
+The concrete native publisher must independently prepay and measure its own graph, bind the
+same row counter and retain actual UI/physical/output custody. It is not implemented here;
+production SDP ingress remains closed. Existing budgets and wire formats are unchanged.
+
 ## Staged original SDP controls (25 October)
 
 Original paid SDP Begin/Resolve/History/Return now have private framed adapters. Same-slot
