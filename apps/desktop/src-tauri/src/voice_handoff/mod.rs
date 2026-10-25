@@ -33,6 +33,7 @@ mod requests;
 mod sdk;
 mod sdp;
 mod sdp_publication;
+mod sdp_submission;
 mod service;
 mod settlement;
 mod transition;

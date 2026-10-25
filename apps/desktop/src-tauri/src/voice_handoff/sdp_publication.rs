@@ -33,20 +33,33 @@ impl Publication {
         intent: &Arc<InitialSdpIntent>,
         payment: TaskCopy,
     ) -> Result<Self, VoiceError> {
-        // Put the affine arguments into their final field order even on local refusal.
-        // Payment then outlives physical destruction instead of relying on parameter order.
-        let owner = Self {
+        let owner = Self::retaining(physical, payment);
+        owner.validate(session, intent)?;
+        Ok(owner)
+    }
+    /// Infallible custody construction for an ordered caller guard. It grants no
+    /// permission; validate must succeed before native final admission or Arc sharing.
+    /// Keeping the complete owner on the caller's guard also orders every refusal Drop
+    /// AFTER Registration, rather than returning physical idle from an inner constructor.
+    pub(super) fn retaining(physical: PhysicalHold, payment: TaskCopy) -> Self {
+        Self {
             commit: None,
             _physical: physical,
             _payment: payment,
-        };
-        if !owner._physical.belongs_to(session) || !owner._payment.uses_intent(intent) {
+        }
+    }
+    pub(super) fn validate(
+        &self,
+        session: &Arc<Session>,
+        intent: &Arc<InitialSdpIntent>,
+    ) -> Result<(), VoiceError> {
+        if !self._physical.belongs_to(session) || !self._payment.uses_intent(intent) {
             return Err(VoiceError::Unauthorized);
         }
-        if !owner._payment.covers_work(TASK_BYTES) {
+        if !self._payment.covers_work(TASK_BYTES) {
             return Err(VoiceError::Capacity);
         }
-        Ok(owner)
+        Ok(())
     }
     /// Only the unique pre-publication worker may install the actual admitted UI guard.
     /// Clones given to bytes/RPCs must always contain Some. No native row retains this owner.

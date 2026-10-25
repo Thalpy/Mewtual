@@ -37,6 +37,9 @@ pub(super) use sdk::Receipt as SdkReceipt;
 pub(super) use sdp::Receipt as SdpReceipt;
 #[cfg(test)]
 pub(in crate::voice_handoff) use sdp_rows::Begin as SdpBegin;
+pub(in crate::voice_handoff) use sdp_rows::{
+    Registration as SdpRegistration, SubmissionOwners as SdpSubmissionOwners,
+};
 mod pc;
 pub(super) use pc::{Receipt as PcReceipt, State as PcState};
 mod plan;

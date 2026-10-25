@@ -7,7 +7,7 @@ use rand_chacha::ChaCha20Rng;
 use rand_core::SeedableRng;
 
 mod action_history;
-pub(in crate::voice_handoff) use action_history::{installed, retire};
+pub(in crate::voice_handoff) use action_history::{installed, installed_when_available, retire};
 mod collection;
 
 const POINT: &str = "046b17d1f2e12c4247f8bce6e563a440f277037d812deb33a0f4a13945d898c2964fe342e2fe1a7f9b8ee7eb4a7c0f9e162bce33576b315ececbb6406837bf51f5";
@@ -759,4 +759,75 @@ async fn lock_before_first_admission_has_authoritative_no_work_cleanup_without_a
     assert_eq!(selected.resources().counts(), after_end);
     assert!(f.state.voice_channels.index.lock().unwrap().is_none());
     f.close().await;
+}
+
+/// A sanctioned Clock callback releases actual occupied Crypto credits at the retry seam.
+/// No literal Capacity, fake Ticket or production capacity increase supplies the result.
+#[tokio::test]
+async fn foreign_setup_retries_only_real_pre_ticket_crypto_pressure() {
+    use catcoms_rt::Clock;
+    struct RetryClock {
+        clock: catcoms_rt::ManualClock,
+        held: std::sync::Mutex<Option<Vec<catcoms_sync::voice_v2::resources::Credit>>>,
+        sleeps: std::sync::atomic::AtomicUsize,
+    }
+    impl std::fmt::Debug for RetryClock {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.write_str("RetryClock")
+        }
+    }
+    impl Clock for RetryClock {
+        fn now_ms(&self) -> u64 {
+            self.clock.now_ms()
+        }
+        fn monotonic_ms(&self) -> u64 {
+            self.clock.monotonic_ms()
+        }
+        fn sleep(
+            &self,
+            duration: std::time::Duration,
+        ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + '_>> {
+            Box::pin(async move {
+                self.sleeps.fetch_add(1, Ordering::AcqRel);
+                let held = self.held.lock().unwrap().take();
+                drop(held);
+                self.clock
+                    .advance_ms(duration.as_millis().try_into().unwrap());
+            })
+        }
+    }
+    let fixture = Fixture::new().await;
+    let (_, selected) = select(&fixture, point()).await;
+    let registry = Registry::default();
+    let resources = selected.resources();
+    let group = selected.binding().scope.group;
+    let mut held = Vec::new();
+    while let Ok(credit) = resources.charge(group, 1, ResourceKind::Crypto) {
+        held.push(credit);
+    }
+    assert!(!held.is_empty());
+    let clock = RetryClock {
+        clock: catcoms_rt::ManualClock::new(1000),
+        held: std::sync::Mutex::new(Some(held)),
+        sleeps: std::sync::atomic::AtomicUsize::new(0),
+    };
+    assert!(matches!(
+        registry.begin(selected.clone(), [3; 32]),
+        Err(Refused::Capacity)
+    ));
+    {
+        let index = registry.index.lock().unwrap();
+        let index = index.as_ref().unwrap();
+        assert_eq!(index.serial, 0);
+        assert!(index.rows.iter().all(Option::is_none));
+    }
+    let (output, route) = installed_when_available(&registry, selected.clone(), &clock, 1100).await;
+    assert_eq!(clock.sleeps.load(Ordering::Acquire), 1);
+    assert_eq!(output.public().slot, 1);
+    assert_eq!(output.public().session, 1u128.to_be_bytes());
+    retire(&registry, &selected);
+    drop((output, route));
+    registry.collect_retired(&fixture.state.voice_handoff);
+    drop(registry); // selected lease still lives, so collection alone retains the closed Row
+    fixture.close().await;
 }

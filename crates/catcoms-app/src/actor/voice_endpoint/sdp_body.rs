@@ -125,6 +125,15 @@ impl VoiceSdpBody {
             }),
         })
     }
+    /// Original native intake/collection binding, not effect authority. The submitting
+    /// worker must prove that these actual bytes retire on its SAME canonical row counter.
+    pub fn uses_native_history(
+        &self,
+        intent: &Arc<InitialSdpIntent>,
+        funding: &Arc<catcoms_sync::voice_v2::chain::sdp_handoff::NativeRowFunding>,
+    ) -> bool {
+        Arc::ptr_eq(&self.state.intent, intent) && self.state.buffer.uses_native_history(funding)
+    }
     /// Native attaches its actual admitted UI/physical publication custodian only while
     /// this fresh body remains unique, before any RPC claim. A separate TaskCopy funds that
     /// custodian, which must NEVER retain this Body or attach itself to its own payment.

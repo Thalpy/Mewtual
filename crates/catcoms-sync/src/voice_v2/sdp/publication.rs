@@ -134,6 +134,17 @@ impl Outcome {
         (matches!(state, IDLE | NEVER_ENTERED) || error(state).is_some())
             && self.published.get().is_none()
     }
+    /// Live retry eligibility only, never a negative drainage witness. The native adapter
+    /// must hold its original Index/parent/row fence and exclusively reclaim the worker
+    /// before obtaining another Writer. An entered interruption, non-capacity refusal or
+    /// any published Action must be recovered/closed instead of submitted again.
+    pub fn permits_local_retry(&self) -> bool {
+        let state = self.state.load(Ordering::Acquire);
+        !self.funding.is_closed()
+            && (matches!(state, IDLE | NEVER_ENTERED)
+                || state == REFUSED + code(VoiceError::Capacity))
+            && self.published.get().is_none()
+    }
     /// One exclusive publisher at a time. A proven prepublication Capacity refusal does
     /// not consume the original row forever: exact retry uses this SAME slot and deadline.
     /// Native must still repeat its own current/physical/final admission before queueing.

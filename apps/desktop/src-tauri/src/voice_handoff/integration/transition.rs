@@ -121,6 +121,7 @@ pub(super) async fn custody_cycle(
     let clock = crate::voice_runtime(state).clock();
     // Actor preflight may be transiently busy with real mesh housekeeping. Only its exact
     // Capacity is retryable under this single fixed observer bound; no Root time is renewed.
+    let claim_started = clock.monotonic_ms();
     let first = tokio::time::timeout(std::time::Duration::from_secs(5), async {
         loop {
             let reply = exchange(state, &public, &route, parent, &claim).await;
@@ -137,6 +138,10 @@ pub(super) async fn custody_cycle(
     assert_eq!(&first[..2], &[3, 1]);
     assert_eq!(&first[2..18], &parent.id().logical());
     assert!(u32::from_be_bytes(first[178..182].try_into().unwrap()) > 0);
+    // Use the earlier observation plus the actual ORIGINAL remaining Claim time. Both
+    // foreign setup attempts share this conservative deadline; no retry renews it.
+    let setup_deadline = claim_started
+        .saturating_add(u32::from_be_bytes(first[178..182].try_into().unwrap()) as u64);
     let receipt: [u8; 32] = first[182..214].try_into().unwrap();
     let key_proof = super::key_session::adopt(state, &public, &route, parent, receipt).await;
     tokio::time::timeout(std::time::Duration::from_secs(10), async {
@@ -188,7 +193,13 @@ pub(super) async fn custody_cycle(
     // recover or release the original claim. Check the row boundary independently of the
     // canonical Registry gate, which also rejects this foreign channel in production.
     let foreign = bootstrap::Registry::default();
-    let (_foreign_output, foreign_route) = bootstrap::fixture_installed(&foreign, selected.clone());
+    let (_foreign_output, foreign_route) = bootstrap::fixture_installed_when_available(
+        &foreign,
+        selected.clone(),
+        clock.as_ref(),
+        setup_deadline,
+    )
+    .await;
     foreign_route.acknowledge_setup().unwrap();
     let (serial, version, input_tag) = parent.status().unwrap().action.unwrap();
     let action = requests::Action {
@@ -231,8 +242,13 @@ pub(super) async fn custody_cycle(
     // Construct the independent actual Session while this selection is still live.
     // A dead selection correctly refuses bootstrap; cleanup never revives it for tests.
     let final_foreign = bootstrap::Registry::default();
-    let (_final_foreign_output, final_foreign_route) =
-        bootstrap::fixture_installed(&final_foreign, selected.clone());
+    let (_final_foreign_output, final_foreign_route) = bootstrap::fixture_installed_when_available(
+        &final_foreign,
+        selected.clone(),
+        clock.as_ref(),
+        setup_deadline,
+    )
+    .await;
     if end_before_recovery {
         // The first reply has been physically collected, but treat its browser receipt as
         // lost. End + lock must preserve same-session recovery and exact Release cleanup.

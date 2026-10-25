@@ -162,6 +162,15 @@ impl Buffer {
     ) -> Result<(), VoiceError> {
         self._copy.bind_native_history(funding)
     }
+    /// Exact original native collection counter, not merely the same Phase or purpose
+    /// label. A native producer must check it before moving intake into queued work;
+    /// otherwise closure could overtake a body charged to a different action's counter.
+    pub fn uses_native_history(&self, funding: &Arc<NativeRowFunding>) -> bool {
+        self._copy
+            .history
+            .as_ref()
+            .is_some_and(|original| Arc::ptr_eq(original, funding))
+    }
     pub fn bytes(&self) -> &[u8] {
         &self.bytes
     }

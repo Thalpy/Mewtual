@@ -733,6 +733,89 @@ impl Incoming {
             }
         }
     }
+    /// Regression seam: replace the actual opened SDP backing with a separately prepaid
+    /// same-counter allocation which deliberately lacks Actor RPC metadata. This changes no
+    /// Header, nonce, content or authority; production cannot select this helper. It permits
+    /// exercising exact-buffer restoration on the real constructor's Capacity refusal.
+    #[cfg(test)]
+    pub(super) fn fixture_underpay_sdp_rpc(
+        &mut self,
+        phase: &Arc<catcoms_sync::voice_v2::chain::sdp_handoff::Phase>,
+        funding: &Arc<catcoms_sync::voice_v2::chain::sdp_handoff::NativeRowFunding>,
+    ) {
+        assert!(matches!(self.body.storage, Storage::Sdp(_)) && self.body.plain_bytes.is_some());
+        let mut copy = phase.copy(self.body.cipher_bytes).unwrap();
+        copy.bind_native_history(funding.clone()).unwrap();
+        let replacement = copy.adopt(self.body.cipher().to_vec()).unwrap();
+        let old = std::mem::replace(&mut self.body.storage, Storage::Sdp(replacement));
+        drop(old);
+    }
+    /// Move exactly the SDP payload selected by the closed version8 decoder. This is a
+    /// distinct Storage::Sdp path; confirmation Data/528 limits never widen. Native must
+    /// first validate encrypted parent/PC/SDK/action bindings against this SAME row.
+    /// Constructor refusal restores the identical opened allocation and affine reply.
+    pub(super) fn sdp_body(
+        &mut self,
+        intent: Arc<catcoms_sync::voice_v2::sdp::InitialSdpIntent>,
+        funding: &Arc<catcoms_sync::voice_v2::chain::sdp_handoff::NativeRowFunding>,
+    ) -> Result<catcoms_app::VoiceSdpBody, Refused> {
+        use super::requests::sdp_action::{Kind, Request};
+        use catcoms_sync::voice_v2::chain::sdp_handoff::NativeRowPurpose;
+        let plain = self.body.plain_bytes.ok_or(Refused::Body)?;
+        let bytes = self.body.plain()?;
+        let request = Request::decode(self.operation(), self.kind(), self.logical(), bytes)
+            .map_err(|_| Refused::Body)?;
+        let (payload, purpose) = match request {
+            Request::Begin(request) => (
+                request.plaintext.ok_or(Refused::Body)?,
+                NativeRowPurpose::Seal,
+            ),
+            Request::Existing(request) => match request.kind {
+                Kind::Sealed { bytes, .. } => (bytes, NativeRowPurpose::Seal),
+                Kind::Opened { bytes, .. } => (bytes, NativeRowPurpose::Open),
+                _ => return Err(Refused::Body),
+            },
+            _ => return Err(Refused::Body),
+        };
+        // The closed decoder requires payload to be the final field and rejects suffixes.
+        // Derive the range here; a caller cannot smuggle header bytes as original SDP.
+        let range = plain.checked_sub(payload.len()).ok_or(Refused::Bounds)?..plain;
+        let Storage::Sdp(buffer) = &self.body.storage else {
+            return Err(Refused::Binding);
+        };
+        if funding.purpose() != purpose
+            || !buffer.uses_intent(&intent)
+            || !buffer.uses_native_history(funding)
+        {
+            return Err(Refused::Binding);
+        }
+        let Storage::Sdp(buffer) = std::mem::replace(
+            &mut self.body.storage,
+            Storage::Control([0; CONTROL_CIPHER]),
+        ) else {
+            unreachable!("checked SDP storage");
+        };
+        let original_cipher = self.body.cipher_bytes;
+        let original_filled = self.filled;
+        self.body.cipher_bytes = 16;
+        self.body.plain_bytes = Some(0);
+        self.filled = 16;
+        match catcoms_app::VoiceSdpBody::from_buffer(buffer, range, intent) {
+            Ok(body) => Ok(body),
+            Err(refusal) => {
+                let (error, buffer) = refusal.into_parts();
+                self.body.storage = Storage::Sdp(buffer);
+                self.body.cipher_bytes = original_cipher;
+                self.body.plain_bytes = Some(plain);
+                self.filled = original_filled;
+                Err(if error == catcoms_sync::voice_v2::VoiceError::Capacity {
+                    Refused::Capacity
+                } else {
+                    Refused::Binding
+                })
+            }
+        }
+    }
     /// Consume the one nonce/paid worker. The old request drops before allocating the reply;
     /// bytes may not escape their paid owner. This is not yet an Actor payload-transfer API.
     pub(super) fn reply(

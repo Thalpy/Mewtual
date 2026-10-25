@@ -233,9 +233,57 @@ pub(in crate::voice_handoff) fn installed(
     registry: &Registry,
     selected: Arc<SelectedHandoffOwner>,
 ) -> (Arc<SetupOutput>, Route) {
-    let Begin::Work(mut ticket) = registry.begin(selected, [3; 32]).unwrap() else {
+    let resources = selected.resources();
+    let Begin::Work(ticket) = registry.begin(selected, [3; 32]).unwrap_or_else(|error| {
+        panic!(
+            "fixture setup refused: {error:?}; actual pool counts {:?}",
+            resources.counts()
+        )
+    }) else {
         panic!("new original setup")
     };
+    complete_install(registry, ticket)
+}
+
+/// TCP verification can temporarily occupy the real group/Crypto capacity needed by an
+/// unrelated foreign Session in an authorization test. Retry ONLY before a Ticket exists;
+/// an admitted setup is never restarted. Both foreign checks share one original bound.
+pub(in crate::voice_handoff) async fn installed_when_available(
+    registry: &Registry,
+    selected: Arc<SelectedHandoffOwner>,
+    clock: &dyn catcoms_rt::Clock,
+    deadline: u64,
+) -> (Arc<SetupOutput>, Route) {
+    loop {
+        assert!(
+            clock.monotonic_ms() < deadline,
+            "foreign setup exceeded original observation bound"
+        );
+        match registry.begin(selected.clone(), [3; 32]) {
+            Ok(Begin::Work(ticket)) => return complete_install(registry, ticket),
+            Err(Refused::Capacity) => {
+                eprintln!(
+                    "foreign setup pre-Ticket Capacity; group {:?}, process {:?}",
+                    selected
+                        .resources()
+                        .group_counts(selected.binding().scope.group),
+                    selected.resources().counts()
+                );
+                clock.sleep(std::time::Duration::from_millis(10)).await;
+            }
+            other => panic!(
+                "foreign setup must create one original Ticket; unexpected stage: {}",
+                if other.is_ok() {
+                    "existing"
+                } else {
+                    "non-capacity refusal"
+                }
+            ),
+        }
+    }
+}
+
+fn complete_install(registry: &Registry, mut ticket: Ticket) -> (Arc<SetupOutput>, Route) {
     let (session, public, setup) = ticket.compute(&mut Rng::new()).unwrap();
     let output = Arc::new(SetupOutput {
         public,

@@ -1027,4 +1027,7 @@ fn require_selected(
 #[cfg(test)]
 mod tests;
 #[cfg(test)]
-pub(super) use tests::{installed as fixture_installed, retire as fixture_retire};
+pub(super) use tests::{
+    installed as fixture_installed, installed_when_available as fixture_installed_when_available,
+    retire as fixture_retire,
+};

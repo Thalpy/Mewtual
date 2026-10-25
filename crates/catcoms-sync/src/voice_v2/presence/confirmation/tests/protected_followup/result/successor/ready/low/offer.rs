@@ -275,3 +275,49 @@ fn low_sdp_offer_recovers_same_fixed_action_after_input_compaction_without_new_n
     );
     assert!(!action.matches_sdp_plaintext_commitment(&changed));
 }
+
+#[test]
+fn low_open_waits_for_delayed_answer_only_on_the_original_live_pc() {
+    let (mut p, phase, intent, _exchange) = fixture();
+    for _ in 0..3 {
+        assert_eq!(
+            p.f.low
+                .join
+                .prepare_low_sdp_open(
+                    &p.low,
+                    &room(&p.f.low),
+                    p.f.id,
+                    &intent,
+                    &ca(&p.f.low.context, &p.f.low.lease),
+                    p._runtimes[0].clock(),
+                    |_, _| panic!("no Answer cannot publish"),
+                    None,
+                )
+                .err(),
+            Some(VoiceError::Capacity)
+        );
+        assert!(p.f.low.join.confirmations.pairs[&p.f.id]
+            .answer_receipt
+            .is_none());
+        assert!(p.f.low.join.confirmations.pairs[&p.f.id]
+            .sdp_input
+            .is_none());
+    }
+    phase.close();
+    assert_eq!(
+        p.f.low
+            .join
+            .prepare_low_sdp_open(
+                &p.low,
+                &room(&p.f.low),
+                p.f.id,
+                &intent,
+                &ca(&p.f.low.context, &p.f.low.lease),
+                p._runtimes[0].clock(),
+                |_, _| panic!("closed PC cannot publish"),
+                None,
+            )
+            .err(),
+        Some(VoiceError::Unauthorized)
+    );
+}

@@ -15,6 +15,7 @@ mod sdp_actor;
 mod sdp_intake;
 mod sdp_outcome;
 mod sdp_rows;
+mod sdp_submission;
 mod transition;
 pub(crate) mod webcrypto;
 pub(crate) use confirmation::{

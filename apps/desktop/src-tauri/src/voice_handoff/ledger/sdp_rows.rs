@@ -56,6 +56,10 @@ pub(in crate::voice_handoff) enum Begin {
 pub(in crate::voice_handoff) struct Registration {
     ledger: Arc<Ledger>,
     row: Arc<Row>,
+    // Fixture-only observation of actual worker retirement, before its real State lock.
+    // Production has no callback/channel and no means to install this barrier.
+    #[cfg(test)]
+    before_retire: Option<std::sync::mpsc::SyncSender<()>>,
 }
 fn position(purpose: NativeRowPurpose) -> usize {
     match purpose {
@@ -269,6 +273,108 @@ impl ResolvedRow {
             outcome,
         })
     }
+    /// Reclaim ONLY this original Pending after a proven local, unstarted or explicit
+    /// prepublication Capacity refusal. Do not mint another row/outcome/deadline, reset
+    /// handed_off, or use a stale outside negative snapshot. Publication recovery wins.
+    /// A worker which may still enter Root is excluded by its SAME outcome's affine Writer.
+    pub(in crate::voice_handoff) fn resume_sdp_action(
+        &self,
+        parent: &ResolvedRow,
+        admission: &Admission<'_>,
+        candidate: &Candidate<'_>,
+        wall: u64,
+        mono: u64,
+    ) -> Result<Option<Registration>, VoiceError> {
+        if !Arc::ptr_eq(&self.ledger, &parent.ledger)
+            || !Arc::ptr_eq(&self.ledger, admission.ledger())
+            || !self
+                .row
+                .key
+                .matches(admission.selected(), self.row.key.purpose)
+            || !self
+                .row
+                .key
+                .parent
+                .as_ref()
+                .is_some_and(|p| Arc::ptr_eq(p, &parent.row))
+        {
+            return Err(VoiceError::Unauthorized);
+        }
+        let index = try_lock(&self.ledger.index)?;
+        for row in [&parent.row, &self.row] {
+            if !index.rows[row.id.slot]
+                .as_ref()
+                .is_some_and(|r| Arc::ptr_eq(r, row))
+            {
+                return Err(VoiceError::Unauthorized);
+            }
+        }
+        let parent_state = try_lock(&parent.row.state)?;
+        let (storage, intent) = original(
+            parent,
+            &parent_state,
+            admission.session(),
+            candidate.request,
+        )?;
+        let phase = storage.phase.as_ref().ok_or(VoiceError::Unauthorized)?;
+        let Purpose::Sdp {
+            parent: original_parent,
+            purpose,
+        } = self.row.key.purpose
+        else {
+            return Err(VoiceError::Unauthorized);
+        };
+        if original_parent != parent.id()
+            || !candidate
+                .outcome
+                .matches(intent, &candidate.funding, candidate.body_tag)
+            || candidate.funding.purpose() != purpose
+            || !candidate.funding.uses_phase(phase)
+            || storage.closed
+            || storage.actions_closed[position(purpose)]
+            || storage.worker()
+            || storage.sdk_preparing
+            || storage.sdk.as_ref().is_none_or(|sdk| sdk.released())
+            || !self.row.key.lease.is_live()
+            || parent_state.final_phase.is_some()
+            || parent_state.final_delivery().is_some()
+        {
+            return Err(VoiceError::Unauthorized);
+        }
+        let mut state = try_lock(&self.row.state)?;
+        if self::body_tag(&state) != Some(candidate.body_tag) {
+            return Err(VoiceError::RetryMismatch);
+        }
+        let Body::SdpPending(p) = &mut state.body else {
+            return Ok(None); // Live/terminal recovery must never re-enqueue its factory.
+        };
+        if !Arc::ptr_eq(&p.owners.session, admission.session())
+            || !Arc::ptr_eq(&p.owners.intent, intent)
+            || !Arc::ptr_eq(&p.owners.phase, phase)
+            || !Arc::ptr_eq(&p.owners.funding, &candidate.funding)
+            || p.closed
+        {
+            return Err(VoiceError::Unauthorized);
+        }
+        if p.worker
+            || p.observer
+            || p.published.is_some()
+            || !p.owners.outcome.permits_local_retry()
+        {
+            return Ok(None);
+        }
+        intent.remaining_at(wall, mono)?;
+        admission.current()?;
+        // Final infallible tail. A retained Writer would have made the original slot
+        // InFlight above; no arbitrary callback or new token is manufactured here.
+        p.worker = true;
+        Ok(Some(Registration {
+            ledger: self.ledger.clone(),
+            row: self.row.clone(),
+            #[cfg(test)]
+            before_retire: None,
+        }))
+    }
     /// Adopt an actual recovered Action after its original worker has disappeared and IO
     /// admission closed. No Copy, body, current grant or Clock is needed. A trusted Actor
     /// recovery path must supply the real Arc; renderer labels cannot construct this value.
@@ -335,9 +441,27 @@ impl ResolvedRow {
     fn retire_closed_unstarted_sdp(&self) -> Result<(), VoiceError> {
         let ready = {
             let state = try_lock(&self.row.state)?;
-            matches!(&state.body, Body::SdpPending(p) if (p.closed
-                || !p.owners.phase.effect().is_live() || !self.row.key.lease.is_live())
-                && !p.worker && p.published.is_some() && p.owners.funding.is_collected())
+            match &state.body {
+                Body::SdpPending(p) => {
+                    (p.closed
+                        || !p.owners.phase.effect().is_live()
+                        || !self.row.key.lease.is_live())
+                        && !p.worker
+                        && p.published.is_some()
+                        && p.owners.funding.is_collected()
+                }
+                // Successful worker attachment does not imply the SDK ever started. Root
+                // alone decides whether this exact live action is genuinely unstarted;
+                // real permits/terminal receipts retain their actual settlement/ACK duties.
+                Body::SdpLive(p) => {
+                    (p.closed
+                        || !p.owners.phase.effect().is_live()
+                        || !self.row.key.lease.is_live())
+                        && !p.worker
+                        && p.owners.funding.is_collected()
+                }
+                _ => false,
+            }
         };
         if !ready {
             return Ok(());
@@ -692,10 +816,65 @@ impl Ledger {
         Ok(Begin::Factory(Registration {
             ledger: self.clone(),
             row,
+            #[cfg(test)]
+            before_retire: None,
         }))
     }
 }
+/// Original fixed provenance for a separately paid producer. These clones grant no
+/// fresh effect or worker claim; Registration remains affine and mark_handoff repeats
+/// current Session/PC/SDK/intent checks. Original fixed-row funding covers its initial
+/// prepayment snapshot; the later task also inventories its synchronous constructor use.
+pub(in crate::voice_handoff) struct SubmissionOwners {
+    pub phase: Arc<sdp_handoff::Phase>,
+    pub intent: Arc<InitialSdpIntent>,
+    pub funding: Arc<NativeRowFunding>,
+    pub handshake: [u8; 32],
+}
 impl Registration {
+    #[cfg(test)]
+    pub(in crate::voice_handoff) fn fixture_retirement_signal(
+        mut self,
+        signal: std::sync::mpsc::SyncSender<()>,
+    ) -> Self {
+        self.before_retire = Some(signal);
+        self
+    }
+    pub(in crate::voice_handoff) fn submission_owners(
+        &self,
+        session: &Arc<SessionIdentity>,
+    ) -> Result<SubmissionOwners, VoiceError> {
+        let resolved = self.resolved();
+        let _index = resolved.transition_index()?;
+        let parent = self
+            .row
+            .key
+            .parent
+            .as_ref()
+            .ok_or(VoiceError::Unauthorized)?;
+        let parent_state = try_lock(&parent.state)?;
+        let state = try_lock(&self.row.state)?;
+        let Body::SdpPending(p) = &state.body else {
+            return Err(VoiceError::Unauthorized);
+        };
+        if !p.worker
+            || p.closed
+            || p.published.is_some()
+            || !Arc::ptr_eq(session, &p.owners.session)
+        {
+            return Err(VoiceError::Unauthorized);
+        }
+        Ok(SubmissionOwners {
+            phase: p.owners.phase.clone(),
+            intent: p.owners.intent.clone(),
+            funding: p.owners.funding.clone(),
+            handshake: parent_state
+                .plan()
+                .ok_or(VoiceError::Unauthorized)?
+                .identity
+                .handshake(),
+        })
+    }
     /// Obtain an affine token only from this canonical row while its actual worker still
     /// owns Registration. Allocation identity repeats at final native handoff admission.
     pub(in crate::voice_handoff) fn publication_writer(&self) -> Result<Writer, VoiceError> {
@@ -839,6 +1018,10 @@ impl Registration {
 }
 impl Drop for Registration {
     fn drop(&mut self) {
+        #[cfg(test)]
+        if let Some(signal) = self.before_retire.take() {
+            let _ = signal.send(());
+        }
         {
             let mut state = self.row.state.lock().unwrap_or_else(|e| e.into_inner());
             match &mut state.body {
@@ -853,6 +1036,10 @@ impl Drop for Registration {
 
 #[cfg(test)]
 impl ResolvedRow {
+    pub(in crate::voice_handoff) fn sdp_test_hold_state<T>(&self, apply: impl FnOnce() -> T) -> T {
+        let _state = self.row.state.lock().unwrap();
+        apply()
+    }
     pub(in crate::voice_handoff) fn sdp_test_notification(
         &self,
     ) -> tokio::sync::futures::Notified<'_> {
@@ -896,6 +1083,7 @@ mod tests {
             + Outcome::allocation_bytes()
             + std::mem::size_of::<Writer>()
             + 2 * std::mem::size_of::<History>()
+            + std::mem::size_of::<SubmissionOwners>()
             + std::mem::size_of::<Registration>()
             + std::mem::size_of::<Begin>()
             + std::mem::size_of::<Candidate<'_>>()

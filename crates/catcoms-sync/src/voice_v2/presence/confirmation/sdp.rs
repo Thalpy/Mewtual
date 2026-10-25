@@ -380,10 +380,35 @@ impl LocalJoin {
             &pair.answer_receipt
         } else {
             &pair.first_offer
-        }
-        .as_ref()
-        .ok_or(VoiceError::Unauthorized)?
-        .clone();
+        };
+        let Some(receipt) = receipt.as_ref() else {
+            // SDP can arrive after this native request on an ordinary delayed P2P route.
+            // Absence is transient ONLY for the exact still-current original PC/pair.
+            // Do not permanently poison its canonical Open row or renew its deadline.
+            // Known receipt + absent input below is intentionally NOT this case: consumed
+            // or retired input must never be reconstructed from a missing buffer.
+            let current = || {
+                !pair.retired
+                    && pair.established
+                    && pair.pin.is_live()
+                    && room.lease.is_live()
+                    && room.scope == self.scope
+                    && actor.uses_resources(&self.resources)
+                    && pair.protected_epoch == Some(authority.context.epoch)
+            };
+            if !current() {
+                return Err(VoiceError::Unauthorized);
+            }
+            let (wall, mono) = actor.preparation_time()?;
+            // Clock is an injected callback outside locks. Recheck independent room
+            // revocation after it; a stale initial snapshot must not authorize waiting.
+            if !current() {
+                return Err(VoiceError::Unauthorized);
+            }
+            intent.remaining_at(wall, mono)?;
+            return Err(VoiceError::Capacity);
+        };
+        let receipt = receipt.clone();
         let key = Key::SdpOpen(receipt.token);
         // Exact history lookup does not recreate an input after Open consumed its token.
         if let Some(action) = self.actions.get(key) {

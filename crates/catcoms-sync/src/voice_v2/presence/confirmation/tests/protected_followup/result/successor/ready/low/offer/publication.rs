@@ -40,6 +40,43 @@ fn canonical_preparation_and_writer_identity_survive_close_without_false_negativ
 }
 
 #[test]
+fn original_outcome_live_retry_requires_proven_local_unstarted_or_capacity_history() {
+    for reason in [
+        VoiceError::Capacity,
+        VoiceError::Unauthorized,
+        VoiceError::Bounds,
+        VoiceError::RetryMismatch,
+        VoiceError::Freshness,
+    ] {
+        let (_p, phase, intent, _) = fixture();
+        let fee = phase.native_history(NativeRowPurpose::Seal).unwrap();
+        let tag = Some(plaintext_commitment(b"v=0").unwrap());
+        let slot = Prepared::new(intent.clone(), fee, tag).unwrap().install();
+        assert!(slot.permits_local_retry());
+        assert!(
+            !slot.is_proven_unpublished(),
+            "live retry is never closed drainage evidence"
+        );
+        let writer = slot.try_writer().unwrap();
+        assert!(!slot.permits_local_retry());
+        drop(writer);
+        assert!(slot.permits_local_retry());
+        let mut writer = slot.try_writer().unwrap();
+        writer.enter(&intent, tag).unwrap();
+        assert!(!slot.permits_local_retry());
+        writer.refused(reason);
+        assert_eq!(slot.permits_local_retry(), reason == VoiceError::Capacity);
+        drop(writer);
+        phase.close();
+        assert!(
+            !slot.permits_local_retry(),
+            "closure cannot revive the original invocation"
+        );
+        assert!(slot.is_proven_unpublished());
+    }
+}
+
+#[test]
 fn recorded_selection_defeats_prepared_unrecorded_tail_and_cached_recovery() {
     let (mut p, phase, intent, exchange) = fixture();
     let fee = phase.native_history(NativeRowPurpose::Seal).unwrap();
@@ -76,6 +113,7 @@ fn recorded_selection_defeats_prepared_unrecorded_tail_and_cached_recovery() {
     )
     .unwrap();
     assert!(matches!(slot.history(), History::Published(_)));
+    assert!(!slot.permits_local_retry());
     // Even exact cached history must not cross the profile boundary.
     assert_eq!(
         offer(&mut p, &intent, &mut namespace, body, |_, _| Ok(())).err(),
@@ -135,6 +173,7 @@ fn original_outcome_never_entered_and_entered_unwind_are_distinct_after_close() 
     }));
     assert!(result.is_err());
     assert!(matches!(slot.history(), History::Uncertain));
+    assert!(!slot.permits_local_retry());
     assert_eq!(slot.try_writer().err(), Some(VoiceError::Unauthorized));
     phase.close();
     assert!(fee.is_collected());

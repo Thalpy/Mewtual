@@ -545,6 +545,18 @@ async fn native_v2_pc_intent_recorded_actor_outcomes_retire_before_actual_io_col
     confirmation_over_blocked_tcp(true, false, false, false, Some(5)).await;
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn native_v2_pc_intent_original_sdp_worker_retries_local_refusal_and_collects_after_waiter_loss(
+) {
+    confirmation_over_blocked_tcp(true, false, false, false, Some(6)).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn native_v2_pc_intent_original_sdp_completion_retires_body_but_keeps_task_and_ui_until_collection(
+) {
+    confirmation_over_blocked_tcp(true, false, false, false, Some(7)).await;
+}
+
 async fn confirmation_over_blocked_tcp(
     framed: bool,
     reject: bool,

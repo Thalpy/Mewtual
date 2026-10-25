@@ -24,6 +24,131 @@ fn before_offer() -> (ProtectedFixture, Arc<Phase>, Arc<InitialSdpIntent>) {
 }
 
 #[test]
+fn original_open_waits_for_delayed_offer_then_retries_same_outcome_without_rearming() {
+    use crate::voice_v2::chain::sdp_handoff::NativeRowPurpose;
+    use crate::voice_v2::sdp::publication::{History, Prepared};
+    let (mut p, phase, intent) = before_offer();
+    let fee = phase.native_history(NativeRowPurpose::Open).unwrap();
+    let slot = Prepared::new(intent.clone(), fee, None).unwrap().install();
+    for _ in 0..3 {
+        let mut writer = slot.try_writer().unwrap();
+        writer.enter(&intent, None).unwrap();
+        let result = open_with_outcome(&mut p, &intent, |_, _| Ok(()), Some(&mut writer));
+        assert_eq!(result.err(), Some(VoiceError::Capacity));
+        writer.refused(VoiceError::Capacity);
+        drop(writer);
+        assert!(slot.permits_local_retry());
+        assert!(matches!(
+            slot.history(),
+            History::Refused(VoiceError::Capacity)
+        ));
+        assert!(p.f.high.join.confirmations.pairs[&p.f.id]
+            .sdp_input
+            .is_none());
+        assert!(p.f.high.join.confirmations.pairs[&p.f.id]
+            .first_offer
+            .is_none());
+    }
+    let object = super::super::admission::offer(&p, 219, 4);
+    let room = room(&p.f.high);
+    super::super::admission::admit(&mut p, &object, &room, |_, _| Ok(())).unwrap();
+    let mut writer = slot.try_writer().unwrap();
+    writer.enter(&intent, None).unwrap();
+    let action = open_with_outcome(&mut p, &intent, |_, _| Ok(()), Some(&mut writer)).unwrap();
+    let History::Published(same) = slot.history() else {
+        panic!("original publication");
+    };
+    assert!(Arc::ptr_eq(&action, &same));
+    assert!(!slot.permits_local_retry());
+    action.retire_if_unstarted();
+    phase.close();
+}
+
+#[test]
+fn missing_incoming_sdp_does_not_make_closed_or_expired_original_pc_retryable() {
+    for closed in [false, true] {
+        let (mut p, phase, intent) = before_offer();
+        if closed {
+            phase.request_close();
+        } else {
+            let remaining = intent
+                .remaining_at(p.f.clock.now_ms(), p.f.clock.monotonic_ms())
+                .unwrap();
+            p.f.clock.advance_ms(remaining);
+        }
+        assert_eq!(
+            open(&mut p, &intent, |_, _| Ok(())).err(),
+            Some(VoiceError::Unauthorized)
+        );
+        phase.close();
+    }
+}
+
+#[test]
+fn missing_offer_rechecks_independent_room_and_deadline_after_actual_clock_callback() {
+    for revoke_room in [false, true] {
+        let (mut p, phase, intent) = before_offer();
+        let mut room = room(&p.f.high);
+        room.lease = CallLease::default();
+        let next = p
+            .origin_clock
+            .reads
+            .load(std::sync::atomic::Ordering::Acquire)
+            + 1;
+        if revoke_room {
+            *p.origin_clock.revoke.lock().unwrap() = Some((next, room.lease.clone()));
+        } else {
+            let remaining = intent.remaining_at(1000, 1000).unwrap();
+            *p.origin_clock.advance.lock().unwrap() = Some((next, remaining));
+        }
+        assert_eq!(
+            p.f.high
+                .join
+                .prepare_high_sdp_open(
+                    &p.high,
+                    &room,
+                    p.f.id,
+                    &intent,
+                    &ca(&p.f.high.context, &p.f.high.lease),
+                    p._runtimes[1].clock(),
+                    |_, _| panic!("waiting must not reach final publication"),
+                    None,
+                )
+                .err(),
+            Some(VoiceError::Unauthorized)
+        );
+        assert!(p.f.high.join.confirmations.pairs[&p.f.id]
+            .first_offer
+            .is_none());
+        phase.close();
+    }
+}
+
+#[test]
+fn delayed_offer_exact_open_history_survives_pc_close_without_recreating_input() {
+    let (mut p, phase, intent) = before_offer();
+    assert_eq!(
+        open(&mut p, &intent, |_, _| panic!("no input")).err(),
+        Some(VoiceError::Capacity)
+    );
+    let object = super::super::admission::offer(&p, 219, 4);
+    let room = room(&p.f.high);
+    super::super::admission::admit(&mut p, &object, &room, |_, _| Ok(())).unwrap();
+    let original = open(&mut p, &intent, |_, _| Ok(())).unwrap();
+    phase.close();
+    let recovered = open(&mut p, &intent, |_, _| panic!("history is not admission")).unwrap();
+    assert!(Arc::ptr_eq(&original, &recovered));
+    assert!(p.f.high.join.confirmations.pairs[&p.f.id]
+        .sdp_input
+        .is_none());
+    assert_eq!(
+        recovered.admit_engine(recovered.engine_bytes()),
+        Err(VoiceError::Unauthorized)
+    );
+    original.retire_if_unstarted();
+}
+
+#[test]
 fn high_first_offer_observes_installed_pc_close_before_during_and_after_admission() {
     for ordering in 0..3 {
         let (mut p, phase, _intent) = before_offer();

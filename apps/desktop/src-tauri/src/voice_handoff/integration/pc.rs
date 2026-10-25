@@ -135,7 +135,7 @@ pub(super) async fn exercise(
         return;
     }
     factory::preflight_binding(&context, route).await.unwrap();
-    if matches!(case, 1 | 4 | 5 | 6 | 7) {
+    if matches!(case, 1 | 4 | 5 | 6 | 7 | 8 | 9) {
         let first = exchange(state, public, route, parent, &body).await;
         assert_eq!(
             first.len(),
@@ -167,7 +167,7 @@ pub(super) async fn exercise(
         None,
     );
     let physical = incoming.hold_position().unwrap();
-    let preparation = if matches!(case, 1 | 4 | 5 | 6 | 7) {
+    let preparation = if matches!(case, 1 | 4 | 5 | 6 | 7 | 8 | 9) {
         None
     } else {
         Some(
@@ -206,13 +206,33 @@ pub(super) async fn exercise(
     let mut unstarted_sdp = None;
     // Successful queue return is the positive barrier: the original command, rather than
     // an unpolled future, owns the same phase contribution behind the paused actor.
-    if matches!(case, 1 | 4 | 5 | 6 | 7) {
+    if matches!(case, 1 | 4 | 5 | 6 | 7 | 8 | 9) {
         let completion = pending.complete().await.unwrap();
         assert!(completion.result().is_ok());
         // A new authenticated frame supplies its own physical hold for actual typed SDP
         // RPC tests. The original PC-intent request is already collected here.
         drop(physical);
         drop(incoming);
+        if matches!(case, 8 | 9) {
+            Box::pin(super::sdp_submission::exercise(
+                state,
+                public,
+                route,
+                parent,
+                &body,
+                completion.result().unwrap(),
+                case == 9,
+            ))
+            .await;
+            parent
+                .close_pc(route.session().identity(), &request)
+                .unwrap();
+            release_sdk(parent, &token);
+            drop(completion);
+            assert_eq!(phase.status(), Status::Drained);
+            assert!(parent.sdp_test_whole_drained());
+            return;
+        }
         if case == 7 {
             let retained = Box::pin(super::sdp_outcome::exercise(
                 state,
