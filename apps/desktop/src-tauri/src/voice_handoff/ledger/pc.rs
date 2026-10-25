@@ -15,9 +15,9 @@ pub(super) struct Claim {
     // Exclusion only. The permanent Claim survives a refused/abandoned local attempt.
     worker: bool,
     intent: Option<Arc<InitialSdpIntent>>,
-    // The small permanent placeholder is covered by the ORIGINAL PC metadata before
-    // independent media capacity exists. It owns no Task/Row/Session/phase backedge.
-    pub(super) media: Option<super::media::Claim>,
+    // One fixed heap record is paid by the ORIGINAL PC metadata before independent
+    // media capacity exists. Keep only its pointer in the already bounded shared Row.
+    pub(super) media: Option<Box<super::media::Claim>>,
 }
 #[derive(Clone, Copy)]
 pub(in crate::voice_handoff) enum State {
@@ -361,6 +361,7 @@ mod tests {
     #[test]
     fn native_pc_fixed_graph_fits_its_share_of_the_original_phase_metadata() {
         let bytes = std::mem::size_of::<Claim>()
+            + std::mem::size_of::<super::super::media::Claim>() // stored Box heap, not only pointer
             + std::mem::size_of::<Preparation>()
             + std::mem::size_of::<Sha256>();
         assert!(

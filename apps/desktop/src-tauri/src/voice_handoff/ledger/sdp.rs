@@ -14,13 +14,16 @@ pub(super) struct Claim {
     pub(super) proof: [u8; 32],
     pub(super) closed: bool,
     worker: bool,
-    pub(super) phase: Option<Arc<Phase>>,
     pub(super) sdk_preparing: bool,
     pub(super) sdk: Option<Arc<super::sdk::Claim>>,
     pub(super) pc: Option<super::pc::Claim>,
     // Fixed intent fences exist before a purpose has a RowId or a paid history fee. A
     // lost-Begin Close must prevent a late worker from installing that purpose afterward.
     pub(super) actions_closed: [bool; 2],
+    // LAST: original PC metadata pays its stored media Box even before media partition.
+    // The box must be destroyed before this last fee anchor. Neither pc nor phase may be
+    // taken out independently; future index migration must prepay a separate anchor first.
+    pub(super) phase: Option<Arc<Phase>>,
 }
 /// Move only OUT of native guards. Actual notifications/reserve retirement run on Drop,
 /// including abandonment/unwind immediately after the irreversible close publication.
@@ -57,7 +60,7 @@ impl Claim {
             // Negotiation/HTTP drainage cannot prove the independently admitted browser
             // peer drained. Keep finalization/orphan GC behind its separate obligation.
             && self.pc.as_ref().is_none_or(|pc| {
-                pc.media.as_ref().is_none_or(super::media::Claim::whole_drained)
+                pc.media.as_ref().is_none_or(|media| media.whole_drained())
             })
     }
     pub(super) fn request_close(&mut self) -> Option<CloseTicket> {

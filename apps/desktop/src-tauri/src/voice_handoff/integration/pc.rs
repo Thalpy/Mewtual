@@ -179,6 +179,24 @@ pub(super) async fn exercise(
         )
     };
     let (actor, grant) = factory::native::observation_actor(&context, route).unwrap();
+    if matches!(case, 2 | 3) {
+        // Original negative media commands must remain possible while the ACTUAL PC
+        // factory is still Preparing. They borrow its paid phase without requiring an
+        // installed Root intent, and create no new SDK debt that could strand old GC.
+        assert!(parent.pc_test_intent().is_none());
+        let media = parent.media_test_original(route.session().identity());
+        let kind = if case == 2 {
+            requests::media::OriginalKind::Close
+        } else {
+            requests::media::OriginalKind::Release
+        };
+        let receipt = parent
+            .media_original_history(route.session().identity(), &media, kind)
+            .unwrap()
+            .unwrap();
+        assert!(receipt.closed && !receipt.admitted);
+        assert_eq!(receipt.released, case == 3);
+    }
     let custody = if let Some(preparation) = &preparation {
         preparation.custody.clone()
     } else {

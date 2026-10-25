@@ -5,7 +5,9 @@ use super::bootstrap::Route;
 use super::channel::{self, BodyKind, CompletedReply, Incoming, PhysicalHold};
 use super::context::Context;
 use super::factory::{self, Refused};
-use super::ledger::{MediaIdentity, MediaReceipt, MediaRows, MediaWorker, ResolvedRow};
+use super::ledger::{
+    MediaIdentity, MediaPrepared, MediaReceipt, MediaRows, MediaWorker, ResolvedRow,
+};
 use super::requests::sdp_action::Begin;
 use catcoms_app::{
     VoiceEndpointError, VoiceInitialMediaPublisher, VoiceInitialMediaWork,
@@ -73,6 +75,7 @@ struct Construction {
     parent: Option<ResolvedRow>,
     original: Option<Begin<'static>>,
     identity: Option<MediaIdentity>,
+    prepared: Option<MediaPrepared>,
     rows: Option<MediaRows>,
     phase: Option<Arc<Phase>>,
     intent: Option<Arc<InitialSdpIntent>>,
@@ -120,6 +123,7 @@ fn queue_impl(
         parent: Some(parent),
         original: Some(original),
         identity: None,
+        prepared: None,
         rows: None,
         phase: None,
         intent: None,
@@ -155,6 +159,11 @@ fn queue_impl(
             .unwrap()
             .media_identity(route.session().identity(), c.original.as_ref().unwrap())?,
     );
+    c.prepared = Some(c.parent.as_ref().unwrap().media_prepare_claim(
+        route.session().identity(),
+        c.original.as_ref().unwrap(),
+        c.identity.as_ref().unwrap(),
+    )?);
     let ledger = { context.upgrade().ok_or(Refused::Closed)?.ledger.clone() };
     c.rows = Some(ledger.media_rows(
         c.parent.as_ref().unwrap(),
@@ -170,6 +179,7 @@ fn queue_impl(
             c.physical.as_ref().unwrap(),
             route.session(),
             c.identity.as_ref().unwrap(),
+            c.prepared.as_mut().unwrap(),
             wall,
             mono,
         )
@@ -452,11 +462,13 @@ pub(super) fn layout_bytes() -> usize {
         + 8 * std::mem::size_of::<Arc<()>>()
         + 6 * std::mem::size_of::<std::sync::MutexGuard<'static, ()>>()
         + 512 // short selector/prepayment/current-origin staging, reply/result wrappers
+        + std::mem::size_of::<MediaPrepared>() + MediaPrepared::heap_bytes()
 }
 fn task_layout() -> usize {
     // The complete concrete constructor/sender/receiver/entered-callback graph, plus the
     // Root preparation snapshots. Persistent rows/Phase/media records keep their OWN fees.
     std::mem::size_of::<Construction>()+std::mem::size_of::<QueueOptions>()+std::mem::size_of::<Target>()
+        + MediaPrepared::heap_bytes() // a second unused candidate may coexist with the stored Box
         + std::mem::size_of::<Publisher>()+std::mem::size_of::<Completion>()+std::mem::size_of::<Waiter>()
         + std::mem::size_of::<(usize,usize,Custody)>()
         + 256 // conservative locked Tokio1.53.3 oneshot Inner (state/value/two task wakers/Arc)
