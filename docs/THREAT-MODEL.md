@@ -1,5 +1,24 @@
 # Threat model; client integrity & enforcement boundaries
 
+## Detached media admission boundary (25 October; Root only)
+
+An old accepted SDP receipt never grants a live media connection. The new inert media
+preparation binds exact original Intent allocation and both actual canonical completed
+Actions. First admission repeats current Ready/effect/open successor and original Root
+Actor membership/policy under try Group/Policy, inside native's required original Session/
+UI/key/SDK/registered-row gates. A prepared record cannot survive key release, expiry or
+Close as a first effect. Current admitted media deliberately survives negotiation cleanup;
+it retains original call/pair/actor/session/policy/epoch observations and an irreversible
+own close gate. This predicate does not itself close a browser PC.
+
+Its8KiB funding comes from original unused ordinary backing, without pool refund/recharge
+or old Phase/Exchange/Action/row retention. The full weak Intent allocation stays paid.
+Child-header and fixed metadata bytes are non-lendable; future native graphs must fit the
+actual remainder. Actor queue/payment lifetime is distinct from native publication and
+actual browser/SDK/Source/Lower drainage. No first native media command or browser adoption
+exists yet; canonical localDrained/key-release/lost-reply gates and bounded physical-PC
+revocation execution still require a consumer and acceptance before App activation.
+
 ## Detached prepaid capacity (25 October; consumer not activated)
 
 Partitioning checks actual ordinary backing and refuses any reservation/lane/custody backedge.

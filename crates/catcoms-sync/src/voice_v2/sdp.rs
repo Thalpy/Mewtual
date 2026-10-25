@@ -13,6 +13,7 @@ pub(crate) mod delivery;
 mod delivery_admission;
 mod engine;
 mod input;
+pub(crate) mod media;
 pub mod publication;
 mod publication_admission;
 mod result_admission;
@@ -21,6 +22,7 @@ pub use delivery_admission::{sdp_delivery_admission_bytes, SdpDeliveryAdmission}
 pub use engine::{sdp_engine_admission_bytes, SdpEngineAdmission};
 pub(crate) use input::InputCurrent;
 pub use input::{sdp_input_admission_bytes, SdpInputAdmission};
+pub use media::{initial_media_admission_bytes, MediaAdmission, SdpMedia};
 pub use publication_admission::SdpPublicationAdmission;
 pub use result_admission::{
     sdp_result_hash_frame_bytes, sdp_result_preparation_bytes, sdp_result_rpc_frame_bytes,

@@ -105,6 +105,7 @@ pub(in crate::voice_v2) struct SuccessorProof(Arc<PlanBinding>);
 /// Fixed historical provenance, independently of the old closed confirmation transition.
 /// This owns no Workflow, Exchange, byte lender or crypto lane. Receipt lookup is not effect
 /// authority: its caller must also check the actual room/epoch and immutable receipt times.
+#[derive(Clone)]
 pub(in crate::voice_v2) struct OriginalPlanObservation(Arc<PlanBinding>);
 impl OriginalPlanObservation {
     pub(in crate::voice_v2) fn belongs_to(&self, binding: &Arc<PlanBinding>) -> bool {
@@ -113,10 +114,21 @@ impl OriginalPlanObservation {
     pub(in crate::voice_v2) fn binding(&self) -> &Binding {
         &self.0.value
     }
+    pub(in crate::voice_v2) fn resources(&self) -> &Arc<Resources> {
+        self.0.resources()
+    }
     pub(in crate::voice_v2) fn current(&self) -> bool {
         self.0.value.live()
             && self.0.transition.epoch_is_live()
             && !self.0.successor_closed.load(Ordering::Acquire)
+    }
+    /// An ADMITTED media connection outlives negotiation custody, not the original call,
+    /// pair, actor/session/policy or epoch. Never use this weaker observation to admit the
+    /// first media owner: that transition must additionally use `current` and the actual
+    /// original Ready/PC authority. The fixed PlanBinding payment follows this observer;
+    /// it retains no old Workflow/Exchange or variable phase storage.
+    pub(in crate::voice_v2) fn media_current(&self) -> bool {
+        self.0.value.live() && self.0.transition.epoch_is_live()
     }
 }
 impl SuccessorProof {

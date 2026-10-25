@@ -1,5 +1,27 @@
 # Mewtual; Interfaces & Hooks Schema
 
+## Root first-media admission (25 October; no native/browser consumer yet)
+
+`InitialSdpIntent::prepare_media` creates one inert, independently funded `SdpMedia` only
+from the actual same-intent accepted/settled/ACKed Seal/Open and Open Applied. It partitions
+original unused phase backing once; retain the SAME preparation across refusal/uncertainty.
+No strong Intent/Phase/Action/Exchange/native-row edge is retained. The weak Intent's complete
+allocation is covered by media metadata through last Drop; fixed PlanBinding keeps its fee.
+
+`ChannelSync::with_voice_initial_media_admission` lends a nonescaping consuming
+`MediaAdmission` on the sole Actor. Native final UI/Coordinator/route/registered-row gates
+must surround commit and require live original key/SDK plus both canonical localDrained rows.
+Commit repeats actual Root try Group/Policy and original Ready/effect/successor currency.
+`ServerActor::try_queue_voice_initial_media` uses a separate original Phase Copy for its
+measured4096B envelope; the concrete native publisher/output needs its own payment. Queue
+capacity refusal is local; actual queue/callback/output custody persists until actual return.
+
+Only admitted media currentness ignores old negotiation expiry/cleanup. It still binds original
+call/pair/actor/session/policy/epoch and its irreversible close; historical admission grants no
+new effect. The8KiB child has4KiB fixed metadata and8192-4096-Reservation-header remaining bytes,
+not4KiB of work. No production general work lender is exposed. Native command/claim, actual
+browser peer transfer and bounded revocation execution still need implementation and evidence.
+
 ## Independent prepaid reservation partition (25 October; no media authority)
 
 `Reservation::partition_retained(group, bytes)` creates one independent finite budget from

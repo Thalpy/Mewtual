@@ -39,6 +39,7 @@ mod sdp_body;
 mod sdp_delivery;
 mod sdp_engine;
 mod sdp_input;
+mod sdp_media;
 mod sdp_ops;
 mod sdp_result;
 pub use body::{
@@ -58,6 +59,10 @@ pub use sdp_engine::{
 };
 pub use sdp_input::{
     voice_sdp_input_rpc_bytes, VoiceSdpInputPublisher, VoiceSdpInputWork, VOICE_SDP_INPUT_RPC_BYTES,
+};
+pub use sdp_media::{
+    voice_initial_media_rpc_bytes, VoiceInitialMediaPublisher, VoiceInitialMediaWork,
+    VOICE_INITIAL_MEDIA_RPC_BYTES,
 };
 pub use sdp_ops::{VoiceSdpPublication, VoiceSdpRecordedInput, VoiceSdpRecordedQueue};
 pub use sdp_result::{
@@ -139,6 +144,7 @@ enum Command {
     SdpEngine(sdp_engine::Command),
     SdpResult(sdp_result::Command),
     SdpDelivery(sdp_delivery::Command),
+    InitialMedia(sdp_media::Command),
     Stop {
         grant: Arc<CallGrant>,
         reply: Reply<()>,
@@ -262,6 +268,7 @@ impl Command {
             Self::SdpEngine(command) => sdp_engine::apply(command, server),
             Self::SdpResult(command) => sdp_result::apply(command, server),
             Self::SdpDelivery(command) => sdp_delivery::apply(command, server),
+            Self::InitialMedia(command) => sdp_media::apply(command, server),
             Self::Stop { grant, reply } => {
                 // An admitted cleanup must run even if its reply is lost. Unlike a factory,
                 // this only retires the SAME original allocation and cannot create authority.

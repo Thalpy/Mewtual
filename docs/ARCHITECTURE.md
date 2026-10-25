@@ -1,5 +1,15 @@
 # Mewtual; Architecture
 
+## Root media custody transition (25 October; consumer not wired)
+
+The first-round SDP path can now prepare an independent finite media record and lend one
+scoped first-admission tail through the sole Actor. Original Ready/effect and native Session/
+row/key gates authorize FIRST publication; committed media then follows original call/pair/
+actor/session/policy/epoch plus its own close rather than the short negotiation timer. This
+record retains fixed paid provenance, not old variable phase/Exchange/Action graphs. Native
+media command/claim, browser actual-PC transfer and bounded revocation handling remain open;
+this is not a live media path. INTERFACES and HANDOVER state exact funding and acceptance.
+
 ## Native service and original browser round connected (25 October)
 
 The authenticated service now chooses the existing SDP15-27 adapters explicitly. Original

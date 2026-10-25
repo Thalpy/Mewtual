@@ -1,5 +1,45 @@
 # Mewtual; Handover
 
+## Root media admission and paid Actor bridge (25 October; native/browser consumer open)
+
+`communication-voice-media-custody` now prepares one independent8KiB media record from
+unused original native SDP capacity. Actual same-intent Seal/Open must be accepted, settled,
+ACKed and Open Applied. Native still has to bind both original registered localDrained rows,
+Session and live key/SDK before consuming the borrowed Root admission. First publication
+requires the original current Ready/effect/successor and actual Actor try Group/Policy;
+Close, key release, expiry and original revocation win without reviving a preparation.
+
+Only admitted media may outlive old Ready/phase/successor retirement. Original call/pair,
+actor/session/policy/epoch and its own irreversible close remain effective. Historical
+admission survives Close without authorizing new work. The record retains no strong Intent,
+Phase, Action, Row, Workflow or Exchange; its complete weak Intent allocation stays paid by
+its4KiB metadata fee. Actual work capacity is8192-4096-Reservation header, below4KiB. No caps
+changed. A maximum/one-byte-over test pins that boundary. A separate original Phase Copy
+pays the first Actor RPC; its queued/running/output payment survives actual callback return.
+
+All15 new media tests pass (18 matching tests including3 neighbors) in0.45s; all45 resource
+tests pass0.01s. Current-source Sync/App/native focused compilation and346 native handoff
+tests pass7.29s. All2,851 frontend tests pass72.72s, Svelte0errors/0warnings and production
+build38.28s pass. Read-only adversarial review has no blocker/high/medium; its LOW capacity
+wording is fixed and regression-pinned. Full X Rust/static gates are still pending. The
+unchanged HTTP checkpoint separately passes all3,650 Root tests,24ignored; its native full
+suite continues serially. Do not count that older full run as validation of these additions.
+
+Next implement the closed native media claim and exact original-session admit/resolve/
+close/release command, with real ChannelSync grant/watch/context rejection, canonical
+localDrained/key-release races, full/stopped mailbox and immediate-output/callback barriers.
+Measure its complete metadata/preparation/RPC graph within existing payments. Then browser
+actual-peer affine transfer and bounded revocation/status handling. No native media command,
+peer transfer, automatic PC stopping or App activation exists in this checkpoint.
+
+This milestone uses original Source expiry: keep the ORIGINAL phase/effect AND Exchange/
+Source/Lower custody paid until their actual retirement; do not release native SDK early.
+One partition per phase means no second ACK child. Signed retention acknowledgements,
+negotiation/history compaction, shared Session/per-pair composition, operational renewal,
+App tracks/data channels, TURN/member relay, combined and physical acceptance remain open.
+Only one desktop is available for physical evidence. Startup/flow scripts were not run:
+this changes no setup, process spawning, UI, message-send or friend-request path.
+
 ## Activation status correction (25 October)
 
 The unused plaintext call driver is explicitly a contract-test model, not the production

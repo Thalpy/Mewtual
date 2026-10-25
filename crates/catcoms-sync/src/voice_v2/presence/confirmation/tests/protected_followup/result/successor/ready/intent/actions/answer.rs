@@ -4,6 +4,7 @@ use super::open_results::{deliver, output, submit};
 use super::*;
 use crate::voice_v2::crypto_actions::CryptoAction;
 use crate::voice_v2::sdp::SdpDelivery;
+mod media;
 
 type Opened = (
     ProtectedFixture,

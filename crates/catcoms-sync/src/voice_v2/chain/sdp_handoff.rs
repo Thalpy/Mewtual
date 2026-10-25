@@ -398,6 +398,19 @@ impl Phase {
     pub(super) fn belongs_to(&self, binding: &Arc<PlanBinding>) -> bool {
         Arc::ptr_eq(&self.effect.original, binding)
     }
+    /// Prepare detached media capacity only outside every final native/Group/Policy
+    /// guard. This irreversibly partitions the ORIGINAL unused ordinary backing; it
+    /// creates no authority and a caller must retain that SAME child across refusals.
+    /// The first native media claimant must exclude duplicate preparation before calling.
+    /// This milestone uses original Source expiry for retirement, not a second ACK child.
+    pub(in crate::voice_v2) fn partition_media(&self) -> Result<Arc<Reservation>, VoiceError> {
+        let state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+        if state.status != Status::Open || !self.effect().is_live() {
+            return Err(VoiceError::Unauthorized);
+        }
+        self.reserve
+            .partition_retained(self.scope.group, super::super::sdp::media::BYTES)
+    }
     pub fn uses(&self, resources: &Arc<Resources>, scope: Scope) -> bool {
         Arc::ptr_eq(&self.resources, resources) && self.scope == scope
     }

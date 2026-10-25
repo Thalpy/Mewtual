@@ -15,6 +15,7 @@ mod ingress;
 mod pair;
 mod ready;
 mod sdp;
+mod sdp_media;
 pub(crate) use ingress::EndpointReceipt;
 
 /// Affine native reply custody for one observer. The Root holds no strong reference to this

@@ -2,6 +2,7 @@
 //! The enclosing fixture deliberately mocks AEAD; it does not claim native/browser RTC.
 use super::*;
 use crate::voice_v2::negotiation::admission::SdpAdmission;
+mod media;
 
 fn answer(p: &ProtectedFixture, signed_offer: &SignedObject, sequence: u64) -> SignedObject {
     let Body::Encrypted { header, .. } = signed_offer.body() else {

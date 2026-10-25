@@ -1,5 +1,20 @@
 # Next voice milestone: native result recovery
 
+## 25 October: Root media record/scoped admission and Actor bridge exist
+
+The inert independently paid record and borrowed first-admission tail now exist. HANDOVER
+records focused evidence, review and pending full gates. Native still needs its exact
+original-session media claim/closed command and canonical registered-row/current-key gates;
+the real public ChannelSync wrapper and Actor lifecycle must be exercised by that consumer.
+Then move the actual private browser PC into independently paid media ownership, clear old
+callback/currentness graphs, and implement bounded native status/revocation handling.
+
+Do not release original SDK/phase before Source expiry and actual Lower retirement. No
+signed retention ACK exists, and the phase's one partition cannot fund another child later.
+Measure all native/browser records/futures within existing caps. History compaction and
+shared Session/per-pair composition are still prerequisites for supported multi-peer calls.
+No App activation, tracks, relay or physical acceptance is claimed.
+
 ## 25 October: independent prepaid funding exists; build the media ownership transition
 
 The isolated media branch now provides one-shot `Reservation::partition_retained`, with a
