@@ -39,7 +39,7 @@ pub use body::{
     VoiceConfirmationBody, VoiceConfirmationCompletion, VOICE_CONFIRMATION_BODY_METADATA_BYTES,
 };
 pub use sdp_body::{
-    VoiceSdpBody, VoiceSdpBodyRefusal, VoiceSdpCompletion, VoiceSdpPending,
+    voice_sdp_rpc_bytes, VoiceSdpBody, VoiceSdpBodyRefusal, VoiceSdpCompletion, VoiceSdpPending,
     VOICE_SDP_RPC_FIXED_BYTES, VOICE_SDP_RPC_METADATA_BYTES,
 };
 

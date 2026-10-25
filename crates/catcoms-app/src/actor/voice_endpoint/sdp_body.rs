@@ -21,7 +21,8 @@ struct ArcAllocation<T> {
     weak: std::sync::atomic::AtomicUsize,
     value: T,
 }
-/// Concrete fixed RPC graph. Native must add its ACTUAL calling future before admission.
+/// Common fixed RPC graph. Use voice_sdp_rpc_bytes with the ACTUAL calling future before
+/// admission, so eager construction is covered too.
 /// Buffer backing capacity and native task/publication storage are separately paid. The
 /// Buffer/Copy inline value is already counted inside State; no extra payload copy exists.
 pub const VOICE_SDP_RPC_FIXED_BYTES: usize = std::mem::size_of::<ArcAllocation<State>>()
@@ -35,9 +36,21 @@ pub const VOICE_SDP_RPC_FIXED_BYTES: usize = std::mem::size_of::<ArcAllocation<S
     + std::mem::size_of::<VoiceSdpPending<Arc<CryptoAction>>>()
     + std::mem::size_of::<VoiceSdpPending<CryptoResultReceipt>>()
     + std::mem::size_of::<VoiceSdpPending<catcoms_sync::voice_v2::sdp::SdpOpenResult>>()
-    + super::sdp_ops::RECORDED_CONSTRUCTION_BYTES
     + 1024; // pinned Tokio oneshot allocation, envelope and channel bookkeeping
-const _: () = assert!(VOICE_SDP_RPC_FIXED_BYTES <= VOICE_SDP_RPC_METADATA_BYTES);
+
+/// Common storage plus the larger of eager construction and the actual returned future.
+/// These execution phases do not coexist: the constructor moves its single request pair
+/// into that future before returning. Backing allocation/common channel graph remains
+/// additive in both phases. Native's enclosing worker/publication needs separate payment.
+pub const fn voice_sdp_rpc_bytes(future_bytes: usize) -> usize {
+    let transient = if future_bytes > super::sdp_ops::RECORDED_CONSTRUCTION_BYTES {
+        future_bytes
+    } else {
+        super::sdp_ops::RECORDED_CONSTRUCTION_BYTES
+    };
+    VOICE_SDP_RPC_FIXED_BYTES.saturating_add(transient)
+}
+const _: () = assert!(voice_sdp_rpc_bytes(0) <= VOICE_SDP_RPC_METADATA_BYTES);
 
 pub struct VoiceSdpBody {
     state: Arc<State>,

@@ -69,10 +69,10 @@ pub mod store;
 pub mod studio;
 pub mod studio_exchange;
 pub use actor::{
-    spawn, AppCommand, AppEvent, DownloadReady, Envelope, InitialSdpCompletion, InitialSdpPending,
-    ServerActor, Trace, TracedEvent, VoiceConfirmationBody, VoiceConfirmationCompletion,
-    VoiceEndpointCommand, VoiceEndpointError, VoiceSdpBody, VoiceSdpBodyRefusal,
-    VoiceSdpCompletion, VoiceSdpPending, INITIAL_SDP_RPC_BYTES,
+    spawn, voice_sdp_rpc_bytes, AppCommand, AppEvent, DownloadReady, Envelope,
+    InitialSdpCompletion, InitialSdpPending, ServerActor, Trace, TracedEvent,
+    VoiceConfirmationBody, VoiceConfirmationCompletion, VoiceEndpointCommand, VoiceEndpointError,
+    VoiceSdpBody, VoiceSdpBodyRefusal, VoiceSdpCompletion, VoiceSdpPending, INITIAL_SDP_RPC_BYTES,
     VOICE_CONFIRMATION_BODY_METADATA_BYTES, VOICE_SDP_RPC_FIXED_BYTES,
     VOICE_SDP_RPC_METADATA_BYTES,
 };
