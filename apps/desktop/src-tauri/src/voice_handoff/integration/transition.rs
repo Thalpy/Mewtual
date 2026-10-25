@@ -160,7 +160,7 @@ pub(super) async fn custody_cycle(
     // Both native Ready consumers must finish before either endpoint intentionally releases
     // its key in this cleanup fixture. No synthetic Ready/CoreDrained flag is installed.
     peer_ready.wait().await;
-    let sdk = super::sdp::exercise(
+    let (sdk, retired_sdp) = super::sdp::exercise(
         state,
         &public,
         &route,
@@ -369,4 +369,11 @@ pub(super) async fn custody_cycle(
     parent
         .acknowledge_final(route.session().identity(), final_receipt.proof.unwrap())
         .unwrap();
+    if let Some(probe) = retired_sdp {
+        // This is deliberately AFTER actual Key/Claim/SDK/PC release, End, Root
+        // retirement, Plan compaction and the original final acknowledgement.
+        probe
+            .after_plan_retirement(state, &public, &route, parent)
+            .await;
+    }
 }

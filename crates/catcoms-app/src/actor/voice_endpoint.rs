@@ -33,6 +33,8 @@ impl std::error::Error for VoiceEndpointError {}
 type Reply<T> = oneshot::Sender<Result<T, VoiceError>>;
 
 mod body;
+mod context;
+pub use context::{voice_context_queue_bytes, VoiceContextPending};
 mod sdp_body;
 mod sdp_ops;
 pub use body::{

@@ -52,7 +52,10 @@ pub(super) async fn exercise(
     attach: bool,
     sdk_race: bool,
     pc_case: Option<u8>,
-) -> Option<super::sdk::Token> {
+) -> (
+    Option<super::sdk::Token>,
+    Option<super::sdp_http::RetiredProbe>,
+) {
     let prepare = body(parent, key, None);
     let request = requests::sdp::Request::decode(parent.id().logical(), &prepare).unwrap();
     let capacity = replies::refused(factory::Refused::Protocol(VoiceError::Capacity));
@@ -91,9 +94,9 @@ pub(super) async fn exercise(
         let phase = parent.sdp_test_phase().unwrap();
         if let Some(case) = pc_case {
             let token = super::sdk::start(state, public, route, parent, &prepare, proof).await;
-            super::pc::exercise(state, public, route, parent, token, case).await;
+            let probe = super::pc::exercise(state, public, route, parent, token, case).await;
             assert!(parent.sdp_test_whole_drained());
-            return None;
+            return (None, probe);
         }
         let mut copy = Some(phase.copy(8192).unwrap().adopt(vec![17; 8192]).unwrap());
         let sdk = if sdk_race {
@@ -143,7 +146,7 @@ pub(super) async fn exercise(
         assert_eq!(&closed[138..170], &proof);
         assert!(phase.arm().is_err());
         assert_eq!(parent.sdp_test_whole_drained(), sdk.is_none());
-        sdk
+        (sdk, None)
     } else {
         let context = context::Context::new(state);
         factory::preflight_binding(&context, route).await.unwrap();
@@ -194,6 +197,6 @@ pub(super) async fn exercise(
         let closed = exchange(state, public, route, parent, &prepare).await;
         assert_eq!(&closed[..2], &[5, 3]);
         assert_eq!(&closed[138..170], &proof);
-        None
+        (None, None)
     }
 }

@@ -1,5 +1,21 @@
 # Next voice milestone: native result recovery
 
+## Original controls continuation (25 October; private handlers under validation)
+
+Begin/Resolve/History/Return now use the canonical row/outcome and actual paid producer;
+HANDOVER records the exact evidence and limitations. Native admission remains closed for
+all SDP action operations. Next add original Input custody using the SAME64KiB phase,
+positive paid work and exact-request response ownership through HTTP collection. Preserve
+the common reply layouts and unchanged12KiB Control/32KiB service guards. A response Copy
+keepalive must retain a distinct paid metadata/input owner; that owner must never retain
+the response Buffer or its own funding Copy, which would create a custody cycle.
+
+Then finish engine/result/delivery/ACK/settlement and actual original-key private WebCrypto.
+Accepted/rejected Open across native compaction, races and delayed serialization remain
+required evidence. The current expiry test pins the fresh post-history observation on a
+no-action HIGH Open; it does not claim an accepted-Open Clock callback. RTC/ICE, fresh
+rounds, multi-peer composition, relay and combined/physical acceptance remain subsequent.
+
 ## Original metadata continuation (25 October; HTTP handlers still pending)
 
 Worker runtime `eab3da2b` is pushed. The next slice adds Root metadata-only Open terminal

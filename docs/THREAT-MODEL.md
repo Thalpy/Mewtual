@@ -1,5 +1,15 @@
 # Threat model; client integrity & enforcement boundaries
 
+## Staged SDP control boundary (25 October)
+
+Private framed SDP controls retain exact original Session/parent/PC/purpose/body bindings.
+Published or uncertain history never re-enqueues a producer. Premature HIGH Seal installs
+no row, and callback-bearing history cannot lend a stale time sample to final admission.
+Absent-purpose close is a purpose fence, never engine/SDK/storage drainage. The new bounded
+context query is read-only existing Actor infrastructure, not effect or publication custody.
+Production SDP action admission remains closed; this checkpoint establishes no RTC/media,
+original-key browser execution or independent physical audio/network acceptance.
+
 ## SDP metadata-only result recovery (25 October; inactive transport family)
 
 Original Open history requires no caller plaintext or reconstructed output. Root returns

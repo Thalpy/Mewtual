@@ -73,7 +73,7 @@ pub(super) async fn exercise(
     parent: &ledger::ResolvedRow,
     token: super::sdk::Token,
     case: u8,
-) {
+) -> Option<super::sdp_http::RetiredProbe> {
     let mut body = token.body[..153].to_vec();
     body[0] = 7;
     body.extend_from_slice(&token.generation.to_be_bytes());
@@ -132,10 +132,10 @@ pub(super) async fn exercise(
             vec![7, 2, 0]
         );
         assert_eq!(phase.status(), Status::Drained);
-        return;
+        return None;
     }
     factory::preflight_binding(&context, route).await.unwrap();
-    if matches!(case, 1 | 4 | 5 | 6 | 7 | 8 | 9) {
+    if matches!(case, 1 | 4 | 5 | 6 | 7 | 8 | 9 | 10) {
         let first = exchange(state, public, route, parent, &body).await;
         assert_eq!(
             first.len(),
@@ -167,7 +167,7 @@ pub(super) async fn exercise(
         None,
     );
     let physical = incoming.hold_position().unwrap();
-    let preparation = if matches!(case, 1 | 4 | 5 | 6 | 7 | 8 | 9) {
+    let preparation = if matches!(case, 1 | 4 | 5 | 6 | 7 | 8 | 9 | 10) {
         None
     } else {
         Some(
@@ -206,13 +206,32 @@ pub(super) async fn exercise(
     let mut unstarted_sdp = None;
     // Successful queue return is the positive barrier: the original command, rather than
     // an unpolled future, owns the same phase contribution behind the paused actor.
-    if matches!(case, 1 | 4 | 5 | 6 | 7 | 8 | 9) {
+    if matches!(case, 1 | 4 | 5 | 6 | 7 | 8 | 9 | 10) {
         let completion = pending.complete().await.unwrap();
         assert!(completion.result().is_ok());
         // A new authenticated frame supplies its own physical hold for actual typed SDP
         // RPC tests. The original PC-intent request is already collected here.
         drop(physical);
         drop(incoming);
+        if case == 10 {
+            let probe = Box::pin(super::sdp_http::exercise(
+                state,
+                public,
+                route,
+                parent,
+                &body,
+                completion.result().unwrap(),
+            ))
+            .await;
+            parent
+                .close_pc(route.session().identity(), &request)
+                .unwrap();
+            release_sdk(parent, &token);
+            drop(completion);
+            assert_eq!(phase.status(), Status::Drained);
+            assert!(parent.sdp_test_whole_drained());
+            return Some(probe);
+        }
         if matches!(case, 8 | 9) {
             Box::pin(super::sdp_submission::exercise(
                 state,
@@ -231,7 +250,7 @@ pub(super) async fn exercise(
             drop(completion);
             assert_eq!(phase.status(), Status::Drained);
             assert!(parent.sdp_test_whole_drained());
-            return;
+            return None;
         }
         if case == 7 {
             let retained = Box::pin(super::sdp_outcome::exercise(
@@ -264,7 +283,7 @@ pub(super) async fn exercise(
                 action.retire_if_unstarted();
                 assert!(action.is_settled());
             }
-            return;
+            return None;
         }
         // Keep the test-only nested stopped-Actor setup out of every ancestor TCP future.
         super::sdp_intake::exercise(state, public, route, parent, &body);
@@ -370,4 +389,5 @@ pub(super) async fn exercise(
     }
     drop(preparation); // Actual native finally, distinct from queued/result Copy drainage.
     assert!(parent.sdp_test_whole_drained());
+    None
 }

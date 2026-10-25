@@ -564,7 +564,35 @@ async fn confirmation_over_blocked_tcp(
     orphan: bool,
     pc_cases: Option<u8>,
 ) {
+    let clock = (pc_cases == Some(8)).then(crate::voice_handoff::integration::ExpiryClock::new);
+    if let Some(clock) = clock {
+        crate::voice_handoff::integration::with_expiry_clock(
+            clock.clone(),
+            confirmation_over_blocked_tcp_inner(
+                framed,
+                reject,
+                known_incoming,
+                orphan,
+                pc_cases,
+                Some(clock),
+            ),
+        )
+        .await;
+    } else {
+        confirmation_over_blocked_tcp_inner(framed, reject, known_incoming, orphan, pc_cases, None)
+            .await;
+    }
+}
+async fn confirmation_over_blocked_tcp_inner(
+    framed: bool,
+    reject: bool,
+    known_incoming: bool,
+    orphan: bool,
+    pc_cases: Option<u8>,
+    clock: Option<Arc<crate::voice_handoff::integration::ExpiryClock>>,
+) {
     let mut scenario = Scenario::new(false, isolate().await);
+    scenario.voice_clock = clock.map(|clock| clock as Arc<dyn catcoms_rt::Clock>);
     scenario.admit().await;
     scenario.close(&[3, 4, 5]).await;
     scenario.rules.drop_gossip.store(true, Ordering::Release);
@@ -793,4 +821,9 @@ async fn native_v2_confirmation_alias_claims_refuse_before_publication_in_both_b
         scenario.close(&[0, 1, 2]).await;
         scenario.rules.assert_graph();
     }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn native_v2_pc_intent_original_http_begin_history_return_and_premature_high_refusal() {
+    confirmation_over_blocked_tcp(true, false, false, false, Some(8)).await;
 }

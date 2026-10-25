@@ -65,6 +65,17 @@ impl Completion {
     pub(super) fn result(&self) -> Result<&ResolvedRow, Refused> {
         self.result.as_ref().map_err(|error| *error)
     }
+    /// Consume actual completed task/publication custody before the HTTP caller observes
+    /// Root history or reacquires UI. The affine ResolvedRow is moved, never cloned into
+    /// an unpaid extra handle. Its own original fixed history funding remains intact.
+    pub(super) fn into_result(self) -> Result<ResolvedRow, Refused> {
+        let Self {
+            result,
+            _publication,
+        } = self;
+        drop(_publication);
+        result
+    }
 }
 /// The raw task/abort handle never escapes. Actual output retains original task funding
 /// through collection, including a caller which loses the response before observing it.

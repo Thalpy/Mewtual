@@ -25,7 +25,7 @@ fn found(seed: u64) -> Server<MemNetwork, ChaCha20Rng> {
 fn point() -> [u8; 65] {
     hex::decode("046b17d1f2e12c4247f8bce6e563a440f277037d812deb33a0f4a13945d898c2964fe342e2fe1a7f9b8ee7eb4a7c0f9e162bce33576b315ececbb6406837bf51f5").unwrap().try_into().unwrap()
 }
-async fn start() -> (
+pub(super) async fn start() -> (
     ServerActor,
     mpsc::Receiver<TracedEvent>,
     JoinHandle<()>,
@@ -50,7 +50,7 @@ async fn start() -> (
     );
     (actor, events, task, runtime, grant)
 }
-async fn park(actor: &ServerActor) -> crate::durable_chat::DurableSendReady {
+pub(super) async fn park(actor: &ServerActor) -> crate::durable_chat::DurableSendReady {
     let expected_context = actor.durable_send_context().await.unwrap();
     actor
         .prepare_durable_send(crate::durable_chat::DurableSendRequest {

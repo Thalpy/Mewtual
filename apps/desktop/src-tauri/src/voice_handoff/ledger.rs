@@ -42,6 +42,7 @@ pub(in crate::voice_handoff) use sdp_history::{
     DeliveryState as SdpDeliveryState, Snapshot as SdpHistory,
 };
 #[cfg(test)]
+pub(in crate::voice_handoff) use sdp_rows::compaction_layout_bytes as sdp_compaction_layout_bytes;
 pub(in crate::voice_handoff) use sdp_rows::Begin as SdpBegin;
 pub(in crate::voice_handoff) use sdp_rows::{
     Registration as SdpRegistration, SubmissionOwners as SdpSubmissionOwners,

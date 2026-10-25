@@ -8,6 +8,31 @@ use catcoms_sync::voice_v2::crypto_actions::CryptoOutcome;
 use catcoms_sync::voice_v2::VoiceError;
 
 pub(super) const HISTORY_BYTES: usize = 220;
+pub(super) const MISSING_BYTES: usize = 20;
+/// Missing is a snapshot miss. Only successful native close_sdp_original may set closed;
+/// even then this records a purpose fence, never engine/SDK/storage or whole-PC drainage.
+pub(super) fn missing(
+    parent: RowId,
+    purpose: NativeRowPurpose,
+    closed: bool,
+) -> [u8; MISSING_BYTES] {
+    let mut bytes = [0; MISSING_BYTES];
+    bytes[..2].copy_from_slice(&[8, 1]);
+    bytes[2..18].copy_from_slice(&parent.logical());
+    bytes[18] = u8::from(purpose == NativeRowPurpose::Open);
+    bytes[19] = u8::from(closed);
+    bytes
+}
+/// Version8 has no legacy decoder fallback, including its bounded refusal variants.
+pub(super) fn refused(error: super::factory::Refused) -> [u8; 4] {
+    use super::factory::Refused;
+    match error {
+        Refused::Closed => [8, 2, 0, 0],
+        Refused::Stopped => [8, 2, 1, 0],
+        Refused::Protocol(error) => [8, 2, 2, error_code(error)],
+    }
+}
+
 /// Only the exact Session-authenticated, paid native snapshot reaches this producer.
 /// The separate HTTP Control envelope pays the stack array and ciphertext until collection.
 pub(super) fn history(value: &SdpHistory) -> Result<[u8; HISTORY_BYTES], VoiceError> {
@@ -132,6 +157,21 @@ fn validate(
         }
         _ => Err(VoiceError::Malformed),
     }
+}
+
+/// Synchronous reply encoder and bounded ciphertext backing, in addition to its caller.
+/// The original history observation has returned before this receipt digest is hashed.
+#[cfg(test)]
+pub(super) fn serialization_layout_bytes() -> usize {
+    std::mem::size_of::<SdpHistory>()
+        + HISTORY_BYTES
+        + std::mem::size_of::<sha2::Sha256>()
+        + std::mem::size_of::<[u8; 32]>()
+        + 2 * std::mem::size_of::<RowId>()
+        + std::mem::size_of::<NativeRowPurpose>()
+        + std::mem::size_of::<&Status>()
+        + 96 // arguments, discriminants and fixed scalar temporaries
+        + HISTORY_BYTES + 16 // independent encrypted reply allocation
 }
 
 #[cfg(test)]
@@ -325,6 +365,59 @@ mod tests {
             bytes <= 4096,
             "complete synchronous history/codec graph needs {bytes}"
         );
+    }
+    #[test]
+    fn browser_control_vectors_keep_missing_close_and_refusal_distinct() {
+        let vectors: serde_json::Value =
+            serde_json::from_str(include_str!("sdp-history-vectors.json")).unwrap();
+        let parent = RowId::from_logical(
+            hex::decode(vectors["parent"].as_str().unwrap())
+                .unwrap()
+                .try_into()
+                .unwrap(),
+        )
+        .unwrap();
+        let errors = [
+            VoiceError::Malformed,
+            VoiceError::Bounds,
+            VoiceError::Signature,
+            VoiceError::Scope,
+            VoiceError::Freshness,
+            VoiceError::Unauthorized,
+            VoiceError::Signing,
+            VoiceError::Capacity,
+            VoiceError::Replay,
+            VoiceError::Reservation,
+            VoiceError::RetryMismatch,
+            VoiceError::RateLimited,
+        ];
+        let mut protocol = 0;
+        for item in vectors["controls"].as_array().unwrap() {
+            let expected = hex::decode(item["body"].as_str().unwrap()).unwrap();
+            if item["kind"] == "missing" {
+                let purpose = if item["purpose"] == "seal" {
+                    NativeRowPurpose::Seal
+                } else {
+                    NativeRowPurpose::Open
+                };
+                assert_eq!(
+                    missing(parent, purpose, item["close"].as_bool().unwrap()).as_slice(),
+                    expected
+                );
+            } else {
+                let error = match item["code"].as_str().unwrap() {
+                    "closed" => super::super::factory::Refused::Closed,
+                    "stopped" => super::super::factory::Refused::Stopped,
+                    _ => {
+                        let error = errors[protocol];
+                        protocol += 1;
+                        error.into()
+                    }
+                };
+                assert_eq!(refused(error).as_slice(), expected);
+            }
+        }
+        assert_eq!(protocol, errors.len());
     }
     #[test]
     fn browser_vectors_match_actual_native_history_and_receipt_digest() {

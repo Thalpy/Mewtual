@@ -1,5 +1,19 @@
 # Mewtual; Interfaces & Hooks Schema
 
+## Staged SDP controls (25 October)
+
+The private version8 SDP adapters implement original Begin/Resolve/History/Return only.
+History is220 bytes; missing-purpose is20 bytes and distinguishes requested close intent
+from drainage; refusal is a closed4-byte union. Shared native/browser vectors bind the
+original parent, purpose, optional row and Resolve close request. No v1 fallback exists.
+Production Host admission still refuses this family. SDP Input/engine/result/delivery/
+ACK/settlement and the private original-key SDK remain pending.
+
+ServerActor::try_queue_voice_v2_context reserves the existing bounded mailbox synchronously,
+then returns its original read-only receiver. Full is pre-admission Capacity; closed is
+Stopped. Actual query results retain the existing Context/String contract. A query is no
+call/action authorization, and an abandoned read has no native publication/drainage claim.
+
 ## SDP terminal history without retained plaintext (25 October; staged)
 
 `CryptoAction::recover_sdp_open_history` accepts only the actual original Open Action and

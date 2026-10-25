@@ -33,7 +33,26 @@ impl Drop for Running {
 }
 
 pub(super) async fn mount(path: &Path) -> Arc<AppState> {
-    let state = Arc::new(AppState::default());
+    mount_with_voice_clock(path, None).await
+}
+/// Only native Voice Runtime time changes; socket/replication/system clocks stay real.
+/// Install the clock during construction, before any selection, grant or Action exists.
+pub(super) async fn mount_with_voice_clock(
+    path: &Path,
+    clock: Option<Arc<dyn catcoms_rt::Clock>>,
+) -> Arc<AppState> {
+    let state = Arc::new(if let Some(clock) = clock {
+        AppState {
+            voice_authority: Arc::new(StdMutex::new(
+                crate::voice_authority::Coordinator::with_runtime(
+                    catcoms_sync::voice_v2::runtime::Runtime::new(clock),
+                ),
+            )),
+            ..AppState::default()
+        }
+    } else {
+        AppState::default()
+    });
     *state.store.lock().await = Some(ServerStore::open(path, PASSWORD, &mut OsCryptoRng).unwrap());
     *state.session_resumable.lock().await = true;
     state

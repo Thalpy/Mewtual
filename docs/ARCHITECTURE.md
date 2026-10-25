@@ -1,5 +1,14 @@
 # Mewtual; Architecture
 
+## Staged original SDP controls (25 October)
+
+Original paid SDP Begin/Resolve/History/Return now have private framed adapters. Same-slot
+history precedes current admission; HIGH Seal requires actual applied Open and fresh time
+checks after history. A bounded read-only Actor preflight keeps only its actual receiver
+across await. Original pending work, fixed rows and detached publication retain their
+existing ownership boundaries and caps. The production SDP family remains refused until
+the Input/engine/result/delivery/ACK/settlement and original-key browser vertical is complete.
+
 ## Original SDP historical projection (25 October; private)
 
 Root exposes metadata-only Open recovery from the actual terminal Engine record. Native

@@ -124,5 +124,101 @@
       "delivery": 0,
       "body": "0800000000000000000000000000000000020000000000000000000000000000000101000101ffffffffffffffff002000000000000107070707070707070707070707070707070707070707070707070707070707070101060606060606060606060606060606060606060606060606060606060606060603000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000101932af913f15fcc24df80dccd90e604ce51911d2c59b6d38dedfcfd71250388cf00"
     }
+  ],
+  "controls": [
+    {
+      "kind": "missing",
+      "purpose": "seal",
+      "close": false,
+      "body": "0801000000000000000000000000000000010000"
+    },
+    {
+      "kind": "missing",
+      "purpose": "seal",
+      "close": true,
+      "body": "0801000000000000000000000000000000010001"
+    },
+    {
+      "kind": "missing",
+      "purpose": "open",
+      "close": false,
+      "body": "0801000000000000000000000000000000010100"
+    },
+    {
+      "kind": "missing",
+      "purpose": "open",
+      "close": true,
+      "body": "0801000000000000000000000000000000010101"
+    },
+    {
+      "kind": "refused",
+      "code": "closed",
+      "body": "08020000"
+    },
+    {
+      "kind": "refused",
+      "code": "stopped",
+      "body": "08020100"
+    },
+    {
+      "kind": "refused",
+      "code": "malformed",
+      "body": "08020200"
+    },
+    {
+      "kind": "refused",
+      "code": "bounds",
+      "body": "08020201"
+    },
+    {
+      "kind": "refused",
+      "code": "signature",
+      "body": "08020202"
+    },
+    {
+      "kind": "refused",
+      "code": "scope",
+      "body": "08020203"
+    },
+    {
+      "kind": "refused",
+      "code": "freshness",
+      "body": "08020204"
+    },
+    {
+      "kind": "refused",
+      "code": "unauthorized",
+      "body": "08020205"
+    },
+    {
+      "kind": "refused",
+      "code": "signing",
+      "body": "08020206"
+    },
+    {
+      "kind": "refused",
+      "code": "capacity",
+      "body": "08020207"
+    },
+    {
+      "kind": "refused",
+      "code": "replay",
+      "body": "08020208"
+    },
+    {
+      "kind": "refused",
+      "code": "reservation",
+      "body": "08020209"
+    },
+    {
+      "kind": "refused",
+      "code": "retry-mismatch",
+      "body": "0802020a"
+    },
+    {
+      "kind": "refused",
+      "code": "rate-limited",
+      "body": "0802020b"
+    }
   ]
 }

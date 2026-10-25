@@ -473,3 +473,6 @@ async fn derivation_cycle(
     assert!(state.voice_handoff.channel_may_close(selected));
     None
 }
+
+mod sdp_http;
+pub(crate) use sdp_http::{with_expiry_clock, ExpiryClock};

@@ -1,5 +1,57 @@
 # Mewtual; Handover
 
+## Original SDP control handlers (25 October; private, validation in progress)
+
+`communication-sdp-begin-http` adds Begin, Resolve, History and Return adapters to the
+original paid SDP producer. The test invokes the staged handlers directly on actual
+authenticated channel frames after real blocked-TCP discovery/confirmation. It does not
+exercise production HTTP dispatch or negotiated SDP/ICE. Production Host admission still refuses the entire SDP action family before allocation
+or nonce debit. Input/engine/result/delivery/ACK/settlement and the original-key private
+browser SDK are not implemented by this checkpoint.
+
+Existing Begin validates the original Session/parent/PC/purpose and plaintext commitment
+before history recovery. It creates no Candidate/payment on published or uncertain work.
+A new HIGH Seal cannot reserve its canonical row before the original Open is accepted
+and actually applied. Native time is freshly observed after callback-bearing history and
+again before final try-only admission. The completed producer's actual publication guard
+is consumed before observing history or reacquiring UI.
+
+A narrow read-only Actor query now reserves the same finite mailbox before allocating
+its reply. Full returns retryable Capacity; the original trace, command and actual reply
+are preserved. Only its thin receiver crosses the native await. Abandoned reads remain
+ordinary bounded Actor infrastructure; this is not SDP publication or drainage custody.
+The complete Control proof includes future/output, synchronous caller/helper stacks,
+compaction, query admission and serialization, with all existing caps unchanged.
+
+Version8 adds explicit missing-purpose and refusal variants with shared native/browser
+vectors. A missing reply records no drainage; successful close of an absent purpose only
+records that purpose's fence. Expectations bind parent/purpose/row and Resolve close intent
+once, without legacy fallback or retained caller/response graphs.
+
+The genuine blocked-TCP fixture exercises same Begin, changed bytes, Return, premature HIGH
+refusal, original-clock expiry at the new post-history observation and Resolve after actual
+PC/SDK/key/Claim release, End, Root retirement and Plan final acknowledgement. The clock
+case has no-action Open history; accepted-Open callback coverage remains a later vertical.
+All337 native handoff tests passed (19.90s), the framed-control TCP fixture passed (9.77s),
+and both real Actor query regressions passed. The complete physical Control proof remains
+12,279/12,288B; the new adapter is3,712B, below the existing largest adapter. Current
+strict Root all-target/all-feature Clippy, native Cargo check/strict all-target Clippy,
+both formatting checks, ambient checks and diff checks passed. All2,750 frontend tests,
+Svelte checks and the production build passed. Final complete backend suites remain pending.
+The unchanged dependency set still fails audit for inherited RUSTSEC-2026-0387 in
+crypto-bigint0.5.5; bans/licenses/sources pass. No advisory ignore or dependency was changed.
+Startup/visual-flow gates were not rerun: no production setup, process launch, UI or
+send/friend-request path changed. No physical/audio result is claimed.
+
+Frozen runtime `41e17a71` completed both mandatory backend suites: Root3,578 passed,
+0 failed,24 ignored across59 summaries; native834 passed,0 failed,0 ignored. These results
+belong to that earlier revision. They are not a full-suite pass for this newer branch.
+
+Next implement exact SDP Input/reply ownership and engine/result/delivery/ACK/settlement,
+then original-key WebCrypto, RTC/ICE, fresh rounds, multi-peer composition, member media
+relay and combined acceptance. Independent physical audio/network acceptance still needs
+a second device/network. Live V2 remains disabled.
+
 ## Original SDP result history (25 October; private metadata path)
 
 `communication-sdp-http-adapter` continues from worker runtime `eab3da2b`. Root can recover
@@ -23,7 +75,7 @@ production build passes (35.76s). Both formatting checks, ambient checks, strict
 all-feature Clippy (2m09s), native Cargo check (1m00s) and strict native all-target Clippy
 (1m55s) pass. The dependency set is unchanged;
 the current audit still reports inherited RUSTSEC-2026-0387 (bans/licenses/sources pass). Prior frozen row runtime41e17a71
-is still running complete Root/native validation sequentially; no current full pass is claimed.
+completed full Root/native validation (3,578/834 passed); no newer-revision full pass is claimed.
 
 Read-only review resolved incomplete nested reconciliation/SHA accounting without raising
 limits, repeated expectation getters and missing Linux inputs. Six precise public JSON

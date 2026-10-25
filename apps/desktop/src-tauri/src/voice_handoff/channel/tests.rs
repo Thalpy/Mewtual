@@ -271,6 +271,7 @@ fn paid_fixed_storage_and_original_control_lane_cover_codec_peak() {
         super::super::confirmation_settlement::layout_bytes(),
         super::super::confirmation_result::layout_bytes(),
         super::super::confirmation_begin::layout_bytes(),
+        super::super::sdp_http::layout_bytes(),
     ];
     eprintln!(
         "adapter graphs pending/history/final/input/admission/settlement/plan-final/transition/child-history/child-input/child-admission/child-settlement/child-result/child-begin: {adapters:?}"

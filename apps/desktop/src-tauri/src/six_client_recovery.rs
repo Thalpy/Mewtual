@@ -154,6 +154,7 @@ struct Scenario {
     clients: Vec<Client>,
     rules: Arc<NetworkRules>,
     clock: SystemClock,
+    voice_clock: Option<Arc<dyn catcoms_rt::Clock>>,
     reverse: bool,
     token: u128,
     // Last: successful scenarios have awaited every actor and driver before returning the
@@ -227,6 +228,7 @@ impl Scenario {
             clients,
             rules,
             clock,
+            voice_clock: None,
             reverse,
             token: 0,
             admission,
@@ -264,7 +266,15 @@ impl Scenario {
         );
         assert!(matches!(count, 3 | 6));
         for index in 0..count {
-            let state = mount(self.clients[index].root.path()).await;
+            let state = if let Some(clock) = &self.voice_clock {
+                runtime::mount_with_voice_clock(
+                    self.clients[index].root.path(),
+                    Some(clock.clone()),
+                )
+                .await
+            } else {
+                mount(self.clients[index].root.path()).await
+            };
             self.clients[index].driver_starting = true;
             let transport =
                 Transport::new(index, &mut self.clients[index].net, self.rules.clone()).await;
@@ -450,7 +460,15 @@ impl Scenario {
         }
         for index in order {
             assert!(self.clients[index].running.is_none());
-            let state = mount(self.clients[index].root.path()).await;
+            let state = if let Some(clock) = &self.voice_clock {
+                runtime::mount_with_voice_clock(
+                    self.clients[index].root.path(),
+                    Some(clock.clone()),
+                )
+                .await
+            } else {
+                mount(self.clients[index].root.path()).await
+            };
             let mut net = load_or_init_server_net(&state, 1, "").await.unwrap();
             assert_eq!(net.key_seed, self.clients[index].net.key_seed);
             assert!(net.advertise.is_empty() && net.relay.is_empty() && net.rendezvous.is_empty());

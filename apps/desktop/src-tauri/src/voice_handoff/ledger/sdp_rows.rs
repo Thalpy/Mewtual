@@ -75,10 +75,14 @@ pub(in crate::voice_handoff) struct Candidate<'a> {
     funding: Arc<NativeRowFunding>,
     body_tag: Option<[u8; 32]>,
     outcome: Prepared,
+    intent: Arc<InitialSdpIntent>,
 }
 impl Candidate<'_> {
     pub(in crate::voice_handoff) fn funding(&self) -> &Arc<NativeRowFunding> {
         &self.funding
+    }
+    pub(in crate::voice_handoff) fn intent(&self) -> &Arc<InitialSdpIntent> {
+        &self.intent
     }
 }
 fn body_tag(state: &State) -> Option<Option<[u8; 32]>> {
@@ -265,13 +269,87 @@ impl ResolvedRow {
             (phase.clone(), intent.clone())
         };
         let funding = phase.native_history(purpose)?;
-        let outcome = Prepared::new(intent, funding.clone(), body_tag)?;
+        let outcome = Prepared::new(intent.clone(), funding.clone(), body_tag)?;
         Ok(Candidate {
             request,
             funding,
             body_tag,
             outcome,
+            intent,
         })
+    }
+    /// Existing Begin checks its full original binding and canonical body without a
+    /// Candidate, fee, Copy, Clock or factory. Pending is NOT retry evidence: only the
+    /// same installed outcome may make the returned planning hint true. Final resume
+    /// repeats every current/worker/observer/outcome check under its admission fence.
+    pub(in crate::voice_handoff) fn check_sdp_begin(
+        &self,
+        parent: &ResolvedRow,
+        session: &Arc<SessionIdentity>,
+        request: &Request<'_>,
+    ) -> Result<bool, VoiceError> {
+        let tag = request
+            .plaintext
+            .map(catcoms_sync::voice_v2::sdp::plaintext_commitment)
+            .transpose()?;
+        let purpose = if tag.is_some() {
+            NativeRowPurpose::Seal
+        } else {
+            NativeRowPurpose::Open
+        };
+        if !Arc::ptr_eq(&self.ledger, &parent.ledger)
+            || self.row.key.purpose
+                != (Purpose::Sdp {
+                    parent: parent.id(),
+                    purpose,
+                })
+            || !self
+                .row
+                .key
+                .parent
+                .as_ref()
+                .is_some_and(|row| Arc::ptr_eq(row, &parent.row))
+        {
+            return Err(VoiceError::Unauthorized);
+        }
+        let _index = self.transition_index()?;
+        let parent_state = try_lock(&parent.row.state)?;
+        original(parent, &parent_state, session, request)?;
+        let state = try_lock(&self.row.state)?;
+        if !self::session(&state).is_some_and(|value| Arc::ptr_eq(value, session)) {
+            return Err(VoiceError::Unauthorized);
+        }
+        if body_tag(&state) != Some(tag) {
+            return Err(VoiceError::RetryMismatch);
+        }
+        Ok(
+            matches!(&state.body, Body::SdpPending(value) if !value.worker && !value.observer
+            && !value.closed && value.published.is_none() && value.owners.outcome.permits_local_retry()),
+        )
+    }
+    /// Pure current check for a new-work prerequisite (notably waiting for HIGH's
+    /// accepted/applied Open). It installs nothing, spends no attempt and grants no effect.
+    pub(in crate::voice_handoff) fn require_sdp_publication_current(
+        &self,
+        admission: &Admission<'_>,
+        candidate: &Candidate<'_>,
+        wall: u64,
+        mono: u64,
+    ) -> Result<(), VoiceError> {
+        if !Arc::ptr_eq(&self.ledger, admission.ledger())
+            || !self
+                .row
+                .key
+                .matches(admission.selected(), self.row.key.purpose)
+        {
+            return Err(VoiceError::Unauthorized);
+        }
+        let _index = self.transition_index()?;
+        let state = try_lock(&self.row.state)?;
+        let (storage, intent) = original(self, &state, admission.session(), candidate.request)?;
+        require_current(
+            self, &state, storage, intent, candidate, admission, wall, mono,
+        )
     }
     /// Reclaim ONLY this original Pending after a proven local, unstarted or explicit
     /// prepublication Capacity refusal. Do not mint another row/outcome/deadline, reset
@@ -572,6 +650,41 @@ impl ResolvedRow {
         Ok(true)
     }
 }
+/// Shared pure first-publication admission. An HTTP prerequisite wait and actual Row
+/// installation must never disagree about a dead original SDK/PC or renew its deadline.
+#[allow(clippy::too_many_arguments)]
+fn require_current(
+    parent: &ResolvedRow,
+    state: &State,
+    storage: &super::sdp::Claim,
+    intent: &Arc<InitialSdpIntent>,
+    candidate: &Candidate<'_>,
+    admission: &Admission<'_>,
+    wall: u64,
+    mono: u64,
+) -> Result<(), VoiceError> {
+    let phase = storage.phase.as_ref().ok_or(VoiceError::Unauthorized)?;
+    let funding = &candidate.funding;
+    if !funding.uses_phase(phase)
+        || !intent.uses_phase(phase)
+        || !candidate
+            .outcome
+            .matches(intent, funding, candidate.body_tag)
+        || storage.closed
+        || storage.actions_closed[position(funding.purpose())]
+        || funding.is_closed()
+        || storage.worker()
+        || storage.sdk_preparing
+        || storage.sdk.as_ref().is_none_or(|sdk| sdk.released())
+        || !parent.row.key.lease.is_live()
+        || state.final_delivery().is_some()
+        || state.final_phase.is_some()
+    {
+        return Err(VoiceError::Unauthorized);
+    }
+    intent.remaining_at(wall, mono)?;
+    admission.current()
+}
 impl Ledger {
     /// Lost Begin may conceal both Action and child RowId. Resolve only exact original
     /// parent/Session/PC/purpose, with no current grant, fee/copy charge or factory call.
@@ -743,20 +856,9 @@ impl Ledger {
                 row: row.clone(),
             }));
         }
-        if storage.closed
-            || storage.actions_closed[position(purpose)]
-            || funding.is_closed()
-            || storage.worker()
-            || storage.sdk_preparing
-            || storage.sdk.as_ref().is_none_or(|sdk| sdk.released())
-            || !parent.row.key.lease.is_live()
-            || state.final_delivery().is_some()
-            || state.final_phase.is_some()
-        {
-            return Err(VoiceError::Unauthorized);
-        }
-        intent.remaining_at(wall, mono)?;
-        admission.current()?;
+        require_current(
+            parent, &state, storage, intent, candidate, admission, wall, mono,
+        )?;
         let slot = index
             .rows
             .iter()
@@ -1062,6 +1164,30 @@ impl Ledger {
             .filter(|row| matches!(row.key.purpose,Purpose::Sdp {parent:id,..} if id==parent))
             .count()
     }
+}
+
+/// Synchronous local compaction inventory, additional to its HTTP caller. Recovery,
+/// reconciliation and retirement finish before the final Body replacement. The retired
+/// enum value is still actual stack storage even though its fixed Arcs have original fees.
+#[cfg(test)]
+pub(in crate::voice_handoff) fn compaction_layout_bytes() -> usize {
+    let replacement = std::mem::size_of::<Body>()
+        + std::mem::size_of::<Drained>()
+        + std::mem::size_of::<Option<Arc<CryptoAction>>>()
+        + std::mem::size_of::<Option<Arc<SdpDelivery>>>()
+        + std::mem::size_of::<Option<[u8; 32]>>()
+        + 3 * std::mem::size_of::<Arc<()>>()
+        + 3 * std::mem::size_of::<std::sync::MutexGuard<'static, ()>>()
+        + 128;
+    let recovery = std::mem::size_of::<History>()
+        + std::mem::size_of::<Arc<Outcome>>()
+        + std::mem::size_of::<Option<sdp_handoff::NativeIoClosure>>()
+        + 3 * std::mem::size_of::<std::sync::MutexGuard<'static, ()>>()
+        + 128;
+    // Includes the actual Observation/status merge used by unstarted retirement too.
+    replacement
+        .max(recovery)
+        .max(super::reconciliation_layout_bytes())
 }
 
 #[cfg(test)]

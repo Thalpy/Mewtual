@@ -1,5 +1,26 @@
 # Chat, files and voice implementation evidence
 
+## Original paid SDP controls (25 October; not live V2 acceptance)
+
+Private Begin/Resolve/History/Return now use the original native row/outcome, actual paid
+producer and closed version8 history/missing/refusal replies. Existing published/uncertain
+work is history only; changed bytes refuse. HIGH cannot reserve Seal before actual applied
+Open. Fresh time observations fence both waiting and final admission. Same-session Resolve
+preserves collected history and absent-purpose close after actual Plan retirement.
+
+Current focused checks: native337 pass (19.90s), Actor query2 pass, one genuine blocked-TCP
+fixture pass (9.77s), frontend2,750 pass with static checks/build. The new controls are invoked
+DIRECTLY on authenticated channel frames after actual blocked-TCP discovery/confirmation;
+production HTTP dispatch still refuses these opcodes. No SDP negotiation, ICE/RTC, private
+original-key browser execution or physical audio/network acceptance is established here.
+The whole12KiB Control proof remains12,279B, with all synchronous caller/compaction stacks.
+
+Frozen runtime41e17a71 passed complete Root/native suites (3,578/834); newer leaf full
+evidence is still pending. HANDOVER tracks current strict checks, inherited dependency audit
+failure and exact boundaries. Input/engine/result/delivery/ACK/settlement, complete RTC/ICE,
+fresh rounds, multi-peer composition, relay and combined/independent physical acceptance
+remain open. This milestone does not close any of those packages or enable live V2.
+
 ## Original PC intent composition (24 October; live V2 still incomplete)
 
 Root's original HIGH/LOW Ready evidence now produces one fixed first-round intent on the
