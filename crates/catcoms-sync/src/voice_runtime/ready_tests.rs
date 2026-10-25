@@ -496,3 +496,151 @@ async fn root_low_ready_shared_namespace_actual_success_retry_collision_and_dela
         "member bridge joins nothing"
     );
 }
+
+fn frozen_ready_helpers(
+    node: &VoiceTestNode,
+    grant: &Arc<CallGrant>,
+    handshake: [u8; 32],
+) -> Option<[Option<DeviceId>; 2]> {
+    let context = node.voice_v2_context(1).unwrap();
+    let runtime = node.voice_runtime.as_ref().unwrap();
+    let join = runtime.endpoints.participant_join_for_test().unwrap();
+    let lease = grant.lease();
+    runtime
+        .current
+        .as_ref()
+        .unwrap()
+        .try_with_current_members(&context, |member| {
+            join.high_ready_helpers(
+                handshake,
+                &voice_v2::packets::Authority {
+                    context: &context,
+                    lease: &lease,
+                    member,
+                },
+            )
+        })
+        .unwrap()
+        .1
+}
+
+#[tokio::test]
+async fn root_connected_ready_waits_for_original_authenticated_route_before_freezing_helpers() {
+    let (mut f, grants, handshake, low) = confirmed().await;
+    let high = 1 - low;
+    let helper = f.b.as_ref().unwrap().device_id();
+    {
+        let node = if high == 0 { &mut f.a } else { &mut f.c };
+        let peers = std::mem::take(&mut node.member_peers);
+        let before = node.voice_runtime.as_ref().unwrap().resources.counts();
+        assert_eq!(
+            node.prepare_voice_high_ready_connected(&grants[high], handshake),
+            Err(VoiceError::Capacity)
+        );
+        assert_eq!(frozen_ready_helpers(node, &grants[high], handshake), None,
+            "no Ready identity/helper choice may be frozen while there is no authenticated usable path");
+        assert_eq!(
+            node.voice_runtime.as_ref().unwrap().resources.counts(),
+            before
+        );
+        node.member_peers = peers;
+    }
+    let mut delivered = false;
+    for _ in 0..80 {
+        let node = if high == 0 { &mut f.a } else { &mut f.c };
+        match node.prepare_voice_high_ready_connected(&grants[high], handshake) {
+            Ok(true) => {
+                assert_eq!(
+                    frozen_ready_helpers(node, &grants[high], handshake),
+                    Some([Some(helper), None])
+                );
+                node.queue_voice_high_ready(&grants[high], handshake)
+                    .unwrap();
+            }
+            Err(VoiceError::Capacity) => {}
+            other => panic!("original delayed route refused: {other:?}"),
+        }
+        let node = if low == 0 { &mut f.a } else { &mut f.c };
+        match node.prepay_voice_low_sdp(&grants[low], handshake) {
+            Ok(()) | Err(VoiceError::Capacity) => {}
+            other => panic!("LOW prepay: {other:?}"),
+        }
+        match node.prepare_voice_low_sdp(&grants[low], handshake) {
+            Ok(true) => {
+                delivered = true;
+                break;
+            }
+            Ok(false) | Err(VoiceError::Capacity | VoiceError::Unauthorized) => {}
+            other => panic!("actual original Ready delivery: {other:?}"),
+        }
+        f.tick(3).await;
+        f.clock.advance_ms(25);
+    }
+    assert!(
+        delivered,
+        "restored B must carry actual signed Ready and allow LOW extraction"
+    );
+}
+
+#[tokio::test]
+async fn root_connected_ready_allows_only_an_unambiguous_authenticated_direct_only_choice() {
+    for case in ["valid", "unbound", "ambiguous", "nonmember"] {
+        let (mut f, grants, handshake, low) = confirmed().await;
+        let high = 1 - low;
+        bind_nodes(&mut f.a, &mut f.c).await;
+        let endpoint = if low == 0 {
+            f.a.device_id()
+        } else {
+            f.c.device_id()
+        };
+        let alias = f.d.device_id();
+        let node = if high == 0 { &mut f.a } else { &mut f.c };
+        node.member_peers.retain(|proof| proof.device == endpoint);
+        assert!(
+            !node.member_peers.is_empty(),
+            "actual direct signed binding must precede the test"
+        );
+        match case {
+            "unbound" => {
+                for proof in &mut node.member_peers {
+                    proof.bound = false;
+                }
+            }
+            "ambiguous" => {
+                node.peer_records
+                    .insert(alias, node.peer_records[&endpoint].clone());
+            }
+            "nonmember" => {
+                let outsider = DeviceId::from_bytes([241; 32]);
+                node.peer_records
+                    .insert(outsider, node.peer_records[&endpoint].clone());
+                for proof in &mut node.member_peers {
+                    proof.device = outsider;
+                }
+            }
+            _ => {}
+        }
+        let before = node.voice_runtime.as_ref().unwrap().resources.counts();
+        let result = node.prepare_voice_high_ready_connected(&grants[high], handshake);
+        if case == "valid" {
+            assert!(matches!(result, Ok(true) | Err(VoiceError::Capacity)));
+            assert_eq!(
+                frozen_ready_helpers(node, &grants[high], handshake),
+                Some([None, None]),
+                "a real authenticated direct route legitimately needs no member helper"
+            );
+        } else {
+            assert_eq!(result, Err(VoiceError::Capacity), "{case}");
+            assert_eq!(
+                frozen_ready_helpers(node, &grants[high], handshake),
+                None,
+                "{case}"
+            );
+            assert_eq!(
+                node.voice_runtime.as_ref().unwrap().resources.counts(),
+                before,
+                "{case}"
+            );
+        }
+    }
+}

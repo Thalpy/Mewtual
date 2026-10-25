@@ -1,5 +1,15 @@
 # Threat model; client integrity & enforcement boundaries
 
+## First connected Ready route snapshot (25 October)
+
+A first HIGH Ready may freeze empty helpers only when an authenticated current direct
+endpoint route exists. Otherwise a usable connected member helper must exist before the
+immutable choice is reserved. The bounded snapshot checks actual proof binding, matching
+peer record, current connection lease, membership and unique member-to-peer association.
+It grants no send/dial authority; final native/Root checks remain independent. Refusal creates
+no Ready identity, signature, Source attempt or renewed deadline. Existing frozen choices
+are never rewritten; later arbitrary route replacement still requires bounded renewal.
+
 ## Private round advancement and action-local return (25 October)
 
 An accepted receipt alone cannot advance Offer to Answer. The original browser executor must

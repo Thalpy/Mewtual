@@ -1,5 +1,26 @@
 # Mewtual; Handover
 
+## Ready first-route admission correction (25 October)
+
+The connected HIGH preparation now refuses Capacity before creating/freezing its first
+Ready when it has neither a usable authenticated direct endpoint connection nor an eligible
+connected member helper. Previously it could irreversibly freeze an empty helper choice;
+a bridge arriving afterward could never carry that same Ready. The original Finish/deadline
+and Source attempt allowance are preserved. Already-frozen choices remain immutable.
+
+The deterministic delayed-binding regression failed before the fix with frozenSome(empty)
+and passes afterward. Restoring B delivers the actual signed Ready and permits LOW extraction.
+Direct-only valid, unbound, ambiguous and nonmember bindings are covered. All21 focused Root
+Ready/SDP tests pass13.15s; read-only re-review has no remaining findings. Full/static gates
+will run on the final native-HTTP candidate. The older full Root baseline was superseded
+and stopped when this Root correction became necessary; its partial passes are not a green
+full-suite result. No concurrent full Rust suite is running now.
+
+This fixes the initially unusable snapshot, not arbitrary bridge renewal. A valid frozen
+choice later losing its route still needs explicit bounded renewed-round semantics. The
+one observed real-TCP Ready timeout remains unattributed; three subsequent repeat runs
+passed, which does not establish its cause or remove that investigation.
+
 ## Private original Offer/Answer composition (25 October; validation in progress)
 
 `communication-sdp-answer-composition` adds `completeNativeSdpRtcRound` on the exact original

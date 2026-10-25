@@ -64,7 +64,19 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         })?;
         let helpers = match frozen {
             Some(helpers) => helpers,
-            None => self.voice_ready_helpers(&context, peer)?,
+            None => {
+                let (helpers, direct) = self.voice_ready_routes(&context, peer)?;
+                // This first choice becomes immutable BEFORE later fallible preparation.
+                // Freezing empty helpers with no authenticated direct path would strand
+                // the same Ready forever when a member bridge appears a moment later.
+                // Refuse before any successor/Ready identity/signature/Source attempt;
+                // retry uses the SAME original Finish and finite deadline. Existing
+                // frozen choices remain immutable; this is not bridge renewal authority.
+                if !direct && helpers == [None, None] {
+                    return Err(VoiceError::Capacity);
+                }
+                helpers
+            }
         };
         match helpers {
             [None, None] => self.prepare_voice_high_ready(grant, handshake, &[]),
@@ -77,15 +89,14 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
     /// Do not call voice_bound_routes here: its full connection/path snapshot and roster
     /// maps can exceed the native producer's small payment. Preserve its authentication
     /// checks with fixed output, one captured lease, and the already-paid Actor roster.
-    fn voice_ready_helpers(
+    fn voice_ready_routes(
         &self,
         context: &voice_v2::Context,
         endpoint: DeviceId,
-    ) -> Result<[Option<DeviceId>; 2], VoiceError> {
+    ) -> Result<([Option<DeviceId>; 2], bool), VoiceError> {
         let mut helpers = [None, None];
-        if !context.indirect || context.scope.policy.is_none() {
-            return Ok(helpers);
-        }
+        let mut direct = false;
+        let indirect = context.indirect && context.scope.policy.is_some();
         if self.member_peers.len() > MAX_PEER_RECORDS || self.peer_records.len() > MAX_PEER_RECORDS
         {
             return Err(VoiceError::Capacity);
@@ -94,7 +105,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         for proof in &self.member_peers {
             if !proof.bound
                 || proof.device == context.local
-                || proof.device == endpoint
+                || (proof.device != endpoint && !indirect)
                 || helpers.contains(&Some(proof.device))
                 || self
                     .peer_records
@@ -119,6 +130,10 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             if !eligible {
                 continue;
             }
+            if proof.device == endpoint {
+                direct = true;
+                continue;
+            }
             // Deterministic smallest-two selection independent of VecDeque/HashMap order.
             if helpers[0].is_none_or(|first| proof.device < first) {
                 helpers[1] = helpers[0];
@@ -127,7 +142,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
                 helpers[1] = Some(proof.device);
             }
         }
-        Ok(helpers)
+        Ok((helpers, direct))
     }
     #[cfg(test)]
     pub(crate) fn occupy_voice_receipt_namespace_for_test(
