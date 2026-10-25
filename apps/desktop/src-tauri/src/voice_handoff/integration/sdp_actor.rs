@@ -56,7 +56,7 @@ fn constructor_refusals(phase: &Arc<Phase>, intent: &Arc<InitialSdpIntent>, othe
     drop(buffer);
 }
 
-fn publication(
+pub(super) fn publication(
     state: &AppState,
     route: &bootstrap::Route,
     phase: &Arc<Phase>,

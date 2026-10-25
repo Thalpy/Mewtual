@@ -135,7 +135,7 @@ pub(super) async fn exercise(
         return;
     }
     factory::preflight_binding(&context, route).await.unwrap();
-    if matches!(case, 1 | 4 | 5 | 6) {
+    if matches!(case, 1 | 4 | 5 | 6 | 7) {
         let first = exchange(state, public, route, parent, &body).await;
         assert_eq!(
             first.len(),
@@ -167,7 +167,7 @@ pub(super) async fn exercise(
         None,
     );
     let physical = incoming.hold_position().unwrap();
-    let preparation = if matches!(case, 1 | 4 | 5 | 6) {
+    let preparation = if matches!(case, 1 | 4 | 5 | 6 | 7) {
         None
     } else {
         Some(
@@ -206,13 +206,46 @@ pub(super) async fn exercise(
     let mut unstarted_sdp = None;
     // Successful queue return is the positive barrier: the original command, rather than
     // an unpolled future, owns the same phase contribution behind the paused actor.
-    if matches!(case, 1 | 4 | 5 | 6) {
+    if matches!(case, 1 | 4 | 5 | 6 | 7) {
         let completion = pending.complete().await.unwrap();
         assert!(completion.result().is_ok());
         // A new authenticated frame supplies its own physical hold for actual typed SDP
         // RPC tests. The original PC-intent request is already collected here.
         drop(physical);
         drop(incoming);
+        if case == 7 {
+            let retained = Box::pin(super::sdp_outcome::exercise(
+                state,
+                public,
+                route,
+                parent,
+                &body,
+                &actor,
+                &grant,
+                completion.result().unwrap(),
+            ))
+            .await;
+            parent
+                .close_pc(route.session().identity(), &request)
+                .unwrap();
+            release_sdk(parent, &token);
+            assert_eq!(phase.status(), Status::Closing);
+            drop(completion);
+            assert_eq!(phase.status(), Status::Drained);
+            assert!(parent.sdp_test_whole_drained());
+            if let Some(slot) = retained {
+                use catcoms_sync::voice_v2::sdp::publication::History;
+                let History::Published(action) = slot.history() else {
+                    panic!("lost original publication after PC/SDK teardown");
+                };
+                assert!(action.matches_sdp_plaintext_commitment(
+                    &catcoms_sync::voice_v2::sdp::plaintext_commitment(b"v=0").unwrap()
+                ));
+                action.retire_if_unstarted();
+                assert!(action.is_settled());
+            }
+            return;
+        }
         // Keep the test-only nested stopped-Actor setup out of every ancestor TCP future.
         super::sdp_intake::exercise(state, public, route, parent, &body);
         unstarted_sdp = Some(

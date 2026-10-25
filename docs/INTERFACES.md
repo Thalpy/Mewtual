@@ -1,5 +1,28 @@
 # Mewtual; Interfaces & Hooks Schema
 
+## Original SDP publication outcome (25 October; native row integration pending)
+
+Rust-only recorded LOW Offer, HIGH Answer and Open Actor APIs take an affine
+`sdp::publication::Writer` from the original `Prepared`/`Outcome`. They eagerly construct
+the complete Command/Pending wrappers before returning the send future. The same original
+body/metadata Copy funds command, reply and collection; cancellation never creates a new
+slot or substitutes an unlocked/current flag. Refusal drops Writer before the last Copy.
+The fixed RPC inventory includes the eager constructor graph as well as returned futures;
+the existing4096B RPC and64KiB native phase limits are unchanged.
+
+Each original intent irreversibly chooses Recorded or Unrecorded publication. Prepared
+validates actual fee/effect/purpose before selecting Recorded. Unrecorded factories choose
+only in their last fallible check, before their first final-tail mutation. Opposite-profile
+cached recovery refuses too. Candidate loss, Capacity and End cannot reset this profile.
+This isolates the paths but does not replace native's one canonical row/slot per purpose.
+
+Root records the SAME actual Action before activation/input destruction. Outcome history
+distinguishes Idle, InFlight, NeverEntered, explicit normal Refused, Uncertain and Published.
+After Root entry, an interrupted invocation stays Uncertain unless the actual tail recorded
+publication. This fixed observation is not a new effect grant, SDK permission, IO drainage,
+engine settlement or receipt ACK. Native production row installation/reconciliation and
+HTTP dispatch still require integration; all staged SDP endpoints remain refused.
+
 ## Staged SDP request grammar (25 October; production dispatch closed)
 
 Canonical native/browser framing adds separate class2 SDP and version8 plaintext. The service

@@ -56,6 +56,11 @@ impl NativeRowFunding {
     pub fn uses_phase(&self, phase: &Phase) -> bool {
         Arc::ptr_eq(&self.original.0, &phase.effect)
     }
+    /// Pure fixed provenance for the original publication outcome. No Phase or variable
+    /// loan is retained by that outcome, including after storage closure/destruction.
+    pub(crate) fn uses_effect(&self, effect: &EffectObserver) -> bool {
+        self.original.is_same(effect)
+    }
     pub fn in_flight(&self) -> usize {
         self.state.load(Ordering::Acquire) & COUNT
     }

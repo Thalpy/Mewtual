@@ -110,14 +110,19 @@ impl LocalJoin {
         clock: Arc<dyn Clock>,
         rng: &mut impl CryptoRngCore,
         final_owner: impl FnOnce(u64, u64) -> Result<(), VoiceError>,
+        mut outcome: Option<&mut crate::voice_v2::sdp::publication::Writer>,
     ) -> Result<Arc<CryptoAction>, VoiceError> {
         use crate::voice_v2::negotiation::answer::AnswerPosition;
         use crate::voice_v2::sdp::action::{plaintext_tag, Direction};
         self.owned(authority)?;
+        intent.check_publication_profile(outcome.is_some())?;
         if plaintext.len() > crate::voice_v2::MAX_SDP_PLAINTEXT
             || std::str::from_utf8(plaintext).is_err()
         {
             return Err(VoiceError::Bounds);
+        }
+        if let Some(outcome) = &outcome {
+            outcome.check_entered(intent, Some(plaintext_tag(plaintext)))?;
         }
         let pair = self
             .confirmations
@@ -142,6 +147,9 @@ impl LocalJoin {
         if let Some(action) = &pair.sdp_seal {
             let binding = action.sdp_binding().ok_or(VoiceError::Unauthorized)?;
             return if binding.belongs_to_intent(intent) && binding.matches_plaintext(plaintext) {
+                if let Some(outcome) = outcome.as_deref_mut() {
+                    outcome.published(action);
+                }
                 Ok(action.clone())
             } else {
                 Err(VoiceError::RetryMismatch)
@@ -253,11 +261,15 @@ impl LocalJoin {
                 .as_ref()
                 .expect("one action")
                 .check_pending_at(own_mono, own_wall)?;
+            intent.admit_publication_profile(outcome.is_some())?;
             origin.publish(|| {
                 issue.publish();
                 let action = self
                     .actions
                     .publish_inactive(inactive.take().expect("one action"));
+                if let Some(outcome) = outcome {
+                    outcome.published(&action);
+                }
                 pair.sdp_seal = Some(action.clone());
                 pair.answer_position = answer.take();
                 published = Some(action);
@@ -287,6 +299,7 @@ impl LocalJoin {
         authority: &Authority<'_>,
         clock: Arc<dyn Clock>,
         final_owner: impl FnOnce(u64, u64) -> Result<(), VoiceError>,
+        outcome: Option<&mut crate::voice_v2::sdp::publication::Writer>,
     ) -> Result<Arc<CryptoAction>, VoiceError> {
         if intent.local_is_low() {
             return Err(VoiceError::Unauthorized);
@@ -299,6 +312,7 @@ impl LocalJoin {
             authority,
             clock,
             final_owner,
+            outcome,
         )
     }
 
@@ -312,6 +326,7 @@ impl LocalJoin {
         authority: &Authority<'_>,
         clock: Arc<dyn Clock>,
         final_owner: impl FnOnce(u64, u64) -> Result<(), VoiceError>,
+        outcome: Option<&mut crate::voice_v2::sdp::publication::Writer>,
     ) -> Result<Arc<CryptoAction>, VoiceError> {
         if !intent.local_is_low() {
             return Err(VoiceError::Unauthorized);
@@ -324,6 +339,7 @@ impl LocalJoin {
             authority,
             clock,
             final_owner,
+            outcome,
         )
     }
 
@@ -339,10 +355,15 @@ impl LocalJoin {
         authority: &Authority<'_>,
         clock: Arc<dyn Clock>,
         final_owner: impl FnOnce(u64, u64) -> Result<(), VoiceError>,
+        mut outcome: Option<&mut crate::voice_v2::sdp::publication::Writer>,
     ) -> Result<Arc<CryptoAction>, VoiceError> {
         use crate::voice_v2::negotiation::Stage;
         use crate::voice_v2::sdp::action::Direction;
         self.owned(authority)?;
+        intent.check_publication_profile(outcome.is_some())?;
+        if let Some(outcome) = &outcome {
+            outcome.check_entered(intent, None)?;
+        }
         let pair = self
             .confirmations
             .pairs
@@ -366,6 +387,9 @@ impl LocalJoin {
         let key = Key::SdpOpen(receipt.token);
         // Exact history lookup does not recreate an input after Open consumed its token.
         if let Some(action) = self.actions.get(key) {
+            if let Some(outcome) = outcome.as_deref_mut() {
+                outcome.published(&action);
+            }
             return Ok(action);
         }
         if pair.retired
@@ -454,12 +478,16 @@ impl LocalJoin {
                 .as_ref()
                 .expect("unpublished original action")
                 .check_pending_at(own_mono, own_wall)?;
+            intent.admit_publication_profile(outcome.is_some())?;
             origin.publish(|| {
                 issue.publish();
-                published = Some(
-                    self.actions
-                        .publish_inactive(inactive.take().expect("one original open")),
-                );
+                let action = self
+                    .actions
+                    .publish_inactive(inactive.take().expect("one original open"));
+                if let Some(outcome) = outcome {
+                    outcome.published(&action);
+                }
+                published = Some(action);
                 retired_input = pair.sdp_input.take();
             })
         })?;

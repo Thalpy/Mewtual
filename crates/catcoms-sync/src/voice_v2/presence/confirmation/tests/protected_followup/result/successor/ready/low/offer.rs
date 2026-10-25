@@ -5,6 +5,7 @@ use crate::voice_v2::crypto_actions::{CryptoAction, CryptoInput, CryptoOperation
 use crate::voice_v2::negotiation::{namespace::ReceiptNamespace, Exchange};
 use crate::voice_v2::sdp::InitialSdpIntent;
 mod answer;
+mod publication;
 mod result;
 
 /// Native packet-boundary fixture only: AEAD/result IPC is intentionally not simulated
@@ -113,6 +114,16 @@ fn offer(
     body: &[u8],
     final_owner: impl FnOnce(u64, u64) -> Result<(), VoiceError>,
 ) -> Result<Arc<CryptoAction>, VoiceError> {
+    offer_with_outcome(p, intent, namespace, body, final_owner, None)
+}
+fn offer_with_outcome(
+    p: &mut ProtectedFixture,
+    intent: &Arc<InitialSdpIntent>,
+    namespace: &mut ReceiptNamespace,
+    body: &[u8],
+    final_owner: impl FnOnce(u64, u64) -> Result<(), VoiceError>,
+    outcome: Option<&mut crate::voice_v2::sdp::publication::Writer>,
+) -> Result<Arc<CryptoAction>, VoiceError> {
     let position = if p.f.low.join.has_initial_sdp_seal(p.f.id) {
         None
     } else {
@@ -130,6 +141,7 @@ fn offer(
         p._runtimes[0].clock(),
         &mut p.f.rng,
         final_owner,
+        outcome,
     )
 }
 

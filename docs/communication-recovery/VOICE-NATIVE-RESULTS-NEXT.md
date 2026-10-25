@@ -1,5 +1,25 @@
 # Next voice milestone: native result recovery
 
+## Original publication outcome continuation (25 October; not activated)
+
+`communication-sdp-publication-outcomes` adds the fixed Root outcome and affine Writer to
+all three final publication tails and to typed Actor queue calls. An intent irreversibly
+selects Recorded or Unrecorded ownership, including cached-history checks. Recorded queue
+calls construct whole paid Command/Pending wrappers before returning a future, and retire
+Writer before Work on refusal/drop. Eager construction is included in the existing4KiB
+RPC contribution. HANDOVER records current tests and their revision boundaries.
+
+Next integrate this one original outcome into native Pending/Live/Drained rows. Precompute
+the validated candidate outside guards, install exactly one slot only after Index uniqueness,
+and include its whole allocation/candidate/writer/history wrappers in the original fixed fee.
+Mark handoff only with a Writer from that SAME installed slot. Recover actual positive
+publication outside native guards even after End/Pair pruning. Negative compaction requires
+the original recorded slot, CLOSED+zero IO, actual worker/observer retirement, a final
+non-publishing outcome check, and actual Root engine/ACK gates when an Action exists.
+Entered Uncertain must stay unresolved; absence of a Pair is never a negative witness.
+Do not reopen storage, issue another action, or allocate speculative duplicate outcome slots.
+Production native handlers/private browser/RTC/fresh rounds/relay remain subsequent work.
+
 ## Current native row continuation (25 October; not enabled)
 
 The draft `communication-sdp-native-rows` checkpoint adds shared-index SDP row identity,

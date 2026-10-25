@@ -57,6 +57,7 @@ fn with_clock(
             &ca(&p.f.high.context, &p.f.high.lease),
             clock,
             |_, _| Ok(()),
+            None,
         )
         .unwrap()
 }
@@ -370,6 +371,7 @@ fn accepted_sdp_delivery_cannot_cross_room_incarnation_epoch_policy_or_session_r
                     &ca(&p.f.high.context, &p.f.high.lease),
                     p._runtimes[1].clock(),
                     |_, _| Ok(()),
+                    None,
                 )
                 .unwrap();
         action.admit_engine(action.engine_bytes()).unwrap();

@@ -97,6 +97,7 @@ fn low_answer_final_refusal_preserves_same_namespace_slot_then_one_exact_token_a
                 &ca(&p.f.low.context, &p.f.low.lease),
                 p._runtimes[0].clock(),
                 |_, _| Ok(()),
+                None,
             )
             .unwrap();
     assert_eq!(open.operation(), CryptoOperation::OpenSdp);

@@ -18,6 +18,48 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         delivery: &Arc<voice_v2::sdp::SdpDelivery>,
         plaintext: &[u8],
     ) -> Result<Arc<voice_v2::crypto_actions::CryptoAction>, VoiceError> {
+        self.prepare_voice_high_sdp_answer_inner(
+            grant, handshake, intent, delivery, plaintext, None,
+        )
+    }
+    /// Record the original invocation independently of Pair teardown. Current grant,
+    /// membership, PC/Ready and final origin checks remain in the same underlying factory.
+    pub fn prepare_voice_high_sdp_answer_recorded(
+        &mut self,
+        grant: &Arc<CallGrant>,
+        handshake: voice_v2::Nonce,
+        intent: &Arc<InitialSdpIntent>,
+        delivery: &Arc<voice_v2::sdp::SdpDelivery>,
+        plaintext: &[u8],
+        outcome: &mut voice_v2::sdp::publication::Writer,
+    ) -> Result<Arc<voice_v2::crypto_actions::CryptoAction>, VoiceError> {
+        outcome.enter(
+            intent,
+            Some(voice_v2::sdp::plaintext_commitment(plaintext)?),
+        )?;
+        let result = self.prepare_voice_high_sdp_answer_inner(
+            grant,
+            handshake,
+            intent,
+            delivery,
+            plaintext,
+            Some(&mut *outcome),
+        );
+        if let Err(reason) = &result {
+            outcome.refused(*reason);
+        }
+        result
+    }
+
+    fn prepare_voice_high_sdp_answer_inner(
+        &mut self,
+        grant: &Arc<CallGrant>,
+        handshake: voice_v2::Nonce,
+        intent: &Arc<InitialSdpIntent>,
+        delivery: &Arc<voice_v2::sdp::SdpDelivery>,
+        plaintext: &[u8],
+        outcome: Option<&mut voice_v2::sdp::publication::Writer>,
+    ) -> Result<Arc<voice_v2::crypto_actions::CryptoAction>, VoiceError> {
         self.validate_current_voice_call_grant(grant)?;
         let context = self.voice_v2_context(grant.scope().room)?;
         let clock = self.voice_v2_clock();
@@ -64,6 +106,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
                     Err(VoiceError::Unauthorized)
                 }
             },
+            outcome,
         )
     }
 
@@ -274,6 +317,43 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         intent: &Arc<InitialSdpIntent>,
         plaintext: &[u8],
     ) -> Result<Arc<voice_v2::crypto_actions::CryptoAction>, VoiceError> {
+        self.prepare_voice_low_sdp_offer_inner(grant, handshake, intent, plaintext, None)
+    }
+    /// Record the original invocation independently of Pair teardown. Current grant,
+    /// membership, PC/Ready and final origin checks remain in the same underlying factory.
+    pub fn prepare_voice_low_sdp_offer_recorded(
+        &mut self,
+        grant: &Arc<CallGrant>,
+        handshake: voice_v2::Nonce,
+        intent: &Arc<InitialSdpIntent>,
+        plaintext: &[u8],
+        outcome: &mut voice_v2::sdp::publication::Writer,
+    ) -> Result<Arc<voice_v2::crypto_actions::CryptoAction>, VoiceError> {
+        outcome.enter(
+            intent,
+            Some(voice_v2::sdp::plaintext_commitment(plaintext)?),
+        )?;
+        let result = self.prepare_voice_low_sdp_offer_inner(
+            grant,
+            handshake,
+            intent,
+            plaintext,
+            Some(&mut *outcome),
+        );
+        if let Err(reason) = &result {
+            outcome.refused(*reason);
+        }
+        result
+    }
+
+    fn prepare_voice_low_sdp_offer_inner(
+        &mut self,
+        grant: &Arc<CallGrant>,
+        handshake: voice_v2::Nonce,
+        intent: &Arc<InitialSdpIntent>,
+        plaintext: &[u8],
+        outcome: Option<&mut voice_v2::sdp::publication::Writer>,
+    ) -> Result<Arc<voice_v2::crypto_actions::CryptoAction>, VoiceError> {
         self.validate_current_voice_call_grant(grant)?;
         let context = self.voice_v2_context(grant.scope().room)?;
         let clock = self.voice_v2_clock();
@@ -317,6 +397,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             clock,
             &mut self.rng,
             |_, _| Ok(()),
+            outcome,
         )
     }
 
@@ -390,6 +471,33 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         handshake: voice_v2::Nonce,
         intent: &Arc<InitialSdpIntent>,
     ) -> Result<Arc<voice_v2::crypto_actions::CryptoAction>, VoiceError> {
+        self.prepare_voice_sdp_open_inner(grant, handshake, intent, None)
+    }
+    /// Record the original invocation independently of Pair teardown. Current grant,
+    /// membership, PC/Ready and final origin checks remain in the same underlying factory.
+    pub fn prepare_voice_sdp_open_recorded(
+        &mut self,
+        grant: &Arc<CallGrant>,
+        handshake: voice_v2::Nonce,
+        intent: &Arc<InitialSdpIntent>,
+        outcome: &mut voice_v2::sdp::publication::Writer,
+    ) -> Result<Arc<voice_v2::crypto_actions::CryptoAction>, VoiceError> {
+        outcome.enter(intent, None)?;
+        let result =
+            self.prepare_voice_sdp_open_inner(grant, handshake, intent, Some(&mut *outcome));
+        if let Err(reason) = &result {
+            outcome.refused(*reason);
+        }
+        result
+    }
+
+    fn prepare_voice_sdp_open_inner(
+        &mut self,
+        grant: &Arc<CallGrant>,
+        handshake: voice_v2::Nonce,
+        intent: &Arc<InitialSdpIntent>,
+        outcome: Option<&mut voice_v2::sdp::publication::Writer>,
+    ) -> Result<Arc<voice_v2::crypto_actions::CryptoAction>, VoiceError> {
         self.validate_current_voice_call_grant(grant)?;
         let context = self.voice_v2_context(grant.scope().room)?;
         let clock = self.voice_v2_clock();
@@ -430,6 +538,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             },
             clock,
             |_, _| Ok(()),
+            outcome,
         )
     }
 }

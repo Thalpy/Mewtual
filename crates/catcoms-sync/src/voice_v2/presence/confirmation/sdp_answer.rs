@@ -21,12 +21,17 @@ impl LocalJoin {
         clock: Arc<dyn Clock>,
         rng: &mut impl CryptoRngCore,
         final_owner: impl FnOnce(u64, u64) -> Result<(), VoiceError>,
+        mut outcome: Option<&mut crate::voice_v2::sdp::publication::Writer>,
     ) -> Result<Arc<CryptoAction>, VoiceError> {
         self.owned(authority)?;
+        intent.check_publication_profile(outcome.is_some())?;
         if plaintext.len() > crate::voice_v2::MAX_SDP_PLAINTEXT
             || std::str::from_utf8(plaintext).is_err()
         {
             return Err(VoiceError::Bounds);
+        }
+        if let Some(outcome) = &outcome {
+            outcome.check_entered(intent, Some(plaintext_tag(plaintext)))?;
         }
         let pair = self
             .confirmations
@@ -60,6 +65,9 @@ impl LocalJoin {
         if let Some(action) = &pair.sdp_seal {
             let binding = action.sdp_binding().ok_or(VoiceError::Unauthorized)?;
             return if binding.belongs_to_intent(intent) && binding.matches_plaintext(plaintext) {
+                if let Some(outcome) = outcome.as_deref_mut() {
+                    outcome.published(action);
+                }
                 Ok(action.clone())
             } else {
                 Err(VoiceError::RetryMismatch)
@@ -170,11 +178,15 @@ impl LocalJoin {
                 .as_ref()
                 .expect("one original Seal")
                 .check_pending_at(own_mono, own_wall)?;
+            intent.admit_publication_profile(outcome.is_some())?;
             origin.publish(|| {
                 issue.publish();
                 let action = self
                     .actions
                     .publish_inactive(inactive.take().expect("one Answer action"));
+                if let Some(outcome) = outcome {
+                    outcome.published(&action);
+                }
                 pair.sdp_seal = Some(action.clone());
                 published = Some(action);
                 publication.take().expect("one Answer draft").publish();

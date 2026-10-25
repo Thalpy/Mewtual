@@ -1,5 +1,30 @@
 # Threat model; client integrity & enforcement boundaries
 
+## Lost SDP publication replies (25 October; production row integration pending)
+
+Actor timeout, waiter loss, Pair pruning and End cannot prove that an action was absent.
+The original fixed outcome retains the actual published Action independently. Its affine
+Writer records success in Root's infallible tail before activation or input destruction;
+ordinary prepublication Err is explicit negative evidence for that invocation. Unwind
+after entry stays uncertain, including after native IO closure. No general attempt refund
+or new publication authority follows from this history.
+
+An irreversible intent profile excludes unrecorded factories once a validated recorded
+candidate selects its path, and excludes later recorded candidates after an unrecorded
+final admission wins. Cached paths check the same profile. Native still must enforce one
+canonical slot per purpose and closed admission, actual worker/IO completion and Root
+engine/ACK gates before using a negative for compaction. The production native integration
+is unfinished; current tests exercise trusted Rust Actor calls under actual TCP PC custody.
+
+Queued recorded calls own Writer within the whole Command before its paid Work. Both
+oneshot halves retain Work. This ordering also holds for never-polled futures, failed or
+cancelled sends and abandoned Actor commands. After destructuring, Actor explicitly drops
+Writer before completing Work. Otherwise a synchronous final IO wake could observe stale
+InFlight forever: Writer itself invokes no callback or later notification under Root locks.
+The outcome retains no native Row/Phase/Copy/publication guard; its actual Action can still
+own separately paid Root input until genuine settlement. Neither fee nor intent owns a
+backedge to the outcome. Browser SDK/RTC and complete native slot graph remain pending.
+
 ## Staged native SDP intake (25 October; no live action/RTC dispatch)
 
 The larger HTTP syntax ceiling is not permission to allocate/read that body. The service

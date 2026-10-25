@@ -66,6 +66,7 @@ fn typed_sdp_result_publication_and_terminal_recovery_never_sample_clock_under_e
                 &ca(&p.f.high.context, &p.f.high.lease),
                 clock.clone(),
                 |_, _| Ok(()),
+                None,
             )
             .unwrap();
     *clock.action.lock().unwrap() = Arc::downgrade(&action);

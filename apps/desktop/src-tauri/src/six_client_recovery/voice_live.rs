@@ -540,6 +540,11 @@ async fn native_v2_pc_intent_unknown_publication_blocks_collection_until_actual_
     confirmation_over_blocked_tcp(true, false, false, false, Some(4)).await;
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn native_v2_pc_intent_recorded_actor_outcomes_retire_before_actual_io_collection() {
+    confirmation_over_blocked_tcp(true, false, false, false, Some(5)).await;
+}
+
 async fn confirmation_over_blocked_tcp(
     framed: bool,
     reject: bool,

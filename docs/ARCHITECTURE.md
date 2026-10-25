@@ -1,5 +1,22 @@
 # Mewtual; Architecture
 
+## Original SDP publication history (25 October; native row integration pending)
+
+A fixed original outcome survives Pair/LocalJoin pruning and lost Actor replies. Its
+affine Writer distinguishes never-entered work, explicit normal refusal, entered uncertainty
+and the actual published Action. LOW Seal, HIGH Seal and Open record that SAME Arc in
+their successful final tail, before packet activation or retired-input destruction.
+An irreversible intent profile separates recorded and unrecorded factories, including
+cached recovery; native still needs one canonical slot per original purpose.
+
+Recorded Actor APIs eagerly construct paid Command/Pending wrappers before returning a
+future. Writer lives in the command before Work; both channel halves retain Work. Explicit
+Actor paths retire Writer before completion, so final native IO notification cannot precede
+the negative observation. The original4KiB RPC inventory counts eager construction and
+actual returned futures. The outcome has no native Row/Phase/Copy/publication backedge;
+its Action retains separately paid Root input until real retirement. Production native row
+installation/reconciliation, SDP HTTP dispatch, private browser SDK and RTC remain open.
+
 ## Concrete paid SDP Actor transport (24 October; endpoint integration pending)
 
 Typed Rust-only SDP commands now carry one original Buffer/Copy into the bounded Actor

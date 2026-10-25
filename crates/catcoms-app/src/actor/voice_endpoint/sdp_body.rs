@@ -35,6 +35,7 @@ pub const VOICE_SDP_RPC_FIXED_BYTES: usize = std::mem::size_of::<ArcAllocation<S
     + std::mem::size_of::<VoiceSdpPending<Arc<CryptoAction>>>()
     + std::mem::size_of::<VoiceSdpPending<CryptoResultReceipt>>()
     + std::mem::size_of::<VoiceSdpPending<catcoms_sync::voice_v2::sdp::SdpOpenResult>>()
+    + super::sdp_ops::RECORDED_CONSTRUCTION_BYTES
     + 1024; // pinned Tokio oneshot allocation, envelope and channel bookkeeping
 const _: () = assert!(VOICE_SDP_RPC_FIXED_BYTES <= VOICE_SDP_RPC_METADATA_BYTES);
 

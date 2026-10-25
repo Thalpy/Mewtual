@@ -70,6 +70,14 @@ fn open(
     intent: &Arc<InitialSdpIntent>,
     final_owner: impl FnOnce(u64, u64) -> Result<(), VoiceError>,
 ) -> Result<Arc<crate::voice_v2::crypto_actions::CryptoAction>, VoiceError> {
+    open_with_outcome(p, intent, final_owner, None)
+}
+fn open_with_outcome(
+    p: &mut ProtectedFixture,
+    intent: &Arc<InitialSdpIntent>,
+    final_owner: impl FnOnce(u64, u64) -> Result<(), VoiceError>,
+    outcome: Option<&mut crate::voice_v2::sdp::publication::Writer>,
+) -> Result<Arc<crate::voice_v2::crypto_actions::CryptoAction>, VoiceError> {
     p.f.high.join.prepare_high_sdp_open(
         &p.high,
         &room(&p.f.high),
@@ -78,6 +86,7 @@ fn open(
         &ca(&p.f.high.context, &p.f.high.lease),
         p._runtimes[1].clock(),
         final_owner,
+        outcome,
     )
 }
 fn input(p: &ProtectedFixture) -> Arc<InboundPacket> {
@@ -86,6 +95,29 @@ fn input(p: &ProtectedFixture) -> Arc<InboundPacket> {
         .as_ref()
         .unwrap()
         .clone()
+}
+
+#[test]
+fn unrecorded_open_chooses_profile_only_at_actual_publication() {
+    use crate::voice_v2::chain::sdp_handoff::NativeRowPurpose;
+    use crate::voice_v2::sdp::publication::Prepared;
+    let (mut p, phase, intent) = fixture();
+    assert_eq!(
+        open(&mut p, &intent, |_, _| Err(VoiceError::Capacity)).err(),
+        Some(VoiceError::Capacity)
+    );
+    assert!(intent.check_publication_profile(false).is_ok());
+    assert!(intent.check_publication_profile(true).is_err());
+    let action = open(&mut p, &intent, |_, _| Ok(())).unwrap();
+    let fee = phase.native_history(NativeRowPurpose::Open).unwrap();
+    assert!(matches!(
+        Prepared::new(intent.clone(), fee, None),
+        Err(VoiceError::Unauthorized)
+    ));
+    let recovered = open(&mut p, &intent, |_, _| Ok(())).unwrap();
+    assert!(Arc::ptr_eq(&action, &recovered));
+    action.settle_engine();
+    phase.close();
 }
 
 #[test]

@@ -1,5 +1,38 @@
 # Mewtual; Handover
 
+## Original SDP publication outcomes (25 October; integration in progress)
+
+`communication-sdp-publication-outcomes` continues from pushed native-row checkpoint
+`9340f643`. Root has a fixed original per-invocation outcome and affine writer, with no
+Phase/Row/native-body/publication backedge. The same original fee stays last. Root records
+its actual Action before packet activation or retired-input destruction in LOW Seal, HIGH
+Seal and Open final tails. Existing-history branches record that same positive evidence.
+New recorded Rust entry points retain the existing current grant/member/PC/Ready/final
+origin checks and capture explicit normal refusals. Typed Actor commands now carry their
+affine writer; production native action handlers and Row installation do not yet use it.
+
+Slot tests distinguish never-entered command loss from entered uncertainty, preserve actual
+IO collection independently of a negative result, prevent a finished old token corrupting
+a retried writer, and fence a close racing writer reservation. Positive history survives
+actual input/join teardown. All624 focused Root voice-v2 tests pass (16.39s), including actual
+LOW/Open/HIGH publication, profile races and cached-mode rejection. The new actual recorded
+Actor/collection-waker blocked-TCP case passed before the final timeout/accounting revision
+(9.56s; exact current rerun pending): unpolled drop, stopped Actor,
+abandoned queued waiter, explicit refusal, synchronous CLOSED+zero observation, and actual
+LOW publication recovered only from its slot after discarded reply and PC/SDK close.
+Formal current Cargo gates, complete native
+Row/slot inventory, final adversarial review and full suites remain pending for this draft.
+
+Each original intent now irreversibly chooses Recorded or Unrecorded publication. Candidate
+fee/purpose validation precedes Recorded selection. Old factories choose Unrecorded only
+after every other final fallible/current check, before their first mutation; cached history
+also rejects the opposite profile. Capacity, candidate loss and End never reset the choice.
+Native still needs one canonical original slot per purpose; this latch alone is not slot
+uniqueness or negative compaction authority. Next inventory and install the complete native
+Row/slot graph, then reconcile outcomes after actual worker/IO closure.
+No production SDP operation, browser SDK/RTC, fresh-round/multi-peer/relay or physical
+acceptance is enabled or completed by this draft. External download resume remains out.
+
 ## Native SDP action rows (25 October; production handlers still unfinished)
 
 `communication-sdp-native-rows` / `target/communication-sdp-native-rows-worktree` continues
@@ -37,12 +70,12 @@ No Unauthorized/closed result is retried. The final read-only review has no rema
 Native Cargo check passes (27.96s); strict Root all-target/all-feature Clippy passes (1m24s).
 The latest strict native all-target Clippy rerun passes (1m13s), including the final
 notification/negative tests. Formatting, ambient-dependency and diff checks pass.
-Full current G Root/native suites remain pending behind the frozen Actor native full suite;
+Full current G Root/native suites remain pending for the integrated SDP continuation;
 these focused checks do not establish a full G pass.
 
-The frozen Actor checkpoint completed its full Root suite:3,557 tests passed, including
-doctests. Its full separate native suite is now building/running. Those results do not
-establish a full G pass. Cargo-deny still fails on inherited RUSTSEC-2026-0387 for
+The frozen Actor checkpoint completed its full Root suite:3,557 tests including doctests,
+and its separate full native suite:819 library plus5 capability integration tests, all
+passing. Those results do not establish a full G pass. Cargo-deny still fails on inherited RUSTSEC-2026-0387 for
 crypto-bigint0.5.5; bans/licenses/sources pass. No dependency or ignore change is included.
 
 Next implement authenticated SDP Input/engine/result/ACK/settlement/Return/delivery handlers,
@@ -121,9 +154,9 @@ initially overflowed the Windows test stack; boxing only its test construction/h
 that without increasing the stack or changing assertions/production payment.
 
 Formal native Cargo check passes (94s); strict Root all-target/all-feature Clippy and strict
-native all-target Clippy pass, as do formatting, ambient and diff checks. The complete frozen Root suite passes:3,557 tests including doctests. The separate
-native full suite is building/running on this same source; earlier full-suite results
-below remain separate. The inherited cargo-deny advisory is not
+native all-target Clippy pass, as do formatting, ambient and diff checks. The complete frozen Root suite passes:3,557 tests including doctests. Its separate full
+native suite also passes:819 library plus5 capability integration tests. Earlier full-suite
+results below remain separate. The inherited cargo-deny advisory is not
 fixed or ignored by this change. No dependency change is included.
 
 No new native SDP opcode/body class or private browser SDP/RTC producer exists yet. Their

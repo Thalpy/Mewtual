@@ -6,9 +6,11 @@ use super::chain::sdp_handoff::{EffectObserver, Phase};
 use super::chain::{EstablishedKeyCustody, OriginalPlanObservation};
 use super::ready::admission::ReadyAdmission;
 use super::*;
+use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::Arc;
 pub(in crate::voice_v2) mod action;
 pub(crate) mod delivery;
+pub mod publication;
 pub use delivery::{SdpDelivery, SdpOpenOutput, SdpOpenResult};
 
 /// Commit exact, bounded Seal input before entering native admission locks. This uses
@@ -29,6 +31,10 @@ pub struct InitialSdpIntent {
     round: SdpRound,
     generation: u64,
     ready: ReadyEvidence,
+    // Irreversible publication profile, shared by Seal and Open. A recorded outcome
+    // cannot prove absence if an unrecorded factory can publish on the same intent.
+    // Candidate loss, Capacity and End must never clear this choice.
+    publication_profile: AtomicU8,
     #[cfg(test)]
     pub(in crate::voice_v2) before_effect_drop: Option<AssertCredit>,
     // Last: the actual metadata credit must outlive Ready's retained lease/watch and
@@ -137,10 +143,51 @@ impl InitialSdpIntent {
             round,
             generation,
             ready,
+            publication_profile: AtomicU8::new(0),
             #[cfg(test)]
             before_effect_drop: None,
             effect,
         }))
+    }
+
+    /// Select recorded ownership only after the candidate's original fee and purpose
+    /// have been validated. This pure latch creates no work or effect authority.
+    pub(in crate::voice_v2) fn select_recorded_publication(&self) -> Result<(), VoiceError> {
+        self.select_publication_profile(2)
+    }
+
+    /// Reject the opposite profile before cached history or preparation. Unselected
+    /// remains available to an old caller until its final admission chooses atomically.
+    pub(in crate::voice_v2) fn check_publication_profile(
+        &self,
+        recorded: bool,
+    ) -> Result<(), VoiceError> {
+        match (recorded, self.publication_profile.load(Ordering::Acquire)) {
+            (true, 2) | (false, 0 | 1) => Ok(()),
+            _ => Err(VoiceError::Unauthorized),
+        }
+    }
+
+    /// Last fallible check before the factory's first final-tail mutation. Recorded
+    /// selection racing an old preparation must defeat that preparation, and vice versa.
+    pub(in crate::voice_v2) fn admit_publication_profile(
+        &self,
+        recorded: bool,
+    ) -> Result<(), VoiceError> {
+        if recorded {
+            self.check_publication_profile(true)
+        } else {
+            self.select_publication_profile(1)
+        }
+    }
+
+    fn select_publication_profile(&self, selected: u8) -> Result<(), VoiceError> {
+        self.publication_profile
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |profile| {
+                (profile == 0 || profile == selected).then_some(selected)
+            })
+            .map(|_| ())
+            .map_err(|_| VoiceError::Unauthorized)
     }
 
     pub(in crate::voice_v2) fn matches_successor(
