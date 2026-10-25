@@ -89,6 +89,9 @@ pub(crate) struct Endpoint {
     // after actual publication. None is preparation state, never a synthetic admission.
     selected: Option<Arc<SelectedHandoffOwner>>,
     callbacks: Callbacks,
+    // An identity-rejection fixture wrapper shares the real affine lease. Retain it
+    // until actual End so its destructor cannot accidentally revoke a positive scenario.
+    media_fixture_grant: Option<Arc<catcoms_sync::voice_v2::CallGrant>>,
 }
 impl Endpoint {
     /// Complete the actual selected-key publication and channel Status before starting a
@@ -178,6 +181,7 @@ impl Endpoint {
             port,
             selected: None,
             callbacks: Callbacks::default(),
+            media_fixture_grant: None,
         };
         let prepared = catch_fixture(async {
         let group = endpoint.state.voice_authority.lock().unwrap().owner(&endpoint.owner).unwrap().binding.scope.group;
@@ -479,6 +483,24 @@ impl Endpoint {
         );
         assert!(sdp_round_terminal(&self.state, &self.selected()));
         assert_eq!(parent.sdk_test_released(), Some(false));
+        {
+            let selected = self.selected();
+            let route = (1..=64)
+                .find_map(|slot| {
+                    self.state
+                        .voice_channels
+                        .route(slot)
+                        .ok()
+                        .filter(|route| Arc::ptr_eq(route.selected(), &selected))
+                })
+                .unwrap();
+            if lose_replies {
+                super::super::media::tests::negative_before_admission(&route, parent);
+            } else {
+                self.media_fixture_grant =
+                    Some(super::super::media::tests::exercise(&self.state, &route, parent).await);
+            }
+        }
     }
 
     pub(crate) async fn close(mut self) -> Result<(), Failure> {

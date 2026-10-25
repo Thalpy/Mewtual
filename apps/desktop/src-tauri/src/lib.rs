@@ -73,8 +73,8 @@ mod studio_exports;
 #[cfg(test)]
 mod voice_activation_tests;
 mod voice_authority;
-// Status bootstrap is app-owned; action transport/live dispatch remain disabled. Remove the
-// temporary unused-item allowance as the live driver takes ownership of those private APIs.
+// Authenticated action dispatch exists, but App V2 call selection is still off. Remove the
+// temporary unused-item allowance as the App driver takes ownership of these private APIs.
 #[allow(dead_code)]
 mod voice_handoff;
 mod voice_join_key;

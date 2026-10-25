@@ -1,5 +1,39 @@
 # Next voice milestone: native result recovery
 
+## 25 October: native media claim exists; connect actual browser ownership
+
+Control28 now binds the original native Session/PC, both registered canonical drained rows,
+live key/SDK and actual Root Open Applied before scoped Actor admission. It retains the
+same paid preparation across refusals and separates historical recovery, currentness,
+negative Close and actual release. Four old negotiation cleanup paths preserve still-live
+Source retries until original expiry/revocation/Close. HANDOVER records focused native race
+evidence, fixed fixture lifecycle findings, measured budgets and pending full gates.
+
+Next use the codecs through the actual retained HTTP/browser channel, then transfer the
+actual private PC into independent paid media custody and clear old callback/negotiation
+graphs. Implement bounded native status/revocation execution that closes and joins that
+PC before media Release. No broker op28 consumer or peer transfer exists yet. These tasks
+precede bounded multiparty/history/Session composition, operational renewal and App/relay/
+combined acceptance. One desktop cannot supply independent physical audio/network proof.
+This supersedes older native-media-command TODOs below; it does not complete live V2.
+
+The current safe native claim remains nested in the old parent PC and correctly blocks
+parent Final/GC until admitted media Release. To retire negotiation while keeping media
+live, move that SAME claim/root into a separately paid finite native media index; do not
+pretend media is Released. Compact status must retain exact original Session, parent row
+generation, Action and proof identity without retaining its strong Row/Phase/Intent graph.
+Keep old Source/effect/Lower payment until original expiry and actual retirement. Shared
+physical Session infrastructure retains its independent payment across per-pair cleanup.
+
+Browser transfer must bind an inert one-shot destination to the SAME original RTC identity.
+Prepay it before construction and native admission. After provider checks and fresh native
+currentness join, transfer the actual peer using only runtime-private synchronous state
+writes: no SDK getter, arbitrary callback, Clock/cancel, await or allocation in that tail.
+Sever the old current closure, which captures channel/chain/phase. Close must not make the
+destination reusable. Explicitly test End at every preparation boundary, failed providers,
+duplicate/foreign destinations, pending SDK work, lost native replies and actual peer close/
+drain. Native currentness alone is not a browser executor or independent media acceptance.
+
 ## 25 October: Root media record/scoped admission and Actor bridge exist
 
 The inert independently paid record and borrowed first-admission tail now exist. HANDOVER

@@ -300,6 +300,9 @@ impl ResolvedRow {
             if !sdk.matches(generation, proof) {
                 return Err(VoiceError::Unauthorized);
             }
+            if !super::media::negotiation_may_close(stored) {
+                return Err(VoiceError::Capacity);
+            }
             // PC-before-Release closes the SAME persisted phase, even when Root's
             // reply is unknown. Release-before-PC makes begin_pc reject released SDK.
             // This shared row fence orders both paths; Released never precedes closure.

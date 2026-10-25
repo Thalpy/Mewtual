@@ -1,5 +1,29 @@
 # Threat model; client integrity & enforcement boundaries
 
+## Native media command and original-Source cleanup (25 October)
+
+Control28 now enforces the previously required native consumer boundary. The fixed header
+and exact closed grammar precede post-AEAD original Session/key/storage/SDK/PC binding.
+The native claim is scoped to the actual Selected/Session allocations. Compact proof bytes
+cannot create it, and historical admission cannot authorize another effect. First media
+publication additionally requires both actual registered canonical drained rows and Root
+Open Applied under native final fences plus the sole Actor's current Group/Policy gate.
+An affine same-byte grant is rejected, not treated as the original Actor participant.
+
+Native preparation exclusion and its fee precede partition. A transient refusal keeps the
+same irreversible child. Close/Release racing attachment remain negative; receipt loss
+cannot reset exclusion or create another media owner. Native callback/physical/task custody
+survives immediate receiver disposal through actual consuming-sender return. Never-admitted
+negative state creates no new SDK debt; admitted media still requires independent release.
+
+Neither local RTC success nor a renderer connected flag may end still-authorized Answer
+Source retries. All four ordinary old PC/SDK/storage/key cleanup paths reject that early
+retirement. The native clock may observe original expiry without rebasing it; actual
+Source/Lower/Actor work remains paid until return. This predicate is not physical media
+revocation execution: op28 HTTP/MAC acceptance, browser affine PC transfer, bounded status
+that closes the real peer, App/relay and physical acceptance remain open. Older Root-only
+consumer TODOs below are superseded by this section, not claims of complete live V2.
+
 ## Detached media admission boundary (25 October; Root only)
 
 An old accepted SDP receipt never grants a live media connection. The new inert media

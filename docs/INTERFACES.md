@@ -1,5 +1,31 @@
 # Mewtual; Interfaces & Hooks Schema
 
+## Original native media Control28/version9 (25 October; browser consumer open)
+
+The authenticated parent header selects the original derive row. The full226B form carries
+version9, mode0Admit/1Resolve/2Close/3Release and the original225B SDP Begin bindings without
+its version byte. The82B compact form carries version9, mode4Current/5Close/6Release, the
+48B original Action and32B media proof. Compact forms require the actual stored claim;
+recomputing public proof bytes creates no claim or permission. All forms are Control-only,
+within the unchanged256B plaintext/272B ciphertext cap. No general Data/SDP fallback exists.
+
+Replies are39B `[9,0,flags,proof32,retireInMsU32]`,2B absent `[9,1]`, or a closed4B version9
+refusal. Flag bits are admitted1/closed2/released4/current8; historical results never set
+current. `retireInMs=0xffffffff` denotes no current native-clock observation, not permission
+to retain a peer indefinitely. Other values describe the ORIGINAL Source expiry remaining,
+including0 after expiry/revocation. A current admitted media connection may outlive that
+negotiation expiry; call/pair/session/policy/epoch and its own Close still revoke it.
+
+The native media producer uses the original4096B task plus original4096B Actor RPC payment,
+apart from the independent8KiB record. Its final admission repeats exact registered Seal/
+Open rows, canonical acceptance/ACK/settlement/localDrained, actual Root Open Applied and
+original live key/SDK under native UI/Coordinator/Route/ordered-row fences. Resolve recovers
+the same claim after a lost reply. Close/Release are irreversible even before attachment;
+Release is distinct from actual worker retirement and, once browser transfer exists, must
+follow that actual PC's drainage. Admitted media blocks premature old negotiation cleanup
+until original expiry, revocation or media Close. Browser codecs exist; the retained broker
+does not yet call op28 or transfer its private PC. The API is not an App activation claim.
+
 ## Root first-media admission (25 October; no native/browser consumer yet)
 
 `InitialSdpIntent::prepare_media` creates one inert, independently funded `SdpMedia` only

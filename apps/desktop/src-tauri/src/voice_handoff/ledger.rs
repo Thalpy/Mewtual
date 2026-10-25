@@ -26,6 +26,10 @@ const ROW_BYTES: usize = 2304;
 mod children;
 mod continuation;
 mod key_session;
+mod media;
+pub(in crate::voice_handoff) use media::{
+    Identity as MediaIdentity, Receipt as MediaReceipt, Rows as MediaRows, Worker as MediaWorker,
+};
 mod ready;
 mod sdk;
 mod sdp;

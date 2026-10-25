@@ -47,6 +47,49 @@ pub(super) struct Drained {
     outcome: Arc<Outcome>,
     funding: Arc<NativeRowFunding>,
 }
+/// Borrow only stable canonical completed-row evidence under the actual registered State.
+/// This creates no observer/lease or Clock callback. A media publisher must also repeat
+/// exact original parent/Session/row/action/phase identity under its final native fence.
+pub(super) struct MediaRow<'a> {
+    pub(super) action: &'a Arc<CryptoAction>,
+    pub(super) funding: &'a Arc<NativeRowFunding>,
+}
+pub(super) fn media_row(
+    state: &State,
+    purpose: NativeRowPurpose,
+) -> Result<MediaRow<'_>, VoiceError> {
+    let Body::SdpDrained(value) = &state.body else {
+        return Err(VoiceError::Capacity);
+    };
+    let action = value.action.as_ref().ok_or(VoiceError::Unauthorized)?;
+    if !state.status.drained
+        || !state.status.engine.settled
+        || !state.status.acknowledged
+        || !value.funding.is_collected()
+        || value.funding.purpose() != purpose
+        || state.status.action != Some((action.serial(), action.version(), action.input_tag()))
+        || !state
+            .status
+            .engine
+            .receipt
+            .as_ref()
+            .is_some_and(|r| match purpose {
+                NativeRowPurpose::Seal => matches!(
+                    r.outcome,
+                    catcoms_sync::voice_v2::crypto_actions::CryptoOutcome::Sealed { .. }
+                ),
+                NativeRowPurpose::Open => {
+                    r.outcome == catcoms_sync::voice_v2::crypto_actions::CryptoOutcome::Opened
+                }
+            })
+    {
+        return Err(VoiceError::Unauthorized);
+    }
+    Ok(MediaRow {
+        action,
+        funding: &value.funding,
+    })
+}
 pub(in crate::voice_handoff) enum Begin {
     Factory(Registration),
     Existing(ResolvedRow),

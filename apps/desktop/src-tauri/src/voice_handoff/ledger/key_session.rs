@@ -248,6 +248,13 @@ impl ResolvedRow {
             if key.receipt != proof {
                 return Err(VoiceError::Unauthorized);
             }
+            if key
+                .sdp
+                .as_ref()
+                .is_some_and(|sdp| !super::media::negotiation_may_close(sdp))
+            {
+                return Err(VoiceError::Capacity);
+            }
             // Cleanup does not take the UI commit guard. Fence the actual original Root
             // binding BEFORE publishing Released, so a parked Ready/SDP actor continuation
             // cannot use an earlier Current snapshot to publish after this release wins.

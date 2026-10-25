@@ -1,5 +1,22 @@
 # Mewtual; Architecture
 
+## Native media obligation after canonical SDP (25 October; browser transfer open)
+
+The authenticated fixed Control service now has a distinct original-PC media obligation.
+Its native preparation/Actor/callback owners are prepaid before allocation and retained
+through actual callback return. A small placeholder precedes the irreversible media split;
+the same detached child is retained across local refusal rather than recreated on retry.
+First effect binds the actual original Session/key/SDK and both registered canonical drained
+rows under ordered native fences, then commits the sole Actor's borrowed Root admission.
+Close/release history remains usable after End without granting fresh effects. Never-admitted
+negative state does not invent a browser debt; admitted media needs its separate release.
+
+Ordinary negotiation cleanup must not cancel active Answer Source retries. The original
+native-clock expiry is observed without renewal, and actual Source/Lower custody stays
+paid until retirement. Native currentness outliving negotiation is not an automatic browser
+PC closer. Browser affine ownership transfer/status execution, op28 HTTP acceptance and
+App activation remain open. This supersedes the older native-media-command TODO below.
+
 ## Root media custody transition (25 October; consumer not wired)
 
 The first-round SDP path can now prepare an independent finite media record and lend one

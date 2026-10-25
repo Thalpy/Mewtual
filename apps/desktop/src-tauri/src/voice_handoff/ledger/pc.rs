@@ -15,6 +15,9 @@ pub(super) struct Claim {
     // Exclusion only. The permanent Claim survives a refused/abandoned local attempt.
     worker: bool,
     intent: Option<Arc<InitialSdpIntent>>,
+    // The small permanent placeholder is covered by the ORIGINAL PC metadata before
+    // independent media capacity exists. It owns no Task/Row/Session/phase backedge.
+    pub(super) media: Option<super::media::Claim>,
 }
 #[derive(Clone, Copy)]
 pub(in crate::voice_handoff) enum State {
@@ -220,6 +223,7 @@ impl ResolvedRow {
                 proof,
                 worker: false,
                 intent: None,
+                media: None,
             });
         }
         storage.pc.as_mut().unwrap().worker = true;
@@ -300,6 +304,9 @@ impl ResolvedRow {
             let _index = self.transition_index()?;
             let mut state = try_lock(&self.row.state)?;
             let storage = storage(self, &state, session, request)?;
+            if !super::media::negotiation_may_close(storage) {
+                return Err(VoiceError::Capacity);
+            }
             let proof = storage.pc.as_ref().map(|pc| pc.proof);
             let close = mutable_storage(&mut state).request_close();
             (proof, close)

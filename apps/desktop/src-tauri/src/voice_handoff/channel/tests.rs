@@ -275,6 +275,7 @@ fn paid_fixed_storage_and_original_control_lane_cover_codec_peak() {
         super::super::sdp_input::layout_bytes(),
         super::super::sdp_engine::layout_bytes(),
         super::super::sdp_delivery::layout_bytes(),
+        super::super::media::layout_bytes(),
         super::super::sdp_result::layout_bytes(),
     ];
     eprintln!(

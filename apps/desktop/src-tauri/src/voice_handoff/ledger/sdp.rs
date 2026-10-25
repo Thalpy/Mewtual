@@ -54,6 +54,11 @@ impl Claim {
             && self.pc.as_ref().is_none_or(|pc| !pc.worker())
             && !self.sdk_preparing
             && self.sdk.as_ref().is_none_or(|sdk| sdk.released())
+            // Negotiation/HTTP drainage cannot prove the independently admitted browser
+            // peer drained. Keep finalization/orphan GC behind its separate obligation.
+            && self.pc.as_ref().is_none_or(|pc| {
+                pc.media.as_ref().is_none_or(super::media::Claim::whole_drained)
+            })
     }
     pub(super) fn request_close(&mut self) -> Option<CloseTicket> {
         self.closed = true;
@@ -327,6 +332,13 @@ impl ResolvedRow {
             let key = claim(self, &state, session, request)?;
             if key.sdp.as_ref().is_none_or(|sdp| sdp.proof != proof) {
                 return Err(VoiceError::Unauthorized);
+            }
+            if key
+                .sdp
+                .as_ref()
+                .is_some_and(|sdp| !super::media::negotiation_may_close(sdp))
+            {
+                return Err(VoiceError::Capacity);
             }
             state
                 .plan_mut()

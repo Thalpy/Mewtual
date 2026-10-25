@@ -1,5 +1,57 @@
 # Mewtual; Handover
 
+## Native media admission/cleanup exists (25 October; browser transfer still open)
+
+This section supersedes the older native-command TODOs below. The authenticated service
+now dispatches Control28/version9 to an original-Session media claim. Full226B commands
+admit/resolve/close/release using the actual original derive/key/storage/SDK/PC obligations;
+compact82B current/close/release commands require the previously stored exact claim. No
+renderer Ready, role, epoch, deadline or media-connected assertion is accepted. Frontend
+codecs share seven golden request vectors, including lossless u64 boundaries. The broker
+does not yet call this command or transfer its actual PC; App V2 selection remains OFF.
+
+The native producer checks both original registered canonical localDrained Seal/Open rows,
+actual Root Open Applied, live original key/SDK and exact Session/Selected identity. First
+publication consumes the borrowed Root step inside UI/Coordinator/Route/Index/ordered-row
+fences and actual Actor Group/Policy admission. Its original4096B native task and4096B Actor
+RPC are separate from the one detached8KiB media child; no global cap grows. Current measured
+test graph is3496/4096B, Actor2060/4096B and Control2176B. Shipping builds expose no fixture
+grant override or sender barrier. The SAME irreversible child survives local capacity refusal.
+
+Historical admission is not fresh currentness. Close/Release before candidate attachment
+are permanent negative state. Admitted media keeps a distinct browser-release obligation;
+never-admitted refusal/Close creates no new SDK debt. Original PC/SDK/storage/key cleanup
+cannot cancel still-authorized Source retries: it waits for the original expiry, actual
+revocation or explicit media Close. A current query observes native time without rebasing
+that expiry. Source/Lower/Actor/callback fees still wait for their actual retirement.
+
+Focused current-source native compilation passes. Five native_browser tests pass36.92s,
+including the real maximum HTTP/WebCrypto/blocked-TCP round with same-byte foreign-grant
+rejection, full mailbox, queued UI refusal, immediate receiving-owner disposal while the
+actual sender is parked, lost-output recovery and all four real early-cleanup refusals.
+The lost-HTTP round also closes a never-admitted media marker and completes actual browser
+SDK/Final cleanup. These media operations are trusted native-scope fixture calls: they do
+NOT establish op28 HTTP/MAC acceptance or browser ownership transfer. The51-test native
+media filter passes0.39s;13 frontend media/frame tests pass. Read-only adversarial re-review
+has no blocker/high/medium. It found a fixture grant-destructor revocation, fixed by retaining
+the affine duplicate through actual End and checking the original lease remains live.
+
+Full X Root validation passes3,675 tests,0failed,24ignored across59 summaries in89m03s.
+Root strict all-target/all-feature Clippy, formatting and ambient checks pass. Final frontend
+validation passes all2,856 tests in70.68s, Svelte0errors/0warnings and build40.58s. Native
+formatting, separate check (30s final rerun) and strict all-target Clippy (1m15s) pass. The
+native full suite started18:35:56UTC and remains pending; record its actual result before
+sign-off. The separate unchanged HTTP checkpoint passed3,650 Root
+tests (24ignored),861 Native/ACL tests and2,851 frontend tests. Do not count those older full
+results as validation of X. Cargo deny still fails the inherited crypto-bigint0.5.5 advisory
+RUSTSEC-2026-0387; bans/licenses/sources pass. No dependency or advisory ignore changed.
+
+Next: actual op28 HTTP/browser recovery, independently paid affine PC transfer and bounded
+native revocation/status that closes the real PC. Then negotiation/history compaction and
+shared physical Session/per-pair composition, operational Ready renewal, App tracks/data
+channels, TURN/member relay and combined acceptance. Physical independent audio/network
+evidence remains unavailable with one desktop. This checkpoint is not live V2 completion.
+
 ## Root media admission and paid Actor bridge (25 October; native/browser consumer open)
 
 `communication-voice-media-custody` now prepares one independent8KiB media record from

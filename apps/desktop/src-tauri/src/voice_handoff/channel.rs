@@ -337,6 +337,13 @@ impl Drop for PhysicalHold {
     }
 }
 impl HeaderWorker {
+    /// Trusted native-scope integration fixture only. Uses the ACTUAL paid/exclusive
+    /// Session position but authenticates/spends no frame. Tests using it must not claim
+    /// HTTP/MAC acceptance; shipping producers obtain their hold only from opened Incoming.
+    #[cfg(test)]
+    pub(super) fn fixture_scope_hold(&self) -> Result<PhysicalHold, Refused> {
+        self.hold()
+    }
     fn hold(&self) -> Result<PhysicalHold, Refused> {
         self.position
             .held

@@ -1,5 +1,27 @@
 # Chat, files and voice implementation evidence
 
+## 25 October: original native media obligation; actual browser transfer still open
+
+The authenticated service has a Control-only original-PC media claim, with full original
+recovery/negative commands and compact existing-claim current/close/release. First admission
+binds exact native Session/Selected/key/SDK and both registered canonical drained rows plus
+Root Open Applied under current native/Actor fences. Same paid preparation survives local
+refusal. Native SDK/PC/storage/key cleanup preserves authorized original Source retries;
+negative never-admitted media state creates no new browser release debt. No caps increase.
+
+Five actual native_browser tests pass36.92s, including native-scope media grant/mailbox/UI/
+lost-output/sender-return and early-cleanup regressions after the real HTTP/WebCrypto/TCP
+round. Media calls themselves are trusted native-scope fixture calls, not op28 HTTP evidence.
+The lost-HTTP case also proves ordinary SDK/Final cleanup after a never-admitted media Close.
+Fifty-one native media-filter tests and13 frontend media/frame codec tests pass. Independent
+read-only review has no unresolved blocker/high/medium. Full Root3,675pass/24ignored and
+frontend2,856pass/Svelte/build pass; separate native gates are still running (see HANDOVER).
+
+Broker op28 interoperability, affine actual PC transfer/independent custody and bounded
+native status that closes the physical peer remain open. App V2 selection remains OFF.
+Operational renewal, supported multiparty/history/Session composition, tracks/TURN/member
+media relay and combined/physical acceptance remain open. One desktop is available.
+
 ## 25 October: actual browser/native round over authenticated HTTP and blocked TCP
 
 The native service now dispatches typed15-27 with dedicated original-row large-body permits

@@ -123,6 +123,11 @@ pub(super) async fn respond(
     route: &Route,
     incoming: Incoming,
 ) -> Result<CompletedReply, Refused> {
+    if incoming.operation() == Operation::Media {
+        return crate::voice_handoff::media::apply(context, route, incoming)
+            .await
+            .map_err(|_| Refused::Body);
+    }
     if incoming.operation().is_sdp() {
         // One explicit typed handler; no decoder fallback or success-as-permission.
         return match incoming.operation() {

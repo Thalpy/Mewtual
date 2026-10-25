@@ -55,6 +55,7 @@ pub(in crate::voice_handoff) enum Operation {
     SdpHistory = 25,
     SdpDelivery = 26,
     SdpResolve = 27,
+    Media = 28,
 }
 impl Operation {
     pub(in crate::voice_handoff) fn is_sdp(self) -> bool {
@@ -104,6 +105,7 @@ impl Operation {
             25 => Ok(Self::SdpHistory),
             26 => Ok(Self::SdpDelivery),
             27 => Ok(Self::SdpResolve),
+            28 => Ok(Self::Media),
             _ => Err(Refused::Header),
         }
     }

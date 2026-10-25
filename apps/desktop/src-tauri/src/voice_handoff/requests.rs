@@ -10,6 +10,7 @@ use catcoms_sync::voice_v2::presence::PairSelector;
 use catcoms_sync::voice_v2::VoiceError;
 use sha2::{Digest, Sha256};
 pub(super) mod key_session;
+pub(super) mod media;
 pub(super) mod pc;
 pub(super) mod sdk;
 pub(super) mod sdp;
@@ -33,6 +34,9 @@ pub(super) fn wire_shape(
     session: [u8; 16],
 ) -> bool {
     use super::channel::BodyKind;
+    if operation == Operation::Media {
+        return media::wire_shape(kind, logical, cipher_bytes);
+    }
     if operation.is_sdp() {
         return sdp_action::wire_shape(operation, kind, logical, cipher_bytes);
     }
