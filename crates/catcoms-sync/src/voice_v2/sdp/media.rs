@@ -13,6 +13,7 @@ use std::sync::Weak;
 /// No process/group limit grows and there is no new ordinary-pool allocation at admission.
 pub(in crate::voice_v2) const BYTES: usize = 8 * 1024;
 const METADATA: usize = 4 * 1024;
+const _: () = assert!(BYTES > METADATA);
 const PREPARED: u8 = 0;
 const ADMITTED: u8 = 1;
 const CLOSED: u8 = 2;
@@ -260,6 +261,5 @@ mod tests {
         // The rest is reserved for the complete native claim/preparation graph. Its actual
         // consumer must add its measured graph before publishing, not silently use4KiB.
         assert!(bytes <= 2048, "fixed media graph {bytes}/2048");
-        assert!(BYTES > METADATA);
     }
 }
