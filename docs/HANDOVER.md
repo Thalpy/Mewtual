@@ -31,8 +31,10 @@ callback returns, for fresh publication and the unused-hook Applied-history path
 maximum TCP case passes11.36s. Final read-only review has no remaining findings.
 
 Final measurements including the test-only barrier: Task4,032/4,096B, App2,052/4,096B,
-physical adapter3,496B and unchanged whole Control12,279/12,288B. Full T Root/native gates
-and native check/Clippy are pending; Root strict all-target/all-feature Clippy passes3m15s.
+physical adapter3,496B and unchanged whole Control12,279/12,288B. Native check (35.12s) and strict native all-target Clippy (2m10s) pass. Root strict
+all-target/all-feature Clippy passes3m15s. The first full Root run stopped without a final
+result after879 passing tests/0failures; a separate background restart is running. Full
+Root/native suites remain serial and pending.
 All2,804 frontend tests, Svelte checks and production build pass (53.24s). Dependency audit still fails the
 inherited crypto-bigint0.5.5 timing advisory RUSTSEC-2026-0387, with no dependency/ignore change.
 The preceding8047d749/5779e23c checkpoint full results below do not substitute for T gates.
