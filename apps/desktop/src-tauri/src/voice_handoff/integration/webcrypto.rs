@@ -57,6 +57,15 @@ struct Metadata {
     from_slot: Option<u8>,
 }
 
+/// Closed test scenarios, never a production mode or renderer effect permission.
+#[derive(Clone, Copy)]
+pub(crate) enum Round {
+    Sdp,
+    LostSdp,
+    Media,
+    LostMedia,
+}
+
 struct Callbacks {
     publication: Option<Metadata>,
     publish_calls: usize,
@@ -92,6 +101,7 @@ pub(crate) struct Endpoint {
     // An identity-rejection fixture wrapper shares the real affine lease. Retain it
     // until actual End so its destructor cannot accidentally revoke a positive scenario.
     media_fixture_grant: Option<Arc<catcoms_sync::voice_v2::CallGrant>>,
+    media_http: bool,
 }
 impl Endpoint {
     /// Complete the actual selected-key publication and channel Status before starting a
@@ -182,6 +192,7 @@ impl Endpoint {
             selected: None,
             callbacks: Callbacks::default(),
             media_fixture_grant: None,
+            media_http: false,
         };
         let prepared = catch_fixture(async {
         let group = endpoint.state.voice_authority.lock().unwrap().owner(&endpoint.owner).unwrap().binding.scope.group;
@@ -469,9 +480,15 @@ impl Endpoint {
 
     /// Full original retained browser round through actual HTTP and native actors. Only
     /// the RTC provider is controlled; no Input/Result/SDP/receipt crosses the control pipe.
-    pub(crate) async fn sdp_round(&mut self, parent: &ledger::ResolvedRow, lose_replies: bool) {
+    pub(crate) async fn sdp_round(&mut self, parent: &ledger::ResolvedRow, round: Round) {
+        let lose_replies = matches!(round, Round::LostSdp);
+        let exercise_media = matches!(round, Round::Media | Round::LostMedia);
         assert!(parent.pc_test_intent().is_some());
-        let name = if lose_replies {
+        let name = if matches!(round, Round::LostMedia) {
+            "rtc-round-media-loss"
+        } else if exercise_media {
+            "rtc-round-media"
+        } else if lose_replies {
             "rtc-round-loss"
         } else {
             "rtc-round"
@@ -494,7 +511,27 @@ impl Endpoint {
                         .filter(|route| Arc::ptr_eq(route.selected(), &selected))
                 })
                 .unwrap();
-            if lose_replies {
+            if exercise_media {
+                // Actual op28 HTTP created the claim. Do not run the trusted-scope native
+                // exerciser here: it would manufacture/close a second acceptance path.
+                let root = parent
+                    .media_test_root()
+                    .expect("actual HTTP28 must retain original media");
+                assert!(root.was_admitted());
+                assert!(root.is_current());
+                let request = parent.media_test_original(route.session().identity());
+                let observed = parent
+                    .media_original_history(
+                        route.session().identity(),
+                        &request,
+                        super::super::requests::media::OriginalKind::Resolve,
+                    )
+                    .unwrap()
+                    .unwrap();
+                assert!(observed.admitted && !observed.closed && !observed.released);
+                assert!(!observed.current, "history is never a current permission");
+                self.media_http = true;
+            } else if lose_replies {
                 super::super::media::tests::negative_before_admission(&route, parent);
             } else {
                 self.media_fixture_grant =
@@ -507,6 +544,13 @@ impl Endpoint {
         let closed =
             catch_fixture(async {
                 crate::end_voice_owner_inner(&self.state, &self.owner).await;
+                if self.media_http {
+                    assert_eq!(
+                        self.step(json!({"tag":"step", "name":"media-revoked"}))
+                            .await,
+                        json!({"kind":"media-stopped"})
+                    );
+                }
                 assert_eq!(
                     self.step(json!({"tag":"step", "name":"close"})).await,
                     json!({"kind":"closed", "bytes":0})
@@ -655,7 +699,10 @@ async fn drive_streams_inner(
     step: Value,
 ) -> (Value, Option<[u8; 32]>) {
     let automatic = step["name"] == "pump";
-    let rtc_round = step["name"] == "rtc-round" || step["name"] == "rtc-round-loss";
+    let rtc_round = matches!(
+        step["name"].as_str(),
+        Some("rtc-round" | "rtc-round-loss" | "rtc-round-media" | "rtc-round-media-loss")
+    );
     write(input, step).await;
     let mut published_executor = None;
     // One callback owner spans the automatic step, rather than returning while a

@@ -1,5 +1,24 @@
 # Threat model; client integrity & enforcement boundaries
 
+## Inactive media driver enforcement (25 October)
+
+The retained browser now actually consumes authenticated Control28 and moves the same
+opaque peer only after a same-claim Current physical finally. A failed in-window media
+check cannot fall back to old Ready. Independent browser payment precedes callbacks and
+native admission. The old graph stays funded; no renderer success cancels Source retries.
+
+Acquisition and refresh have absolute 5s bounds even during hung IO. Early notifications
+rearm the unchanged deadline; invalid/rolled-back clocks close the actual peer. Timer
+replacement fences cancellation/provider reentry. A scheduler that registers then throws
+creates an unresolved debt, discharged only by that exact registration's callback. Old
+callbacks cannot clear a newer debt. Failed cancellation/SDK close/native release retains
+custody and payment. End stops the real peer before asynchronous cleanup waits.
+
+Read-only driver review has no remaining blocker/high/medium. Native acceptance still has
+intermittent failures under diagnosis; the inactive pilot is not activation, independent
+index retirement, multiparty, relay or physical-media evidence. HANDOVER is authoritative
+for current verification limits. Earlier missing-driver statements below are historical.
+
 ## Inactive browser media transfer and freshness leaves (25 October)
 
 The affine RTC leaf binds a module-private destination to the exact original identity;

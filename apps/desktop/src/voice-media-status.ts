@@ -6,6 +6,17 @@ import type { VoiceMediaReceipt } from "./voice-ipc-media.ts";
 export const VOICE_MEDIA_STALE_MS = 5000;
 const refused = (): never => { throw new Error("original media status unavailable"); };
 
+/** Conservative absolute deadline for a fractional monotonic browser clock. Adding
+ * directly can round UP even at ordinary values (3192.004 + 5000), accidentally refusing
+ * healthy peers in a strict delta check. Floor first: ordinary clock magnitudes lose
+ * under one millisecond, never gain time. Huge accepted clocks can round down further;
+ * the final represented-delta check still rejects unsafe upward/non-advancing results. */
+export function voiceMediaDeadline(now: number): number | null {
+  if (!Number.isFinite(now)) return null;
+  const until = Math.floor(now) + VOICE_MEDIA_STALE_MS;
+  return Number.isFinite(until) && until > now && until - now <= VOICE_MEDIA_STALE_MS ? until : null;
+}
+
 export class VoiceMediaStatus {
   readonly #proof: string;
   #closed = false;
@@ -38,10 +49,8 @@ export class VoiceMediaStatus {
   begin(now: number): object {
     this.#observe(now);
     if (this.#closed || this.#flight || this.#completing) return refused();
-    const until = now + VOICE_MEDIA_STALE_MS;
-    // Very large finite clock values can round +5000 UP to a larger interval. Refuse
-    // that seam rather than silently exceeding the promised native-refresh grace.
-    if (!Number.isFinite(until) || until <= now || until - now > VOICE_MEDIA_STALE_MS) { this.close(); return refused(); }
+    const until = voiceMediaDeadline(now);
+    if (until === null) { this.close(); return refused(); }
     const token = Object.freeze({});
     this.#attemptUntil = until; this.#flight = token; return token;
   }

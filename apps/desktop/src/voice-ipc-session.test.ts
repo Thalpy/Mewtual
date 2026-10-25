@@ -1,3 +1,4 @@
+import { encodeVoiceMediaOriginal, encodeVoiceMediaExisting } from "./voice-ipc-media.ts";
 import { encodeVoicePcIntent } from "./voice-ipc-pc.ts";
 import { encodeVoiceSdpPhase } from "./voice-ipc-sdp.ts";
 import { encodeVoiceSdkCustody } from "./voice-ipc-sdk.ts";
@@ -585,6 +586,8 @@ async function framedConfirmation(f: Awaited<ReturnType<typeof fixture>>, finish
  * execute unchanged. Real Root/Finish/Session evidence is covered by the Rust TCP fixture. */
 function custodyReplies(f: Awaited<ReturnType<typeof fixture>>, child: Awaited<ReturnType<typeof framedConfirmation>>) {
   let sdpResponder: Parameters<typeof f.actions>[0] = null;
+  let mediaResponder: typeof sdpResponder = null;
+  let mediaReleased: (() => boolean) | null = null;
   let claims = 0, releases = 0, claimed = false, released = false, loseClaim = false, loseRelease = false, refuse = false;
   let releaseHold: ReturnType<typeof gate> | null = null;
   let keyAdoptions = 0, keyReleases = 0, keyAdopted = false, keyReleased = false, loseAdoption = false;
@@ -607,8 +610,13 @@ function custodyReplies(f: Awaited<ReturnType<typeof fixture>>, child: Awaited<R
     assert.ok(!storagePrepared || storageReleased, "Final cannot overtake storage Release");
     assert.ok(!sdkAdmitted || sdkReleased, "Final cannot overtake SDK Release");
     assert.ok(!pcPrepared || pcClosed, "Final cannot overtake PC Close");
+    assert.ok(!mediaReleased || mediaReleased(), "Final cannot overtake media Release");
   });
   child.parent.transitionReplies(async (header, opened) => {
+    if (header.operation === 28) {
+      assert.ok(mediaResponder, "unexpected private media operation");
+      return mediaResponder(header, opened);
+    }
     if (header.operation >= 15) {
       assert.ok(sdpResponder, "unexpected private SDP operation");
       return sdpResponder(header, opened);
@@ -662,6 +670,7 @@ function custodyReplies(f: Awaited<ReturnType<typeof fixture>>, child: Awaited<R
         request: releasing ? { kind: "release", generation: "1", proof: sdkProof } : { kind: "admit" } }).body);
       if (releasing) {
         assert.ok(!pcPrepared || pcClosed, "PC Close must precede SDK Release");
+        assert.ok(!mediaReleased || mediaReleased(), "media Release precedes old SDK Release");
         sdkReleases++; assert.ok(sdkAdmitted); sdkReleased = true; effectOrder.push("sdk-release");
         if (loseSdkRelease) { loseSdkRelease = false; throw new Error("native SDK Release reply lost"); }
       } else {
@@ -723,6 +732,7 @@ function custodyReplies(f: Awaited<ReturnType<typeof fixture>>, child: Awaited<R
   });
   return { counts: () => ({ claims, releases, claimed, released }),
     sdpReplies(responder: typeof sdpResponder) { sdpResponder = responder; },
+    mediaReplies(responder: typeof sdpResponder, released: () => boolean) { mediaResponder = responder; mediaReleased = released; },
     loseClaim() { loseClaim = true; }, loseRelease() { loseRelease = true; }, refuseClaim() { refuse = true; },
     holdRelease() { releaseHold = gate(); return releaseHold; },
     keyCounts: () => ({ adoptions: keyAdoptions, releases: keyReleases, adopted: keyAdopted, released: keyReleased }),
@@ -3202,4 +3212,104 @@ test("failed original RTC close retains broker payment and withholds native SDK 
   } finally { fails = false; f.f.advance(1000); }
   await closing; assert.equal(done, true); assert.equal(f.f.broker.counts().bytes, 0);
   assert.equal(f.custody.effectCounts().sdkReleases, 1);
+});
+
+
+/** Real framing/AEAD with independent native stand-in; Rust TCP tests separately
+ * establish actual native admission. Assert exact original bindings and release order. */
+async function framedMedia(t: TestContext, low = true) {
+  const f = await framedSdpRound(t, low), sdk = sdpRtcProvider(t, low); await f.round();
+  const original = { parentRow: f.child.parent.row, identity: f.child.parent.identity,
+    handshake: f.child.parent.binding.handshake, key: hash(99), sequence: "1",
+    storage: hash(100), sdkGeneration: "1", sdkProof: hash(101), pcProof: hash(102) };
+  const proof = hash(121), modes: number[] = [];
+  let admitted = false, closed = false, released = false, lost = -1, hold = -1, held = gate();
+  f.f.cleanup(() => held.release());
+  f.custody.mediaReplies(async (header, opened) => {
+    const mode = opened[1]; modes.push(mode); assert.equal(header.logical, original.parentRow);
+    const expected = mode <= 3 ? encodeVoiceMediaOriginal(original, (["admit", "resolve", "close", "release"] as const)[mode])
+      : encodeVoiceMediaExisting(original.parentRow, original.identity, proof, (["current", "close", "release"] as const)[mode - 4]);
+    assert.deepEqual(opened, expected.body);
+    if (mode === 0) admitted = true;
+    if (mode === 2 || mode === 5) closed = true;
+    if (mode === 3 || mode === 6) { assert.ok(closed); assert.equal(sdk.calls.closed, 1); released = true; }
+    if (mode === hold) await held.promise;
+    if (mode === lost) { lost = -1; throw new Error("exact native media reply lost"); }
+    if (!admitted) return { kind: 0, body: new Uint8Array([9, 1]) };
+    const current = mode === 4 && !closed && f.f.owner.isCurrent();
+    const bytes = Buffer.alloc(39); bytes.set([9, 0, 1 | (closed ? 2 : 0) | (released ? 4 : 0) | (current ? 8 : 0)]);
+    Buffer.from(proof, "hex").copy(bytes, 3); bytes.writeUInt32BE(current ? 1000 : 0xffffffff, 35);
+    return { kind: 0, body: bytes };
+  }, () => !admitted || released);
+  return { ...f, sdk, modes, media: () => f.f.broker.completeNativeMediaHandoff(f.f.owner, f.child.channel, f.child.ready.chain),
+    lose(mode: number) { lost = mode; }, hold(mode: number) { hold = mode; held = gate(); return held; } };
+}
+for (const low of [true, false]) test(`framed media adopts original peer once and releases before old SDK/Final; LOW=${low}`, async t => {
+  const f = await framedMedia(t, low), before = f.f.broker.counts().bytes;
+  const first = f.media(); assert.equal(f.media(), first); await first;
+  assert.equal(f.f.broker.counts().bytes, before + 8192); assert.deepEqual(f.modes, [0, 4]);
+  assert.equal(f.sdk.calls.created, 1); assert.equal(f.sdk.calls.closed, 0);
+  await f.media(); assert.deepEqual(f.modes, [0, 4, 4]);
+  f.f.owner.retire(); assert.equal(f.sdk.calls.closed, 1);
+  await f.child.channel.close(); assert.deepEqual(f.modes.slice(-2), [2, 3]);
+  assert.equal(f.f.broker.counts().bytes, 0); assert.equal(f.child.parent.finalCounts().finalAcknowledged, true);
+});
+for (const mode of [0, 4]) test(`framed End closes actual peer before held media mode${mode} returns`, async t => {
+  const f = await framedMedia(t), held = f.hold(mode), pending = f.media();
+  await until(() => f.modes.includes(mode)); const paid = f.f.broker.counts().bytes; let finished = false;
+  f.f.owner.retire(); assert.equal(f.sdk.calls.closed, 1);
+  const closing = f.child.channel.close().then(() => { finished = true; });
+  await new Promise<void>(yes => setImmediate(yes));
+  assert.equal(finished, false); assert.equal(f.f.broker.counts().bytes, paid); assert.equal(f.custody.effectCounts().sdkReleases, 0);
+  held.release(); await pending; await closing;
+  assert.equal(f.f.broker.counts().bytes, 0); assert.deepEqual(f.modes.slice(-2), [2, 3]);
+});
+test("framed lost media admission recovers original claim without a second peer or payment", async t => {
+  const f = await framedMedia(t); f.lose(0); const paid = f.f.broker.counts().bytes;
+  await f.media(); assert.deepEqual(f.modes, [0]);
+  await f.media(); assert.deepEqual(f.modes, [0, 1, 4]);
+  assert.equal(f.sdk.calls.created, 1); assert.equal(f.sdk.calls.closed, 0); assert.equal(f.f.broker.counts().bytes, paid + 8192);
+  f.f.owner.retire(); await f.child.channel.close(); assert.equal(f.f.broker.counts().bytes, 0);
+});
+test("HMR refuses funded broker28 without waking its media-less cleanup shape", async t => {
+  const f = await framedMedia(t), previous = Object.create(f.f.broker);
+  Object.defineProperty(previous, "version", { value: 28 }); let wakes = 0; previous.retrySelectedJoinKeys = () => { wakes++; };
+  const key = Symbol.for("mewtual.voice.crypto-broker.v2"), host = { [key]: previous };
+  assert.throws(() => windowVoiceCryptoBroker({ async admit() { return ""; }, async settle() {}, async commitInbound() {} }, host, real), /reload required/);
+  assert.equal(wakes, 0); assert.equal(host[key], previous); f.f.owner.retire(); await f.child.channel.close();
+});
+
+
+test("framed expired media closes actual peer while Current IO stays entered", async t => {
+  const f = await framedMedia(t); await f.media(); const held = f.hold(4);
+  f.f.advance(1000); await until(() => f.modes.filter(mode => mode === 4).length === 2);
+  f.f.advance(4000); assert.equal(f.sdk.calls.closed, 1);
+  f.f.owner.retire(); // Release the separate selected-join key too.
+  const paid = f.f.broker.counts().bytes; let finished = false;
+  const closing = f.child.channel.close().then(() => { finished = true; });
+  await new Promise<void>(yes => setImmediate(yes)); assert.equal(finished, false); assert.equal(f.f.broker.counts().bytes, paid);
+  held.release(); await closing; assert.equal(f.sdk.calls.closed, 1); assert.equal(f.f.broker.counts().bytes, 0);
+});
+
+test("framed lost media Release keeps old SDK/storage until exact released recovery", async t => {
+  const f = await framedMedia(t); await f.media(); f.lose(3); f.f.owner.retire(); const closing = f.child.channel.close();
+  await until(() => f.modes.includes(3) && f.f.timers().delays.includes(1000));
+  assert.equal(f.custody.effectCounts().sdkReleases, 0); assert.equal(f.custody.effectCounts().storageReleases, 0);
+  assert.ok(f.f.broker.counts().bytes >= 64 * 1024 + 8192);
+  f.f.advance(1000); await closing; assert.deepEqual(f.modes.slice(-3), [2, 3, 2]); assert.equal(f.f.broker.counts().bytes, 0);
+});
+
+test("media prepayment refuses before native or SDK callbacks under full group pressure", async t => {
+  const f = await framedMedia(t), before = f.f.broker.counts().bytes;
+  // Model unrelated prepaid work by using the actual broker charge/refund seam. No
+  // capacity constants or admission rules are changed; the fee is retained until released.
+  const pool = f.f.broker as unknown as { charge(owner: typeof f.f.owner, bytes: number): void; refund(owner: typeof f.f.owner, bytes: number): void };
+  let paid = 0;
+  try {
+    for (;;) { try { pool.charge(f.f.owner, 8192); paid += 8192; } catch { break; } }
+    assert.ok(paid > 0); assert.throws(f.media, /capacity/);
+    assert.deepEqual(f.modes, []); assert.equal(f.sdk.calls.closed, 0); assert.equal(f.sdk.calls.created, 1);
+  } finally { pool.refund(f.f.owner, paid); }
+  assert.equal(f.f.broker.counts().bytes, before); await f.media(); assert.deepEqual(f.modes, [0, 4]);
+  f.f.owner.retire(); await f.child.channel.close(); assert.equal(f.f.broker.counts().bytes, 0);
 });

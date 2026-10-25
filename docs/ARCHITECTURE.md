@@ -1,5 +1,19 @@
 # Mewtual; Architecture
 
+## Inactive one-pair media driver (25 October)
+
+Broker29 connects the original completed RTC round to authenticated Control28. A separate
+8 KiB browser record owns one acquisition/status flight, monitor and opaque destination.
+Fresh Current authorizes only synchronous same-peer transfer; historical admission and
+old Ready cannot substitute for it. The driver closes the real peer on End or freshness
+failure before waiting for IO, then joins all custody before native release/refund.
+
+The pilot deliberately retains its original channel/negotiation graph until End. Native
+media remains nested in the old parent record. Independent indexing, legitimate old-source
+retirement and shared Session/multiparty composition remain prerequisites for activation.
+HANDOVER records the passing tests and intermittent native acceptance failures still under
+diagnosis. The older leaf-only TODOs below are superseded only for this inactive pilot.
+
 ## Browser affine RTC leaf and passive freshness (25 October; inactive)
 
 An inert same-original destination can take the exact completed RTC peer once, after

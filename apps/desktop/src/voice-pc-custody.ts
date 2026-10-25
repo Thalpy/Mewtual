@@ -15,6 +15,12 @@ export class VoicePcCustody {
 
   get needsClose(): boolean { return this.attempted && !this.released; }
   get nativeClosed(): boolean { return !this.needsClose; }
+  /** Original lookup metadata for media recovery/cleanup after Ready expiry. This is
+   * not currentness or permission; the retained media path obtains fresh native Current. */
+  originalProof(): string {
+    if (!this.identity || this.identity.generation !== "1") throw new Error("original voice PC identity unavailable");
+    return this.identity.proof;
+  }
   /** Latch BEFORE the first cryptographic/transport callback. A lost admission reply
    * still requires Close on the original obligations, even with no returned identity. */
   begin(): void {

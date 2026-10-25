@@ -1,5 +1,20 @@
 # Mewtual; Interfaces & Hooks Schema
 
+## Broker29 original media handoff (25 October; inactive pilot)
+
+`completeNativeMediaHandoff(owner, channel, chain)` requires the exact retained original
+channel/chain and completed two-direction RTC round. Its `Promise<void>` joins one attempt;
+it is not a success receipt. Repetition uses the same prepaid 8 KiB driver and native claim.
+Control28 codecs and wire sizes are unchanged. Broker28 HMR state is refused without waking
+or replacing its funded pool because its cleanup shape lacks the new media obligation.
+
+The driver first recovers/adopts the original native claim, then obtains compact Current.
+Its transfer window gives an authoritative true/false result to the original RTC predicate;
+only outside that window may ordinary old Ready checks apply. Freshness remains bounded
+by request-start+5s and the first acquisition by its original 5s deadline. Close/Release
+must join before old SDK/parent cleanup. No new public PC, connected flag, Source completion
+or multiparty contract is exposed. Native acceptance failures remain open in HANDOVER.
+
 ## Inactive browser media custody leaves (25 October)
 
 `VoiceSdpRtcOwner::prepareMediaDestination` creates at most one inert same-original

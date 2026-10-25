@@ -14,6 +14,8 @@ import { decodeVoiceTransition, encodeVoiceTransition, type VoiceTransitionReque
 import { decodeVoiceKeySession, encodeVoiceKeySession, type VoiceKeySessionRequest } from "./voice-ipc-key-session.ts";
 import { VoiceKeyCustody } from "./voice-key-custody.ts";
 import { VoiceSdpRtcOwner } from "./voice-sdp-rtc.ts";
+import { VoiceNativeMedia, VOICE_NATIVE_MEDIA_BYTES } from "./voice-native-media.ts";
+import { decodeVoiceMedia } from "./voice-ipc-media.ts";
 import { VoiceSdpSdkCustody, VOICE_SDP_SDK_BYTES } from "./voice-sdp-sdk-custody.ts";
 import { decodeVoiceSdpPhase, encodeVoiceSdpPhase, type VoiceSdpPhaseRequest } from "./voice-ipc-sdp.ts";
 import { decodeVoiceSdkCustody, encodeVoiceSdkCustody, type VoiceSdkRequest } from "./voice-ipc-sdk.ts";
@@ -443,7 +445,7 @@ function context(label: string, transcript: Uint8Array): Uint8Array<ArrayBuffer>
  * unsettled work. Revoking an owner never frees a running promise; only its real settlement does.
  * A derive pipeline uses one permit for sequential import/ECDH/HKDF work, never parallel calls. */
 export class VoiceCryptoBroker {
-  readonly version = 28;
+  readonly version = 29;
   readonly subtle: SubtleCrypto;
   private readonly native: VoiceCryptoAdmission;
   private active = 0;
@@ -599,7 +601,7 @@ export class VoiceCryptoBroker {
     }
     this.charge(owner, IPC_SETUP_BYTES + IPC_CONTROL_BYTES + IPC_WORK_BYTES);
     this.ipcPositions++; selected.channelUsers++;
-    let setupPaid = true, position = true, historyPaid = true;
+    let setupPaid = true, position = true, historyPaid = true, mediaPaid = false;
     const channel = new RetainedIpcChannel(selected, native, transport, this.subtle, this.ipcClock, {
       begin: () => { this.active++; this.ipcActive++; },
       end: () => { this.active--; this.ipcActive--; this.pump(); },
@@ -628,6 +630,13 @@ export class VoiceCryptoBroker {
       },
       finishInput: chain => this.retainFinishCustody(chain),
       transitionUpdated: chain => { this.drainChain(chain); if (this.chainCurrent(chain)) this.armChain(chain); },
+      mediaPrepared: () => {
+        if (mediaPaid) throw new Error("original media payment already exists");
+        this.charge(owner, VOICE_NATIVE_MEDIA_BYTES); mediaPaid = true;
+      },
+      mediaReleased: () => {
+        if (mediaPaid) { mediaPaid = false; this.refund(owner, VOICE_NATIVE_MEDIA_BYTES); }
+      },
     });
     this.ipcChannels.set(owner.token, channel);
     try { channel.observe(); }
@@ -715,6 +724,16 @@ export class VoiceCryptoBroker {
     if (!channel || channel.handle !== handle || !channel.owns(owner) || !chain || chain.owner !== owner ||
         chain.channel !== channel || !chain.sdp || chain.sdpRows !== 2) throw new Error("original native RTC custody required");
     return channel.startRtc(chain, true);
+  }
+
+  /** Complete the original one-peer native media handoff. A void result joins an
+   * acquisition attempt; it exposes no peer/receipt permission. Original graph remains
+   * paid until End; supported multiparty/negotiation retirement are separate work. */
+  completeNativeMediaHandoff(owner: VoiceCryptoOwner, handle: VoiceIpcChannel, plan: VoiceCryptoChain): Promise<void> {
+    const channel = this.ipcChannels.get(owner.token), chain = this.chains.get(plan);
+    if (!channel || channel.handle !== handle || !channel.owns(owner) || !chain || chain.owner !== owner ||
+        chain.channel !== channel || !chain.sdp || chain.sdpRows !== 2) throw new Error("original native media custody required");
+    return channel.startMedia(chain);
   }
 
   /** Attempt the original native PC intent only after separate SDK/storage custody.
@@ -1821,6 +1840,7 @@ type IpcCustody = Readonly<{
   finishInput(chain: BrowserChain): void;
   transitionUpdated(chain: BrowserChain): void;
   sdpUnlinked(chain: BrowserChain, phase: VoiceSdpSdkCustody): void;
+  mediaPrepared(): void; mediaReleased(): void;
 }>;
 function ipcBytes(hex: string): Uint8Array<ArrayBuffer> {
   const bytes = new Uint8Array(hex.length / 2);
@@ -1856,6 +1876,7 @@ class RetainedIpcChannel {
   private rtcFlight: Promise<void> | null = null;
   private rtcCreating = false;
   private sdpRtc: VoiceSdpRtcOwner | null = null;
+  private media: VoiceNativeMedia | null = null;
   private sdpRoundStage: "offer" | "answer" | "done" = "offer";
   private sdpAction: VoiceSdpActionOwner | null = null;
   private sdpCreating = false;
@@ -2393,8 +2414,13 @@ class RetainedIpcChannel {
     this.rtcCreating = true; this.actionBusy = true; this.beginActivity();
     const flight = Promise.resolve().then(async () => {
       const pc = phase.pc.cryptoBinding(this.clock.now());
-      const current = () => {
+      const current: () => boolean = () => {
         if (!this.live()) return false;
+        // This synchronous window exists ONLY after actual op28 Current has physically
+        // joined for this exact peer. It permits media adoption after old Ready expiry;
+        // it never authorizes another crypto action or retires the original Source.
+        const mediaCurrent = this.media?.transferCurrent(rtc);
+        if (mediaCurrent !== null && mediaCurrent !== undefined) return mediaCurrent;
         try {
           const next = phase.pc.cryptoBinding(this.clock.now());
           return !this.retired && !this.drained && this.linked === chain && chain.sdp === phase &&
@@ -2450,6 +2476,30 @@ class RetainedIpcChannel {
       this.sdpAction = null;
       return true;
     } finally { action = null; } // No first Action graph across the next SDK/Begin await.
+  }
+
+  startMedia(chain: BrowserChain): Promise<void> {
+    if (this.linked !== chain) throw new Error("original native media chain required");
+    if (this.media) return this.media.start();
+    if (this.linked !== chain || !chain.sdp || !this.sdpRtc || this.sdpRoundStage !== "done" ||
+        this.rtcFlight || this.sdpFlight || this.actionBusy || this.retired || this.drained) throw new Error("completed original RTC round required");
+    this.custody.mediaPrepared(); // BEFORE construction, Clock, SDK or native callbacks.
+    try {
+      const phase = chain.sdp, storage = phase.storage, sdk = phase.sdk;
+      if (!storage || !sdk) throw new Error("original media storage unavailable");
+      const original = { ...this.sdpIdentity(chain), storage: storage.proof,
+        sdkGeneration: sdk.generation, sdkProof: sdk.proof, pcProof: phase.pc.originalProof() };
+      const media = new VoiceNativeMedia(original, this.sdpRtc, {
+        clock: this.clock, live: () => this.live(),
+        begin: () => this.beginActivity(), end: () => this.endActivity(),
+        stopped: () => this.retire(), refund: () => this.custody.mediaReleased(),
+        request: (encoded, cleanup) => this.execution.run(() => this.framed(
+          encoded.operation, encoded.kind, encoded.logical, encoded.body, cleanup,
+          (kind, length) => kind === 0 && (length === 18 || length === 20 || length === 55), decodeVoiceMedia)),
+      });
+      this.media = media; // Publish before start can invoke any provider/Clock callback.
+      return media.start();
+    } catch (error) { if (!this.media) this.custody.mediaReleased(); throw error; }
   }
 
   /** One separately paid crypto owner; no awaited SDK holds the native-RPC lane. Only
@@ -2726,6 +2776,7 @@ class RetainedIpcChannel {
   private check(): void { if (!this.live()) throw new Error("voice channel closed"); }
   private retire(): void {
     if (!this.retired) { this.retired = true; this.controller?.abort(); }
+    this.media?.close(); // Real peer closes BEFORE any join of abort-resistant IO.
     this.sdpRtc?.close();
     this.sdpAction?.close();
     void this.workPump?.close();
@@ -2804,6 +2855,13 @@ class RetainedIpcChannel {
         // OUTSIDE the lane that its exact recovery/release calls require.
         if (this.rtcFlight) await this.rtcFlight;
         if (this.sdpFlight) await this.sdpFlight;
+        // Media debt blocks native parent Final. Finish it BEFORE unseen-parent/old SDK
+        // cleanup, and never own SharedIpcExecution while joining SDK or current work.
+        while (this.media) {
+          const observed = this.wakeIdentity;
+          try { await this.media.cleanup(); this.media = null; break; }
+          catch { await this.waitCleanupWake(observed); }
+        }
         // A failed SDK close is not actual drainage. Keep the original paid peer and
         // retry cleanup; never release native SDK custody merely because End was seen.
         while (this.sdpRtc) {
@@ -3256,7 +3314,7 @@ export function windowVoiceCryptoBroker(
   const host = window as Record<symbol, unknown>;
   const previous = host[BROKER] as VoiceCryptoBroker | undefined;
   if (previous) {
-    if (previous.version !== 28 || typeof previous.completeNativeSdpRtcRound !== "function" || typeof previous.prepareNativeSdpRtc !== "function" || typeof previous.prepareNativeSdpCrypto !== "function" || typeof previous.prepareNativePcIntent !== "function" || typeof previous.prepareNativeSdpHandoff !== "function" || typeof previous.observeNativeWork !== "function" || typeof previous.returnNativeDerivation !== "function" || typeof previous.nativeConfirmationFromChannel !== "function" || typeof previous.nativeDerivationFromChannel !== "function" || typeof previous.recoverChannelHistory !== "function" || typeof previous.prepareChainFromChannel !== "function" || typeof previous.nativeChannel !== "function" || typeof previous.run !== "function" || typeof previous.selectJoinKey !== "function" || typeof previous.retrySelectedJoinKeys !== "function" ||
+    if (previous.version !== 29 || typeof previous.completeNativeMediaHandoff !== "function" || typeof previous.completeNativeSdpRtcRound !== "function" || typeof previous.prepareNativeSdpRtc !== "function" || typeof previous.prepareNativeSdpCrypto !== "function" || typeof previous.prepareNativePcIntent !== "function" || typeof previous.prepareNativeSdpHandoff !== "function" || typeof previous.observeNativeWork !== "function" || typeof previous.returnNativeDerivation !== "function" || typeof previous.nativeConfirmationFromChannel !== "function" || typeof previous.nativeDerivationFromChannel !== "function" || typeof previous.recoverChannelHistory !== "function" || typeof previous.prepareChainFromChannel !== "function" || typeof previous.nativeChannel !== "function" || typeof previous.run !== "function" || typeof previous.selectJoinKey !== "function" || typeof previous.retrySelectedJoinKeys !== "function" ||
         typeof previous.registerProtectedConfirmation !== "function" ||
         typeof previous.registerProtectedDerivation !== "function" || typeof previous.registerConfirmation !== "function" || typeof previous.createPair !== "function") {
       throw new Error("voice crypto broker version changed; reload required");

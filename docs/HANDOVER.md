@@ -1,5 +1,44 @@
 # Mewtual; Handover
 
+## One-pair browser/native media driver implemented; acceptance still open (25 October)
+
+The retained Broker29 now prepays a separate 8 KiB browser record before preparing a
+media destination or submitting Control28. It recovers the original admitted claim after
+a lost reply and requires a fresh authenticated Current, including its physical finally,
+before moving the SAME peer. During that transfer, a refused media check cannot fall back
+to old Ready. The old source/negotiation graph remains paid until End in this pilot.
+
+One monitor enforces the original 5s acquisition window and request-start freshness while
+IO is pending. End/expiry closes the actual peer before joining abort-resistant IO. Media
+Close/Release precedes old SDK/storage/key/parent cleanup. Fees remain held through actual
+SDK, IO, timer and callback return. Review found and fixed early-timer, cancellation
+reentry, transfer fallback and schedule-throw races. An uncertain schedule without a
+returned handle retains its payment until the SAME callback arrives; if no callback was
+registered, that debt is conservatively retained rather than guessed absent.
+
+Focused coverage currently passes 242 framed-session tests and 19 driver tests. The full
+frontend run passed 2,911 tests before the final two scheduler regressions and the fractional-clock corrections; its final rerun,
+static/build and full backend validation are pending. Read-only implementation re-review
+has no remaining blocker/high/medium in the driver. Earlier full Root/native results below
+are previous-checkpoint evidence, not full validation of these new native fixtures.
+
+The actual native fixtures now cover HTTP28 adoption and lost authenticated positive
+Admit/Current/Release observations after A-B-C TCP Offer/Answer with A-C forbidden and B
+joining no call. Native End must close the actual controlled RTC peer while the browser
+owner remains live. Seven native/browser scenarios passed in 78.29s. Subsequent repetitions
+also exposed broker-idle and media-acquisition failures. Three deterministic regressions
+reproduced the acquisition defect: ordinary fractional time3192.004 made a strict
+`now+5000` delta slightly exceed5000, refusing before Current. Both acquisition/status now
+use floor-first deadlines with the same hard5s maximum. All three failed before and pass
+after. Read-only re-review has no blocker/high/medium. The earlier broker-idle symptom
+remains independently unattributed. Fixed-size step/activity/mode/flag/timing diagnostics
+remain present; no timeout was raised. Final native validation is still required.
+
+App V2 remains OFF. Independent native indexing, old negotiation retirement, shared
+Session/multi-peer composition, operational renewal, App tracks, TURN/member media relay
+and combined/physical acceptance remain unfinished. This is controlled-RTC handoff evidence,
+not real WebRTC/audio/network acceptance. Only one desktop is available.
+
 ## Browser ownership/cleanup checkpoint validated (25 October)
 
 The browser runtime at4d68fa00 plus native layout repair6c7f547e has completed its checks.

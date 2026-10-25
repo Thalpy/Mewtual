@@ -1,5 +1,28 @@
 # Chat, files and voice implementation evidence
 
+## 25 October: actual one-pair handoff; fractional-clock defect corrected
+
+The browser now invokes HTTP28 after the original actual HTTP/WebCrypto/TCP Offer/Answer
+round. It prepays its own record, recovers the exact claim, transfers the same opaque peer
+after fresh Current and closes on native End without requiring browser owner retirement.
+Native tests independently inspect Root admission and original historical claim state;
+they skip the trusted native exerciser in this mode. Lost-reply injection counts only
+actual AEAD-authenticated positive native mode0/4/3 observations, never Capacity replies.
+
+Seven native/browser scenarios passed78.29s. Repetition exposed a first-acquisition defect:
+ordinary fractional clocks can round `(now+5000)-now` slightly above5000. A strict safety
+check then refused a healthy first attempt or lost-Admit recovery before Current. Three
+regressions fail before and pass after floor-first absolute deadlines. The maximum remains
+5s; no timeout/cap grows. The separate earlier broker-idle failure is not independently
+attributed. Bounded step/activity/mode/flag/timing diagnostics remain; full final validation
+is required. Passing repetitions alone are not the correction evidence.
+
+242 framed tests and 19 driver tests pass. The full frontend run before the final two timer
+regressions passed 2,911; final full validation is pending. HANDOVER records review/fixes and
+the previous Root/native checkpoint separately. No complete live-V2/media acceptance claim
+is made. Independent index/retirement, shared Session/multiparty, renewal, App tracks,
+TURN/member relay and combined/physical evidence remain open; App V2 selection is OFF.
+
 ## 25 October: corrected checkpoint final validation
 
 The corrected native source passes862 unit+5 ACL tests,0failed/ignored. Both original

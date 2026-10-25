@@ -2,6 +2,7 @@
 //! pair state is injected. This test proves signalling custody, not audible WebRTC media.
 use super::*;
 use crate::voice_authority::SelectedHandoffOwner;
+use crate::voice_handoff::integration::webcrypto::Round;
 use catcoms_sync::voice_v2::presence::{PairSelector, VoicePairConfirmation};
 use catcoms_sync::voice_v2::{Body, CallGrant};
 
@@ -34,7 +35,7 @@ async fn native_webcrypto_cycle(
     end_before_input: bool,
     automatic_browser: bool,
     exercise_ready: bool,
-    exercise_sdp: Option<bool>,
+    exercise_sdp: Option<Round>,
 ) {
     use crate::voice_handoff::integration::webcrypto::{catch_fixture, Endpoint, Failure};
     async fn observation(
@@ -193,8 +194,8 @@ async fn native_webcrypto_cycle(
                 // Original PC identity now traverses real HTTP14 and the retained broker.
                 // This still creates no RTCPeerConnection or SDP/ICE/media effect.
                 tokio::join!(a.pc_custody(&ap), c.pc_custody(&cp));
-                if let Some(lose_replies) = exercise_sdp {
-                    tokio::join!(a.sdp_round(&ap, lose_replies), c.sdp_round(&cp, lose_replies));
+                if let Some(round) = exercise_sdp {
+                    tokio::join!(a.sdp_round(&ap, round), c.sdp_round(&cp, round));
                 }
             }
             scenario.rules.assert_graph();
@@ -883,7 +884,7 @@ async fn native_v2_sdp_maximum_seal_and_open_cross_actual_native_result_and_tcp_
 /// RTC provider proves ordering/composition only, not real SDP/ICE/media or WebView policy.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn native_browser_maximum_offer_answer_round_uses_real_http_and_blocked_tcp_bridge() {
-    native_webcrypto_cycle(false, true, true, Some(false)).await;
+    native_webcrypto_cycle(false, true, true, Some(Round::Sdp)).await;
 }
 
 /// Each endpoint loses both actual native Result replies, the first completed action24
@@ -891,5 +892,21 @@ async fn native_browser_maximum_offer_answer_round_uses_real_http_and_blocked_tc
 /// browser keys/PC/actions must recover without repeating either controlled RTC method.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn native_browser_original_round_retries_lost_http_results_applied_and_return() {
-    native_webcrypto_cycle(false, true, true, Some(true)).await;
+    native_webcrypto_cycle(false, true, true, Some(Round::LostSdp)).await;
+}
+
+/// Actual original PC transfers through authenticated HTTP28 after canonical maximum
+/// Offer/Answer over A-B-C TCP (A-C forbidden, B joins no call). Controlled RTC only;
+/// this proves native/browser ownership and End, not physical media/audio connectivity.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn native_browser_media_adopts_same_original_peer_through_real_http_and_blocked_tcp() {
+    native_webcrypto_cycle(false, true, true, Some(Round::Media)).await;
+}
+
+/// Lose only authenticated positive op28 Admit/Current/Release observations. Exact
+/// recovery must not recreate PC/payment; native End closes the actual controlled SDK
+/// peer while its browser owner remains live, then all original obligations collect.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn native_browser_media_recovers_lost_authenticated_admit_current_release_and_native_end() {
+    native_webcrypto_cycle(false, true, true, Some(Round::LostMedia)).await;
 }

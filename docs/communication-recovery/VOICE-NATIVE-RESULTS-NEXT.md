@@ -1,5 +1,22 @@
 # Next voice milestone: native result recovery
 
+## Current work: one-pair consumer exists; resolve acceptance before retirement (25 October)
+
+Broker29 now uses actual op28, independent browser payment, fresh-current same-peer
+transfer, an armed expiry monitor and ordered MediaRelease before old SDK/parent cleanup.
+Driver re-review has no blocker/high/medium; HANDOVER records the timer/reentry fixes.
+Native HTTP/blocked-TCP tests cover normal and lost authenticated media observations with
+controlled RTC, including native End while browser owner stays live. A reproduced
+fractional-clock acquisition rejection is corrected with floor-first deadlines that keep
+the5s maximum; three before/after regressions pass. The earlier idle symptom remains
+independently unattributed. Final native/frontend/static/build gates remain pending.
+
+Next detach the SAME native claim into a finite independently paid media index, preserve
+original Source/Lower work until legitimate retirement, then retire old graph/history while
+keeping shared physical Session/key infrastructure paid. Add per-pair composition before
+App activation/tracks, media relay and combined acceptance. One desktop cannot establish
+independent physical audio/network acceptance. Older missing-pilot TODOs below are historical.
+
 ## Final checkpoint status (25 October)
 
 Root3,675pass/24ignored, corrected native867pass, frontend2,887pass/Svelte/build and the

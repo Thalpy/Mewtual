@@ -75,3 +75,14 @@ test("finite clock precision cannot round the promised freshness grace upward", 
   status.finish(status.begin(now), live(), now);
   assert.ok(status.deadline! - now <= VOICE_MEDIA_STALE_MS, "rounding down is conservative");
 });
+
+
+test("ordinary fractional browser clocks do not turn rounding into an admission failure", () => {
+  const now = 3192.004;
+  assert.ok((now + VOICE_MEDIA_STALE_MS) - now > VOICE_MEDIA_STALE_MS, "pin the real floating-point counterexample");
+  const status = new VoiceMediaStatus(proof);
+  status.finish(status.begin(now), live(), now + 1);
+  assert.ok(status.deadline! - now <= VOICE_MEDIA_STALE_MS);
+  assert.ok(status.deadline! - now >= VOICE_MEDIA_STALE_MS - 1);
+  assert.equal(status.currentAt(now + 4999), true); assert.equal(status.currentAt(8192), false);
+});

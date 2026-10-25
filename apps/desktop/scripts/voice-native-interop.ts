@@ -16,7 +16,7 @@ import { decodeVoiceWorkSnapshot } from "../src/voice-ipc-work.ts";
 
 const MAX_FRAME = 4096;
 const scratch = Buffer.alloc(MAX_FRAME + 4);
-let used = 0, stepRunning = false;
+let used = 0, stepRunning = false, currentStep = "none";
 let callback: { resolve(value: unknown): void; reject(reason: Error): void } | null = null;
 let broker: VoiceCryptoBroker, owner: VoiceCryptoOwner, key: VoiceJoinKeyHandle;
 let channel: VoiceIpcChannel, chain: VoiceCryptoChain;
@@ -27,6 +27,11 @@ let availability: ReturnType<typeof setInterval> | null = null;
 // A closed native refusal code is metadata; every other crypto result contributes length.
 const stages: string[] = [];
 let capacityRefusals = 0, providerCalls = 0;
+let loseMediaReplies = false, mediaRequestMode = -1;
+const lostMediaModes = new Set<number>();
+const mediaEvents: string[] = [];
+let mediaStarted = 0;
+function mediaEvent(value: string): void { if (mediaEvents.length < 6) mediaEvents.push(value + "@" + Math.floor(performance.now() - mediaStarted)); }
 // Test control only: Rust stops a long-lived automatic cycle after independently observing
 // actual native receipts/ACKs/Returns. No row, role, input or key is passed into this step.
 let stopPump: (() => void) | null = null;
@@ -36,11 +41,25 @@ const provider = new Proxy(webcrypto.subtle as unknown as SubtleCrypto, { get(ta
   if (typeof value !== "function") return value;
   return async (...args: unknown[]) => {
     providerCalls++;
+    if (name === "encrypt" && args[2] instanceof Uint8Array) {
+      const body = args[2];
+      if (body[0] === 9 && (body.byteLength === 226 || body.byteLength === 82)) { mediaRequestMode = body[1]; mediaEvent(">" + mediaRequestMode); }
+    }
     const result = await Reflect.apply(value, target, args);
     let detail = String(name);
     if (result instanceof ArrayBuffer) {
       detail += ":" + result.byteLength;
       const view = new Uint8Array(result);
+      if (name === "decrypt" && view.length === 39 && view[0] === 9 && view[1] === 0) { stage(`media:${mediaRequestMode}/${view[2]}`); mediaEvent("<" + view[2]); }
+      if (loseMediaReplies && name === "decrypt" && view.length === 39 && view[0] === 9 && view[1] === 0 &&
+          !lostMediaModes.has(mediaRequestMode) &&
+          (((mediaRequestMode === 0 || mediaRequestMode === 4) && view[2] === 9) || (mediaRequestMode === 3 && view[2] === 7))) {
+        // Test-only lost observation AFTER actual HTTP+AEAD authentication. Count only
+        // exact positive native replies, never Capacity. Retain no plaintext/proof;
+        // native independently checks canonical admission and eventual collection.
+        lostMediaModes.add(mediaRequestMode); view.fill(0);
+        throw new Error("test-only authenticated media observation lost");
+      }
       if (name === "decrypt" && view.length === 3 && view[0] === 1 && view[1] === 3) {
         detail += "/refused-" + view[2];
         if (view[2] === 7) capacityRefusals++;
@@ -87,6 +106,7 @@ const native: VoiceIpcNative = Object.freeze({
 });
 const realFetch = globalThis.fetch;
 let loseSdpReplies = false;
+let mediaPeerCalls: { closed: number } | null = null;
 const replyLoss = new NativeSdpReplyLoss();
 // Node does not supply a WebView Origin. This is the sole fetch shim: actual HTTP,
 // response stream, MAC/AEAD and BYOB reader remain untouched. This proves no WebView policy.
@@ -124,7 +144,11 @@ const transport: typeof fetch = async (url, init) => {
 async function idle(): Promise<void> {
   const deadline = performance.now() + 5000;
   while (broker.counts().active !== 0) {
-    assert.ok(performance.now() < deadline, "actual broker did not drain");
+    if (performance.now() >= deadline) {
+      // Fixed flags only: identify active ownership without exposing rows/keys/SDP.
+      const retained = (broker as unknown as { ipcChannels: Map<string, { activity: number; driving: boolean; retired: boolean; sdpRoundStage: string }> }).ipcChannels.get(owner.token);
+      throw new Error(`idle:${currentStep} a${broker.counts().active} c${retained?.activity} d${Number(retained?.driving)} r${Number(retained?.retired)} s${retained?.sdpRoundStage}`);
+    }
     await new Promise<void>(resolve => setImmediate(resolve));
   }
 }
@@ -133,7 +157,7 @@ type Step =
   | { tag: "step"; name: "derive"; purpose: VoiceIpcPurpose }
   | { tag: "step"; name: "sdp-custody"; purpose: VoiceIpcPurpose; row: string; identity: VoiceIpcActionIdentity }
   | { tag: "step"; name: "child"; request: VoiceIpcConfirmationPurpose["request"] }
-  | { tag: "step"; name: "pump" | "close" | "wedge" | "pc-custody" | "rtc-round" | "rtc-round-loss" };
+  | { tag: "step"; name: "pump" | "close" | "wedge" | "pc-custody" | "rtc-round" | "rtc-round-loss" | "rtc-round-media" | "rtc-round-media-loss" | "media-revoked" };
 async function step(value: Step): Promise<unknown> {
   switch (value.name) {
     case "pump": {
@@ -296,7 +320,9 @@ async function step(value: Step): Promise<unknown> {
       return { kind: "pc-attempted" };
     }
     case "rtc-round":
-    case "rtc-round-loss": {
+    case "rtc-round-loss":
+    case "rtc-round-media":
+    case "rtc-round-media-loss": {
       loseSdpReplies = value.name === "rtc-round-loss";
       // Controlled SDK ONLY: this validates real native/HTTP/WebCrypto/TCP composition,
       // not a WebView, SDP parser, ICE connectivity, media tracks or audible WebRTC.
@@ -331,15 +357,47 @@ async function step(value: Step): Promise<unknown> {
         }
         assert.deepEqual(calls, { created: 1, local: 1, remote: 1, closed: 0 });
         assert.equal(broker.counts().bytes, before);
+        if (value.name === "rtc-round-media" || value.name === "rtc-round-media-loss") {
+          loseMediaReplies = value.name === "rtc-round-media-loss"; mediaStarted = performance.now();
+          // Read-only test observation of the actual retained driver, never a new app
+          // authority/connected flag. Rust independently observes original admission.
+          const retained = (broker as unknown as { ipcChannels: Map<string, { media: { adopted: boolean; closed: boolean } | null }> }).ipcChannels.get(owner.token)!;
+          const deadline = performance.now() + 5000;
+          do {
+            assert.ok(performance.now() < deadline, `media c${Number(retained.media?.closed)} sdk${calls.closed} lost${[...lostMediaModes].join("/")} ${mediaEvents.join(",")}`);
+            await broker.completeNativeMediaHandoff(owner, channel, chain); await idle();
+            if (!retained.media?.adopted) await new Promise<void>(yes => setTimeout(yes, 25));
+          } while (!retained.media?.adopted);
+          assert.equal(retained.media.closed, false);
+          assert.equal(broker.counts().bytes, before + 8192);
+          assert.equal(calls.created, 1); assert.equal(calls.closed, 0);
+          mediaPeerCalls = calls;
+          assert.deepEqual([...lostMediaModes], loseMediaReplies ? [0, 4] : []);
+        }
         const lost = replyLoss.count;
         assert.equal(lost, loseSdpReplies ? 4 : 0);
         return { kind: "sdp-round", peers: calls.created, local: calls.local, remote: calls.remote, lost };
       } finally { globalThis.RTCPeerConnection = previous; loseSdpReplies = false; }
     }
+    case "media-revoked": {
+      assert.ok(mediaPeerCalls);
+      const deadline = performance.now() + 6000;
+      // Native End already happened; leave browser owner live. Only the actual media
+      // refresh/expiry driver may close the SDK peer in this step.
+      while (mediaPeerCalls.closed === 0) {
+        assert.ok(performance.now() < deadline, "native revocation did not close actual peer");
+        await new Promise<void>(yes => setTimeout(yes, 25));
+      }
+      assert.equal(mediaPeerCalls.closed, 1);
+      return { kind: "media-stopped" };
+    }
     case "close": {
       owner.retire(); broker.retrySelectedJoinKeys();
+      if (mediaPeerCalls) assert.equal(mediaPeerCalls.closed, 1, "End synchronously closes original adopted peer");
       await channel.close(); await idle();
       assert.equal(broker.counts().bytes, 0, "actual original browser owners must collect");
+      if (mediaPeerCalls) assert.deepEqual([...lostMediaModes], loseMediaReplies ? [0, 4, 3] : []);
+      loseMediaReplies = false;
       return { kind: "closed", bytes: broker.counts().bytes };
     }
     case "wedge": {
@@ -364,7 +422,7 @@ function accept(value: unknown): void {
     else pending.reject(new Error("native metadata callback refused"));
   } else {
     assert.equal(frame.tag, "step"); assert.equal(stepRunning, false, "control steps are serialized");
-    stepRunning = true;
+    stepRunning = true; currentStep = String(frame.name);
     void step(frame as Step).then(value => {
       stepRunning = false; send({ tag: "done", value });
     }, error => {
