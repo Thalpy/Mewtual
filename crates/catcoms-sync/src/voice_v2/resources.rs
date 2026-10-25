@@ -584,6 +584,102 @@ impl Reservation {
         state.credit.release_retained_bytes(unused);
     }
 
+    /// Move one portion of unused ordinary backing into an independent reservation.
+    /// No process/group bytes are charged or refunded by this transfer. The child can
+    /// keep lending its own finite allowance after the parent closes, without retaining
+    /// the parent, its Phase/Exchange, or any of their custody graphs.
+    ///
+    /// This is capacity only: it proves neither native authority nor SDK/IO drainage.
+    /// The child's complete reservation/Arc allocation is kept non-lendable within
+    /// `bytes` until its last strong child/loan owner drops. Any surviving Weak index
+    /// must independently pay its pinned allocation and remove that Weak before its own
+    /// fee drops. The trusted consumer must additionally prepay
+    /// its own record/continuation metadata before lending payload capacity, prepare this
+    /// child outside final native/Group/Policy guards, and retain the SAME child through
+    /// retryable admission refusals. Dropping it refunds the pool, not its parent.
+    /// Only one partition is permitted; neither resulting backing may be partitioned
+    /// again. Ordinary borrow/return/close and global work-slot limits are unchanged.
+    pub fn partition_retained(
+        self: &Arc<Self>,
+        group: [u8; 32],
+        bytes: usize,
+    ) -> Result<Arc<Reservation>, VoiceError> {
+        self.partition_retained_inner(
+            group,
+            bytes,
+            #[cfg(test)]
+            || {},
+        )
+    }
+
+    fn partition_retained_inner(
+        self: &Arc<Self>,
+        group: [u8; 32],
+        bytes: usize,
+        #[cfg(test)] after_split: impl FnOnce(),
+    ) -> Result<Arc<Reservation>, VoiceError> {
+        if group != self.group {
+            return Err(VoiceError::Scope);
+        }
+        let credit = {
+            let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+            if state.closed || bytes > state.available {
+                return Err(VoiceError::Capacity);
+            }
+            // A loan or custody-backed split would retain its producer. Refuse that
+            // composition explicitly rather than silently returning a cyclic child if
+            // another reservation constructor is introduced later.
+            if !Arc::ptr_eq(&state.credit.pool, &self.pool) || state.credit.group != group {
+                return Err(VoiceError::Scope);
+            }
+            if state.credit.reservation.is_some()
+                || state.credit.lane.is_some()
+                || state.credit.custody.is_some()
+            {
+                return Err(VoiceError::Bounds);
+            }
+            if bytes <= Self::partition_metadata_bytes() {
+                return Err(VoiceError::Bounds);
+            }
+            // split_retained checks full/repeated splits before changing anything.
+            // Only the actual ordinary backing is moved; no pool headroom is required.
+            let credit = state.credit.split_retained(bytes)?;
+            state.available -= bytes;
+            credit
+        };
+        // Test-only pause AFTER parent mutation/unlock and BEFORE allocating the child.
+        // The actual local plain Credit, not a cloned observer, owns all moved bytes.
+        #[cfg(test)]
+        after_split();
+        // The split plain credit pays this allocation before it exists. No reference to
+        // `self` is stored, even indirectly through a loan, lane, or shared keepalive.
+        Ok(Arc::new(Reservation {
+            pool: self.pool.clone(),
+            group,
+            state: Mutex::new(ReservationState {
+                credit,
+                available: bytes - Self::partition_metadata_bytes(),
+                closed: false,
+            }),
+        }))
+    }
+
+    /// Whole pinned Rust Arc allocation for a standalone reservation, excluding allocator
+    /// slack/RSS. This retained slice is never lent or refunded by close; the backing credit
+    /// pays it until the last strong child/loan owner is destroyed. A surviving Weak index
+    /// needs independent payment/removal discipline. Re-audit on a toolchain change.
+    pub fn partition_metadata_bytes() -> usize {
+        // ArcInner is repr(C): two atomic usize counters, followed by the value. Include
+        // value alignment and final tail padding instead of assuming a usize alignment.
+        let header = std::alloc::Layout::new::<[std::sync::atomic::AtomicUsize; 2]>();
+        header
+            .extend(std::alloc::Layout::new::<Self>())
+            .expect("fixed reservation layout")
+            .0
+            .pad_to_align()
+            .size()
+    }
+
     fn return_loan(&self, bytes: usize) {
         let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
         if state.closed {
@@ -1489,5 +1585,323 @@ mod tests {
         drop(challenges);
         drop(replacement);
         assert_eq!(pool.counts(), (0, 0));
+    }
+}
+
+#[cfg(test)]
+mod partition_tests {
+    use super::*;
+
+    #[test]
+    fn independent_child_survives_parent_close_under_full_process_pressure() {
+        let pool = Arc::new(Resources::default());
+        let parent = pool.reserve([1; 32], 64 * 1024).unwrap();
+        let parent_weak = Arc::downgrade(&parent);
+        let mut pressure = vec![pool
+            .charge([1; 32], GROUP_BYTES - 64 * 1024, ResourceKind::Retained)
+            .unwrap()];
+        for group in 2..=4 {
+            pressure.push(
+                pool.charge([group; 32], GROUP_BYTES, ResourceKind::Retained)
+                    .unwrap(),
+            );
+        }
+        assert_eq!(pool.counts(), (PROCESS_BYTES, 0));
+        assert!(pool.charge([1; 32], 1, ResourceKind::Retained).is_err());
+        let child = parent.partition_retained([1; 32], 8192).unwrap();
+        assert_eq!(
+            pool.counts(),
+            (PROCESS_BYTES, 0),
+            "partition has no charge/refund gap"
+        );
+        assert!(child.state.lock().unwrap().credit.reservation.is_none());
+        parent.close();
+        drop(parent);
+        assert!(parent_weak.upgrade().is_none());
+        pressure.push(
+            pool.charge([1; 32], 64 * 1024 - 8192, ResourceKind::Retained)
+                .unwrap(),
+        );
+        assert_eq!(pool.counts(), (PROCESS_BYTES, 0));
+        let work = child.charge([1; 32], 512, ResourceKind::Forward).unwrap();
+        let weak = Arc::downgrade(&child);
+        child.close();
+        drop(child);
+        assert!(
+            weak.upgrade().is_some(),
+            "actual child loan retains only its own budget"
+        );
+        assert_eq!(
+            pool.counts(),
+            (
+                PROCESS_BYTES - 8192 + 512 + Reservation::partition_metadata_bytes(),
+                0
+            )
+        );
+        drop(work);
+        assert!(weak.upgrade().is_none());
+        drop(pressure);
+        assert_eq!(pool.counts(), (0, 0));
+    }
+
+    #[test]
+    fn child_drop_refunds_pool_once_without_restoring_parent_allowance() {
+        let pool = Arc::new(Resources::default());
+        let parent = pool.reserve([1; 32], 4096).unwrap();
+        let loan = parent.charge([1; 32], 1024, ResourceKind::Crypto).unwrap();
+        let child = parent.partition_retained([1; 32], 2048).unwrap();
+        assert_eq!(parent.state.lock().unwrap().available, 1024);
+        drop(child);
+        assert_eq!(pool.counts(), (2048, 1));
+        assert_eq!(parent.state.lock().unwrap().available, 1024);
+        parent.close();
+        assert_eq!(pool.counts(), (1024, 1));
+        drop(loan);
+        assert_eq!(pool.counts(), (0, 0));
+        drop(parent);
+        assert_eq!(pool.counts(), (0, 0));
+    }
+
+    #[test]
+    fn partition_refusals_leave_original_backing_and_pool_unchanged() {
+        let pool = Arc::new(Resources::default());
+        let parent = pool.reserve([1; 32], 4096).unwrap();
+        for (group, bytes, expected) in [
+            ([2; 32], 1024, VoiceError::Scope),
+            ([1; 32], 0, VoiceError::Bounds),
+            ([1; 32], 4096, VoiceError::Bounds),
+            ([1; 32], 4097, VoiceError::Capacity),
+        ] {
+            assert_eq!(
+                parent.partition_retained(group, bytes).err(),
+                Some(expected)
+            );
+            assert_eq!(parent.state.lock().unwrap().available, 4096);
+            assert_eq!(pool.counts(), (4096, 0));
+        }
+        let loan = parent
+            .charge([1; 32], 3072, ResourceKind::Retained)
+            .unwrap();
+        assert_eq!(
+            parent.partition_retained([1; 32], 2048).err(),
+            Some(VoiceError::Capacity)
+        );
+        assert_eq!(parent.state.lock().unwrap().available, 1024);
+        drop(loan);
+        let child = parent.partition_retained([1; 32], 1024).unwrap();
+        assert_eq!(
+            parent.partition_retained([1; 32], 512).err(),
+            Some(VoiceError::Bounds)
+        );
+        assert_eq!(
+            child.partition_retained([1; 32], 512).err(),
+            Some(VoiceError::Bounds)
+        );
+        assert_eq!(parent.state.lock().unwrap().available, 3072);
+        parent.close();
+        assert_eq!(
+            parent.partition_retained([1; 32], 512).err(),
+            Some(VoiceError::Capacity)
+        );
+        child.close();
+        drop((child, parent));
+        assert_eq!(pool.counts(), (0, 0));
+    }
+
+    #[test]
+    fn detached_budget_cannot_bypass_global_work_slots_or_pool_identity() {
+        let pool = Arc::new(Resources::default());
+        let other = Arc::new(Resources::default());
+        let parent = pool.reserve([1; 32], 4096).unwrap();
+        let child = parent.partition_retained([1; 32], 2048).unwrap();
+        let lanes: Vec<_> = (0..4)
+            .map(|_| pool.reserve_forward_lane([1; 32]).unwrap())
+            .collect();
+        assert_eq!(
+            child.charge([1; 32], 1, ResourceKind::Forward).err(),
+            Some(VoiceError::Capacity)
+        );
+        assert_eq!(
+            child.state.lock().unwrap().available,
+            2048 - Reservation::partition_metadata_bytes()
+        );
+        assert_eq!(
+            ByteBudget::Reserved(child.clone())
+                .charge(&other, [1; 32], 1, ResourceKind::Retained)
+                .err(),
+            Some(VoiceError::Scope)
+        );
+        assert_eq!(other.counts(), (0, 0));
+        drop(lanes);
+        let work = child.charge([1; 32], 1, ResourceKind::Forward).unwrap();
+        parent.close();
+        child.close();
+        drop((work, child, parent));
+        assert_eq!(pool.counts(), (0, 0));
+    }
+
+    #[test]
+    fn child_header_is_not_lendable_and_remains_paid_until_last_child_owner() {
+        let pool = Arc::new(Resources::default());
+        let parent = pool.reserve([1; 32], 4096).unwrap();
+        let child = parent.partition_retained([1; 32], 2048).unwrap();
+        let metadata = Reservation::partition_metadata_bytes();
+        let work = child
+            .charge([1; 32], 2048 - metadata, ResourceKind::Retained)
+            .unwrap();
+        assert_eq!(
+            child.charge([1; 32], 1, ResourceKind::Retained).err(),
+            Some(VoiceError::Capacity)
+        );
+        parent.close();
+        drop(parent);
+        child.close();
+        assert_eq!(pool.counts(), (2048, 0));
+        drop(work);
+        assert_eq!(pool.counts(), (metadata, 0));
+        assert_eq!(
+            child.charge([1; 32], 1, ResourceKind::Retained).err(),
+            Some(VoiceError::Capacity)
+        );
+        drop(child);
+        assert_eq!(pool.counts(), (0, 0));
+    }
+
+    #[test]
+    fn partition_refuses_borrowed_or_producer_backed_backing_without_detaching_it() {
+        let pool = Arc::new(Resources::default());
+        let original = pool.reserve([1; 32], 4096).unwrap();
+        let loan = original
+            .charge([1; 32], 4096, ResourceKind::Retained)
+            .unwrap();
+        // Simulate a future constructor accidentally accepting a loan. The public
+        // partition must fail closed instead of retaining that old producer graph.
+        let borrowed = Arc::new(Reservation {
+            pool: pool.clone(),
+            group: [1; 32],
+            state: Mutex::new(ReservationState {
+                credit: loan,
+                available: 4096,
+                closed: false,
+            }),
+        });
+        assert_eq!(
+            borrowed.partition_retained([1; 32], 1024).err(),
+            Some(VoiceError::Bounds)
+        );
+        assert_eq!(borrowed.state.lock().unwrap().available, 4096);
+        drop(borrowed);
+        original.close();
+        drop(original);
+        assert_eq!(pool.counts(), (0, 0));
+        let parent = pool.reserve([1; 32], 4096).unwrap();
+        parent.state.lock().unwrap().credit.custody = Some(Arc::new(()));
+        assert_eq!(
+            parent.partition_retained([1; 32], 1024).err(),
+            Some(VoiceError::Bounds)
+        );
+        assert_eq!(parent.state.lock().unwrap().available, 4096);
+        assert_eq!(pool.counts(), (4096, 0));
+        drop(parent);
+        assert_eq!(pool.counts(), (0, 0));
+    }
+
+    #[test]
+    fn split_credit_stays_paid_when_parent_closes_before_child_allocation() {
+        let pool = Arc::new(Resources::default());
+        let parent = pool.reserve([1; 32], 4096).unwrap();
+        let entered = Arc::new(std::sync::Barrier::new(2));
+        let release = Arc::new(std::sync::Barrier::new(2));
+        let thread = {
+            let parent = parent.clone();
+            let entered = entered.clone();
+            let release = release.clone();
+            std::thread::spawn(move || {
+                parent
+                    .partition_retained_inner([1; 32], 1024, || {
+                        entered.wait();
+                        release.wait();
+                    })
+                    .unwrap()
+            })
+        };
+        entered.wait();
+        assert_eq!(parent.state.lock().unwrap().available, 3072);
+        parent.close();
+        assert_eq!(pool.counts(), (1024, 0));
+        // The actual split owner still pays the child allowance before an Arc exists.
+        let pressure = pool
+            .charge([1; 32], GROUP_BYTES - 1024, ResourceKind::Retained)
+            .unwrap();
+        assert!(pool.charge([1; 32], 1, ResourceKind::Retained).is_err());
+        release.wait();
+        let child = thread.join().unwrap();
+        assert_eq!(pool.counts(), (GROUP_BYTES, 0));
+        let loan = child.charge([1; 32], 128, ResourceKind::Forward).unwrap();
+        child.close();
+        drop((loan, child, parent, pressure));
+        assert_eq!(pool.counts(), (0, 0));
+    }
+
+    #[test]
+    fn unwind_after_split_returns_only_transferred_bytes_and_never_restores_parent() {
+        let pool = Arc::new(Resources::default());
+        let parent = pool.reserve([1; 32], 4096).unwrap();
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            parent.partition_retained_inner([1; 32], 1024, || {
+                panic!("after actual split, before child allocation")
+            })
+        }));
+        assert!(result.is_err());
+        assert_eq!(pool.counts(), (3072, 0));
+        assert_eq!(parent.state.lock().unwrap().available, 3072);
+        assert_eq!(
+            parent.partition_retained([1; 32], 512).err(),
+            Some(VoiceError::Bounds)
+        );
+        parent.close();
+        drop(parent);
+        assert_eq!(pool.counts(), (0, 0));
+    }
+
+    #[test]
+    fn partition_and_close_have_one_serial_order_without_a_refund_gap() {
+        for partition_first in [false, true] {
+            let pool = Arc::new(Resources::default());
+            let parent = pool.reserve([1; 32], 4096).unwrap();
+            let start = Arc::new(std::sync::Barrier::new(2));
+            let finish = Arc::new(std::sync::Barrier::new(2));
+            let thread = {
+                let parent = parent.clone();
+                let start = start.clone();
+                let finish = finish.clone();
+                std::thread::spawn(move || {
+                    start.wait();
+                    let child = parent.partition_retained([1; 32], 1024);
+                    finish.wait();
+                    child
+                })
+            };
+            if partition_first {
+                start.wait();
+                finish.wait();
+                parent.close();
+            } else {
+                parent.close();
+                start.wait();
+                finish.wait();
+            }
+            let child = thread.join().unwrap();
+            if partition_first {
+                let child = child.unwrap();
+                assert_eq!(pool.counts(), (1024, 0));
+                child.close();
+                drop(child);
+            } else {
+                assert_eq!(child.err(), Some(VoiceError::Capacity));
+            }
+            drop(parent);
+            assert_eq!(pool.counts(), (0, 0));
+        }
     }
 }

@@ -1,5 +1,19 @@
 # Threat model; client integrity & enforcement boundaries
 
+## Detached prepaid capacity (25 October; consumer not activated)
+
+Partitioning checks actual ordinary backing and refuses any reservation/lane/custody backedge.
+It conserves pool/group charges and cannot reset the original one-shot split or global work
+slots. The child retains non-lendable metadata through its last strong owner; surviving Weak
+indexes must pay their own pinned allocation. Closing/dropping the parent cannot refund child
+loans, and child drop cannot restore parent availability. Actual local credit covers the gap
+between split publication and child allocation, including concurrent close and unwind.
+
+This capacity operation grants no membership, packet, SDK, RTC, media or retirement authority.
+The future consumer must reserve its own metadata, keep the same child across admission refusal,
+and independently enforce current native scope and actual old-owner drainage before refunds.
+No live-media consumer or acknowledgement wire feature is implemented by this primitive.
+
 ## Enabled authenticated handoff dispatch (25 October; App V2 still off)
 
 SDP header MAC and closed wire shape precede every admission. Large15/19/20 require an

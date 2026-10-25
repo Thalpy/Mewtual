@@ -1,5 +1,35 @@
 # Mewtual; Handover
 
+## Media/acknowledgement funding primitive (25 October; consumer still open)
+
+`communication-voice-media-custody` adds `Reservation::partition_retained`. It moves one
+unused portion of the original ordinary backing into an independent finite reservation,
+without a pool charge/refund gap or parent/Phase/Exchange backedge. The child retains its
+own non-lendable Arc/reservation metadata slice through its last strong owner/loan; a Weak
+index must pay its pinned allocation separately. Consumer record metadata still needs its
+own prepayment before payload lending. Closing the parent does not close the child, and
+existing global work-slot/pool/scope checks remain enforced.
+
+The partition is irreversible and one-shot/nonrecursive. Dropping the child refunds the
+pool, not parent availability; a later authority/signing refusal must retain the SAME child.
+Borrowed/custody-backed backing refuses, preventing an accidental old-producer backedge.
+A test-only barrier pins parent close after the actual split/unlock and before child Arc
+allocation; the real local credit keeps all moved bytes paid. An unwind there returns only
+those bytes and never restores partition eligibility. All45 resource tests pass0.01s and a
+non-test current-source metadata compile passes8.65s. Read-only re-review has no findings.
+Full X suites remain pending; the unchanged HTTP candidate is completing its serial full
+suites in its own worktree. This primitive is not wired to media or packet publication yet.
+
+Next implement single-pair live-media adoption and complete negotiation retirement, then
+safe terminal-history compaction and a shared Session with bounded per-pair negotiation.
+A signed native acknowledgement of exact retained SDP ciphertext is a possible fast Source
+retirement mechanism; it is a design task, not an implemented wire feature. The alternative
+must keep the ORIGINAL native phase/effect AND Root Exchange/Source open and paid until
+original expiry and actual IO retirement. Native SDK release currently closes that effect
+and would cancel Answer retries. Never refund a phase while its actual peer or old callback
+still holds the original channel/phase graph. App activation, actual media, arbitrary bridge
+renewal, multi-peer/member relay and combined/physical acceptance remain open.
+
 ## Native HTTP Offer/Answer interoperability (25 October; final gates running)
 
 `communication-sdp-native-http` connects authenticated service operations15-27 to their

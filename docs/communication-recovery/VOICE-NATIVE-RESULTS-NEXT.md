@@ -1,5 +1,28 @@
 # Next voice milestone: native result recovery
 
+## 25 October: independent prepaid funding exists; build the media ownership transition
+
+The isolated media branch now provides one-shot `Reservation::partition_retained`, with a
+non-lendable child metadata slice, no parent producer backedge and unchanged global limits.
+45 resource tests and non-test compilation pass; full gates remain pending. This is funding
+only and has no media/acknowledgement consumer yet. HANDOVER records review and exact limits.
+
+The next coherent boundary is one actual peer moving into independently paid private media
+ownership, admitted from original canonical round evidence. Publish new custody before dropping
+old references; recover the same adoption record after reply loss. Its currentness must depend
+on call/pair/room/epoch revocation, not the expired Ready window. Clear old callbacks/continuations
+and retire native/browser phases PLUS Root Exchange/cache, preserving actual Source/Lower fees
+until their real retirement. Keeping only Exchange refs while releasing native SDK is unsafe:
+Source also checks the original native phase effect.
+
+Then compact exact terminal history/tombstones before reusing native32-row/browser32-action
+positions, and separate per-pair negotiation from the shared physical Session. Changing linked
+into a map or allocating another broker would multiply budgets and retain old graphs. Signed
+native SDP-retention acknowledgement is a candidate to retire matching Source promptly; it must
+bind exact issuer/recipient, joins/keys, epoch/scope, handshake/round/OfferId and packet hash.
+No such wire feature exists yet. Expiry-based retirement must keep all original effects paid.
+Real App/RTC/media, bounded renewal, multi-peer, member relay and physical acceptance follow.
+
 ## 25 October: actual HTTP/browser round validated; operational composition next
 
 Authenticated native service15-27 and original browser Offer/Answer now interoperate across

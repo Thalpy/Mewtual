@@ -1,5 +1,19 @@
 # Mewtual; Interfaces & Hooks Schema
 
+## Independent prepaid reservation partition (25 October; no media authority)
+
+`Reservation::partition_retained(group, bytes)` creates one independent finite budget from
+unused ordinary backing. Scope/open/available/provenance and one-shot checks precede mutation;
+no ordinary headroom is required. The child's Arc/reservation metadata is kept non-lendable
+inside the requested amount, and payload loans retain their own child's fee after close.
+It has no parent/Phase/Exchange/custody reference. Existing slot and pool-identity limits apply.
+
+Prepare outside final native/Group/Policy guards, prepay consumer metadata and retain the same
+child on retryable refusal. A dropped child refunds the pool without restoring parent capacity.
+Weak indexes need independent allocation payment/removal discipline. This API supplies capacity
+only; it proves neither native authority, SDK/IO drainage, media adoption nor round retirement.
+There is no wire/IPC change and no production consumer yet.
+
 ## Authenticated native SDP service dispatch (25 October)
 
 The existing closed version8 grammar15-27 is now selected by the native HTTP service after
