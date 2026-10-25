@@ -57,7 +57,7 @@ test("SDP maxima do not widen confirmation results or old Data framing", () => {
     const encoded = encodeVoiceSdpAction(target(p), request);
     assert.equal(encoded.body.length, 100 + maximum);
     assert.throws(() => encodeVoiceSdpAction(target(p), { ...request, bytes: new Uint8Array(maximum + 1) }));
-    assert.throws(() => encodeVoiceSdpAction(target(p), { ...request, bytes: new Uint8Array(p === "seal" ? 16 : 0) }));
+    if (p === "seal") assert.throws(() => encodeVoiceSdpAction(target(p), { ...request, bytes: new Uint8Array(16) }));
     assert.throws(() => encodeVoiceSdpAction(target(p === "seal" ? "open" : "seal"), request));
   }
   assert.throws(() => encodeVoiceIpcAction({ peer: "11".repeat(32), join: "12".repeat(32), keyRef: "13".repeat(32), epoch: "0" }, { kind: "result", identity, tag: "17".repeat(32), output: new Uint8Array(529) }));
@@ -87,4 +87,15 @@ test("malformed original IDs, direction/purpose unions and action identities ref
   // Extra caller metadata must not turn a history request into an Action write or enlarge
   // its fixed control allocation. Only the closed selected variant supplies field meaning.
   assert.equal(encodeVoiceSdpAction(target("open"), { kind: "history", identity } as VoiceSdpActionRequest).body.length, 18);
+});
+
+
+test("empty successful Open remains an exact class2 result distinct from AEAD failure", () => {
+  const opened = encodeVoiceSdpAction(target("open"), { kind: "opened", identity, tag: "17".repeat(32), bytes: new Uint8Array() });
+  assert.equal(opened.operation, 20); assert.equal(opened.kind, 2); assert.equal(opened.body.length, 100);
+  assert.equal(new DataView(opened.body.buffer).getUint16(98), 0);
+  const failed = encodeVoiceSdpAction(target("open"), { kind: "authentication-failed", identity });
+  assert.equal(failed.operation, 21); assert.equal(failed.kind, 0); assert.equal(failed.body.length, 66);
+  assert.throws(() => encodeVoiceSdpAction(target("seal"), { kind: "opened", identity, tag: "17".repeat(32), bytes: new Uint8Array() }));
+  assert.throws(() => encodeVoiceSdpBegin(original, new Uint8Array()));
 });

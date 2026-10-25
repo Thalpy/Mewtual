@@ -1,5 +1,24 @@
 # Mewtual; Handover
 
+## Empty successful SDP Open Result (25 October; private wire correction)
+
+The native opcode20 and browser action encoder now represent0..8KiB plaintext, matching
+Root's exact input-selected output contract. A tag-only16B incoming packet may decrypt to
+empty plaintext successfully; this must never be recast as AEAD failure. SealBegin remains
+nonempty, the authenticated existing-row class2 path remains mandatory and Root still
+requires exactly ciphertext-length-minus16 output bytes before any result effect.
+
+The grammar regression,6 browser codec tests and actual-Actor/TCP negative-plus-correct
+result check pass (10.30s). The normal19B Offer rejects empty then accepts its original3B
+result without settling/replacing the Action. A new maximum test passes (13.48s): actual
+8KiB LOW Begin,8,208B sealed Result, real Source/TCP bridge and8KiB HIGH Open Result with
+canonical delivery retry. The maximum negative header case independently rejects Seal
+bytes too large for opcode20 before nonce debit, then tests a permitted-size foreign
+purpose header against the original row. No limit/timeout was raised. A genuine
+adversarial tag-only incoming packet's positive native case remains a coverage gap; no
+fixture pretends the existing nonempty LOW Seal produced a16B packet. Production SDP
+remains refused; this correction alone grants no SDP syntax validity or RTC authority.
+
 ## Scoped native SDP Result checkpoint (25 October; production disabled)
 
 `communication-sdp-result` continues from pushed engine checkpoint `8348729b`.

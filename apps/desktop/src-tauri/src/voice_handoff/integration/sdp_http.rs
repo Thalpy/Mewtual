@@ -158,8 +158,9 @@ pub(super) async fn exercise(
     original.extend_from_slice(&parent.pc_test_proof());
     let mut begin = original.clone();
     if seal {
-        begin.extend_from_slice(&3u16.to_be_bytes());
-        begin.extend_from_slice(b"v=0");
+        let plaintext: &[u8] = if effect == 5 { &[b'x'; 8192] } else { b"v=0" };
+        begin.extend_from_slice(&(plaintext.len() as u16).to_be_bytes());
+        begin.extend_from_slice(plaintext);
     }
     let capacity =
         super::super::sdp_replies::refused(factory::Refused::Protocol(VoiceError::Capacity));
@@ -303,6 +304,7 @@ pub(super) async fn exercise(
                 ledger::RowId::from_logical(child).unwrap(),
                 action,
                 effect == 3,
+                effect == 5,
             ))
             .await;
         } else if effect == 1 {
@@ -347,6 +349,8 @@ pub(super) async fn exercise(
                 ledger::RowId::from_logical(child).unwrap(),
                 action,
                 effect == 2,
+                effect == 4,
+                effect == 5,
             ))
             .await;
         }

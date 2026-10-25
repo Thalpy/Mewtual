@@ -1,5 +1,14 @@
 # Mewtual; Interfaces & Hooks Schema
 
+## Empty successful native Open Result (25 October; disabled opcode20)
+
+Opcode20's closed class2 payload is0..8KiB, preserving the exact successful result of a
+legal tag-only Open. Opcode21 remains distinct metadata-only AuthenticationFailed.
+Root independently requires the original Action's ciphertext-length-minus16 bytes and
+actual tag; the wider lower bound is no permission to change that exact expected output.
+SealBegin remains nonempty, quotas and generic Data/Control limits are unchanged, and
+SDP/RTC validity remains downstream. Production admission is still disabled.
+
 ## Scoped SDP Result contract (25 October; private opcodes19/20/21)
 
 `submit_voice_sdp_result_scoped` and `submit_voice_sdp_open_result_scoped` lend
@@ -218,7 +227,7 @@ exist. The browser pilot reader still caps2064B; its live broker does not use th
 |17|Control /66|Input for actual row/action|
 |18|Control /70|Exact action and engine byte declaration|
 |19|SDP /100+17..8208|Exact sealed result/tag|
-|20|SDP /100+1..8192|Exact opened result/tag|
+|20|SDP /100+0..8192|Exact opened result/tag|
 |21|Control /66|Authentication failure; no fabricated plaintext|
 |22|Control /98|Exact original result ACK digest|
 |23|Control /66|Original action settlement|

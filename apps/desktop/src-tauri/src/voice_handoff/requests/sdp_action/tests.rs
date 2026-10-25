@@ -231,3 +231,50 @@ fn full_original_identity_purpose_and_closed_unions_reject_substitution() {
         }
     }
 }
+
+#[test]
+fn successful_empty_open_has_its_own_exact_class_and_never_becomes_authentication_failure() {
+    let vectors = vectors();
+    let vector = vectors["requests"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|v| v["name"] == "opened")
+        .unwrap();
+    let (_, class, row, mut bytes) = decoded(vector);
+    bytes.truncate(100);
+    bytes[98..100].copy_from_slice(&0u16.to_be_bytes());
+    assert!(wire_shape(
+        Operation::SdpOpenedResult,
+        class,
+        row,
+        bytes.len() + 16
+    ));
+    let Request::Existing(request) =
+        Request::decode(Operation::SdpOpenedResult, class, row, &bytes).unwrap()
+    else {
+        panic!("same original Open row");
+    };
+    let Kind::Opened {
+        bytes: plaintext, ..
+    } = request.kind
+    else {
+        panic!("successful plaintext is distinct from AEAD failure");
+    };
+    assert!(plaintext.is_empty());
+    assert!(std::ptr::eq(plaintext.as_ptr(), bytes[100..].as_ptr()));
+    assert!(Request::decode(
+        Operation::SdpAuthenticationFailed,
+        BodyKind::Control,
+        row,
+        &bytes
+    )
+    .is_err());
+    assert!(Request::decode(Operation::SdpSealedResult, class, row, &bytes).is_err());
+    assert!(Request::decode(Operation::SdpOpenedResult, BodyKind::Data, row, &bytes).is_err());
+    for end in 0..100 {
+        assert!(Request::decode(Operation::SdpOpenedResult, class, row, &bytes[..end]).is_err());
+    }
+    bytes.push(0);
+    assert!(Request::decode(Operation::SdpOpenedResult, class, row, &bytes).is_err());
+}

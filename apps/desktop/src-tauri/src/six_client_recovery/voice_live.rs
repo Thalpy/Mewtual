@@ -565,7 +565,7 @@ async fn confirmation_over_blocked_tcp(
     pc_cases: Option<u8>,
 ) {
     let clock = (pc_cases == Some(8)).then(crate::voice_handoff::integration::ExpiryClock::new);
-    if matches!(pc_cases, Some(10 | 11)) {
+    if matches!(pc_cases, Some(10..=13)) {
         crate::voice_handoff::integration::with_result_completion(
             std::sync::Arc::new(tokio::sync::Barrier::new(2)),
             confirmation_over_blocked_tcp_inner(
@@ -857,4 +857,14 @@ async fn native_v2_original_sdp_result_uses_actual_actor_and_survives_eager_canc
 async fn native_v2_sdp_result_lost_after_commit_recovers_original_seal_and_plaintext_open_through_tcp_bridge(
 ) {
     confirmation_over_blocked_tcp(true, false, false, false, Some(11)).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn native_v2_sdp_empty_result_cannot_replace_nonempty_original_open() {
+    confirmation_over_blocked_tcp(true, false, false, false, Some(12)).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn native_v2_sdp_maximum_seal_and_open_cross_actual_native_result_and_tcp_bridge() {
+    confirmation_over_blocked_tcp(true, false, false, false, Some(13)).await;
 }

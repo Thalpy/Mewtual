@@ -135,7 +135,7 @@ pub(super) async fn exercise(
         return None;
     }
     factory::preflight_binding(&context, route).await.unwrap();
-    if matches!(case, 1 | 4 | 5 | 6 | 7 | 8 | 9 | 10..=13) {
+    if matches!(case, 1 | 4 | 5 | 6 | 7 | 8 | 9 | 10..=15) {
         let first = exchange(state, public, route, parent, &body).await;
         assert_eq!(
             first.len(),
@@ -167,7 +167,7 @@ pub(super) async fn exercise(
         None,
     );
     let physical = incoming.hold_position().unwrap();
-    let preparation = if matches!(case, 1 | 4 | 5 | 6 | 7 | 8 | 9 | 10..=13) {
+    let preparation = if matches!(case, 1 | 4 | 5 | 6 | 7 | 8 | 9 | 10..=15) {
         None
     } else {
         Some(
@@ -206,14 +206,14 @@ pub(super) async fn exercise(
     let mut unstarted_sdp = None;
     // Successful queue return is the positive barrier: the original command, rather than
     // an unpolled future, owns the same phase contribution behind the paused actor.
-    if matches!(case, 1 | 4 | 5 | 6 | 7 | 8 | 9 | 10..=13) {
+    if matches!(case, 1 | 4 | 5 | 6 | 7 | 8 | 9 | 10..=15) {
         let completion = pending.complete().await.unwrap();
         assert!(completion.result().is_ok());
         // A new authenticated frame supplies its own physical hold for actual typed SDP
         // RPC tests. The original PC-intent request is already collected here.
         drop(physical);
         drop(incoming);
-        if matches!(case, 10..=13) {
+        if matches!(case, 10..=15) {
             let probe = Box::pin(super::sdp_http::exercise(
                 state,
                 public,

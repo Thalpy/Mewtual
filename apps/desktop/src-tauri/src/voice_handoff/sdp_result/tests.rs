@@ -187,6 +187,7 @@ pub(in crate::voice_handoff) async fn exercise(
     child: super::super::ledger::RowId,
     action: Action,
     lose_reply: bool,
+    maximum: bool,
 ) {
     let context = Context::new(state);
     let (actor, _) = factory::native::observation_actor(&context, route).unwrap();
@@ -211,7 +212,7 @@ pub(in crate::voice_handoff) async fn exercise(
         .sdp_input_owners(route.session().identity(), action)
         .unwrap();
     let funding = owners.funding.clone();
-    let payload = [42; 19];
+    let payload = vec![42; if maximum { 8208 } else { 19 }];
     let tag = original.output_tag(&payload).unwrap();
     let encoded = body(parent, action, tag, &payload);
     let expected = Expected {
@@ -229,7 +230,15 @@ pub(in crate::voice_handoff) async fn exercise(
             2,
             logical,
         );
-        let wire = signed_frame(public, header, &encoded);
+        // Keep this foreign-purpose header within its OWN authenticated class maximum.
+        // Maximum Seal output is16 bytes larger than maximum Open: a full-sized Seal
+        // under opcode20 must refuse even earlier at header authentication, below.
+        let header_body = if operation == 20 {
+            &encoded[..encoded.len().min(100 + 8192)]
+        } else {
+            &encoded
+        };
+        let wire = signed_frame(public, header, header_body);
         let authenticated = authenticated_header(route, &wire);
         let before = route.session().fixture_counts();
         assert!(state
@@ -241,6 +250,20 @@ pub(in crate::voice_handoff) async fn exercise(
                 crate::voice_runtime(state).clock()
             )
             .is_err());
+        assert_eq!(route.session().fixture_counts(), before);
+    }
+    if maximum {
+        let before = route.session().fixture_counts();
+        let header = (before.1 + 1, 20, 2, child.logical());
+        let wire = signed_frame(public, header, &encoded);
+        let mut worker = route.session().header().unwrap();
+        let filled = wire.len().min(super::super::http::HEADER_BYTES);
+        worker.scratch_mut()[..filled].copy_from_slice(&wire[..filled]);
+        worker.set_filled(filled).unwrap();
+        assert!(matches!(
+            worker.authenticate(41891, "http://tauri.localhost"),
+            Err(channel::Refused::Header)
+        ));
         assert_eq!(route.session().fixture_counts(), before);
     }
     {
@@ -595,7 +618,8 @@ pub(in crate::voice_handoff) async fn exercise(
 }
 
 /// The HIGH native row is created only after the real signed Offer traversed the
-/// permitted TCP topology. Exercise metadata custody AND an actual rejected Open.
+/// permitted TCP topology. Exercise metadata custody, exact output bounds and Open history.
+#[allow(clippy::too_many_arguments)] // Original endpoint/row tuple plus bounded fixture variants.
 pub(in crate::voice_handoff) async fn exercise_open(
     state: &crate::AppState,
     public: &super::super::bootstrap::SetupOutput,
@@ -604,6 +628,8 @@ pub(in crate::voice_handoff) async fn exercise_open(
     child: super::super::ledger::RowId,
     action: Action,
     authentication_failed: bool,
+    check_wrong_empty: bool,
+    maximum: bool,
 ) {
     let context = Context::new(state);
     let (actor, _) = factory::native::observation_actor(&context, route).unwrap();
@@ -683,10 +709,24 @@ pub(in crate::voice_handoff) async fn exercise_open(
         .await
         .unwrap();
 
+    if check_wrong_empty {
+        // Class2 can represent an exact empty success, but THIS original signed Offer
+        // has19 ciphertext bytes and requires exactly3 plaintext bytes. Its immutable
+        // Root output bound must still refuse zero before any terminal/token effect.
+        let mut empty = encoded.clone();
+        empty.extend_from_slice(&[0; 32]);
+        empty.extend_from_slice(&0u16.to_be_bytes());
+        assert_eq!(
+            exchange(state, public, route, child, &empty, 20, &owners.intent).await,
+            super::super::sdp_replies::refused(VoiceError::Bounds.into())
+        );
+        assert!(original.terminal_status().receipt.is_none());
+        assert!(!original.terminal_status().settled);
+    }
     let operation = if authentication_failed {
         21
     } else {
-        let plaintext = b"v=0";
+        let plaintext: &[u8] = if maximum { &[b'x'; 8192] } else { b"v=0" };
         encoded.extend_from_slice(&original.output_tag(plaintext).unwrap());
         encoded.extend_from_slice(&(plaintext.len() as u16).to_be_bytes());
         encoded.extend_from_slice(plaintext);
