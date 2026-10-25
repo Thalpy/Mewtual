@@ -1,5 +1,11 @@
 # Chat, files and voice implementation evidence
 
+## 25 October: first-Offer checkpoint full validation
+
+The final complete Root suite for native checkpoint 5779e23c passed 3,638 tests with 24 ignored (59 summaries). The separate native suite passed 852 unit tests plus 5 ACL tests, with no failures. Browser checkpoint 7804717a has identical Rust sources and separately passes all 2,804 frontend tests, Svelte checks (0 errors/0 warnings) and production build. Root/native formatting, ambient checks, Root strict all-target/all-feature Clippy, native check and strict all-target Clippy passed as recorded below. Dependency audit still fails inherited crypto-bigint0.5.5 advisory RUSTSEC-2026-0387; no dependency/ignore change was made.
+
+Production15-27 remain refused. These results close validation of the private first-Offer slice, not delivery/RTC or live V2 activation. Fresh delivery26/RTC, Answer/ICE/renewed rounds, multi-peer, member media relay, combined acceptance and independent physical audio/network evidence remain open. New delivery work is separate and is not covered by these results. Older pending-gate entries below are checkpoint history.
+
 ## 25 October: private browser first-Offer crypto integration
 
 The retained broker now connects the authenticated native SDP codecs to one private
