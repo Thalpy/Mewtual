@@ -2930,7 +2930,7 @@ test("PC custody never starts on copied handles, foreign chains or a closed orig
 /** Concrete retained-channel caller with a controlled RTC provider. Native MAC/AEAD and
  * original broker SDK are real; Root authority and WebRTC implementation are still mocked.
  * This does not claim WebView/native interoperability, connected media or physical audio. */
-function sdpRtcProvider(t: TestContext, localIsLow: boolean, onLocal: () => void = () => {}) {
+function sdpRtcProvider(t: TestContext, localIsLow: boolean, onLocal: () => void = () => {}, onClose: () => void = () => {}) {
   const old = globalThis.RTCPeerConnection;
   const calls = { created: 0, local: 0, remote: 0, closed: 0 };
   let held: ReturnType<typeof gate> | null = null, localHeld: ReturnType<typeof gate> | null = null;
@@ -2946,7 +2946,7 @@ function sdpRtcProvider(t: TestContext, localIsLow: boolean, onLocal: () => void
       if (held) await held.promise;
     }
     addEventListener() {} removeEventListener() {}
-    close() { calls.closed++; }
+    close() { calls.closed++; onClose(); }
   }
   globalThis.RTCPeerConnection = Peer as unknown as typeof RTCPeerConnection;
   t.after(() => { globalThis.RTCPeerConnection = old; held?.release(); localHeld?.release(); });
@@ -3186,4 +3186,20 @@ test("round composer rejects copied channel/chain and broker27 without waking ol
   assert.throws(() => windowVoiceCryptoBroker(f.f.admission, host, real), /reload required/);
   assert.equal(wakes, 0); assert.equal(host[key], previous); assert.equal(sdk.calls.created, 0);
   f.f.owner.retire(); await f.child.channel.close(); assert.equal(f.f.broker.counts().bytes, 0);
+});
+
+test("failed original RTC close retains broker payment and withholds native SDK release until retry", async t => {
+  const f = await framedSdpRound(t, true); let fails = true;
+  const sdk = sdpRtcProvider(t, true, () => {}, () => { if (fails) throw new Error("SDK close failed"); });
+  await f.round(); assert.equal(sdk.calls.created, 1);
+  f.f.owner.retire(); let done = false;
+  const closing = f.child.channel.close().then(() => { done = true; });
+  try {
+    await until(() => f.f.timers().delays.includes(1000));
+    assert.equal(done, false); assert.ok(f.f.broker.counts().bytes >= 64 * 1024);
+    assert.equal(f.custody.effectCounts().sdkReleases, 0);
+    assert.equal(f.custody.effectCounts().storageReleases, 0);
+  } finally { fails = false; f.f.advance(1000); }
+  await closing; assert.equal(done, true); assert.equal(f.f.broker.counts().bytes, 0);
+  assert.equal(f.custody.effectCounts().sdkReleases, 1);
 });

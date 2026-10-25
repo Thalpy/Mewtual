@@ -1,5 +1,30 @@
 # Mewtual; Handover
 
+## Original RTC failed-close cleanup (25 October; pilot still open)
+
+Review of the proposed one-pair media pilot found a prerequisite: the original SDP owner
+swallowed a throwing SDK close and could forget the still-live peer. It now publishes
+close-complete only after actual SDK return, keeps peer custody through failure and
+retries during drain. Reentrant drain cannot overtake an entered close callback. The
+retained broker retries outside its shared execution lane and withholds native SDK/
+storage release and the original64KiB payment until actual cleanup succeeds.
+
+Two new RTC regressions plus a framed broker regression cover this pre-transfer boundary.
+All274 focused session/RTC/status tests pass4.67s. Final frontend validation passes2,887
+tests65.07s, Svelte0errors/0warnings and production build37.20s. Read-only adversarial
+re-review has no blocker/high/medium. The actual current-source native/browser compatibility
+run remains queued after the corrected X native full suite; earlier results predate this
+cleanup change. No new full Rust suite competes with that run.
+
+The next actual op28 one-pair pilot is NOT implemented. It must prepay/publish independent
+browser custody, use fresh authenticated Current (including lost admission after Ready
+expiry), close the real peer synchronously on End/expiry BEFORE joining hung IO, and keep
+the expiry timer armed while Current is pending. Join timer/callback/IO/SDK work before
+MediaClose/Release, and finish that release BEFORE unseen parent/old SDK cleanup. A pilot
+may retain the old graph until End; it cannot claim negotiation retirement or multiparty
+support. Native index detachment, shared Session composition, App/relay and combined/
+physical acceptance remain open. Only one desktop is available.
+
 ## Native fixed-layout correction (25 October; final native rerun pending)
 
 The first X native full run finished860pass/2failed in1567.91s. Both failures were real

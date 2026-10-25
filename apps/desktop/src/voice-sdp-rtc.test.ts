@@ -9,6 +9,7 @@ function fixture(low = true) {
   let localHeld: ReturnType<typeof gate> | null = null, remoteHeld: ReturnType<typeof gate> | null = null;
   let createHook: (() => void) | null = null, currentHook: (() => void) | null = null;
   let registrationHook: (() => void) | null = null;
+  let closeHook: (() => void) | null = null;
   let remoteFails = false, local = "v=0\r\n";
   const calls = { created: 0, local: 0, remote: 0, closed: 0, audio: 0 };
   const listeners = new Set<() => void>(), timers = new Map<object, { run: () => void; deadline: number }>();
@@ -25,7 +26,7 @@ function fixture(low = true) {
     }
     addEventListener(_kind: string, callback: () => void) { listeners.add(callback); registrationHook?.(); }
     removeEventListener(_kind: string, callback: () => void) { listeners.delete(callback); }
-    close() { calls.closed++; }
+    close() { calls.closed++; closeHook?.(); }
   }
   globalThis.RTCPeerConnection = Peer as unknown as typeof RTCPeerConnection;
   owner = new VoiceSdpRtcOwner(low, () => { currentHook?.(); return live; }, {
@@ -36,6 +37,7 @@ function fixture(low = true) {
   return { owner, calls, timers, listeners, incoming: () => incoming,
     restore() { globalThis.RTCPeerConnection = old; }, local(text: string) { local = text; }, time(value: number) { now = value; },
     onRegistration(run: () => void) { registrationHook = run; },
+    onClose(run: () => void) { closeHook = run; },
     stop() { live = false; owner.close(); }, gathering() { complete = false; },
     gathered() { complete = true; for (const callback of [...listeners]) callback(); },
     holdLocal() { localHeld = gate(); return localHeld; }, holdRemote() { remoteHeld = gate(); return remoteHeld; },
@@ -53,6 +55,28 @@ test("original RTC local preparation awaits fresh admission and real gathering; 
   assert.equal(bytes.length, 8192); assert.equal(bytes.every(value => value === 120), true);
   assert.throws(() => f.owner.takeLocal()); bytes.fill(0);
   assert.equal(f.listeners.size, 0); assert.equal(f.timers.size, 0); await f.owner.drain(); assert.equal(f.calls.closed, 1);
+});
+
+test("a failed pre-transfer SDK close retains the real peer until explicit cleanup succeeds", async t => {
+  const f = fixture(false); t.after(f.restore); const held = f.holdRemote();
+  const work = f.owner.applyRemote(new TextEncoder().encode("v=0"), "offer"); await turn();
+  let fails = true; f.onClose(() => { if (fails) throw new Error("SDK close failed"); });
+  f.stop(); let completed = false;
+  const closing = f.owner.drain().then(() => { completed = true; });
+  const rejected = assert.rejects(closing, /close still running/);
+  await turn(); assert.equal(completed, false); assert.equal(f.calls.created, 1);
+  held.release(); await work; await rejected;
+  assert.equal(completed, false); assert.throws(() => f.owner.prepareMediaDestination());
+  fails = false; const before = f.calls.closed; await f.owner.drain();
+  assert.equal(f.calls.closed, before + 1); await f.owner.drain(); assert.equal(f.calls.closed, before + 1);
+});
+
+test("pre-transfer SDK close reentry cannot report drainage from the entered close callback", async t => {
+  const f = fixture(); t.after(f.restore); await f.owner.prepareLocal(async () => 30_000, "offer");
+  f.owner.takeLocal().fill(0); let nested: Promise<void> | null = null;
+  f.onClose(() => { nested = f.owner.drain(); });
+  f.owner.close(); await assert.rejects(nested!, /close still running/);
+  await f.owner.drain(); assert.equal(f.calls.closed, 1);
 });
 
 test("provider callbacks see published flight; constructor End closes the actual returned peer", async t => {

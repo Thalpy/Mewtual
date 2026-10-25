@@ -1,5 +1,26 @@
 # Next voice milestone: native result recovery
 
+## 25 October: original RTC close errors retain custody; implement the one-pair pilot
+
+Original SDP peer cleanup now retains/retries an actual failed close and prevents native
+SDK release or browser refund until that peer and its SDK flight drain. The broker-level
+regression and full frontend checks pass; HANDOVER records review and native compatibility
+status. This fixes the pre-transfer prerequisite; the media pilot itself does not exist.
+
+For the pilot, charge/publish an independent browser record BEFORE destination construction
+or native media Admit. Use actual retained op28 and recover the same original claim after
+reply loss. A private post-native handoff policy must support admitted media after old Ready
+expiry, with no public connected/current boolean standing in for Source completion. Keep
+old Source/effect and negotiation payment until legitimate retirement or End.
+
+Use one status flight and one timer that remains able to close the actual PC at the stale
+deadline DURING pending IO. End/expiry closes the real owner before waiting for abort-
+resistant work. Retain payment through callback/timer/IO/SDK/native-release return. Complete
+MediaClose/Release before unseen-parent finalization or old SDK/key cleanup, otherwise
+the existing admitted-media debt can block that cleanup loop. Retaining the old graph is
+acceptable for this inactive one-pair step; independent index/retirement/multiparty remain
+separate prerequisites for App activation. No physical acceptance claim follows.
+
 ## 25 October: affine RTC leaf and passive status gate exist; wire the actual handoff
 
 The isolated browser branch now has one inert same-original destination and an atomic

@@ -2804,7 +2804,13 @@ class RetainedIpcChannel {
         // OUTSIDE the lane that its exact recovery/release calls require.
         if (this.rtcFlight) await this.rtcFlight;
         if (this.sdpFlight) await this.sdpFlight;
-        await this.sdpRtc?.drain();
+        // A failed SDK close is not actual drainage. Keep the original paid peer and
+        // retry cleanup; never release native SDK custody merely because End was seen.
+        while (this.sdpRtc) {
+          const observed = this.wakeIdentity;
+          try { await this.sdpRtc.drain(); break; }
+          catch { await this.waitCleanupWake(observed); }
+        }
         // The original job's23/24 RPCs require this same physical lane. Join its SDK,
         // Result and close-first unknown Begin outside execution.run and before release.
         while (this.sdpAction && !this.sdpAction.returned) {

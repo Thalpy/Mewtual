@@ -60,6 +60,7 @@ export class VoiceSdpRtcOwner {
   #peer: RTCPeerConnection | null = null;
   #stopped = false;
   #peerClosed = false;
+  #peerClosing = false;
   private localStarted = false;
   private localDone = false;
   private remoteStarted = false;
@@ -109,7 +110,7 @@ export class VoiceSdpRtcOwner {
     const target = mediaOwners.get(destination);
     if (!finished || !target || target.identity !== this.#mediaIdentity || this.#mediaDestination !== destination ||
         target.adopted || target.stopped || target.peer !== null || target.closing || target.closeComplete ||
-        this.#stopped || this.#peerClosed || !this.#peer) return unavailable();
+        this.#stopped || this.#peerClosed || this.#peerClosing || !this.#peer) return unavailable();
 
     // COMMIT: private state writes only. No getter, method/provider/Clock callback,
     // allocation, await or fallible operation after the first mutation. The SAME actual
@@ -284,14 +285,25 @@ export class VoiceSdpRtcOwner {
     this.localBytes?.fill(0); this.localBytes = null;
     const stop = this.gatherStop; this.gatherStop = null;
     try { stop?.(); } catch { /* Preserve Close even if an injected observer throws. */ }
-    if (this.#peer && !this.#peerClosed) {
-      this.#peerClosed = true;
-      try { this.#peer.close(); } catch { /* This original peer stays closed locally. */ }
+    if (this.#peer && !this.#peerClosed && !this.#peerClosing) {
+      this.#peerClosing = true;
+      try {
+        const close = this.#peer.close;
+        close.call(this.#peer);
+        this.#peerClosed = true; // Actual SDK return, not merely a close intent.
+      } catch { /* Retain the actual peer and payment; drain retries instead of inventing completion. */ }
+      finally { this.#peerClosing = false; }
     }
   }
   async drain(): Promise<void> {
     this.close();
-    try { await this.flight; } catch { /* The actual SDK await has returned; no success is invented. */ }
+    const flight = this.flight;
+    if (flight) {
+      try { await flight; } catch { /* Actual SDK await returned; no success is invented. */ }
+    }
+    this.close(); // A failed close while SDK work was pending is independently retryable.
+    if (this.#peer && (!this.#peerClosed || this.#peerClosing)) throw new Error("voice RTC close still running");
     this.#peer = null;
+    this.#current = null;
   }
 }
