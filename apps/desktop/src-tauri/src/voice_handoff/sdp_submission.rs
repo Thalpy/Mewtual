@@ -413,27 +413,25 @@ async fn run(mut worker: Worker) -> Completion {
             }
         }
     };
-    let Worker {
-        writer,
-        registration,
-        input,
-        actor,
-        grant,
-        intent,
-        publication,
-        ..
-    } = worker;
-    drop(writer);
-    drop(registration); // actual worker finally; body/task IO may still be outstanding
-    drop((actor, grant, intent));
+    drop(worker.writer.take());
     // Actor completion and canonical publication capture are finished. Root's actual
     // Action owns its independently paid input; retaining the old native request bytes
     // in a metadata-only output would needlessly hold another buffer/IO contribution.
     // Destroy them now, while this SAME publication still pays the final task/output.
-    drop(input);
+    drop(std::mem::replace(&mut worker.input, Input::Open(None)));
+    // A delivered RPC completion can beat the sender's synchronous send/last Work Drop.
+    // That Work still retains THIS actual publication UI guard. Keep Registration's
+    // factory exclusion and this Session's sole physical request while waiting for all
+    // other SAME-counter IO, without Clock or another Actor query under the held UI gate.
+    // Only then may into_result release the final publication before historical Clock.
+    let result = match worker.publication.wait_other_io_collected().await {
+        Ok(()) => result,
+        Err(error) => Err(error.into()),
+    };
     Completion {
         result,
-        _publication: publication,
+        // Keep Worker intact: its original fields drop before publication on unwind too.
+        _publication: worker.publication.clone(),
     }
 }
 fn checked_queue<F>(future: F) -> Result<F, VoiceError>

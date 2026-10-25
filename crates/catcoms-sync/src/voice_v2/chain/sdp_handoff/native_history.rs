@@ -48,6 +48,19 @@ impl Drop for NativeIoClosure {
     }
 }
 impl NativeRowFunding {
+    /// Only TaskCopy lends this wait, with its own real contribution kept alive. Native
+    /// producer/physical exclusion must prevent a later same-row copy during this snapshot.
+    pub(super) async fn wait_only_task(&self) {
+        loop {
+            let changed = self.changed.notified();
+            tokio::pin!(changed);
+            changed.as_mut().enable();
+            if self.in_flight() == 1 {
+                return;
+            }
+            changed.await;
+        }
+    }
     pub fn purpose(&self) -> NativeRowPurpose {
         self.purpose
     }
@@ -111,10 +124,10 @@ impl NativeRowFunding {
     fn release_copy(&self) {
         let previous = self.state.fetch_sub(1, Ordering::AcqRel);
         assert!(previous & COUNT > 0, "one original native IO contribution");
-        if previous == CLOSED + 1 {
-            // Copy credit and Phase count already retired, and their guards are gone.
-            self.changed.notify_waiters();
-        }
+        // Copy keepalive, credit and Phase count already retired; their guards are gone.
+        // The original native producer also waits at2->1 while IO remains OPEN, before
+        // releasing its UI guard and running callback-bearing historical observations.
+        self.changed.notify_waiters();
     }
     /// Whole fixed allocation including Arc counters/alignment; add native Row/Index/
     /// wrappers separately before asserting that their shared2304B payment is sufficient.

@@ -25,6 +25,12 @@ impl std::fmt::Debug for Publication {
     }
 }
 impl Publication {
+    /// After body/completion collection, wait WITHOUT Clock for the actual bound Actor
+    /// sender's remaining Copy/keepalive/credit to retire. The same original worker and
+    /// physical position exclude new same-purpose IO; TaskCopy itself remains retained.
+    pub(super) async fn wait_other_io_collected(&self) -> Result<(), VoiceError> {
+        self._payment.wait_other_native_io_collected().await
+    }
     /// Outside every native/Root/Phase guard, BEFORE constructing a detached future or
     /// lending custody to an Actor body. Both inputs are affine original native owners.
     pub(super) fn preparing(

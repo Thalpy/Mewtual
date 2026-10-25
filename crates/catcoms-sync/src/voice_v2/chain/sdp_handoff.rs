@@ -130,6 +130,16 @@ pub struct Copy {
 /// ```
 pub struct TaskCopy(Copy);
 impl TaskCopy {
+    /// Observe retirement of every OTHER contribution on this actual bound native row.
+    /// The caller must retain its exclusive producer/physical request and relinquish its
+    /// own body/RPC/response Copies first. Otherwise it can wait for itself indefinitely.
+    /// This takes no Clock and closes/refunds nothing; one while open is only a collection
+    /// snapshot, never current authority, stable absence or whole-row/SDK drainage.
+    pub async fn wait_other_native_io_collected(&self) -> Result<(), VoiceError> {
+        let funding = self.0.history.as_ref().ok_or(VoiceError::Unauthorized)?;
+        funding.wait_only_task().await;
+        Ok(())
+    }
     pub fn uses_intent(&self, intent: &crate::voice_v2::sdp::InitialSdpIntent) -> bool {
         self.0.uses_intent(intent)
     }

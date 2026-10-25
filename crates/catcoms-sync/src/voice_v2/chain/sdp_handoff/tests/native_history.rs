@@ -6,6 +6,101 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::task::{Context, Poll, Wake, Waker};
 
 #[test]
+fn original_task_waits_for_other_io_after_keepalive_credit_and_phase_retirement_while_open_or_closed(
+) {
+    use std::sync::atomic::AtomicBool;
+    #[derive(Debug)]
+    struct Keepalive(Arc<AtomicBool>);
+    impl Drop for Keepalive {
+        fn drop(&mut self) {
+            self.0.store(true, Ordering::Release);
+        }
+    }
+    for closed in [false, true] {
+        let (_, _, _, phase, _alive) = fixture();
+        phase.arm().unwrap();
+        let funding = phase.native_history(NativeRowPurpose::Seal).unwrap();
+        let mut task = phase.task_copy(1024).unwrap();
+        task.bind_native_history(funding.clone()).unwrap();
+        let mut rpc = phase.copy(1024).unwrap();
+        rpc.bind_native_history(funding.clone()).unwrap();
+        let destroyed = Arc::new(AtomicBool::new(false));
+        rpc.attach_keepalive(Arc::new(Keepalive(destroyed.clone())))
+            .unwrap();
+        let wakes = Arc::new(AtomicUsize::new(0));
+        let waker = Waker::from(Arc::new(CountWake {
+            wakes: wakes.clone(),
+            phase: Arc::downgrade(&phase),
+        }));
+        let mut cx = Context::from_waker(&waker);
+        let mut wait = Box::pin(task.wait_other_native_io_collected());
+        assert!(wait.as_mut().poll(&mut cx).is_pending());
+        if closed {
+            phase.close();
+        }
+        // Deterministic real retirement gap: payload/keepalive/credit/Phase already
+        // retired, but the original counter still includes this actual RPC contribution.
+        rpc.retire(|| {
+            assert!(destroyed.load(Ordering::Acquire));
+            assert_eq!(funding.in_flight(), 2);
+            assert_eq!(phase.state.lock().unwrap().copies, 1);
+            assert!(wait.as_mut().poll(&mut cx).is_pending());
+        });
+        assert!(wakes.load(Ordering::Acquire) > 0);
+        assert_eq!(wait.as_mut().poll(&mut cx), Poll::Ready(Ok(())));
+        assert_eq!(funding.in_flight(), 1);
+        assert!(
+            !funding.is_collected(),
+            "own task is not collected or refunded"
+        );
+        assert_eq!(funding.is_closed(), closed);
+        drop(wait);
+        if !closed {
+            // Waiting is NOT IO closure: the next original Input may acquire a Copy.
+            let mut next = phase.copy(32).unwrap();
+            next.bind_native_history(funding.clone()).unwrap();
+            assert_eq!(funding.in_flight(), 2);
+            drop(next);
+            assert_eq!(funding.in_flight(), 1);
+        }
+        drop(task);
+        phase.close();
+        assert!(funding.is_collected());
+        assert_eq!(phase.status(), Status::Drained);
+    }
+}
+
+#[test]
+fn task_collection_wait_refuses_unbound_and_recovers_after_observer_cancellation() {
+    let (_, _, _, phase, _alive) = fixture();
+    phase.arm().unwrap();
+    let mut task = phase.task_copy(1024).unwrap();
+    let mut cx = Context::from_waker(Waker::noop());
+    {
+        let mut unbound = Box::pin(task.wait_other_native_io_collected());
+        assert_eq!(
+            unbound.as_mut().poll(&mut cx),
+            Poll::Ready(Err(VoiceError::Unauthorized))
+        );
+    }
+    let funding = phase.native_history(NativeRowPurpose::Seal).unwrap();
+    task.bind_native_history(funding.clone()).unwrap();
+    let mut rpc = phase.copy(1024).unwrap();
+    rpc.bind_native_history(funding.clone()).unwrap();
+    let mut cancelled = Box::pin(task.wait_other_native_io_collected());
+    assert!(cancelled.as_mut().poll(&mut cx).is_pending());
+    drop(cancelled); // observer cancellation changes neither original contribution
+    assert_eq!(funding.in_flight(), 2);
+    drop(rpc);
+    let mut late = Box::pin(task.wait_other_native_io_collected());
+    assert_eq!(late.as_mut().poll(&mut cx), Poll::Ready(Ok(())));
+    drop(late);
+    assert!(!funding.is_closed());
+    drop(task);
+    phase.close();
+}
+
+#[test]
 fn original_plain_native_fees_recover_under_pressure_and_survive_phase_destruction() {
     let (resources, scope, _, phase, alive) = fixture();
     phase.arm().unwrap();
