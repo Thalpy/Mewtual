@@ -78,8 +78,10 @@ until Drop. Metadata-only commands need their own original intent-matching Copy,
 and publication keepalive. Action result/delivery commands also require actual intent identity.
 
 VOICE_SDP_RPC_FIXED_BYTES models aligned Body/Work Arc allocations, actual Actor/App envelopes,
-pending/completion values and bounded oneshot bookkeeping. Native adds its ACTUAL calling
-future before admission. Independent TaskCopy pays its own native publication/worker graph;
+pending/completion values and bounded oneshot bookkeeping. Native must use
+voice_sdp_rpc_bytes(actual_future_size): common storage plus the maximum of eager
+construction and the actual returned future, which occupy separate ownership phases.
+Independent TaskCopy pays its own native publication/worker graph;
 it cannot attach a keepalive or turn into a body Copy. No native wire opcode/body class,
 browser ABI change or live voice enablement is added by this Actor increment.
 

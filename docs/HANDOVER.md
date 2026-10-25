@@ -15,13 +15,21 @@ Slot tests distinguish never-entered command loss from entered uncertainty, pres
 IO collection independently of a negative result, prevent a finished old token corrupting
 a retried writer, and fence a close racing writer reservation. Positive history survives
 actual input/join teardown. All624 focused Root voice-v2 tests pass (16.39s), including actual
-LOW/Open/HIGH publication, profile races and cached-mode rejection. The new actual recorded
-Actor/collection-waker blocked-TCP case passed before the final timeout/accounting revision
-(9.56s; exact current rerun pending): unpolled drop, stopped Actor,
+LOW/Open/HIGH publication, profile races and cached-mode rejection. All39 exact current
+Actor tests pass (0.41s). All6 current blocked-TCP PC cases pass (66.54s), including the
+recorded Actor/collection-waker case: unpolled drop, stopped Actor,
 abandoned queued waiter, explicit refusal, synchronous CLOSED+zero observation, and actual
 LOW publication recovered only from its slot after discarded reply and PC/SDK close.
-Formal current Cargo gates, complete native
-Row/slot inventory, final adversarial review and full suites remain pending for this draft.
+All2740 frontend tests (72.00s), Svelte checks and production build (37.85s) pass.
+The latest memory inventory uses common storage plus the maximum of eager construction
+and the returned future: one original request pair moves between them. Refusal retires all
+owned arguments first; backing/native enclosing work remains separately additive.
+Current native check (57.64s), strict native clippy (1m42s) and strict Root all-target/feature
+clippy (47.16s) pass. Read-only adversarial review found no blocker/high/medium; its LOW
+accounting, timeout and documentation findings are resolved. The dependency audit still
+fails on inherited RUSTSEC-2026-0387 / crypto-bigint0.5.5; no dependencies/ignores changed.
+Full current Root/native suites and the subsequent native Row/slot integration remain
+pending; these focused results are not complete V2 or physical acceptance.
 
 Each original intent now irreversibly chooses Recorded or Unrecorded publication. Candidate
 fee/purpose validation precedes Recorded selection. Old factories choose Unrecorded only
