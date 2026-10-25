@@ -4,7 +4,7 @@ use super::*;
 use voice_v2::crypto_actions::{SdpAdmittedInput, SdpInputRead};
 
 type Fixture = (Box<SdpFixture>, Arc<CryptoAction>);
-async fn opened_fixture() -> Fixture {
+pub(super) async fn opened_fixture() -> Fixture {
     // Keep the existing four-node fixture/future on the heap. Nesting another
     // by-value async return would duplicate it in the test thread's small stack.
     let mut fixture = Box::new(Box::pin(sdp_fixture()).await);
@@ -187,6 +187,12 @@ async fn root_sdp_input_terminal_history_survives_ack_end_and_compaction() {
 
 #[tokio::test]
 async fn root_sdp_input_refreshes_action_expiry_after_actor_preparation_clock_callback() {
+    packet_expiry_during_actor_preparation(false).await;
+}
+
+/// Both public scoped paths must refresh the SAME Action after Actor preparation:
+/// Ready can remain current even when the original signed incoming packet expires.
+pub(super) async fn packet_expiry_during_actor_preparation(engine: bool) {
     use std::sync::atomic::{AtomicBool, Ordering};
     let clock = Arc::new(ManualClock::new(1000));
     let hook = Arc::new(ReplySampleClock {
@@ -230,11 +236,12 @@ async fn root_sdp_input_refreshes_action_expiry_after_actor_preparation_clock_ca
     let action_probe = action.clone();
     let gates = node.voice_transport_actor().unwrap().lock_probe_for_test();
     let original = clock.clone();
-    // Actual calls: original Action history (2 source monotonic reads), MLS context,
-    // grant/source context, current context (3), then Actor origin's first read (6).
-    // Advance only at origin preparation, AFTER the original Action observation.
+    // Input first reads Action history (2 monotonic samples); Engine prepares its
+    // candidate without Clock. Both then observe MLS/grant/current context (3),
+    // followed by the ACTUAL origin preparation. Advance only at that origin sample.
+    // The counter selects a deterministic seam, not a literal currentness result.
     *hook.on_mono.lock().unwrap() = Some((
-        5,
+        if engine { 3 } else { 5 },
         Box::new(move || {
             assert!(gates(), "Clock must precede actual Group/Policy guards");
             assert!(
@@ -246,20 +253,34 @@ async fn root_sdp_input_refreshes_action_expiry_after_actor_preparation_clock_ca
         }),
     ));
     let before = observations(node);
-    let result =
+    let final_fence = || {
+        assert!(
+            crossed.load(Ordering::Acquire),
+            "actual preparation callback ran"
+        );
+        // Neither scoped commit may observe Clock beneath native's final fences.
+        *hook.on_mono.lock().unwrap() = Some((
+            0,
+            Box::new(|| panic!("Clock beneath native final admission")),
+        ));
+    };
+    let result = if engine {
+        node.with_voice_sdp_engine_admission(
+            &grants[high],
+            &intents[high],
+            &action,
+            action.engine_bytes(),
+            |step| {
+                final_fence();
+                step.commit().map(|_| ())
+            },
+        )
+    } else {
         node.with_voice_sdp_input_admission(&grants[high], &intents[high], &action, |step| {
-            assert!(
-                crossed.load(Ordering::Acquire),
-                "the actual preparation callback ran"
-            );
-            // The native callback is the final fence. A callback-bearing observation here
-            // would violate it, even if its numerical timestamp happened to be unchanged.
-            *hook.on_mono.lock().unwrap() = Some((
-                0,
-                Box::new(|| panic!("Clock beneath native final admission")),
-            ));
-            step.commit()
-        });
+            final_fence();
+            step.commit().map(|_| ())
+        })
+    };
     assert_eq!(result.err(), Some(VoiceError::Unauthorized));
     assert!(
         hook.on_mono.lock().unwrap().take().is_some(),

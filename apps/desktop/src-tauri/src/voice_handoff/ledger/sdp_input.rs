@@ -6,7 +6,6 @@ use super::sdp_rows;
 use super::transition::try_lock;
 use super::*;
 use catcoms_sync::voice_v2::chain::sdp_handoff::{NativeRowFunding, NativeRowPurpose, Phase};
-use catcoms_sync::voice_v2::crypto_actions::SdpInputRead;
 use catcoms_sync::voice_v2::sdp::InitialSdpIntent;
 
 /// Fixed descriptor provenance, derived exclusively from original native owners. The
@@ -180,14 +179,14 @@ impl Target {
     }
     /// All native guards remain borrowed through the final Root commit. No allocation,
     /// Clock, owner destruction or await belongs in this tail. Once it returns, the caller
-    /// must drop every short guard BEFORE inspecting/destroying the affine Data loan.
+    /// must drop every short guard BEFORE inspecting/destroying the admitted output.
     /// Step/target Action identity is additionally checked on the resulting Data outside
     /// guards: App's generic hook accepts a separately supplied same-intent Action.
-    pub(in crate::voice_handoff) fn admit(
+    pub(in crate::voice_handoff) fn admit<T>(
         &self,
         admission: &Admission<'_>,
-        commit: impl FnOnce() -> Result<SdpInputRead, VoiceError>,
-    ) -> Result<SdpInputRead, VoiceError> {
+        commit: impl FnOnce() -> Result<T, VoiceError>,
+    ) -> Result<T, VoiceError> {
         if !Arc::ptr_eq(&self.row.ledger, admission.ledger())
             || !Arc::ptr_eq(&self.session, admission.session())
             || !std::ptr::eq(self.selected.as_ref(), admission.selected())

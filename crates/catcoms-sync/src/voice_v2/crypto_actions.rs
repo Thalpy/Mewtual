@@ -23,7 +23,10 @@ const CONFIRM_BYTES: usize = 512;
 const RECORD_BYTES: usize = 1024;
 mod handoff;
 mod results;
+mod sdp_engine;
 mod sdp_input;
+pub use sdp_engine::SdpEngineRead;
+pub(crate) use sdp_engine::{ObservedSdpEngine, PreparedSdpEngine};
 mod snapshot;
 pub(crate) use sdp_input::ObservedSdpInput;
 pub use sdp_input::{SdpAdmittedInput, SdpInputRead};
@@ -230,6 +233,13 @@ redacted_debug!(
 );
 
 impl CryptoAction {
+    /// Deterministic test barrier on the actual Engine, independent of permit state.
+    /// It models contention only; production never waits beneath native admission.
+    #[cfg(test)]
+    pub(crate) fn with_engine_fence_for_test<T>(&self, check: impl FnOnce() -> T) -> T {
+        let _engine = self.engine.lock().unwrap();
+        check()
+    }
     pub fn serial(&self) -> u64 {
         self.serial
     }
@@ -384,6 +394,27 @@ impl CryptoAction {
         if bytes != self.engine_bytes {
             return Err(VoiceError::RetryMismatch);
         }
+        let mut candidate = self.prepare_engine_candidate(bytes)?;
+        let (mono, wall) = self.pending_observation();
+        let result = fence(CryptoEngineAdmission {
+            action: self,
+            bytes,
+            mono,
+            wall,
+            candidate: &mut candidate,
+        });
+        // A refused/unneeded candidate was never an engine permit. Its Drop can wait on
+        // capacity fences, so keep it OUTSIDE the native callback/Engine guards, including
+        // unwind. Only an actually installed permit remains owned by Engine after return.
+        drop(candidate);
+        result
+    }
+
+    /// Prepare the original capacity before native fences or final Clock samples. Exact
+    /// permit retries retain the same credit; no caller may treat this observation as
+    /// current admission. SDP also retains a failed preparation until its terminal-first
+    /// commit, allowing a result racing preparation to recover canonical history.
+    fn prepare_engine_candidate(&self, bytes: usize) -> Result<Option<Credit>, VoiceError> {
         // This preflight may wait, but occurs BEFORE the final Clock observation. Never
         // lend the mutable Engine or a credit owner across callbacks. Exact held permits
         // need no second reservation; a racing admission is reconciled again at commit.
@@ -407,7 +438,7 @@ impl CryptoAction {
                 )
             }
         };
-        let mut candidate = match lender {
+        Ok(match lender {
             Some(lender) => match lender.charge(
                 &self.resources,
                 self.scope.group,
@@ -434,20 +465,7 @@ impl CryptoAction {
                 Err(error) => return Err(error),
             },
             None => None,
-        };
-        let (mono, wall) = self.pending_observation();
-        let result = fence(CryptoEngineAdmission {
-            action: self,
-            bytes,
-            mono,
-            wall,
-            candidate: &mut candidate,
-        });
-        // A refused/unneeded candidate was never an engine permit. Its Drop can wait on
-        // capacity fences, so keep it OUTSIDE the native callback/Engine guards, including
-        // unwind. Only an actually installed permit remains owned by Engine after return.
-        drop(candidate);
-        result
+        })
     }
 
     /// Actual engine and last result-RPC settlement only. An unstarted action can be closed too;

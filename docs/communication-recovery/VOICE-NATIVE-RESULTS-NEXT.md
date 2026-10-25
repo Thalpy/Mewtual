@@ -1,5 +1,27 @@
 # Next voice milestone: native result recovery
 
+## 25 October: scoped engine admission exists privately; complete Result next
+
+The actual-Actor engine gate now repeats current MLS/room/watch/call/pair and original
+Action/intent checks, with terminal-first history and original candidate/permit custody.
+Its paid App/native opcode18 adapter and closed version8/tag4 browser decoder are implemented.
+Production remains disabled and current memory/TCP/full-gate validation is recorded in
+HANDOVER. This supersedes the engine-admission implementation task in older sections below.
+
+Complete zero-copy original native Result intake and scoped final terminal publication,
+including original signature/hash/Clock preparation before native guards. Recover exact
+accepted and rejected results before consumed-token/current checks; retain the same output/
+tag across Capacity and lost replies. Native output/actor collection, engine settlement,
+ACK, Return and fresh delivery remain separate observations. Expand maximum native Open,
+terminal races and actual actor-stop coverage. Do not infer complete native readiness from
+Root maximum-size tests or the new metadata decoder alone.
+
+Then connect one paid private browser owner through authenticated large Input, WebCrypto,
+Result and actual settlement, preserving a one-execution latch and retained output across
+lost replies. Measure complete64KiB stages and eventual RTC strings. Follow with original
+RTC/ICE, fresh rounds, multi-peer, relay and combined acceptance. Independent physical
+audio/network acceptance still requires devices/networks unavailable in this session.
+
 ## 25 October: scoped Begin is complete privately; engine/result vertical next
 
 `communication-sdp-publication-admission` fixes the earlier Begin/Clock-under-UI boundary:

@@ -9,6 +9,18 @@ use catcoms_sync::voice_v2::VoiceError;
 
 pub(super) const HISTORY_BYTES: usize = 220;
 pub(super) const MISSING_BYTES: usize = 20;
+/// Distinct version8/tag4 permit, bound to the authenticated original SDP request.
+/// Reuse only the fixed field encoder; never expose confirmation's version1 grammar.
+pub(super) fn admitted(
+    row: RowId,
+    action: super::requests::Action,
+    engine_bytes: usize,
+    permit: u64,
+) -> Result<[u8; super::replies::PERMIT_BYTES], VoiceError> {
+    let mut bytes = super::replies::admitted(row, action, engine_bytes, permit)?;
+    bytes[..2].copy_from_slice(&[8, 4]);
+    Ok(bytes)
+}
 /// Missing is a snapshot miss. Only successful native close_sdp_original may set closed;
 /// even then this records a purpose fence, never engine/SDK/storage or whole-PC drainage.
 pub(super) fn missing(
@@ -176,6 +188,37 @@ pub(super) fn serialization_layout_bytes() -> usize {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn engine_permit_matches_the_shared_browser_vector_and_refuses_wrong_serial() {
+        let vector: serde_json::Value =
+            serde_json::from_str(include_str!("sdp-engine-vectors.json")).unwrap();
+        let row = super::RowId::from_logical(
+            hex::decode(vector["row"].as_str().unwrap())
+                .unwrap()
+                .try_into()
+                .unwrap(),
+        )
+        .unwrap();
+        let action = super::super::requests::Action {
+            serial: vector["identity"]["action"]
+                .as_str()
+                .unwrap()
+                .parse()
+                .unwrap(),
+            version: vector["identity"]["version"]
+                .as_str()
+                .unwrap()
+                .parse()
+                .unwrap(),
+            input_tag: [7; 32],
+        };
+        let bytes = vector["engineBytes"].as_u64().unwrap() as usize;
+        assert_eq!(
+            hex::encode(super::admitted(row, action, bytes, action.serial).unwrap()),
+            vector["permit"].as_str().unwrap()
+        );
+        assert!(super::admitted(row, action, bytes, action.serial - 1).is_err());
+    }
     use super::*;
     use catcoms_sync::voice_v2::crypto_actions::{CryptoResultReceipt, CryptoResultStatus};
     fn ids() -> (RowId, RowId) {

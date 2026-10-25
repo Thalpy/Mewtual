@@ -1,5 +1,30 @@
 # Chat, files and voice implementation evidence
 
+## 25 October actual-Actor engine checkpoint (validation in progress)
+
+The private original SDP engine gate now checks registered Action/intent and actual current
+MLS/room/watch/call/pair under Engine then Group/Policy. Original candidate payment and
+Clock preparation precede native publication; final UI is lexical, not retained in output.
+The concrete paid App/native command and version8/tag4 browser decoder exist, while production
+still refuses the whole SDP family. Neither a permit retry nor history executes SDK/RTC.
+
+All782 focused Root voice tests (eleven new engine regressions) and four decoder regressions
+pass; all2,754 frontend
+tests, Svelte checks/build and strict Root Clippy pass. Native Task2,392/4,096B passes;
+the physical adapter is3,800B and unchanged whole Control12,279/12,288B passes. All342 native
+handoff tests pass (23.59s), blocked-TCP engine passes (12.61s), and the existing staged
+HTTP/Input regression passes (9.78s). Canonical projection and serialization use separate
+source stages. Independent lifetime escape fails while its committed positive control compiles.
+Separate native Cargo check/strict all-target Clippy, both formatting gates, ambient and
+diff checks pass. Final read-only review has no remaining blocker/high/medium.
+Maximum Seal/Open pressure and equal-label Action-allocation checks pass at Root. See HANDOVER
+for current results rather than interpreting this development checkpoint as acceptance.
+
+Preceding revision `0d983c95` completed full Root3,608/0 fail/24 ignored. Its separate native
+gate is compiling/running; neither result is full validation of the current engine source.
+Native Result/browser execution, fresh delivery/RTC, fresh rounds, multi-peer, relay,
+combined acceptance and independent physical audio/network evidence remain unfinished.
+
 ## 25 October scoped native Begin checkpoint (not live V2 acceptance)
 
 The private original LOW Offer/HIGH Answer/Open factories now prepare original clocks

@@ -93,6 +93,85 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         publish(SdpInputAdmission::current(observed, current))
     }
 
+    /// Lend one original SDP engine admission on the actual Actor. A retained intent
+    /// or generic action permit alone cannot establish current MLS/room membership.
+    /// All capacity and Clock preparation precedes the trusted native hook; commit
+    /// retains Engine then current Group/Policy through infallible permit installation.
+    /// Terminal/settled metadata wins over now-stale current context and grants no RTC.
+    ///
+    /// ```compile_fail
+    /// use catcoms_rt::{CryptoRngCore, MeshTransport};
+    /// use catcoms_sync::{ChannelSync, voice_v2::{CallGrant, crypto_actions::CryptoAction, sdp::InitialSdpIntent}};
+    /// use std::sync::Arc;
+    /// fn escape<T: MeshTransport, R: CryptoRngCore>(sync: &mut ChannelSync<T, R>,
+    ///     grant: &Arc<CallGrant>, intent: &Arc<InitialSdpIntent>, action: &Arc<CryptoAction>) {
+    ///     let _escaped = sync.with_voice_sdp_engine_admission(grant, intent, action,
+    ///         action.engine_bytes(), |step| Ok(step));
+    /// }
+    /// ```
+    pub fn with_voice_sdp_engine_admission<U>(
+        &mut self,
+        grant: &Arc<CallGrant>,
+        intent: &Arc<InitialSdpIntent>,
+        action: &Arc<voice_v2::crypto_actions::CryptoAction>,
+        bytes: usize,
+        publish: impl FnOnce(voice_v2::sdp::SdpEngineAdmission<'_>) -> Result<U, VoiceError>,
+    ) -> Result<U, VoiceError> {
+        // Capacity can wait during preparation. Pay it BEFORE the actual Actor
+        // captures origin time, then observe this original Action last below.
+        let preparation = action.prepare_sdp_engine_candidate(intent, bytes)?;
+        // These are fallible preparations, not final authority. Keep their failures until
+        // commit so terminal publication racing this preparation can still recover history.
+        // Actual MLS context is compared with the paid actor view even if its retained
+        // EpochObservation has not yet been advanced by reconciliation.
+        let context = self
+            .validate_current_voice_call_grant(grant)
+            .and_then(|()| self.voice_v2_context(grant.scope().room));
+        let room = context
+            .as_ref()
+            .map_err(|error| *error)
+            .and_then(|context| {
+                self.voice_runtime
+                    .as_ref()
+                    .ok_or(VoiceError::Unauthorized)?
+                    .directory
+                    .authority(context.scope)
+            });
+        let current = (|| {
+            let context = context.as_ref().map_err(|error| *error)?;
+            let room = room.as_ref().map_err(|error| *error)?;
+            let voice = self
+                .voice_runtime
+                .as_ref()
+                .ok_or(VoiceError::Unauthorized)?;
+            let actor = voice.current.as_ref().ok_or(VoiceError::Unauthorized)?;
+            let participant = voice
+                .endpoints
+                .participant
+                .as_ref()
+                .ok_or(VoiceError::Unauthorized)?;
+            if !std::sync::Weak::ptr_eq(&participant.grant, &Arc::downgrade(grant))
+                || participant.watch.scope != context.scope
+            {
+                return Err(VoiceError::Unauthorized);
+            }
+            participant.join.prepare_sdp_input_current(
+                actor,
+                room,
+                action,
+                intent,
+                context,
+                &participant.lease,
+                &participant.watch.lease,
+            )
+        })();
+        // The SAME action observes its final time after callback-bearing Actor
+        // context preparation AND original candidate payment, before native fences.
+        preparation.with_observation(|observed| {
+            publish(voice_v2::sdp::SdpEngineAdmission::new(observed, current))
+        })
+    }
+
     /// Prepare only HIGH's original applied Offer response. Root resolves the actual
     /// accepted Open/delivery and derives its OfferId internally; no renderer label or
     /// result receipt is accepted as a substitute for that fixed native allocation.

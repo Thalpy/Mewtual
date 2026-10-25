@@ -16,6 +16,12 @@ pub(crate) struct InputCurrent<'a> {
 }
 impl InputCurrent<'_> {
     fn check(self) -> Result<(), VoiceError> {
+        self.with_current(|| ())
+    }
+    /// Shared actual-Actor provenance for Input and engine admission. The engine's
+    /// infallible permit insertion must run inside the original Group/Policy view,
+    /// rather than after a reusable boolean currentness observation escapes it.
+    pub(in crate::voice_v2) fn with_current(self, apply: impl FnOnce()) -> Result<(), VoiceError> {
         self.origin.with_origin(|wall, mono, origin| {
             if !self.room.lease.is_live()
                 || !self.call.is_live()
@@ -26,8 +32,9 @@ impl InputCurrent<'_> {
                 return Err(VoiceError::Unauthorized);
             }
             // Group/Policy were entered with the original peer and actual context.
-            // This publishes no packet/quota debit and grants no engine or RTC effect.
-            origin.publish(|| ())
+            // The caller supplies only the already prepared infallible apply tail.
+            // This creates no signed packet, traffic quota or RTC effect.
+            origin.publish(apply)
         })
     }
 }

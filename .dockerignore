@@ -68,6 +68,7 @@
 !apps/desktop/src-tauri/src/voice_handoff/requests/transition/vectors.json
 !apps/desktop/src-tauri/src/voice_handoff/replies/vectors.json
 !apps/desktop/src-tauri/src/voice_handoff/sdp-history-vectors.json
+!apps/desktop/src-tauri/src/voice_handoff/sdp-engine-vectors.json
 !apps/desktop/src-tauri/src/voice_handoff/requests/key-session-vectors.json
 !apps/desktop/src-tauri/src/voice_handoff/requests/sdp-vectors.json
 !apps/desktop/src-tauri/src/voice_handoff/requests/sdk-vectors.json

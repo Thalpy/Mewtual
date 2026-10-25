@@ -1,5 +1,26 @@
 # Mewtual; Interfaces & Hooks Schema
 
+## Scoped SDP engine gate and private permit (25 October; disabled family)
+
+`ChannelSync::with_voice_sdp_engine_admission` lends one `SdpEngineAdmission` after original
+capacity/Actor/Action-clock preparation. Native verifies `belongs_to_action` against its
+indexed original allocation before consuming commit. `SdpEngineRead::History` is metadata
+only; `Permit` names the same serial and credit, never permission to invoke SDK twice.
+Pending commit checks actual current MLS/room/participant under Engine then Group/Policy.
+
+`ServerActor::try_queue_voice_sdp_engine` takes a separately paid4KiB Copy and consuming
+`VoiceSdpEnginePublisher`. Full is local Capacity, stopped is uncertain. Ordered payment
+and callback retirement share the established Input lifecycle primitive. The concrete
+native publisher pays its own Task, tries original UI/Coordinator/route/index/row fences,
+and releases UI before hook return. No admitted engine guard survives in output custody.
+
+Opcode18's private version8/tag4 permit is78 bytes: row16, Action serial/version/tag48,
+original permit8 and engine bytes4, plus the two-byte prefix. It is authenticated against
+the exact original request. `decodeVoiceSdpEngineReply` binds expected row/Action/tag/charge,
+retains only fixed scalars, and also accepts canonical original History/refusal. Generic
+SDP Control and confirmation decoders do not accept this permit grammar. No shipping Host
+or browser engine invokes it yet. Result, ACK/settlement and fresh RTC delivery remain open.
+
 ## Scoped original SDP publication (25 October; trusted Rust-only)
 
 The three `ChannelSync::prepare_voice_*_recorded_scoped` factories lend one synchronous

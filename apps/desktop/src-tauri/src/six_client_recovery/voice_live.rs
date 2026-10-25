@@ -827,3 +827,9 @@ async fn native_v2_confirmation_alias_claims_refuse_before_publication_in_both_b
 async fn native_v2_pc_intent_original_http_begin_history_return_and_premature_high_refusal() {
     confirmation_over_blocked_tcp(true, false, false, false, Some(8)).await;
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn native_v2_original_sdp_engine_uses_actual_actor_and_recovers_lost_permit_after_queue_and_lock_races(
+) {
+    confirmation_over_blocked_tcp(true, false, false, false, Some(9)).await;
+}

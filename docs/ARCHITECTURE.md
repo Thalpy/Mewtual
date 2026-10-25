@@ -1,5 +1,22 @@
 # Mewtual; Architecture
 
+## Scoped actual-Actor SDP engine admission (25 October; private)
+
+Engine candidate payment precedes current Actor origin capture; the same original Action's
+time is observed last. A scoped synchronous step retains Engine then current Group/Policy
+through original permit insertion. Canonical terminal/settled history precedes current
+failures; an immutable PC/Ready intent or generic engine permit cannot replace actual MLS,
+room/watch/call/pair and registered Action checks. Unused candidate credit drops outside
+the native hook. The same serial/credit is reused on exact retries, without SDK reexecution.
+
+The separately paid App/native command binds the original row counter and actual Action
+allocation before effect. Its UI guard is lexical and ends before callback return; Root
+cleanup may then retire an unused candidate. Callback retirement precedes canonical history.
+Fixed metadata survives in original physical Control custody after native Task/Actor graphs
+are destroyed. Projection and serialization are separate stages to preserve the existing
+Control cap; current validation status is in HANDOVER. The version8/tag4 permit has a private
+browser decoder but no engine consumer. Production SDP, Result/RTC/media remain disabled.
+
 ## Scoped original SDP Begin publication (25 October; private)
 
 Original LOW Offer, HIGH Answer and Open factories now lend one stack-only prepared

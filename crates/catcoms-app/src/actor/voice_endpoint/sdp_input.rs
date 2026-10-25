@@ -29,21 +29,21 @@ pub trait VoiceSdpInputPublisher: Send {
 pub struct VoiceSdpInputWork(Arc<InvocationState<Copy>>);
 /// Lifecycle only, separate from actual Copy/output collection. An output intentionally
 /// retains this allocation; waiting for its last Arc instead would deadlock history.
-struct InvocationState<P> {
+pub(super) struct InvocationState<P> {
     retired: AtomicBool,
     notify: tokio::sync::Notify,
     // LAST: notification/observer metadata stays paid through its own actual destruction.
     payment: P,
 }
 impl<P> InvocationState<P> {
-    fn new(payment: P) -> Self {
+    pub(super) fn new(payment: P) -> Self {
         Self {
             retired: AtomicBool::new(false),
             notify: tokio::sync::Notify::new(),
             payment,
         }
     }
-    async fn wait_retired(&self) {
+    pub(super) async fn wait_retired(&self) {
         loop {
             let notified = self.notify.notified();
             tokio::pin!(notified);
@@ -57,7 +57,7 @@ impl<P> InvocationState<P> {
         }
     }
 }
-struct InvocationRetirement<P>(Arc<InvocationState<P>>);
+pub(super) struct InvocationRetirement<P>(pub(super) Arc<InvocationState<P>>);
 impl<P> Drop for InvocationRetirement<P> {
     fn drop(&mut self) {
         self.0.retired.store(true, Ordering::Release);
@@ -84,9 +84,9 @@ impl std::fmt::Debug for VoiceSdpInputWork {
 /// The same ordered aggregate is used for raw intake and queued work. Keeping it
 /// intact across callbacks makes paid-last destruction hold on ordinary return AND unwind.
 pub(super) struct Paid<A, P> {
-    arguments: A,
+    pub(super) arguments: A,
     // LAST. No Drop implementation may extract this ahead of the argument graph.
-    payment: P,
+    pub(super) payment: P,
 }
 pub(super) struct Arguments {
     grant: Arc<CallGrant>,

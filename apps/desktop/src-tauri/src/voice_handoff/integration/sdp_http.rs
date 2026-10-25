@@ -140,6 +140,7 @@ pub(super) async fn exercise(
     parent: &ledger::ResolvedRow,
     pc_frame: &[u8],
     intent: &Arc<InitialSdpIntent>,
+    engine: bool,
 ) -> RetiredProbe {
     let seal = intent.local_is_low();
     let operation = if seal { 15 } else { 16 };
@@ -275,20 +276,34 @@ pub(super) async fn exercise(
         assert_eq!(&unchanged[2..86], &first[2..86]);
         // This staged slice exercises the actual Input queue/hook and class2 response;
         // production SDP dispatch and browser/RTC execution are still disabled.
-        Box::pin(super::super::sdp_input::exercise(
-            state,
-            public,
-            route,
-            parent,
-            pc_frame,
-            ledger::RowId::from_logical(child).unwrap(),
-            requests::Action {
-                serial: u64::from_be_bytes(first[38..46].try_into().unwrap()),
-                version: u64::from_be_bytes(first[46..54].try_into().unwrap()),
-                input_tag: first[54..86].try_into().unwrap(),
-            },
-        ))
-        .await;
+        let action = requests::Action {
+            serial: u64::from_be_bytes(first[38..46].try_into().unwrap()),
+            version: u64::from_be_bytes(first[46..54].try_into().unwrap()),
+            input_tag: first[54..86].try_into().unwrap(),
+        };
+        if engine {
+            Box::pin(super::super::sdp_engine::exercise(
+                state,
+                public,
+                route,
+                parent,
+                pc_frame,
+                ledger::RowId::from_logical(child).unwrap(),
+                action,
+            ))
+            .await;
+        } else {
+            Box::pin(super::super::sdp_input::exercise(
+                state,
+                public,
+                route,
+                parent,
+                pc_frame,
+                ledger::RowId::from_logical(child).unwrap(),
+                action,
+            ))
+            .await;
+        }
     }
     if !seal {
         if let Ok(clock) = EXPIRY_CLOCK.try_with(Arc::clone) {

@@ -1,5 +1,26 @@
 # Threat model; client integrity & enforcement boundaries
 
+## Actual-Actor SDP engine currentness (25 October; production family refused)
+
+The private SDP engine path no longer relies on generic permit admission as its only Root
+authority. The actual Actor resolves the registered Action and original intent against
+current MLS/room/watch/call/pair, then installs the prepaid permit under Engine and current
+Group/Policy. Candidate payment precedes origin time; Action time is last. Terminal or
+settled history wins after End without becoming a new engine permit. Exact retries use the
+same engine; a future browser operation must latch SDK-started before invoking WebCrypto.
+
+Native binds the indexed original row and compares actual Action allocation before effect.
+Its UI guard ends before hook return so Root's unused-candidate cleanup cannot run beneath
+retained UI output. Task/Actor/physical custody remains independently paid; callback return,
+physical idle, serialized metadata and Task collection are not actual engine settlement.
+The narrow version8/tag4 decoder rejects legacy and mismatched row/Action/charge data after
+exact channel authentication. No generic reader limit or production opcode is widened.
+
+Canonical history projection finishes before encoded reply serialization. The unchanged
+whole Control guard passes at12,279/12,288B; no budget was raised to accommodate the adapter.
+HANDOVER records current evidence and limits. Native maximum Open/terminal/stop combinations,
+browser64KiB/SDK execution, Result/delivery/RTC, relay and physical acceptance remain open.
+
 ## Scoped Begin publication and paid queue backing (25 October; disabled SDP family)
 
 Begin's earlier Clock-under-UI overlap is fixed in the private staged path. Root prepares

@@ -4,6 +4,8 @@
 use super::*;
 use voice_v2::chain::sdp_handoff::Phase;
 use voice_v2::sdp::InitialSdpIntent;
+#[path = "sdp/engine.rs"]
+mod engine;
 #[path = "sdp/input.rs"]
 mod input;
 

@@ -1,5 +1,65 @@
 # Mewtual; Handover
 
+## Actual-Actor SDP engine admission (25 October; private, validation in progress)
+
+`communication-sdp-engine` continues from pushed publication checkpoint `03315cf5`.
+Root now prepares the original Exchange engine candidate before capturing current Actor
+origin time, then observes the same Action's clock last. Scoped commit holds Engine,
+recovers terminal/settled history first, and otherwise checks the registered original
+Action/intent, actual MLS epoch, room/watch/call/pair and current Group/Policy before
+installing the original permit in the infallible publication tail. Unused candidate credit
+stays outside native guards, including refusal and unwind. Existing generic engine behavior
+is preserved; the SDP gate adds the actual-Actor current-context checks it lacks.
+
+A separate paid App command uses the finite mailbox, same native row counter, ordered
+arguments/payment and actual callback-retirement observation. Its concrete native opcode18
+adapter binds original Session/parent/row/Action/SDK/PC/intent/Phase/funding and compares the
+actual Action allocation before effect. UI is lexical through engine commit and released
+before callback return; it is never stored in engine output. Fixed permit/history Control
+metadata outlives Task wrappers only after their graph is destroyed and remains paid by
+the original physical Control envelope. Neither Task retirement nor a lost reply settles
+the engine or authorizes another SDK execution. Production still rejects all SDP opcodes.
+
+The private native/browser permit is version8/tag4,78 bytes, with exact row, Action/tag,
+engine charge and original serial. Its browser decoder requires authentication of the
+exact request/response pair, snapshots caller fields once, preserves u64s as strings and
+rejects legacy grammar. It is not connected to a browser engine. The shared vector has an
+exact Docker allowlist and context-audit entry; no broad JSON exception was added.
+
+Current evidence: all782 focused Root voice tests, including eleven new engine regressions,
+and four new decoder tests pass. The new expiry test crosses the original signed packet's
+deadline during the actual Actor preparation callback while Ready remains live. All
+2,754 frontend tests, Svelte checks and production build pass. Strict Root all-target/
+all-feature Clippy, separate native Cargo check/strict all-target Clippy, both formatting
+checks, ambient and diff checks pass. An independent compile-fail rejects engine-step escape while
+the committed positive control compiles. Native Task is2,392/4,096B; its physical adapter
+is3,800B and the whole Control guard passes unchanged at12,279/12,288B. Canonical history
+projection and serialization are separate source stages. All342 native handoff tests pass
+(23.59s); the actual blocked-TCP engine scenario passes (12.61s), and the existing staged
+HTTP/Input regression passes (9.78s). No capacity was raised. Maximum Seal/Open under
+ordinary pressure and equal-label foreign Action allocation checks pass at Root. Review's
+Docker finding is fixed; final read-only review has no remaining blocker/high/medium.
+Its fixture uses an actual Actor FIFO barrier before asserting zero RPC copies:
+callback retirement precedes the sender's last payment Drop. The consuming Publisher
+keeps its actual paid Box through the borrowed completion helper's send and return.
+
+Full Root validation of preceding checkpoint `0d983c95` completed:3,608 pass,0 fail,
+24 ignored across59 summaries. Its native workspace is compiling/running separately.
+Those results do not establish a full-suite pass for this newer source. The earlier
+publication checkpoint passed its frontend/build and focused/static gates; current full
+Root/native gates remain mandatory. Dependency audit still has inherited crypto-bigint
+RUSTSEC-2026-0387, with no dependency or ignore change. Docker context execution needs a
+Docker daemon; only the exact source allowlist/audit has been checked here.
+Startup/visual-flow checks were not rerun: no setup, runtime/process placement, UI,
+message-send or friend-request path changed, and the entire SDP family remains refused.
+
+Next finish native Result intake/publication, canonical accepted/rejected result recovery,
+ACK, actual settlement and fresh delivery. Then connect a paid private browser Input/
+WebCrypto/result owner (including its separate authenticated large-Input reader), original
+RTC/ICE and SDK-started latch. Root Exchange, native Phase and browser sidecar remain separate
+accounts. Maximum native Open/terminal/stop races, complete browser64KiB composition, fresh
+rounds, multi-peer, relay, combined and independent physical acceptance remain unfinished.
+
 ## Scoped native SDP Begin publication (25 October; private, full gates pending)
 
 `communication-sdp-publication-admission` continues from `0d983c95`. This supersedes the

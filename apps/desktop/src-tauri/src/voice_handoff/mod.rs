@@ -40,6 +40,7 @@ mod transition;
 
 mod sdp_replies;
 
+mod sdp_engine;
 mod sdp_http;
 mod sdp_input;
 mod sdp_input_codec;
