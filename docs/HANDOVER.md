@@ -1,14 +1,22 @@
 # Mewtual; Handover
 
-## HTTP checkpoint: full Root suite passed (25 October)
+## HTTP checkpoint: complete runtime validation passed (25 October)
 
-The `communication-sdp-native-http` candidate passes the complete Root command
-`cargo test --all --all-features -j1`: 3,650 passed, 0 failed, 24 ignored across59 summaries
-in86m06s. This is the unchanged Ready/HTTP candidate, not the newer media-custody work.
-The separate native full suite started16:27:46UTC and is still running. All2,851 frontend
-tests, Svelte checks, production build and Root/native strict lint/check gates reported
-below passed. The inherited dependency advisory remains unresolved. No App activation,
-live media, relay or physical acceptance claim is added.
+The `communication-sdp-native-http` candidate passes all mandatory full suites:
+Root `cargo test --all --all-features -j1`:3,650 passed,0failed,24ignored across59summaries
+(86m06s). Native `cargo test --manifest-path apps/desktop/src-tauri/Cargo.toml -j1`:
+856unit+5ACL passed,0failed/ignored (32m17s including compilation; unit runtime1533.49s).
+Frontend:2,851 passed,0failed. Svelte0errors/0warnings; production build35.55s. Root/native
+format, strict Clippy, native check and ambient gates pass. Dependency audit still fails
+inherited crypto-bigint0.5.5 advisory RUSTSEC-2026-0387; bans/licenses/sources pass.
+No dependency/ignore was changed to suppress it. Startup/flows were not run because this
+checkpoint changes no setup/process spawning, UI/message/friend-request path.
+
+These results supersede the pending full-gate notes below for this HTTP/Ready checkpoint;
+they do NOT validate newer media-custody source. Controlled RTC remains distinct from
+real WebView/ICE/media, and the earlier one-off Ready timeout remains unattributed despite
+its focused and full-suite passes. App activation, live media, relay and physical acceptance
+remain open. The reviewed media branch is completing its own validation and consumer work.
 
 ## Activation status correction (25 October)
 
