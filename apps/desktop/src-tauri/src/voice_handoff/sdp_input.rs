@@ -1,5 +1,6 @@
 //! Private original SDP Input producer. No factory/registration, replacement input or
-//! current-authority reply crosses an await. Production SDP dispatch remains disabled.
+//! current-authority reply crosses an await. Authenticated service dispatch uses this
+//! producer; App V2 call selection and real media acceptance remain separate.
 use super::bootstrap::Route;
 use super::channel::{self, BodyKind, CompletedReply, Incoming, PhysicalHold};
 use super::context::Context;

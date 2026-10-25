@@ -284,6 +284,9 @@ pub(super) struct Trace {
     pub received_requests: BTreeSet<(usize, usize)>,
     pub received_kinds: BTreeMap<(usize, usize, u8), usize>,
     pub connected_submissions: BTreeMap<(usize, usize, u8), (usize, bool, String)>,
+    /// Test-only public Ready shape, not authenticated admission: attempts and helper
+    /// count per permitted fixture edge. Never retain SDP, packet bytes or identity seeds.
+    pub ready_submissions: BTreeMap<(usize, usize), (usize, usize)>,
     /// Bounded by the six fixture identities; contains no routes, identity seeds or payloads.
     pub peer_dials: BTreeMap<(usize, usize), (usize, String)>,
     /// Driver-confirmed local dial attempts, excluding suppressed batches/errors. This is
@@ -574,6 +577,31 @@ impl MeshTransport for Transport {
         mut cancellation: RequestCancellation,
     ) -> Result<Bytes, TransportError> {
         let kind = data.first().copied().unwrap_or(0);
+        if kind == 28 {
+            let mut frame = catcoms_wire::Decoder::new(&data);
+            if frame.get_u8().is_ok() {
+                if let Ok(inner) = frame.get_bytes() {
+                    if let Ok(envelope) = catcoms_sync::voice_v2::Envelope::decode(inner) {
+                        let ready = match envelope.object().body() {
+                            catcoms_sync::voice_v2::Body::PairReady { header } => Some(header),
+                            catcoms_sync::voice_v2::Body::PairReadyRound { header, .. } => {
+                                Some(header)
+                            }
+                            _ => None,
+                        };
+                        if let Some(header) = ready {
+                            let mut trace = self.rules.trace.lock().unwrap();
+                            let entry = trace
+                                .ready_submissions
+                                .entry((self.index, self.rules.index(peer)))
+                                .or_default();
+                            entry.0 += 1;
+                            entry.1 = header.helpers.len();
+                        }
+                    }
+                }
+            }
+        }
         let cancelled_at_entry = cancellation.is_cancelled();
         let answer = self
             .inner

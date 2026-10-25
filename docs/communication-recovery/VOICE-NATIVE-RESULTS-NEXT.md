@@ -1,5 +1,22 @@
 # Next voice milestone: native result recovery
 
+## 25 October: actual HTTP/browser round validated; operational composition next
+
+Authenticated native service15-27 and original browser Offer/Answer now interoperate across
+two processes over blocked TCP through unjoined B. Native accepted/Applied/drain history is
+the oracle; RTC is controlled. Exact distinct Result/first-Return/Applied response losses
+recover without repeated SDK methods. HANDOVER records focused evidence, review and pending
+full/static gates. Older native-service and full-round integration TODOs are superseded.
+
+Next close actual integrated SDP socket cancellation/expiry/actor-stop coverage and investigate
+the observed Ready timeout using the new bounded transport/Ready-shape diagnostics. The
+first-route correction prevents initially empty-helper freezing; it does not renew legitimate
+frozen choices after route loss. Implement bounded operational renewed rounds and actual App
+native/browser/RTC composition with legacy isolation before activation. Add real media tracks/
+TURN, supported multi-peer composition, member media relay and combined rollout/rollback
+acceptance. Independent physical audio/network proof remains unavailable with one desktop.
+No controlled RTC/HTTP test substitutes for WebView policy, real ICE/media or audible results.
+
 ## 25 October: private Offer/Answer composer exists; connect real native dispatch next
 
 Both original endpoint roles now compose Offer/Answer with one RTC peer and one active

@@ -1,5 +1,49 @@
 # Mewtual; Handover
 
+## Native HTTP Offer/Answer interoperability (25 October; final gates running)
+
+`communication-sdp-native-http` connects authenticated service operations15-27 to their
+existing original-owner adapters. Large15/19/20 require the dedicated original SDP intake
+permit before allocation or either counter debit; generic Data/Phase fallback stays closed.
+Fixed Control admits only valid MAC/header shape and is then checked by its typed encrypted
+owner/purpose adapter, preserving exact history/Return/Resolve after End. Clock is captured
+from the original Coordinator runtime and its guard drops before ledger/Clock callbacks.
+Every existing final native/Root authorization and lifecycle check remains in force.
+
+Actual two-process retained browser brokers now complete maximum8KiB Offer/Answer through
+real authenticated HTTP/BYOB, P256/HKDF/AEAD, native actors and TCP A-B-C with A-C forbidden.
+B joins no call. The RTC provider is controlled: one original peer executes one local and
+one remote method per endpoint. Independent native original-row accepted results, settlement,
+ACK/retirement, localDrained and Open Applied determine success. No plaintext/Input/Result
+or manufactured receipt crosses the bounded test control pipe.
+
+The loss case discards each endpoint's exact19 and20 response, first action24 and successful
+Applied26 only after native evidence for that original purpose/row. A review found that the
+earlier aggregate-counter shim could count one Result twice or the second Return; exact-row
+bookkeeping plus two deterministic transient-observation regressions correct it. The final
+normal/loss native filter passes5 tests (two real process scenarios, three codec tests) in
+34.19s against the rebuilt Ready correction. The earlier one-off Ready timeout remains
+unattributed; bounded transport/Ready-shape diagnostics were added without raising timeouts.
+
+The complete service graph measures27,632/32,768B; physical Control remains12,279/12,288B.
+No caps changed. All346 focused native handoff tests pass20.11s; all21 Root Ready/SDP tests,
+2,851 frontend tests, Svelte0errors/0warnings and production build35.94s pass. Root/native
+format checks and the ambient gate pass. Root strict all-target/all-feature Clippy (1m50s), native check (52.96s) and native
+strict all-target Clippy (1m45s) pass. The full Root suite is running; the native suite
+follows serially on this final candidate. Earlier partial Root runs are superseded,
+not counted as green. Dependency audit still fails inherited crypto-bigint0.5.5 advisory
+RUSTSEC-2026-0387; bans/licenses/sources pass, and no dependency or ignore changed.
+
+Authenticated handoff-service dispatch is now enabled; App V2 call selection remains OFF.
+This supersedes older service15-27-refusal and native/browser-round TODOs below. It is not
+WebView policy, real WebRTC/ICE/media, audible audio, arbitrary bridge renewal or operational
+multi-peer acceptance. Renewed rounds, production App composition/legacy isolation activation,
+media tracks/TURN, member media relay, combined rollout/rollback acceptance and independent
+physical testing remain open. Actual SDP socket cancellation/expiry/actor-stop integration
+coverage remains a follow-up beyond the existing generic service and direct-adapter tests.
+Startup/visual flow gates are not applicable: production setup/process spawning, UI, message
+send and friend acceptance paths were not changed. Only one physical desktop is available.
+
 ## Ready first-route admission correction (25 October)
 
 The connected HIGH preparation now refuses Capacity before creating/freezing its first

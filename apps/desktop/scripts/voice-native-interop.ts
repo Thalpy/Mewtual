@@ -3,6 +3,7 @@
  * sends crypto Input, Result, private keys or plaintext over this control pipe. The Rust
  * parent accepts a closed set of public-metadata callbacks. No app command invokes this. */
 import assert from "node:assert/strict";
+import { NativeSdpReplyLoss, type NativeSdpObservation } from "./voice-native-reply-loss.ts";
 import { webcrypto } from "node:crypto";
 import {
   VoiceCryptoBroker, createVoiceCryptoOwner,
@@ -59,7 +60,7 @@ function send(value: unknown): void {
   const head = Buffer.alloc(4); head.writeUInt32BE(body.length);
   process.stdout.write(head); process.stdout.write(body);
 }
-type Method = "admitKey" | "publishKey" | "settleKey" | "setup" | "settleSetup" | "collectChannel" | "readWork" | "observeTerminal";
+type Method = "admitKey" | "publishKey" | "settleKey" | "setup" | "settleSetup" | "collectChannel" | "readWork" | "observeTerminal" | "observeSdpRound";
 async function rpc<T>(method: Method, args: Record<string, string | number>): Promise<T> {
   assert.equal(callback, null, "only one native metadata call may be outstanding");
   const answer = new Promise<unknown>((resolve, reject) => { callback = { resolve, reject }; });
@@ -85,11 +86,39 @@ const native: VoiceIpcNative = Object.freeze({
   readWork: (owner: string, executor: string, fromSlot: number) => rpc<unknown>("readWork", { owner, executor, fromSlot }),
 });
 const realFetch = globalThis.fetch;
+let loseSdpReplies = false;
+const replyLoss = new NativeSdpReplyLoss();
 // Node does not supply a WebView Origin. This is the sole fetch shim: actual HTTP,
 // response stream, MAC/AEAD and BYOB reader remain untouched. This proves no WebView policy.
-const transport: typeof fetch = (url, init) => {
+const transport: typeof fetch = async (url, init) => {
   const headers = new Headers(init?.headers); headers.set("origin", "http://tauri.localhost");
-  return realFetch(url, { ...init, headers });
+  const response = await realFetch(url, { ...init, headers });
+  const operation = Number.parseInt((headers.get("x-voice-admission") ?? "").slice(12, 14), 16);
+  if (loseSdpReplies && [19, 20, 24, 26].includes(operation)) {
+    // Native observations prove the ORIGINAL effect before this fixture drops its reply.
+    // No success receipt/SDP/input is supplied over the metadata pipe. A refused response
+    // alone cannot satisfy the loss case or cause the test to count an uncommitted effect.
+    const row = (headers.get("x-voice-admission") ?? "").slice(32, 64);
+    let state = await rpc<NativeSdpObservation>("observeSdpRound", { owner: owner.token, executor: channelExecutor! });
+    // The native oracle's try-lock refusal is explicit absence of evidence. Retry this
+    // bounded metadata read before forwarding the original response; never credit the
+    // other action's result/Return or count one Result twice.
+    for (let retry = 0; state.firstRow === null && retry < 10; retry++) {
+      await new Promise<void>(yes => setTimeout(yes, 25));
+      state = await rpc<NativeSdpObservation>("observeSdpRound", { owner: owner.token, executor: channelExecutor! });
+    }
+    const discard = replyLoss.discard(operation, row, state);
+    if (discard) {
+      // Fixed Control response, not a generic unbounded buffering shim. Join the actual
+      // stream/EOF before simulating a lost browser observation of this completed effect.
+      const reader = response.body!.getReader(); let bytes = 0;
+      try {
+        for (;;) { const next = await reader.read(); if (next.done) break; bytes += next.value.byteLength; assert.ok(bytes <= 512); }
+      } finally { await reader.cancel(); reader.releaseLock(); }
+      throw new Error("test-only native SDP reply lost after canonical effect");
+    }
+  }
+  return response;
 };
 
 async function idle(): Promise<void> {
@@ -104,7 +133,7 @@ type Step =
   | { tag: "step"; name: "derive"; purpose: VoiceIpcPurpose }
   | { tag: "step"; name: "sdp-custody"; purpose: VoiceIpcPurpose; row: string; identity: VoiceIpcActionIdentity }
   | { tag: "step"; name: "child"; request: VoiceIpcConfirmationPurpose["request"] }
-  | { tag: "step"; name: "pump" | "close" | "wedge" | "pc-custody" };
+  | { tag: "step"; name: "pump" | "close" | "wedge" | "pc-custody" | "rtc-round" | "rtc-round-loss" };
 async function step(value: Step): Promise<unknown> {
   switch (value.name) {
     case "pump": {
@@ -265,6 +294,47 @@ async function step(value: Step): Promise<unknown> {
       // requires an original Root intent attached by the actual HTTP14 dispatch below.
       assert.equal(broker.counts().bytes, before);
       return { kind: "pc-attempted" };
+    }
+    case "rtc-round":
+    case "rtc-round-loss": {
+      loseSdpReplies = value.name === "rtc-round-loss";
+      // Controlled SDK ONLY: this validates real native/HTTP/WebCrypto/TCP composition,
+      // not a WebView, SDP parser, ICE connectivity, media tracks or audible WebRTC.
+      const previous = globalThis.RTCPeerConnection;
+      const calls = { created: 0, local: 0, remote: 0, closed: 0 };
+      class Peer {
+        private local: "offer" | "answer" | null = null;
+        private remote: "offer" | "answer" | null = null;
+        constructor() { calls.created++; assert.equal(calls.created, 1); }
+        iceGatheringState = "complete";
+        get localDescription() { assert.ok(this.local); return { type: this.local, sdp: "s".repeat(8192) }; }
+        addTransceiver() { assert.equal(this.remote, null); }
+        async setLocalDescription() { calls.local++; assert.equal(calls.local, 1); this.local = this.remote === "offer" ? "answer" : "offer"; }
+        async setRemoteDescription(value: RTCSessionDescriptionInit) {
+          calls.remote++; assert.equal(calls.remote, 1);
+          assert.equal(value.type, this.local === "offer" ? "answer" : "offer");
+          assert.equal(value.sdp, "s".repeat(8192)); this.remote = value.type as "offer" | "answer";
+        }
+        addEventListener() {} removeEventListener() {}
+        close() { calls.closed++; }
+      }
+      globalThis.RTCPeerConnection = Peer as unknown as typeof RTCPeerConnection;
+      const before = broker.counts().bytes;
+      try {
+        // Independent native histories are the oracle. A void attempt or controlled SDK
+        // success cannot prove both accepted results, Applied, settlement, ACK and Return.
+        let complete = false;
+        while (!complete) {
+          await broker.completeNativeSdpRtcRound(owner, channel, chain); await idle();
+          complete = (await rpc<{ complete: boolean }>("observeSdpRound", { owner: owner.token, executor: channelExecutor! })).complete;
+          if (!complete) await new Promise<void>(yes => setTimeout(yes, 50));
+        }
+        assert.deepEqual(calls, { created: 1, local: 1, remote: 1, closed: 0 });
+        assert.equal(broker.counts().bytes, before);
+        const lost = replyLoss.count;
+        assert.equal(lost, loseSdpReplies ? 4 : 0);
+        return { kind: "sdp-round", peers: calls.created, local: calls.local, remote: calls.remote, lost };
+      } finally { globalThis.RTCPeerConnection = previous; loseSdpReplies = false; }
     }
     case "close": {
       owner.retire(); broker.retrySelectedJoinKeys();

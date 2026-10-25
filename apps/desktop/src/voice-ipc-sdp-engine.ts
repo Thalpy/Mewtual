@@ -1,6 +1,6 @@
 /** Private opcode18/version8 engine replies. Decode only after authenticating the exact
  * original request/response pair. A repeated permit names the SAME engine; it never
- * authorizes a second SDK invocation. Production SDP admission remains disabled. */
+ * authorizes a second SDK invocation. Native service admission is enforced independently; App V2 call selection remains disabled. */
 import type { VoiceIpcActionIdentity } from "./voice-ipc-actions.ts";
 import { isVoiceIpcActionRow } from "./voice-ipc-replies.ts";
 import { decodeVoiceSdpReply, type VoiceSdpReply } from "./voice-ipc-sdp-replies.ts";

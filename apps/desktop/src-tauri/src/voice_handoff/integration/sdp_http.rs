@@ -1,5 +1,6 @@
 //! Real authenticated framing and paid native producer on the blocked-TCP call fixture.
-//! The production Host still rejects this staged opcode family. No SDK/RTC is simulated.
+//! These direct typed-adapter checks isolate native boundaries. Separate two-process tests
+//! cover authenticated service dispatch; App V2 call selection remains disabled.
 use super::*;
 use catcoms_sync::voice_v2::sdp::InitialSdpIntent;
 use catcoms_sync::voice_v2::{chain::sdp_handoff::NativeRowPurpose, VoiceError};
@@ -287,8 +288,9 @@ pub(super) async fn exercise(
         )
         .await;
         assert_eq!(&unchanged[2..86], &first[2..86]);
-        // This staged slice exercises the actual Input queue/hook and class2 response;
-        // production SDP dispatch and browser/RTC execution are still disabled.
+        // This direct adapter slice exercises the actual Input queue/hook and class2
+        // response. Separate two-process tests cover the authenticated HTTP dispatcher;
+        // App V2 call selection and real media remain separate acceptance boundaries.
         let action = requests::Action {
             serial: u64::from_be_bytes(first[38..46].try_into().unwrap()),
             version: u64::from_be_bytes(first[46..54].try_into().unwrap()),

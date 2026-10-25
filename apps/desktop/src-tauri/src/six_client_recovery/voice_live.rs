@@ -9,17 +9,17 @@ use catcoms_sync::voice_v2::{Body, CallGrant};
 /// proves a single-pair Node/native cycle; it does not establish WebView policy or live RTC.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn native_webcrypto_confirmation_uses_real_http_and_blocked_tcp_member_bridge() {
-    native_webcrypto_cycle(false, false, false).await;
+    native_webcrypto_cycle(false, false, false, None).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn native_webcrypto_end_closes_automatic_work_before_first_browser_input() {
-    native_webcrypto_cycle(true, false, false).await;
+    native_webcrypto_cycle(true, false, false, None).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn native_and_browser_automatically_confirm_over_blocked_tcp_member_bridge() {
-    native_webcrypto_cycle(false, true, false).await;
+    native_webcrypto_cycle(false, true, false, None).await;
 }
 
 /// Native Ready now traverses normal dispatch after both original browser/confirmation
@@ -27,13 +27,14 @@ async fn native_and_browser_automatically_confirm_over_blocked_tcp_member_bridge
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn native_ready_is_automatic_over_blocked_tcp_member_bridge_after_browser_confirmation_returns(
 ) {
-    native_webcrypto_cycle(false, true, true).await;
+    native_webcrypto_cycle(false, true, true, None).await;
 }
 
 async fn native_webcrypto_cycle(
     end_before_input: bool,
     automatic_browser: bool,
     exercise_ready: bool,
+    exercise_sdp: Option<bool>,
 ) {
     use crate::voice_handoff::integration::webcrypto::{catch_fixture, Endpoint, Failure};
     async fn observation(
@@ -174,10 +175,15 @@ async fn native_webcrypto_cycle(
                             a_clock.sleep(std::time::Duration::from_millis(20)).await;
                         }
                     } => {},
-                    _ = SystemClock.sleep(Duration::from_secs(30)) => panic!(
-                        "automatic Ready stalled: (LOW, progress, released, current) A={:?}, C={:?}",
-                        ap.ready_test_observation(), cp.ready_test_observation()
-                    ),
+                    _ = SystemClock.sleep(Duration::from_secs(30)) => {
+                        let transport = {
+                            let trace = scenario.rules.trace.lock().unwrap();
+                            format!("connections={:?}; received={:?}; submitted={:?}; Ready attempts/helpers={:?}",
+                                trace.connections, trace.received_kinds, trace.connected_submissions, trace.ready_submissions)
+                        }; // Never hold the transport trace while observing native ledger locks.
+                        panic!("automatic Ready stalled: (LOW, progress, released, current) A={:?}, C={:?}; {transport}",
+                            ap.ready_test_observation(), cp.ready_test_observation());
+                    },
                 }
                 // Core192KiB + original HIGH Ready32KiB and both actual old Workflows
                 // have drained/extracted before either new64KiB native sidecar is paid.
@@ -187,6 +193,9 @@ async fn native_webcrypto_cycle(
                 // Original PC identity now traverses real HTTP14 and the retained broker.
                 // This still creates no RTCPeerConnection or SDP/ICE/media effect.
                 tokio::join!(a.pc_custody(&ap), c.pc_custody(&cp));
+                if let Some(lose_replies) = exercise_sdp {
+                    tokio::join!(a.sdp_round(&ap, lose_replies), c.sdp_round(&cp, lose_replies));
+                }
             }
             scenario.rules.assert_graph();
             return;
@@ -867,4 +876,20 @@ async fn native_v2_sdp_empty_result_cannot_replace_nonempty_original_open() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn native_v2_sdp_maximum_seal_and_open_cross_actual_native_result_and_tcp_bridge() {
     confirmation_over_blocked_tcp(true, false, false, false, Some(13)).await;
+}
+
+/// Actual two-process retained brokers + authenticated HTTP/BYOB/WebCrypto and normal
+/// native/Root dispatch over A-B-C TCP with A-C forbidden. B joins no call. The controlled
+/// RTC provider proves ordering/composition only, not real SDP/ICE/media or WebView policy.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn native_browser_maximum_offer_answer_round_uses_real_http_and_blocked_tcp_bridge() {
+    native_webcrypto_cycle(false, true, true, Some(false)).await;
+}
+
+/// Each endpoint loses both actual native Result replies, the first completed action24
+/// and successful Applied26, after independent canonical native observations. The same
+/// browser keys/PC/actions must recover without repeating either controlled RTC method.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn native_browser_original_round_retries_lost_http_results_applied_and_return() {
+    native_webcrypto_cycle(false, true, true, Some(true)).await;
 }

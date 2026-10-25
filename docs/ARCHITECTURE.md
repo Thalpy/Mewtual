@@ -1,5 +1,21 @@
 # Mewtual; Architecture
 
+## Native service and original browser round connected (25 October)
+
+The authenticated service now chooses the existing SDP15-27 adapters explicitly. Original
+large-body permits and fixed Control remain separate, with MAC/wire checks before capacity
+or counters and typed full ownership after AEAD. The whole service infrastructure graph and
+physical codec use independent unchanged payments:27,632/32,768B and12,279/12,288B. Native
+Task/RPC/output retirement still remains distinct from SDK settlement and shared release.
+
+Two actual retained brokers complete8KiB Offer/Answer over real HTTP/BYOB/WebCrypto and
+blocked A-C TCP through unjoined B. Native canonical rows/Applied/drain establish completion;
+controlled RTC methods establish lifecycle ordering only. Exact-row reply-loss tests prevent
+aggregate counts from hiding an unexercised action. The Ready first-route correction is a
+separate commit and does not add arbitrary helper renewal. App activation, real WebRTC/media,
+operational renewed rounds, multi-peer, relay and combined/physical acceptance remain open.
+This supersedes older native-service/round-integration TODOs below.
+
 ## Serial private Offer/Answer round (25 October)
 
 The retained channel now composes both directions on one original RTC peer. Before changing

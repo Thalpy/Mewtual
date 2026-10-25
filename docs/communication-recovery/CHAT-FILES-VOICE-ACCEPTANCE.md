@@ -1,5 +1,23 @@
 # Chat, files and voice implementation evidence
 
+## 25 October: actual browser/native round over authenticated HTTP and blocked TCP
+
+The native service now dispatches typed15-27 with dedicated original-row large-body permits
+and unchanged final authority gates. Two original browser brokers complete maximum8KiB
+Offer/Answer via real HTTP/BYOB/WebCrypto and native actors over A-B-C with A-C forbidden;
+B joins no call. Canonical native accepted rows, actual settle/ACK/retirement/drain and Open
+Applied are required. Controlled RTC runs one local and one remote method on one peer.
+
+The corrected loss case discards each exact19/20, first24 and successful Applied26 after
+native per-row evidence, with deterministic regressions for the earlier aggregate-count
+false-pass. Final normal/loss filter:5 passed in34.19s, including two actual process scenarios.
+346 focused native handoff,21 Root Ready/SDP and2,851 frontend tests pass; Svelte/build and
+format/ambient pass. Full/static status and inherited dependency-audit failure are in HANDOVER.
+The earlier Ready timeout remains unattributed despite subsequent passes; diagnostics were
+added and timeouts preserved. No arbitrary bridge renewal claim follows from the new first-
+route guard. App activation, real WebView/WebRTC/media, operational rounds, multi-peer,
+member relay and combined/physical acceptance remain open. Only one desktop is available.
+
 ## 25 October: private Offer/Answer composition; real interoperability next
 
 The retained broker now composes one original round in both endpoint roles, with action-local

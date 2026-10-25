@@ -1,6 +1,7 @@
 //! Private SDP delivery admission through the actual Actor. Native pays only this
 //! metadata queue/publication graph; RTC execution and its actual drainage remain
-//! independently owned by the original private browser. Production SDP dispatch is still disabled.
+//! independently owned by the original private browser. Authenticated service dispatch is enabled;
+//! App V2 call selection remains disabled.
 use super::bootstrap::Route;
 use super::channel::{self, BodyKind, CompletedReply, Incoming, PhysicalHold};
 use super::context::Context;

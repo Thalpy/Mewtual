@@ -1,6 +1,6 @@
 /** Closed version8 SDP history. Call only after original retained-channel authentication.
  * These fixed observations grant no engine, input, packet, SDK or RTC authority. This pure
- * decoder is staged separately; the live broker still refuses the SDP action family. */
+ * decoder is used by the original retained broker; App V2 call selection remains disabled. */
 import type { VoiceIpcActionIdentity } from "./voice-ipc-actions.ts";
 import { isVoiceIpcActionRow, type VoiceIpcPending, type VoiceIpcProtocolError, type VoiceIpcReceipt } from "./voice-ipc-replies.ts";
 const ERRORS = ["malformed", "bounds", "signature", "scope", "freshness", "unauthorized", "signing", "capacity", "replay", "reservation", "retry-mismatch", "rate-limited"] as const satisfies readonly VoiceIpcProtocolError[];

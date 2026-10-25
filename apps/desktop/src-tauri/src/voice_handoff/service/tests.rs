@@ -413,7 +413,7 @@ pub(in crate::voice_handoff) fn authenticated_header(
         .unwrap()
 }
 #[tokio::test]
-async fn unsupported_sdp_control_and_large_data_refuse_before_allocation_or_nonce_debit() {
+async fn invalid_sdp_shape_and_unfunded_large_data_refuse_before_allocation_or_nonce_debit() {
     let (f, _owner, public, runtime, client) = setup().await;
     let route = f.state.voice_channels.route(client.slot).unwrap();
     let context = super::super::context::Context::new(&f.state);
@@ -433,6 +433,10 @@ async fn unsupported_sdp_control_and_large_data_refuse_before_allocation_or_nonc
             27 => (0, 227),
             _ => (0, 66),
         };
+        // Fixed Control has no original body in this fixture: use an impossible header
+        // shape. Valid fixed Control now reaches typed encrypted-owner rejection AFTER
+        // debit, whereas unfunded large bodies must still refuse BEFORE either counter.
+        let plain = plain + usize::from(kind == 0);
         let wire = signed_frame(&public, (1, op, kind, logical), &vec![8; plain]);
         let mut worker = route.session().header().unwrap();
         worker.scratch_mut()[..wire.len()].copy_from_slice(&wire);
@@ -445,7 +449,7 @@ async fn unsupported_sdp_control_and_large_data_refuse_before_allocation_or_nonc
                 &route,
                 &context
             ),
-            Err(Refused::Binding)
+            Err(Refused::Binding | Refused::Header)
         ));
         assert_eq!(route.session().fixture_counts(), (false, 0, 0));
         assert_eq!(runtime.resources().counts(), before);
@@ -2093,5 +2097,43 @@ async fn completed_reply_without_a_row_reference_keeps_native_control_paid_throu
     let collected = runtime.resources().counts();
     collect_channel(&f.state, &owner, [9; 32]).await.unwrap();
     assert_eq!(runtime.resources().counts(), collected);
+    f.close().await;
+}
+
+/// Valid fixed Control can be admitted without a live SDP phase so that exact24/25/27
+/// cleanup/history remain available after End. It conveys no publication/RTC permission;
+/// the typed encrypted owner/purpose decoder must still reject this malformed body.
+#[tokio::test]
+async fn authenticated_sdp_control_reaches_typed_refusal_without_large_phase_fallback() {
+    let (f, _owner, public, runtime, client) = setup().await;
+    let route = f.state.voice_channels.route(client.slot).unwrap();
+    let context = super::super::context::Context::new(&f.state);
+    let mut logical = [0; 16];
+    logical[15] = 1;
+    let before = runtime.resources().counts();
+    let body = vec![8; 227];
+    let header = (1, 27, 0, logical);
+    let wire = signed_frame(&public, header, &body);
+    let mut worker = route.session().header().unwrap();
+    worker.scratch_mut()[..wire.len()].copy_from_slice(&wire);
+    worker.set_filled(wire.len()).unwrap();
+    let mut incoming = super::dispatch::admit(
+        worker,
+        41891,
+        Origin::PackagedHttp.value(),
+        &route,
+        &context,
+    )
+    .unwrap();
+    incoming.open().unwrap();
+    let reply = super::dispatch::respond(&context, &route, incoming)
+        .await
+        .unwrap();
+    let refusal = opened_reply(&public, header, &body, &reply);
+    assert_eq!(&refusal[..2], &[8, 2]);
+    assert_eq!(refusal.len(), 4);
+    drop(reply);
+    assert_eq!(route.session().fixture_counts(), (false, 1, 1));
+    assert_eq!(runtime.resources().counts(), before);
     f.close().await;
 }

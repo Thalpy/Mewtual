@@ -1,5 +1,5 @@
 /** Version8 SDP-only byte grammar. These are lookup hints, never native/RTC authority.
- * This codec is not wired to the live broker. A private producer must pay the complete
+ * The retained original-chain broker uses this codec. Its producer pays the complete
  * backing allocation BEFORE calling, retain it through actual IO, then zero the bytes. */
 import type { VoiceIpcActionIdentity } from "./voice-ipc-actions.ts";
 import type { VoiceIpcHeader } from "./voice-ipc-frame.ts";

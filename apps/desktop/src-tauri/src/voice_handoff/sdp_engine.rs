@@ -1,6 +1,7 @@
 //! Private SDP engine admission through the actual Actor. Native pays only this
 //! queue/publication graph; the original Root Exchange owns engine credit through
-//! actual SDK/result settlement. Production SDP dispatch is still disabled.
+//! actual SDK/result settlement. Authenticated service dispatch is enabled;
+//! App V2 call selection remains disabled.
 use super::bootstrap::Route;
 use super::channel::{self, BodyKind, CompletedReply, Incoming, PhysicalHold};
 use super::context::Context;
@@ -229,8 +230,8 @@ enum Prepared {
     Completion(Box<Completion>),
 }
 
-/// Staged authenticated handler only. The shipping Host continues to refuse opcode18
-/// with the rest of the SDP family before allocation or request-counter debit.
+/// Authenticated typed service handler. Original native/Root admission, rather than a
+/// successful header or cached receipt, remains the final engine execution boundary.
 pub(super) async fn admit(
     context: &Context,
     route: &Route,

@@ -16,6 +16,7 @@ pub(super) fn admission_layout_bytes() -> usize {
     std::mem::size_of::<crate::voice_handoff::context::LiveContext>()
         + std::mem::size_of::<channel::AuthenticatedRequest>()
         + std::mem::size_of::<Option<Arc<crate::voice_handoff::custody::Phase>>>()
+            .max(std::mem::size_of::<channel::sdp::Permit>())
         + 128
 }
 
@@ -32,12 +33,6 @@ pub(super) fn admit(
     let authenticated = worker
         .authenticate(port, origin)
         .map_err(|_| Refused::Header)?;
-    // Grammar is staged before its native action handlers. Until each original row/
-    // publication adapter exists, even small SDP control must refuse BEFORE admission;
-    // do not spend nonces through the generic Control arm and reject only after AEAD.
-    if authenticated.operation().is_sdp() {
-        return Err(Refused::Binding);
-    }
     // A valid MAC alone must not spend counters for an impossible operation/class/length
     // or logical identity. The encrypted version/purpose is checked after AEAD by exactly
     // one typed decoder; this fixed header predicate never chooses a fallback grammar.
@@ -49,6 +44,9 @@ pub(super) fn admit(
         route.session_id(),
     ) {
         return Err(Refused::Header);
+    }
+    if authenticated.operation().is_sdp() {
+        return admit_sdp(authenticated, route, context);
     }
     let phase = match (authenticated.operation(), authenticated.kind()) {
         (Operation::Result, BodyKind::Data) => {
@@ -73,6 +71,50 @@ pub(super) fn admit(
         .map_err(|_| Refused::Body)
 }
 
+/// The SDP grammar has its own original-row capacity permit. Never pass its large
+/// bodies through optional legacy Phase admission. Fixed Control remains authenticated
+/// bounded metadata: full encrypted ownership and current/cleanup authority are checked
+/// by the selected adapter after opening, including valid history/Return after End.
+fn admit_sdp(
+    authenticated: channel::AuthenticatedRequest,
+    route: &Route,
+    context: &Context,
+) -> Result<Incoming, Refused> {
+    if authenticated.kind() == BodyKind::Control {
+        return authenticated.admit(None).map_err(|_| Refused::Body);
+    }
+    let permit = {
+        let live = context.upgrade().ok_or(Refused::Binding)?;
+        let clock = {
+            let authority = match live.authority.try_lock() {
+                Ok(authority) => authority,
+                Err(std::sync::TryLockError::Poisoned(error)) => error.into_inner(),
+                Err(std::sync::TryLockError::WouldBlock) => return Err(Refused::Capacity),
+            };
+            authority.runtime().clock()
+        }; // No authority guard survives original Clock callbacks or ledger intake.
+        match authenticated.operation() {
+            Operation::SdpSealBegin => live.ledger.sdp_begin_intake(
+                route.selected(),
+                route.session().identity(),
+                &authenticated,
+                clock,
+            ),
+            Operation::SdpSealedResult | Operation::SdpOpenedResult => {
+                live.ledger.sdp_result_intake(
+                    route.selected(),
+                    route.session().identity(),
+                    &authenticated,
+                    clock,
+                )
+            }
+            _ => return Err(Refused::Binding),
+        }
+        .map_err(|_| Refused::Binding)?
+    }; // No upgraded broad native context survives body allocation or any await.
+    authenticated.admit_sdp(permit).map_err(|_| Refused::Body)
+}
+
 /// Explicit version selection, never decoder fallback. There is no fabricated browser
 /// request for native production: Begin-v1 is historical only. A child factory still requires
 /// its original admitted parent, normalized purpose and native UI/Actor fences.
@@ -81,6 +123,27 @@ pub(super) async fn respond(
     route: &Route,
     incoming: Incoming,
 ) -> Result<CompletedReply, Refused> {
+    if incoming.operation().is_sdp() {
+        // One explicit typed handler; no decoder fallback or success-as-permission.
+        return match incoming.operation() {
+            Operation::SdpInput => {
+                crate::voice_handoff::sdp_input::pull(context, route, incoming).await
+            }
+            Operation::SdpEngineAdmit => {
+                crate::voice_handoff::sdp_engine::admit(context, route, incoming).await
+            }
+            Operation::SdpSealedResult
+            | Operation::SdpOpenedResult
+            | Operation::SdpAuthenticationFailed => {
+                crate::voice_handoff::sdp_result::apply(context, route, incoming).await
+            }
+            Operation::SdpDelivery => {
+                crate::voice_handoff::sdp_delivery::apply(context, route, incoming).await
+            }
+            _ => crate::voice_handoff::sdp_http::apply(context, route, incoming).await,
+        }
+        .map_err(|_| Refused::Body);
+    }
     if incoming.operation() == Operation::Status {
         return status(route, incoming);
     }

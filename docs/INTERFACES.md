@@ -1,5 +1,21 @@
 # Mewtual; Interfaces & Hooks Schema
 
+## Authenticated native SDP service dispatch (25 October)
+
+The existing closed version8 grammar15-27 is now selected by the native HTTP service after
+MAC and exact operation/class/length checks. Large15/19/20 obtain original SDP row/phase/
+Session/PC capacity permits before allocation or nonce debit, never generic Data fallback.
+Fixed Control can debit before typed encrypted-owner refusal; it must remain usable for
+exact24/25/27 cleanup/history after End. Header admission grants no engine, publication or RTC
+authority; original final native/Root checks remain mandatory in the selected handler.
+
+Broker28's original single-round composer now interoperates with that service across two
+real processes and blocked TCP through an unjoined member. RTC is controlled, and canonical
+native terminal/Applied/drain observations are the oracle. Exact distinct Result/first-Return/
+Applied response losses preserve the original keys/actions/peer. App V2 selection remains
+off; real WebView/WebRTC/media, renewed rounds, multi-peer and relay acceptance remain open.
+Older blanket native15-27-refusal statements below describe superseded checkpoints.
+
 ## Private original RTC round composition (25 October)
 
 `completeNativeSdpRtcRound(owner, channel, chain)` joins progress for the exact existing

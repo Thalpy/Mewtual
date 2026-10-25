@@ -44,6 +44,7 @@ enum Method {
     CollectChannel,
     ReadWork,
     ObserveTerminal,
+    ObserveSdpRound,
 }
 #[derive(Deserialize, Clone, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
@@ -462,6 +463,24 @@ impl Endpoint {
         assert_eq!(parent.sdk_test_released(), Some(false));
     }
 
+    /// Full original retained browser round through actual HTTP and native actors. Only
+    /// the RTC provider is controlled; no Input/Result/SDP/receipt crosses the control pipe.
+    pub(crate) async fn sdp_round(&mut self, parent: &ledger::ResolvedRow, lose_replies: bool) {
+        assert!(parent.pc_test_intent().is_some());
+        let name = if lose_replies {
+            "rtc-round-loss"
+        } else {
+            "rtc-round"
+        };
+        assert_eq!(
+            self.step(json!({"tag":"step", "name":name})).await,
+            json!({"kind":"sdp-round", "peers":1, "local":1, "remote":1,
+                "lost":if lose_replies { 4 } else { 0 }})
+        );
+        assert!(sdp_round_terminal(&self.state, &self.selected()));
+        assert_eq!(parent.sdk_test_released(), Some(false));
+    }
+
     pub(crate) async fn close(mut self) -> Result<(), Failure> {
         let closed =
             catch_fixture(async {
@@ -614,13 +633,18 @@ async fn drive_streams_inner(
     step: Value,
 ) -> (Value, Option<[u8; 32]>) {
     let automatic = step["name"] == "pump";
+    let rtc_round = step["name"] == "rtc-round" || step["name"] == "rtc-round-loss";
     write(input, step).await;
     let mut published_executor = None;
     // One callback owner spans the automatic step, rather than returning while a
     // background Node readWork waits forever. The bound follows the pump's minimum50ms
     // cadence, maximum32-slot scan and unchanged30s outer harness bound. Ordinary steps
     // retain32. No budget, timeout or protocol attempt is renewed by this fixture.
-    let callbacks_bound = if automatic { 32 * (30_000 / 50) } else { 32 };
+    let callbacks_bound = if automatic || rtc_round {
+        32 * (30_000 / 50)
+    } else {
+        32
+    };
     for _ in 0..callbacks_bound {
         let length = output
             .read_u32()
@@ -767,6 +791,133 @@ fn automatic_terminal(state: &AppState, selected: &SelectedHandoffOwner) -> bool
     parent.is_some() && children == 3
 }
 
+/// Independent exact native terminal/Applied/compaction observations. Missing work or
+/// transient try-lock refusal means incomplete, never success or permission to run RTC.
+/// This is bounded test-only metadata inspection and cannot publish/renew any authority.
+#[derive(serde::Serialize)]
+struct SdpRowObservation {
+    row: String,
+    accepted: bool,
+    drained: bool,
+    applied: bool,
+}
+#[derive(Default, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SdpRoundObservation {
+    complete: bool,
+    first_row: Option<String>,
+    seal: Option<SdpRowObservation>,
+    open: Option<SdpRowObservation>,
+}
+fn sdp_round_observation(
+    state: &AppState,
+    selected: &Arc<SelectedHandoffOwner>,
+) -> SdpRoundObservation {
+    use catcoms_sync::voice_v2::chain::sdp_handoff::NativeRowPurpose;
+    use catcoms_sync::voice_v2::crypto_actions::CryptoOutcome;
+    let mut result = SdpRoundObservation::default();
+    let Some(route) = (1..=64).find_map(|slot| {
+        state
+            .voice_channels
+            .route(slot)
+            .ok()
+            .filter(|route| Arc::ptr_eq(route.selected(), selected))
+    }) else {
+        return result;
+    };
+    let mut from = 0;
+    let mut parent = None;
+    while from < 32 {
+        let Ok(projection) = state.voice_handoff.project_work(selected, from) else {
+            return SdpRoundObservation::default();
+        };
+        from = projection.next_slot;
+        if let Some(metadata) = &projection.metadata {
+            if matches!(metadata.purpose, ledger::Purpose::Derive(_)) {
+                if parent.is_some() {
+                    return SdpRoundObservation::default();
+                }
+                let Ok(row) = state
+                    .voice_handoff
+                    .resolve(selected, metadata.purpose, metadata.row)
+                else {
+                    return SdpRoundObservation::default();
+                };
+                parent = Some(row);
+            }
+        }
+    }
+    let Some(parent) = parent else {
+        return result;
+    };
+    let Some(intent) = parent.pc_test_intent() else {
+        return result;
+    };
+    let mut settled_acknowledged = 0;
+    for purpose in [NativeRowPurpose::Seal, NativeRowPurpose::Open] {
+        let Some(row) = state.voice_handoff.lookup_original(
+            selected,
+            ledger::Purpose::Sdp {
+                parent: parent.id(),
+                purpose,
+            },
+        ) else {
+            continue;
+        };
+        let Ok(history) = row.sdp_history(route.session().identity()) else {
+            return SdpRoundObservation::default();
+        };
+        let status = history.status();
+        let accepted = status
+            .engine
+            .receipt
+            .as_ref()
+            .is_some_and(|receipt| match purpose {
+                NativeRowPurpose::Seal => matches!(receipt.outcome, CryptoOutcome::Sealed { .. }),
+                NativeRowPurpose::Open => receipt.outcome == CryptoOutcome::Opened,
+            });
+        if accepted
+            && status.acknowledged
+            && status.engine.settled
+            && status
+                .engine
+                .receipt
+                .as_ref()
+                .is_some_and(|receipt| receipt.retired)
+        {
+            settled_acknowledged += 1;
+        }
+        let observed = SdpRowObservation {
+            row: hex::encode(row.id().logical()),
+            accepted,
+            drained: status.drained,
+            applied: history
+                .delivery()
+                .is_some_and(|delivery| delivery.was_applied()),
+        };
+        if (purpose == NativeRowPurpose::Seal) == intent.local_is_low() {
+            result.first_row = Some(observed.row.clone());
+        }
+        match purpose {
+            NativeRowPurpose::Seal => result.seal = Some(observed),
+            NativeRowPurpose::Open => result.open = Some(observed),
+        }
+    }
+    result.complete = settled_acknowledged == 2
+        && result
+            .seal
+            .as_ref()
+            .is_some_and(|row| row.accepted && row.drained)
+        && result
+            .open
+            .as_ref()
+            .is_some_and(|row| row.accepted && row.drained && row.applied);
+    result
+}
+fn sdp_round_terminal(state: &AppState, selected: &Arc<SelectedHandoffOwner>) -> bool {
+    sdp_round_observation(state, selected).complete
+}
+
 struct MetadataReply {
     value: Value,
     executor: Option<[u8; 32]>,
@@ -870,6 +1021,15 @@ async fn metadata(
         // the caller independently inspects actual native histories + original Claim.
         // It creates no work, grant, token, key, adoption or SDK/RTC authority.
         Method::ObserveTerminal => Value::Null,
+        Method::ObserveSdpRound => {
+            let selected = state
+                .voice_authority
+                .lock()
+                .unwrap()
+                .selected_handoff_owner(owner, executor)
+                .map_err(|_| ())?;
+            serde_json::to_value(sdp_round_observation(state, &selected)).map_err(|_| ())?
+        }
     };
     Ok(MetadataReply {
         value,

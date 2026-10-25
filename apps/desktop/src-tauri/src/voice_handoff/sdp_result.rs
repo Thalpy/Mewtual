@@ -1,5 +1,6 @@
 //! Private authenticated SDP Result adapter. Exact original output crosses the
-//! existing paid Body RPC with no plaintext clone. Production SDP remains disabled.
+//! existing paid Body RPC with no plaintext clone. The authenticated service dispatches
+//! this adapter; production App V2 call selection remains disabled.
 use super::bootstrap::Route;
 use super::channel::{self, BodyKind, CompletedReply, Incoming, PhysicalHold};
 use super::context::Context;
@@ -340,7 +341,8 @@ fn resolve(
     Ok((row, action, expected, past))
 }
 
-/// Staged authenticated handler only; the shipping Host still refuses19/20/21.
+/// Authenticated19/20/21 service handler; final native/Root gates still bind the exact
+/// original action/output and recover canonical terminal history independently.
 pub(super) async fn apply(
     context: &Context,
     route: &Route,

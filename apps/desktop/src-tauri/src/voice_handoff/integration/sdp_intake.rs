@@ -1,5 +1,5 @@
 //! Real original PC/Ready/Phase capacity, with independently authenticated loopback bytes.
-//! This exercises intake only: unsupported service dispatch stays closed and no Action is
+//! This exercises intake only: this fixture exercises intake only; service dispatch and SDK execution are covered separately and no Action is
 //! issued. Fixture Vecs are not claims about production browser custody or audible RTC.
 use super::*;
 use catcoms_sync::voice_v2::chain::sdp_handoff::NativeRowPurpose;

@@ -1,5 +1,22 @@
 # Threat model; client integrity & enforcement boundaries
 
+## Enabled authenticated handoff dispatch (25 October; App V2 still off)
+
+SDP header MAC and closed wire shape precede every admission. Large15/19/20 require an
+original registered Session/parent/row/phase/intent permit before allocation or counter debit;
+that permit supplies capacity only. Fixed bounded Control rejects malformed encrypted owner/
+purpose after debit and preserves post-End exact recovery. No generic Data fallback or
+cached receipt can authorize a fresh engine/publication/RTC effect. Clock callbacks occur
+outside the Coordinator guard, and every final native/Root authority gate stays unchanged.
+
+Real browser/native HTTP/TCP tests use original accepted rows, Applied, settlement/ACK and
+compaction as their success oracle. Test loss bookkeeping now binds each distinct Result and
+the actual first Return to exact native rows; transient empty observations cannot be counted
+as another action's evidence. RTC is controlled; no real WebView/media/physical guarantee is
+implied. The earlier Ready timeout remains unattributed. Renewed rounds, arbitrary bridge
+replacement, App activation, multi-peer/member media relay and combined acceptance remain
+open. Older blanket service15-27-refusal statements below are superseded.
+
 ## First connected Ready route snapshot (25 October)
 
 A first HIGH Ready may freeze empty helpers only when an authenticated current direct

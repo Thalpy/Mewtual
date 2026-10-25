@@ -1,6 +1,6 @@
-//! Original paid SDP Begin/Resolve/History/ACK/settlement/Return handlers. These are staged private
-//! adapters: the production Header gate still refuses ALL SDP action operations until
-//! Input/engine/result/delivery/ACK/settlement and the private SDK vertical are coherent.
+//! Original paid SDP Begin/Resolve/History/ACK/settlement/Return handlers. Authenticated
+//! service dispatch selects these typed adapters after exact MAC/header admission. App V2
+//! call selection remains disabled pending operational rounds, composition and media.
 use super::bootstrap::Route;
 use super::channel::{self, BodyKind, CompletedReply, Incoming, PhysicalHold};
 use super::context::Context;
