@@ -1,6 +1,46 @@
 # Mewtual; Handover
 
-## Browser SDP Input reader (25 October; private consumer still pending)
+## Browser first-Offer crypto owner (25 October; production still disabled)
+
+`communication-sdp-browser-input` now connects the retained channel to the private native
+Begin/Resolve/Input/engine/Result/ACK/settlement/Return codecs. LOW can seal its original
+Offer; HIGH can open an incoming Offer. SDK execution is latched once, and exact Result
+retries retain that output and tag. Successful Open plaintext stays in the paid private
+inbox for a future fresh-delivery consumer. No RTC object, plaintext or permission escapes
+the public `Promise<void>` observer. HIGH Answer and LOW Answer Open remain dormant.
+
+The broker reserves both fixed rows under the existing32-row limit before unknown Begin
+and retains them until actual phase unlink. The original64KiB browser phase pays a serial
+stage inventory, including16KiB of existing SDK/PC records, fixed metadata, callbacks and
+promise wrappers. No quota was increased. UTF8 is bounded before allocation; Begin bytes
+survive Pending/Capacity until actual Action attachment, then release before Input/Result.
+The Input backing transfers after real read/cancel/timer cleanup and a fresh owner/phase/
+PC check. Its descriptor frame ends before Result encoding. End joins SDK and exact native
+cleanup outside the shared RPC lane before SDK/storage/key release. Broker version26
+refuses a retained older shape rather than creating another outstanding pool.
+
+Focused owner/session regressions pass, including maximum actual WebCrypto and HMAC/AEAD
+framing, delayed/lost replies, Pending publication, reentrant creation, deadline expiry and
+End at Input/SDK/Result boundaries. These browser tests mock native authority; the separate
+Rust TCP tests do not by themselves establish browser/native WebView interoperability.
+All219 focused owner/session regressions and all2,804 frontend tests pass. Svelte static
+checks report zero errors/warnings and the production build passes (52.87s). Final
+read-only review has no remaining blocker/high/medium/low.
+The unchanged Rust stack's full root/native suites continue serially from the Result
+checkout. Production still refuses
+opcodes15–27. Fresh scoped delivery26, actual SDP/ICE/RTC, renewed rounds, multi-peer,
+member relay and combined/physical acceptance remain unfinished. Only one desktop/network
+is available. The inherited cargo-deny advisory remains recorded below.
+
+No startup or send/friend-flow gate was repeated: this slice changes no setup, process/
+runtime placement, App activation or chat/friend flow; production SDP remains disabled.
+
+The HIGH channel fixture derives the peer's transmit key independently from its own
+private key and the browser's public point. Maximum and genuine tag-only Open, corrupted
+AEAD tag, exact20/21 Result retry and End during the retained Pair RX await pass. This
+closes the earlier standalone-only HIGH coverage gap, but native authority is still mocked.
+
+## Browser SDP Input reader (25 October; reader-only checkpoint)
 
 `communication-sdp-browser-input` integrates the pushed native Result/cleanup stack
 through `5779e23c`.
@@ -10,9 +50,9 @@ The v8/tag3 decoder checks original row/parent/Action/Ready/key/SDK/storage/PC b
 role, generation, full-u64 sequence, engine charge and exact lengths. AAD/body are views
 of one exact ordinary fixed backing, with no plaintext copy or caller-object retention.
 
-This is a standalone data boundary. The retained channel does not consume it yet:
-its existing framed cleanup clears `opened`, so integration must explicitly transfer the
-paid backing to one exclusive owner with one final clearer. Input Open16 is valid and
+This reader-only checkpoint initially lacked an exclusive retained consumer. The
+first-Offer owner above now transfers the paid backing after physical cleanup into one
+exclusive owner with one final clearer. Input Open16 is valid and
 successful AEAD may yield empty plaintext; opcode20 and the browser codec now represent
 that exact result separately from AEAD failure. The native positive tag-only case below
 remains a coverage gap before end-to-end SDK acceptance.

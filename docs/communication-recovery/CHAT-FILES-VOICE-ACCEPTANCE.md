@@ -1,5 +1,25 @@
 # Chat, files and voice implementation evidence
 
+## 25 October: private browser first-Offer crypto integration
+
+The retained broker now connects the authenticated native SDP codecs to one private
+SDK owner for LOW Offer Seal/HIGH Offer Open. Focused tests cover maximum actual
+WebCrypto, channel HMAC/AEAD and large Input, retained output after Result reply loss,
+Pending Begin retries, reentrant creation, delayed permits across PC expiry, and End
+during Input-finally/SDK/Result. Both fixed row claims precede unknown Begin and survive
+until phase unlink. Serial stage inventories fit the unchanged64KiB browser payment.
+
+The HIGH fixture independently derives the peer's transmit key and exercises retained
+Pair RX, including maximum and tag-only success, corrupted tag, exact20/21 retry and End
+during real decryption. All219 focused owner/session checks and2,804 frontend tests pass;
+Svelte static checks and the production build also pass. Final read-only review has no
+outstanding findings.
+These browser tests mock native authority. Separate native TCP evidence is not a
+browser/native WebView interoperability or physical media result. The unchanged Rust
+stack's serial full suites remain pending.
+Production still refuses15–27; fresh delivery26, actual RTC/Answer/ICE, renewed rounds,
+multi-peer, relay and combined/physical acceptance remain open.
+
 ## 25 October: browser SDP Input data boundary, integration still open
 
 The private opcode17 reader and v8/tag3 decoder now provide bounded authenticated

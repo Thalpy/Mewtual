@@ -6,7 +6,7 @@ import {
   decodeVoiceIpcAdmission, encodeVoiceIpcAdmission, encodeVoiceIpcHeader,
   voiceIpcNonce, voiceIpcResponseAad, type VoiceIpcHeader,
 } from "./voice-ipc-frame.ts";
-import { readVoiceIpcResponse } from "./voice-ipc-body.ts";
+import { readVoiceIpcResponse, readVoiceIpcSdpInputResponse } from "./voice-ipc-body.ts";
 import { encodeVoiceIpcAction, encodeVoiceIpcConfirmationAction, type VoiceIpcPurpose, type VoiceIpcActionIdentity, type VoiceIpcActionRequest, type VoiceIpcConfirmationPurpose, type VoiceIpcConfirmationRequest } from "./voice-ipc-actions.ts";
 import { decodeVoiceIpcDerivationInput, decodeVoiceIpcPermit } from "./voice-ipc-input.ts";
 import { decodeVoiceIpcConfirmationInput } from "./voice-ipc-confirmation-input.ts";
@@ -17,6 +17,11 @@ import { VoiceSdpSdkCustody, VOICE_SDP_SDK_BYTES } from "./voice-sdp-sdk-custody
 import { decodeVoiceSdpPhase, encodeVoiceSdpPhase, type VoiceSdpPhaseRequest } from "./voice-ipc-sdp.ts";
 import { decodeVoiceSdkCustody, encodeVoiceSdkCustody, type VoiceSdkRequest } from "./voice-ipc-sdk.ts";
 import { decodeVoicePcIntent, encodeVoicePcIntent } from "./voice-ipc-pc.ts";
+import { encodeVoiceSdpAction, encodeVoiceSdpBegin, encodeVoiceSdpResolve } from "./voice-ipc-sdp-actions.ts";
+import { decodeVoiceSdpReply } from "./voice-ipc-sdp-replies.ts";
+import { decodeVoiceSdpEngineReply } from "./voice-ipc-sdp-engine.ts";
+import type { VoiceSdpInput, VoiceSdpInputExpectation } from "./voice-ipc-sdp-input.ts";
+import { VoiceSdpActionOwner, VoiceSdpInputLoan, voiceSdpUtf8 } from "./voice-sdp-action.ts";
 import { decodeVoiceWorkSnapshot, type VoiceWorkDescriptor } from "./voice-ipc-work.ts";
 import { NativeWorkPump, type VoiceNativeWorkObserver } from "./voice-ipc-pump.ts";
 import { decodeVoiceIpcActionReply, decodeVoiceIpcFinalReply, isVoiceIpcActionRow, type VoiceIpcActionReply } from "./voice-ipc-replies.ts";
@@ -80,6 +85,7 @@ const encoder = new TextEncoder();
 const MAX_DERIVATION_CONTEXT = 1024 - encoder.encode("mewtual/voice/v2/aes-gcm/high-to-low\0").length;
 type Job = { owner: VoiceCryptoOwner; bytes: number; start(): Promise<void>; refuse(): void };
 const CONFIRM_COMPUTE = Symbol("native confirmation computation");
+const SDP_COMPUTE = Symbol("original native SDP computation");
 const MAX_ACTIONS = 32;
 type ConfirmationKind = "hello" | "proof" | "finish";
 type RejectionCode = "retired" | "invalid" | "capacity";
@@ -268,6 +274,7 @@ type BrowserChain = {
   // Same keys/payment; no effect, admission, SDP or RTC authority lives in this metadata.
   custody: VoiceKeyCustody | null;
   sdp: VoiceSdpSdkCustody | null;
+  sdpRows: number;
 };
 type ConfirmationIntake = {
   chain: BrowserChain; purpose: VoiceIpcConfirmationPurpose; row: string | null; identity: VoiceIpcActionIdentity | null;
@@ -435,7 +442,7 @@ function context(label: string, transcript: Uint8Array): Uint8Array<ArrayBuffer>
  * unsettled work. Revoking an owner never frees a running promise; only its real settlement does.
  * A derive pipeline uses one permit for sequential import/ECDH/HKDF work, never parallel calls. */
 export class VoiceCryptoBroker {
-  readonly version = 25;
+  readonly version = 26;
   readonly subtle: SubtleCrypto;
   private readonly native: VoiceCryptoAdmission;
   private active = 0;
@@ -614,6 +621,7 @@ export class VoiceCryptoBroker {
         // state3 refunds an outstanding RPC/WebCrypto/RTC promise or its retained graph.
         if (chain.sdp !== phase || !phase.nativeReleased) throw new Error("voice SDK custody remains unresolved");
         chain.sdp = null;
+        this.reservedRows -= chain.sdpRows; chain.sdpRows = 0;
         if (this.progress.get(owner.group) === phase) this.progress.delete(owner.group);
         this.refund(owner, VOICE_SDP_SDK_BYTES);
       },
@@ -666,11 +674,25 @@ export class VoiceCryptoBroker {
     current(owner);
     if (!this.chainCurrent(chain) || chain.variable || chain.running || chain.continuation?.running ||
         chain.custody?.keyReceipt?.state !== "current" || this.progress.has(owner.group)) throw new Error("established drained voice chain required");
+    if (this.actions.size + this.reservedRows + 2 > MAX_ACTIONS) throw new Error("voice action history capacity reached");
     this.charge(owner, VOICE_SDP_SDK_BYTES);
     // No callback/await between payment and publication. Unknown replies retain this SAME
     // intent; remounts cannot allocate a second subtree or another admission flight.
-    const phase = new VoiceSdpSdkCustody(); chain.sdp = phase; this.progress.set(owner.group, phase);
+    const phase = new VoiceSdpSdkCustody(); chain.sdp = phase; chain.sdpRows = 2;
+    this.reservedRows += 2; this.progress.set(owner.group, phase);
     return channel.startSdp(chain);
+  }
+
+  /** Private first-round SDK vertical. A nonempty description is LOW's original Offer;
+   * null discovers HIGH's incoming Offer. This returns only joined progress, never plaintext,
+   * a receipt-as-permission, or RTC authority. Exact repeated calls join the original owner;
+   * use null for retry after its first description was synchronously consumed. Production
+   * native SDP remains disabled until delivery/RTC and complete composition are integrated. */
+  prepareNativeSdpCrypto(owner: VoiceCryptoOwner, handle: VoiceIpcChannel, plan: VoiceCryptoChain, description: string | null): Promise<void> {
+    const channel = this.ipcChannels.get(owner.token), chain = this.chains.get(plan);
+    if (!channel || channel.handle !== handle || !channel.owns(owner) || !chain || chain.owner !== owner ||
+        chain.channel !== channel || !chain.sdp || chain.sdpRows !== 2) throw new Error("original native SDP custody required");
+    return channel.startSdpCrypto(chain, description);
   }
 
   /** Attempt the original native PC intent only after separate SDK/storage custody.
@@ -971,7 +993,7 @@ export class VoiceCryptoBroker {
       variable: true, fixedBytes: fixed, record: null, unsubscribe: () => {}, handle: null!, timer: null,
       records: new Map(), queue: [], retainedBytes: 130 + setup.transcript.length, enginePeak: 0,
       continuation: null, confirmations: new Map(),
-      channel, drained: signal<void>(), custody: null, sdp: null,
+      channel, drained: signal<void>(), custody: null, sdp: null, sdpRows: 0,
     };
     chain.handle = Object.freeze({ close: () => this.closeChain(chain), isCurrent: () => this.chainCurrent(chain) });
     if (intake) { intake.transferred = true; intake.rows = 0; intake.fixedBytes = 0; intake.variable = false; }
@@ -1809,6 +1831,8 @@ class RetainedIpcChannel {
   private derivationReturn: Promise<void> | null = null;
   private transitionFlight: Promise<void> | null = null;
   private sdpFlight: Promise<void> | null = null;
+  private sdpAction: VoiceSdpActionOwner | null = null;
+  private sdpCreating = false;
   private derivationReturned = false;
   // One current metadata cleanup intent survives lost history/final replies, plus at most
   // one waiting parent below. Never retain a32-row queue or reconstruct browser keys.
@@ -2328,6 +2352,112 @@ class RetainedIpcChannel {
       .finally(() => { this.sdpFlight = null; this.actionBusy = false; this.endActivity(); this.collect(); });
     this.sdpFlight = pending; return pending;
   }
+  /** One separately paid crypto owner; no awaited SDK holds the native-RPC lane. Only
+   * the original private Pair can compute, and original native18 admits that one engine.
+   * The initial profile deliberately stops before HIGH Answer/fresh RTC delivery. */
+  startSdpCrypto(chain: BrowserChain, description: string | null): Promise<void> {
+    if (this.sdpCreating) throw new Error("voice SDP creation is already in progress");
+    const phase = chain.sdp;
+    if (this.linked !== chain || !phase || phase.closed || chain.closed || !this.live() ||
+        phase.storage?.state !== "funded" || phase.sdk?.state !== "held" ||
+        this.request || this.historyRequest || this.driving) throw new Error("original SDP crypto custody unavailable");
+    if (!this.sdpAction) {
+      if (this.sdpFlight || this.actionBusy) throw new Error("voice channel is busy");
+      // Clock/owner seams can synchronously reenter this method. Publish the creation
+      // fence before either callback; no second owner/backing may replace the first.
+      this.sdpCreating = true;
+      try {
+        const pc = phase.pc.cryptoBinding(this.clock.now()), base = this.sdpIdentity(chain);
+        const ownerCurrent = this.live();
+        if (!ownerCurrent || this.retired || this.drained || this.linked !== chain || chain.sdp !== phase || phase.closed || chain.closed ||
+            this.sdpAction || this.sdpFlight || this.actionBusy) throw new Error("original SDP crypto custody unavailable");
+        if (pc.localIsLow !== (description !== null)) throw new Error("first SDP Offer role required");
+        const original = Object.freeze({ ...base, storage: phase.storage.proof, sdkGeneration: phase.sdk.generation,
+          sdkProof: phase.sdk.proof, pcProof: pc.proof });
+        const purpose = pc.localIsLow ? "seal" as const : "open" as const;
+        const live = () => {
+          // Key custody intentionally outlives this PC round. Never use Pair currentness
+          // as the PC deadline, including a permit reply held across the original expiry.
+          if (!this.live()) return false;
+          try {
+            const current = phase.pc.cryptoBinding(this.clock.now());
+            // Clock and owner predicates can reenter End. All final checks are callback-free.
+            return !this.retired && !this.drained && this.linked === chain && chain.sdp === phase &&
+              !phase.closed && !chain.closed && current.proof === pc.proof && current.ready === pc.ready &&
+              current.generation === pc.generation && current.localIsLow === pc.localIsLow;
+          } catch { return false; }
+        };
+        const expected = (row: string, identity: VoiceIpcActionIdentity): VoiceSdpInputExpectation => ({
+          row, parentRow: base.parentRow, identity, purpose, generation: pc.generation, ready: pc.ready,
+          key: base.key, sdkGeneration: "1", sdkProof: original.sdkProof, storage: original.storage,
+          pcProof: pc.proof, localIsLow: pc.localIsLow,
+        });
+        const control = (encoded: ReturnType<typeof encodeVoiceSdpBegin>, row: string | null, close: boolean | null = null) =>
+          this.execution.run(async () => {
+            try { return await this.framed(encoded.operation, encoded.kind, encoded.logical, encoded.body, true,
+              (kind, length) => kind === 0 && (length === 20 || length === 36 || length === 236),
+              bytes => decodeVoiceSdpReply(bytes, { parentRow: base.parentRow, row, purpose, resolveClose: close })); }
+            finally { encoded.body.fill(0); }
+          });
+        const action = (row: string, request: Parameters<typeof encodeVoiceSdpAction>[1]) =>
+          control(encodeVoiceSdpAction({ parentRow: base.parentRow, row, purpose }, request), row);
+        // Consume the string synchronously. No async closure or completed observer retains
+        // it; the one8KiB UTF8 backing releases only after native attaches the Action.
+        let plaintext = description === null ? null : voiceSdpUtf8(description);
+        description = null; // Do not depend on a VM's closure-environment liveness analysis.
+        this.sdpAction = new VoiceSdpActionOwner({ live,
+          begin: bytes => control(encodeVoiceSdpBegin(original, bytes), null),
+          resolve: close => control(encodeVoiceSdpResolve(original, purpose, close), null, close),
+          input: (row, identity, loan) => this.execution.run(async () => {
+            const encoded = encodeVoiceSdpAction({ parentRow: base.parentRow, row, purpose }, { kind: "input", identity });
+            try { return await this.framed(encoded.operation, encoded.kind, encoded.logical, encoded.body, false,
+              (kind, length) => (kind === 2 && length <= 9232) || (kind === 0 && (length === 20 || length === 236)),
+              bytes => decodeVoiceSdpReply(bytes, { parentRow: base.parentRow, row, purpose, resolveClose: null }),
+              { loan, expected: expected(row, identity), current: () => {
+                if (!live()) throw new Error("voice SDP Input retired");
+                // Read/cancel/timer finally can reenter End. Recheck the original PC's
+                // conservative deadline immediately before moving this exact backing.
+                const current = phase.pc.cryptoBinding(this.clock.now());
+                if (!live() || current.proof !== pc.proof || current.ready !== pc.ready) throw new Error("voice SDP Input retired");
+              } }); }
+            finally { encoded.body.fill(0); }
+          }),
+          admit: (row, identity, engineBytes) => this.execution.run(async () => {
+            const encoded = encodeVoiceSdpAction({ parentRow: base.parentRow, row, purpose }, { kind: "admit", identity, engineBytes });
+            try { return await this.framed(encoded.operation, encoded.kind, encoded.logical, encoded.body, false,
+              (kind, length) => kind === 0 && (length === 20 || length === 94 || length === 236),
+              bytes => decodeVoiceSdpEngineReply(bytes, { parentRow: base.parentRow, row, purpose, identity, engineBytes })); }
+            finally { encoded.body.fill(0); }
+          }),
+          compute: input => this.execution.run(async () => {
+            const current = phase.pc.cryptoBinding(this.clock.now());
+            if (!live()) throw new Error("voice SDP engine retired");
+            if (current.proof !== pc.proof || current.ready !== pc.ready) throw new Error("original voice SDP PC changed");
+            const pair = chain.record?.pair;
+            if (!pair) throw new Error("original voice Pair unavailable");
+            return pair.computeSdp(SDP_COMPUTE, input, live);
+          }),
+          digest: async output => {
+            const digest = new Uint8Array(await this.subtle.digest("SHA-256", output));
+            try { return Array.from(digest, value => value.toString(16).padStart(2, "0")).join(""); }
+            finally { digest.fill(0); }
+          },
+          result: (row, identity, output, tag) => action(row, output === null ? { kind: "authentication-failed", identity }
+            : { kind: purpose === "seal" ? "sealed" : "opened", identity, bytes: output, tag: tag! }),
+          ack: (row, identity, digest) => action(row, { kind: "ack", identity, digest }),
+          settle: (row, identity) => action(row, { kind: "settle", identity }),
+          returned: row => action(row, { kind: "return" }),
+        }, plaintext);
+        plaintext = null; // The job is the sole owner, including if this closure frame survives.
+      } finally { this.sdpCreating = false; }
+    } else if (description !== null) throw new Error("original SDP description already consumed; retry without it");
+    if (this.sdpFlight) return this.sdpFlight;
+    if (this.actionBusy) throw new Error("voice channel is busy");
+    this.actionBusy = true; this.beginActivity();
+    const pending = this.sdpAction.attempt().catch(() => { /* Retain exact paid work/output for retry or End. */ })
+      .finally(() => { this.sdpFlight = null; this.actionBusy = false; this.endActivity(); this.collect(); });
+    this.sdpFlight = pending; return pending;
+  }
   private sdpIdentity(chain: BrowserChain) {
     const original = this.terminalAction, key = chain.custody?.keyReceipt;
     if (this.linked !== chain || !chain.sdp || !original || !key || !this.keys || !this.bootstrap) throw new Error("original SDP custody required");
@@ -2471,6 +2601,7 @@ class RetainedIpcChannel {
   private check(): void { if (!this.live()) throw new Error("voice channel closed"); }
   private retire(): void {
     if (!this.retired) { this.retired = true; this.controller?.abort(); }
+    this.sdpAction?.close();
     void this.workPump?.close();
     this.wake();
     // Retire the original prepaid intake even while its owner remains current. The broker
@@ -2546,6 +2677,14 @@ class RetainedIpcChannel {
         // Independent of old96KiB drainage. Join the actual SDK/IO admission finally
         // OUTSIDE the lane that its exact recovery/release calls require.
         if (this.sdpFlight) await this.sdpFlight;
+        // The original job's23/24 RPCs require this same physical lane. Join its SDK,
+        // Result and close-first unknown Begin outside execution.run and before release.
+        while (this.sdpAction && !this.sdpAction.returned) {
+          const observed = this.wakeIdentity;
+          try { await this.sdpAction.cleanup(); }
+          catch { await this.waitCleanupWake(observed); }
+        }
+        this.sdpAction = null;
         const sdkChain = this.linked, sdkPhase = sdkChain?.sdp;
         await this.execution.run(() => this.cleanup());
         if (sdkChain && sdkPhase) this.custody.sdpUnlinked(sdkChain, sdkPhase);
@@ -2640,10 +2779,20 @@ class RetainedIpcChannel {
   /** One original physical flight. The caller prepays Data intake before entering here and
    * retains that same claim through decoding/SDK/read cancellation. Cleanup may use only the
    * original keys/counters after End; no constructor or fresh-work owner check is weakened. */
+  private framed<T>(operation: VoiceIpcHeader["operation"], kind: VoiceIpcHeader["kind"],
+    logical: string, plaintext: Uint8Array<ArrayBuffer>, afterEnd: boolean,
+    allowed: (kind: VoiceIpcHeader["kind"], length: number) => boolean,
+    decode: (opened: Uint8Array<ArrayBuffer>, kind: VoiceIpcHeader["kind"]) => T): Promise<T>;
+  private framed<T>(operation: VoiceIpcHeader["operation"], kind: VoiceIpcHeader["kind"],
+    logical: string, plaintext: Uint8Array<ArrayBuffer>, afterEnd: boolean,
+    allowed: (kind: VoiceIpcHeader["kind"], length: number) => boolean,
+    decode: (opened: Uint8Array<ArrayBuffer>, kind: VoiceIpcHeader["kind"]) => T,
+    input: Readonly<{ loan: VoiceSdpInputLoan; expected: VoiceSdpInputExpectation; current(): void }>): Promise<T | null>;
   private async framed<T>(operation: VoiceIpcHeader["operation"], kind: VoiceIpcHeader["kind"],
     logical: string, plaintext: Uint8Array<ArrayBuffer>, afterEnd: boolean,
     allowed: (kind: VoiceIpcHeader["kind"], length: number) => boolean,
-    decode: (opened: Uint8Array<ArrayBuffer>, kind: VoiceIpcHeader["kind"]) => T): Promise<T> {
+    decode: (opened: Uint8Array<ArrayBuffer>, kind: VoiceIpcHeader["kind"]) => T,
+    input?: Readonly<{ loan: VoiceSdpInputLoan; expected: VoiceSdpInputExpectation; current(): void }>): Promise<T | null> {
     const keys = this.keys, bootstrap = this.bootstrap;
     const check = () => {
       if (!keys || !bootstrap || this.keys !== keys || this.bootstrap !== bootstrap || this.drained) throw new Error("original voice channel unavailable");
@@ -2651,6 +2800,7 @@ class RetainedIpcChannel {
     };
     const step = async <V>(promise: Promise<V>): Promise<V> => { const value = await promise; check(); return value; };
     check();
+    if (input && (operation !== 17 || kind !== 0 || plaintext.byteLength !== 66)) throw new Error("original SDP Input request required");
     if (this.tx === 0xffff_ffff_ffff_ffffn) { this.retired = true; throw new Error("voice channel exhausted"); }
     // Debit before every SDK/fetch callback. No local refusal/lost reply refunds this TX.
     const request: VoiceIpcHeader = Object.freeze({ direction: 0, operation, kind,
@@ -2658,9 +2808,10 @@ class RetainedIpcChannel {
     const header = encodeVoiceIpcHeader(request);
     let sealed: Uint8Array<ArrayBuffer> | null = null, opened: Uint8Array<ArrayBuffer> | null = null;
     let body: Uint8Array<ArrayBuffer> | null = null, response: Response | null = null;
+    let result: T | null = null, transfer = false;
     const controller = new AbortController(); this.controller = controller;
     let timer: unknown = null;
-    try {
+    try { try {
       sealed = new Uint8Array(await this.subtle.encrypt({ name: "AES-GCM", iv: voiceIpcNonce(request), additionalData: header }, keys!.requestBody, plaintext));
       check(); plaintext.fill(0);
       const mac = new Uint8Array(await step(this.subtle.sign("HMAC", keys!.requestMac, header)));
@@ -2679,30 +2830,40 @@ class RetainedIpcChannel {
       });
       check();
       let incoming: ReturnType<typeof decodeVoiceIpcAdmission> | null = null;
-      body = await readVoiceIpcResponse(response, controller.signal, async admission => {
+      const authenticate = async (admission: string) => {
         const decoded = decodeVoiceIpcAdmission(admission);
         if (decoded.header.operation !== request.operation || !allowed(decoded.header.kind, decoded.header.length)) throw new Error("voice reply refused");
         const aad = voiceIpcResponseAad(decoded.header, request);
         if (!await step(this.subtle.verify("HMAC", keys!.responseMac, decoded.tag, aad))) throw new Error("voice response refused");
         if (decoded.header.sequence <= this.rx) throw new Error("voice response replayed");
         this.rx = decoded.header.sequence; incoming = decoded;
-        return decoded.header.length;
-      });
+        return decoded.header;
+      };
+      body = input ? await readVoiceIpcSdpInputResponse(response, controller.signal, authenticate)
+        : await readVoiceIpcResponse(response, controller.signal, async admission => (await authenticate(admission)).length);
       check();
       const received = incoming as ReturnType<typeof decodeVoiceIpcAdmission> | null;
       if (!received) throw new Error("voice response refused");
       opened = new Uint8Array(await this.subtle.decrypt({ name: "AES-GCM", iv: voiceIpcNonce(received.header), additionalData: voiceIpcResponseAad(received.header, request) }, keys!.responseBody, body));
       check();
-      return decode(opened, received.header.kind);
+      if (input && received.header.kind === 2) transfer = true;
+      else result = decode(opened, received.header.kind);
     } finally {
       try { if (response?.body && !response.body.locked) await response.body.cancel(); }
       catch { /* Keep the original error; actual cancellation has settled. */ }
       finally {
         if (timer !== null) this.clock.cancel(timer);
-        plaintext.fill(0); sealed?.fill(0); opened?.fill(0); body?.fill(0);
+        plaintext.fill(0); sealed?.fill(0); body?.fill(0);
         if (this.controller === controller) this.controller = null;
       }
     }
+      if (transfer) {
+        check(); input!.current(); // AFTER actual read/cancel/timer finally.
+        input!.loan.accept(opened!, input!.expected);
+        opened = null; // Exactly one clearer now belongs to the private crypto owner.
+      }
+      return result;
+    } finally { opened?.fill(0); }
   }
   private async cleanup(): Promise<void> {
     // setup()/exchange() have returned: every real SDK promise has settled. The close-first
@@ -2961,7 +3122,7 @@ export function windowVoiceCryptoBroker(
   const host = window as Record<symbol, unknown>;
   const previous = host[BROKER] as VoiceCryptoBroker | undefined;
   if (previous) {
-    if (previous.version !== 25 || typeof previous.prepareNativePcIntent !== "function" || typeof previous.prepareNativeSdpHandoff !== "function" || typeof previous.observeNativeWork !== "function" || typeof previous.returnNativeDerivation !== "function" || typeof previous.nativeConfirmationFromChannel !== "function" || typeof previous.nativeDerivationFromChannel !== "function" || typeof previous.recoverChannelHistory !== "function" || typeof previous.prepareChainFromChannel !== "function" || typeof previous.nativeChannel !== "function" || typeof previous.run !== "function" || typeof previous.selectJoinKey !== "function" || typeof previous.retrySelectedJoinKeys !== "function" ||
+    if (previous.version !== 26 || typeof previous.prepareNativeSdpCrypto !== "function" || typeof previous.prepareNativePcIntent !== "function" || typeof previous.prepareNativeSdpHandoff !== "function" || typeof previous.observeNativeWork !== "function" || typeof previous.returnNativeDerivation !== "function" || typeof previous.nativeConfirmationFromChannel !== "function" || typeof previous.nativeDerivationFromChannel !== "function" || typeof previous.recoverChannelHistory !== "function" || typeof previous.prepareChainFromChannel !== "function" || typeof previous.nativeChannel !== "function" || typeof previous.run !== "function" || typeof previous.selectJoinKey !== "function" || typeof previous.retrySelectedJoinKeys !== "function" ||
         typeof previous.registerProtectedConfirmation !== "function" ||
         typeof previous.registerProtectedDerivation !== "function" || typeof previous.registerConfirmation !== "function" || typeof previous.createPair !== "function") {
       throw new Error("voice crypto broker version changed; reload required");
@@ -3047,6 +3208,33 @@ export class VoiceCryptoPair {
       this.#broker.burnSequence(this.#owner, this.#domain, sequence);
       result = new Uint8Array(await this.#broker.subtle.encrypt(algorithm, this.#tx!, input.body as Uint8Array<ArrayBuffer>));
     } else result = new Uint8Array(await this.#broker.subtle.decrypt(algorithm, this.#rx!, input.body as Uint8Array<ArrayBuffer>));
+    try { this.assertCurrent(); return result; } catch (error) { result.fill(0); throw error; }
+  }
+
+  /** Original SDP-only SDK seam. The retained native row owner latches one execution
+   * before entry; old confirmation APIs never admit larger input or these operations.
+   * Only actual AEAD OperationError is the closed authentication-failed result. End,
+   * provider/programming errors and bad lengths must settle without invented plaintext. */
+  async computeSdp(mark: symbol, input: VoiceSdpInput, isCurrent: () => boolean): Promise<Uint8Array<ArrayBuffer> | null> {
+    if (mark !== SDP_COMPUTE || !this.#protected) throw new Error("original native SDP computation required");
+    this.assertCurrent();
+    const sequence = u64(input.sequence, "sequence"), seal = input.purpose === "seal";
+    const algorithm = { name: "AES-GCM", iv: voicePacketIv(sequence), additionalData: input.aad, tagLength: 128 };
+    let result: Uint8Array<ArrayBuffer>;
+    try {
+      if (seal) {
+        this.#broker.burnSequence(this.#owner, this.#domain, sequence);
+        if (!isCurrent()) throw new Error("voice SDP engine retired");
+        result = new Uint8Array(await this.#broker.subtle.encrypt(algorithm, this.#tx!, input.body));
+      } else {
+        if (!isCurrent()) throw new Error("voice SDP engine retired");
+        result = new Uint8Array(await this.#broker.subtle.decrypt(algorithm, this.#rx!, input.body));
+      }
+    } catch (error) {
+      this.assertCurrent();
+      if (!seal && error instanceof DOMException && error.name === "OperationError") return null;
+      throw error;
+    }
     try { this.assertCurrent(); return result; } catch (error) { result.fill(0); throw error; }
   }
 

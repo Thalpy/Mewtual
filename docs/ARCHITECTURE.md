@@ -1,15 +1,31 @@
 # Mewtual; Architecture
 
-## Separate browser SDP Input data boundary (25 October; not integrated)
+## Private first-Offer browser crypto owner (25 October)
+
+The retained encrypted channel now owns one serial first-Offer crypto job inside its
+original64KiB SDP phase. Two fixed global row claims precede unknown Begin. LOW Offer
+Seal and HIGH Offer Open use the original protected Pair, exact authenticated native18
+admission and one SDK-started latch. Native Result uncertainty retains the original output;
+it cannot execute WebCrypto again. Successful Open keeps its private paid plaintext inbox.
+No HIGH Answer can begin until a later fresh native delivery/RTC owner applies that Offer.
+
+Begin UTF8 survives a known Pending row until Action attachment. Input moves exactly once
+after read/cancel/timer cleanup and fresh original-PC currentness; its lexical descriptor
+scope ends before Result encoding. End joins the job outside SharedIpcExecution before
+native SDK/storage release, including close-first recovery of an unknown Begin. Fixed
+metadata/callbacks and stage buffers have separate terms within the same64KiB payment.
+The production dispatcher remains closed; this is not RTC or media-relay activation.
+
+## Separate browser SDP Input data boundary (25 October; reader-only checkpoint)
 
 A dedicated opcode17 BYOB response reader admits only authenticated direction1/class2
 Input or fixed Control. It shares the existing read/cancellation implementation while
 keeping generic2,064B ceilings unchanged. The v8/tag3 descriptor decoder checks the exact
 original row/Action/PC/SDK/storage/Ready bindings and returns borrowed AAD/body views from
 one fixed exact backing. It does not normalize AAD or grant engine/SDK/RTC authority.
-A future consumer must explicitly transfer and retain its paid backing: the current
-retained channel's framed finally clears `opened`. Full64KiB composition and actual
-SDK/Result/settlement integration remain open; production SDP stays disabled.
+This reader-only checkpoint initially lacked an exclusive retained consumer. The
+first-Offer owner above now supplies the explicit paid backing transfer and serial
+SDK/Result/settlement integration. RTC composition remains open; production SDP stays disabled.
 
 ## Original SDP cleanup controls (25 October; private)
 
@@ -54,7 +70,8 @@ cleanup may then retire an unused candidate. Callback retirement precedes canoni
 Fixed metadata survives in original physical Control custody after native Task/Actor graphs
 are destroyed. Projection and serialization are separate stages to preserve the existing
 Control cap; current validation status is in HANDOVER. The version8/tag4 permit has a private
-browser decoder but no engine consumer. Production SDP, Result/RTC/media remain disabled.
+browser decoder now consumed by the private first-Offer owner above. Production SDP and
+RTC/media remain disabled.
 
 ## Scoped original SDP Begin publication (25 October; private)
 

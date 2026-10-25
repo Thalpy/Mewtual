@@ -49,6 +49,14 @@ export class VoicePcCustody {
     }
     if (receipt.state === "closed") { this.stopped = true; this.released = true; }
   }
+  /** Private crypto lookup bindings only. This conservative local observation grants no
+   * SDK or RTC effect; every native Input/engine/Result repeats actual current admission.
+   * Snapshot scalars so the crypto owner retains neither this record nor an RTC object. */
+  cryptoBinding(now: number): Readonly<{ generation: "1"; proof: string; ready: string; localIsLow: boolean }> {
+    if (this.stopped || this.released || !this.identity || !this.admission || this.identity.generation !== "1" ||
+        this.deadline === null || !Number.isFinite(now) || now < 0 || now >= this.deadline) throw new Error("voice PC intent is closed");
+    return Object.freeze({ generation: "1", proof: this.identity.proof, ready: this.admission.ready, localIsLow: this.admission.localIsLow });
+  }
   // No public effect/grant accessor: a future RTC consumer must acquire its own exact
   // native effect permission. This historical record is insufficient even before expiry.
 }

@@ -1,6 +1,23 @@
 # Threat model; client integrity & enforcement boundaries
 
-## Browser SDP Input boundaries (25 October; no production consumer)
+## Browser first-Offer SDK ownership (25 October; production disabled)
+
+Authenticated native history cannot authorize a new SDK execution or RTC effect. The
+private first-Offer driver reserves its rows before Begin, preserves exact pending input,
+latches SDK-started before WebCrypto and retains one output through uncertain Result RPCs.
+Only actual AEAD OperationError is the closed authentication-failure domain; successful
+empty Open remains a distinct byte result. Other provider failures close without inventing
+plaintext or retrying the engine. Keys outlive PC rounds, so fresh same-PC/deadline checks
+must independently precede SDK start after a delayed permit or lent execution position.
+
+Reentrant Clock/owner callbacks cannot replace the original job. Input admission occurs
+after physical cleanup, then a final callback-free flag fence. End joins real SDK/Result
+work and original native cleanup before release; buffer clearing alone is not collection.
+The fixed and serial-stage inventory remains inside the existing64KiB payment. Open's
+private plaintext inbox is retained for later fresh delivery; a receipt is insufficient.
+No production SDP dispatch, RTC integration, relay or physical media acceptance is claimed.
+
+## Browser SDP Input boundaries (25 October; reader-only checkpoint)
 
 The separate op17 reader cannot let a keyless stale loopback service select a large
 application body before exact channel authentication. Wrong direction/op/class/length,
@@ -11,8 +28,8 @@ The descriptor decoder binds the original native row/Action/PC/SDK/storage/Ready
 checks exact role, sequence and charge. Shared/resizable/subview backings are refused;
 expected getters are snapshotted once and payload bytes are not copied. Borrowed views
 still require exclusive ownership and paid backing through actual async settlement.
-Neither decoding nor historical data grants engine/SDK/RTC/currentness. Existing framed
-cleanup cannot yet transfer that loan. Successful empty Open is not authentication
+Neither decoding nor historical data grants engine/SDK/RTC/currentness. The first-Offer
+owner above now transfers that loan after framed cleanup. Successful empty Open is not authentication
 failure; its native/browser representation is now corrected, while a genuine tag-only
 positive native case remains a test gap. No
 complete SDK/RTC memory proof or audible/physical acceptance is claimed.

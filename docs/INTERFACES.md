@@ -1,5 +1,21 @@
 # Mewtual; Interfaces & Hooks Schema
 
+## Private browser first-Offer SDK integration (25 October)
+
+`prepareNativeSdpCrypto` accepts the exact existing owner/channel/chain. LOW supplies its
+initial bounded Offer string once; HIGH supplies null to discover its incoming Offer.
+Retries supply null and join the same retained job. The result is `Promise<void>`, never
+plaintext, an RTC object or effect permission. It is not called by production App activation.
+HIGH Answer and LOW Answer Open are not implemented by this first-Offer interface.
+
+The job uses original15/16/27,17,18,19/20/21,22/23/24 framing without generic Data widening.
+Its Input loan transfers only after actual physical cleanup and a fresh same-PC fence.
+SDK runs once after native18; Result retries reuse its exact bytes/tag. Native23 follows
+actual SDK/digest and last Result-RPC settlement, independently of receipt/ACK/Return.
+Pending Begin retries preserve original bytes until native attaches an Action. Successful
+Open plaintext remains private and paid; only a future fresh delivery26 may authorize RTC.
+The retained broker shape is26 and reserves both row slots before any unknown Begin.
+
 ## Private browser SDP Input reader/decoder (25 October; staged)
 
 `readVoiceIpcSdpInputResponse` requires the original authentication callback to verify
@@ -13,7 +29,7 @@ It validates purpose/role/profile/generations/u64 sequence/engine formula/length
 returns two borrowed views of the same exact non-shared, non-resizable ArrayBuffer.
 The caller owes exclusive paid custody through every async use and exactly one clearer;
 Readonly/frozen metadata does not make byte views immutable. This is not an engine or RTC
-permit and is not wired into the retained broker. Input Open16 remains legal; native
+permit. The first-Offer owner above now wires it into the retained broker. Input Open16 remains legal; native
 opcode20 now represents exact empty plaintext independently of AEAD failure.
 
 ## Private SDP ACK22 and settlement23 (25 October)
@@ -74,8 +90,9 @@ Opcode18's private version8/tag4 permit is78 bytes: row16, Action serial/version
 original permit8 and engine bytes4, plus the two-byte prefix. It is authenticated against
 the exact original request. `decodeVoiceSdpEngineReply` binds expected row/Action/tag/charge,
 retains only fixed scalars, and also accepts canonical original History/refusal. Generic
-SDP Control and confirmation decoders do not accept this permit grammar. No shipping Host
-or browser engine invokes it yet. Result, ACK/settlement and fresh RTC delivery remain open.
+SDP Control and confirmation decoders do not accept this permit grammar. The private
+first-Offer browser owner now consumes it; the shipping Host still refuses the family.
+Fresh RTC delivery remains open.
 
 ## Scoped original SDP publication (25 October; trusted Rust-only)
 

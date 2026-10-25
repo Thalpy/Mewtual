@@ -1,5 +1,20 @@
 # Next voice milestone: native result recovery
 
+## 25 October: private first-Offer browser crypto is connected
+
+The retained broker now runs LOW Offer Seal and HIGH Offer Open through authenticated
+native codecs with one original SDK execution, exact Result retries and joined cleanup.
+HANDOVER records current validation/review status. Production still refuses15–27, and
+browser tests mock native authority: no actual WebView/native interoperability is claimed.
+
+Next add scoped fresh native delivery26 on the actual Actor, preserving original Action/
+Open output/Offer/PC ownership and current MLS/room/epoch checks. Then consume the same paid
+Open inbox once through actual RTC, record Applied only after its successful SDK await,
+and admit HIGH Answer/LOW Answer Open. Retain and account for actual local/remote UTF16
+descriptions and RTC promises; do not add them on top of the current stage peak or raise
+caps. Follow with renewed rounds/compaction, supported multi-peer composition, member media
+relay, combined acceptance and physical testing on independent desktops/networks.
+
 ## 25 October: browser Input format and reader exist; integrate original owner next
 
 The standalone op17 reader preserves authenticated class-specific ceilings and generic

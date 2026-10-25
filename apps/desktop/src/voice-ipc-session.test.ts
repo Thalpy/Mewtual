@@ -1,13 +1,14 @@
 import { encodeVoicePcIntent } from "./voice-ipc-pc.ts";
 import { encodeVoiceSdpPhase } from "./voice-ipc-sdp.ts";
 import { encodeVoiceSdkCustody } from "./voice-ipc-sdk.ts";
+import { encodeVoiceSdpAction, encodeVoiceSdpBegin, encodeVoiceSdpResolve } from "./voice-ipc-sdp-actions.ts";
 import { encodeVoiceKeySession } from "./voice-ipc-key-session.ts";
 import assert from "node:assert/strict";
 import test, { type TestContext } from "node:test";
 import { webcrypto, createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import {
-  VoiceCryptoBroker, createVoiceCryptoOwner, windowVoiceCryptoBroker,
+  VoiceCryptoBroker, createVoiceCryptoOwner, windowVoiceCryptoBroker, voicePacketIv,
   type VoiceIpcNative, type VoiceSelectedKeyNative, type VoiceCryptoChainBinding,
   type VoiceDerivationInput, type VoiceDerivationNative,
 } from "./voice-crypto.ts";
@@ -52,16 +53,16 @@ async function fixture(t: TestContext, sharedBroker?: VoiceCryptoBroker, identit
   const bodyReads: number[] = [];
   const operations: number[] = [];
   let historyBody = Buffer.from(historyVector("derived-drained").plaintext, "hex");
-  type ActionResponse = { kind: 0 | 1; body: Uint8Array };
+  type ActionResponse = { kind: 0 | 1 | 2; body: Uint8Array };
   let actionResponder: ((header: VoiceIpcHeader, opened: Uint8Array) => ActionResponse | Promise<ActionResponse>) | null = null;
   let responseChange: Partial<VoiceIpcHeader> | null = null;
   let holdAt = -1, held: ReturnType<typeof gate> | null = null, engineEnabled = false;
   let holdWhen: ((name: string, args: unknown[]) => boolean) | null = null;
   let stalled = false, cancelEntered = false, cancelGate: ReturnType<typeof gate> | null = null;
-  let observedStep = -1;
+  let observedStep = -1, sdpSdkCalls = 0;
   let now = 0, timerSerial = 0, hostileHeaders = false, hangFetch = false, fetchAborted = false, fetchEntered = false;
   const timers = new Map<number, { at: number; run(): void }>();
-  let timerPeak = 0, scheduleHook: (() => void) | null = null;
+  let timerPeak = 0, scheduleHook: (() => void) | null = null, cancelHook: (() => void) | null = null, nowHook: (() => void) | null = null;
   let fetchCancel: ReturnType<typeof gate> | null = null;
   const engine = new Proxy(real, { get(target, name) {
     const value = Reflect.get(target, name);
@@ -69,6 +70,7 @@ async function fixture(t: TestContext, sharedBroker?: VoiceCryptoBroker, identit
     return async (...args: unknown[]) => {
       if (engineEnabled) {
         const index = engineSteps.length; engineSteps.push(String(name));
+        if ((name === "encrypt" || name === "decrypt") && (args[0] as AesGcmParams)?.additionalData?.byteLength === 579) sdpSdkCalls++;
         if (index === holdAt) { observedStep = index; await held!.promise; }
         if (holdWhen?.(String(name), args)) { holdWhen = null; observedStep = -2; await held!.promise; }
         if (name === "encrypt" && failEncrypt) { failEncrypt = false; throw new Error("local provider failure"); }
@@ -82,11 +84,11 @@ async function fixture(t: TestContext, sharedBroker?: VoiceCryptoBroker, identit
   });
   const admission = { async admit() { ordinary++; return "ordinary"; }, async settle() {}, async commitInbound() {} };
   const broker = sharedBroker ?? new VoiceCryptoBroker(admission, engine, () => now, {
-    now: () => now, schedule(run, ms) {
+    now() { const hook = nowHook; nowHook = null; hook?.(); return now; }, schedule(run, ms) {
       const id = ++timerSerial; timers.set(id, { at: now + ms, run }); timerPeak = Math.max(timerPeak, timers.size);
       const hook = scheduleHook; scheduleHook = null; hook?.(); return id;
     },
-    cancel(id) { timers.delete(id as number); },
+    cancel(id) { timers.delete(id as number); const hook = cancelHook; cancelHook = null; hook?.(); },
   });
   const selectedNative: VoiceSelectedKeyNative = {
     async admit(owner, value) { executor = value; return { owner, executor, permit: "permit", join: hash(2), kind: "admitted" }; },
@@ -160,7 +162,7 @@ async function fixture(t: TestContext, sharedBroker?: VoiceCryptoBroker, identit
     requestSequences.push(request.header.sequence);
     const opened = new Uint8Array(await real.decrypt({ name: "AES-GCM", iv: voiceIpcNonce(request.header), additionalData: request.bytes }, requestBody, init!.body as Uint8Array<ArrayBuffer>));
     operations.push(request.header.operation);
-    let actionReply: { kind: 0 | 1; body: Uint8Array } | null = null;
+    let actionReply: ActionResponse | null = null;
     if (request.header.operation === 9) {
       assert.deepEqual(opened, new Uint8Array(Buffer.concat([Buffer.from([1]), session, transcriptHash])));
     } else if (request.header.operation === 8 && opened[0] !== 2) {
@@ -216,6 +218,7 @@ async function fixture(t: TestContext, sharedBroker?: VoiceCryptoBroker, identit
     historyReply(name: string) { historyBody = Buffer.from(historyVector(name).plaintext, "hex"); },
     responseChange(value: Partial<VoiceIpcHeader> | null) { responseChange = value; },
     operations: () => [...operations], bodyReads: () => [...bodyReads],
+    sdpSdkCount: () => sdpSdkCalls,
     rowBudget() {
       // Read-only unit observation of actual retained claims. Public counts intentionally
       // expose no capability/history internals to application callers.
@@ -238,6 +241,8 @@ async function fixture(t: TestContext, sharedBroker?: VoiceCryptoBroker, identit
       assert.equal(timers.size, 1); const [id, timer] = [...timers][0]; timers.delete(id); timer.run();
     },
     onSchedule(work: () => void) { scheduleHook = work; },
+    onCancel(work: () => void) { cancelHook = work; },
+    onNow(work: () => void) { nowHook = work; },
     advance(ms: number) { now += ms; for (const [id, timer] of [...timers]) if (timer.at <= now) { timers.delete(id); timer.run(); } },
   };
 }
@@ -290,7 +295,7 @@ async function linkedDerivation(f: Awaited<ReturnType<typeof fixture>>, channel 
 
 /** Independent fixed native projection for browser transport tests. Unlike native integration
  * tests this fixture grants no Actor/MLS authority; its fake keyRef belongs to its mock signer. */
-async function framedDerivation(f: Awaited<ReturnType<typeof fixture>>) {
+async function framedDerivation(f: Awaited<ReturnType<typeof fixture>>, localIsLow = true) {
   const peer = await real.generateKey({ name: "ECDH", namedCurve: "P-256" }, false, ["deriveBits"]);
   const point = new Uint8Array(await real.exportKey("raw", peer.publicKey));
   const transcript = utf8.encode("original native framed action");
@@ -299,11 +304,11 @@ async function framedDerivation(f: Awaited<ReturnType<typeof fixture>>) {
   const engineBytes = 3 * transcript.length + 4096 + 256;
   const binding = { chain: "1", epoch: historyPurpose.epoch, localDevice: "06".repeat(32), localJoin: hash(2), localKey: hash(3),
     peerDevice: historyPurpose.peer, peerJoin: historyPurpose.join, peerKey: historyPurpose.keyRef, handshake: hash(10),
-    generation: "9007199254741011", nativeDeadline: "500000", localIsLow: true };
+    generation: "9007199254741011", nativeDeadline: "500000", localIsLow };
   const data = Buffer.concat([Buffer.from([1, 5]), Buffer.from(row, "hex"), integer(BigInt(identity.action), 8), integer(1n, 8), Buffer.from(identity.inputTag, "hex"),
     integer(1n, 8), Buffer.from(f.owner.group, "hex"), Buffer.from([0]), Buffer.alloc(32), integer(1n, 16), integer(BigInt(binding.epoch), 8),
     ...[binding.localDevice, binding.localJoin, binding.localKey, binding.peerDevice, binding.peerJoin, binding.peerKey, binding.handshake].map(s => Buffer.from(s, "hex")),
-    integer(BigInt(binding.generation), 8), integer(BigInt(binding.nativeDeadline), 8), Buffer.from([1]), integer(BigInt(engineBytes), 4), Buffer.from([0]),
+    integer(BigInt(binding.generation), 8), integer(BigInt(binding.nativeDeadline), 8), Buffer.from([Number(localIsLow)]), integer(BigInt(engineBytes), 4), Buffer.from([0]),
     f.key.publicKey(), point, integer(BigInt(transcript.length), 2), transcript]);
   assert.equal(data.length, 541 + transcript.length);
   let inputReads = 0, admissions = 0, commits = 0, acknowledgements = 0, settlements = 0;
@@ -337,7 +342,7 @@ async function framedDerivation(f: Awaited<ReturnType<typeof fixture>>) {
   };
   f.cleanup(() => { finalPending = false; loseIssuance = false; loseFinalAck = false; settleHold?.release(); returnHold?.release(); f.native.settleSetup = nativeSettle; });
   f.actions(async (header, opened) => {
-    if (header.operation >= 10 && header.operation <= 14) {
+    if (header.operation >= 10) {
       assert.ok(transitionResponder, "unexpected custody operation");
       return transitionResponder(header, opened);
     }
@@ -406,7 +411,24 @@ async function framedDerivation(f: Awaited<ReturnType<typeof fixture>>) {
     assert.equal(header.operation, 5); settlements++; if (settleHold) await settleHold.promise;
     settled = true; return status();
   });
-  return { row, identity, binding, data, engineBytes, counts: () => ({ inputReads, admissions, commits, acknowledgements, settlements }),
+  // Independent peer derives its outgoing key from the public browser point and its own
+  // private key. Never extract/access the retained browser Pair or selected private key.
+  let incomingKey: CryptoKey | null = null;
+  const incoming = async (plaintext: Uint8Array<ArrayBuffer>, aad: Uint8Array<ArrayBuffer>, sequence: bigint) => {
+    if (!incomingKey) {
+      const browserPoint = await real.importKey("raw", f.key.publicKey(), { name: "ECDH", namedCurve: "P-256" }, false, []);
+      const secret = new Uint8Array(await real.deriveBits({ name: "ECDH", public: browserPoint }, peer.privateKey, 256));
+      let material: CryptoKey;
+      try { material = await real.importKey("raw", secret, "HKDF", false, ["deriveKey"]); } finally { secret.fill(0); }
+      const context = (label: string) => Buffer.concat([utf8.encode(label + "\0"), transcript]);
+      const salt = new Uint8Array(await real.digest("SHA-256", context("mewtual/voice/v2/transcript")));
+      incomingKey = await real.deriveKey({ name: "HKDF", hash: "SHA-256", salt,
+        info: context("mewtual/voice/v2/aes-gcm/" + (localIsLow ? "high-to-low" : "low-to-high")) }, material,
+        { name: "AES-GCM", length: 256 }, false, ["encrypt"]);
+    }
+    return new Uint8Array(await real.encrypt({ name: "AES-GCM", iv: voicePacketIv(sequence), additionalData: aad }, incomingKey, plaintext));
+  };
+  return { row, identity, binding, data, engineBytes, incoming, counts: () => ({ inputReads, admissions, commits, acknowledgements, settlements }),
     historical() { historical = true; derived = true; settled = true; },
     loseResult() { lostResult = true; }, alter(work: typeof alter) { alter = work; },
     finalCounts: () => ({ retireCalls, finalCalls, finalAcknowledged }),
@@ -427,20 +449,21 @@ async function framedDerivation(f: Awaited<ReturnType<typeof fixture>>) {
 
 /** Mock native signer/Root only; actual original-channel framing, P256/HKDF/AEAD, bounded
  * stream reads, broker ownership and native-action adapters execute unchanged. */
-async function framedConfirmation(f: Awaited<ReturnType<typeof fixture>>, finish = false) {
+async function framedConfirmation(f: Awaited<ReturnType<typeof fixture>>, finish = false, localIsLow = true) {
   const channel = f.channel(); await channel.status();
-  const parent = await framedDerivation(f);
+  const parent = await framedDerivation(f, localIsLow);
   const ready = await f.broker.nativeDerivationFromChannel(f.owner, channel, f.key, historyPurpose, parent.row, parent.identity).attempt();
   assert.equal(ready.kind, "ready"); if (ready.kind !== "ready") throw new Error("original chain required");
   let row = "00000000000000010000000000000001", identity = { action: "9007199254741027", version: "3", inputTag: hash(91) };
   let purpose: VoiceIpcConfirmationPurpose = { parent: historyPurpose, parentRow: parent.row, request: { kind: "start", predecessor: null } };
-  const aad = utf8.encode("native signed Hello header"), body = utf8.encode("native closed Hello");
-  const engineBytes = 4 * (aad.length + body.length + 16) + 3 * 512 + 2048;
+  const aad = utf8.encode("native signed Hello header"), body = localIsLow ? utf8.encode("native closed Hello")
+    : await parent.incoming(utf8.encode("native closed Hello"), aad, 1n);
+  const engineBytes = 4 * (aad.length + body.length + (localIsLow ? 16 : 0)) + 3 * 512 + 2048;
   const b = parent.binding;
   const data = Buffer.concat([Buffer.from([1, 7]), Buffer.from(row, "hex"), integer(BigInt(identity.action), 8), integer(BigInt(identity.version), 8),
     Buffer.from(identity.inputTag, "hex"), Buffer.from(parent.row, "hex"), Buffer.from(f.owner.group, "hex"), Buffer.from([0]), Buffer.alloc(32), integer(1n, 16), integer(BigInt(b.epoch), 8),
     ...[b.localDevice, b.localJoin, b.localKey, b.peerDevice, b.peerJoin, b.peerKey, b.handshake].map(s => Buffer.from(s, "hex")),
-    integer(BigInt(b.generation), 8), integer(BigInt(b.nativeDeadline), 8), Buffer.from([1]), integer(BigInt(engineBytes), 4), Buffer.from([1, finish ? 3 : 1]),
+    integer(BigInt(b.generation), 8), integer(BigInt(b.nativeDeadline), 8), Buffer.from([Number(localIsLow)]), integer(BigInt(engineBytes), 4), Buffer.from([localIsLow ? 1 : 2, finish ? 3 : 1]),
     integer(1n, 8), integer(BigInt(aad.length), 2), integer(BigInt(body.length), 2), aad, body]);
   assert.equal(data.length, 430 + aad.length + body.length);
   let inputs = 0, admissions = 0, results = 0, acknowledgements = 0, settlements = 0, returns = 0;
@@ -561,6 +584,7 @@ async function framedConfirmation(f: Awaited<ReturnType<typeof fixture>>, finish
 /** Independent mock native lifecycle; actual channel HMAC/AEAD, SDK/IO and broker cleanup
  * execute unchanged. Real Root/Finish/Session evidence is covered by the Rust TCP fixture. */
 function custodyReplies(f: Awaited<ReturnType<typeof fixture>>, child: Awaited<ReturnType<typeof framedConfirmation>>) {
+  let sdpResponder: Parameters<typeof f.actions>[0] = null;
   let claims = 0, releases = 0, claimed = false, released = false, loseClaim = false, loseRelease = false, refuse = false;
   let releaseHold: ReturnType<typeof gate> | null = null;
   let keyAdoptions = 0, keyReleases = 0, keyAdopted = false, keyReleased = false, loseAdoption = false;
@@ -585,6 +609,10 @@ function custodyReplies(f: Awaited<ReturnType<typeof fixture>>, child: Awaited<R
     assert.ok(!pcPrepared || pcClosed, "Final cannot overtake PC Close");
   });
   child.parent.transitionReplies(async (header, opened) => {
+    if (header.operation >= 15) {
+      assert.ok(sdpResponder, "unexpected private SDP operation");
+      return sdpResponder(header, opened);
+    }
     const base = { parentRow: child.parent.row, identity: child.parent.identity, handshake: child.parent.binding.handshake, key: keyProof, sequence: "1" };
     const prefix = () => [Buffer.from(base.parentRow, "hex"), integer(BigInt(base.identity.action), 8), integer(BigInt(base.identity.version), 8),
       Buffer.from(base.identity.inputTag, "hex"), Buffer.from(base.handshake, "hex"), Buffer.from(base.key, "hex"), integer(1n, 8)];
@@ -694,6 +722,7 @@ function custodyReplies(f: Awaited<ReturnType<typeof fixture>>, child: Awaited<R
     assert.equal(bytes.length, 214); return { kind: 0, body: bytes };
   });
   return { counts: () => ({ claims, releases, claimed, released }),
+    sdpReplies(responder: typeof sdpResponder) { sdpResponder = responder; },
     loseClaim() { loseClaim = true; }, loseRelease() { loseRelease = true; }, refuseClaim() { refuse = true; },
     holdRelease() { releaseHold = gate(); return releaseHold; },
     keyCounts: () => ({ adoptions: keyAdoptions, releases: keyReleases, adopted: keyAdopted, released: keyReleased }),
@@ -2533,8 +2562,8 @@ test("End during authenticated Current key reply cannot revive keys and still re
 });
 
 
-async function establishedSdpFixture(t: TestContext) {
-  const f = await fixture(t), child = await framedConfirmation(f, true), custody = custodyReplies(f, child);
+async function establishedSdpFixture(t: TestContext, localIsLow = true) {
+  const f = await fixture(t), child = await framedConfirmation(f, true, localIsLow), custody = custodyReplies(f, child);
   await child.derive(); await child.handle().attempt();
   await until(() => custody.keyCounts().adopted && f.broker.counts().active === 0);
   const prepare = () => f.broker.prepareNativeSdpHandoff(f.owner, child.channel, child.ready.chain);
@@ -2597,11 +2626,219 @@ test("HMR refuses fully shaped funded broker24 without waking or replacing its o
 });
 
 
-async function establishedPcFixture(t: TestContext) {
-  const fixture = await establishedSdpFixture(t); await fixture.prepare();
+async function establishedPcFixture(t: TestContext, localIsLow = true) {
+  const fixture = await establishedSdpFixture(t, localIsLow); await fixture.prepare();
   const { f, child } = fixture;
   return { ...fixture, admitPc: () => f.broker.prepareNativePcIntent(f.owner, child.channel, child.ready.chain) };
 }
+
+/** Original broker and real channel/SDK crypto; native authority is still an independent
+ * mock. The actual Rust TCP gates establish Root/native behavior separately, not a WebView
+ * or an interoperating browser/native process. This fixture never grants RTC delivery. */
+async function framedSdpOffer(t: TestContext, localIsLow = true, plaintextLength = 8192, authenticationFails = false) {
+  const f = await establishedPcFixture(t, localIsLow); await f.admitPc();
+  const { child, custody } = f;
+  const parentRow = child.parent.row, row = "00000000000000020000000000000001";
+  const identity = { action: "9007199254741101", version: "1", inputTag: hash(110) };
+  const original = { parentRow, identity: child.parent.identity, handshake: child.parent.binding.handshake,
+    key: hash(99), sequence: "1", storage: hash(100), sdkGeneration: "1", sdkProof: hash(101), pcProof: hash(102) };
+  const selector = { parentRow, row, purpose: localIsLow ? "seal" as const : "open" as const };
+  const plaintext = new Uint8Array(plaintextLength).fill(115), aad = new Uint8Array(579).fill(4);
+  const incoming = localIsLow ? plaintext : await child.parent.incoming(plaintext, aad, 42n);
+  if (authenticationFails) incoming[0] ^= 1;
+  const engineBytes = 4 * (aad.length + incoming.length + (localIsLow ? 16 : 0)) + 3 * 8192 + 2048;
+  const input = Buffer.alloc(277 + aad.length + incoming.length);
+  input.set([8, 3]); Buffer.from(row, "hex").copy(input, 2); Buffer.from(parentRow, "hex").copy(input, 18);
+  integer(BigInt(identity.action), 8).copy(input, 34); integer(1n, 8).copy(input, 42); Buffer.from(identity.inputTag, "hex").copy(input, 50);
+  integer(1n, 8).copy(input, 82); Buffer.from(hash(103), "hex").copy(input, 90); input[122] = 1;
+  Buffer.from(original.key, "hex").copy(input, 123); integer(1n, 8).copy(input, 155); Buffer.from(original.sdkProof, "hex").copy(input, 163);
+  Buffer.from(original.storage, "hex").copy(input, 195); Buffer.from(original.pcProof, "hex").copy(input, 227);
+  integer(42n, 8).copy(input, 259); integer(BigInt(engineBytes), 4).copy(input, 267); input[271] = Number(!localIsLow);
+  integer(BigInt(aad.length), 2).copy(input, 273); integer(BigInt(incoming.length), 2).copy(input, 275); input.set(aad, 277); input.set(incoming, 277 + aad.length);
+  const counts = { begin: 0, resolve: 0, input: 0, admit: 0, result: 0, settle: 0, ack: 0, returned: 0 };
+  let began = false, settled = false, acknowledged = false, returned = false, pendingBegin = false, attached = false;
+  let output: Uint8Array | null = null, outputTag: string | null = null, resultRecorded = false;
+  let lose: keyof typeof counts | null = null, hold: keyof typeof counts | null = null, held = gate();
+  let onInput: (() => void) | null = null;
+  f.f.cleanup(() => held.release());
+  const status = () => {
+    const bytes = Buffer.alloc(220); bytes.set([8, 0]); Buffer.from(row, "hex").copy(bytes, 2); Buffer.from(parentRow, "hex").copy(bytes, 18); bytes[34] = Number(!localIsLow);
+    bytes[35] = attached ? 0 : 1; bytes[36] = Number(returned); bytes[37] = Number(attached);
+    if (attached) { integer(BigInt(identity.action), 8).copy(bytes, 38); integer(1n, 8).copy(bytes, 46); Buffer.from(identity.inputTag, "hex").copy(bytes, 54); }
+    bytes[86] = Number(settled); bytes[87] = Number(resultRecorded);
+    if (resultRecorded) {
+      Buffer.from(outputTag!, "hex").copy(bytes, 88);
+      if (authenticationFails) { bytes[120] = 3; bytes[121] = 0; } // Root's closed rejection is Malformed.
+      else if (localIsLow) { bytes[120] = 1; Buffer.from(hash(111), "hex").copy(bytes, 121); Buffer.from(hash(112), "hex").copy(bytes, 153); }
+      else { bytes[120] = 2; bytes[219] = 1; }
+      bytes[185] = Number(settled && acknowledged); Buffer.from(hash(113), "hex").copy(bytes, 187);
+    }
+    bytes[186] = Number(acknowledged); return { kind: 0 as const, body: bytes };
+  };
+  const step = async (name: keyof typeof counts) => {
+    counts[name]++; if (hold === name) await held.promise;
+    if (lose === name) { lose = null; throw new Error("native reply lost after effect"); }
+  };
+  custody.sdpReplies(async (header, opened) => {
+    if (header.operation === 15 || header.operation === 16) {
+      assert.deepEqual(f.f.rowBudget(), { reserved: 2, actions: 2 }, "both global rows precede unknown Begin");
+      assert.deepEqual(opened, encodeVoiceSdpBegin(original, localIsLow ? plaintext : null).body); began = true; attached = !pendingBegin; await step("begin"); return status();
+    }
+    if (header.operation === 27) {
+      const close = opened[226] === 1;
+      assert.deepEqual(opened, encodeVoiceSdpResolve(original, selector.purpose, close).body); await step("resolve");
+      assert.equal(began, true); return status();
+    }
+    assert.equal(header.logical, row);
+    if (header.operation === 17) {
+      assert.deepEqual(opened, encodeVoiceSdpAction(selector, { kind: "input", identity }).body);
+      onInput?.();
+      await step("input"); return { kind: 2, body: input };
+    }
+    if (header.operation === 18) {
+      assert.deepEqual(opened, encodeVoiceSdpAction(selector, { kind: "admit", identity, engineBytes }).body);
+      await step("admit"); return { kind: 0, body: Buffer.concat([Buffer.from([8, 4]), Buffer.from(row, "hex"),
+        integer(BigInt(identity.action), 8), integer(1n, 8), Buffer.from(identity.inputTag, "hex"), integer(BigInt(identity.action), 8), integer(BigInt(engineBytes), 4)]) };
+    }
+    if (header.operation === 19 || header.operation === 20) {
+      const bytes = opened.subarray(100), tag = Buffer.from(opened.subarray(66, 98)).toString("hex");
+      assert.deepEqual(opened, encodeVoiceSdpAction(selector, { kind: localIsLow ? "sealed" : "opened", identity, bytes, tag }).body);
+      assert.equal(tag, createHash("sha256").update(bytes).digest("hex")); assert.equal(bytes.length, plaintextLength + (localIsLow ? 16 : 0));
+      if (!localIsLow) assert.deepEqual(bytes, plaintext);
+      if (output) assert.deepEqual(bytes, output); else { output = bytes.slice(); outputTag = tag; }
+      resultRecorded = true;
+      await step("result"); return status();
+    }
+    if (header.operation === 21) {
+      assert.equal(authenticationFails, true); assert.deepEqual(opened, encodeVoiceSdpAction(selector, { kind: "authentication-failed", identity }).body);
+      resultRecorded = true; outputTag = createHash("sha256").update("mewtual/voice/native-sdp-aead-failure/v1\0").update(Buffer.from(identity.inputTag, "hex")).digest("hex");
+      await step("result"); return status();
+    }
+    if (header.operation === 22) {
+      assert.deepEqual(opened, encodeVoiceSdpAction(selector, { kind: "ack", identity, digest: hash(113) }).body);
+      acknowledged = true; await step("ack"); return status();
+    }
+    if (header.operation === 23) {
+      assert.deepEqual(opened, encodeVoiceSdpAction(selector, { kind: "settle", identity }).body);
+      settled = true; await step("settle"); return status();
+    }
+    assert.equal(header.operation, 24); assert.ok(settled && (!resultRecorded || acknowledged));
+    assert.deepEqual(opened, encodeVoiceSdpAction(selector, { kind: "return" }).body);
+    returned = true; await step("returned"); return status();
+  });
+  const start = (text: string | null = null) => f.f.broker.prepareNativeSdpCrypto(f.f.owner, child.channel, child.ready.chain, text);
+  return { ...f, counts, start, lose(name: keyof typeof counts) { lose = name; },
+    pendingBegin(value: boolean) { pendingBegin = value; },
+    onInput(work: () => void) { onInput = work; },
+    hold(name: keyof typeof counts) { hold = name; return held; },
+    cryptoCount: () => f.f.counts().steps.filter(name => name === "encrypt").length - f.f.operations().length,
+  };
+}
+
+test("maximum browser SDP runs through original authenticated IPC and retries Result without another SDK", async t => {
+  const f = await framedSdpOffer(t); const before = f.cryptoCount(); f.lose("result");
+  const first = f.start("s".repeat(8192)); assert.equal(f.start(), first); assert.equal(await first, undefined);
+  assert.equal(f.counts.result, 1); await f.start(); assert.equal(f.counts.result, 2);
+  assert.equal(f.cryptoCount() - before, 1); assert.equal(f.counts.input, 1); assert.equal(f.counts.admit, 1);
+  assert.ok(f.f.bodyReads().includes(277 + 579 + 8192 + 16), "dedicated op17 reader consumes maximum Seal Input");
+  assert.throws(() => f.start("different"), /already consumed/);
+  f.f.owner.retire(); await f.child.channel.close(); assert.equal(f.counts.returned, 1); assert.equal(f.f.rowBudget().reserved, 0);
+});
+
+for (const sample of [{ name: "maximum", length: 8192, bad: false }, { name: "tag-only", length: 0, bad: false },
+  { name: "AEAD failure", length: 0, bad: true }]) test(`HIGH ${sample.name} Open uses the original retained Pair RX and exact Result retry`, async t => {
+  const f = await framedSdpOffer(t, false, sample.length, sample.bad);
+  assert.throws(() => f.start("answer before Applied"), /first SDP Offer role/);
+  const before = f.f.sdpSdkCount(); f.lose("result"); await f.start();
+  assert.equal(f.counts.result, 1); await f.start(); assert.equal(f.counts.result, 2);
+  assert.equal(f.f.sdpSdkCount() - before, 1); assert.equal(f.counts.input, 1); assert.equal(f.counts.admit, 1);
+  assert.ok(f.f.operations().includes(sample.bad ? 21 : 20));
+  if (sample.length === 8192) assert.ok(f.f.bodyReads().includes(277 + 579 + 8208 + 16));
+  f.f.owner.retire(); await f.child.channel.close(); assert.equal(f.counts.returned, 1); assert.equal(f.f.broker.counts().bytes, 0);
+});
+
+test("End during retained HIGH RX SDK is retirement rather than a forged AEAD failure", async t => {
+  const f = await framedSdpOffer(t, false), held = f.f.holdWhen((name, args) => name === "decrypt" &&
+    (args[0] as AesGcmParams)?.additionalData?.byteLength === 579);
+  const pending = f.start(); await until(held.entered); const payment = f.f.broker.counts().bytes;
+  let closed = false; f.f.owner.retire(); const closing = f.child.channel.close().then(() => { closed = true; });
+  await new Promise<void>(yes => setImmediate(yes)); assert.equal(closed, false); assert.equal(f.counts.settle, 0);
+  assert.equal(f.f.broker.counts().bytes, payment); held.release(); await pending; await closing;
+  assert.equal(f.counts.result, 0); assert.equal(f.counts.settle, 1); assert.equal(f.counts.returned, 1);
+});
+
+test("lost browser SDP Begin recovers its exact row before any SDK work", async t => {
+  const f = await framedSdpOffer(t); f.lose("begin"); await f.start("s".repeat(8192));
+  assert.equal(f.counts.begin, 1); assert.equal(f.counts.input, 0);
+  await f.start(); assert.equal(f.counts.resolve, 1); assert.equal(f.counts.begin, 1); assert.equal(f.counts.result, 1);
+  f.f.owner.retire(); await f.child.channel.close();
+});
+
+test("End with a held browser SDP Result keeps funding and joins native cleanup outside the lane", async t => {
+  const f = await framedSdpOffer(t), held = f.hold("result"), pending = f.start("s".repeat(8192));
+  await until(() => f.counts.result === 1); const payment = f.f.broker.counts().bytes;
+  let closed = false; f.f.owner.retire(); const closing = f.child.channel.close().then(() => { closed = true; });
+  await new Promise<void>(yes => setImmediate(yes)); assert.equal(closed, false); assert.equal(f.counts.settle, 0);
+  assert.equal(f.f.broker.counts().bytes, payment); assert.equal(f.custody.effectCounts().sdkReleases, 0);
+  held.release(); await pending; await closing; assert.equal(f.counts.settle, 1); assert.equal(f.counts.returned, 1);
+  assert.equal(f.f.broker.counts().bytes, 0);
+});
+
+test("End in Input timer finally refuses the loan before engine admission", async t => {
+  const f = await framedSdpOffer(t);
+  f.onInput(() => f.f.onCancel(() => f.f.owner.retire()));
+  await f.start("s".repeat(8192)); await f.child.channel.close();
+  assert.equal(f.counts.input, 1); assert.equal(f.counts.admit, 0); assert.equal(f.counts.result, 0);
+  assert.equal(f.counts.settle, 1); assert.equal(f.counts.returned, 1); assert.equal(f.f.broker.counts().bytes, 0);
+});
+
+test("End joins actual held SDP WebCrypto before releasing its original input/payment", async t => {
+  const f = await framedSdpOffer(t);
+  const held = f.f.holdWhen((name, args) => name === "encrypt" &&
+    (args[0] as AesGcmParams)?.additionalData?.byteLength === 579);
+  const pending = f.start("s".repeat(8192)); await until(held.entered);
+  let closed = false; const payment = f.f.broker.counts().bytes;
+  f.f.owner.retire(); const closing = f.child.channel.close().then(() => { closed = true; });
+  await new Promise<void>(yes => setImmediate(yes)); assert.equal(closed, false); assert.equal(f.counts.settle, 0);
+  assert.equal(f.f.broker.counts().bytes, payment); assert.equal(f.custody.effectCounts().sdkReleases, 0);
+  held.release(); await pending; await closing; assert.equal(f.counts.result, 0); assert.equal(f.counts.settle, 1);
+  assert.equal(f.f.broker.counts().bytes, 0);
+});
+
+test("SDP reserves both rows before unknown admission and refuses a retained broker25", async t => {
+  const { f, child, prepare } = await establishedSdpFixture(t), bytes = f.broker.counts().bytes;
+  const state = f.broker as unknown as { reservedRows: number };
+  const reserved = state.reservedRows; state.reservedRows = 29;
+  try { assert.throws(prepare, /history capacity/); assert.equal(f.broker.counts().bytes, bytes); }
+  finally { state.reservedRows = reserved; }
+  await prepare(); assert.equal(f.rowBudget().reserved, 2);
+  const previous = Object.create(f.broker); Object.defineProperty(previous, "version", { value: 25 });
+  const key = Symbol.for("mewtual.voice.crypto-broker.v2"), host = { [key]: previous };
+  assert.throws(() => windowVoiceCryptoBroker(f.admission, host, real), /reload required/); assert.equal(host[key], previous);
+  f.owner.retire(); await child.channel.close(); assert.equal(f.rowBudget().reserved, 0);
+});
+
+test("Pending native SDP retries the same Begin bytes until Action attachment", async t => {
+  const f = await framedSdpOffer(t); f.pendingBegin(true); await f.start("s".repeat(8192));
+  assert.equal(f.counts.begin, 2); assert.equal(f.counts.input, 0);
+  f.pendingBegin(false); await f.start(); assert.equal(f.counts.begin, 3); assert.equal(f.counts.input, 1); assert.equal(f.counts.result, 1);
+  f.f.owner.retire(); await f.child.channel.close();
+});
+
+test("reentrant SDP creation clock cannot install a second owner", async t => {
+  const f = await framedSdpOffer(t);
+  f.f.onNow(() => assert.throws(() => f.start("s".repeat(8192)), /creation is already in progress/));
+  await f.start("s".repeat(8192)); assert.equal(f.counts.begin, 1); assert.equal(f.counts.result, 1);
+  f.f.owner.retire(); await f.child.channel.close();
+});
+
+test("an engine permit held beyond the original PC deadline cannot start SDP WebCrypto", async t => {
+  const f = await framedSdpOffer(t), before = f.cryptoCount(), held = f.hold("admit");
+  const pending = f.start("s".repeat(8192)); await until(() => f.counts.admit === 1);
+  f.f.advance(10_000); held.release(); await pending;
+  assert.equal(f.cryptoCount() - before, 0); assert.equal(f.counts.result, 0);
+  f.f.owner.retire(); await f.child.channel.close(); assert.equal(f.counts.settle, 1); assert.equal(f.counts.returned, 1);
+});
 
 test("PC admission retains the original paid subtree and Close precedes SDK/storage/key release", async t => {
   const { f, child, custody, admitPc } = await establishedPcFixture(t);
