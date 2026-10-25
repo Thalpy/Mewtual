@@ -11,6 +11,12 @@ RUN test -f Cargo.toml \
     && test -f apps/desktop/src-tauri/src/voice_handoff/requests/confirmation/vectors.json \
     && test -f apps/desktop/src-tauri/src/voice_handoff/requests/transition/vectors.json \
     && test -f apps/desktop/src-tauri/src/voice_handoff/replies/vectors.json \
+    && test -f apps/desktop/src-tauri/src/voice_handoff/sdp-history-vectors.json \
+    && test -f apps/desktop/src-tauri/src/voice_handoff/requests/key-session-vectors.json \
+    && test -f apps/desktop/src-tauri/src/voice_handoff/requests/sdp-vectors.json \
+    && test -f apps/desktop/src-tauri/src/voice_handoff/requests/sdk-vectors.json \
+    && test -f apps/desktop/src-tauri/src/voice_handoff/requests/pc-vectors.json \
+    && test -f apps/desktop/src-tauri/src/voice_handoff/requests/sdp-action-vectors.json \
     && test -f assets/mewtual-logo.svg \
     && test -f assets/cat/mascot-idle.svg \
     && test ! -e .claude/review-secret \

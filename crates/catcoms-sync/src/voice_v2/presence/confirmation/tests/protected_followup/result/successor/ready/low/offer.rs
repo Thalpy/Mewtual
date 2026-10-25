@@ -321,3 +321,16 @@ fn low_open_waits_for_delayed_answer_only_on_the_original_live_pc() {
         Some(VoiceError::Unauthorized)
     );
 }
+
+#[test]
+fn open_history_refuses_actual_seal_action() {
+    let (mut p, phase, intent, _exchange) = fixture();
+    let mut namespace = ReceiptNamespace::default();
+    let action = offer(&mut p, &intent, &mut namespace, b"v=0", |_, _| Ok(())).unwrap();
+    assert_eq!(
+        action.recover_sdp_open_history().err(),
+        Some(VoiceError::Unauthorized)
+    );
+    action.retire_if_unstarted();
+    phase.close();
+}

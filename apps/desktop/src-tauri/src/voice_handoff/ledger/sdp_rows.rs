@@ -40,7 +40,7 @@ pub(super) struct Live {
 /// Row.key.parent intentionally retains the original parent graph until safe GC; parent
 /// storage closure must retire its unused reserve/Copies even while this history survives.
 pub(super) struct Drained {
-    action: Option<Arc<CryptoAction>>,
+    pub(super) action: Option<Arc<CryptoAction>>,
     delivery: Option<Arc<SdpDelivery>>,
     body_tag: Option<[u8; 32]>,
     session: Arc<SessionIdentity>,
@@ -203,7 +203,7 @@ impl ResolvedRow {
     /// Recover ONLY the actual positive publication from this row's original slot. Read
     /// its historical Arc outside native guards; no current grant, Pair lookup, clock or
     /// new Copy is needed. Entered uncertainty is deliberately not converted to absence.
-    fn recover_sdp_publication(&self) -> Result<(), VoiceError> {
+    pub(super) fn recover_sdp_publication(&self) -> Result<(), VoiceError> {
         let outcome = {
             let state = try_lock(&self.row.state)?;
             match &state.body {

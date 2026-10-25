@@ -144,6 +144,30 @@ pub(super) async fn exercise(
     let row = ticket.resolved();
     let id = row.id();
     let slot = row.sdp_test_outcome();
+    let pending_history = row.sdp_history(route.session().identity()).unwrap();
+    assert_eq!(pending_history.row(), row.id());
+    assert_eq!(pending_history.parent(), parent.id());
+    assert!(pending_history.status().action.is_none());
+    assert!(pending_history.delivery().is_none());
+    let encoded_history = super::super::sdp_replies::history(&pending_history).unwrap();
+    assert_eq!(&encoded_history[..2], &[8, 0]);
+    assert_eq!(
+        (
+            encoded_history[35],
+            encoded_history[36],
+            encoded_history[37],
+            encoded_history[86]
+        ),
+        (1, 0, 0, 0)
+    );
+    drop(pending_history);
+    // A distinct actual identity allocation cannot query the original row. This is a
+    // post-authentication boundary test; MAC/HTTP enforcement is exercised separately.
+    let foreign = Arc::new(channel::SessionIdentity([77; 32]));
+    assert_eq!(
+        row.sdp_history(&foreign).err(),
+        Some(VoiceError::Unauthorized)
+    );
     let original_remaining = intent
         .remaining_at(clock.now_ms(), clock.monotonic_ms())
         .unwrap();
@@ -459,6 +483,20 @@ pub(super) async fn exercise(
                 assert!(row.status().unwrap().action.is_none());
             }
             assert!(row.try_compact_sdp().unwrap());
+            let history = row.sdp_history(route.session().identity()).unwrap();
+            let encoded = super::super::sdp_replies::history(&history).unwrap();
+            assert_eq!(&encoded[..2], &[8, 0]);
+            assert_eq!(
+                encoded[36], 1,
+                "actual closed/zero IO and original outcome are collected"
+            );
+            assert_eq!(encoded[37], u8::from(seal));
+            assert_eq!(
+                encoded[86],
+                u8::from(seal),
+                "negative collection never invents engine settlement"
+            );
+            assert!(history.delivery().is_none());
             assert_eq!(
                 row.status().unwrap().engine.settled,
                 seal,

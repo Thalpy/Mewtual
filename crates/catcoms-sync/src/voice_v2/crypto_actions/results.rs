@@ -223,6 +223,42 @@ impl CryptoAction {
             None => Ok(None),
         }
     }
+    /// Recover the terminal result of this SAME original Open action without asking the
+    /// browser to retain or reconstruct plaintext merely to identify a lost result. The
+    /// native adapter must authenticate its registered action owner before exposing it.
+    ///
+    /// This returns fixed historical metadata and the original delivery observer, including
+    /// after token consumption, ACK, settlement or End. It never creates another observer,
+    /// renews a deadline, reads input or grants fresh delivery/RTC permission. A busy Engine
+    /// is a temporary refusal; it is never evidence that no terminal result exists.
+    pub fn recover_sdp_open_history(
+        &self,
+    ) -> Result<Option<super::super::sdp::SdpOpenResult>, VoiceError> {
+        if self.operation != CryptoOperation::OpenSdp {
+            return Err(VoiceError::Unauthorized);
+        }
+        // The original Clock is injected code. Observe it BEFORE Engine, including for
+        // closed history; callbacks may inspect this same Action without lock inversion.
+        let (mono, wall) = self.authority.history_time();
+        let engine = match self.engine.try_lock() {
+            Ok(engine) => engine,
+            Err(std::sync::TryLockError::Poisoned(error)) => error.into_inner(),
+            Err(std::sync::TryLockError::WouldBlock) => return Err(VoiceError::Capacity),
+        };
+        let Some(recorded) = &engine.terminal else {
+            return Ok(None);
+        };
+        // Match the actual terminal invariant rather than inventing a missing delivery or
+        // letting a non-Open result be represented by this typed recovery interface.
+        match (recorded.result.outcome, &engine.sdp_delivery) {
+            (CryptoOutcome::Opened, Some(_)) | (CryptoOutcome::Rejected(_), None) => {}
+            _ => return Err(VoiceError::Unauthorized),
+        }
+        Ok(Some(super::super::sdp::SdpOpenResult {
+            receipt: recorded.receipt_at(self, mono, wall),
+            delivery: engine.sdp_delivery.clone(),
+        }))
+    }
     pub(in crate::voice_v2) fn owns_sdp_delivery(
         &self,
         delivery: &Arc<super::super::sdp::SdpDelivery>,

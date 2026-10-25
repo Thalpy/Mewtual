@@ -29,12 +29,18 @@ mod key_session;
 mod ready;
 mod sdk;
 mod sdp;
+mod sdp_history;
 mod sdp_intake;
 mod sdp_rows;
 pub(super) use key_session::KeySessionReceipt;
 pub(in crate::voice_handoff) use ready::{ReadyContinuation, ReadyProgress};
 pub(super) use sdk::Receipt as SdkReceipt;
 pub(super) use sdp::Receipt as SdpReceipt;
+#[cfg(test)]
+pub(in crate::voice_handoff) use sdp_history::layout_bytes as sdp_history_layout_bytes;
+pub(in crate::voice_handoff) use sdp_history::{
+    DeliveryState as SdpDeliveryState, Snapshot as SdpHistory,
+};
 #[cfg(test)]
 pub(in crate::voice_handoff) use sdp_rows::Begin as SdpBegin;
 pub(in crate::voice_handoff) use sdp_rows::{
