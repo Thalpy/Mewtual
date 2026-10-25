@@ -64,7 +64,7 @@ pub(super) fn publication(
     physical: channel::PhysicalHold,
 ) -> Arc<sdp_publication::Publication> {
     let task = phase.task_copy(sdp_publication::TASK_BYTES).unwrap();
-    let mut owner =
+    let owner =
         sdp_publication::Publication::preparing(physical, route.session(), intent, task).unwrap();
     // The enclosing genuine PC fixture has already passed current native admission. This
     // test installs the actual UI commit, never a claimed generation or cached open bool.

@@ -7,6 +7,7 @@ use crate::voice_v2::sdp::InitialSdpIntent;
 mod answer;
 mod publication;
 mod result;
+mod scoped_publication;
 
 /// Native packet-boundary fixture only: AEAD/result IPC is intentionally not simulated
 /// by this helper. It publishes actual signed bytes to exercise downstream intake/Source.

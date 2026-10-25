@@ -536,3 +536,31 @@ async fn high_offer_receipt_wait_uses_earlier_original_pc_ready_deadline_without
     ));
     phase.close();
 }
+
+#[test]
+fn scoped_original_open_commits_without_clock_beneath_native_publication() {
+    let (mut p, phase, intent) = fixture();
+    let clock = p.origin_clock.clone();
+    let mut held = None;
+    let action =
+        p.f.high
+            .join
+            .prepare_sdp_open_scoped(
+                &p.high,
+                &room(&p.f.high),
+                p.f.id,
+                &intent,
+                &ca(&p.f.high.context, &p.f.high.lease),
+                p._runtimes[1].clock(),
+                |_, _| Ok(()),
+                None,
+                |step| {
+                    held = Some(NativeFenceProbe::new(&clock));
+                    step.commit()
+                },
+            )
+            .unwrap();
+    drop(held);
+    action.retire_if_unstarted();
+    phase.close();
+}

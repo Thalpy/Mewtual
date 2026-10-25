@@ -1,5 +1,28 @@
 # Chat, files and voice implementation evidence
 
+## 25 October scoped native Begin checkpoint (not live V2 acceptance)
+
+The private original LOW Offer/HIGH Answer/Open factories now prepare original clocks
+and owned work before scoped native final admission on the actual Actor. PreRoot UI
+custody ends before enqueue; final UI/store/Coordinator/route/row/Root publication retains
+actual custody only after admission. This resolves the earlier Begin/Clock blocker below.
+Production still refuses the entire SDP family; no limit or protocol was widened.
+
+Five new Root scoped tests and all647 voice_v2/58 voice_endpoint tests pass. App's actual
+sender/refusal regressions pass; the complete sender/observer graph is3,608/4,096B. Native
+worker is2,248/4,096B and common Control stays12,279/12,288B. All340 native handoff tests
+pass (32.57s), two actual TCP producer cases pass (20.76s), and staged HTTP/Input passes
+(15.55s). These exercise full mailbox/copy pressure, retained completed queues, waiter
+loss, lock before final admission/after admitted output and queued PC close. Root probes
+exercise all three factories; native HIGH Answer/Open race expansion remains follow-up.
+Read-only final review has no remaining blocker/high/medium. Complete current backend
+gates remain pending; `0d983c95` validation still running is an earlier checkpoint.
+
+No actual native SDP engine/result/browser/RTC vertical, multi-peer, media relay, combined
+scenario or independent physical audio/network result follows. Engine admission must use
+the actual Actor's current MLS/room/watch context. Root Exchange, native Phase and browser
+sidecar are independent payments, and the browser needs an authenticated SDP-sized reader.
+
 ## 25 October concrete native Input checkpoint (not live V2 acceptance)
 
 The private Input adapter now publishes the actual original scoped Actor loan through an

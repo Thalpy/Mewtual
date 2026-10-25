@@ -52,6 +52,11 @@ pub(in crate::voice_v2) struct PreparedLocalOrigin<'a> {
     mono: u64,
 }
 impl PreparedLocalOrigin<'_> {
+    /// Pure samples for the enclosing synchronous native admission; no authority escapes.
+    pub(in crate::voice_v2) fn observed_time(&self) -> (u64, u64) {
+        (self.wall, self.mono)
+    }
+
     pub(in crate::voice_v2) fn with_origin(
         self,
         publish: impl FnOnce(u64, u64, LocalOrigin<'_>) -> Result<(), VoiceError>,

@@ -44,8 +44,9 @@ pub use voice_endpoint::{
     InitialSdpCompletion, InitialSdpPending, VoiceConfirmationBody, VoiceConfirmationCompletion,
     VoiceContextPending, VoiceEndpointCommand, VoiceEndpointError, VoiceSdpBody,
     VoiceSdpBodyRefusal, VoiceSdpCompletion, VoiceSdpInputPublisher, VoiceSdpInputWork,
-    VoiceSdpPending, INITIAL_SDP_RPC_BYTES, VOICE_CONFIRMATION_BODY_METADATA_BYTES,
-    VOICE_SDP_INPUT_RPC_BYTES, VOICE_SDP_RPC_FIXED_BYTES, VOICE_SDP_RPC_METADATA_BYTES,
+    VoiceSdpPending, VoiceSdpPublication, VoiceSdpRecordedInput, VoiceSdpRecordedQueue,
+    INITIAL_SDP_RPC_BYTES, VOICE_CONFIRMATION_BODY_METADATA_BYTES, VOICE_SDP_INPUT_RPC_BYTES,
+    VOICE_SDP_RPC_FIXED_BYTES, VOICE_SDP_RPC_METADATA_BYTES,
 };
 
 /// Per drive: how long to wait for a discovered record before concluding the queue is drained.

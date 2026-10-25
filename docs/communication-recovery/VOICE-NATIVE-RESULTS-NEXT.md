@@ -1,5 +1,38 @@
 # Next voice milestone: native result recovery
 
+## 25 October: scoped Begin is complete privately; engine/result vertical next
+
+`communication-sdp-publication-admission` fixes the earlier Begin/Clock-under-UI boundary:
+original factory preparation precedes a scoped actual-Actor hook, and native drops PreRoot
+UI before enqueue. HANDOVER records measured Task/RPC/Control graphs, queue-retirement and
+actual native lock/close evidence. All three original factories use the same boundary;
+production still refuses the whole SDP family. Earlier sections below are checkpoint history.
+
+Next add scoped SDP engine admission on actual ChannelSync, checking the registered
+Action/intent and current MLS/room/watch/call/pair context under Engine then try Group/Policy.
+Reuse original candidate credit and idempotent permit; do not copy generic confirmation
+admission unchanged. Prepare capacity and refresh original Clock samples before lending
+native final UI/Coordinator/route/row admission; unused credits must drop outside guards.
+
+Then add exact native Result intake and zero-copy original result-body transfer, scoped
+terminal publication and canonical accepted/rejected history recovery. Preserve original
+output/tag across Capacity or lost replies. Engine settlement, ACK, Return and fresh RTC
+delivery are distinct. Closed history must not allocate a fresh large body or grant RTC.
+
+Compose one private browser SDP owner serially through Input, WebCrypto, Result and actual
+settlement. The generic2,064-byte reader cannot consume maximum SDP Input: add a separate
+authenticated operation/class-specific reader without widening generic limits. Measure
+all buffers, fetch/WebCrypto copies and eventual retained UTF16 descriptions. Root's
+Exchange192KiB, native Phase64KiB and browser sidecar64KiB are independent accounts;
+61,772B engine work plus the browser's4KiB bookkeeping already exceeds64KiB, so stage
+actual browser ownership rather than claiming those simultaneous allocations fit.
+
+Pin maximum Seal/Open under pressure, unreconciled MLS/room/epoch change at engine commit,
+Input-retirement/Result overlap, lost permit/result replies with one SDK execution, End
+during each asynchronous stage, and sender/output collection gaps. Continue through fresh
+delivery/RTC/ICE, new rounds, multi-peer, relay and combined acceptance. Independent physical
+audio/network acceptance still needs devices/networks unavailable in this session.
+
 ## 25 October: concrete Input exists; replace earlier Begin admission next
 
 The staged native Input publisher/codec now uses scoped Root admission and original paid

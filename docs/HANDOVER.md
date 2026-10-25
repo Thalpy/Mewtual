@@ -1,5 +1,51 @@
 # Mewtual; Handover
 
+## Scoped native SDP Begin publication (25 October; private, full gates pending)
+
+`communication-sdp-publication-admission` continues from `0d983c95`. This supersedes the
+Begin/Clock-under-UI blocker recorded below. All three original recorded factories (LOW
+Offer, HIGH Answer and Open) prepare packets, capacity and original Clock samples before
+lending a synchronous publication tail on the actual Actor. Native drops its short PreRoot
+UI gate before enqueue. Final publication tries UI, mounted store/resumable state,
+Coordinator, route and the indexed original parent/row, then Root Group/Policy. It matches
+the original entered Outcome, body commitment, Session, SDK/PC, intent, Phase and funding.
+Unused preparation is destroyed after the hook releases its guards, including unwind.
+No queued wait retains UI. An admitted completion retains actual UI/physical/Task custody;
+lock cannot complete ahead of collection. A positive original Outcome cannot become a
+retry merely because a callback or waiter loses its reply.
+
+The single eager Actor sender has a separately boxed backing paid by the original RPC
+contribution. Validation refusal constructs no sender or Box. Its same Work anchor is
+last after the boxed state, covering cancellation and retained completed queues. Complete
+measured sender/observer storage is3,608/4,096 bytes, native worker2,248/4,096, and the common
+Control guard remains12,279/12,288. No limit, pool, protocol or production opcode changed.
+Physical-request availability is not proof that its payment counter retired; tests also
+wait for the actual original funding counter before claiming collection.
+
+Focused evidence: five new Root scoped regressions, all647 voice_v2 and58 voice_endpoint
+tests pass; both App sender-layout/refusal regressions pass; all340 native handoff tests
+pass (32.57s). Two actual TCP producer scenarios pass (20.76s), covering original payment,
+full mailbox, cancellation, retained completed queue, lock winning final admission, held
+successful completion and PC close after enqueue. The staged HTTP/Input scenario passes
+(15.55s). Native HIGH Answer/Open callback-unwind and queued-close races remain a coverage
+follow-up; Root probes exercise all three factories. Read-only final review finds no
+remaining blocker/high/medium in this slice. Independent compilation rejects admission
+escape (E0521) while its committed positive control compiles. All2,750 frontend tests,
+Svelte checks, strict Root all-target/all-feature Clippy, separate native Cargo check/strict
+all-target Clippy, both formatting checks, ambient and diff checks pass. Frontend build and
+full current Root/native validation remain pending;
+the preceding `0d983c95` gates are still running sequentially and are distinct evidence.
+
+Next implement actual-Actor scoped SDP engine admission and exact native Result custody,
+then private browser Input/WebCrypto/result/settlement composition and fresh delivery to
+RTC. Generic engine admission alone lacks the actual current MLS/room/watch check and must
+not be reused unchanged. Root Exchange192KiB, native Phase64KiB and browser sidecar64KiB
+are separate accounts. The browser's generic2,064-byte response reader also cannot read
+maximum SDP Input; a separate authenticated operation-specific reader is needed. Production
+still refuses the whole SDP family. SDP/ICE/RTC, fresh rounds, multi-peer composition,
+media relay, combined acceptance and independent physical testing remain unfinished.
+The inherited crypto-bigint advisory remains unresolved; no dependency or ignore changed.
+
 ## Concrete native SDP Input (25 October; private, full validation pending)
 
 `communication-sdp-input-native` continues from `9ed07e44`. The staged Input handler now

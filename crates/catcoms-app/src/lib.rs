@@ -74,8 +74,9 @@ pub use actor::{
     TracedEvent, VoiceConfirmationBody, VoiceConfirmationCompletion, VoiceContextPending,
     VoiceEndpointCommand, VoiceEndpointError, VoiceSdpBody, VoiceSdpBodyRefusal,
     VoiceSdpCompletion, VoiceSdpInputPublisher, VoiceSdpInputWork, VoiceSdpPending,
-    INITIAL_SDP_RPC_BYTES, VOICE_CONFIRMATION_BODY_METADATA_BYTES, VOICE_SDP_INPUT_RPC_BYTES,
-    VOICE_SDP_RPC_FIXED_BYTES, VOICE_SDP_RPC_METADATA_BYTES,
+    VoiceSdpPublication, VoiceSdpRecordedInput, VoiceSdpRecordedQueue, INITIAL_SDP_RPC_BYTES,
+    VOICE_CONFIRMATION_BODY_METADATA_BYTES, VOICE_SDP_INPUT_RPC_BYTES, VOICE_SDP_RPC_FIXED_BYTES,
+    VOICE_SDP_RPC_METADATA_BYTES,
 };
 pub use moderation::{
     ModerationEvent, ModerationState, ModerationVote, MAX_MOD_EVIDENCE_BYTES, MAX_MOD_EVIDENCE_IDS,

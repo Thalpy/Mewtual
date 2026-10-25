@@ -220,6 +220,12 @@ impl Outcome {
 }
 
 impl Writer {
+    /// Only Root's enclosing factory lends this immutable identity to its scoped tail.
+    /// It grants no publication/current authority and must not be confused with PreRoot.
+    pub(crate) fn original_outcome(&self) -> Arc<Outcome> {
+        self.outcome.clone()
+    }
+
     /// Pure native final-admission identity; not Root entry or a new effect grant. The
     /// affine token must still be owned by the original Registration's real worker.
     pub fn belongs_to(&self, outcome: &Arc<Outcome>) -> bool {

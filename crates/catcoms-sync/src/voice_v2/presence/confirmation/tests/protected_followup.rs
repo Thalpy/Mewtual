@@ -21,14 +21,23 @@ struct ProtectedFixture {
 struct OriginClock {
     inner: ManualClock,
     reads: std::sync::atomic::AtomicUsize,
+    native_fence: std::sync::atomic::AtomicBool,
     revoke: std::sync::Mutex<Option<(usize, CallLease)>>,
     advance: std::sync::Mutex<Option<(usize, u64)>>,
 }
 impl Clock for OriginClock {
     fn now_ms(&self) -> u64 {
+        assert!(
+            !self.native_fence.load(std::sync::atomic::Ordering::Acquire),
+            "Clock callback beneath native publication"
+        );
         self.inner.now_ms()
     }
     fn monotonic_ms(&self) -> u64 {
+        assert!(
+            !self.native_fence.load(std::sync::atomic::Ordering::Acquire),
+            "Clock callback beneath native publication"
+        );
         let read = self.reads.fetch_add(1, std::sync::atomic::Ordering::AcqRel) + 1;
         let mut revoke = self.revoke.lock().unwrap();
         if revoke.as_ref().is_some_and(|(at, _)| *at == read) {
@@ -45,6 +54,25 @@ impl Clock for OriginClock {
         duration: std::time::Duration,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + '_>> {
         self.inner.sleep(duration)
+    }
+}
+/// Deterministic native-lock stand-in only for Root scoped-tail unit tests. The SAME
+/// injected clock rejects every callback while this guard lives, including unwind and
+/// cleanup after the hook returns. Native tests still need the actual UI commit guard.
+struct NativeFenceProbe(Arc<OriginClock>);
+impl NativeFenceProbe {
+    fn new(clock: &Arc<OriginClock>) -> Self {
+        assert!(!clock
+            .native_fence
+            .swap(true, std::sync::atomic::Ordering::AcqRel));
+        Self(clock.clone())
+    }
+}
+impl Drop for NativeFenceProbe {
+    fn drop(&mut self) {
+        self.0
+            .native_fence
+            .store(false, std::sync::atomic::Ordering::Release);
     }
 }
 fn register(runtime: &Arc<Runtime>, end: &End, peer: DeviceId, helpers: &[DeviceId]) -> ActorOwner {
@@ -76,6 +104,7 @@ fn fixture_with_members(helpers: &[DeviceId]) -> ProtectedFixture {
     let origin_clock = Arc::new(OriginClock {
         inner: clock.clone(),
         reads: std::sync::atomic::AtomicUsize::new(0),
+        native_fence: std::sync::atomic::AtomicBool::new(false),
         revoke: std::sync::Mutex::new(None),
         advance: std::sync::Mutex::new(None),
     });

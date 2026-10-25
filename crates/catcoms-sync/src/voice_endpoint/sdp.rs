@@ -105,7 +105,13 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         plaintext: &[u8],
     ) -> Result<Arc<voice_v2::crypto_actions::CryptoAction>, VoiceError> {
         self.prepare_voice_high_sdp_answer_inner(
-            grant, handshake, intent, delivery, plaintext, None,
+            grant,
+            handshake,
+            intent,
+            delivery,
+            plaintext,
+            None,
+            |step| step.commit(),
         )
     }
     /// Record the original invocation independently of Pair teardown. Current grant,
@@ -130,6 +136,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             delivery,
             plaintext,
             Some(&mut *outcome),
+            |step| step.commit(),
         );
         if let Err(reason) = &result {
             outcome.refused(*reason);
@@ -137,6 +144,41 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         result
     }
 
+    /// Lend the final prepared publication tail on this actual exclusively borrowed
+    /// Actor. Every Clock callback runs before the trusted native hook. The hook must
+    /// enter its final current native fences and retain actual custody on success.
+    /// Refusal/unwind destroys prepared owners only after the hook's guards release.
+    #[allow(clippy::too_many_arguments)]
+    pub fn prepare_voice_high_sdp_answer_recorded_scoped(
+        &mut self,
+        grant: &Arc<CallGrant>,
+        handshake: voice_v2::Nonce,
+        intent: &Arc<InitialSdpIntent>,
+        delivery: &Arc<voice_v2::sdp::SdpDelivery>,
+        plaintext: &[u8],
+        outcome: &mut voice_v2::sdp::publication::Writer,
+        publish: impl FnOnce(voice_v2::sdp::SdpPublicationAdmission<'_>) -> Result<(), VoiceError>,
+    ) -> Result<Arc<voice_v2::crypto_actions::CryptoAction>, VoiceError> {
+        outcome.enter(
+            intent,
+            Some(voice_v2::sdp::plaintext_commitment(plaintext)?),
+        )?;
+        let result = self.prepare_voice_high_sdp_answer_inner(
+            grant,
+            handshake,
+            intent,
+            delivery,
+            plaintext,
+            Some(&mut *outcome),
+            publish,
+        );
+        if let Err(reason) = &result {
+            outcome.refused(*reason);
+        }
+        result
+    }
+
+    #[allow(clippy::too_many_arguments)]
     fn prepare_voice_high_sdp_answer_inner(
         &mut self,
         grant: &Arc<CallGrant>,
@@ -145,6 +187,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         delivery: &Arc<voice_v2::sdp::SdpDelivery>,
         plaintext: &[u8],
         outcome: Option<&mut voice_v2::sdp::publication::Writer>,
+        publish: impl FnOnce(voice_v2::sdp::SdpPublicationAdmission<'_>) -> Result<(), VoiceError>,
     ) -> Result<Arc<voice_v2::crypto_actions::CryptoAction>, VoiceError> {
         self.validate_current_voice_call_grant(grant)?;
         let context = self.voice_v2_context(grant.scope().room)?;
@@ -171,7 +214,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         let members = super::ready::ready_member_snapshot(actor, &context, peer, &[])?;
         let call = participant.lease.clone();
         let watch = participant.watch.lease.clone();
-        participant.join.prepare_high_sdp_answer(
+        participant.join.prepare_high_sdp_answer_scoped(
             actor,
             &room,
             handshake,
@@ -193,6 +236,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
                 }
             },
             outcome,
+            publish,
         )
     }
 
@@ -403,7 +447,9 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         intent: &Arc<InitialSdpIntent>,
         plaintext: &[u8],
     ) -> Result<Arc<voice_v2::crypto_actions::CryptoAction>, VoiceError> {
-        self.prepare_voice_low_sdp_offer_inner(grant, handshake, intent, plaintext, None)
+        self.prepare_voice_low_sdp_offer_inner(grant, handshake, intent, plaintext, None, |step| {
+            step.commit()
+        })
     }
     /// Record the original invocation independently of Pair teardown. Current grant,
     /// membership, PC/Ready and final origin checks remain in the same underlying factory.
@@ -425,6 +471,51 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             intent,
             plaintext,
             Some(&mut *outcome),
+            |step| step.commit(),
+        );
+        if let Err(reason) = &result {
+            outcome.refused(*reason);
+        }
+        result
+    }
+
+    /// Lend the final prepared publication tail on this actual exclusively borrowed
+    /// Actor. Every Clock callback runs before the trusted native hook. The hook must
+    /// enter its final current native fences and retain actual custody on success.
+    /// Refusal/unwind destroys prepared owners only after the hook's guards release.
+    ///
+    /// The borrowed tail cannot escape the actual Actor call:
+    /// ```compile_fail
+    /// use catcoms_rt::{CryptoRngCore, MeshTransport};
+    /// use catcoms_sync::{ChannelSync, voice_v2::{CallGrant, sdp::{InitialSdpIntent, SdpPublicationAdmission, publication::Writer}}};
+    /// use std::sync::Arc;
+    /// fn escape<T: MeshTransport, R: CryptoRngCore>(sync: &mut ChannelSync<T, R>,
+    ///     grant: &Arc<CallGrant>, intent: &Arc<InitialSdpIntent>, writer: &mut Writer,
+    ///     retained: &mut Option<SdpPublicationAdmission<'static>>) {
+    ///     let _ = sync.prepare_voice_low_sdp_offer_recorded_scoped(grant, [0; 32], intent,
+    ///         b"v=0", writer, |step| { *retained = Some(step); Ok(()) });
+    /// }
+    /// ```
+    pub fn prepare_voice_low_sdp_offer_recorded_scoped(
+        &mut self,
+        grant: &Arc<CallGrant>,
+        handshake: voice_v2::Nonce,
+        intent: &Arc<InitialSdpIntent>,
+        plaintext: &[u8],
+        outcome: &mut voice_v2::sdp::publication::Writer,
+        publish: impl FnOnce(voice_v2::sdp::SdpPublicationAdmission<'_>) -> Result<(), VoiceError>,
+    ) -> Result<Arc<voice_v2::crypto_actions::CryptoAction>, VoiceError> {
+        outcome.enter(
+            intent,
+            Some(voice_v2::sdp::plaintext_commitment(plaintext)?),
+        )?;
+        let result = self.prepare_voice_low_sdp_offer_inner(
+            grant,
+            handshake,
+            intent,
+            plaintext,
+            Some(&mut *outcome),
+            publish,
         );
         if let Err(reason) = &result {
             outcome.refused(*reason);
@@ -439,6 +530,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         intent: &Arc<InitialSdpIntent>,
         plaintext: &[u8],
         outcome: Option<&mut voice_v2::sdp::publication::Writer>,
+        publish: impl FnOnce(voice_v2::sdp::SdpPublicationAdmission<'_>) -> Result<(), VoiceError>,
     ) -> Result<Arc<voice_v2::crypto_actions::CryptoAction>, VoiceError> {
         self.validate_current_voice_call_grant(grant)?;
         let context = self.voice_v2_context(grant.scope().room)?;
@@ -467,7 +559,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         } else {
             Some(voice.endpoints.public.reserve_position()?)
         };
-        participant.join.prepare_low_sdp_offer(
+        participant.join.prepare_low_sdp_offer_scoped(
             actor,
             &room,
             handshake,
@@ -484,6 +576,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             &mut self.rng,
             |_, _| Ok(()),
             outcome,
+            publish,
         )
     }
 
@@ -557,7 +650,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         handshake: voice_v2::Nonce,
         intent: &Arc<InitialSdpIntent>,
     ) -> Result<Arc<voice_v2::crypto_actions::CryptoAction>, VoiceError> {
-        self.prepare_voice_sdp_open_inner(grant, handshake, intent, None)
+        self.prepare_voice_sdp_open_inner(grant, handshake, intent, None, |step| step.commit())
     }
     /// Record the original invocation independently of Pair teardown. Current grant,
     /// membership, PC/Ready and final origin checks remain in the same underlying factory.
@@ -569,8 +662,39 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         outcome: &mut voice_v2::sdp::publication::Writer,
     ) -> Result<Arc<voice_v2::crypto_actions::CryptoAction>, VoiceError> {
         outcome.enter(intent, None)?;
-        let result =
-            self.prepare_voice_sdp_open_inner(grant, handshake, intent, Some(&mut *outcome));
+        let result = self.prepare_voice_sdp_open_inner(
+            grant,
+            handshake,
+            intent,
+            Some(&mut *outcome),
+            |step| step.commit(),
+        );
+        if let Err(reason) = &result {
+            outcome.refused(*reason);
+        }
+        result
+    }
+
+    /// Lend the final prepared publication tail on this actual exclusively borrowed
+    /// Actor. Every Clock callback runs before the trusted native hook. The hook must
+    /// enter its final current native fences and retain actual custody on success.
+    /// Refusal/unwind destroys prepared owners only after the hook's guards release.
+    pub fn prepare_voice_sdp_open_recorded_scoped(
+        &mut self,
+        grant: &Arc<CallGrant>,
+        handshake: voice_v2::Nonce,
+        intent: &Arc<InitialSdpIntent>,
+        outcome: &mut voice_v2::sdp::publication::Writer,
+        publish: impl FnOnce(voice_v2::sdp::SdpPublicationAdmission<'_>) -> Result<(), VoiceError>,
+    ) -> Result<Arc<voice_v2::crypto_actions::CryptoAction>, VoiceError> {
+        outcome.enter(intent, None)?;
+        let result = self.prepare_voice_sdp_open_inner(
+            grant,
+            handshake,
+            intent,
+            Some(&mut *outcome),
+            publish,
+        );
         if let Err(reason) = &result {
             outcome.refused(*reason);
         }
@@ -583,6 +707,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         handshake: voice_v2::Nonce,
         intent: &Arc<InitialSdpIntent>,
         outcome: Option<&mut voice_v2::sdp::publication::Writer>,
+        publish: impl FnOnce(voice_v2::sdp::SdpPublicationAdmission<'_>) -> Result<(), VoiceError>,
     ) -> Result<Arc<voice_v2::crypto_actions::CryptoAction>, VoiceError> {
         self.validate_current_voice_call_grant(grant)?;
         let context = self.voice_v2_context(grant.scope().room)?;
@@ -606,13 +731,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         }
         let peer = participant.join.protected_ready_peer(handshake)?;
         let members = super::ready::ready_member_snapshot(actor, &context, peer, &[])?;
-        let prepare = if intent.local_is_low() {
-            voice_v2::presence::LocalJoin::prepare_low_sdp_open
-        } else {
-            voice_v2::presence::LocalJoin::prepare_high_sdp_open
-        };
-        prepare(
-            &mut participant.join,
+        participant.join.prepare_sdp_open_scoped(
             actor,
             &room,
             handshake,
@@ -625,6 +744,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             clock,
             |_, _| Ok(()),
             outcome,
+            publish,
         )
     }
 }

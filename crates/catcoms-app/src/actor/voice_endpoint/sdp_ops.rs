@@ -6,7 +6,126 @@ use super::sdp_body::{
 use super::*;
 use catcoms_sync::voice_v2::chain::sdp_handoff::Copy;
 use catcoms_sync::voice_v2::sdp::publication::Writer;
-use catcoms_sync::voice_v2::sdp::{InitialSdpIntent, SdpDelivery, SdpOpenOutput, SdpOpenResult};
+use catcoms_sync::voice_v2::sdp::{
+    InitialSdpIntent, SdpDelivery, SdpOpenOutput, SdpOpenResult, SdpPublicationAdmission,
+};
+
+/// Trusted native final fence, separately paid by the original native Task. Root lends
+/// its stack-only prepared tail AFTER Clock/RNG preparation. This consuming hook may
+/// try the prescribed native fences and must return exactly its commit result. It
+/// retains actual UI/physical custody on success; it cannot await or call Clock/Root.
+pub trait VoiceSdpPublication: Send {
+    fn publish(self: Box<Self>, step: SdpPublicationAdmission<'_>) -> Result<(), VoiceError>;
+}
+
+/// Original native input chosen before enqueue; no renderer can construct this Rust-only
+/// contract. Body is claimed synchronously and the returned sender retains no body borrow.
+pub enum VoiceSdpRecordedInput<'a> {
+    Offer(&'a VoiceSdpBody),
+    Answer {
+        body: &'a VoiceSdpBody,
+        delivery: Arc<SdpDelivery>,
+    },
+    Open(Copy),
+}
+
+/// The original recorded sender future has its OWN concrete allocation, paid by the
+/// already reserved Body/Metadata RPC contribution. Keeping it outside native's spawned
+/// Task prevents that separate Task from embedding and paying the entire Actor graph too.
+/// There is no new Copy, channel, task or body clone; the Box owns the original eager
+/// Command/Pending unchanged. Cancellation drops that same ordered request.
+pub struct VoiceSdpRecordedQueue<'a> {
+    state: RecordedQueueState<'a>,
+    // LAST: a caller may retain this completed Box after dropping returned Pending.
+    // Actual backing deallocation (also unwind) must precede the SAME Work's last Drop.
+    _work: Option<Arc<Work>>,
+}
+type RecordedSend<'a> = std::pin::Pin<
+    Box<
+        dyn std::future::Future<
+                Output = Result<VoiceSdpPending<Arc<CryptoAction>>, VoiceEndpointError>,
+            > + Send
+            + 'a,
+    >,
+>;
+enum RecordedQueueState<'a> {
+    Refused(Option<VoiceEndpointError>),
+    Sending(RecordedSend<'a>),
+}
+impl std::fmt::Debug for VoiceSdpRecordedInput<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("VoiceSdpRecordedInput { .. }")
+    }
+}
+impl std::fmt::Debug for VoiceSdpRecordedQueue<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("VoiceSdpRecordedQueue { .. }")
+    }
+}
+
+impl std::future::Future for VoiceSdpRecordedQueue<'_> {
+    type Output = Result<VoiceSdpPending<Arc<CryptoAction>>, VoiceEndpointError>;
+    fn poll(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Self::Output> {
+        match &mut self.get_mut().state {
+            RecordedQueueState::Refused(error) => {
+                std::task::Poll::Ready(Err(error.take().expect("queue polled after refusal")))
+            }
+            RecordedQueueState::Sending(future) => future.as_mut().poll(cx),
+        }
+    }
+}
+impl<'a> VoiceSdpRecordedQueue<'a> {
+    /// Do not even construct a sender future on validation error. Besides returning no
+    /// Work, the refusal must allocate no backing that would need the rejected payment.
+    fn from_prepared<F>(prepared: RecordedRequest, send: impl FnOnce(RecordedRequest) -> F) -> Self
+    where
+        F: std::future::Future<
+                Output = Result<VoiceSdpPending<Arc<CryptoAction>>, VoiceEndpointError>,
+            > + Send
+            + 'a,
+    {
+        match prepared {
+            Err(error) => Self {
+                state: RecordedQueueState::Refused(Some(error)),
+                _work: None,
+            },
+            Ok((command, pending)) => {
+                let work = command.work.clone();
+                Self::paid(send(Ok((command, pending))), work)
+            }
+        }
+    }
+    fn paid<F>(future: F, work: Arc<Work>) -> Self
+    where
+        F: std::future::Future<
+                Output = Result<VoiceSdpPending<Arc<CryptoAction>>, VoiceEndpointError>,
+            > + Send
+            + 'a,
+    {
+        // Eager request construction already validated its SAME actual Body/metadata
+        // contribution. Check the concrete Box backing AND thin observer before allocation.
+        // This is additional to the common channel graph, not a thin trait size claim.
+        if super::sdp_body::voice_sdp_rpc_bytes(
+            std::mem::size_of::<F>() + std::mem::size_of::<Self>(),
+        ) > VOICE_SDP_RPC_METADATA_BYTES
+        {
+            drop(future); // Writer/argument owners precede the last original Work/Copy.
+            return Self {
+                state: RecordedQueueState::Refused(Some(VoiceEndpointError::Protocol(
+                    VoiceError::Capacity,
+                ))),
+                _work: Some(work),
+            };
+        }
+        Self {
+            state: RecordedQueueState::Sending(Box::pin(future)),
+            _work: Some(work),
+        }
+    }
+}
 
 pub(super) enum Message {
     LowOffer {
@@ -14,6 +133,7 @@ pub(super) enum Message {
         handshake: Nonce,
         intent: Arc<InitialSdpIntent>,
         outcome: Option<Writer>,
+        publisher: Option<Box<dyn VoiceSdpPublication>>,
         reply: Reply<VoiceSdpCompletion<Arc<CryptoAction>>>,
     },
     HighAnswer {
@@ -22,6 +142,7 @@ pub(super) enum Message {
         intent: Arc<InitialSdpIntent>,
         delivery: Arc<SdpDelivery>,
         outcome: Option<Writer>,
+        publisher: Option<Box<dyn VoiceSdpPublication>>,
         reply: Reply<VoiceSdpCompletion<Arc<CryptoAction>>>,
     },
     OpenAction {
@@ -29,6 +150,7 @@ pub(super) enum Message {
         handshake: Nonce,
         intent: Arc<InitialSdpIntent>,
         outcome: Option<Writer>,
+        publisher: Option<Box<dyn VoiceSdpPublication>>,
         reply: Reply<VoiceSdpCompletion<Arc<CryptoAction>>>,
     },
     Sealed {
@@ -109,6 +231,8 @@ struct RecordedCaller {
     _copy: Option<Copy>,
     _body: Option<&'static VoiceSdpBody>,
     _writer: Writer,
+    _publisher: Option<Box<dyn VoiceSdpPublication>>,
+    _input: Option<VoiceSdpRecordedInput<'static>>,
 }
 pub(super) const RECORDED_CONSTRUCTION_BYTES: usize = std::mem::size_of::<RecordedConstruction>();
 pub(super) fn apply<T: MeshTransport, R: CryptoRngCore>(
@@ -128,13 +252,24 @@ pub(super) fn apply<T: MeshTransport, R: CryptoRngCore>(
             handshake,
             intent,
             mut outcome,
+            mut publisher,
             reply,
         } => {
             let result = if work.uses_intent(&intent) {
                 work.bytes().and_then(|bytes| match outcome.as_mut() {
-                    Some(outcome) => server.sync.prepare_voice_low_sdp_offer_recorded(
-                        &grant, handshake, &intent, bytes, outcome,
-                    ),
+                    Some(outcome) => match publisher.take() {
+                        Some(publisher) => server.sync.prepare_voice_low_sdp_offer_recorded_scoped(
+                            &grant,
+                            handshake,
+                            &intent,
+                            bytes,
+                            outcome,
+                            |step| publisher.publish(step),
+                        ),
+                        None => server.sync.prepare_voice_low_sdp_offer_recorded(
+                            &grant, handshake, &intent, bytes, outcome,
+                        ),
+                    },
                     None => server
                         .sync
                         .prepare_voice_low_sdp_offer(&grant, handshake, &intent, bytes),
@@ -144,7 +279,7 @@ pub(super) fn apply<T: MeshTransport, R: CryptoRngCore>(
             };
             // Writer retirement must precede Work/Copy collection and its cleanup wake,
             // including refusal before Root entry. A missing reply is never a negative.
-            drop((outcome, grant, intent));
+            drop((outcome, publisher, grant, intent));
             sdp_rpc::complete(reply, work, |work| {
                 Ok(VoiceSdpCompletion::new(result, work))
             });
@@ -155,13 +290,27 @@ pub(super) fn apply<T: MeshTransport, R: CryptoRngCore>(
             intent,
             delivery,
             mut outcome,
+            mut publisher,
             reply,
         } => {
             let result = if work.uses_intent(&intent) {
                 work.bytes().and_then(|bytes| match outcome.as_mut() {
-                    Some(outcome) => server.sync.prepare_voice_high_sdp_answer_recorded(
-                        &grant, handshake, &intent, &delivery, bytes, outcome,
-                    ),
+                    Some(outcome) => match publisher.take() {
+                        Some(publisher) => {
+                            server.sync.prepare_voice_high_sdp_answer_recorded_scoped(
+                                &grant,
+                                handshake,
+                                &intent,
+                                &delivery,
+                                bytes,
+                                outcome,
+                                |step| publisher.publish(step),
+                            )
+                        }
+                        None => server.sync.prepare_voice_high_sdp_answer_recorded(
+                            &grant, handshake, &intent, &delivery, bytes, outcome,
+                        ),
+                    },
                     None => server.sync.prepare_voice_high_sdp_answer(
                         &grant, handshake, &intent, &delivery, bytes,
                     ),
@@ -169,7 +318,7 @@ pub(super) fn apply<T: MeshTransport, R: CryptoRngCore>(
             } else {
                 Err(VoiceError::Unauthorized)
             };
-            drop((outcome, grant, intent, delivery));
+            drop((outcome, publisher, grant, intent, delivery));
             sdp_rpc::complete(reply, work, |work| {
                 Ok(VoiceSdpCompletion::new(result, work))
             });
@@ -179,13 +328,23 @@ pub(super) fn apply<T: MeshTransport, R: CryptoRngCore>(
             handshake,
             intent,
             mut outcome,
+            mut publisher,
             reply,
         } => {
             let result = if work.uses_intent(&intent) {
                 match outcome.as_mut() {
-                    Some(outcome) => server
-                        .sync
-                        .prepare_voice_sdp_open_recorded(&grant, handshake, &intent, outcome),
+                    Some(outcome) => match publisher.take() {
+                        Some(publisher) => server.sync.prepare_voice_sdp_open_recorded_scoped(
+                            &grant,
+                            handshake,
+                            &intent,
+                            outcome,
+                            |step| publisher.publish(step),
+                        ),
+                        None => server
+                            .sync
+                            .prepare_voice_sdp_open_recorded(&grant, handshake, &intent, outcome),
+                    },
                     None => server
                         .sync
                         .prepare_voice_sdp_open(&grant, handshake, &intent),
@@ -193,7 +352,7 @@ pub(super) fn apply<T: MeshTransport, R: CryptoRngCore>(
             } else {
                 Err(VoiceError::Unauthorized)
             };
-            drop((outcome, grant, intent));
+            drop((outcome, publisher, grant, intent));
             sdp_rpc::complete(reply, work, |work| {
                 Ok(VoiceSdpCompletion::new(result, work))
             });
@@ -332,6 +491,83 @@ impl ServerActor {
         Ok(VoiceSdpPending(pending))
     }
 
+    /// One eager constructor / sender type for all recorded native factory variants.
+    /// Native awaits this ONE future rather than retaining three alternate sender graphs.
+    /// Original Writer and concrete final fence enter the ordered Command before return.
+    pub fn queue_voice_sdp_recorded_scoped(
+        &self,
+        grant: Arc<CallGrant>,
+        handshake: Nonce,
+        intent: Arc<InitialSdpIntent>,
+        input: VoiceSdpRecordedInput<'_>,
+        outcome: Writer,
+        publisher: Box<dyn VoiceSdpPublication>,
+    ) -> VoiceSdpRecordedQueue<'_> {
+        let prepared = match input {
+            VoiceSdpRecordedInput::Offer(body) => {
+                match body.claim(&intent, catcoms_sync::voice_v2::MAX_SDP_PLAINTEXT) {
+                    Ok(flight) => Ok(sdp_rpc::request(Work::Body(flight), |reply| {
+                        Message::LowOffer {
+                            grant,
+                            handshake,
+                            intent,
+                            outcome: Some(outcome),
+                            publisher: Some(publisher),
+                            reply,
+                        }
+                    })),
+                    Err(reason) => {
+                        drop(outcome);
+                        drop(publisher);
+                        drop((grant, intent));
+                        Err(VoiceEndpointError::Protocol(reason))
+                    }
+                }
+            }
+            VoiceSdpRecordedInput::Answer { body, delivery } => {
+                match body.claim(&intent, catcoms_sync::voice_v2::MAX_SDP_PLAINTEXT) {
+                    Ok(flight) => Ok(sdp_rpc::request(Work::Body(flight), |reply| {
+                        Message::HighAnswer {
+                            grant,
+                            handshake,
+                            intent,
+                            delivery,
+                            outcome: Some(outcome),
+                            publisher: Some(publisher),
+                            reply,
+                        }
+                    })),
+                    Err(reason) => {
+                        drop(outcome);
+                        drop(publisher);
+                        drop((grant, intent, delivery));
+                        Err(VoiceEndpointError::Protocol(reason))
+                    }
+                }
+            }
+            VoiceSdpRecordedInput::Open(copy) => match check_metadata(&copy, &intent) {
+                Ok(()) => Ok(sdp_rpc::request(Work::Metadata(copy), |reply| {
+                    Message::OpenAction {
+                        grant,
+                        handshake,
+                        intent,
+                        outcome: Some(outcome),
+                        publisher: Some(publisher),
+                        reply,
+                    }
+                })),
+                Err(reason) => {
+                    drop(outcome);
+                    drop(publisher);
+                    drop(copy);
+                    drop((grant, intent));
+                    Err(reason)
+                }
+            },
+        };
+        VoiceSdpRecordedQueue::from_prepared(prepared, |prepared| self.queue_sdp_recorded(prepared))
+    }
+
     /// Publish one original LOW action with its retained native outcome. Calling this
     /// function immediately claims the body and takes the affine Writer; never recreate
     /// either on a lost reply. History recovery belongs to the original native slot.
@@ -345,6 +581,44 @@ impl ServerActor {
     ) -> impl std::future::Future<
         Output = Result<VoiceSdpPending<Arc<CryptoAction>>, VoiceEndpointError>,
     > + '_ {
+        self.queue_voice_sdp_offer_recorded_with_fence(
+            grant, handshake, intent, body, outcome, None,
+        )
+    }
+
+    /// Queue the same original recorded work with an actual native final fence.
+    pub fn queue_voice_sdp_offer_recorded_scoped(
+        &self,
+        grant: Arc<CallGrant>,
+        handshake: Nonce,
+        intent: Arc<InitialSdpIntent>,
+        body: &VoiceSdpBody,
+        outcome: Writer,
+        publisher: Box<dyn VoiceSdpPublication>,
+    ) -> impl std::future::Future<
+        Output = Result<VoiceSdpPending<Arc<CryptoAction>>, VoiceEndpointError>,
+    > + '_ {
+        self.queue_voice_sdp_offer_recorded_with_fence(
+            grant,
+            handshake,
+            intent,
+            body,
+            outcome,
+            Some(publisher),
+        )
+    }
+
+    fn queue_voice_sdp_offer_recorded_with_fence(
+        &self,
+        grant: Arc<CallGrant>,
+        handshake: Nonce,
+        intent: Arc<InitialSdpIntent>,
+        body: &VoiceSdpBody,
+        outcome: Writer,
+        publisher: Option<Box<dyn VoiceSdpPublication>>,
+    ) -> impl std::future::Future<
+        Output = Result<VoiceSdpPending<Arc<CryptoAction>>, VoiceEndpointError>,
+    > + '_ {
         let prepared = match body.claim(&intent, catcoms_sync::voice_v2::MAX_SDP_PLAINTEXT) {
             Ok(flight) => Ok(sdp_rpc::request(Work::Body(flight), |reply| {
                 Message::LowOffer {
@@ -352,11 +626,13 @@ impl ServerActor {
                     handshake,
                     intent,
                     outcome: Some(outcome),
+                    publisher,
                     reply,
                 }
             })),
             Err(reason) => {
                 drop(outcome);
+                drop(publisher);
                 drop((grant, intent));
                 Err(VoiceEndpointError::Protocol(reason))
             }
@@ -377,6 +653,49 @@ impl ServerActor {
     ) -> impl std::future::Future<
         Output = Result<VoiceSdpPending<Arc<CryptoAction>>, VoiceEndpointError>,
     > + '_ {
+        self.queue_voice_sdp_answer_recorded_with_fence(
+            grant, handshake, intent, delivery, body, outcome, None,
+        )
+    }
+
+    /// Queue the same original recorded work with an actual native final fence.
+    #[allow(clippy::too_many_arguments)]
+    pub fn queue_voice_sdp_answer_recorded_scoped(
+        &self,
+        grant: Arc<CallGrant>,
+        handshake: Nonce,
+        intent: Arc<InitialSdpIntent>,
+        delivery: Arc<SdpDelivery>,
+        body: &VoiceSdpBody,
+        outcome: Writer,
+        publisher: Box<dyn VoiceSdpPublication>,
+    ) -> impl std::future::Future<
+        Output = Result<VoiceSdpPending<Arc<CryptoAction>>, VoiceEndpointError>,
+    > + '_ {
+        self.queue_voice_sdp_answer_recorded_with_fence(
+            grant,
+            handshake,
+            intent,
+            delivery,
+            body,
+            outcome,
+            Some(publisher),
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn queue_voice_sdp_answer_recorded_with_fence(
+        &self,
+        grant: Arc<CallGrant>,
+        handshake: Nonce,
+        intent: Arc<InitialSdpIntent>,
+        delivery: Arc<SdpDelivery>,
+        body: &VoiceSdpBody,
+        outcome: Writer,
+        publisher: Option<Box<dyn VoiceSdpPublication>>,
+    ) -> impl std::future::Future<
+        Output = Result<VoiceSdpPending<Arc<CryptoAction>>, VoiceEndpointError>,
+    > + '_ {
         let prepared = match body.claim(&intent, catcoms_sync::voice_v2::MAX_SDP_PLAINTEXT) {
             Ok(flight) => Ok(sdp_rpc::request(Work::Body(flight), |reply| {
                 Message::HighAnswer {
@@ -385,11 +704,13 @@ impl ServerActor {
                     intent,
                     delivery,
                     outcome: Some(outcome),
+                    publisher,
                     reply,
                 }
             })),
             Err(reason) => {
                 drop(outcome);
+                drop(publisher);
                 drop((grant, intent, delivery));
                 Err(VoiceEndpointError::Protocol(reason))
             }
@@ -409,6 +730,42 @@ impl ServerActor {
     ) -> impl std::future::Future<
         Output = Result<VoiceSdpPending<Arc<CryptoAction>>, VoiceEndpointError>,
     > + '_ {
+        self.queue_voice_sdp_open_recorded_with_fence(grant, handshake, intent, copy, outcome, None)
+    }
+
+    /// Queue the same original recorded work with an actual native final fence.
+    pub fn queue_voice_sdp_open_recorded_scoped(
+        &self,
+        grant: Arc<CallGrant>,
+        handshake: Nonce,
+        intent: Arc<InitialSdpIntent>,
+        copy: Copy,
+        outcome: Writer,
+        publisher: Box<dyn VoiceSdpPublication>,
+    ) -> impl std::future::Future<
+        Output = Result<VoiceSdpPending<Arc<CryptoAction>>, VoiceEndpointError>,
+    > + '_ {
+        self.queue_voice_sdp_open_recorded_with_fence(
+            grant,
+            handshake,
+            intent,
+            copy,
+            outcome,
+            Some(publisher),
+        )
+    }
+
+    fn queue_voice_sdp_open_recorded_with_fence(
+        &self,
+        grant: Arc<CallGrant>,
+        handshake: Nonce,
+        intent: Arc<InitialSdpIntent>,
+        copy: Copy,
+        outcome: Writer,
+        publisher: Option<Box<dyn VoiceSdpPublication>>,
+    ) -> impl std::future::Future<
+        Output = Result<VoiceSdpPending<Arc<CryptoAction>>, VoiceEndpointError>,
+    > + '_ {
         let prepared = match check_metadata(&copy, &intent) {
             Ok(()) => Ok(sdp_rpc::request(Work::Metadata(copy), |reply| {
                 Message::OpenAction {
@@ -416,11 +773,13 @@ impl ServerActor {
                     handshake,
                     intent,
                     outcome: Some(outcome),
+                    publisher,
                     reply,
                 }
             })),
             Err(reason) => {
                 drop(outcome);
+                drop(publisher);
                 drop(copy);
                 drop((grant, intent));
                 Err(reason)
@@ -461,6 +820,7 @@ impl ServerActor {
             handshake,
             intent,
             outcome: None,
+            publisher: None,
             reply,
         })
         .await
@@ -484,6 +844,7 @@ impl ServerActor {
             intent,
             delivery,
             outcome: None,
+            publisher: None,
             reply,
         })
         .await
@@ -502,6 +863,7 @@ impl ServerActor {
             handshake,
             intent,
             outcome: None,
+            publisher: None,
             reply,
         })
         .await
@@ -640,6 +1002,28 @@ mod tests {
         std::mem::size_of::<F>()
     }
     #[test]
+    fn rejected_recorded_input_never_constructs_or_boxes_an_unfunded_sender() {
+        let queue = VoiceSdpRecordedQueue::from_prepared(
+            Err(VoiceEndpointError::Protocol(VoiceError::Capacity)),
+            |_| {
+                panic!("validation refusal constructed a sender before proving its Work");
+                #[allow(unreachable_code)]
+                std::future::ready(Err(VoiceEndpointError::Stopped))
+            },
+        );
+        assert!(matches!(
+            queue.state,
+            RecordedQueueState::Refused(Some(VoiceEndpointError::Protocol(VoiceError::Capacity)))
+        ));
+        assert!(queue._work.is_none());
+    }
+    struct Refuse;
+    impl VoiceSdpPublication for Refuse {
+        fn publish(self: Box<Self>, _: SdpPublicationAdmission<'_>) -> Result<(), VoiceError> {
+            Err(VoiceError::Capacity)
+        }
+    }
+    #[test]
     fn all_concrete_sdp_rpc_futures_fit_the_original_body_or_metadata_contribution() {
         fn recorded<F>(
             _make: impl FnOnce(
@@ -655,6 +1039,47 @@ mod tests {
             std::mem::size_of::<F>()
         }
         let futures = [
+            recorded(|actor, grant, intent, _, _, body, writer| {
+                actor.queue_voice_sdp_offer_recorded_scoped(
+                    grant,
+                    [0; 32],
+                    intent,
+                    body,
+                    writer,
+                    Box::new(Refuse),
+                )
+            }),
+            recorded(|actor, grant, intent, delivery, _, body, writer| {
+                actor.queue_voice_sdp_answer_recorded_scoped(
+                    grant,
+                    [0; 32],
+                    intent,
+                    delivery,
+                    body,
+                    writer,
+                    Box::new(Refuse),
+                )
+            }),
+            recorded(|actor, grant, intent, _, copy, _, writer| {
+                actor.queue_voice_sdp_open_recorded_scoped(
+                    grant,
+                    [0; 32],
+                    intent,
+                    copy,
+                    writer,
+                    Box::new(Refuse),
+                )
+            }),
+            recorded(|actor, grant, intent, _, _, body, writer| {
+                actor.queue_voice_sdp_recorded_scoped(
+                    grant,
+                    [0; 32],
+                    intent,
+                    VoiceSdpRecordedInput::Offer(body),
+                    writer,
+                    Box::new(Refuse),
+                )
+            }),
             recorded(|actor, grant, intent, _, _, body, writer| {
                 actor.queue_voice_sdp_offer_recorded(grant, [0; 32], intent, body, writer)
             }),
@@ -697,6 +1122,17 @@ mod tests {
                 "SDP RPC graph needs {total}"
             );
         }
+        // Thin boxed queue sizeof is not proof: measure its ACTUAL original sender
+        // backing too. The same check runs before Box allocation in paid().
+        fn sender<F>(_: fn(&'static ServerActor, RecordedRequest) -> F) -> usize {
+            std::mem::size_of::<F>()
+        }
+        let sender_bytes = sender(ServerActor::queue_sdp_recorded);
+        let total = super::super::sdp_body::voice_sdp_rpc_bytes(
+            sender_bytes + std::mem::size_of::<VoiceSdpRecordedQueue<'static>>(),
+        );
+        eprintln!("actual recorded sender/observer graph {total}/{VOICE_SDP_RPC_METADATA_BYTES}; backing {sender_bytes}");
+        assert!(total <= VOICE_SDP_RPC_METADATA_BYTES);
         fn completion<F, T>(_make: impl FnOnce(VoiceSdpPending<T>) -> F) -> usize {
             std::mem::size_of::<F>()
         }

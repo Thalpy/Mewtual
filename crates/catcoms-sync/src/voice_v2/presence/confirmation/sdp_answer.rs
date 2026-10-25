@@ -8,6 +8,7 @@ use crate::voice_v2::sdp::action::{plaintext_tag, Direction};
 use crate::voice_v2::sdp::{InitialSdpIntent, SdpDelivery};
 
 impl LocalJoin {
+    #[cfg(test)]
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn prepare_high_sdp_answer(
         &mut self,
@@ -21,7 +22,41 @@ impl LocalJoin {
         clock: Arc<dyn Clock>,
         rng: &mut impl CryptoRngCore,
         final_owner: impl FnOnce(u64, u64) -> Result<(), VoiceError>,
+        outcome: Option<&mut crate::voice_v2::sdp::publication::Writer>,
+    ) -> Result<Arc<CryptoAction>, VoiceError> {
+        self.prepare_high_sdp_answer_scoped(
+            actor,
+            room,
+            handshake,
+            intent,
+            delivery,
+            plaintext,
+            authority,
+            clock,
+            rng,
+            final_owner,
+            outcome,
+            |step| step.commit(),
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn prepare_high_sdp_answer_scoped(
+        &mut self,
+        actor: &ActorOwner,
+        room: &RoomAuthority,
+        handshake: Nonce,
+        intent: &Arc<InitialSdpIntent>,
+        delivery: &Arc<SdpDelivery>,
+        plaintext: &[u8],
+        authority: &Authority<'_>,
+        clock: Arc<dyn Clock>,
+        rng: &mut impl CryptoRngCore,
+        final_owner: impl FnOnce(u64, u64) -> Result<(), VoiceError>,
         mut outcome: Option<&mut crate::voice_v2::sdp::publication::Writer>,
+        publish: impl FnOnce(
+            crate::voice_v2::sdp::SdpPublicationAdmission<'_>,
+        ) -> Result<(), VoiceError>,
     ) -> Result<Arc<CryptoAction>, VoiceError> {
         self.owned(authority)?;
         intent.check_publication_profile(outcome.is_some())?;
@@ -153,46 +188,72 @@ impl LocalJoin {
         let mut inactive = Some(inactive);
         let mut publication = Some(publication);
         let mut published = None;
-        let own_mono = clock.monotonic_ms();
-        let own_wall = clock.now_ms();
         let pair = self
             .confirmations
             .pairs
             .get_mut(&handshake)
             .expect("exclusive original HIGH Pair");
-        actor.with_local_origin(peer, authority.context, |wall, mono, origin| {
-            final_owner(wall, mono)?;
-            if !room.lease.is_live()
-                || !binding.current_at(wall, mono)
-                || !delivery.current_at(wall, mono)
-                || !delivery.permits_answer(handshake, kind, header.offer)
-            {
-                return Err(VoiceError::Unauthorized);
-            }
-            publication
+        // All Clock callbacks finish before the native publisher receives this loan.
+        // Actual prepared owners remain in this outer frame on refusal and unwind.
+        {
+            let mut origin = Some(actor.prepare_local_origin(peer, authority.context)?);
+            let (wall, mono) = origin
                 .as_ref()
-                .expect("one original Answer")
-                .admission()
-                .check_at(origin.epoch(), wall, mono)?;
-            inactive
-                .as_ref()
-                .expect("one original Seal")
-                .check_pending_at(own_mono, own_wall)?;
-            intent.admit_publication_profile(outcome.is_some())?;
-            origin.publish(|| {
-                issue.publish();
-                let action = self
-                    .actions
-                    .publish_inactive(inactive.take().expect("one Answer action"));
-                if let Some(outcome) = outcome {
-                    outcome.published(&action);
-                }
-                pair.sdp_seal = Some(action.clone());
-                published = Some(action);
-                publication.take().expect("one Answer draft").publish();
-            })
-        })?;
+                .expect("original Actor samples")
+                .observed_time();
+            // Actor preparation itself calls injected Clock. Refresh the original
+            // Action/packet domain afterward, before lending native publication.
+            let own_mono = clock.monotonic_ms();
+            let own_wall = clock.now_ms();
+            let recorded = outcome
+                .as_deref()
+                .map(crate::voice_v2::sdp::publication::Writer::original_outcome);
+            let mut final_owner = Some(final_owner);
+            let mut commit = || {
+                origin
+                    .take()
+                    .ok_or(VoiceError::Unauthorized)?
+                    .with_origin(|wall, mono, origin| {
+                        final_owner.take().expect("one original owner check")(wall, mono)?;
+                        if !room.lease.is_live()
+                            || !binding.current_at(wall, mono)
+                            || !delivery.current_at(wall, mono)
+                            || !delivery.permits_answer(handshake, kind, header.offer)
+                        {
+                            return Err(VoiceError::Unauthorized);
+                        }
+                        publication
+                            .as_ref()
+                            .expect("one original Answer")
+                            .admission()
+                            .check_at(origin.epoch(), wall, mono)?;
+                        inactive
+                            .as_ref()
+                            .expect("one original Seal")
+                            .check_pending_at(own_mono, own_wall)?;
+                        intent.admit_publication_profile(outcome.is_some())?;
+                        origin.publish(|| {
+                            issue.publish();
+                            let action = self
+                                .actions
+                                .publish_inactive(inactive.take().expect("one Answer action"));
+                            if let Some(outcome) = outcome.as_deref_mut() {
+                                outcome.published(&action);
+                            }
+                            pair.sdp_seal = Some(action.clone());
+                            published = Some(action);
+                            publication.take().expect("one Answer draft").publish();
+                        })
+                    })
+            };
+            publish(crate::voice_v2::sdp::SdpPublicationAdmission::new(
+                wall,
+                mono,
+                recorded.as_ref(),
+                &mut commit,
+            ))?;
+        }
         drop((inactive, publication, issue));
-        Ok(published.expect("one native HIGH Answer"))
+        published.ok_or(VoiceError::Unauthorized)
     }
 }

@@ -1,5 +1,27 @@
 # Mewtual; Interfaces & Hooks Schema
 
+## Scoped original SDP publication (25 October; trusted Rust-only)
+
+The three `ChannelSync::prepare_voice_*_recorded_scoped` factories lend one synchronous
+`SdpPublicationAdmission` after all original Clock and fallible preparation. Its lifetime
+cannot escape the actual Actor call. `belongs_to_outcome` compares the original entered
+Writer allocation; `observed_time` returns captured samples, not current authority.
+Consuming `commit` returns only `Result<(), VoiceError>`: no owned Action/preparation is
+destroyed beneath a native refusal. A committed positive Outcome remains positive even
+when the callback subsequently errors. Existing recorded APIs commit immediately.
+
+`VoiceSdpPublication` is a consuming paid native hook. `VoiceSdpRecordedInput` selects the
+original Offer body, Answer body/delivery or Open Copy before enqueue. The named
+`VoiceSdpRecordedQueue` boxes only a successfully constructed original sender, paid by
+the same RPC contribution. Its last Work anchor covers backing destruction after Ready
+or cancellation. Refused input constructs no sender/backing. The native Task separately
+pays its actual Worker, publisher and output; neither account substitutes for the other.
+
+Native final commit binds the actual original row/Outcome/intent/Session/PC/funding and
+retains UI/physical custody through collection. No UI gate spans queued Root clocks.
+Production still rejects the entire SDP opcode family. This supersedes the earlier Begin
+admission limitation below; no browser engine/result/RTC integration is enabled.
+
 ## Private native Input descriptor (25 October; not enabled)
 
 The staged authenticated opcode17 Input adapter returns version8/tag3 Data: a fixed277-byte

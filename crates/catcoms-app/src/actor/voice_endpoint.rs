@@ -48,6 +48,7 @@ pub use sdp_body::{
 pub use sdp_input::{
     voice_sdp_input_rpc_bytes, VoiceSdpInputPublisher, VoiceSdpInputWork, VOICE_SDP_INPUT_RPC_BYTES,
 };
+pub use sdp_ops::{VoiceSdpPublication, VoiceSdpRecordedInput, VoiceSdpRecordedQueue};
 
 /// Actual queued/result ownership for one initial SDP-intent RPC. A lost observer or
 /// closed reply does not refund its phase contribution before Root and the reply retire.

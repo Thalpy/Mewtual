@@ -1,5 +1,28 @@
 # Threat model; client integrity & enforcement boundaries
 
+## Scoped Begin publication and paid queue backing (25 October; disabled SDP family)
+
+Begin's earlier Clock-under-UI overlap is fixed in the private staged path. Root prepares
+all callback-bearing work before lending its final publication tail on the actual Actor.
+Native's original PreRoot mark-handoff gate does not span enqueue. Final try-only native
+UI/store/Coordinator/route/index/row checks compare original Outcome, body commitment,
+Session/SDK/PC/intent/Phase/funding before Root Group/Policy publication. Prepared owners
+stay outside the hook; refusal and unwind destroy them only after short guards release.
+Lock or PC close before final admission prevents publication; admitted output keeps UI
+until actual collection. Lost replies never convert a published Outcome into absence.
+
+A thin boxed sender is not sufficient memory evidence: its actual backing and retained
+completed state must remain paid. The original RPC Work anchor is last after that Box,
+and invalid preparation allocates no sender. Native Task custody remains independently
+paid. Physical availability precedes the last Copy/payment retirement, so it cannot prove
+collection. Actual original counter observation pins that distinction in native tests.
+
+No production SDP action is enabled. Generic CryptoEngineAdmission does not independently
+check actual Actor MLS/room/watch state; upcoming SDP engine admission must repeat those
+checks under its own scoped final fence. The browser's generic response ceiling remains
+too small for maximum SDP Input. Native Result, complete browser/RTC memory composition,
+HIGH/Open native race coverage, relay and independent physical acceptance remain open.
+
 ## Concrete Input publication and sender retirement (25 October; disabled family)
 
 The native Input publisher repeats actual mounted-store and resumable state after its queued

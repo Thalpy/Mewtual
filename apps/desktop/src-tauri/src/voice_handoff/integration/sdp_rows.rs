@@ -263,7 +263,7 @@ pub(super) async fn exercise(
         );
         let mut task = phase.task_copy(sdp_publication::TASK_BYTES).unwrap();
         task.bind_native_history(funding.clone()).unwrap();
-        let mut publication = sdp_publication::Publication::preparing(
+        let publication = sdp_publication::Publication::preparing(
             incoming.hold_position().unwrap(),
             route.session(),
             intent,

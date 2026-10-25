@@ -6,6 +6,7 @@ use crate::voice_handoff::sdp_submission::{Payload, Preparation};
 use catcoms_sync::voice_v2::chain::sdp_handoff::NativeRowPurpose;
 use catcoms_sync::voice_v2::sdp::{publication::History, InitialSdpIntent};
 use catcoms_sync::voice_v2::VoiceError;
+use std::future::Future;
 
 fn opened(
     state: &AppState,
@@ -91,6 +92,18 @@ fn payload(
         }
     } else {
         Payload::Open
+    }
+}
+/// These commands are either never enqueued or abandoned before the Actor applies them.
+/// The real original body/row/Writer/Work below is funded; only this zero-sized refusal
+/// hook supplies no native authority. Any unexpected invocation is a fixture failure.
+struct NeverApplied;
+impl catcoms_app::VoiceSdpPublication for NeverApplied {
+    fn publish(
+        self: Box<Self>,
+        _: catcoms_sync::voice_v2::sdp::SdpPublicationAdmission<'_>,
+    ) -> Result<(), VoiceError> {
+        panic!("abandoned recorded queue invoked its native publisher")
     }
 }
 #[allow(clippy::too_many_arguments)]
@@ -348,6 +361,117 @@ pub(super) async fn exercise(
 
             factory::preflight_binding(&context, route).await.unwrap();
             let (actor, _) = factory::native::observation_actor(&context, route).unwrap();
+            if seal {
+                // A refused input must return inline: the underpaid original Copy is
+                // collected even while its returned queue object is retained/unpolled.
+                let wall = clock.now_ms(); let mono = clock.monotonic_ms();
+                let ticket = crate::voice_handoff::sdp::current(&context, route, |admission| {
+                    row.resume_sdp_action(parent, admission, &candidate, wall, mono)
+                }).unwrap().unwrap();
+                let incoming = opened(state, public, route, parent, &encoded, true);
+                let mut task = phase.task_copy(super::super::sdp_publication::TASK_BYTES).unwrap();
+                task.bind_native_history(funding.clone()).unwrap();
+                let publication = Arc::new(super::super::sdp_publication::Publication::preparing(
+                    incoming.hold_position().unwrap(), route.session(), intent, task).unwrap());
+                let mut copy = phase.copy(1).unwrap(); copy.bind_native_history(funding.clone()).unwrap();
+                copy.attach_keepalive(publication.clone()).unwrap();
+                let (_, grant) = factory::native::observation_actor(&context, route).unwrap();
+                let refused = actor.queue_voice_sdp_recorded_scoped(grant, request.pc.base.handshake,
+                    intent.clone(), catcoms_app::VoiceSdpRecordedInput::Open(copy), ticket.publication_writer().unwrap(), Box::new(NeverApplied));
+                drop(incoming); // its original authenticated body has its own bound IO
+                assert_eq!(funding.in_flight(), 1, "only the separate native Task may survive validation refusal");
+                assert!(matches!(slot.history(), History::NeverEntered));
+                drop(ticket); drop(publication);
+                assert_eq!(funding.in_flight(), 0, "retained refused queue owns no RPC sender or payment");
+                assert!(matches!(refused.await, Err(catcoms_app::VoiceEndpointError::Protocol(VoiceError::Capacity))));
+
+                for completed in [false, true] {
+                    let wall = clock.now_ms(); let mono = clock.monotonic_ms();
+                    let ticket = crate::voice_handoff::sdp::current(&context, route, |admission| {
+                        row.resume_sdp_action(parent, admission, &candidate, wall, mono)
+                    }).unwrap().unwrap();
+                    let mut incoming = opened(state, public, route, parent, &encoded, true);
+                    let mut task = phase.task_copy(super::super::sdp_publication::TASK_BYTES).unwrap();
+                    task.bind_native_history(funding.clone()).unwrap();
+                    let publication = Arc::new(super::super::sdp_publication::Publication::preparing(
+                        incoming.hold_position().unwrap(), route.session(), intent, task).unwrap());
+                    let Payload::Seal { mut body, .. } = payload(&mut incoming, intent, &funding, true) else { unreachable!() };
+                    body.attach_publication(publication.clone()).unwrap();
+                    let parked = super::pc::park(&actor).await;
+                    let mut queries = Vec::new();
+                    if !completed {
+                        loop {
+                            match actor.try_queue_voice_v2_context(route.selected().binding().scope.room) {
+                                Ok(query) => queries.push(query),
+                                Err(catcoms_app::VoiceEndpointError::Protocol(VoiceError::Capacity)) => break,
+                                Err(error) => panic!("unexpected context queue failure {error}"),
+                            }
+                        }
+                        assert!(!queries.is_empty(), "actual bounded mailbox was not filled");
+                    }
+                    let (_, grant) = factory::native::observation_actor(&context, route).unwrap();
+                    let mut queued = actor.queue_voice_sdp_recorded_scoped(grant, request.pc.base.handshake,
+                        intent.clone(), catcoms_app::VoiceSdpRecordedInput::Offer(&body), ticket.publication_writer().unwrap(), Box::new(NeverApplied));
+                    if completed {
+                        let pending = std::future::poll_fn(|cx| std::pin::Pin::new(&mut queued).poll(cx)).await.unwrap();
+                        drop(pending); // the Actor will drop this abandoned command without applying it
+                    } else {
+                        std::future::poll_fn(|cx| {
+                            assert!(std::pin::Pin::new(&mut queued).poll(cx).is_pending(), "actual full mailbox did not park original sender");
+                            std::task::Poll::Ready(())
+                        }).await;
+                    }
+                    drop(ticket); drop(body); drop(incoming); drop(publication);
+                    if completed {
+                        drop(parked);
+                        actor.voice_v2_context(route.selected().binding().scope.room).await.unwrap();
+                        assert!(matches!(slot.history(), History::NeverEntered));
+                        assert_eq!(funding.in_flight(), 2, "retained completed Box lost its original Work or publication");
+                        assert!(route.session().fixture_counts().0);
+                        drop(queued); // Box backing drops BEFORE its last original Work anchor
+                    } else {
+                        assert!(matches!(slot.history(), History::InFlight));
+                        assert_eq!(funding.in_flight(), 2);
+                        assert!(route.session().fixture_counts().0);
+                        drop(queued); // cancellation retires actual Writer before last Work/Task/physical
+                        assert!(matches!(slot.history(), History::NeverEntered));
+                        drop(queries); drop(parked);
+                        actor.voice_v2_context(route.selected().binding().scope.room).await.unwrap();
+                    }
+                    route.session().fixture_wait_physical_idle().await;
+                    assert_eq!(funding.in_flight(), 0);
+                    assert!(state.ui_session_commit.try_lock().is_ok());
+                }
+            }
+            if seal {
+                // A queued handoff is NOT final admission. Let the real UI gate win
+                // after positive mailbox admission but before the parked Actor prepares
+                // Root. The scoped callback must refuse and permit exact local retry.
+                let parked = super::pc::park(&actor).await;
+                let wall = clock.now_ms();
+                let mono = clock.monotonic_ms();
+                let ticket = crate::voice_handoff::sdp::current(&context, route, |admission| {
+                    row.resume_sdp_action(parent, admission, &candidate, wall, mono)
+                }).unwrap().unwrap();
+                let mut incoming = opened(state, public, route, parent, &encoded, true);
+                let physical = incoming.hold_position().unwrap();
+                let input = payload(&mut incoming, intent, &funding, true);
+                let preparation = Preparation::new(ticket, physical, route.session(), input).unwrap();
+                let (queued, accepted) = tokio::sync::oneshot::channel();
+                let waiter = preparation.launch_with_queue_barrier(&context, route, queued).unwrap();
+                accepted.await.unwrap();
+                let held = state.ui_session_commit.clone().try_lock_owned().expect("queued preparation retained UI before Root clocks");
+                drop(parked);
+                let completion = waiter.await.unwrap();
+                assert!(matches!(completion.result(), Err(factory::Refused::Protocol(VoiceError::Capacity))));
+                assert!(matches!(slot.history(), History::Refused(VoiceError::Capacity)));
+                assert!(slot.permits_local_retry());
+                assert!(row.status().unwrap().action.is_none());
+                drop(completion);
+                drop(incoming);
+                drop(held);
+                assert_eq!(funding.in_flight(), 0);
+            }
             if !seal {
                 let wall = clock.now_ms();
                 let mono = clock.monotonic_ms();
@@ -441,7 +565,9 @@ pub(super) async fn exercise(
                 drop(waiter.take()); // waiter loss detaches the actual queued worker
                 None
             };
-            assert!(state.ui_session_commit.try_lock().is_err());
+            let published = held_output.is_some();
+            assert_eq!(state.ui_session_commit.try_lock().is_err(), published,
+                "only actual successful final admission retains UI custody");
             assert!(matches!(
                 route.session().header(),
                 Err(channel::Refused::Capacity)
@@ -458,16 +584,26 @@ pub(super) async fn exercise(
                 .unwrap();
             assert!(!row.try_compact_sdp().unwrap());
             assert!(!funding.is_collected());
+            if seal && !published {
+                // Actual PC close wins after enqueue. Unlike the older pre-queue UI
+                // admission contract, no Action may first publish after this close.
+                let pc = requests::pc::Request::decode(parent.id().logical(), pc_frame).unwrap();
+                parent.close_pc(route.session().identity(), &pc).unwrap();
+            }
             drop(parked.take());
             drop(held_output); // real last output, not a claimed drain bit, releases Task/position
             actor
                 .voice_v2_context(route.selected().binding().scope.room)
                 .await
                 .unwrap();
-            route.session().fixture_wait_physical_idle().await; // actual worker/output/body/publication collection
+            route.session().fixture_wait_physical_idle().await;
+            // PhysicalHold retires before Publication's final TaskCopy by design. Its
+            // idle notification is not proof of counter/payment/Phase collection; wait
+            // the actual closed funding counter after relinquishing all our contributions.
+            funding.wait_collected().await;
             assert!(state.ui_session_commit.try_lock().is_ok());
             assert!(funding.is_collected());
-            if seal {
+            if published {
                 let History::Published(action) = slot.history() else {
                     panic!("lost actual LOW publication");
                 };
@@ -477,8 +613,8 @@ pub(super) async fn exercise(
                 );
             } else {
                 assert!(
-                    matches!(slot.history(), History::Refused(VoiceError::Capacity)),
-                    "no incoming SDP exists yet"
+                    matches!(slot.history(), History::Refused(reason) if reason == if seal { VoiceError::Unauthorized } else { VoiceError::Capacity }),
+                    "queued work cannot publish after native PC closure or invent missing Open input"
                 );
                 assert!(row.status().unwrap().action.is_none());
             }
@@ -490,16 +626,16 @@ pub(super) async fn exercise(
                 encoded[36], 1,
                 "actual closed/zero IO and original outcome are collected"
             );
-            assert_eq!(encoded[37], u8::from(seal));
+            assert_eq!(encoded[37], u8::from(published));
             assert_eq!(
                 encoded[86],
-                u8::from(seal),
+                u8::from(published),
                 "negative collection never invents engine settlement"
             );
             assert!(history.delivery().is_none());
             assert_eq!(
                 row.status().unwrap().engine.settled,
-                seal,
+                published,
                 "only real Root unstarted retirement settles an engine"
             );
             let wall = clock.now_ms();

@@ -6,15 +6,16 @@ use super::bootstrap::Route;
 use super::channel::{PhysicalHold, Session};
 use super::context::Context;
 use super::factory::{self, Refused};
-use super::ledger::{ResolvedRow, SdpRegistration, SdpSubmissionOwners};
+use super::ledger::{ResolvedRow, SdpPublicationTarget, SdpRegistration, SdpSubmissionOwners};
 use super::sdp_publication::{self, Publication};
 use catcoms_app::{
-    voice_sdp_rpc_bytes, ServerActor, VoiceSdpBody, VoiceSdpPending, VOICE_SDP_RPC_METADATA_BYTES,
+    voice_sdp_rpc_bytes, ServerActor, VoiceSdpBody, VoiceSdpPending, VoiceSdpPublication,
+    VoiceSdpRecordedInput, VOICE_SDP_RPC_METADATA_BYTES,
 };
 use catcoms_sync::voice_v2::chain::sdp_handoff::{Copy, NativeRowPurpose, TaskCopy};
 use catcoms_sync::voice_v2::crypto_actions::CryptoAction;
 use catcoms_sync::voice_v2::sdp::publication::Writer;
-use catcoms_sync::voice_v2::sdp::{InitialSdpIntent, SdpDelivery};
+use catcoms_sync::voice_v2::sdp::{InitialSdpIntent, SdpDelivery, SdpPublicationAdmission};
 use catcoms_sync::voice_v2::{CallGrant, VoiceError};
 use std::sync::Arc;
 
@@ -91,10 +92,52 @@ impl std::future::Future for Waiter {
             .map(|result| result.map_err(|_| Refused::Stopped))
     }
 }
+/// Concrete native final fence; the original Task pays this Box in addition to the
+/// existing Worker/Actor envelope. There is no channel, new Copy or Registration backedge.
+struct Publisher {
+    context: Context,
+    route: Route,
+    target: SdpPublicationTarget,
+    // LAST. Original target/native metadata retires before its actual Task/physical owner.
+    publication: Arc<Publication>,
+}
+impl VoiceSdpPublication for Publisher {
+    fn publish(self: Box<Self>, step: SdpPublicationAdmission<'_>) -> Result<(), VoiceError> {
+        let live = self.context.upgrade().ok_or(VoiceError::Unauthorized)?;
+        let commit = live
+            .commit
+            .clone()
+            .try_lock_owned()
+            .map_err(|_| VoiceError::Capacity)?;
+        factory::require_unlocked_now(&live, self.route.selected()).map_err(
+            |error| match error {
+                Refused::Protocol(reason) => reason,
+                _ => VoiceError::Unauthorized,
+            },
+        )?;
+        let result = {
+            let authority = match live.authority.try_lock() {
+                Ok(authority) => authority,
+                Err(std::sync::TryLockError::Poisoned(error)) => error.into_inner(),
+                Err(std::sync::TryLockError::WouldBlock) => return Err(VoiceError::Capacity),
+            };
+            let admission =
+                super::transition::Admission::new(&live, &authority, &self.route, &commit);
+            self.route
+                .try_with_open(|| self.target.admit(&admission, step))
+        };
+        // Group/Policy and every short native guard are gone before custody installation
+        // or any affine/fallible owner destruction. No Clock follows successful admission.
+        result?;
+        self.publication.admit(commit);
+        Ok(())
+    }
+}
 struct Worker {
     writer: Option<Writer>,
     registration: SdpRegistration,
     input: Input,
+    publisher: Option<Box<Publisher>>,
     actor: ServerActor,
     grant: Arc<CallGrant>,
     intent: Arc<InitialSdpIntent>,
@@ -150,6 +193,9 @@ impl Preparation {
             physical: Some(physical),
             task: None,
         };
+        if task_layout() > sdp_publication::TASK_BYTES {
+            return Err(VoiceError::Capacity);
+        }
         // This small prepayment snapshot is inventoried in the ORIGINAL fixed row fee.
         // No variable allocation or detached future exists before TaskCopy is acquired.
         construction.owners = Some(
@@ -236,7 +282,8 @@ impl Preparation {
 
     /// Final nonblocking native admission. Call the existing Actor preflight before this
     /// synchronous function; no broad mounted context crosses the worker's Actor wait.
-    /// The actual UI guard moves into original publication custody before Arc sharing.
+    /// The short PreRoot handoff fence is released BEFORE enqueue or Clock. The actual
+    /// final publisher later installs UI custody inside the scoped Actor callback.
     pub(super) fn launch(self, context: &Context, route: &Route) -> Result<Waiter, Refused> {
         self.launch_inner(
             context,
@@ -257,7 +304,7 @@ impl Preparation {
         self.launch_inner(context, route, Some(queued))
     }
     fn launch_inner(
-        mut self,
+        self,
         context: &Context,
         route: &Route,
         #[cfg(test)] queued: Option<tokio::sync::oneshot::Sender<()>>,
@@ -275,12 +322,12 @@ impl Preparation {
         let wall = clock.now_ms();
         let mono = clock.monotonic_ms();
         drop(clock); // no launch-only owner overlaps the running worker/spawn graph
-        factory::require_unlocked_now(&live, route.selected())?;
         let commit = live
             .commit
             .clone()
             .try_lock_owned()
             .map_err(|_| VoiceError::Capacity)?;
+        factory::require_unlocked_now(&live, route.selected())?;
         {
             let authority = match live.authority.try_lock() {
                 Ok(authority) => authority,
@@ -298,7 +345,7 @@ impl Preparation {
             })?;
         }
         drop(live);
-        self.publication.admit(commit);
+        drop(commit);
         let Self {
             writer,
             registration,
@@ -309,10 +356,11 @@ impl Preparation {
         } = self;
         // Restore the ordered affine owner BEFORE any further fallible call. Independent
         // locals here could return TaskCopy ahead of a still-reserved Writer on failure.
-        let mut worker = Worker {
+        let mut worker = Box::new(Worker {
             writer,
             registration,
             input,
+            publisher: None,
             actor,
             grant,
             intent,
@@ -320,8 +368,17 @@ impl Preparation {
             #[cfg(test)]
             queued,
             publication: Arc::new(publication),
-        };
-        // All shared work now holds the actual admitted UI/physical owner. The original
+        });
+        worker.publisher = Some(Box::new(Publisher {
+            context: context.clone(),
+            route: route.clone(),
+            target: worker
+                .registration
+                .publication_target(route.session().identity())?,
+            publication: worker.publication.clone(),
+        }));
+        // Shared work initially retains physical/payment lifetime custody with NO UI
+        // guard. The actual Actor's scoped publication tail installs UI only on success. The original
         // TaskCopy cannot receive this keepalive, so no self-funding cycle can form.
         match &mut worker.input {
             Input::Seal { body, .. } => body.attach_publication(worker.publication.clone())?,
@@ -339,52 +396,41 @@ impl Preparation {
         Ok(Waiter(runtime.spawn(future)))
     }
 }
-async fn run(mut worker: Worker) -> Completion {
-    // Keep queue and collection in this ONE paid future. A nested execute(&mut Worker)
-    // future would retain another inline control frame throughout the same operation.
-    macro_rules! queue {
-        ($future:expr) => {
-            match checked_queue($future) {
-                Ok(future) => future.await.map_err(Refused::from),
-                Err(error) => Err(error.into()),
-            }
-        };
-    }
-    // Eager recorded APIs move Writer into the complete Command/Pending wrapper before
-    // their send future exists. Original bound IO keeps publication paid after cancellation.
+async fn run(mut worker: Box<Worker>) -> Completion {
+    // Construct one original request synchronously, then await ONE sender type. The
+    // prior three awaited alternatives retained avoidable branch storage in this Task.
     let writer = worker
         .writer
         .take()
         .expect("one original publication invocation");
-    let pending = match &mut worker.input {
+    let publisher = worker.publisher.take().expect("one original final fence");
+    let input = match &mut worker.input {
         Input::Seal {
             body,
             delivery: None,
-        } => queue!(worker.actor.queue_voice_sdp_offer_recorded(
-            worker.grant.clone(),
-            worker.handshake,
-            worker.intent.clone(),
-            body,
-            writer
-        )),
+        } => VoiceSdpRecordedInput::Offer(body),
         Input::Seal {
             body,
             delivery: Some(delivery),
-        } => queue!(worker.actor.queue_voice_sdp_answer_recorded(
-            worker.grant.clone(),
-            worker.handshake,
-            worker.intent.clone(),
-            delivery.clone(),
+        } => VoiceSdpRecordedInput::Answer {
             body,
-            writer
-        )),
-        Input::Open(copy) => queue!(worker.actor.queue_voice_sdp_open_recorded(
-            worker.grant.clone(),
-            worker.handshake,
-            worker.intent.clone(),
-            copy.take().expect("one original metadata Copy"),
-            writer
-        )),
+            delivery: delivery.clone(),
+        },
+        Input::Open(copy) => {
+            VoiceSdpRecordedInput::Open(copy.take().expect("one original metadata Copy"))
+        }
+    };
+    let queued = worker.actor.queue_voice_sdp_recorded_scoped(
+        worker.grant.clone(),
+        worker.handshake,
+        worker.intent.clone(),
+        input,
+        writer,
+        publisher,
+    );
+    let pending = match checked_queue(queued) {
+        Ok(future) => future.await.map_err(Refused::from),
+        Err(error) => Err(error.into()),
     };
     let result = match pending {
         Err(error) => Err(error),
@@ -458,7 +504,7 @@ fn construction_layout() -> usize {
 }
 fn launch_layout() -> usize {
     std::mem::size_of::<Preparation>()
-        + std::mem::size_of::<Worker>()
+        + std::mem::size_of::<Box<Worker>>()
         + std::mem::size_of::<super::context::LiveContext>()
         + std::mem::size_of::<crate::UiSessionGate<'static>>()
         + std::mem::size_of::<super::transition::Admission<'static>>()
@@ -477,7 +523,28 @@ fn worker_layout(future_bytes: usize) -> usize {
         + std::mem::size_of::<Completion>()
         + std::mem::size_of::<Waiter>()
         + 512; // pinned Tokio task allocation/handles; no native constructor allowance
-    sdp_publication::FIXED_BYTES + running.max(construction_layout()).max(launch_layout())
+    let publisher = std::mem::size_of::<Publisher>()
+        + std::mem::size_of::<super::context::LiveContext>()
+        + std::mem::size_of::<super::transition::Admission<'static>>()
+        + std::mem::size_of::<crate::UiSessionGate<'static>>()
+        + std::mem::size_of::<std::sync::MutexGuard<'static, crate::voice_authority::Coordinator>>(
+        )
+        + 3 * std::mem::size_of::<std::sync::MutexGuard<'static, ()>>()
+        + std::mem::size_of::<tokio::sync::OwnedMutexGuard<()>>()
+        + 128; // borrowed scoped tail, selectors and short guard bookkeeping
+    sdp_publication::FIXED_BYTES
+        + std::mem::size_of::<Worker>() // sole Box backing, retained through the task
+        + publisher
+        + running.max(construction_layout()).max(launch_layout())
+}
+
+/// Infer the original spawned future without constructing any Worker or allocation.
+/// Refuse a layout change before Task/Publisher/Worker construction, not after payment.
+fn task_layout() -> usize {
+    fn measured<F: std::future::Future<Output = Completion>>(_: fn(Box<Worker>) -> F) -> usize {
+        worker_layout(std::mem::size_of::<F>())
+    }
+    measured(run)
 }
 
 #[cfg(test)]
@@ -487,10 +554,16 @@ mod tests {
     fn original_sdp_submission_task_graph_has_no_new_payment_pool() {
         // Infer the ACTUAL future type without constructing a fake Worker. This includes
         // all awaited recorded queue alternatives and the final output/custodian graph.
-        fn measured<F: std::future::Future<Output = Completion>>(_: fn(Worker) -> F) -> usize {
+        fn measured<F: std::future::Future<Output = Completion>>(_: fn(Box<Worker>) -> F) -> usize {
             worker_layout(std::mem::size_of::<F>())
         }
         let bytes = measured(run);
+        eprintln!(
+            "SDP worker graph {bytes}, Worker {}, Publisher {}, publication {}",
+            std::mem::size_of::<Worker>(),
+            std::mem::size_of::<Publisher>(),
+            sdp_publication::FIXED_BYTES
+        );
         assert!(
             bytes <= sdp_publication::TASK_BYTES,
             "complete original SDP worker graph needs {bytes}; constructor {}, launch {}",

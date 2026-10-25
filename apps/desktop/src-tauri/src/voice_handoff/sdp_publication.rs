@@ -6,14 +6,14 @@ use super::channel::{PhysicalHold, Session};
 use catcoms_sync::voice_v2::chain::sdp_handoff::TaskCopy;
 use catcoms_sync::voice_v2::sdp::InitialSdpIntent;
 use catcoms_sync::voice_v2::VoiceError;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 // Measure actual detached-worker/custodian/future storage before worker entry. Body/RPC
 // metadata has a separate ORIGINAL Copy. Both come from the SAME 64KiB phase, not a new pool.
 pub(super) const TASK_BYTES: usize = 4096;
 
 pub(super) struct Publication {
-    commit: Option<tokio::sync::OwnedMutexGuard<()>>,
+    commit: OnceLock<tokio::sync::OwnedMutexGuard<()>>,
     _physical: PhysicalHold,
     // LAST. TaskCopy cannot adopt bytes, retain a keepalive or expose its underlying Copy.
     // Thus Publication cannot retain itself through its own funding owner.
@@ -49,7 +49,7 @@ impl Publication {
     /// AFTER Registration, rather than returning physical idle from an inner constructor.
     pub(super) fn retaining(physical: PhysicalHold, payment: TaskCopy) -> Self {
         Self {
-            commit: None,
+            commit: OnceLock::new(),
             _physical: physical,
             _payment: payment,
         }
@@ -67,14 +67,14 @@ impl Publication {
         }
         Ok(())
     }
-    /// Only the unique pre-publication worker may install the actual admitted UI guard.
-    /// Clones given to bytes/RPCs must always contain Some. No native row retains this owner.
-    pub(super) fn admit(&mut self, commit: tokio::sync::OwnedMutexGuard<()>) {
+    /// Lifetime custody is shared before queueing with NO UI guard. Only the actual
+    /// final native callback installs the admitted guard after its short guards release.
+    /// The original Worker, body/RPC sender and output retain this same owner thereafter.
+    pub(super) fn admit(&self, commit: tokio::sync::OwnedMutexGuard<()>) {
         assert!(
-            self.commit.is_none(),
+            self.commit.set(commit).is_ok(),
             "one original SDP publication admission"
         );
-        self.commit = Some(commit);
     }
 }
 

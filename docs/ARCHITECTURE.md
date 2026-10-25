@@ -1,5 +1,26 @@
 # Mewtual; Architecture
 
+## Scoped original SDP Begin publication (25 October; private)
+
+Original LOW Offer, HIGH Answer and Open factories now lend one stack-only prepared
+publication tail from the actual Actor. Original Clock/capacity/signing preparation occurs
+before native final fences. The affine Writer still enters once; the tail exposes only
+original Outcome identity, captured samples and consuming commit. Prepared owned graphs
+remain outside the hook so refusal/unwind cannot destroy their capacity under native guards.
+
+Native's short PreRoot mark-handoff gate ends before queueing. Final admission tries actual
+UI/store/resumable, Coordinator, route, indexed parent/row and original provenance before
+Root Group/Policy. Successful output retains actual UI/physical/Task custody. The original
+boxed Actor sender is paid by RPC, with a last same-Work anchor through completed backing
+destruction; it creates no new task, channel, copy or budget. Measured RPC sender3,608/4,096B,
+native worker2,248/4,096B and common Control12,279/12,288B fit unchanged limits.
+
+This fixes the Begin/Clock overlap described in earlier checkpoints below. It does not
+enable production SDP. Actual-Actor engine admission, native Result, browser staged
+WebCrypto/result/settlement and RTC remain next. Root Exchange, native Phase and browser
+sidecar accounts must each cover their own complete retained graphs; engine Exchange
+credit is not a native Phase allocation. Multi-peer, relay and physical acceptance remain open.
+
 ## Concrete original SDP Input publication (25 October; private)
 
 The native Input adapter binds its actual Actor RPC, Task and response to the same original

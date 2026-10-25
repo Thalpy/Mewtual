@@ -396,3 +396,36 @@ fn root_open_and_applied_high_answer_capture_their_same_actions_in_original_outc
     assert!(matches!(seal_slot.history(), History::Published(_)));
     // SDK/plaintext application is mocked by these trusted calls; this is NOT RTC evidence.
 }
+
+#[test]
+fn scoped_high_answer_commits_without_clock_beneath_native_publication() {
+    let (mut p, phase, intent, open, delivery) = opened();
+    deliver(&p, &open, &delivery, |_, _| Ok(())).unwrap();
+    complete(&p, &open, &delivery, |_, _| Ok(())).unwrap();
+    let clock = p.origin_clock.clone();
+    let mut held = None;
+    let action =
+        p.f.high
+            .join
+            .prepare_high_sdp_answer_scoped(
+                &p.high,
+                &room(&p.f.high),
+                p.f.id,
+                &intent,
+                &delivery,
+                b"v=0",
+                &ca(&p.f.high.context, &p.f.high.lease),
+                p._runtimes[1].clock(),
+                &mut p.f.rng,
+                |_, _| Ok(()),
+                None,
+                |step| {
+                    held = Some(NativeFenceProbe::new(&clock));
+                    step.commit()
+                },
+            )
+            .unwrap();
+    drop(held);
+    action.settle_engine();
+    phase.close();
+}

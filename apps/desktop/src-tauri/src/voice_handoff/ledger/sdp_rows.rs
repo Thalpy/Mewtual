@@ -965,7 +965,139 @@ pub(in crate::voice_handoff) struct SubmissionOwners {
     pub funding: Arc<NativeRowFunding>,
     pub handshake: [u8; 32],
 }
+/// One paid immutable lookup target, not a second worker/Writer or current permission.
+/// The actual affine Registration remains in the detached worker until sender retirement.
+pub(in crate::voice_handoff) struct PublicationTarget {
+    row: ResolvedRow,
+    selected: Arc<SelectedHandoffOwner>,
+    session: Arc<SessionIdentity>,
+    phase: Arc<sdp_handoff::Phase>,
+    intent: Arc<InitialSdpIntent>,
+    outcome: Arc<Outcome>,
+    funding: Arc<NativeRowFunding>,
+    body: Option<[u8; 32]>,
+}
+impl PublicationTarget {
+    /// Final UI/Coordinator/route fences are already borrowed. Hold original Index,
+    /// parent and row through the Root tail; every owner stays outside these guards.
+    /// A queued earlier handoff is uncertainty only and cannot authorize this effect.
+    pub(in crate::voice_handoff) fn admit(
+        &self,
+        admission: &Admission<'_>,
+        step: catcoms_sync::voice_v2::sdp::SdpPublicationAdmission<'_>,
+    ) -> Result<(), VoiceError> {
+        if !Arc::ptr_eq(&self.row.ledger, admission.ledger())
+            || !Arc::ptr_eq(&self.session, admission.session())
+            || !std::ptr::eq(self.selected.as_ref(), admission.selected())
+            || !self
+                .row
+                .row
+                .key
+                .matches(admission.selected(), self.row.row.key.purpose)
+            || !step.belongs_to_outcome(&self.outcome)
+        {
+            return Err(VoiceError::Unauthorized);
+        }
+        let index = self.row.transition_index()?;
+        let parent = self
+            .row
+            .row
+            .key
+            .parent
+            .as_ref()
+            .ok_or(VoiceError::Unauthorized)?;
+        if !index.rows[parent.id.slot]
+            .as_ref()
+            .is_some_and(|row| Arc::ptr_eq(row, parent))
+        {
+            return Err(VoiceError::Unauthorized);
+        }
+        let parent_state = try_lock(&parent.state)?;
+        let claim = parent_state
+            .plan()
+            .and_then(|p| p.transition.as_ref())
+            .ok_or(VoiceError::Unauthorized)?;
+        let key = claim.key.as_ref().ok_or(VoiceError::Unauthorized)?;
+        let storage = key.sdp.as_ref().ok_or(VoiceError::Unauthorized)?;
+        let state = try_lock(&self.row.row.state)?;
+        let Body::SdpPending(p) = &state.body else {
+            return Err(VoiceError::Unauthorized);
+        };
+        let Purpose::Sdp { purpose, .. } = self.row.row.key.purpose else {
+            return Err(VoiceError::Unauthorized);
+        };
+        if !p.worker
+            || !p.handed_off
+            || p.closed
+            || p.published.is_some()
+            // body_matches is populated by capture AFTER publication. Requiring it
+            // here would reject every new action. The entered original Outcome binds
+            // Root's actual payload before this scoped callback is lent.
+            || p.body_tag != self.body
+            || !Arc::ptr_eq(&p.owners.selected, &self.selected)
+            || !Arc::ptr_eq(&p.owners.session, &self.session)
+            || !Arc::ptr_eq(&claim.session, &self.session)
+            || !Arc::ptr_eq(&p.owners.phase, &self.phase)
+            || !Arc::ptr_eq(&p.owners.intent, &self.intent)
+            || !Arc::ptr_eq(&p.owners.outcome, &self.outcome)
+            || !Arc::ptr_eq(&p.owners.funding, &self.funding)
+            || !self.funding.uses_phase(&self.phase)
+            || self.funding.purpose() != purpose
+            || self.funding.is_closed()
+            || claim.released
+            || key.released
+            || !key.custody.is_current()
+            || storage.closed
+            || storage.actions_closed[position(purpose)]
+            || storage.worker()
+            || storage.sdk_preparing
+            || storage.sdk.as_ref().is_none_or(|sdk| sdk.released())
+            || storage
+                .phase
+                .as_ref()
+                .is_none_or(|phase| !Arc::ptr_eq(phase, &self.phase))
+            || storage
+                .pc
+                .as_ref()
+                .and_then(|pc| pc.intent())
+                .is_none_or(|intent| !Arc::ptr_eq(intent, &self.intent))
+            || !self.row.row.key.lease.is_live()
+        {
+            return Err(VoiceError::Unauthorized);
+        }
+        let (wall, mono) = step.observed_time();
+        self.intent.remaining_at(wall, mono)?;
+        admission.current()?;
+        step.commit()
+    }
+}
 impl Registration {
+    /// Construct only after the original native Task has paid this complete target.
+    /// It grants no queue admission and cannot outlive its worker as effect authority.
+    pub(in crate::voice_handoff) fn publication_target(
+        &self,
+        session: &Arc<SessionIdentity>,
+    ) -> Result<PublicationTarget, VoiceError> {
+        let resolved = self.resolved();
+        let _index = resolved.transition_index()?;
+        let state = try_lock(&self.row.state)?;
+        let Body::SdpPending(p) = &state.body else {
+            return Err(VoiceError::Unauthorized);
+        };
+        if !p.worker || !p.handed_off || p.closed || !Arc::ptr_eq(session, &p.owners.session) {
+            return Err(VoiceError::Unauthorized);
+        }
+        Ok(PublicationTarget {
+            row: self.resolved(),
+            selected: p.owners.selected.clone(),
+            session: session.clone(),
+            phase: p.owners.phase.clone(),
+            intent: p.owners.intent.clone(),
+            outcome: p.owners.outcome.clone(),
+            funding: p.owners.funding.clone(),
+            body: p.body_tag,
+        })
+    }
     #[cfg(test)]
     pub(in crate::voice_handoff) fn fixture_retirement_signal(
         mut self,
