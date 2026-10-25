@@ -24,9 +24,10 @@ initially overflowed the Windows test stack; boxing only its test construction/h
 that without increasing the stack or changing assertions/production payment.
 
 Formal native Cargo check passes (94s); strict Root all-target/all-feature Clippy and strict
-native all-target Clippy pass, as do formatting, ambient and diff checks. The complete frozen Root suite passes:3,557 tests including doctests. The separate
-native full suite is building/running on this same source; earlier full-suite results
-below remain separate. The inherited cargo-deny advisory is not
+native all-target Clippy pass, as do formatting, ambient and diff checks. The complete frozen Root suite passes:3,557 tests including doctests. The separate native
+full suite also passes:819 library tests plus5 capability integration tests (1,428.05s for
+the library). Complete frontend2,735 tests, checking and production build passed earlier
+on the same runtime source. Earlier full-suite results below remain separate. The inherited cargo-deny advisory is not
 fixed or ignored by this change. No dependency change is included.
 
 No new native SDP opcode/body class or private browser SDP/RTC producer exists yet. Their
