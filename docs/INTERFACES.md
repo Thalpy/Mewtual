@@ -1,5 +1,29 @@
 # Mewtual; Interfaces & Hooks Schema
 
+## Original native SDP submission (25 October; private producer)
+
+`ResolvedRow::resume_sdp_action` returns an affine Registration only for the same indexed
+parent/child allocation, purpose, body commitment, fee, intent and authenticated Session.
+It repeats original UI/SDK/PC/deadline admission and requires no existing worker/observer.
+Only Idle/NeverEntered/explicit Capacity can retry; it does not reset outcome or handoff.
+`Preparation::new` binds TaskCopy and body/metadata to the exact original native counter.
+`launch` takes the actual UI publication guard after original Actor preflight and returns
+an opaque observer. Dropping it detaches actual work; no abort method is exposed.
+
+`Incoming::sdp_body` redecodes version8 to select the final bounded payload, checks actual
+intent and row-counter allocation, and consumes its one Storage::Sdp buffer. It cannot
+extract twice. `VoiceSdpBody` construction refusal restores the same opened buffer,
+cipher/plain lengths and affine reply. Buffer/Body counter accessors prove original
+collection identity only and grant no effect, input, SDK or RTC authority. Production
+HTTP dispatch remains closed until the complete native vertical and private SDK exist.
+
+
+A missing first Offer/Answer receipt reports temporary Capacity only for the same current
+original pair/room/intent within its unchanged deadline. Exact known Action recovery stays
+before current refusal. A known receipt with absent input is still Unauthorized; consumed
+or expired data is never reconstructed. Delayed P2P arrival can therefore retry the original
+native Open row without weakening authentication or creating another round.
+
 ## Canonical native SDP outcome (25 October; HTTP/SDK handlers pending)
 
 Each native Pending/Live/Drained row now retains the SAME original Root outcome. Candidate

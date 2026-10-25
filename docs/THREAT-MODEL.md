@@ -1,5 +1,29 @@
 # Threat model; client integrity & enforcement boundaries
 
+## Native SDP producer cancellation and retry (25 October; inactive HTTP family)
+
+A lost waiter is not cancellation or no-publication evidence. The paid native producer
+exposes no raw task handle. Its queued command retains original body/metadata IO and actual
+UI/physical publication custody; the canonical outcome recovers the same Action if the
+observer disappears. Constructor failures also require this order: an ordered guard exists
+before the first fallible operation, with Writer then Registration before body/physical/task
+retirement. Partial metadata admission must not publish idle while the real worker remains.
+
+Live retry uses the same row/outcome/body/Session/intent under original current/deadline
+checks, and only after explicit Idle/NeverEntered/Capacity evidence. InFlight/Uncertain and
+other refusals cannot re-enqueue. A same-Phase buffer on another native collection counter
+is insufficient; zero-copy transfer and the producer both verify the exact fixed funding.
+No capacity, deadline, slot or profile resets are introduced. A closed attached action still
+requires Root's genuine unstarted retirement or actual engine settlement and receipt ACK.
+These private leaves do not establish production HTTP, SDK/RTC or physical acceptance.
+
+
+A missing first Offer/Answer receipt reports temporary Capacity only for the same current
+original pair/room/intent within its unchanged deadline. Exact known Action recovery stays
+before current refusal. A known receipt with absent input is still Unauthorized; consumed
+or expired data is never reconstructed. Delayed P2P arrival can therefore retry the original
+native Open row without weakening authentication or creating another round.
+
 ## Canonical outcome and native compaction (25 October; no live HTTP/SDK dispatch)
 
 A fixed fee or same Phase cannot authorize a newly substituted outcome. Final native

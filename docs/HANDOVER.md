@@ -1,5 +1,56 @@
 # Mewtual; Handover
 
+## Original paid SDP submission (25 October; focused checks pass, HTTP still closed)
+
+`communication-sdp-native-worker` continues from runtime `41e17a71`. The native adapter
+can reclaim the same Pending worker after Idle, NeverEntered or explicit prepublication
+Capacity history. It repeats Index/parent/row, body, intent, fee, Session, current UI/SDK/PC
+and original deadline checks. Published, InFlight, Uncertain and other refusals never
+re-enqueue a factory. No row/outcome/deadline is replaced or reset.
+
+A private paid submission worker carries the canonical Writer and actual native
+Registration into recorded LOW Seal, HIGH Seal or Open Actor calls. The actual UI commit
+and physical request move into separately funded publication custody. Its opaque waiter
+has no abort API. Capture of the actual Root Action precedes attachment, including after
+Return. Construction, admission, worker and output have explicit refusal/drop order; the
+first constructor snapshot is included in original fixed-row accounting. A closed Live
+action now also consults Root's actual unstarted-retirement gate; an admitted engine or
+unacknowledged terminal result still retains its independent obligations.
+
+The separate SDP transfer decodes the closed version8 payload, checks the actual original
+row counter and moves Storage::Sdp into VoiceSdpBody. A constructor refusal restores the
+same allocation, opened bytes and affine reply. Generic Data/confirmation limits are
+unchanged. Focused regressions cover partial construction, true State/worker retirement
+barriers without a surviving Incoming, actual mailbox admission, waiter loss, Return,
+same-row retry and native handoff under ordinary-pool pressure. Root's 631 V2 tests pass
+(16.82s), all331 native handoff tests pass (22.38s), and all8 actual blocked-TCP PC cases
+pass (86.76s), including the reviewed fixture correction.
+Both fixed history and task/storage graph tests pass within unchanged limits. The
+actual TCP regression found a liveness defect: a live original Open with no incoming SDP
+yet returned permanent Unauthorized. It now reports temporary Capacity only after exact
+current pair/room/PC/deadline checks. Known receipt with missing input still refuses, and
+expired/closed/foreign intents stay refused. Root and native regressions pass.
+A successful held-output test separately pins native body retirement after Actor capture
+while task/physical/UI custody remains paid until real completed-output collection.
+
+The full frontend suite passes (2,740 tests, 82.19s), with zero Svelte errors/warnings and
+production build (40.56s). Strict Root all-target/all-feature Clippy passes (2m20s), as do
+ambient-dependency checks. Native Cargo check (32.13s) and strict all-target Clippy (1m21s) pass after correcting a
+staged test-only re-export. Dependency audit still fails the inherited crypto-bigint0.5.5
+RUSTSEC-2026-0387 advisory; bans/licenses/sources pass. No dependency or ignore changed.
+Read-only adversarial review has no unresolved blocker/high/medium. It corrected a fixture
+which used shutdown-only wait_idle on a live Session. Foreign-session negative checks now
+retry only genuine pre-Ticket setup Capacity under one conservative original Claim bound;
+actual Crypto-pressure coverage pins zero rows/serial before successful admission. The
+initial TCP setup failure's precise resource limiter remains unconfirmed. The corrected
+fixture passes all8 cases under the original bounds; it does not discard the refusal.
+
+Runtime checkpoint `eab3da2b` is frozen; no unresolved review finding remains. Full validation
+of the preceding row checkpoint runs separately; neither complete suite is yet claimed. Production refuses the entire SDP HTTP
+family; handlers, SDK WebCrypto/RTC, fresh rounds, multi-peer/media relay, combined and
+physical acceptance remain unfinished. No live V2 activation is included.
+
+
 ## Canonical native SDP outcomes (25 October; focused checks pass, not live V2)
 
 `communication-sdp-row-outcomes` continues from Root/Actor outcome commit `4b483768` and

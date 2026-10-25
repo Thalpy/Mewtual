@@ -1,5 +1,23 @@
 # Mewtual; Architecture
 
+## Paid original SDP producer (25 October; HTTP dispatch still closed)
+
+The native SDP producer now has an affine preparation and a separately paid detached task.
+Its canonical row can reclaim a worker only on original Idle/NeverEntered/Capacity history,
+under final current and deadline checks; uncertain or published work is recovered instead.
+Construction installs an ordered guard before any fallible snapshot/copy operation. Writer
+retires before Registration, which retires before physical custody and the final payment.
+The worker's original Copy keeps UI publication ordering through queued Actor work, even
+if its observer disappears. No task/abort handle escapes. Actual output stays paid until
+collection, and an actual Root Action is captured before fallible native attachment.
+
+SDP body transfer uses its distinct storage and original row IO counter. It never widens
+confirmation Data and restores identical opened backing on local construction refusal.
+The initial provenance snapshot belongs to the fixed row fee; native construction,
+admission and task/output graphs are inventoried as separate execution phases within the
+same task allowance. This is a private producer, not an enabled HTTP/SDK/RTC path.
+
+
 ## Canonical native SDP outcomes (25 October; production vertical pending)
 
 The shared native Index installs one original Root outcome per parent/PC/purpose after
