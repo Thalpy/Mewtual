@@ -1,5 +1,19 @@
 # Chat, files and voice implementation evidence
 
+## 25 October: corrected checkpoint final validation
+
+The corrected native source passes862 unit+5 ACL tests,0failed/ignored. Both original
+2304B layout assertions now pass unchanged. Root3,675pass/24ignored and current frontend
+2,887pass/Svelte0errors/0warnings/build37.20s are green. Full backend commands ran in X
+on byte-identical Rust/interop source. An additional current Y native build and all five
+real native_browser compatibility scenarios pass33.71s against the changed browser module.
+No second full Rust suite ran concurrently or redundantly in Y. Detailed commands, first
+failed-run history, review findings/fixes and inherited cargo-deny failure are in HANDOVER.
+
+This validates the current native admission and inactive browser leaves/cleanup. It does
+not implement the actual op28 browser handoff/status driver or establish media/physical
+acceptance. App V2 selection remains OFF; the remaining boundaries below are still open.
+
 ## 25 October: native media admission and inactive browser ownership leaves
 
 These boundaries are separate. A passing leaf test is not completion of the live handoff.

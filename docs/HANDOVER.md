@@ -1,5 +1,35 @@
 # Mewtual; Handover
 
+## Browser ownership/cleanup checkpoint validated (25 October)
+
+The browser runtime at4d68fa00 plus native layout repair6c7f547e has completed its checks.
+All2,887 frontend tests pass65.07s; Svelte reports0errors/0warnings and build passes37.20s.
+An isolated current-source native build succeeds, then all five actual native_browser
+HTTP/WebCrypto/blocked-TCP compatibility scenarios pass33.71s using THIS branch's changed
+RTC/broker module. This includes maximum Offer/Answer, exact lost replies and the native
+admission/cleanup regressions. It is not actual op28 HTTP or physical RTC/media acceptance.
+
+Rust production/test source and interop script are byte-identical to the corrected X
+checkpoint (verified by git diff). Its complete Root suite passes3,675 tests/24ignored;
+its complete native suite passes862 unit+5 ACL tests,0failed/ignored. Those full backend
+runs were performed in X; no duplicate full Rust suite was run in Y. The extra Y-native
+compatibility build/run specifically covers the changed browser module. Root/native fmt,
+strict Clippy, separate native check and ambient checks pass. Cargo deny still fails the
+inherited crypto-bigint0.5.5/RUSTSEC-2026-0387 advisory; no dependency/ignore changed.
+
+The first native run's two fixed-layout failures are resolved without raising caps; its
+corrected full rerun completed19:58:11UTC. Read-only adversarial review has no unresolved
+blocker/high/medium. The narrower dynamic stored-box/last-phase drop observer remains a
+documented follow-up; current payment/declaration ordering is statically reviewed.
+Startup/flows were not applicable to these non-setup/non-UI changes.
+
+This is a validated checkpoint, not completion of the communication plan. The actual
+one-pair op28 browser/native media pilot is still NOT implemented. Independent payment,
+fresh post-native transfer/status driving and automatic real-PC revocation execution are
+next, followed by native index/negotiation retirement, shared Session/multi-peer composition,
+App activation/tracks, relay and combined acceptance. Physical independent audio/network
+evidence remains unavailable with one desktop. App V2 selection remains OFF.
+
 ## Original RTC failed-close cleanup (25 October; pilot still open)
 
 Review of the proposed one-pair media pilot found a prerequisite: the original SDP owner

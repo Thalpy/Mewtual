@@ -1,5 +1,13 @@
 # Next voice milestone: native result recovery
 
+## Final checkpoint status (25 October)
+
+Root3,675pass/24ignored, corrected native867pass, frontend2,887pass/Svelte/build and the
+five additional current-browser/native compatibility cases pass. HANDOVER distinguishes
+the full identical-backend runs from the extra changed-browser check and records review,
+fixed layout/cleanup defects, inherited audit failure and exact limitations. No App V2
+activation or completed media-handoff claim follows. Implement the one-pair pilot below.
+
 ## 25 October: original RTC close errors retain custody; implement the one-pair pilot
 
 Original SDP peer cleanup now retains/retries an actual failed close and prevents native
