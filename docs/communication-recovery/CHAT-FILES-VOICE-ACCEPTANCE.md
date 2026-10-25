@@ -1,5 +1,28 @@
 # Chat, files and voice implementation evidence
 
+## 25 October: native media admission and inactive browser ownership leaves
+
+These boundaries are separate. A passing leaf test is not completion of the live handoff.
+
+| Boundary | Current evidence | Still open |
+| --- | --- | --- |
+| Original native media admission | Control28, exact native Session/PC/key/SDK and canonical drained rows; actual Actor admission. Native race/queue/lost-output tests pass. | Real op28 HTTP/browser success and lost-reply acceptance. |
+| Fixed native payment | Boxed media state fits existing2304B rows and288B PC metadata; Task3568/4096B and Control2248B checks pass. | Final native full rerun after the earlier two layout failures; see HANDOVER. |
+| Same-peer browser transfer | Runtime-private one-shot leaf moves the same controlled RTC peer and severs old currentness; late-getter HIGH fixed and regression-pinned. | Independent broker prepayment and the actual authenticated transfer consumer. |
+| Freshness bookkeeping | Passive one-token/start-anchored5s gate; delayed replies, capacity, Close and clock precision tests pass. | Actual timer/status driver that closes and joins the real peer during hung IO. |
+| Failed SDK close | Original and media owners retain peer custody on failure; framed broker test withholds native release and64KiB payment until retry succeeds. | Native/WebView provider and physical media acceptance. |
+| Negotiation retirement | Original Source/Lower custody remains paid; early cleanup guards are tested. | Independent native media index, exact old-history compaction and shared Session/per-pair composition. |
+
+Latest frontend tests pass2,887 with Svelte0errors/0warnings and build37.20s. Read-only
+review has no unresolved blocker/high/medium. Complete unchanged Root results and native
+run history are recorded in HANDOVER. Current Y RTC/native compatibility is queued after
+the corrected X native full run; no concurrent heavy Rust suite was started. Startup/flow
+scripts were not applicable to these non-UI/non-setup changes.
+
+App V2 selection remains OFF. The one-pair browser/native media pilot, supported multiparty
+composition, operational renewal, tracks/TURN/member media relay and combined/physical
+acceptance remain unfinished. Only one desktop is available for physical evidence.
+
 ## 25 October: original native media obligation; actual browser transfer still open
 
 The authenticated service has a Control-only original-PC media claim, with full original
