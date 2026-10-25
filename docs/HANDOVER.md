@@ -1,5 +1,15 @@
 # Mewtual; Handover
 
+## HTTP checkpoint: full Root suite passed (25 October)
+
+The `communication-sdp-native-http` candidate passes the complete Root command
+`cargo test --all --all-features -j1`: 3,650 passed, 0 failed, 24 ignored across59 summaries
+in86m06s. This is the unchanged Ready/HTTP candidate, not the newer media-custody work.
+The separate native full suite started16:27:46UTC and is still running. All2,851 frontend
+tests, Svelte checks, production build and Root/native strict lint/check gates reported
+below passed. The inherited dependency advisory remains unresolved. No App activation,
+live media, relay or physical acceptance claim is added.
+
 ## Activation status correction (25 October)
 
 The unused plaintext call driver is explicitly a contract-test model, not the production
