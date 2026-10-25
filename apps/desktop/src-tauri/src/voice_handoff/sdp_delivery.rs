@@ -14,6 +14,7 @@ use catcoms_app::{
     VOICE_SDP_DELIVERY_RPC_BYTES,
 };
 use catcoms_sync::voice_v2::chain::sdp_handoff::{Copy, TaskCopy};
+#[cfg(test)]
 use catcoms_sync::voice_v2::crypto_actions::CryptoAction;
 use catcoms_sync::voice_v2::sdp::{SdpDelivery, SdpDeliveryAdmission};
 use catcoms_sync::voice_v2::VoiceError;

@@ -39,7 +39,7 @@ pub(super) use key_session::KeySessionReceipt;
 pub(in crate::voice_handoff) use ready::{ReadyContinuation, ReadyProgress};
 pub(super) use sdk::Receipt as SdkReceipt;
 pub(super) use sdp::Receipt as SdpReceipt;
-#[cfg(test)]
+// Delivery construction enforces this inventory before admitting its production Task.
 pub(in crate::voice_handoff) use sdp_history::layout_bytes as sdp_history_layout_bytes;
 pub(in crate::voice_handoff) use sdp_history::{
     DeliveryState as SdpDeliveryState, Snapshot as SdpHistory,
