@@ -14,11 +14,16 @@ mod engine;
 mod input;
 pub mod publication;
 mod publication_admission;
+mod result_admission;
 pub use delivery::{SdpDelivery, SdpOpenOutput, SdpOpenResult};
 pub use engine::{sdp_engine_admission_bytes, SdpEngineAdmission};
 pub(crate) use input::InputCurrent;
 pub use input::{sdp_input_admission_bytes, SdpInputAdmission};
 pub use publication_admission::SdpPublicationAdmission;
+pub use result_admission::{
+    sdp_result_hash_frame_bytes, sdp_result_preparation_bytes, sdp_result_rpc_frame_bytes,
+    SdpResultAdmission, SdpResultIdentity,
+};
 
 /// Commit exact, bounded Seal input before entering native admission locks. This uses
 /// the same domain/length framing as the retained Root ActionBinding, without retaining

@@ -39,6 +39,7 @@ mod sdp_body;
 mod sdp_engine;
 mod sdp_input;
 mod sdp_ops;
+mod sdp_result;
 pub use body::{
     VoiceConfirmationBody, VoiceConfirmationCompletion, VOICE_CONFIRMATION_BODY_METADATA_BYTES,
 };
@@ -54,6 +55,9 @@ pub use sdp_input::{
     voice_sdp_input_rpc_bytes, VoiceSdpInputPublisher, VoiceSdpInputWork, VOICE_SDP_INPUT_RPC_BYTES,
 };
 pub use sdp_ops::{VoiceSdpPublication, VoiceSdpRecordedInput, VoiceSdpRecordedQueue};
+pub use sdp_result::{
+    VoiceSdpResult, VoiceSdpResultInput, VoiceSdpResultPublisher, VoiceSdpResultQueue,
+};
 
 /// Actual queued/result ownership for one initial SDP-intent RPC. A lost observer or
 /// closed reply does not refund its phase contribution before Root and the reply retire.
@@ -128,6 +132,7 @@ enum Command {
     Sdp(sdp_ops::Command),
     SdpInput(sdp_input::Command),
     SdpEngine(sdp_engine::Command),
+    SdpResult(sdp_result::Command),
     Stop {
         grant: Arc<CallGrant>,
         reply: Reply<()>,
@@ -249,6 +254,7 @@ impl Command {
             Self::Sdp(command) => sdp_ops::apply(command, server),
             Self::SdpInput(command) => sdp_input::apply(command, server),
             Self::SdpEngine(command) => sdp_engine::apply(command, server),
+            Self::SdpResult(command) => sdp_result::apply(command, server),
             Self::Stop { grant, reply } => {
                 // An admitted cleanup must run even if its reply is lost. Unlike a factory,
                 // this only retires the SAME original allocation and cannot create authority.

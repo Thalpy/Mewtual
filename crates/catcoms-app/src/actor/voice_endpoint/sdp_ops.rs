@@ -464,7 +464,10 @@ fn metadata(copy: Copy, intent: &Arc<InitialSdpIntent>) -> Result<Work, VoiceEnd
     check_metadata(&copy, intent)?;
     Ok(Work::Metadata(copy))
 }
-fn check_metadata(copy: &Copy, intent: &Arc<InitialSdpIntent>) -> Result<(), VoiceEndpointError> {
+pub(super) fn check_metadata(
+    copy: &Copy,
+    intent: &Arc<InitialSdpIntent>,
+) -> Result<(), VoiceEndpointError> {
     if !copy.uses_intent(intent) || !copy.has_keepalive() {
         return Err(VoiceEndpointError::Protocol(VoiceError::Unauthorized));
     }

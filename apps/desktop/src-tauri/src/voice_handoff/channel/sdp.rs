@@ -21,6 +21,51 @@ pub(in crate::voice_handoff) struct Permit {
     position: Arc<PhysicalPosition>,
 }
 impl Permit {
+    /// Header-only capacity for the SAME already registered Result row. The caller
+    /// resolved its actual native Session/parent/purpose under the index first. Full
+    /// encrypted Action/output bindings are checked after AEAD by the Result adapter.
+    #[allow(clippy::too_many_arguments)]
+    pub(in crate::voice_handoff) fn original_result(
+        authenticated: &AuthenticatedRequest,
+        session: Arc<SessionIdentity>,
+        phase: Arc<sdp_handoff::Phase>,
+        intent: Arc<InitialSdpIntent>,
+        funding: Arc<NativeRowFunding>,
+        scope: Scope,
+        clock: Arc<dyn catcoms_rt::Clock>,
+    ) -> Result<Self, VoiceError> {
+        let purpose = match authenticated.operation() {
+            Operation::SdpSealedResult => NativeRowPurpose::Seal,
+            Operation::SdpOpenedResult => NativeRowPurpose::Open,
+            _ => return Err(VoiceError::Unauthorized),
+        };
+        if !authenticated.belongs_to(&session)
+            || authenticated.kind() != BodyKind::Sdp
+            || !super::super::requests::sdp_action::wire_shape(
+                authenticated.operation(),
+                authenticated.kind(),
+                authenticated.logical(),
+                authenticated.length(),
+            )
+            || !funding.uses_phase(&phase)
+            || funding.purpose() != purpose
+            || !intent.uses_phase(&phase)
+            || !phase.effect().is_live()
+        {
+            return Err(VoiceError::Unauthorized);
+        }
+        intent.remaining_at(clock.now_ms(), clock.monotonic_ms())?;
+        Ok(Self {
+            phase,
+            intent,
+            funding,
+            session,
+            scope,
+            request: authenticated.request,
+            clock,
+            position: authenticated.worker.position.clone(),
+        })
+    }
     /// Call outside native fences: the fixed fee is recovered/paid before any body
     /// allocation. Only the native ledger should resolve these actual original owners.
     /// Header MAC alone never supplies them, and equal labels cannot substitute a Phase.
@@ -75,7 +120,12 @@ impl Permit {
             || !self.phase.uses(&original.resources, self.scope)
             || self.scope.group != original.group
             || !self.funding.uses_phase(&self.phase)
-            || self.funding.purpose() != NativeRowPurpose::Seal
+            || self.funding.purpose()
+                != match authenticated.operation() {
+                    Operation::SdpSealBegin | Operation::SdpSealedResult => NativeRowPurpose::Seal,
+                    Operation::SdpOpenedResult => NativeRowPurpose::Open,
+                    _ => return Err(Refused::Binding),
+                }
         {
             return Err(Refused::Binding);
         }

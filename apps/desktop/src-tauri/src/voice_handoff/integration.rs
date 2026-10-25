@@ -17,6 +17,7 @@ mod sdp_outcome;
 mod sdp_rows;
 mod sdp_submission;
 mod transition;
+pub(crate) use sdp_http::with_result_completion;
 pub(crate) mod webcrypto;
 pub(crate) use confirmation::{
     confirmation_alias_claims, confirmation_framed_round_trip, confirmation_known_incoming_retry,

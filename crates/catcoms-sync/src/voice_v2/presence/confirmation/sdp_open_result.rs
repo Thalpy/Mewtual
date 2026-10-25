@@ -6,6 +6,7 @@ use crate::voice_v2::runtime::ActorOwner;
 use crate::voice_v2::sdp::{SdpDelivery, SdpOpenOutput, SdpOpenResult};
 
 impl LocalJoin {
+    #[cfg(test)]
     #[allow(clippy::too_many_arguments)]
     pub(crate) fn submit_sdp_open_result(
         &mut self,
@@ -16,6 +17,30 @@ impl LocalJoin {
         authority: &Authority<'_>,
         clock: &dyn Clock,
         final_owner: impl FnOnce(u64, u64) -> Result<(), VoiceError>,
+    ) -> Result<SdpOpenResult, VoiceError> {
+        self.submit_sdp_open_result_scoped(
+            actor,
+            room,
+            action,
+            output,
+            authority,
+            clock,
+            final_owner,
+            |step| step.commit(),
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn submit_sdp_open_result_scoped(
+        &mut self,
+        actor: &ActorOwner,
+        room: &RoomAuthority,
+        action: &Arc<CryptoAction>,
+        output: SdpOpenOutput<'_>,
+        authority: &Authority<'_>,
+        clock: &dyn Clock,
+        final_owner: impl FnOnce(u64, u64) -> Result<(), VoiceError>,
+        publish: impl FnOnce(crate::voice_v2::sdp::SdpResultAdmission<'_>) -> Result<(), VoiceError>,
     ) -> Result<SdpOpenResult, VoiceError> {
         if room.scope != self.scope
             || !actor.uses_resources(&self.resources)
@@ -62,6 +87,14 @@ impl LocalJoin {
         }
         let pair_pin = pair.pin.clone();
         let _preparation = action.begin_result_preparation()?;
+        if crate::voice_v2::sdp::sdp_result_preparation_bytes(
+            packet.aad().len(),
+            packet.ciphertext().len(),
+        )
+        .is_none_or(|bytes| bytes > action.engine_bytes())
+        {
+            return Err(VoiceError::Capacity);
+        }
         self.pair_current(packet.header.handshake, authority, clock)?;
         let mut prepared = Some(self.ledger.validate_inbound_commit(
             packet.token,
@@ -108,39 +141,76 @@ impl LocalJoin {
             .validate_inbound_owner(ready, authority, clock)?;
         // All callback-bearing samples precede Engine. The final origin repeats original
         // current owners using only try-locks and pure observations; no await is allowed.
-        let origin = actor.prepare_local_origin(packet.issuer, authority.context)?;
-        let observed = action.observe_sdp_open_output(output)?;
+        let mut origin = Some(actor.prepare_local_origin(packet.issuer, authority.context)?);
+        let (wall, mono) = origin
+            .as_ref()
+            .expect("original Actor samples")
+            .observed_time();
+        let mut observed = Some(action.observe_sdp_open_output(output)?);
         let mut retired_packet = None;
-        let result = observed.commit_with_delivery(|own_mono, own_wall| {
-            origin.with_origin(|wall, mono, origin| {
-                final_owner(wall, mono)?;
-                if !room.lease.is_live()
-                    || !pc.current_at(wall, mono)
-                    || !admission.authorized_at(wall, mono)
-                {
-                    return Err(VoiceError::Unauthorized);
+        let mut result = None;
+        let mut final_owner = Some(final_owner);
+        {
+            let mut commit = || {
+                let committed = observed
+                    .take()
+                    .ok_or(VoiceError::Unauthorized)?
+                    .commit_with_delivery(|own_mono, own_wall| {
+                        origin.take().expect("one original origin").with_origin(
+                            |wall, mono, origin| {
+                                final_owner.take().expect("one original owner check")(wall, mono)?;
+                                if !room.lease.is_live()
+                                    || !pc.current_at(wall, mono)
+                                    || !admission.authorized_at(wall, mono)
+                                {
+                                    return Err(VoiceError::Unauthorized);
+                                }
+                                action.check_pending_at(own_mono, own_wall)?;
+                                prepared.as_ref().expect("one original token").check_at(
+                                    origin.epoch(),
+                                    wall,
+                                    mono,
+                                )?;
+                                origin.publish(|| {
+                                    retired_packet = Some(
+                                        self.ledger.consume_validated_inbound_deferred(
+                                            prepared
+                                                .take()
+                                                .expect("one original token consumption"),
+                                        ),
+                                    );
+                                })
+                            },
+                        )?;
+                        Ok((
+                            terminal.take().expect("one exact Open terminal"),
+                            delivery.take(),
+                        ))
+                    });
+                let status = committed.as_ref().map(|_| ()).map_err(|error| *error);
+                result = Some(committed);
+                status
+            };
+            let identity = match output {
+                SdpOpenOutput::Plaintext { claimed_tag, .. } => {
+                    crate::voice_v2::sdp::SdpResultIdentity::Bytes(claimed_tag)
                 }
-                action.check_pending_at(own_mono, own_wall)?;
-                prepared.as_ref().expect("one original token").check_at(
-                    origin.epoch(),
-                    wall,
-                    mono,
-                )?;
-                origin.publish(|| {
-                    retired_packet = Some(self.ledger.consume_validated_inbound_deferred(
-                        prepared.take().expect("one original token consumption"),
-                    ));
-                })
-            })?;
-            Ok((
-                terminal.take().expect("one exact Open terminal"),
-                delivery.take(),
-            ))
-        });
+                SdpOpenOutput::AuthenticationFailed => {
+                    crate::voice_v2::sdp::SdpResultIdentity::AuthenticationFailed
+                }
+            };
+            publish(crate::voice_v2::sdp::SdpResultAdmission::new(
+                action,
+                identity,
+                wall,
+                mono,
+                &mut commit,
+            ))?;
+        }
         // Destruction can return slots, notify revocation and retire PhaseLoans. Keep ALL
         // these actual owners outside Engine/Group/Policy even on refusal and exact retry.
         drop((retired_packet, prepared, terminal, delivery));
-        result?;
+        result.ok_or(VoiceError::Unauthorized)??;
         action
             .recover_sdp_open_result(output)?
             .ok_or(VoiceError::Unauthorized)

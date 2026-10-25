@@ -1,5 +1,23 @@
 # Threat model; client integrity & enforcement boundaries
 
+## Native SDP Result ownership and uncertainty (25 October; disabled family)
+
+An authenticated header only admits bounded capacity for an existing original native row.
+Full Session/selected owner/parent/purpose/Action and actual output-tag binding precedes
+first publication; hashing/signing/Clock callbacks precede native final fences. Root's
+borrowed Result tail cannot escape the Actor call. The native final fence is lexical
+through Engine/Group/Policy publication, then releases before callback cleanup/history.
+No-op, refusal, unwind, stale PC or replaced owners cannot fabricate an accepted terminal.
+
+Exact accepted/rejected history survives consumed tokens and lost replies without creating
+another delivery or authorizing SDK/RTC use. AEAD failure is a distinct output domain and
+never fabricated plaintext. Native Body and metadata keep one-way Task custody; original
+payment survives synchronous sender completion and actual last-reference destruction.
+Observer retirement or a fixed Control reply does not establish funding0, SDK settlement,
+ACK, Return or fresh RTC authority. Explicit historical hashing and pending-engine peak
+inventories preserve current bounds. Native TCP tests mock AEAD output; they do not prove
+browser SDK execution, RTC, media isolation or physical acceptance. SDP stays disabled.
+
 ## Actual-Actor SDP engine currentness (25 October; production family refused)
 
 The private SDP engine path no longer relies on generic permit admission as its only Root

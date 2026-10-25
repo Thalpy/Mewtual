@@ -1,5 +1,24 @@
 # Mewtual; Interfaces & Hooks Schema
 
+## Scoped SDP Result contract (25 October; private opcodes19/20/21)
+
+`submit_voice_sdp_result_scoped` and `submit_voice_sdp_open_result_scoped` lend
+`SdpResultAdmission` only after original Clock/hash/signature/capacity preparation.
+`matches` compares actual Action allocation plus `SdpResultIdentity` (bytes tag versus
+closed AEAD failure); equal serialized labels cannot substitute ownership. Commit returns
+only unit; the enclosing factory retains owned preparation and returns canonical metadata.
+A no-op hook refuses; an exact terminal retry may bypass/drop an unused hook successfully.
+Native must release lexical guards before hook return, not retain UI in Result output.
+
+`queue_voice_sdp_result_scoped` eagerly claims one `VoiceSdpResultInput` and constructs
+ordered paid work before returning its sender. It uses one original Body/metadata RPC,
+not another reply channel or output copy. Its exact4KiB inventory includes Root history/
+hash survivors; pending scratch has a checked original-engine inventory. Opcode19 sealed
+bytes and20 Open plaintext use existing-row authenticated class2 intake;21 is closed
+metadata-only failure with the same Task custody. All return fixed version8 history/refusal,
+with engine settlement/ACK/Return/delivery separate. Shipping Host still refuses them.
+See HANDOVER for current evidence and incomplete browser execution/RTC activation.
+
 ## Scoped SDP engine gate and private permit (25 October; disabled family)
 
 `ChannelSync::with_voice_sdp_engine_admission` lends one `SdpEngineAdmission` after original

@@ -565,7 +565,20 @@ async fn confirmation_over_blocked_tcp(
     pc_cases: Option<u8>,
 ) {
     let clock = (pc_cases == Some(8)).then(crate::voice_handoff::integration::ExpiryClock::new);
-    if let Some(clock) = clock {
+    if matches!(pc_cases, Some(10 | 11)) {
+        crate::voice_handoff::integration::with_result_completion(
+            std::sync::Arc::new(tokio::sync::Barrier::new(2)),
+            confirmation_over_blocked_tcp_inner(
+                framed,
+                reject,
+                known_incoming,
+                orphan,
+                pc_cases,
+                None,
+            ),
+        )
+        .await;
+    } else if let Some(clock) = clock {
         crate::voice_handoff::integration::with_expiry_clock(
             clock.clone(),
             confirmation_over_blocked_tcp_inner(
@@ -832,4 +845,16 @@ async fn native_v2_pc_intent_original_http_begin_history_return_and_premature_hi
 async fn native_v2_original_sdp_engine_uses_actual_actor_and_recovers_lost_permit_after_queue_and_lock_races(
 ) {
     confirmation_over_blocked_tcp(true, false, false, false, Some(9)).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn native_v2_original_sdp_result_uses_actual_actor_and_survives_eager_cancellation_lock_and_history_retries(
+) {
+    confirmation_over_blocked_tcp(true, false, false, false, Some(10)).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn native_v2_sdp_result_lost_after_commit_recovers_original_seal_and_plaintext_open_through_tcp_bridge(
+) {
+    confirmation_over_blocked_tcp(true, false, false, false, Some(11)).await;
 }

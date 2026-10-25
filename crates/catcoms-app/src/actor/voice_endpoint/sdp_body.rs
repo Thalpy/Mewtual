@@ -43,13 +43,37 @@ pub const VOICE_SDP_RPC_FIXED_BYTES: usize = std::mem::size_of::<ArcAllocation<S
 /// into that future before returning. Backing allocation/common channel graph remains
 /// additive in both phases. Native's enclosing worker/publication needs separate payment.
 pub const fn voice_sdp_rpc_bytes(future_bytes: usize) -> usize {
-    let transient = if future_bytes > super::sdp_ops::RECORDED_CONSTRUCTION_BYTES {
+    let construction = super::sdp_ops::RECORDED_CONSTRUCTION_BYTES;
+    let transient = if future_bytes > construction {
         future_bytes
     } else {
-        super::sdp_ops::RECORDED_CONSTRUCTION_BYTES
+        construction
     };
     VOICE_SDP_RPC_FIXED_BYTES.saturating_add(transient)
 }
+
+/// Exact scoped Result RPC, including the Root historical/surviving frame. There is
+/// one result type in this channel, so count its actual completion and pending rather
+/// than adding mutually exclusive legacy result types. Sender backing can remain live
+/// while the Actor executes Root: those two graphs are deliberately ADDITIVE here.
+pub(super) const fn voice_sdp_result_rpc_bytes(future_bytes: usize) -> usize {
+    let transient = if future_bytes > super::sdp_result::CONSTRUCTION_BYTES {
+        future_bytes
+    } else {
+        super::sdp_result::CONSTRUCTION_BYTES
+    };
+    std::mem::size_of::<ArcAllocation<State>>()
+        + std::mem::size_of::<ArcAllocation<Work>>()
+        + std::mem::size_of::<super::Command>()
+        + std::mem::size_of::<crate::AppCommand>()
+        + std::mem::size_of::<VoiceSdpBody>()
+        + std::mem::size_of::<VoiceSdpCompletion<super::sdp_result::VoiceSdpResult>>()
+        + std::mem::size_of::<VoiceSdpPending<super::sdp_result::VoiceSdpResult>>()
+        + 1024 // same pinned Tokio channel/envelope bookkeeping; no Root allowance hidden here
+        + transient
+        + catcoms_sync::voice_v2::sdp::sdp_result_rpc_frame_bytes()
+}
+const _: () = assert!(voice_sdp_result_rpc_bytes(0) <= VOICE_SDP_RPC_METADATA_BYTES);
 const _: () = assert!(voice_sdp_rpc_bytes(0) <= VOICE_SDP_RPC_METADATA_BYTES);
 
 pub struct VoiceSdpBody {

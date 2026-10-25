@@ -327,6 +327,19 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         action: &Arc<voice_v2::crypto_actions::CryptoAction>,
         output: voice_v2::sdp::SdpOpenOutput<'_>,
     ) -> Result<voice_v2::sdp::SdpOpenResult, VoiceError> {
+        self.submit_voice_sdp_open_result_scoped(grant, action, output, |step| step.commit())
+    }
+
+    /// Lend the exact prepared Open Result to the trusted native final fence. A known
+    /// terminal may recover without invoking the hook; post-End history instead uses
+    /// the independently authenticated native registered Action path.
+    pub fn submit_voice_sdp_open_result_scoped(
+        &mut self,
+        grant: &Arc<CallGrant>,
+        action: &Arc<voice_v2::crypto_actions::CryptoAction>,
+        output: voice_v2::sdp::SdpOpenOutput<'_>,
+        publish: impl FnOnce(voice_v2::sdp::SdpResultAdmission<'_>) -> Result<(), VoiceError>,
+    ) -> Result<voice_v2::sdp::SdpOpenResult, VoiceError> {
         self.validate_current_voice_call_grant(grant)?;
         let context = self.voice_v2_context(grant.scope().room)?;
         let clock = self.voice_v2_clock();
@@ -352,7 +365,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         let members = super::ready::ready_member_snapshot(actor, &context, peer, &[])?;
         let call = participant.lease.clone();
         let watch = participant.watch.lease.clone();
-        let result = participant.join.submit_sdp_open_result(
+        let result = participant.join.submit_sdp_open_result_scoped(
             actor,
             &room,
             action,
@@ -370,6 +383,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
                     Err(VoiceError::Unauthorized)
                 }
             },
+            publish,
         )?;
         voice.endpoints.changed();
         Ok(result)
@@ -462,6 +476,34 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         ciphertext: &[u8],
         claimed_tag: [u8; 32],
     ) -> Result<voice_v2::crypto_actions::CryptoResultReceipt, VoiceError> {
+        self.submit_voice_sdp_result_scoped(grant, action, ciphertext, claimed_tag, |step| {
+            step.commit()
+        })
+    }
+
+    /// Sign and prepare before lending this synchronous final Result publication.
+    /// All owned preparation outlives the callback; native must release its guards
+    /// before returning. Exact historical success may bypass the callback entirely.
+    /// The loan cannot escape the actual Actor call:
+    /// ```compile_fail
+    /// use catcoms_rt::{CryptoRngCore, MeshTransport};
+    /// use catcoms_sync::{ChannelSync, voice_v2::{CallGrant, crypto_actions::CryptoAction, sdp::SdpResultAdmission}};
+    /// use std::sync::Arc;
+    /// fn escape<T: MeshTransport, R: CryptoRngCore>(sync: &mut ChannelSync<T, R>,
+    ///     grant: &Arc<CallGrant>, action: &Arc<CryptoAction>,
+    ///     retained: &mut Option<SdpResultAdmission<'static>>) {
+    ///     let _ = sync.submit_voice_sdp_result_scoped(grant, action, &[], [0; 32],
+    ///         |step| { *retained = Some(step); Ok(()) });
+    /// }
+    /// ```
+    pub fn submit_voice_sdp_result_scoped(
+        &mut self,
+        grant: &Arc<CallGrant>,
+        action: &Arc<voice_v2::crypto_actions::CryptoAction>,
+        ciphertext: &[u8],
+        claimed_tag: [u8; 32],
+        publish: impl FnOnce(voice_v2::sdp::SdpResultAdmission<'_>) -> Result<(), VoiceError>,
+    ) -> Result<voice_v2::crypto_actions::CryptoResultReceipt, VoiceError> {
         self.validate_current_voice_call_grant(grant)?;
         let context = self.voice_v2_context(grant.scope().room)?;
         let clock = self.voice_v2_clock();
@@ -487,7 +529,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         let members = super::ready::ready_member_snapshot(actor, &context, peer, &[])?;
         let call = participant.lease.clone();
         let watch = participant.watch.lease.clone();
-        let receipt = participant.join.submit_sdp_sealed_result(
+        let receipt = participant.join.submit_sdp_sealed_result_scoped(
             voice_v2::presence::ProtectedSealedResult {
                 actor,
                 room: &room,
@@ -511,6 +553,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
                     Err(VoiceError::Unauthorized)
                 }
             },
+            publish,
         )?;
         voice.endpoints.changed();
         Ok(receipt)

@@ -37,6 +37,7 @@ pub use super::chain::{
     HandoffLoan, PlanRetirement,
 };
 pub use handoff::{ProtectedCryptoBinding, ProtectedCryptoPlan};
+pub(in crate::voice_v2) use results::ObservedSdpResult;
 pub use results::{CryptoHandoffStatus, CryptoOutcome, CryptoResultReceipt, CryptoResultStatus};
 pub(super) use results::{ResultBinding, TerminalResult};
 

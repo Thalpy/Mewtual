@@ -8,6 +8,8 @@ use voice_v2::sdp::InitialSdpIntent;
 mod engine;
 #[path = "sdp/input.rs"]
 mod input;
+#[path = "sdp/result.rs"]
+mod result;
 
 fn observations(node: &VoiceTestNode) -> (u64, u64) {
     let runtime = node.voice_runtime.as_ref().unwrap();

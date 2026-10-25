@@ -45,7 +45,8 @@ pub use voice_endpoint::{
     VoiceConfirmationCompletion, VoiceContextPending, VoiceEndpointCommand, VoiceEndpointError,
     VoiceSdpBody, VoiceSdpBodyRefusal, VoiceSdpCompletion, VoiceSdpEnginePublisher,
     VoiceSdpEngineWork, VoiceSdpInputPublisher, VoiceSdpInputWork, VoiceSdpPending,
-    VoiceSdpPublication, VoiceSdpRecordedInput, VoiceSdpRecordedQueue, INITIAL_SDP_RPC_BYTES,
+    VoiceSdpPublication, VoiceSdpRecordedInput, VoiceSdpRecordedQueue, VoiceSdpResult,
+    VoiceSdpResultInput, VoiceSdpResultPublisher, VoiceSdpResultQueue, INITIAL_SDP_RPC_BYTES,
     VOICE_CONFIRMATION_BODY_METADATA_BYTES, VOICE_SDP_ENGINE_RPC_BYTES, VOICE_SDP_INPUT_RPC_BYTES,
     VOICE_SDP_RPC_FIXED_BYTES, VOICE_SDP_RPC_METADATA_BYTES,
 };

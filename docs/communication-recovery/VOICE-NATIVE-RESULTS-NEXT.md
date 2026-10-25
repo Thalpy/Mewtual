@@ -1,5 +1,23 @@
 # Next voice milestone: native result recovery
 
+## 25 October: native Result is staged; browser execution is next
+
+The scoped Root/App/native19/20/21 path now handles the original paid output and canonical
+accepted/rejected history. Preparation precedes lexical native fences; actual Action/output
+binding and Root Engine/Group/Policy remain final. Existing-row class2 intake preserves the
+original buffer on local constructor refusal. Body and metadata retain one-way Task custody;
+SDK settlement, ACK, Return and fresh RTC admission remain distinct. Production stays off.
+HANDOVER records focused/full/static status and current review; older sections below are
+checkpoint history, not a claim that this path is already activated.
+
+Next connect one original private browser owner through authenticated large Input,
+WebCrypto, exact native Result retry and actual SDK settlement. Preserve the one-execution
+latch and original output across lost replies; compose all real buffers/continuations with
+the Root pending peak instead of assigning shared credit twice. Expand native maximum Open,
+actual actor-stop and terminal-race cases, then add scoped fresh delivery and original
+SDP/ICE/RTC, fresh rounds, multi-peer, relay and combined acceptance. No mocked AEAD/TCP
+fixture substitutes for audible WebView or independent physical network acceptance.
+
 ## 25 October: scoped engine admission exists privately; complete Result next
 
 The actual-Actor engine gate now repeats current MLS/room/watch/call/pair and original

@@ -59,6 +59,30 @@ fn action(state: &State) -> Result<Option<&Arc<CryptoAction>>, VoiceError> {
     }
 }
 impl ResolvedRow {
+    /// Fixed historical Action selection for an authenticated Result. This does not
+    /// lend input, admit an engine or require a live PC. The caller must hash the
+    /// actual bounded output outside native guards and independently fence every
+    /// first effect. Equal wire labels alone never select an unregistered allocation.
+    pub(in crate::voice_handoff) fn sdp_result_action(
+        &self,
+        session: &Arc<SessionIdentity>,
+        expected: super::super::requests::Action,
+    ) -> Result<Arc<CryptoAction>, VoiceError> {
+        self.recover_sdp_publication()?;
+        let _index = self.transition_index()?;
+        let state = try_lock(&self.row.state)?;
+        if !sdp_rows::session(&state).is_some_and(|original| Arc::ptr_eq(original, session)) {
+            return Err(VoiceError::Unauthorized);
+        }
+        let original = action(&state)?.ok_or(VoiceError::Unauthorized)?;
+        if (original.serial(), original.version(), original.input_tag())
+            != (expected.serial, expected.version, expected.input_tag)
+        {
+            return Err(VoiceError::Unauthorized);
+        }
+        Ok(original.clone())
+    }
+
     /// Caller has already resolved the exact native purpose/parent. Repeat actual Session
     /// provenance before any recovery and again after Root observation. History stays
     /// available after End; it is not a current SDK/engine/factory or delivery admission.

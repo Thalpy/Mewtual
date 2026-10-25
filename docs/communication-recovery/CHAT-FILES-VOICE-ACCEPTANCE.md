@@ -1,5 +1,27 @@
 # Chat, files and voice implementation evidence
 
+## 25 October original native Result checkpoint (full validation pending)
+
+The scoped Root/App/native Result path is implemented privately; production still refuses
+SDP15-27. Exact original Body/metadata custody, final native/Root admission and canonical
+accepted/rejected history are separate from SDK settlement, ACK, Return and fresh RTC.
+Current focused evidence:790 Root voice tests,15 App SDP tests,343 native handoff tests,
+2 actual blocked-TCP Result cases plus one graph test pass. LOW's signed Offer reaches HIGH
+through B; native HIGH accepts plaintext or records exact AEAD rejection. Lost-after-commit
+reply, eager/capacity-wait/abandoned cancellation, lock-after-enqueue, same delivery retry
+and changed-output refusal are covered. AEAD output is mocked; no browser/RTC/audio claim.
+
+RPC3,836/4,096B includes Root history/hash; pending preparation is checked against original
+engine credit and actual encoding capacities. Native Task2,352/4,096B, adapter3,696B and
+unchanged Control12,279/12,288B pass. All2,754 frontend tests/check/build pass; lifetime
+escape fails and its positive control compiles. Review-driven whole-observer-bound fixes
+are being rechecked. Full Q Root/native and static gates remain required; older engine
+validation was intentionally superseded. The preceding0d983c95 full run is green:
+3,608 Root pass/24 ignored, native843+5 pass. See HANDOVER for audit and remaining gaps.
+
+This does not close browser SDK integration, actual settlement/delivery/RTC/ICE, fresh
+rounds, multi-peer composition, media relay, combined or independent physical acceptance.
+
 ## 25 October actual-Actor engine checkpoint (validation in progress)
 
 The private original SDP engine gate now checks registered Action/intent and actual current

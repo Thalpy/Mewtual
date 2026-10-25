@@ -5,6 +5,71 @@ use super::transition::try_lock;
 use super::*;
 use crate::voice_handoff::channel::sdp::Permit;
 impl Ledger {
+    /// Resolve a known Result row before any large allocation/counter debit. Header
+    /// labels select only existing paid native storage; they cannot create an Action.
+    pub(in crate::voice_handoff) fn sdp_result_intake(
+        &self,
+        selected: &SelectedHandoffOwner,
+        session: &Arc<SessionIdentity>,
+        authenticated: &AuthenticatedRequest,
+        clock: Arc<dyn catcoms_rt::Clock>,
+    ) -> Result<Permit, VoiceError> {
+        use catcoms_sync::voice_v2::chain::sdp_handoff::NativeRowPurpose;
+        let purpose = match authenticated.operation() {
+            Operation::SdpSealedResult => NativeRowPurpose::Seal,
+            Operation::SdpOpenedResult => NativeRowPurpose::Open,
+            _ => return Err(VoiceError::Unauthorized),
+        };
+        if !authenticated.belongs_to(session) || authenticated.kind() != BodyKind::Sdp {
+            return Err(VoiceError::Unauthorized);
+        }
+        let (phase, intent, funding) = {
+            let index = try_lock(&self.index)?;
+            let id = RowId::from_logical(authenticated.logical())?;
+            let row = index.rows[id.slot]
+                .as_ref()
+                .filter(|row| row.id == id)
+                .ok_or(VoiceError::Unauthorized)?;
+            let Purpose::Sdp {
+                parent,
+                purpose: original,
+            } = row.key.purpose
+            else {
+                return Err(VoiceError::Unauthorized);
+            };
+            if original != purpose
+                || !row.key.matches(selected, row.key.purpose)
+                || !row.key.lease.is_live()
+                || row.key.parent.as_ref().is_none_or(|actual| {
+                    actual.id != parent
+                        || index.rows[parent.slot]
+                            .as_ref()
+                            .is_none_or(|indexed| !Arc::ptr_eq(indexed, actual))
+                })
+            {
+                return Err(VoiceError::Unauthorized);
+            }
+            let state = try_lock(&row.state)?;
+            let owners = super::sdp_rows::input_owners(&state)?;
+            if !Arc::ptr_eq(owners.session, session) || owners.funding.purpose() != purpose {
+                return Err(VoiceError::Unauthorized);
+            }
+            (
+                owners.phase.clone(),
+                owners.intent.clone(),
+                owners.funding.clone(),
+            )
+        };
+        Permit::original_result(
+            authenticated,
+            session.clone(),
+            phase,
+            intent,
+            funding,
+            selected.binding().scope,
+            clock,
+        )
+    }
     pub(in crate::voice_handoff) fn sdp_begin_intake(
         &self,
         selected: &SelectedHandoffOwner,

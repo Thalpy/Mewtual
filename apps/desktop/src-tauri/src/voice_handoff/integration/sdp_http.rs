@@ -54,6 +54,15 @@ impl catcoms_rt::Clock for ExpiryClock {
     }
 }
 tokio::task_local! { static EXPIRY_CLOCK: Arc<ExpiryClock>; }
+tokio::task_local! { static RESULT_COMPLETE: Arc<tokio::sync::Barrier>; }
+/// Both real native endpoints finish their Result before either intentionally closes
+/// its PC. This test-only rendezvous supplies no protocol state or effect authority.
+pub(crate) async fn with_result_completion<F: std::future::Future>(
+    barrier: Arc<tokio::sync::Barrier>,
+    future: F,
+) -> F::Output {
+    RESULT_COMPLETE.scope(barrier, future).await
+}
 pub(crate) async fn with_expiry_clock<F: std::future::Future>(
     clock: Arc<ExpiryClock>,
     future: F,
@@ -140,7 +149,7 @@ pub(super) async fn exercise(
     parent: &ledger::ResolvedRow,
     pc_frame: &[u8],
     intent: &Arc<InitialSdpIntent>,
-    engine: bool,
+    effect: u8,
 ) -> RetiredProbe {
     let seal = intent.local_is_low();
     let operation = if seal { 15 } else { 16 };
@@ -194,7 +203,10 @@ pub(super) async fn exercise(
             )
             .await;
             if reply != capacity {
-                assert!(seal, "HIGH with no incoming Offer must wait");
+                assert!(
+                    seal || (effect >= 2 && reply.len() == 220 && reply[37] == 1),
+                    "HIGH without an actual incoming Offer must wait"
+                );
                 return reply;
             }
             let found = exchange(
@@ -207,7 +219,7 @@ pub(super) async fn exercise(
                 &resolve(&original, seal, false),
             )
             .await;
-            if !seal && found.len() == 220 {
+            if !seal && found.len() == 220 && (effect < 2 || found[37] == 1) {
                 return found;
             }
             clock.sleep(std::time::Duration::from_millis(10)).await;
@@ -217,7 +229,7 @@ pub(super) async fn exercise(
     .expect("original native HTTP observer bound");
     assert_eq!(&first[..2], &[8, 0]);
     assert_eq!(first.len(), 220);
-    assert_eq!(first[37], u8::from(seal));
+    assert_eq!(first[37], u8::from(seal || effect >= 2));
     let child: [u8; 16] = first[2..18].try_into().unwrap();
     let history = exchange(
         state,
@@ -281,7 +293,19 @@ pub(super) async fn exercise(
             version: u64::from_be_bytes(first[46..54].try_into().unwrap()),
             input_tag: first[54..86].try_into().unwrap(),
         };
-        if engine {
+        if effect >= 2 {
+            Box::pin(super::super::sdp_result::exercise(
+                state,
+                public,
+                route,
+                parent,
+                pc_frame,
+                ledger::RowId::from_logical(child).unwrap(),
+                action,
+                effect == 3,
+            ))
+            .await;
+        } else if effect == 1 {
             Box::pin(super::super::sdp_engine::exercise(
                 state,
                 public,
@@ -309,6 +333,29 @@ pub(super) async fn exercise(
         if let Ok(clock) = EXPIRY_CLOCK.try_with(Arc::clone) {
             expiry_after_history(state, public, route, parent, &original, intent, clock).await;
         }
+        if effect >= 2 {
+            let action = requests::Action {
+                serial: u64::from_be_bytes(first[38..46].try_into().unwrap()),
+                version: u64::from_be_bytes(first[46..54].try_into().unwrap()),
+                input_tag: first[54..86].try_into().unwrap(),
+            };
+            Box::pin(super::super::sdp_result::exercise_open(
+                state,
+                public,
+                route,
+                parent,
+                ledger::RowId::from_logical(child).unwrap(),
+                action,
+                effect == 2,
+            ))
+            .await;
+        }
+    }
+    if effect >= 2 {
+        let barrier = RESULT_COMPLETE.with(Arc::clone);
+        barrier.wait().await;
+        let pc = requests::pc::Request::decode(parent.id().logical(), pc_frame).unwrap();
+        parent.close_pc(route.session().identity(), &pc).unwrap();
     }
     let returned = exchange(
         state,
@@ -321,11 +368,11 @@ pub(super) async fn exercise(
     )
     .await;
     assert_eq!(returned[36], 1);
-    assert_eq!(returned[37], u8::from(seal));
+    assert_eq!(returned[37], u8::from(seal || effect >= 2));
     assert_eq!(
         returned[86],
-        u8::from(seal),
-        "closed negative must not invent engine settlement"
+        u8::from(seal || effect >= 2),
+        "engine settlement follows actual fixture completion only"
     );
     if seal {
         let mut input = existing(parent, true);

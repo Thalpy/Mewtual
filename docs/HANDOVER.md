@@ -1,5 +1,62 @@
 # Mewtual; Handover
 
+## Scoped native SDP Result checkpoint (25 October; production disabled)
+
+`communication-sdp-result` continues from pushed engine checkpoint `8348729b`.
+Root Seal/Open Result now prepares signing, hashing, token plans and fixed delivery
+candidates before lending a lifetime-bound `SdpResultAdmission`. Native matches the actual
+registered Action allocation and exact byte-tag/AEAD-failure domain, then tries original
+UI/Coordinator/route/index/parent/row ownership before the Engine -> Group -> Policy tail.
+UI is lexical and released before callback return. Prepared owners stay in the outer
+factory on refusal/unwind; no-op hooks cannot report success. Exact accepted/rejected
+terminal history may bypass the hook and survives consumed tokens, closure and lost replies.
+
+The eager App Result RPC uses the original immutable Body/metadata Copy and one reply
+channel. Ordered arguments/publisher retire before Work, including an unpolled sender,
+capacity-wait cancellation, abandoned commands and unused historical hooks. Its mailbox
+sender awaits a position before constructing the envelope. The complete Result RPC is
+3,836/4,096B, including explicit Root historical/surviving and SHA256/digest frames.
+Pending-only signed/token preparation is checked against the original engine allowance;
+ResultPreparation retains that credit through scratch destruction. Actual Vec capacities
+at growth boundaries through8KiB are tested. No quota was increased.
+
+Private native19/20/21 handlers exist; shipping Host still refuses the entire SDP family.
+Class2 Result intake resolves an existing original Session/parent/purpose row before large
+allocation or nonce debit. It moves the same authenticated buffer into Body, restores that
+buffer on constructor refusal and authenticates actual output bytes before historical retry.
+Body and AEAD-failure metadata both retain one-way Task/physical custody. Canonical positive
+history wins after uncertain completion. Observer destruction, sender Work retirement,
+engine settlement, ACK, Return and fresh RTC delivery are distinct; fixed Control output
+may outlive observer wrappers while sender Body/Task custody still remains paid.
+
+Focused evidence:790 Root voice tests,15 App SDP tests,343 native handoff tests,
+2 blocked-TCP Result cases plus the Task graph test pass. The real Source carries LOW's
+signed Offer through B while A-C is blocked; HIGH records either the exact AEAD rejection
+or an accepted plaintext Open. The latter retains the same prepared delivery on retry,
+without granting RTC. A barrier loses the actual reply after commit and verifies original
+funding until sender retirement. The native Task is2,352/4,096B; adapter3,696B; whole Control
+remains12,279/12,288B. Independent lifetime escape rejects with E0521 and its committed
+control compiles. All2,754 frontend tests, Svelte checks/build and fmt/ambient pass.
+Final two TCP Result cases and the Task graph pass (23.13s); existing Begin and engine
+TCP regressions pass (12.69s and11.69s). Root strict all-target/all-feature Clippy,
+separate native Cargo check/strict all-target Clippy pass. Final read-only adversarial
+review has no remaining blocker/high/medium. Full Root/native Q gates remain pending.
+
+The older `0d983c95` full run finished:3,608 Root pass,24 ignored; native843+5 pass.
+The separate full engine-worktree run was intentionally interrupted so full validation
+can cover this final Result stack once; it is not a test failure or a green engine/Q gate.
+Dependency audit has inherited crypto-bigint RUSTSEC-2026-0387, with no dependency/ignore
+change. Current full Root/native suites and static gates must be recorded before sign-off.
+Startup/visual-flow gates do not apply: no setup/runtime placement/UI/send/friend path changed.
+
+Next: connect one original paid browser owner through large Input, WebCrypto, exact Result,
+actual SDK settlement, ACK and Return; then scoped fresh delivery/RTC, ICE/fresh rounds,
+multi-peer composition, member media relay and combined acceptance. Native maximum Open
+and actual stopped-Actor coverage still need expansion. Mocked AEAD output and TCP state
+acceptance do not establish WebView cryptography, RTC, audible audio or physical networks.
+Only one desktop is available; independent physical acceptance remains unavailable.
+External download resume remains outside this worktree's scope.
+
 ## Actual-Actor SDP engine admission (25 October; private, validation in progress)
 
 `communication-sdp-engine` continues from pushed publication checkpoint `03315cf5`.

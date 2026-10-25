@@ -6,6 +6,7 @@ use super::*;
 use crate::voice_v2::presence::ProtectedSealedResult;
 
 impl LocalJoin {
+    #[cfg(test)]
     pub(crate) fn submit_sdp_sealed_result(
         &mut self,
         request: ProtectedSealedResult<'_>,
@@ -13,6 +14,25 @@ impl LocalJoin {
         authority: &Authority<'_>,
         clock: &dyn Clock,
         final_owner: impl FnOnce(u64, u64) -> Result<(), VoiceError>,
+    ) -> Result<CryptoResultReceipt, VoiceError> {
+        self.submit_sdp_sealed_result_scoped(
+            request,
+            signer,
+            authority,
+            clock,
+            final_owner,
+            |step| step.commit(),
+        )
+    }
+
+    pub(crate) fn submit_sdp_sealed_result_scoped(
+        &mut self,
+        request: ProtectedSealedResult<'_>,
+        signer: &dyn VoiceSigner,
+        authority: &Authority<'_>,
+        clock: &dyn Clock,
+        final_owner: impl FnOnce(u64, u64) -> Result<(), VoiceError>,
+        publish: impl FnOnce(crate::voice_v2::sdp::SdpResultAdmission<'_>) -> Result<(), VoiceError>,
     ) -> Result<CryptoResultReceipt, VoiceError> {
         let ProtectedSealedResult {
             actor,
@@ -63,6 +83,14 @@ impl LocalJoin {
         let peer = pair.binding.peer;
         let pair_pin = pair.pin.clone();
         let _preparation = action.begin_result_preparation()?;
+        if crate::voice_v2::sdp::sdp_result_preparation_bytes(
+            flight.reservation.aad.len(),
+            ciphertext.len(),
+        )
+        .is_none_or(|bytes| bytes > action.engine_bytes())
+        {
+            return Err(VoiceError::Capacity);
+        }
         self.current(signer, authority)?;
         self.pair_current(flight.handshake, authority, clock)?;
         let mut publication = Some(self.ledger.prepare_sealed_publication(
@@ -93,30 +121,57 @@ impl LocalJoin {
             binding: result_binding,
             outcome,
         });
-        let observation = action.observe_sdp_result(ciphertext, claimed_tag)?;
-        let origin = actor.prepare_local_origin(peer, authority.context)?;
+        let mut origin = Some(actor.prepare_local_origin(peer, authority.context)?);
+        let (wall, mono) = origin
+            .as_ref()
+            .expect("original Actor samples")
+            .observed_time();
+        // Actor preparation invokes injected Clock. Refresh the Action's original
+        // domain LAST so expiry during that preparation cannot authorize a Result.
+        let mut observation = Some(action.observe_sdp_result(ciphertext, claimed_tag)?);
         let mut retired_signed = None;
-        let result = observation.commit(|own_mono, own_wall| {
-            origin.with_origin(|wall, mono, origin| {
-                final_owner(wall, mono)?;
-                if !room.lease.is_live() || !pc.current_at(wall, mono) {
-                    return Err(VoiceError::Unauthorized);
-                }
-                action.check_pending_at(own_mono, own_wall)?;
-                publication.as_ref().expect("one prepared seal").check_at(
-                    origin.epoch(),
-                    wall,
-                    mono,
-                )?;
-                origin.publish(|| {
-                    retired_signed =
-                        Some(publication.take().expect("one seal publication").publish());
-                })
-            })?;
-            Ok(terminal.take().expect("one immutable terminal"))
-        });
+        let mut result = None;
+        let mut final_owner = Some(final_owner);
+        {
+            let mut commit = || {
+                let committed = observation.take().ok_or(VoiceError::Unauthorized)?.commit(
+                    |own_mono, own_wall| {
+                        origin.take().expect("one original origin").with_origin(
+                            |wall, mono, origin| {
+                                final_owner.take().expect("one original owner check")(wall, mono)?;
+                                if !room.lease.is_live() || !pc.current_at(wall, mono) {
+                                    return Err(VoiceError::Unauthorized);
+                                }
+                                action.check_pending_at(own_mono, own_wall)?;
+                                publication.as_ref().expect("one prepared seal").check_at(
+                                    origin.epoch(),
+                                    wall,
+                                    mono,
+                                )?;
+                                origin.publish(|| {
+                                    retired_signed = Some(
+                                        publication.take().expect("one seal publication").publish(),
+                                    );
+                                })
+                            },
+                        )?;
+                        Ok(terminal.take().expect("one immutable terminal"))
+                    },
+                );
+                let status = committed.as_ref().map(|_| ()).map_err(|error| *error);
+                result = Some(committed);
+                status
+            };
+            publish(crate::voice_v2::sdp::SdpResultAdmission::new(
+                action,
+                crate::voice_v2::sdp::SdpResultIdentity::Bytes(claimed_tag),
+                wall,
+                mono,
+                &mut commit,
+            ))?;
+        }
         // Signed clone, packet/slot/Phase and native result owners never drop under guards.
         drop((retired_signed, publication, terminal));
-        result
+        result.ok_or(VoiceError::Unauthorized)?
     }
 }

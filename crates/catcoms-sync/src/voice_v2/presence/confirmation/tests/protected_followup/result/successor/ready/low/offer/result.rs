@@ -2,6 +2,7 @@
 use super::*;
 use crate::voice_v2::crypto_actions::{CryptoOutcome, CryptoResultReceipt};
 use crate::voice_v2::presence::ProtectedSealedResult;
+mod admission;
 
 fn signer(p: &ProtectedFixture) -> Signer {
     let mut signer = Signer::original(p);

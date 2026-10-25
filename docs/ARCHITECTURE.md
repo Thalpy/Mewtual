@@ -1,5 +1,23 @@
 # Mewtual; Architecture
 
+## Original SDP Result publication (25 October; staged native path)
+
+Seal/Open prepare all fallible signature/hash/token/delivery work outside native guards,
+then lend one stack-only final Result tail on the actual Actor. Native checks the original
+indexed Action and exact output domain before UI/Coordinator/route/row admission; Root
+then holds Engine and current Group/Policy through infallible publication. Prepared owners
+stay outside the callback, including refusal/unwind. Native UI is lexical; post-hook
+history and cleanup never inherit it. A historical accepted/rejected terminal needs no
+new hook, input, engine or token, and is not fresh RTC authority.
+
+The eager original Body/metadata RPC has one channel and paid-last sender/observer ownership.
+Historical/hash frames are explicitly RPC-paid; pending scratch is checked against the
+retained original engine allowance. Native known-row Result intake transfers the same
+class2 allocation and attaches one-way Task/physical custody to Body or failure metadata.
+Canonical history can outlive observer wrappers while independent sender Work still owns
+its bytes/custody. Production SDP dispatch remains closed. HANDOVER records current gates
+and the remaining browser/SDK/RTC/composition/media boundaries.
+
 ## Scoped actual-Actor SDP engine admission (25 October; private)
 
 Engine candidate payment precedes current Actor origin capture; the same original Action's
