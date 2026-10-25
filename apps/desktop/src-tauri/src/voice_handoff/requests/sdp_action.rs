@@ -103,7 +103,7 @@ pub(in crate::voice_handoff) fn wire_shape(
             (RESULT_BYTES + 17..=RESULT_BYTES + MAX_SDP_PLAINTEXT + 16).contains(&bytes)
         }
         (Operation::SdpOpenedResult, BodyKind::Sdp) => {
-            (RESULT_BYTES + 1..=RESULT_BYTES + MAX_SDP_PLAINTEXT).contains(&bytes)
+            (RESULT_BYTES..=RESULT_BYTES + MAX_SDP_PLAINTEXT).contains(&bytes)
         }
         (Operation::SdpReceiptAck, BodyKind::Control) => bytes == ACTION_BYTES + 32,
         (Operation::SdpReturn | Operation::SdpHistory, BodyKind::Control) => bytes == ROW_BYTES,
@@ -208,7 +208,9 @@ impl<'a> Request<'a> {
             Operation::SdpOpenedResult if purpose == NativeRowPurpose::Open => Kind::Opened {
                 action: cursor.action()?,
                 tag: cursor.take()?,
-                bytes: payload(&mut cursor, 1, MAX_SDP_PLAINTEXT)?,
+                // A valid tag-only Open has zero plaintext. Preserve that exact
+                // successful SDK result; it is not AuthenticationFailed or SDP validity.
+                bytes: payload(&mut cursor, 0, MAX_SDP_PLAINTEXT)?,
             },
             Operation::SdpAuthenticationFailed if purpose == NativeRowPurpose::Open => {
                 Kind::AuthenticationFailed(cursor.action()?)

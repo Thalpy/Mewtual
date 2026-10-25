@@ -79,7 +79,7 @@ export function encodeVoiceSdpAction(value: VoiceSdpRow, request: VoiceSdpAction
     case "sealed": case "opened": {
       const sealed = request.kind === "sealed";
       if (value.purpose !== (sealed ? "seal" : "open") || !(request.bytes instanceof Uint8Array) ||
-          request.bytes.byteLength < (sealed ? 17 : 1) || request.bytes.byteLength > (sealed ? 8208 : 8192)) return refuse();
+          request.bytes.byteLength < (sealed ? 17 : 0) || request.bytes.byteLength > (sealed ? 8208 : 8192)) return refuse();
       fixed(request.tag, 32); operation = sealed ? 19 : 20; kind = 2; length = 100 + request.bytes.byteLength; break;
     }
     case "authentication-failed":

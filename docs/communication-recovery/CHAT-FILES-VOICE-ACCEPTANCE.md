@@ -5,9 +5,17 @@
 The private opcode17 reader and v8/tag3 decoder now provide bounded authenticated
 large-Input intake and exact original binding checks without copying payload bytes.
 They do not enable production SDP or connect WebCrypto/RTC. Borrowed backing transfer,
-actual SDK execution/settlement, empty successful Open Result representation, fresh
+actual SDK execution/settlement, a positive tag-only incoming native case, fresh
 delivery/RTC, multi-peer, relay and combined/physical acceptance remain open. HANDOVER
 records current focused/full/static evidence; no physical acceptance has been added.
+
+## 25 October: empty Open Result representation corrected privately
+
+The native/browser opcode20 grammar can represent exact empty successful plaintext;
+AuthenticationFailed remains separate. Original Action length/hash/ownership enforcement
+and nonempty SealBegin remain unchanged. The native negative19B->0B case/correct3B retry and a maximum8KiB
+Seal/Open nativeResult case through the actual TCP bridge pass; a genuine tag-only signed incoming packet's positive native
+case is still a test gap. This neither enables SDP nor establishes browser/RTC acceptance.
 
 ## 25 October original native Result checkpoint (full validation pending)
 

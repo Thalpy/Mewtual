@@ -12,12 +12,32 @@ of one exact ordinary fixed backing, with no plaintext copy or caller-object ret
 This is a standalone data boundary. The retained channel does not consume it yet:
 its existing framed cleanup clears `opened`, so integration must explicitly transfer the
 paid backing to one exclusive owner with one final clearer. Input Open16 is valid and
-successful AEAD may yield empty plaintext; native opcode20 currently refuses that result.
-Correct that mismatch before SDK integration, preserving exact success versus AEAD failure.
+successful AEAD may yield empty plaintext; opcode20 and the browser codec now represent
+that exact result separately from AEAD failure. The native positive tag-only case below
+remains a coverage gap before end-to-end SDK acceptance.
 No permission, quota or production dispatch was widened. Complete SDK/RTC ownership,
 settlement, fresh delivery, multi-peer, relay and physical acceptance remain outstanding.
 Current focused/frontend/static/full evidence is being collected; preceding Result gates
 remain recorded below. Independent physical testing still lacks a second desktop/network.
+
+## Empty successful SDP Open Result (25 October; private wire correction)
+
+The native opcode20 and browser action encoder now represent0..8KiB plaintext, matching
+Root's exact input-selected output contract. A tag-only16B incoming packet may decrypt to
+empty plaintext successfully; this must never be recast as AEAD failure. SealBegin remains
+nonempty, the authenticated existing-row class2 path remains mandatory and Root still
+requires exactly ciphertext-length-minus16 output bytes before any result effect.
+
+The grammar regression,6 browser codec tests and actual-Actor/TCP negative-plus-correct
+result check pass (10.30s). The normal19B Offer rejects empty then accepts its original3B
+result without settling/replacing the Action. A new maximum test passes (13.48s): actual
+8KiB LOW Begin,8,208B sealed Result, real Source/TCP bridge and8KiB HIGH Open Result with
+canonical delivery retry. The maximum negative header case independently rejects Seal
+bytes too large for opcode20 before nonce debit, then tests a permitted-size foreign
+purpose header against the original row. No limit/timeout was raised. A genuine
+adversarial tag-only incoming packet's positive native case remains a coverage gap; no
+fixture pretends the existing nonempty LOW Seal produced a16B packet. Production SDP
+remains refused; this correction alone grants no SDP syntax validity or RTC authority.
 
 ## Scoped native SDP Result checkpoint (25 October; production disabled)
 

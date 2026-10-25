@@ -13,7 +13,8 @@ expected getters are snapshotted once and payload bytes are not copied. Borrowed
 still require exclusive ownership and paid backing through actual async settlement.
 Neither decoding nor historical data grants engine/SDK/RTC/currentness. Existing framed
 cleanup cannot yet transfer that loan. Successful empty Open is not authentication
-failure; its native Result representation must be corrected before integration. No
+failure; its native/browser representation is now corrected, while a genuine tag-only
+positive native case remains a test gap. No
 complete SDK/RTC memory proof or audible/physical acceptance is claimed.
 
 ## Native SDP Result ownership and uncertainty (25 October; disabled family)

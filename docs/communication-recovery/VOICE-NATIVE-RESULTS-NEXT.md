@@ -6,7 +6,8 @@ The standalone op17 reader preserves authenticated class-specific ceilings and g
 limits; the v8/tag3 decoder borrows AAD/body after exact original row/Action/Ready/SDK/PC
 checks. They are not connected to the retained channel. Before doing so, transfer its
 paid `opened` backing explicitly rather than letting framed finally clear borrowed views.
-Correct native opcode20 for successful empty plaintext from legal Open16; never replace
+Native opcode20 and its browser codec now represent empty successful plaintext from
+legal Open16; add the genuine tag-only positive native case without ever replacing
 that success with AuthenticationFailed. Then compose one original private owner through
 large Input, WebCrypto, exact Result retry, actual SDK settlement, ACK and Return, with
 the original one-execution latch/output across reply loss and complete measured64KiB
