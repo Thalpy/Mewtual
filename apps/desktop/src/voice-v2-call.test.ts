@@ -210,11 +210,14 @@ async function joined(h: ReturnType<typeof harness>) {
 }
 const offerOf = (n: number, issuer = LOW) => ({ issuer, message: join(n) });
 
-test("V2 activation is unavailable until the native adapter exists, and says what is missing", () => {
+test("V2 activation lists unfinished App and multi-peer work without obsolete factory gaps", () => {
   const activation = voiceV2Activation();
   assert.equal(activation.available, false);
   assert.ok(!activation.available && activation.missing.length >= 3);
   assert.ok(!activation.available && activation.missing.some((m) => /SDP\/ICE/.test(m)));
+  assert.ok(!activation.available && activation.missing.some(m => /memory and history limits/.test(m)));
+  assert.ok(!activation.available && activation.missing.every(m => !/native SDP phase factories/.test(m)),
+    "implemented native factories must not be reported as missing");
 });
 
 test("initiator path: fresh peer, native pairing, one offer, applied answer; signalling and media stay separate", async () => {
