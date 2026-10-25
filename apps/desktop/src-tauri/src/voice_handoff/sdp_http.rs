@@ -1,4 +1,4 @@
-//! Original paid SDP Begin/Resolve/History/Return handlers. These are staged private
+//! Original paid SDP Begin/Resolve/History/ACK/settlement/Return handlers. These are staged private
 //! adapters: the production Header gate still refuses ALL SDP action operations until
 //! Input/engine/result/delivery/ACK/settlement and the private SDK vertical are coherent.
 use super::bootstrap::Route;
@@ -240,6 +240,12 @@ fn inspect(
                     row.close_sdp_action(route.session().identity())?;
                     row.try_compact_sdp()?;
                 }
+                sdp_action::Kind::Ack { action, digest } => {
+                    cleanup_action(&row, route.session().identity(), action, Some(digest))?;
+                }
+                sdp_action::Kind::Settle(action) => {
+                    cleanup_action(&row, route.session().identity(), action, None)?;
+                }
                 _ => return Err(VoiceError::Malformed.into()),
             }
             Ok(Some(Reply::History(
@@ -268,6 +274,37 @@ fn inspect(
             }
             Ok(None)
         }
+    }
+}
+
+/// Exact original executor cleanup, not new SDK/RTC authority. The authenticated SAME
+/// Session's physical position excludes queued/native output work; the browser additionally
+/// owes a join of its real SDK and last Result RPC before sending23. Native cannot infer
+/// that join from a receipt, funding snapshot, closed PC, timeout or lost reply.
+///
+/// Select the registered allocation under native provenance fences, then release every
+/// native guard before Root clocks/Engine/credit destructors. These trusted historical
+/// seams intentionally remain usable after End/lock, without a current grant or Actor.
+fn cleanup_action(
+    row: &ResolvedRow,
+    session: &std::sync::Arc<super::channel::SessionIdentity>,
+    action: super::requests::Action,
+    digest: Option<[u8; 32]>,
+) -> Result<(), VoiceError> {
+    let original = row.sdp_result_action(session, action)?;
+    if let Some(digest) = digest {
+        let status = original.terminal_status();
+        let receipt = status.receipt.as_ref().ok_or(VoiceError::Unauthorized)?;
+        if super::requests::receipt_digest(receipt) != digest {
+            return Err(VoiceError::RetryMismatch);
+        }
+        original.acknowledge_result(receipt)
+    } else {
+        // Root serializes this irreversible fence with admission/publication. In-flight
+        // preparation keeps its own credit until actual retirement. An uncertain result
+        // never refunds an engine; only this original executor's settlement statement does.
+        original.settle_engine();
+        Ok(())
     }
 }
 // This synchronous result is measured in the Control graph before its sole waiter parks.
@@ -451,7 +488,8 @@ pub(super) fn layout_bytes() -> usize {
         + 3 * std::mem::size_of::<ResolvedRow>()
         + 128
         + super::ledger::sdp_history_layout_bytes()
-            .max(super::ledger::sdp_compaction_layout_bytes());
+            .max(super::ledger::sdp_compaction_layout_bytes())
+            .max(cleanup_layout_bytes());
     let start_caller = std::mem::size_of::<Request<'static>>()
         + 4 * std::mem::size_of::<ResolvedRow>()
         + std::mem::size_of::<Option<std::sync::Arc<catcoms_sync::voice_v2::sdp::SdpDelivery>>>()
@@ -486,4 +524,18 @@ pub(super) fn layout_bytes() -> usize {
         measured(apply)
     );
     bytes
+}
+
+/// ACK/settlement coexist with the inspect caller, not later history/serialization.
+/// Persistent registered Action/receipt owners keep their original fees. Count the actual
+/// handle, fixed status, SHA256/digest and Root Engine/argument wrappers explicitly here.
+#[cfg(test)]
+fn cleanup_layout_bytes() -> usize {
+    std::mem::size_of::<std::sync::Arc<catcoms_sync::voice_v2::crypto_actions::CryptoAction>>()
+        + std::mem::size_of::<catcoms_sync::voice_v2::crypto_actions::CryptoResultStatus>()
+        + std::mem::size_of::<sha2::Sha256>()
+        + 2 * std::mem::size_of::<[u8; 32]>()
+        + std::mem::size_of::<Option<[u8; 32]>>()
+        + std::mem::size_of::<std::sync::MutexGuard<'static, ()>>()
+        + 128
 }

@@ -1,5 +1,15 @@
 # Mewtual; Architecture
 
+## Original SDP cleanup controls (25 October; private)
+
+Native22 ACK and23 settlement use exact registered original Session/row/parent/purpose/
+Action provenance, then invoke trusted Root historical cleanup outside native guards.
+The actual receipt digest selects ACK; settlement is irreversible and grants no new
+engine/input/RTC permission. These controls survive End/PC closure. Same-Session physical
+custody fences native work; the browser separately owes its actual SDK/result-RPC join.
+No native observation of history, counter zero or closure substitutes for that join.
+Production SDP remains refused; this is not browser/RTC activation.
+
 ## Original SDP Result publication (25 October; staged native path)
 
 Seal/Open prepare all fallible signature/hash/token/delivery work outside native guards,

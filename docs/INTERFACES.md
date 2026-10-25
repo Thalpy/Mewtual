@@ -1,5 +1,17 @@
 # Mewtual; Interfaces & Hooks Schema
 
+## Private SDP ACK22 and settlement23 (25 October)
+
+Both controls authenticate the same original Session and full registered row/Action.
+ACK22 supplies the actual native receipt digest, excluding mutable retirement observations;
+a wrong digest never acknowledges or settles. Settlement23 reports the original executor's
+actual SDK/last Result-RPC drainage and irreversibly closes engine admission. Either order
+is legal; terminal input compacts only after ACK and settlement; no-terminal input
+retires on settlement without ACK. Exact fixed reply loss is
+retryable after End/lock without current permission. Root clocks/credit destruction run
+outside native guards. No browser-supplied CLOSED/counter flag is used as proof of drainage.
+The private handler is staged behind the shipping family's unchanged refusal gate.
+
 ## Empty successful native Open Result (25 October; disabled opcode20)
 
 Opcode20's closed class2 payload is0..8KiB, preserving the exact successful result of a

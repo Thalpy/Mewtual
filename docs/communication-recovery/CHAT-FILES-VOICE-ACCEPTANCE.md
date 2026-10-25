@@ -1,5 +1,16 @@
 # Chat, files and voice implementation evidence
 
+## 25 October: native SDP cleanup controls staged
+
+Private authenticated22/23 replace direct Root ACK/settlement in the TCP Result fixtures.
+Exact Session/row/Action/receipt binding, both ACK/settle orders, incorrect digest/identity,
+input compaction and lost fixed reply retries are checked. Post-PC-close cleanup, deliberately discarded successful fixed replies and the
+complete unchanged Control graph pass focused validation. No-terminal23/late-engine
+history/Return also passes, without inventing a receipt or ACK. All344 focused native
+handoff tests and the unchanged12,279/12,288B Control graph pass. Actual browser SDK
+join/reporting remains unfinished; native control success does not establish that evidence.
+Production SDP and RTC remain disabled; HANDOVER records gates and remaining acceptance.
+
 ## 25 October: empty Open Result representation corrected privately
 
 The native/browser opcode20 grammar can represent exact empty successful plaintext;

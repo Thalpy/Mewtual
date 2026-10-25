@@ -90,9 +90,15 @@ async fn exchange(
     intent: &Arc<catcoms_sync::voice_v2::sdp::InitialSdpIntent>,
 ) -> Vec<u8> {
     let clock = crate::voice_runtime(state).clock();
-    let remaining = intent
-        .remaining_at(clock.now_ms(), clock.monotonic_ms())
-        .unwrap();
+    let remaining = if matches!(operation, 22 | 23) {
+        // Historical cleanup survives PC closure/expiry. This is only a broken-test
+        // observer bound, never renewed protocol currentness or new action authority.
+        15_000
+    } else {
+        intent
+            .remaining_at(clock.now_ms(), clock.monotonic_ms())
+            .unwrap()
+    };
     let deadline = clock.monotonic_ms().saturating_add(remaining);
     let capacity = super::super::sdp_replies::refused(VoiceError::Capacity.into());
     let attempts = async {
@@ -111,6 +117,8 @@ async fn exchange(
             let context = Context::new(state);
             let reply = if operation == 18 {
                 super::super::sdp_engine::admit(&context, route, incoming).await
+            } else if matches!(operation, 22 | 23) {
+                super::super::sdp_http::apply(&context, route, incoming).await
             } else {
                 apply(&context, route, incoming).await
             }
@@ -139,6 +147,99 @@ async fn exchange(
         result = attempts => result,
     }
 }
+/// The fixture has joined its real native Result flight and retained no SDK operation.
+/// These are actual authenticated22/23 controls, not direct Root settlement. Both orders
+/// retain input until ACK AND settlement; only browser integration can prove its SDK join.
+#[allow(clippy::too_many_arguments)]
+async fn finish_original(
+    state: &crate::AppState,
+    public: &super::super::bootstrap::SetupOutput,
+    route: &Route,
+    parent: super::super::ledger::RowId,
+    child: super::super::ledger::RowId,
+    action: Action,
+    original: &Arc<CryptoAction>,
+    receipt: &catcoms_sync::voice_v2::crypto_actions::CryptoResultReceipt,
+    intent: &Arc<catcoms_sync::voice_v2::sdp::InitialSdpIntent>,
+    open: bool,
+) {
+    let mut settle = body(parent, action, [0; 32], &[])[..66].to_vec();
+    settle[17] = u8::from(open);
+    let mut ack = settle.clone();
+    ack.extend_from_slice(&super::super::requests::receipt_digest(receipt));
+    let mut wrong_digest = ack.clone();
+    *wrong_digest.last_mut().unwrap() ^= 1;
+    assert_eq!(
+        exchange(state, public, route, child, &wrong_digest, 22, intent).await,
+        super::super::sdp_replies::refused(VoiceError::RetryMismatch.into())
+    );
+    let mut wrong_action = settle.clone();
+    wrong_action[34] ^= 1; // valid grammar, foreign original input commitment
+    assert_eq!(
+        exchange(state, public, route, child, &wrong_action, 23, intent).await,
+        super::super::sdp_replies::refused(VoiceError::Unauthorized.into())
+    );
+    assert!(!original.handoff_status().acknowledged);
+    assert!(!original.terminal_status().settled);
+    assert!(original.input().is_ok());
+    // LOW uses ACK->settle; HIGH uses settle->ACK. Exact repeated controls model
+    // losing either fixed reply, without inventing another provider execution.
+    let order = if open {
+        [(23, &settle), (22, &ack)]
+    } else {
+        [(22, &ack), (23, &settle)]
+    };
+    for (index, (operation, encoded)) in order.into_iter().enumerate() {
+        let clock = crate::voice_runtime(state).clock();
+        let lost = async {
+            loop {
+                let h = (
+                    route.session().fixture_counts().1 + 1,
+                    operation,
+                    0,
+                    child.logical(),
+                );
+                let incoming = opened_frame(public, route, h, encoded, None);
+                let reply = super::super::sdp_http::apply(&Context::new(state), route, incoming)
+                    .await
+                    .unwrap();
+                // Do not authenticate/decrypt/read this response. Observe actual Root
+                // effect separately, then lose its successful fixed reply before retry.
+                drop(reply);
+                let observed = original.handoff_status();
+                if if operation == 22 {
+                    observed.acknowledged
+                } else {
+                    observed.engine.settled
+                } {
+                    break;
+                }
+                // A short native try-lock may refuse before effect. Keep the same exact
+                // metadata under one whole observer bound, never blind-reexecute SDK.
+                clock.sleep(std::time::Duration::from_millis(10)).await;
+            }
+        };
+        tokio::select! {
+            biased;
+            _ = clock.sleep(std::time::Duration::from_secs(15)) => panic!("native cleanup effect did not commit within harness bound"),
+            _ = lost => {}
+        }
+        let reply = exchange(state, public, route, child, encoded, operation, intent).await;
+        assert_eq!(&reply[..2], &[8, 0]);
+        assert_eq!(reply[86], u8::from(open || index == 1));
+        assert_eq!(reply[186], u8::from(!open || index == 1));
+        let repeated = exchange(state, public, route, child, encoded, operation, intent).await;
+        assert_eq!(&repeated[38..185], &reply[38..185]);
+        assert_eq!(repeated[186], reply[186]);
+        if index == 0 {
+            assert!(original.input().is_ok());
+        }
+    }
+    assert!(original.handoff_status().acknowledged);
+    assert!(original.terminal_status().settled);
+    assert!(original.input().is_err());
+}
+
 struct NeverApplied {
     funding: Arc<NativeRowFunding>,
     dropped: Arc<AtomicBool>,
@@ -604,9 +705,19 @@ pub(in crate::voice_handoff) async fn exercise(
         .unwrap()
         .same_transition(&past));
     assert!(!saved.status().engine.settled);
-    // Fixture-only SDK completion/ACK for later cleanup; no browser execution claim.
-    original.acknowledge_result(&past).unwrap();
-    original.settle_engine();
+    finish_original(
+        state,
+        public,
+        route,
+        parent,
+        child,
+        action,
+        &original,
+        &past,
+        &owners.intent,
+        false,
+    )
+    .await;
     assert!(
         row()
             .sdp_history(route.session().identity())
@@ -625,6 +736,7 @@ pub(in crate::voice_handoff) async fn exercise_open(
     public: &super::super::bootstrap::SetupOutput,
     route: &Route,
     parent: &ResolvedRow,
+    pc_frame: &[u8],
     child: super::super::ledger::RowId,
     action: Action,
     authentication_failed: bool,
@@ -797,6 +909,21 @@ pub(in crate::voice_handoff) async fn exercise_open(
             "exact native retry returns SAME delivery allocation"
         );
     }
-    original.acknowledge_result(&first.receipt).unwrap();
-    original.settle_engine();
+    // Close the actual native PC before HIGH's cleanup. Its same Session/Action ACK
+    // and settlement remain available without granting or reviving SDK/RTC currentness.
+    let pc = super::super::requests::pc::Request::decode(parent.id().logical(), pc_frame).unwrap();
+    parent.close_pc(route.session().identity(), &pc).unwrap();
+    finish_original(
+        state,
+        public,
+        route,
+        parent.id(),
+        child,
+        action,
+        &original,
+        &first.receipt,
+        &owners.intent,
+        true,
+    )
+    .await;
 }

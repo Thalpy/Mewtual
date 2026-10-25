@@ -1,5 +1,16 @@
 # Threat model; client integrity & enforcement boundaries
 
+## Authenticated SDP cleanup is not SDK proof (25 October; disabled family)
+
+Only the original authenticated local Session/selected row/full Action may ACK22 or
+settle23. ACK compares the immutable actual receipt digest; it cannot create a terminal
+or delivery. Historical settlement survives revocation but closes first admission/result
+permanently. Same-Session physical custody excludes queued/uncollected native operations;
+engine/input/credit destructors run after native guards release. The original trusted
+browser executor still must join actual SDK and last Result-RPC promises before23.
+Native cannot infer that join from a receipt, time, funding count, PC closure or lost reply.
+No SDP dispatch, browser engine or RTC is enabled by these private controls.
+
 ## Native SDP Result ownership and uncertainty (25 October; disabled family)
 
 An authenticated header only admits bounded capacity for an existing original native row.

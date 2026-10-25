@@ -346,6 +346,7 @@ pub(super) async fn exercise(
                 public,
                 route,
                 parent,
+                pc_frame,
                 ledger::RowId::from_logical(child).unwrap(),
                 action,
                 effect == 2,

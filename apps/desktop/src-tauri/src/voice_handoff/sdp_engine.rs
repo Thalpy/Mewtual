@@ -709,7 +709,50 @@ pub(super) async fn exercise(
         .await
         .unwrap();
     assert_eq!(funding.in_flight(), 0);
-    original.settle_engine();
+    // No SDK ran and the actual native engine flight has joined. Settle through the
+    // authenticated original23 control AFTER PC closure, with no terminal to ACK.
+    // A local try-lock Capacity may retry the same metadata; no fresh engine is lent.
+    let settle = &body[..66];
+    let clock = crate::voice_runtime(state).clock();
+    let cleanup = async {
+        loop {
+            let h = (
+                route.session().fixture_counts().1 + 1,
+                23,
+                0,
+                child.logical(),
+            );
+            let reply = super::sdp_http::apply(
+                &context,
+                route,
+                opened_frame(public, route, h, settle, None),
+            )
+            .await
+            .unwrap();
+            let history = opened_reply(public, h, settle, &reply);
+            drop(reply);
+            if history != capacity {
+                break history;
+            }
+            clock.sleep(std::time::Duration::from_millis(10)).await;
+        }
+    };
+    let history = tokio::select! {
+        biased;
+        _ = clock.sleep(std::time::Duration::from_secs(15)) => panic!("no-result native settlement exceeded harness bound"),
+        history = cleanup => history,
+    };
+    assert_eq!(&history[..2], &[8, 0]);
+    assert_eq!(history[86], 1);
+    assert_eq!(
+        history[87], 0,
+        "settlement never invents a terminal receipt"
+    );
+    assert_eq!(
+        history[186], 0,
+        "no-result settlement needs no invented ACK"
+    );
+    assert!(original.input().is_err());
     let h = header();
     let reply = admit(&context, route, opened_frame(public, route, h, &body, None))
         .await
