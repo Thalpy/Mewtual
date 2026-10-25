@@ -2,7 +2,8 @@
 
 ## Browser SDP Input reader (25 October; private consumer still pending)
 
-`communication-sdp-browser-input` builds on pushed Result checkpoint `b74804d6`.
+`communication-sdp-browser-input` integrates the pushed native Result/cleanup stack
+through `5779e23c`.
 The separate opcode17 response reader authenticates its bounded prefix before allocating
 class2 Input (at most9,232B) or Control (at most272B); generic readers remain2,064B.
 The v8/tag3 decoder checks original row/parent/Action/Ready/key/SDK/storage/PC bindings,
@@ -17,8 +18,37 @@ that exact result separately from AEAD failure. The native positive tag-only cas
 remains a coverage gap before end-to-end SDK acceptance.
 No permission, quota or production dispatch was widened. Complete SDK/RTC ownership,
 settlement, fresh delivery, multi-peer, relay and physical acceptance remain outstanding.
-Current focused/frontend/static/full evidence is being collected; preceding Result gates
-remain recorded below. Independent physical testing still lacks a second desktop/network.
+The28 reader/decoder/generic-reader focused checks pass. All2,772 frontend tests,
+Svelte checks and production build pass on this merged browser source. Final read-only
+review fixed an intrinsic-backing bypass and has no remaining blocker/high/medium.
+Root/native full suites run serially from the Result checkout; both branches contain
+identical Rust sources. Earlier focused/static results remain below. Full gates remain
+pending; inherited crypto-bigint RUSTSEC-2026-0387 still fails cargo deny, with no new
+dependency or ignore. Independent physical testing still lacks a second desktop/network.
+
+## Native SDP receipt ACK and settlement (25 October; staged)
+
+Private native22/23 now resolve the authenticated original Session, selected row,
+parent/purpose and full registered Action before invoking Root cleanup outside all native
+guards. ACK compares the digest of the actual immutable receipt;23 irreversibly settles
+the original engine, including no-result cleanup. Neither operation needs current PC/room
+permission after End. The same Session physical exclusion keeps queued/uncollected native
+work separate; the original browser still must join its actual SDK/last Result RPC before
+sending23. Native accepts that exact executor statement, not a proof of browser drainage.
+
+The actual TCP fixture now uses authenticated22/23 instead of direct Root calls: LOW
+ACKs then settles, HIGH settles then ACKs, with wrong digest/Action refusal and exact lost
+reply retries. Terminal input stays retained until both observations; no-terminal settlement retires
+input without inventing an ACK. HIGH cleanup after its actual
+PC closes and the unchanged complete Control graph pass focused checks. Actual successful
+22/23 replies are discarded unread before exact retry, with independent Root effect
+observation. The actual native no-terminal23/late-engine-history/Return case also passes (12.80s),
+with no invented receipt or ACK and no new engine permit. All344 native handoff tests
+and the Control graph pass; the same Control peak remains12,279/12,288B. Separate
+native Cargo check (46.11s) and strict all-target Clippy (1m35s) pass. Final read-only
+review has no remaining blocker/high/medium/low finding in this cleanup slice. The
+shipping Host still refuses the whole SDP family. Browser execution/ownership, fresh
+RTC delivery, ICE/rounds, multi-peer, relay and combined/physical acceptance remain open.
 
 ## Empty successful SDP Open Result (25 October; private wire correction)
 

@@ -13,6 +13,15 @@ large Input, WebCrypto, exact Result retry, actual SDK settlement, ACK and Retur
 the original one-execution latch/output across reply loss and complete measured64KiB
 stages. Fresh delivery/RTC, ICE/fresh rounds, multi-peer, relay and acceptance follow.
 
+## 25 October: native ACK/settlement adapters exist; browser join is still next
+
+Private authenticated22/23 now bind the exact original Session/row/Action and immutable
+receipt digest, invoking Root cleanup outside native guards. They preserve both orders,
+End/PC-close cleanup and input compaction semantics. Actual browser SDK/last Result-RPC
+joining before23 is still a required consumer contract, not something the native receipt
+can prove. Connect that original paid browser owner, with one SDK execution and retained
+output across lost replies, then fresh RTC delivery/ICE/rounds, multi-peer and media.
+
 ## 25 October: native Result is staged; browser execution is next
 
 The scoped Root/App/native19/20/21 path now handles the original paid output and canonical
