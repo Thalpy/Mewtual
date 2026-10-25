@@ -1,5 +1,51 @@
 # Mewtual; Handover
 
+## Browser media ownership leaves (25 October; integration in progress)
+
+`communication-voice-browser-media` builds on pushed native checkpoint3b9a5192. The RTC
+leaf can now prepare one inert destination bound to the exact original identity and move
+the SAME completed peer once. Current/provider checks and all ordinary bookkeeping reads
+finish before both owners' runtime-private gates are repeated; the transfer tail performs
+only private state writes. It clears the old current callback and peer, so old SDP close/
+drain cannot close the moved peer or retain its current closure. The destination stores no
+old phase/Clock/current graph. A failed actual SDK close retains custody for explicit cleanup.
+
+Review found a HIGH late-getter race that could adopt into an already-closed empty
+destination and leak its actual peer on drain. Holding the reentry fence across all such
+reads and checking both owners afterward fixes it. Its exact regression fails against the
+old order and passes against current code. Read-only re-review reports no blocker/high/
+medium in the corrected leaf. Thirteen new RTC cases plus11 existing cases pass1.16s.
+
+`VoiceMediaStatus` adds passive proof/token/deadline/close metadata for a future shared
+driver. It retains no callbacks, clock, timers, promises, peer or old channel. One original
+request token bounds a flight. Freshness is request-start+5s, independent of old SDP Source
+expiry; a delayed positive reply cannot extend it by reply latency. Capacity keeps only a
+previous still-valid deadline. Expiry/Close cannot be undone, and Close cannot pretend an
+outstanding RPC drained. Fifteen status cases bring the focused total to39pass1.20s.
+Read-only review found one LOW clock-precision edge: very large finite numbers could round
+the5s grace up to8192ms. The represented deadline delta is now bounded; upward/non-advancing
+rounding refuses and conservative downward rounding remains allowed. Re-review has no
+remaining findings in either leaf. These results do not establish the missing actual driver.
+
+Final frontend validation passes2,884 tests63.92s, Svelte0errors/0warnings and build35.19s.
+The earlier status run caught a TypeScript definite-assignment issue, corrected before the
+final pass. Rust source is identical
+to X; its Root3,675pass result is recorded below. X native full validation remains running
+against IMMUTABLE X source and does not establish Y RTC/native integration. No competing
+full Rust suite was started. All new browser code remains inactive and is not signed off.
+An isolated current-source native build plus the actual five native_browser compatibility
+tests is queued AFTER X's full suite, so it will use Y's changed RTC module without two
+Rust workloads competing. It is not a second full Native run. Startup/flow scripts are
+not applicable: setup, process creation, UI, message-send and friend-request paths are unchanged.
+
+Still missing: independent broker record/payment before destination/native admission,
+actual op28 HTTP recovery/currentness driving, automatic real-PC close on bounded status
+failure, native media-index detachment and old negotiation retirement/shared Session
+collection. The conservative leaf still checks old negotiation currentness; a lost/recovered
+native media admission after Ready expiry needs an explicit new-currentness handoff policy.
+Do not treat historical admission as that policy. Supported multi-peer composition, App
+activation/tracks, relay and combined/physical acceptance remain open. One desktop is available.
+
 ## Native media admission/cleanup exists (25 October; browser transfer still open)
 
 This section supersedes the older native-command TODOs below. The authenticated service

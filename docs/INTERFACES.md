@@ -1,5 +1,23 @@
 # Mewtual; Interfaces & Hooks Schema
 
+## Inactive browser media custody leaves (25 October)
+
+`VoiceSdpRtcOwner::prepareMediaDestination` creates at most one inert same-original
+destination. Trusted callers must prepay its independent record before construction and
+native Admit. `transferInto` requires both SDK directions complete, no flight/gather/local
+buffer, live original currentness and an unclosed never-adopted exact destination. All
+provider and ordinary-field reads precede the final private ownership gates. The atomic
+tail moves the actual peer and severs the old current closure; it exposes no raw PC.
+Destination Close is negative; drain requires actual synchronous close return. A throwing
+provider keeps peer custody for retry. No caller currently invokes this production handoff.
+
+`VoiceMediaStatus` is passive metadata only. `begin(now)` publishes one opaque original
+attempt; `finish` accepts only that exact completion token. A fresh authenticated current
+receipt can grant at most requestStart+5000ms, independent of SDP Source expiry. Capacity
+does not extend an older deadline; Close/expiry never reopen. Close leaves an outstanding
+flight pending. It stores no executor, callback, timer, Clock or native capability; actual
+framing/authentication, payment and real-PC revocation execution still need a driver.
+
 ## Original native media Control28/version9 (25 October; browser consumer open)
 
 The authenticated parent header selects the original derive row. The full226B form carries

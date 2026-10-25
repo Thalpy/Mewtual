@@ -1,5 +1,22 @@
 # Next voice milestone: native result recovery
 
+## 25 October: affine RTC leaf and passive status gate exist; wire the actual handoff
+
+The isolated browser branch now has one inert same-original destination and an atomic
+same-peer transfer leaf with runtime-private critical state. Source old-current closure
+and peer are severed. Review's late-getter destination-close HIGH is regression-pinned
+and fixed; no blocker/high/medium remains in that leaf. Passive `VoiceMediaStatus` holds
+one exact request token and start-anchored freshness, with no old callbacks/Clock/peer.
+HANDOVER records focused results and pending final review/validation.
+
+Neither leaf is integrated. Prepay the independent record before allocation/native Admit;
+use actual retained op28 framing and fresh currentness, not a historical receipt. The old
+RTC current predicate still depends on Ready, so delayed recovery after admitted-media
+survives Ready expiry needs an explicit handoff policy. Add the separately paid shared
+status driver and real-PC Close/drain execution, then detach native custody into its
+finite independent index before old negotiation Final/GC. Preserve actual Source/Lower
+retirement and shared physical executor/key payment. No App activation/media claim follows.
+
 ## 25 October: native media claim exists; connect actual browser ownership
 
 Control28 now binds the original native Session/PC, both registered canonical drained rows,

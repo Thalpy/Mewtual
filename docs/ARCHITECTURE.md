@@ -1,5 +1,20 @@
 # Mewtual; Architecture
 
+## Browser affine RTC leaf and passive freshness (25 October; inactive)
+
+An inert same-original destination can take the exact completed RTC peer once, after
+provider/current checks and both owners' final private gates. The no-callback transfer
+tail clears the source peer and old current closure. Destination state is module-private
+and contains no old phase/channel/Clock graph. Failed synchronous SDK close retains the
+actual peer instead of claiming drained. This leaf still requires independently prepaid
+broker custody and fresh authenticated native media admission before use.
+
+A separate passive status gate holds only proof, one exact attempt token, numeric deadline
+and irreversible close metadata. Refresh validity is anchored before IPC; delayed replies
+and capacity cannot extend expired observations. The future shared driver must authenticate,
+schedule, close/join the real PC and retain its own payment. Neither leaf provides that
+driver, native index detachment, App activation or media/physical acceptance.
+
 ## Native media obligation after canonical SDP (25 October; browser transfer open)
 
 The authenticated fixed Control service now has a distinct original-PC media obligation.

@@ -84,7 +84,8 @@ test("End retains the original peer and real remote SDK promise until settlement
   assert.equal(drained, false); assert.equal(f.calls.closed, 1); assert.equal(f.incoming()?.sdp?.length, 8192);
   assert.throws(() => f.owner.applyRemote(bytes, "offer")); held.release(); assert.equal(await work, undefined); await close;
   assert.equal(f.incoming()?.sdp, ""); assert.equal(f.owner.applied, true, "actual SDK success is separate from current native Applied permission");
-  assert.equal((f.owner as unknown as { peer: unknown }).peer, null);
+  assert.equal(Object.hasOwn(f.owner, "peer"), false, "actual peer custody is runtime-private");
+  assert.throws(() => f.owner.prepareMediaDestination(), "drained SDK owner cannot revive");
 });
 
 test("RTC parser rejection never becomes AEAD failure or invented Applied", async t => {

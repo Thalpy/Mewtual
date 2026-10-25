@@ -12,10 +12,54 @@ export type VoiceSdpRtcClock = Readonly<{
 const unavailable = (): never => { throw new Error("original voice RTC peer unavailable"); };
 const decoder = new TextDecoder("utf-8", { fatal: true });
 
+type MediaState = {
+  identity: object; peer: RTCPeerConnection | null; adopted: boolean;
+  stopped: boolean; closing: boolean; closeComplete: boolean;
+};
+// Runtime-private ownership, not a public setter or a renderer-supplied peer/capability.
+// The identity is a fixed inert token, with no old owner/phase/clock/callback backedge.
+const mediaOwners = new WeakMap<MediaRtcOwner, MediaState>();
+class MediaRtcOwner {
+  constructor(identity: object) {
+    mediaOwners.set(this, { identity, peer: null, adopted: false, stopped: false, closing: false, closeComplete: false });
+  }
+  get adopted(): boolean { return mediaOwners.get(this)!.adopted; }
+  get closed(): boolean { return mediaOwners.get(this)!.stopped; }
+  get drained(): boolean {
+    const state = mediaOwners.get(this)!;
+    return state.stopped && state.closeComplete && state.peer === null;
+  }
+  /** Negative-only execution by the separately paid media/status owner. No current
+   * callback, negotiation clock, native receipt or old SDK graph is retained here.
+   * A throwing SDK close leaves the actual peer retained for an explicit cleanup retry. */
+  close(): void {
+    const state = mediaOwners.get(this)!;
+    state.stopped = true;
+    if (!state.peer) { state.closeComplete = true; return; }
+    if (state.closeComplete || state.closing) return;
+    state.closing = true; // Before a provider method getter can reenter close/drain.
+    try {
+      const close = state.peer.close;
+      close.call(state.peer);
+      state.closeComplete = true; // Actual synchronous SDK return, never a close intent.
+    } finally { state.closing = false; }
+  }
+  /** No new SDK promise exists in this leaf. Future track/data-channel workers must
+   * acquire their own payment and join here before native media Release is legal. */
+  async drain(): Promise<void> {
+    this.close();
+    const state = mediaOwners.get(this)!;
+    if (!state.closeComplete || state.closing) throw new Error("voice media close still running");
+    state.peer = null;
+  }
+}
+/** Opaque custody only: no actual PC, description or media/key handle is exposed. */
+export type VoiceMediaRtcOwner = MediaRtcOwner;
+
 export class VoiceSdpRtcOwner {
-  private peer: RTCPeerConnection | null = null;
-  private stopped = false;
-  private peerClosed = false;
+  #peer: RTCPeerConnection | null = null;
+  #stopped = false;
+  #peerClosed = false;
   private localStarted = false;
   private localDone = false;
   private remoteStarted = false;
@@ -24,31 +68,76 @@ export class VoiceSdpRtcOwner {
   private flight: Promise<void> | null = null;
   private gatherStop: (() => void) | null = null;
   private readonly localIsLow: boolean;
-  private readonly current: () => boolean;
+  #current: (() => boolean) | null;
   private readonly clock: VoiceSdpRtcClock;
+  readonly #mediaIdentity = {};
+  #mediaDestination: MediaRtcOwner | null = null;
+  #transferChecking = false;
   constructor(localIsLow: boolean, current: () => boolean, clock: VoiceSdpRtcClock) {
-    this.localIsLow = localIsLow; this.current = current; this.clock = clock;
+    this.localIsLow = localIsLow; this.#current = current; this.clock = clock;
   } // Inert: no getter, Clock, constructor or SDK callback before publication.
 
   private live(): boolean {
-    const current = !this.stopped && this.current();
-    return current && !this.stopped; // current is injected code and can synchronously End.
+    const observe = this.#current;
+    const current = !this.#stopped && observe !== null && observe();
+    return current && !this.#stopped && this.#current === observe; // injected code may End.
+  }
+
+  /** Inert one-shot destination for this EXACT SDK peer identity. The trusted retained
+   * broker must prepay its independent record BEFORE calling this or native media Admit.
+   * Construction itself grants no native/RTC authority and performs no provider callback.
+   * This leaf does not implement that broker payment or native handoff/status driver. */
+  prepareMediaDestination(): VoiceMediaRtcOwner {
+    if (this.#stopped) return unavailable();
+    return this.#mediaDestination ??= new MediaRtcOwner(this.#mediaIdentity);
+  }
+  /** Trusted broker only, AFTER a fresh joined native media admission/current reply.
+   * Perform the final callback outside the transfer tail; repeat every pure ownership
+   * condition afterward because that callback can synchronously End or reenter us.
+   * Historical native admission alone must never be used to call this transition. */
+  transferInto(destination: VoiceMediaRtcOwner): void {
+    if (this.#transferChecking) return unavailable();
+    this.#transferChecking = true;
+    let finished = false;
+    // Existing SDP bookkeeping uses ordinary properties. Finish ALL such reads before
+    // checking either owner's runtime-private gates: a hostile getter can synchronously
+    // Close the inert destination, including its close-complete latch, while it is empty.
+    try {
+      if (!this.live()) return unavailable();
+      finished = this.localDone && this.remoteDone && !this.flight && !this.gatherStop && !this.localBytes;
+    } finally { this.#transferChecking = false; }
+    const target = mediaOwners.get(destination);
+    if (!finished || !target || target.identity !== this.#mediaIdentity || this.#mediaDestination !== destination ||
+        target.adopted || target.stopped || target.peer !== null || target.closing || target.closeComplete ||
+        this.#stopped || this.#peerClosed || !this.#peer) return unavailable();
+
+    // COMMIT: private state writes only. No getter, method/provider/Clock callback,
+    // allocation, await or fallible operation after the first mutation. The SAME actual
+    // peer moves once; old close/drain loses all authority over it. Clear the old current
+    // closure so retaining this stopped source cannot pin its channel/chain/phase graph.
+    target.peer = this.#peer;
+    target.adopted = true;
+    this.#peer = null;
+    this.#peerClosed = true;
+    this.#stopped = true;
+    this.#current = null;
+    this.#mediaDestination = null;
   }
   private originalPeer(): RTCPeerConnection {
     if (!this.live()) return unavailable();
-    if (this.peer) return this.peer;
+    if (this.#peer) return this.#peer;
     const Constructor = globalThis.RTCPeerConnection;
     if (!this.live() || typeof Constructor !== "function") return unavailable();
     try {
       const peer = new Constructor({ bundlePolicy: "max-bundle" });
-      this.peer = peer; // Publish actual identity before another provider callback.
+      this.#peer = peer; // Publish actual identity before another provider callback.
       if (!this.live()) { this.close(); return unavailable(); }
       return peer;
     } catch (error) { this.close(); throw error; }
   }
   private start(work: () => Promise<void>): Promise<void> {
     if (this.flight) return this.flight;
-    if (this.stopped) return Promise.reject(new Error("original voice RTC peer unavailable"));
+    if (this.#stopped) return Promise.reject(new Error("original voice RTC peer unavailable"));
     // No SDK/provider callback runs until this actual observer is published. The channel
     // separately publishes its enclosing activity before calling this method.
     const flight = Promise.resolve().then(() => {
@@ -137,7 +226,7 @@ export class VoiceSdpRtcOwner {
     });
   }
   get applied(): boolean { return this.remoteDone; }
-  get closed(): boolean { return this.stopped; }
+  get closed(): boolean { return this.#stopped; }
 
   /** CompleteSdpV1 sends the gathered description, never an unbounded early ICE queue.
    * This is an observer-only await; Close detaches it. It cannot stand in for joining the
@@ -191,18 +280,18 @@ export class VoiceSdpRtcOwner {
   /** Fence/close synchronously, but retain original Peer/flight until its actual SDK await
    * returns. A rejected/hanging SDK call is not made drained by close or timer expiry. */
   close(): void {
-    this.stopped = true;
+    this.#stopped = true;
     this.localBytes?.fill(0); this.localBytes = null;
     const stop = this.gatherStop; this.gatherStop = null;
     try { stop?.(); } catch { /* Preserve Close even if an injected observer throws. */ }
-    if (this.peer && !this.peerClosed) {
-      this.peerClosed = true;
-      try { this.peer.close(); } catch { /* This original peer stays closed locally. */ }
+    if (this.#peer && !this.#peerClosed) {
+      this.#peerClosed = true;
+      try { this.#peer.close(); } catch { /* This original peer stays closed locally. */ }
     }
   }
   async drain(): Promise<void> {
     this.close();
     try { await this.flight; } catch { /* The actual SDK await has returned; no success is invented. */ }
-    this.peer = null;
+    this.#peer = null;
   }
 }

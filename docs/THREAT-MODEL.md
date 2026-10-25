@@ -1,5 +1,24 @@
 # Threat model; client integrity & enforcement boundaries
 
+## Inactive browser media transfer and freshness leaves (25 October)
+
+The affine RTC leaf binds a module-private destination to the exact original identity;
+foreign/forged/closed destinations cannot take a peer. Ordinary bookkeeping getters are
+treated as reentrant: every such read finishes before BOTH source and destination private
+gates are checked. The transfer tail contains no callback, getter, allocation or await.
+Old current closure and peer references are severed; old cleanup cannot close moved media.
+The destination retains actual custody through a failed SDK close and cannot report early
+drain from a reentrant cleanup. Opaque browser RTC heap is outside declared byte accounting.
+
+The passive freshness gate does not authorize native effects. A future paid driver must
+authenticate the exact physical reply and act on expiry/Close by closing the actual peer.
+Only original request-start time bounds freshness; capacity/late positive replies cannot
+revive expired state, and even finite floating-point clocks cannot round the5s bound up.
+An outstanding request remains an obligation after Close. No broker funding, op28 consumer,
+status/timer executor or native independent-index handoff is implemented by these leaves.
+The old Ready-dependent current predicate still conservatively refuses late transfer;
+an explicit admitted-media handoff policy is required before activation.
+
 ## Native media command and original-Source cleanup (25 October)
 
 Control28 now enforces the previously required native consumer boundary. The fixed header
