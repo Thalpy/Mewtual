@@ -1,5 +1,28 @@
 # Mewtual; Interfaces & Hooks Schema
 
+## Canonical native SDP outcome (25 October; HTTP/SDK handlers pending)
+
+Each native Pending/Live/Drained row now retains the SAME original Root outcome. Candidate
+preparation validates/hash-commits input and prepays outside guards. Installation repeats
+exact intent Arc, funding Arc and body commitment after Index uniqueness, before allocating
+one outcome and one row. Registration.publication_writer obtains only that canonical slot's
+affine Writer; mark_handoff checks its exact allocation and PreRoot state alongside current
+Session/SDK/PC/Ready admission. Equal labels or another funded same-intent slot do not pass.
+
+After worker loss, try_compact_sdp recovers a Published Action from that slot outside native
+guards, then reconciles actual Root status. No Actor lookup, new Copy, current grant or
+storage reopen is needed for that history. Native capture accepts only the slot's SAME
+actual Action. Negative compaction rereads is_proven_unpublished under final Index/State
+after CLOSED+zero IO and worker/observer retirement. Idle/NeverEntered/explicit normal
+Refused can establish absence; InFlight/Uncertain cannot. Existing Actions still require
+actual unstarted retirement or real engine settlement and receipt ACK. Drained retains the
+original outcome and fixed fee; retired variable owners drop outside guards.
+
+The complete fixed graph fits the existing2304B per-purpose fee and64KiB phase envelope.
+No new handler or live feature activation follows from these Rust leaves. A future async
+producer must keep Registration or bound paid IO through Writer retirement; bare Writer
+Drop supplies no notification. Notification-only SDP waiting remains unsupported.
+
 ## Original SDP publication outcome (25 October; native row integration pending)
 
 Rust-only recorded LOW Offer, HIGH Answer and Open Actor APIs take an affine
@@ -78,8 +101,10 @@ until Drop. Metadata-only commands need their own original intent-matching Copy,
 and publication keepalive. Action result/delivery commands also require actual intent identity.
 
 VOICE_SDP_RPC_FIXED_BYTES models aligned Body/Work Arc allocations, actual Actor/App envelopes,
-pending/completion values and bounded oneshot bookkeeping. Native adds its ACTUAL calling
-future before admission. Independent TaskCopy pays its own native publication/worker graph;
+pending/completion values and bounded oneshot bookkeeping. Native must use
+voice_sdp_rpc_bytes(actual_future_size): common storage plus the maximum of eager
+construction and the actual returned future, which occupy separate ownership phases.
+Independent TaskCopy pays its own native publication/worker graph;
 it cannot attach a keepalive or turn into a body Copy. No native wire opcode/body class,
 browser ABI change or live voice enablement is added by this Actor increment.
 

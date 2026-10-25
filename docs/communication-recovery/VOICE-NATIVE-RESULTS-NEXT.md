@@ -1,5 +1,23 @@
 # Next voice milestone: native result recovery
 
+## Canonical row/outcome continuation (25 October; HTTP vertical still pending)
+
+`communication-sdp-row-outcomes` integrates one original Root outcome into native rows,
+exact Writer handoff, same-slot positive recovery after parent closure, and final stable
+negative compaction. Its whole fixed graph fits the unchanged2304B fee and64KiB envelope.
+HANDOVER records focused results and pending full gates.
+
+Next implement the authenticated SDP HTTP vertical using these rows and recorded Actor
+calls. Before adding any notification-only waiter, structurally retain Registration or
+original bound IO through Writer retirement: its bare Drop supplies no row notification.
+Queue/body/completion ownership must preserve the existing Writer-before-Work ordering.
+Begin/Resolve, Input, engine, result, ACK, settlement, Return, delivery and history must use
+the original canonical row/session and prepaid actual buffers, including cancellation and
+lost replies. The entire family remains refused before allocation/nonce debit until this
+vertical and its private browser producer are coherent. Then wire original-key WebCrypto,
+complete ICE/RTC, fresh rounds and multi-peer/relay composition; do not enable from Rust
+ledger coverage alone.
+
 ## Original publication outcome continuation (25 October; not activated)
 
 `communication-sdp-publication-outcomes` adds the fixed Root outcome and affine Writer to

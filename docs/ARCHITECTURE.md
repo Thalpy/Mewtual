@@ -1,5 +1,21 @@
 # Mewtual; Architecture
 
+## Canonical native SDP outcomes (25 October; production vertical pending)
+
+The shared native Index installs one original Root outcome per parent/PC/purpose after
+exact candidate intent/fee/body checks and uniqueness. Pending/Live/Drained retain it on
+the original2304B fixed fee; the complete graph still fits without increasing64KiB storage.
+Its affine Writer is obtained only from the actual Registration. Final native handoff checks
+that same allocation and PreRoot state before calling the recorded Actor API.
+
+After worker loss, compaction recovers actual publication from the slot outside guards and
+reconciles Root engine history. Stable absence is reread under final Index/State after
+original IO closure/collection and worker/observer retirement; InFlight/Uncertain remain
+unresolved. The same outcome survives terminal compaction. Native variable owners leave
+guards before destruction. Production HTTP/SDK/RTC handlers remain closed. An async
+producer must keep Registration or paid IO until its Writer retires; the current bare
+Writer API is not a notification-only waiting mechanism.
+
 ## Original SDP publication history (25 October; native row integration pending)
 
 A fixed original outcome survives Pair/LocalJoin pruning and lost Actor replies. Its

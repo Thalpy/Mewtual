@@ -1,5 +1,30 @@
 # Threat model; client integrity & enforcement boundaries
 
+## Canonical outcome and native compaction (25 October; no live HTTP/SDK dispatch)
+
+A fixed fee or same Phase cannot authorize a newly substituted outcome. Final native
+installation compares exact intent/funding/body after shared-index uniqueness and allocates
+one slot only then. Writer handoff checks that exact slot and PreRoot state; native capture
+checks its actual published Arc. A changed SDP producer is refused before publication.
+The previous post-publication mismatch fixture intentionally changes to test this stronger
+contract; real admitted-engine settlement and late positive recovery remain covered.
+
+Native reads positive outcome history outside guards and preserves the same Action before
+fallible attachment. Pair pruning/End cannot remove it. A negative is checked freshly under
+Index/State only after original IO CLOSED+zero and actual worker/observer retirement. An
+entered ambiguous call stays unresolved. A reservation racing closure cannot return a
+usable new Writer after the closed check; a pre-close returned Writer remains InFlight
+until actual retirement. No absent Root action can acquire invented settled/ACK history.
+The unchanged fixed fee pays Row/outcome/candidate/writer/history allocations, without a
+Phase/Row/Copy/publication backedge from the outcome. Its real Action owns its separate
+Root payment. Compaction retains the same fixed outcome and destroys variable owners
+outside native guards.
+
+These APIs alone do not provide an async SDP wake protocol. Production submission must
+keep a real worker or original bound IO until its Writer retires; bare Writer Drop has no
+Notify callback. Notification-only SDP waiting is still refused. HTTP/SDK/RTC activation
+must not precede that worker/collection integration and full final acceptance.
+
 ## Lost SDP publication replies (25 October; production row integration pending)
 
 Actor timeout, waiter loss, Pair pruning and End cannot prove that an action was absent.

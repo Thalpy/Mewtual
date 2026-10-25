@@ -1,5 +1,39 @@
 # Mewtual; Handover
 
+## Canonical native SDP outcomes (25 October; focused checks pass, not live V2)
+
+`communication-sdp-row-outcomes` continues from Root/Actor outcome commit `4b483768` and
+the reviewed RPC accounting correction (`a086c2ed`, equivalent to `089403a0`). Native
+rows now install one original outcome after Index uniqueness and exact intent/fee/body
+checks. Their worker gets an affine Writer only from that slot; final handoff repeats its
+identity. Positive recovery reads the original slot outside guards after worker loss, even
+after parent closure. Final negative compaction checks the SAME slot freshly under
+Index/State after CLOSED+zero IO and actual worker/observer retirement. Uncertain/InFlight
+never substitute for absent publication, and native never fabricates engine settlement/ACK.
+
+The changed-body fixture contract intentionally changes: a canonical recorded Writer
+refuses mixed-up bytes before Root publication. Other cases retain actual admitted-engine
+settlement, unstarted parent closure, competing candidate uniqueness and lost positive
+publication recovery. The entered-uncertain negative gate has actual Root unwind coverage;
+no native test pretends that a literal negative can replace it.
+
+All 625 Root V2 tests pass (16.63s), all 329 native handoff tests pass (20.39s), and all 6
+actual blocked-TCP PC cases pass (62.81s). The complete fixed Row/fee/Prepared/Outcome/
+Writer/History graph fits the unchanged2304B per-purpose fee. Existing64KiB/copy peak
+checks pass with no budget increases. The foreign-slot handoff test uses a real separately
+funded same-intent Root outcome and is refused; canonical handoff still succeeds.
+The final read-only adversarial review has no unresolved findings. Both formatting checks,
+strict Root all-target/all-feature Clippy (2m21s), native Cargo check (54.88s), strict native
+all-target Clippy (1m43s), ambient-dependency checks, all 2,740 frontend tests (74.09s),
+Svelte checking and production build (37.44s) pass. Complete Root/native suites are now
+running sequentially against frozen runtime commit `41e17a71`; they have not yet passed.
+A production submission must keep Registration or bound paid IO alive until its Writer
+retires. Bare Writer Drop does not notify the row. Current notification-only SDP waiting is
+unsupported; the retained-Writer test deliberately repolls, and is not a wake proof.
+Production SDP HTTP handlers, private browser SDK/RTC, fresh rounds, multi-peer/media relay
+and physical acceptance are still unfinished. Further implementation is isolated in `communication-sdp-native-worker` while this
+checkpoint runs its complete suites.
+
 ## Original SDP publication outcomes (25 October; integration in progress)
 
 `communication-sdp-publication-outcomes` continues from pushed native-row checkpoint
