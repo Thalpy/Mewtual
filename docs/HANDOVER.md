@@ -1,5 +1,15 @@
 # Mewtual; Handover
 
+## Activation status correction (25 October)
+
+The unused plaintext call driver is explicitly a contract-test model, not the production
+retained native/browser adapter. Its activation reasons now identify App setup/cleanup,
+negotiation retirement and multi-peer limits, tracks/data channels and real media checks;
+they no longer call the implemented native SDP factories missing. Activation remains OFF.
+Read-only review has no findings. All2,851 frontend tests pass68.55s, Svelte checks report
+0errors/0warnings and the production build passes35.55s. Rust source is unchanged by this
+correction; the HTTP candidate's serial full Rust validation continues below.
+
 ## Media/acknowledgement funding primitive (25 October; consumer still open)
 
 `communication-voice-media-custody` adds `Reservation::partition_retained`. It moves one

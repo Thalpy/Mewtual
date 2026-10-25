@@ -1,5 +1,18 @@
 # V2 voice signalling: production scheduling and the call driver
 
+## 25 October status: contract model, not the production adapter
+
+The original browser broker and native service now interoperate through scoped Ready and
+one complete SDP round. `voice-v2-call.ts` remains a contract-test model; App does not instantiate
+it. Its plaintext submit/events and description-held async frames do not meet the retained
+broker's ownership/budget contract. Do not wire that interface to IPC as a shortcut.
+
+App activation remains false. Production setup/cleanup through the retained broker, live-peer
+adoption and negotiation/history retirement, multi-peer composition, microphone/data channels,
+operational recovery and real WebView/media acceptance are still required. The activation
+reasons now list those gaps rather than claiming the native SDP factories are absent. Earlier
+sections below describe the model's tested behavior, not production integration evidence.
+
 22 October 2026, branch `communication-v2-signalling` (from `f227b4f7`). Package 2 of the
 [chat, files and voice plan](CHAT-FILES-VOICE-PLAN.md), under the
 [V2 signalling decision](VOICE-SIGNALLING-V2.md). **Live V2 calls are still not enabled, and V2

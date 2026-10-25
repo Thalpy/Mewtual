@@ -1,23 +1,20 @@
 // voice-v2-call.ts: the V2 call driver (docs/communication-recovery/VOICE-V2-CALL-DRIVER.md).
 //
-// One instance owns one V2 call for one room and connects the native-authorized V2 signalling
-// path to the browser's RTCPeerConnections. It is the only renderer code that may turn V2 SDP/ICE
-// into RTC effects, and it never reads the legacy `call-signal` path: App.svelte excludes every
-// legacy signal for a V2 room before its legacy handler runs (voice-signaling.ts).
+// Contract-test model for one call's generation/offer fencing and exact retry behavior.
+// App.svelte does not instantiate it. The actual private SDP path uses the retained native
+// broker and VoiceSdpRtcOwner, whose bounded ownership and fresh admission are tested separately.
+// This model's plaintext submit/events interface is not an adapter to that retained path:
+// its description objects/async frames need a separate budget/ownership proof before any use.
 //
-// Authority stays native. This module receives only items the native path has already
-// authenticated, freshness-checked and authorized for the exact current join, and it submits
-// plaintext SDP/ICE to the native path, which reserves, encrypts, signs and routes it. The driver's
-// own job is the renderer half of the contract:
-// - fence every RTC continuation by call generation, exact peer record and exact OfferId, so a
-//   delayed bye, stale ICE, a lost reply or a replaced join can never touch newer state;
-// - keep signalling progress, native submission and media connectivity as separate facts;
-// - never fall back to the legacy protocol, whatever fails.
+// The tests remain useful for delayed bye/ICE, replacement, exact retries and mode isolation.
+// Every legacy signal is excluded from a V2 session before the legacy App handler can run.
+// Native receipt, remote SDK completion and media connectivity remain distinct observations.
 //
-// ACTIVATION IS INCOMPLETE. The encrypted handoff supports native Derive/confirmation and
-// cleanup, but no complete VoiceV2Native adapter or native SDP phase factory exists. `voiceV2Activation()` therefore
-// reports unavailable and App.svelte keeps every call on legacy signalling. The contract tests in
-// voice-v2-call.test.ts pin the behaviour a native adapter must support before that changes.
+// ACTIVATION IS INCOMPLETE. Native Derive/confirmation, Ready, scoped SDP factories and the
+// authenticated service now interoperate with the original browser broker through one round.
+// Production call ownership, negotiation retirement/history compaction, multi-peer composition,
+// media tracks and real WebView/media acceptance are unfinished. voiceV2Activation stays false;
+// wiring this historical plaintext model to IPC would not complete those boundaries.
 
 import {
   isCallIdentity,
@@ -215,16 +212,17 @@ export type VoiceV2Activation =
 const UNAVAILABLE: VoiceV2Activation = Object.freeze({
   available: false,
   missing: Object.freeze([
-    "native start/events/submit/end commands implementing VoiceV2Native",
-    "handoff delivery of SDP/ICE actions and post-decrypt native authorization",
-    "native SDP phase factories on a confirmed LocalJoin",
-    "App RTC wiring for V2 peers (tracks, data channels, ontrack fencing)",
+    "App call setup and cleanup through the native broker",
+    "Multiple peers within the existing memory and history limits",
+    "App SDP/ICE/RTC wiring, microphone tracks and data channels",
+    "Automatic recovery and real WebView/media checks",
   ]),
 });
 
 /**
- * Whether this build may start V2 calls. It may not: see UNAVAILABLE.missing. Flipping this is
- * the activation step, and it must come with the native adapter, not before it.
+ * Whether App may start V2 calls. The private native/browser round is not full call
+ * composition. Activation also needs the missing ownership/media/acceptance boundaries;
+ * the plaintext contract model above must not bypass the retained broker's budget gates.
  */
 export function voiceV2Activation(): VoiceV2Activation {
   return UNAVAILABLE;
