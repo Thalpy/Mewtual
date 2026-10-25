@@ -85,12 +85,14 @@ type RecordedRequest = Result<
 
 // Eager constructors execute before the returned future exists. Inventory their actual
 // parameter/closure/request wrapper types separately: future sizeof alone would omit
-// this synchronous ownership graph. Count both caller and moved request conservatively,
-// plus request()'s intermediate Work/Arc/message/channel handles. Heap backing and Tokio
+// this synchronous ownership graph. Count the caller and its ONE moved request pair,
+// plus request()'s intermediate Work/Arc/message/channel handles. `prepared` moves into
+// the async sender; it never coexists with a second owned Command/Pending pair. Compiler
+// move temporaries are not additional owned graphs. Heap backing and Tokio
 // allocation bookkeeping are already included in sdp_body's fixed graph. This is bounded
 // owned storage, not a claim about compiler-specific machine stack or runtime call depth.
 struct RecordedConstruction {
-    _requests: [RecordedRequest; 2],
+    _request: RecordedRequest,
     _caller: RecordedCaller,
     _work: Work,
     _anchor: Arc<Work>,
@@ -355,6 +357,7 @@ impl ServerActor {
             })),
             Err(reason) => {
                 drop(outcome);
+                drop((grant, intent));
                 Err(VoiceEndpointError::Protocol(reason))
             }
         };
@@ -387,6 +390,7 @@ impl ServerActor {
             })),
             Err(reason) => {
                 drop(outcome);
+                drop((grant, intent, delivery));
                 Err(VoiceEndpointError::Protocol(reason))
             }
         };
@@ -418,6 +422,7 @@ impl ServerActor {
             Err(reason) => {
                 drop(outcome);
                 drop(copy);
+                drop((grant, intent));
                 Err(reason)
             }
         };
@@ -686,7 +691,7 @@ mod tests {
             }),
         ];
         for future in futures {
-            let total = future + super::super::sdp_body::VOICE_SDP_RPC_FIXED_BYTES;
+            let total = super::super::sdp_body::voice_sdp_rpc_bytes(future);
             assert!(
                 total <= VOICE_SDP_RPC_METADATA_BYTES,
                 "SDP RPC graph needs {total}"
@@ -701,7 +706,7 @@ mod tests {
             completion(|pending: VoiceSdpPending<SdpOpenResult>| pending.complete()),
             completion(|pending: VoiceSdpPending<()>| pending.complete()),
         ] {
-            let total = future + super::super::sdp_body::VOICE_SDP_RPC_FIXED_BYTES;
+            let total = super::super::sdp_body::voice_sdp_rpc_bytes(future);
             assert!(
                 total <= VOICE_SDP_RPC_METADATA_BYTES,
                 "SDP collection graph needs {total}"
