@@ -37,12 +37,12 @@ No Unauthorized/closed result is retried. The final read-only review has no rema
 Native Cargo check passes (27.96s); strict Root all-target/all-feature Clippy passes (1m24s).
 The latest strict native all-target Clippy rerun passes (1m13s), including the final
 notification/negative tests. Formatting, ambient-dependency and diff checks pass.
-Full current G Root/native suites remain pending behind the frozen Actor native full suite;
+Full current G Root/native suites remain pending for the integrated SDP continuation;
 these focused checks do not establish a full G pass.
 
-The frozen Actor checkpoint completed its full Root suite:3,557 tests passed, including
-doctests. Its full separate native suite is now building/running. Those results do not
-establish a full G pass. Cargo-deny still fails on inherited RUSTSEC-2026-0387 for
+The frozen Actor checkpoint completed its full Root suite:3,557 tests including doctests,
+and its separate full native suite:819 library plus5 capability integration tests, all
+passing. Those results do not establish a full G pass. Cargo-deny still fails on inherited RUSTSEC-2026-0387 for
 crypto-bigint0.5.5; bans/licenses/sources pass. No dependency or ignore change is included.
 
 Next implement authenticated SDP Input/engine/result/ACK/settlement/Return/delivery handlers,
@@ -121,9 +121,9 @@ initially overflowed the Windows test stack; boxing only its test construction/h
 that without increasing the stack or changing assertions/production payment.
 
 Formal native Cargo check passes (94s); strict Root all-target/all-feature Clippy and strict
-native all-target Clippy pass, as do formatting, ambient and diff checks. The complete frozen Root suite passes:3,557 tests including doctests. The separate
-native full suite is building/running on this same source; earlier full-suite results
-below remain separate. The inherited cargo-deny advisory is not
+native all-target Clippy pass, as do formatting, ambient and diff checks. The complete frozen Root suite passes:3,557 tests including doctests. Its separate full
+native suite also passes:819 library plus5 capability integration tests. Earlier full-suite
+results below remain separate. The inherited cargo-deny advisory is not
 fixed or ignored by this change. No dependency change is included.
 
 No new native SDP opcode/body class or private browser SDP/RTC producer exists yet. Their
