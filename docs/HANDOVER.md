@@ -24,8 +24,8 @@ Queued borrower End, other-channel collection, reentrant admission and wrapper i
 are covered. These are controlled browser/native-adapter tests, not physical audio evidence.
 Read-only review has no remaining blocker/high/medium or material low in the scheduler slice.
 All320 focused regressions pass6.09s. Merged complete frontend2,997 tests64.54s, static0errors/0warnings
-and production build36.54s pass. Native check/strict Clippy and both actual native HTTP
-compaction cases pass40.74s/41.90s. The full Native scheduling-source rerun is running.
+and production build36.25s pass. Native check/strict Clippy and both actual native HTTP
+compaction cases pass40.74s/41.56s. The full Native scheduling-source rerun is running.
 
 Second-peer admission remains disabled. The next boundary is replacing the active negotiation
 only after original SDK/IO/final ACK and history disposal, retaining independent per-peer media.
