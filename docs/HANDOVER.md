@@ -23,8 +23,9 @@ while another Session's bootstrap/ECDH remains held, with observed provider/code
 Queued borrower End, other-channel collection, reentrant admission and wrapper inventories
 are covered. These are controlled browser/native-adapter tests, not physical audio evidence.
 Read-only review has no remaining blocker/high/medium or material low in the scheduler slice.
-All320 focused regressions pass6.09s. Complete frontend2,988 tests64.65s, static0errors/0warnings
-and production build36.98s pass. Native integration for this source remains pending.
+All320 focused regressions pass6.09s. Merged complete frontend2,997 tests64.54s, static0errors/0warnings
+and production build36.54s pass. Native check/strict Clippy and both actual native HTTP
+compaction cases pass40.74s/41.90s. The full Native scheduling-source rerun is running.
 
 Second-peer admission remains disabled. The next boundary is replacing the active negotiation
 only after original SDK/IO/final ACK and history disposal, retaining independent per-peer media.
@@ -32,7 +33,7 @@ Operational renewal, App RTC/tracks, member relay, combined/physical acceptance 
 crypto-bigint advisory remain open. App V2 stays OFF. External download resume is separately
 owned; only one desktop is available. Do not describe the communication plan as complete.
 
-## Live browser compaction and native acceptance (26 October; full rerun pending)
+## Live browser compaction and native acceptance (26 October; current gates passed)
 
 Broker33 compacts the exact original browser negotiation after variable retirement and
 native mode8 history collection, preserving the indexed peer and shared Session keys/counters.
@@ -58,8 +59,9 @@ fixture-isolation cascades. It did not establish which individual mutex was cont
 The fixture now deterministically holds the actual row mutex, requires that local refusal,
 and retries only the same original metadata lookup within32 attempts. No new Input, engine,
 authority deadline or native attempt is created. The focused regression passes9.55s;
-strict Native Clippy passes1m11s. The fresh full Native rerun is running serially. Review
-found no blocker/high/medium;32 attempts with31 Clock sleeps are not a strict elapsed deadline.
+strict Native Clippy passes1m11s. The fresh complete Native rerun passes879 tests
+(874unit+5ACL; test body1795.29s), with Root/native formatting and ambient checks passing.
+Review found no blocker/high/medium;32 attempts with31 Clock sleeps are not a strict elapsed deadline.
 
 Operational renewal, per-pair/multi-peer admission, App RTC/tracks, TURN/member media relay,
 combined acceptance and independent physical audio/network testing remain open. Root runtime

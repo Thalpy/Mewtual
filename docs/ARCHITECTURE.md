@@ -23,7 +23,7 @@ inert plan marker and the independently paid media driver survive; old final/sel
 is cleared. A separate small completion scope refunds after heavy transaction frames actually
 return. Shared Session keys/counters stay unchanged. End closes the actual peer before joining
 compaction and cleanup. Another negotiation is still blocked; this is not multi-peer support.
-HANDOVER records passing extended HTTP/browser gates and the current full Native rerun. App V2 is OFF.
+HANDOVER records passing extended HTTP/browser gates and the passing current full Native rerun. App V2 is OFF.
 
 ## End-only browser terminal disposal (26 October; inactive)
 
