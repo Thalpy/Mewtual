@@ -37,22 +37,6 @@ impl SavedRun {
             Self::Download(run) => server.sync.put_download(run, bytes),
         }
     }
-    /// Saved files propagate (owner decision): a Download chunk that has passed its ciphertext
-    /// CID and file-decryption checks and reached the private store is also stored in the shared
-    /// cache, so this device serves it to members like any file it has displayed. Only after the
-    /// private write succeeded, and a failure here is logged and never fails the save. Keep runs
-    /// do not copy: their completed copy is already served.
-    pub(super) fn fill_cache<T: MeshTransport, R: CryptoRngCore>(
-        self,
-        server: &mut Server<T, R>,
-        ciphertext: &[u8],
-    ) {
-        if let Self::Download(_) = self {
-            if let Err(error) = server.sync.put_blob(ciphertext) {
-                tracing::warn!(%error, "saved chunk could not be copied into the shared cache");
-            }
-        }
-    }
     pub(super) fn get<T: MeshTransport, R: CryptoRngCore>(
         self,
         server: &Server<T, R>,

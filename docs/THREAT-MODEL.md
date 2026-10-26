@@ -30,8 +30,11 @@ crash-safe writes and leave cleanup ([design](design-cache-housekeeping.md)).
   never holds a torn record. There is no per-write directory flush: power loss can lose a renamed
   entry (fetched again), not tear it. Mount recovery removes temporary files no live handle owns
   and sealed records shorter than 40 bytes. Keep's own stores keep their earlier write path.
-- **Saved files serve.** A verified Download chunk is also put in the shared cache, so a member
-  asking for it can learn this device holds the file, as for any file it has displayed.
+- **Saved files serve, once saved.** A private Download's chunks reach the shared cache only after
+  its save published outside the app: export reads stage them invisibly, `FinishDownloadExport`
+  promotes them, and Remove or a retired lease drops them. From then on a member asking can learn
+  this device holds the file, as for any file it has displayed. An unfinished, failed or removed
+  Download never makes this device a source.
 - **Leave cleanup** runs under an in-process claim per group (attach waits on it), which a leave
   takes before it stops the server, while that server's handle still holds the Keep lease. Any
   handle still open at cleanup time therefore attached while the lease was held and has a faulted
@@ -631,8 +634,8 @@ Sealed Download ownership has its own domain and canonical random-ID directory, 
 retained quota and exclusive mount with Keeps. Purpose and full MLS group/device scope are checked
 before pending-journal reconciliation. A CID match grants no cross-purpose cleanup or run access.
 Public blob reads/source preparation exclude all Downloads, including completed copies (since cache
-housekeeping, each verified Download chunk is also copied into the ordinary cache, which does
-serve; the private record itself still never does). Private
+housekeeping, a Download whose save has published has its chunks promoted into the ordinary cache,
+which does serve; the private record itself never does, and nothing propagates before that). Private
 export requires exact issuing mount AND transfer-generation identity, saved chunk bounds and
 whole-file verification. Original actor freeze/thaw, Root/epoch, account/entry, Pause/removal and
 remount revoke old effects; cleanup of a committed export cannot remove a later verification run.

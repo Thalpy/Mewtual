@@ -15,10 +15,13 @@ async fn file_keep_uses_member_bridge_without_a_direct_edge_and_survives_solo_na
     bridged_saved_copy(false).await;
 }
 
-/// Renamed from `..._without_becoming_a_source_...` when saved files began to propagate: the
-/// private record still never serves, but its verified chunks now also fill the ordinary cache.
+/// Was `..._without_becoming_a_source_and_exports_...`. Saved files now propagate (cache
+/// housekeeping), but only once the save publishes: acquisition, the restart recheck and the
+/// export reads still leave the file unavailable here, and the published export makes it
+/// available. The private record itself never serves.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn private_download_bridges_fills_the_cache_and_exports_after_solo_native_reopen() {
+async fn private_download_bridges_and_becomes_a_source_only_once_exported_after_solo_native_reopen()
+{
     bridged_saved_copy(true).await;
 }
 
@@ -103,10 +106,8 @@ async fn bridged_saved_copy(private: bool) {
     let kept = scenario.online(2).actor.kept_files().await;
     let expected_plan = if let Some(id) = download_id {
         assert!(kept.files.is_empty() && kept.transfers.is_empty());
-        // Saved files propagate (cache housekeeping): the verified chunks were also copied into
-        // the ordinary cache, so the file is available here. The private record itself is still
-        // not a Keep and never a public source.
-        assert!(scenario.online(2).actor.file_available(raw.clone()).await);
+        // Saved files propagate only once a save publishes, so acquisition leaves nothing here.
+        assert!(!scenario.online(2).actor.file_available(raw.clone()).await);
         let saved = scenario.online(2).actor.downloads().await.unwrap();
         assert_eq!(saved.len(), 1);
         assert!(saved[0].checked && saved[0].id == id);
@@ -186,6 +187,10 @@ async fn bridged_saved_copy(private: bool) {
         .await
         .unwrap();
         let actual = std::fs::read(path).unwrap();
+        assert!(
+            !source.running.actor.file_available(raw.clone()).await,
+            "export reads only stage; nothing is served until native reports the published save"
+        );
         source
             .running
             .actor
@@ -193,6 +198,10 @@ async fn bridged_saved_copy(private: bool) {
             .await
             .unwrap();
         assert!(source.running.actor.downloads().await.unwrap().is_empty());
+        assert!(
+            source.running.actor.file_available(raw.clone()).await,
+            "the published save propagates: this device now serves the file"
+        );
         actual
     } else {
         bounded(
@@ -690,7 +699,8 @@ async fn interrupted_saved_bridge(private: bool) {
     let actual = if let Some(ready) = ready {
         assert!(!scenario.online(2).actor.file_available(raw.clone()).await);
         assert!(scenario.online(2).actor.kept_files().await.files.is_empty());
-        bounded(
+        let id = ready.id();
+        let chunk = bounded(
             "private resumed bytes remain under original native custody",
             scenario
                 .online(2)
@@ -699,7 +709,21 @@ async fn interrupted_saved_bridge(private: bool) {
         )
         .await
         .unwrap()
-        .into_bytes()
+        .into_bytes();
+        // Saved files propagate only once a save publishes. An export read stages its chunk but
+        // serves nothing, and removing the Download then leaves nothing to serve either.
+        assert!(!scenario.online(2).actor.file_available(raw.clone()).await);
+        bounded(
+            "the resumed private Download is removed",
+            scenario.online(2).actor.cancel_download(id),
+        )
+        .await
+        .unwrap();
+        assert!(
+            !scenario.online(2).actor.file_available(raw.clone()).await,
+            "a removed Download never makes this device a source"
+        );
+        chunk
     } else {
         let (actual, _) = bounded(
             "recovered native file reads verified bytes",

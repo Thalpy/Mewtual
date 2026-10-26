@@ -29,6 +29,7 @@ First round:
   fetched again. Only missing or corrupt chunks are fetched.
 - **Saved files propagate.** When a file is saved out of the app, its verified chunks also go into
   the shared cache, so the device can serve them to members as it does for files it has viewed.
+  Only once the save has published (section 10): an unfinished or removed Download never serves.
 - **Crash-safe writes.** Temporary name, sync, rename. A chunk counts as held only once verified.
 - **Leaving a server cleans up** its cached and Keep files, reports the space freed, and never
   removes anything Studio still references.
@@ -300,15 +301,33 @@ through the composite store.
 
 ### 10. Saved files into the cache
 
-During a Download, when a chunk has passed its ciphertext CID check and file decryption and has
-been written to the private Download store, the same ciphertext is also put into the shared cache
-unless it already holds a healthy copy; chunks taken from the private store on resume are copied the
-same way. A failed cache copy is logged and never fails the save. Keep runs do not copy (their
-completed copy serves). The copy happens per chunk, so a cancelled save can leave cached chunks;
-that is the same standard as display, and the whole-file check still gates the export. Afterwards
-this device serves those chunks to members like any file it has displayed, so a member asking can
-learn it holds the file. Tests that pinned "a Download never becomes a source" change with this
-decision.
+Contract (corrected after CI on `0c32f7ae`, which had copied at acquisition, more broadly than
+decided): a private Download's chunks reach the shared cache only once a save of that Download has
+**published** outside the app. An in-progress, paused, failed, cancelled or removed Download never
+makes this device a source.
+
+- **Acquisition copies nothing.** Network fetches and the recheck from the private store after a
+  restart write only to the private store, which is never served.
+- **Export reads stage.** Each `ReadDownloadChunk` puts the ciphertext it read (whose CID the
+  private store's read re-verified) into the primary cache's `staging/`, unless the cache already
+  holds it. Staged blobs are invisible to `has`/`get`, serving, `file_available` and cache usage.
+- **Publication promotes.** Native calls `FinishDownloadExport` only after the save published. The
+  actor releases the private record and then promotes the staged chunks (one rename each), but only
+  if the export lease was still current and the release succeeded. Otherwise (a Remove won the
+  race, or the release was refused) it drops them.
+- **Remove drops.** `CancelDownload` drops whatever that Download's exports staged. A failed export
+  leaves staged blobs that are never served; they go at the next attach (`clear_staged_uploads`),
+  or when the Download is saved or removed.
+
+Staging during the export, rather than copying everything at its end, keeps the end to renames: a
+1 GiB file re-sealed in one actor turn would stall the server's other commands for seconds. A failed
+stage or promotion is logged and never fails the read, save or removal. Keep runs do not copy (their
+completed copy serves). Afterwards this device serves those chunks like any file it has displayed,
+so a member asking can learn it holds the file. Limitation: a journaled save whose temporary second
+name could not be removed keeps its record (native skips `FinishDownloadExport`), so that save does
+not propagate, and Clear later drops what it staged. Tests that pinned "a Download never becomes a
+source" keep that check through acquisition and export and now also check that the published save
+makes the file available and that a removed Download does not.
 
 ### 11. Storage health and Repair
 

@@ -528,7 +528,9 @@ The **Files** tab is a folder browser:
 ### Cache on this device
 
 Files you open, play or save stay in an encrypted cache on this device, so they show again
-without fetching, and this device can send them to other members who ask. Each server has its own
+without fetching, and this device can send them to other members who ask. A download joins the
+cache only once it has been saved to your folder; one still in progress, or one you remove from
+Transfers, does not. Each server has its own
 **cache limit on this device**, set in **Server settings → Storage** (1 GiB to 1 TiB, or no limit;
 5 GiB unless you change it, or more if the cache was already bigger when you updated).
 

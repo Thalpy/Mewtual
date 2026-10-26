@@ -22,7 +22,9 @@ cleanup on leave ([design](design-cache-housekeeping.md), owner decisions record
 - **Writes.** The primary cache writes `incoming/<cid>.<pid>.<generation>.<seq>`, syncs, renames;
   mount recovery removes temps no live handle owns and torn sealed records. Keep's stores are
   unchanged.
-- **Saved files propagate.** Verified Download chunks are also cached, so this device serves them.
+- **Saved files propagate, once saved.** Export reads stage a Download's chunks in the cache's
+  `staging/`; only `FinishDownloadExport` (sent after the save published) promotes them, so this
+  device then serves the file. Acquisition copies nothing, and Remove drops what was staged.
 - **Leave.** Every Leave entry point confirms, naming Keep copies and unfinished Downloads. The
   bridge claims the group, writes a marker before `remove_server`, then (after the registry
   persisted) empties the namespace in batches without the store lock, keeps Studio-referenced
@@ -34,8 +36,11 @@ cleanup on leave ([design](design-cache-housekeeping.md), owner decisions record
 - **Storage health** reports other members' absent chunks as not cached; Repair fetches only
   corrupt chunks and chunks missing from this device's own uploads.
 - **UI.** Footer cache segment (bar, %, "N leaving soon" past 90%), Server settings → Storage.
-- **Contract changes:** private Downloads now fill the cache (test and the six-client test
-  renamed); `leave_server` returns a report; Storage health's `missing_chunks` narrowed.
+- **Contract changes:** a private Download whose save published now fills the cache (the
+  six-client private test renamed; it keeps "not available" through acquisition, restart and
+  export, then checks the published save makes the file available, and the interrupted test checks
+  a removed Download does not); `leave_server` returns a report; Storage health's `missing_chunks`
+  narrowed.
 - **Limits:** no holder probe; caches left before this change are not cleaned; usage counts sealed
   file lengths; expiry unenforced.
 
