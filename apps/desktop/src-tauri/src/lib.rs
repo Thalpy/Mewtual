@@ -70,6 +70,7 @@ mod media_decode;
 mod media_worker;
 mod member_reconnect;
 mod private_downloads;
+mod saved_files;
 mod studio_exports;
 #[cfg(test)]
 mod voice_activation_tests;
@@ -15396,6 +15397,7 @@ async fn save_group_file(
     operation: Option<String>,
     fresh_copy: Option<bool>,
     save_as: Option<bool>,
+    replace_older: Option<bool>,
 ) -> Result<SavedFileResult, String> {
     let generation = keep_session::invocation_generation(&state).await?;
     if operation.as_ref().is_some_and(|id| {
@@ -15481,6 +15483,13 @@ async fn save_group_file(
                 app.path().download_dir().ok().as_deref(),
                 Path::new(&saved.path),
             );
+            // PR #56: it is listed (or the result says why not), and it never replaces.
+            if let Some(note) = prepared.unlisted {
+                private_downloads::append_warning(&mut saved, note);
+            }
+            if replace_older.unwrap_or(false) {
+                private_downloads::append_warning(&mut saved, saved_files::NOT_REPLACED_THIS_TIME);
+            }
             return Ok(saved);
         }
         left_behind = prepared.notice;
@@ -15540,9 +15549,15 @@ async fn save_group_file(
             .is_some_and(|exported| !exported.staging_cleared);
         // Review M-5: a temporary name that had to stay is reported with the saved result.
         let mut staging_note: Option<String> = None;
+        // PR #56: where the saved file is for the saved-files list (identities only from a
+        // journal), and whether this save found an interrupted session's publication instead.
+        let mut journaled_location = None;
+        let mut recovered = false;
         let path = match journaled {
             Some(exported) => {
                 staging_note = exported.staging_note.map(str::to_owned);
+                journaled_location = Some(exported.location);
+                recovered = exported.recovered;
                 exported.path
             }
             None => {
@@ -15577,6 +15592,109 @@ async fn save_group_file(
                 path
             }
         };
+        // PR #56: list the publication at once, in every case (design review L10), before
+        // anything below can stop this invocation. "Replace my older saved copy" reads its
+        // candidate from the same locked list, under a per-file claim; a recovered publication
+        // is listed but never replaces.
+        let asked = replace_older.unwrap_or(false);
+        let ask = (asked && !recovered).then(|| saved_files::ReplaceAsk {
+            claim: saved_files::ReplaceClaim::try_acquire(server, target),
+            // A one-click save asked for the sanitized listed name; a Save as name is the
+            // user's own and is never renamed (design review M2).
+            started_from: match &destination {
+                private_downloads::Destination::Downloads(_) => Some(safe_download_name(&name)),
+                private_downloads::Destination::Chosen(_) => None,
+            },
+        });
+        let location = journaled_location
+            .or_else(|| catcoms_storage::kept::SavedLocation::unidentified(&path));
+        let recorded = match location {
+            Some(location) => {
+                saved_files::record_save(
+                    &state,
+                    server,
+                    instance,
+                    saved_files::PublishedSave {
+                        cid: ready.cid(),
+                        size,
+                        location,
+                    },
+                    ask,
+                )
+                .await
+            }
+            None => saved_files::Recorded::No { tell: true },
+        };
+        let unlisted = recorded.note();
+        let mut replace_note: Option<&'static str> = None;
+        let plan = match recorded {
+            saved_files::Recorded::Yes {
+                replace: saved_files::ReplaceChoice::Run(plan),
+                ..
+            } if !keep_record => Some(plan),
+            saved_files::Recorded::Yes {
+                replace: saved_files::ReplaceChoice::Skip(note),
+                ..
+            } => {
+                replace_note = note;
+                None
+            }
+            // Not asked, or asked for a save that is not finished tidying up (a kept record),
+            // a recovered publication, or one that could not be listed.
+            _ => {
+                if asked {
+                    replace_note = Some(saved_files::NOT_REPLACED_THIS_TIME);
+                }
+                None
+            }
+        };
+        if let Some(plan) = plan {
+            // The replace branch: release the private record first (its journal names the new
+            // copy's first name, which the replace may drop), then replace, then inspect and
+            // reveal the final name. Releasing retires the storage lease by design, so the
+            // response is fenced by the original invocation, as `finish_recovered_save` is.
+            let released = actor.finish_download_export(ready.clone()).await.is_ok();
+            let (final_path, notes) = if released {
+                let done =
+                    saved_files::run_replace(&state, server, instance, &origin, &ready, *plan)
+                        .await;
+                let final_path = done
+                    .renamed_to
+                    .map_or_else(|| path.clone(), |leaf| path.with_file_name(leaf));
+                (final_path, done.notes)
+            } else {
+                drop(plan);
+                (
+                    path.clone(),
+                    vec![saved_files::NOT_REPLACED_THIS_TIME.into()],
+                )
+            };
+            let mut saved = finish_saved_read_if(
+                &state,
+                generation,
+                &origin,
+                &final_path,
+                &declared_mime,
+                inspect_published,
+                reveal_path,
+                || ready.invocation_current(),
+            )
+            .await?;
+            saved.in_downloads = private_downloads::saved_in_downloads(
+                app.path().download_dir().ok().as_deref(),
+                &final_path,
+            );
+            if let Some(note) = staging_note {
+                private_downloads::append_warning(&mut saved, &note);
+            }
+            if !released {
+                private_downloads::append_warning(&mut saved, DOWNLOAD_COPY_LEFT);
+            }
+            for note in notes {
+                private_downloads::append_warning(&mut saved, &note);
+            }
+            return Ok(saved);
+        }
         let mut saved = finish_saved_read_if(
             &state,
             generation,
@@ -15597,6 +15715,9 @@ async fn save_group_file(
         }
         if let Some(note) = staging_note {
             private_downloads::append_warning(&mut saved, &note);
+        }
+        for note in unlisted.into_iter().chain(replace_note) {
+            private_downloads::append_warning(&mut saved, note);
         }
         if keep_record {
             private_downloads::append_warning(&mut saved, private_downloads::STAGING_LEFT);
@@ -15622,6 +15743,10 @@ async fn save_group_file(
     private_downloads::report_left_behind(result, left_behind)
 }
 
+/// Said with a successful save whose private encrypted copy could not be released.
+const DOWNLOAD_COPY_LEFT: &str =
+    "The file was saved. Its encrypted download copy could not be removed; remove it from Transfers.";
+
 /// Cleanup can wait behind actor work AFTER external publication. Its completion is not a new
 /// native response capability: the ORIGINAL invocation must still authorize returning a path.
 /// Self-cleanup deliberately retires storage custody, so only the original actor/Root observer
@@ -15641,10 +15766,7 @@ where
     if cleanup.await.is_err() {
         // Picker review L1: append, never replace. Earlier notices (an old partial left on disk,
         // a location that cannot resume, a failed reveal) must survive a failed cleanup.
-        private_downloads::append_warning(
-            &mut saved,
-            "The file was saved. Its encrypted download copy could not be removed; remove it from Transfers.",
-        );
+        private_downloads::append_warning(&mut saved, DOWNLOAD_COPY_LEFT);
     }
     let _commit = keep_session::read_commit(state, generation, origin).await?;
     if !allowed() {
@@ -18864,7 +18986,12 @@ pub fn run() {
             private_downloads::retry_private_download,
             private_downloads::cancel_private_download,
             private_downloads::check_saved_download,
-            private_downloads::reveal_saved_download
+            private_downloads::reveal_saved_download,
+            saved_files::get_saved_files,
+            saved_files::check_saved_files,
+            saved_files::reveal_saved_file,
+            saved_files::forget_saved_file,
+            saved_files::reset_saved_files
         ])
         .build(context)
         .expect("error while building the Mewtual desktop app");

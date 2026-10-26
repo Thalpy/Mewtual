@@ -232,6 +232,11 @@
     "allow-cancel-private-download",
     "allow-check-saved-download",
     "allow-reveal-saved-download",
+    "allow-get-saved-files",
+    "allow-check-saved-files",
+    "allow-forget-saved-file",
+    "allow-reset-saved-files",
+    "allow-reveal-saved-file",
 
     "allow-call-media-key",
     "allow-begin-inline-download",
