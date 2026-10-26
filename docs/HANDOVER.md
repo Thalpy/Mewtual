@@ -12,9 +12,11 @@ HMR36 requires reload.
 
 Real framed/WebCrypto regressions reproduce the cross-peer abort before the fix, and two
 Clock/schedule regressions reproduce post-retirement Input submission to an abort-resistant
-transport. All363 focused tests pass after both corrections; static0errors/0warnings passed
-before the two additional Clock tests. Read-only re-review has no remaining blocker/high/medium;
-final static/full gates remain pending.
+transport. All363 focused tests pass7.29s after both corrections. Complete frontend3,011
+passes67.14s; final static0errors/0warnings and production build36.71s pass. Root/native fmt
+and the Git Bash ambient gate pass. Read-only re-review has no remaining blocker/high/medium.
+Current cargo deny again fails the inherited RUSTSEC-2026-0387; bans/licenses/sources pass.
+Final Root/native gates remain pending; the879-test Native pass below predates Broker37.
 This does not implement failed-negotiation retirement/replacement. App V2 stays OFF; Root full
 is still running serially and the real native two-peer fixture is queued behind it.
 
