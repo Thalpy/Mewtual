@@ -21,6 +21,11 @@ fn plan_drained(binding: &PlanBinding) -> bool {
 }
 
 impl Workflow {
+    /// Negative original-plan identity only. Key release/old Workflow closure alone
+    /// cannot stop LOW Finish retries; only explicit retire_all publishes this latch.
+    pub(in crate::voice_v2) fn whole_plan_retired(&self) -> bool {
+        self.binding.whole_closed.load(Ordering::Acquire)
+    }
     /// Capacity-only table fixture: occupy every ORIGINAL claim without inventing a new
     /// global pool or reducing a limit. Native third-attempt tests use real packet rows.
     #[cfg(test)]
@@ -52,6 +57,14 @@ impl Workflow {
     }
 }
 impl PreparedChain {
+    /// Permission-independent CACHE cleanup for this exact terminal plan. This does
+    /// not revoke its established pair, erase replay/history, or certify real drainage.
+    pub(in crate::voice_v2) fn retired_whole_confirmation_binding(&self) -> Option<&Binding> {
+        self.binding
+            .whole_closed
+            .load(Ordering::Acquire)
+            .then_some(&self.binding.value)
+    }
     /// Cleanup-only original binding. This cannot reconstruct a Workflow or authorize
     /// work. Call outside Group/Policy: subsequent cache drops may retire real credits.
     pub(in crate::voice_v2) fn retired_high_confirmation_binding(&self) -> Option<&Binding> {
@@ -83,10 +96,21 @@ impl ConfirmationControl {
     // before it waits for Control, while preparation is between its open check and busy CAS.
     pub(super) fn retire_all_after_close(self, after_close: impl FnOnce()) -> PlanRetirement {
         self.binding.successor_closed.store(true, Ordering::Release);
+        // Publish only after successor closure. Observers may discard idle caches now,
+        // even while Control is contended; Source's same-latch authority gate prevents
+        // retained pre-close activities from recreating a fresh attempt record.
+        self.binding.whole_closed.store(true, Ordering::Release);
         after_close();
         let binding = self.binding.clone();
         drop(self.retire());
         PlanRetirement { binding }
+    }
+    #[cfg(test)]
+    pub(in crate::voice_v2) fn retire_all_before_control_for_test(
+        self,
+        observe: impl FnOnce(),
+    ) -> PlanRetirement {
+        self.retire_all_after_close(observe)
     }
 }
 

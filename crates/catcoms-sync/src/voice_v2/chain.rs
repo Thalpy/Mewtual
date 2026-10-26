@@ -101,6 +101,9 @@ pub(super) struct PlanBinding {
     workflow_drained: AtomicBool,
     // Distinct from old-Workflow retirement: a prepared/ticket/Exchange can survive it.
     successor_closed: AtomicBool,
+    // Whole-plan retirement additionally makes old confirmation retry CACHE obsolete.
+    // Key-only successor closure has a narrower contract and MUST NOT set this latch.
+    whole_closed: AtomicBool,
     successor_busy: AtomicBool,
     // Set only by exact authenticated LOW Ready publication. Local Finish/ACK/Established
     // never imply remote readiness. This stops old Source work without closing Await.
@@ -564,6 +567,7 @@ impl PreparedChain {
             transition: transition::FinishWindow::default(),
             workflow_drained: AtomicBool::new(false),
             successor_closed: AtomicBool::new(false),
+            whole_closed: AtomicBool::new(false),
             successor_busy: AtomicBool::new(false),
             low_ready: AtomicBool::new(false),
         });

@@ -536,7 +536,8 @@ impl SourceLedger {
             // record until signed expiry. Otherwise preserve the original call's attempts;
             // generic room/pair/authority loss is not permission to recreate a retry record.
             // Extra terminal cases are HIGH's native Finish-open plus old-plan closure,
-            // and LOW's exact authenticated native Ready. LOW local Finish/Established
+            // LOW's exact authenticated native Ready, and explicit whole-plan closure.
+            // Key-only successor closure remains distinct. LOW local Finish/Established
             // alone is insufficient. Fixed original phase history prevents re-admission, while
             // actual flights/Lower/ACK owners remain charged by the first branch below.
             // Map removal is not drainage proof: external activities/authorities may still

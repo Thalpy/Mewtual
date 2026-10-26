@@ -585,7 +585,8 @@ pub(super) struct SourcePacketAuthority {
 impl SourcePacketAuthority {
     pub(super) fn obsolete_confirmation(&self) -> bool {
         self.workflow.as_ref().is_some_and(|workflow| {
-            workflow.high_confirmation_sources_retired()
+            workflow.whole_plan_retired()
+                || workflow.high_confirmation_sources_retired()
                 || workflow.low_confirmation_sources_retired()
         })
     }
@@ -601,10 +602,9 @@ impl SourcePacketAuthority {
             && self.pair.is_live()
             && self.packet.is_live()
             && self.chain.as_ref().is_none_or(CallLease::is_live)
-            && self
-                .workflow
-                .as_ref()
-                .is_none_or(|workflow| !workflow.low_confirmation_sources_retired())
+            && self.workflow.as_ref().is_none_or(|workflow| {
+                !workflow.whole_plan_retired() && !workflow.low_confirmation_sources_retired()
+            })
             && mono < self.deadline
             && wall < self.expires
             && self
@@ -807,6 +807,26 @@ impl PacketLedger {
         let binding = chain
             .retired_high_confirmation_binding()
             .ok_or(VoiceError::Unauthorized)?;
+        self.retire_confirmation_cache(chain, binding, false)
+    }
+    /// Explicit whole-plan retirement also covers LOW before Ready and HIGH before
+    /// successor preparation. Drop only idle cache custody for the actual original
+    /// binding; established pair/replay/allocators and independent SDP/media stay live.
+    pub(in crate::voice_v2) fn retire_whole_confirmation_cache(
+        &mut self,
+        chain: &super::chain::PreparedChain,
+    ) -> Result<(), VoiceError> {
+        let binding = chain
+            .retired_whole_confirmation_binding()
+            .ok_or(VoiceError::Unauthorized)?;
+        self.retire_confirmation_cache(chain, binding, true)
+    }
+    fn retire_confirmation_cache(
+        &mut self,
+        chain: &super::chain::PreparedChain,
+        binding: &super::chain::Binding,
+        close_packets: bool,
+    ) -> Result<(), VoiceError> {
         if binding.scope != self.scope
             || binding.local != self.local
             || binding.local_join != self.join
@@ -816,10 +836,17 @@ impl PacketLedger {
             return Err(VoiceError::Scope);
         }
         self.outgoing.retain(|_, outgoing| {
-            !outgoing
+            let original = outgoing
                 .workflow
                 .as_ref()
-                .is_some_and(|workflow| workflow.belongs_to_plan(chain))
+                .is_some_and(|workflow| workflow.belongs_to_plan(chain));
+            if original && close_packets {
+                // Wake already queued Lower/ACK cancellation without refunding its
+                // real owners. Source active-flight retention remains authoritative.
+                outgoing.live.revoke();
+                outgoing.crypto.0.revoke();
+            }
+            !original
         });
         self.incoming.retain(|_, incoming| {
             let Body::Encrypted { header, .. } = incoming.object.body() else {

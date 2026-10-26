@@ -454,6 +454,7 @@ fn terminal_high_cleanup_cannot_remove_a_foreign_ledgers_confirmation_cache() {
         .chain
         .clone()
         .unwrap();
+    let control = chain.workflow().unwrap().confirmation_control();
     let before =
         p.f.low
             .join
@@ -463,6 +464,11 @@ fn terminal_high_cleanup_cannot_remove_a_foreign_ledgers_confirmation_cache() {
     let _output = prepare(&mut p, |_, _| Ok(())).unwrap();
     assert_eq!(
         p.f.low.join.ledger.retire_high_confirmation_cache(&chain),
+        Err(VoiceError::Scope)
+    );
+    let _whole = control.retire_all();
+    assert_eq!(
+        p.f.low.join.ledger.retire_whole_confirmation_cache(&chain),
         Err(VoiceError::Scope)
     );
     assert_eq!(
@@ -594,6 +600,195 @@ fn source_pruning_does_not_treat_low_local_finish_as_received_ready() {
     assert!(p.f.low.lease.is_live());
     p.f.low.lease.revoke();
     assert_eq!(source.counts(), (0, 0, 0));
+}
+
+#[test]
+fn explicit_whole_plan_closure_drops_only_idle_confirmation_caches_before_ready() {
+    let (mut p, finish) = super::transition::ready_to_finish();
+    let held_input = finish.input().unwrap();
+    let (object, _) = protected_seal(&mut p.f.low, &p.low, &finish, &p.f.clock);
+    let source = p.low.source().unwrap();
+    let activity =
+        p.f.low
+            .join
+            .source_packet_activity(
+                &object,
+                &ca(&p.f.low.context, &p.f.low.lease),
+                Arc::new(p.f.clock.clone()),
+            )
+            .unwrap();
+    source
+        .admit_borrowed(&p.low, &object, activity, room(&p.f.low))
+        .unwrap();
+    let chain = p.f.low.join.confirmations.pairs[&p.f.id]
+        .chain
+        .clone()
+        .unwrap();
+    let before = p.f.clock.monotonic_ms();
+    let whole = chain
+        .workflow()
+        .unwrap()
+        .confirmation_control()
+        .retire_all();
+    p.f.low.join.collect_expired(&p.f.clock);
+    assert_eq!(source.counts(), (0, 0, 0),
+        "an explicit whole-Plan fence must retire idle LOW Finish without inventing Ready or waiting for signed expiry");
+    assert!(p.f.low.lease.is_live());
+    assert!(!p.f.low.join.confirmations.pairs[&p.f.id].retired);
+    assert!(p.f.low.join.confirmations.pairs[&p.f.id].pin.is_live(),
+        "old confirmation cache cleanup cannot retire the established pair used by independent media");
+    assert_eq!(
+        p.f.clock.monotonic_ms(),
+        before,
+        "cleanup never advances the original clock/deadline"
+    );
+    assert!(
+        !whole.is_drained(),
+        "actual borrowed Input must retain its original Workflow payment"
+    );
+    drop(held_input);
+    assert!(
+        whole.is_drained(),
+        "only real last-owner return certifies variable retirement"
+    );
+}
+
+#[test]
+fn key_only_successor_closure_does_not_retire_old_confirmation_retry_custody() {
+    let (mut p, finish) = super::transition::ready_to_finish();
+    let control = finish.confirmation_control().unwrap();
+    let plan = finish.protected_plan().unwrap();
+    let (object, _) = protected_seal(&mut p.f.low, &p.low, &finish, &p.f.clock);
+    let finite = plan
+        .confirmation_custody(&control, p.f.clock.monotonic_ms())
+        .unwrap();
+    let keys = plan
+        .established_key_custody(&finite, p.f.clock.monotonic_ms())
+        .unwrap();
+    let source = p.low.source().unwrap();
+    let activity =
+        p.f.low
+            .join
+            .source_packet_activity(
+                &object,
+                &ca(&p.f.low.context, &p.f.low.lease),
+                Arc::new(p.f.clock.clone()),
+            )
+            .unwrap();
+    source
+        .admit_borrowed(&p.low, &object, activity.clone(), room(&p.f.low))
+        .unwrap();
+    keys.close_successor_effects();
+    p.f.low.join.collect_expired(&p.f.clock);
+    assert_eq!(source.counts(), (1, 0, 0));
+    assert!(
+        activity.check(&object).is_ok(),
+        "key-only closure cannot broaden into old confirmation cancellation"
+    );
+    assert!(!keys.is_current());
+}
+
+#[test]
+fn whole_plan_cache_pruning_cannot_recreate_source_before_control_actually_closes() {
+    let (mut p, finish) = super::transition::ready_to_finish();
+    let control = finish.confirmation_control().unwrap(); // Capture BEFORE actual engine settlement.
+    let (object, _) = protected_seal(&mut p.f.low, &p.low, &finish, &p.f.clock);
+    let source = p.low.source().unwrap();
+    let activity =
+        p.f.low
+            .join
+            .source_packet_activity(
+                &object,
+                &ca(&p.f.low.context, &p.f.low.lease),
+                Arc::new(p.f.clock.clone()),
+            )
+            .unwrap();
+    source
+        .admit_borrowed(&p.low, &object, activity.clone(), room(&p.f.low))
+        .unwrap();
+    let whole = control.retire_all_before_control_for_test(|| {
+        // Original Control/Workflow leases are STILL live at this exact hook. Only
+        // the new whole-plan latch can prevent a pruned record being re-admitted.
+        assert_eq!(source.counts(), (0, 0, 0));
+        assert_eq!(
+            source
+                .admit_borrowed(&p.low, &object, activity.clone(), room(&p.f.low))
+                .err(),
+            Some(VoiceError::Unauthorized)
+        );
+        assert_eq!(
+            source.counts(),
+            (0, 0, 0),
+            "no fresh attempt record/allowance after closure"
+        );
+    });
+    p.f.low.join.collect_expired(&p.f.clock);
+    assert!(
+        !whole.is_drained(),
+        "retained original Source authority remains a real paid owner"
+    );
+    drop(activity);
+    assert!(whole.is_drained());
+}
+
+#[tokio::test]
+async fn explicit_whole_plan_closure_cancels_finish_but_actual_lower_and_ack_keep_their_payment() {
+    use futures::FutureExt;
+    let (mut p, finish) = super::transition::ready_to_finish();
+    let control = finish.confirmation_control().unwrap(); // Capture BEFORE actual engine settlement.
+    let (object, _) = protected_seal(&mut p.f.low, &p.low, &finish, &p.f.clock);
+    let source = p.low.source().unwrap();
+    let activity =
+        p.f.low
+            .join
+            .source_packet_activity(
+                &object,
+                &ca(&p.f.low.context, &p.f.low.lease),
+                Arc::new(p.f.clock.clone()),
+            )
+            .unwrap();
+    source
+        .admit_borrowed(&p.low, &object, activity, room(&p.f.low))
+        .unwrap();
+    let job = source
+        .take_ready(
+            &p.low,
+            &[crate::voice_v2::helper::BoundRoute {
+                device: p.f.high.context.local,
+                peer: catcoms_rt::PeerId::from_u64(91),
+            }],
+        )
+        .unwrap()
+        .pop()
+        .unwrap();
+    let lower = job.keepalive();
+    let authority = job.authority();
+    let mut canceled = Box::pin(authority.revoked());
+    assert!(futures::poll!(&mut canceled).is_pending());
+    let whole = control.retire_all();
+    p.f.low.join.collect_expired(&p.f.clock);
+    assert!(!authority.authorized());
+    assert!(
+        canceled.now_or_never().is_some(),
+        "terminal original packet wakes cancellation without clock advance"
+    );
+    assert_eq!(source.counts(), (1, 1, 1));
+    assert!(!whole.is_drained());
+    drop(job);
+    assert_eq!(
+        source.counts(),
+        (1, 1, 1),
+        "detached actual Lower retains the original active flight"
+    );
+    assert!(!whole.is_drained());
+    drop(lower);
+    assert_eq!(source.counts(), (0, 0, 0));
+    assert!(
+        !whole.is_drained(),
+        "an actual retained ACK authority still owns the original packet/payment"
+    );
+    drop(authority);
+    assert!(whole.is_drained());
 }
 
 #[test]

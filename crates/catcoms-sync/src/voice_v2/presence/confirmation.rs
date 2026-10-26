@@ -951,6 +951,15 @@ impl LocalJoin {
                 // Same arm-versus-close CAS as process Workflow collection. Keeping transfer
                 // custody alive does not change pair.deadline or any old action/source grant.
                 chain.collect_expired(clock.monotonic_ms());
+                if chain.retired_whole_confirmation_binding().is_some() {
+                    // No new old-plan publication can be authorized. Cache owners
+                    // must not pin a closed Workflow until signed expiry; actual
+                    // inputs/SDK/Source/Lower keep their independent original debt.
+                    // Keep the established pair/pin/counters for indexed media.
+                    // A defensive Scope refusal leaves debt for ordinary expiry;
+                    // cleanup never widens the lookup or retires another binding.
+                    let _ = self.ledger.retire_whole_confirmation_cache(chain);
+                }
             }
             successor::collect(&mut pair.sdp_successor, clock.monotonic_ms());
             if pair.sdp_successor.is_none() {
