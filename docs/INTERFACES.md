@@ -1,5 +1,20 @@
 # Mewtual; Interfaces & Hooks Schema
 
+## Native RetireHistory mode8 (26 October; inactive)
+
+Compact Control28/version9 mode8 uses the existing82B parent/Action/media-proof request.
+Only its actual indexed original Session may request native history retirement. Exact native
+Plan-kind final issuance/ACK and drainage precede its latch. Capacity means pending ownership;
+only after actual removal and destructor return does the same request receive a39B historical
+admitted receipt with current=false and no retirement-time observation. A lost success can be
+recovered from the same paid entry; missing rows alone never imply success. Older natives
+refuse mode8. Current/Close/Release remain indexed after old-row removal.
+
+This neither marks physical Session collected nor refunds browser history. Native Begin must
+reject the original selector even under another physical Session for the same original grant/
+executor/lease. Discovery skips that compact history. Actual mode8 HTTP/browser acceptance is
+still pending; the current integration invokes the trusted Target directly. See HANDOVER.
+
 ## Broker30 and original media Detach (25 October; inactive)
 
 `retireNativeNegotiation(owner, channel, chain)` joins one exact original retirement flight.

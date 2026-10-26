@@ -1,5 +1,21 @@
 # Next voice milestone: native result recovery
 
+## Current work: validate native history collection, then detach browser handles (26 October)
+
+Native mode8 and compact full-purpose tombstones now support removal after exact Plan-final/
+ACK, canonical drainage and real Row ownership return. One collector spans outside-guard Drop
+and completion; ordinary maintenance advances it without setup. HANDOVER records review and
+pending regressions/full gates. Session collection and browser fixed-history refund are separate.
+
+Next add actual mode8 HTTP/lost-reply acceptance, then detach retained browser handles into
+paid terminal cells before any fixed-history refund. Replace one generation-bound negotiation
+owner only after its actual joins and exact terminal-forget ACK. Preserve ONE physical Session,
+keys/counters/executor. Add bounded fair media refresh scheduling and pair-local failure;
+whole-call End must synchronously close every peer before joining cleanup. Measure capacity
+before native Begin: browser256KiB and Root16-incarnation bounds do not imply50-peer support.
+Then operational renewal, App/RTC tracks, TURN/member relay and combined/physical acceptance.
+App V2 remains OFF; external download resume is separate and one desktop limits physical proof.
+
 ## Current work: finish index gates, then shared Session composition (25 October)
 
 Broker30/native mode7 now detach the SAME admitted media Root, keep the original peer current

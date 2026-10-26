@@ -208,6 +208,13 @@ async fn native_webcrypto_cycle(
                         Some((low,received))
                     } else {None};
                     tokio::join!(a.sdp_round(&ap, round), c.sdp_round(&cp, round));
+                    if matches!(round,Round::MediaHistory|Round::MediaHistoryCollector) {
+                        let held=matches!(round,Round::MediaHistoryCollector);
+                        tokio::join!(a.native_history_retirement(ap,discovered[0].1,held),
+                            c.native_history_retirement(cp,discovered[1].1,held));
+                        scenario.rules.assert_graph();
+                        return;
+                    }
                     if let Some((low,received))=lower {
                         let owner=bounded("original successful TCP Source lower owner capture",received).await.unwrap();
                         let blocked=if low==1 {a.block_media_index(&ap)} else {c.block_media_index(&cp)};
@@ -986,4 +993,14 @@ async fn native_browser_media_keeps_same_peer_current_while_expired_original_low
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn native_browser_sdp_index_candidate_release_wins_and_last_drop_follows_actual_ui_return() {
     native_webcrypto_cycle(false, true, true, Some(Round::NativeIndexDrop)).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn native_browser_media_native_history_collection_preserves_same_session_and_peer() {
+    native_webcrypto_cycle(false, true, true, Some(Round::MediaHistory)).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn native_browser_media_history_second_collector_cannot_overtake_actual_last_parent_drop() {
+    native_webcrypto_cycle(false, true, true, Some(Round::MediaHistoryCollector)).await;
 }

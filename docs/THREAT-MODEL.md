@@ -1,5 +1,20 @@
 # Threat model; client integrity & enforcement boundaries
 
+## Native terminal-history removal boundary (26 October; inactive)
+
+The live-lease GC exception requires an exact independently indexed claim, actual original
+Session and native Plan-kind proof/ACK plus canonical Root drainage. An external row/projection
+owner blocks removal. Compact full-selector history mirrors Key grant/executor/lease semantics
+and remains through media Release until actual Session collection plus lease End, preventing
+late Begin from recreating old work. Discovery must skip it as well as ordinary live rows.
+
+Collection absence is not proof of destructor return. A nonwaiting affine ticket excludes
+all competing/reentrant collectors through actual outside-Index destruction and completion.
+History completion is distinct from physical Session collection; using the latter flag would
+allow premature independent-claim GC. Maintenance supplies bounded progress, with no new byte
+cap, parallel collector, SDK effect or attempt refund. Browser history is not refunded here.
+HANDOVER distinguishes direct-Target tests from still-pending mode8 HTTP and real media proof.
+
 ## Indexed media and negotiation retirement (25 October; inactive)
 
 Mode7 Detach repeats actual Session/selected owner/Ledger and original parent generation,

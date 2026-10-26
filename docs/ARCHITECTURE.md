@@ -1,5 +1,19 @@
 # Mewtual; Architecture
 
+## Live-lease native history collection (26 October; inactive)
+
+An indexed media entry retains full Derive selector, original parent/Action/Session and an
+irreversible native Plan-final proof/ACK latch. Mode8 requests removal without keeping its own
+ResolvedRow. Canonical drained/root-ready rows with index-only ownership can leave while the
+lease remains live; uncertain work cannot. The compact original-purpose tombstone prevents
+re-admission and discovery starvation after removal. Session collection is a separate state.
+
+One affine collector ticket spans unlink, outside-guard destruction and completion. Concurrent
+or reentrant collectors return without marking absence. Ordinary service maintenance advances
+this bounded work independently of setup. Physical Session and media payment remain intact.
+This is native-row reclamation; browser handle/history detachment and composition remain open.
+HANDOVER records review, exact evidence and pending gates. App V2 remains OFF.
+
 ## Independent native media index (25 October; inactive)
 
 Control28 mode7 Detach moves the SAME expired-negotiation media Root into 32 fixed native

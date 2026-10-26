@@ -1,5 +1,20 @@
 # Chat, files and voice implementation evidence
 
+## 26 October: native-row retirement implementation; final evidence pending
+
+Mode8 has a retained full-selector tombstone, exact native Plan-final/ACK latch and separate
+history-completion state. Review found and fixed competing-collector premature completion and
+missing periodic progress. The implementation now keeps one affine collector through real
+last-owner destruction and runs a bounded maintenance sweep without setup traffic. New native
+fixtures pass both gaps, plus held rows, old-purpose replay and serial reuse (46.99s/41.58s).
+All356 handoff tests pass20.85s. HANDOVER records the fixture corrections and final Current-
+start oracle tightening. Full native validation covers that last script adjustment and is pending.
+
+Full frontend passes2,927 tests, Svelte static checks and build. Mode8 itself is not yet exercised
+over authenticated HTTP; this test slice invokes its trusted Native Target after a real browser
+round. Browser fixed history and Root incarnation limits remain. No composition, App activation,
+renewal, relay or physical acceptance is claimed. App V2 remains OFF.
+
 ## 25 October: native index and variable negotiation retirement
 
 Actual HTTP/WebCrypto and blocked-topology TCP fixtures pass normal/lost-positive Detach,

@@ -852,7 +852,10 @@ impl ResolvedRow {
         claimed: [u8; 32],
         kind: ExistingKind,
     ) -> Result<Receipt, VoiceError> {
-        if matches!(kind, ExistingKind::Current | ExistingKind::Detach) {
+        if matches!(
+            kind,
+            ExistingKind::Current | ExistingKind::Detach | ExistingKind::RetireHistory
+        ) {
             return Err(VoiceError::Unauthorized);
         }
         let retired;
@@ -1151,6 +1154,8 @@ pub(super) fn migration_parts(
 }
 /// Borrow only through the original final UI/Index/Row tail. A failed index publication
 /// leaves this owner in place; observing actual source expiry is independently legitimate.
+// Keep each original authority/immutable preparation binding explicit at this final gate.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn migration_claim<'a>(
     parent: &ResolvedRow,
     state: &'a mut State,

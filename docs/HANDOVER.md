@@ -1,5 +1,50 @@
 # Mewtual; Handover
 
+## Native terminal-history reclamation (26 October; validation in progress)
+
+Control28/version9 adds compact mode8 RetireHistory on an EXISTING indexed media claim.
+It latches only the exact original Session/Action/parent with native Plan-kind final proof,
+ACK and current Root drainage. Actual outstanding Row/child/projection owners keep it pending.
+A compact selector tombstone remains independently paid and blocks the same original purpose
+before Pending resume or allocation. Discovery also skips that purpose so another peer can
+progress. The full selected grant allocation/executor/lease comparison matches Key semantics.
+
+History completion and physical Session collection are separate. One nonwaiting collector
+owns unlink, outside-Index destruction and completion marking. Its affine RemovalBatch keeps
+the gate until every actual removed owner returns. This fixes review's concurrent-collector
+race, where a second sweep could mistake another collector's temporary absence for completion.
+Regular250ms service maintenance supplies bounded progress without setup/close traffic; this
+fixes a second reviewed liveness gap. Old dead-owner cleanup retains its Close pass and uses
+the same gate. No collection/CloseTicket scratch is added to the physical Control envelope.
+
+Focused native cases pass for held parent/child ownership, independent maintenance,
+a second collector while the actual unlinked parent stays held, repeated completed observation,
+old-purpose replay and same-slot/new-serial reuse (46.99s/41.58s). All356 handoff tests pass20.85s.
+They reuse the real HTTP/WebCrypto/TCP round
+and controlled peer, but mode8 itself is exercised through its trusted Native Target, not HTTP.
+The first run reached completed history and failed on a wrong fixture cleanup assumption: an
+unstarted Registration is already removed on Drop. The corrected test checks that existing
+contract; no production check was relaxed. A second fixture correction replaced a background-
+retirement-only status check with direct Current. Review tightened it to join any old flight
+before measuring a newly started authenticated Current; the full run covers that final oracle.
+Final full native validation remains pending.
+Read-only re-review has no blocker/high/medium in the corrected collection design. Full frontend
+passes2,927 tests, Svelte reports zero errors/warnings and build passes. Logs are target/media-history-*.
+
+This reclaims native negotiation rows only. Browser fixed history/retained handles are still
+paid, physical Session keys/counters persist, and Root pair-incarnation bounds still apply.
+Actual mode8 HTTP/lost-reply coverage and browser handle detachment precede shared Session/
+per-pair composition. App activation, operational renewal, tracks, TURN/member relay and combined
+acceptance remain open. App V2 stays OFF. Only one desktop is available for physical testing;
+external download resume remains separately owned. The earlier index checkpoint is c49db6ec;
+its focused tests/frontend pass, and the final native full suite runs once on this descendant.
+Complete Root validation passes3,675 tests/24ignored in74m50s on byte-identical Root source,
+with strict Root Clippy and ambient checks green. Native check passes74.5s. Strict Native
+Clippy found the final gate's intentional8-argument binding signature; a narrow documented
+allow follows existing neighboring conventions without changing runtime behavior. Its rerun
+is queued after full Native validation. Cargo deny was rerun with cache-lock access and still
+fails the inherited crypto-bigint0.5.5/RUSTSEC-2026-0387 advisory; no ignore/dependency changed.
+
 ## Native media indexing and negotiation retirement (25 October; final gates pending)
 
 Broker30 and compact Control28/version9 mode7 Detach move the SAME admitted media Root

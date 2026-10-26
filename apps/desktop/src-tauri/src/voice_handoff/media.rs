@@ -346,7 +346,15 @@ fn start(context: &Context, route: &Route, incoming: &Incoming) -> Result<Starte
             live.ledger
                 .indexed_media(route.selected(), route.session().identity(), &request)?
         {
-            let receipt = if indexed.needs_current(&request)? {
+            let receipt = if matches!(
+                &request,
+                Request::Existing {
+                    kind: ExistingKind::RetireHistory,
+                    ..
+                }
+            ) {
+                indexed.retire_history()?
+            } else if indexed.needs_current(&request)? {
                 let (_, mono) = observe_time(context)?;
                 super::sdp::current(context, route, |admission| {
                     indexed.observe(&request, Some((admission, mono)))

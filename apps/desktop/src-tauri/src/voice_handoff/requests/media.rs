@@ -22,6 +22,8 @@ pub(in crate::voice_handoff) enum ExistingKind {
     Current,
     /// Move existing admitted custody after original source expiry; never admit a PC.
     Detach,
+    /// Retire exact ACKed native history; never assert physical Session collection.
+    RetireHistory,
     Close,
     Release,
 }
@@ -119,6 +121,7 @@ impl Request {
                 5 => ExistingKind::Close,
                 6 => ExistingKind::Release,
                 7 => ExistingKind::Detach,
+                8 => ExistingKind::RetireHistory,
                 _ => return Err(VoiceError::Malformed),
             };
             Self::Existing {
@@ -224,7 +227,7 @@ mod tests {
                 let permitted = if body.len() == ORIGINAL_BYTES {
                     mode <= 3
                 } else {
-                    (4..=7).contains(&mode)
+                    (4..=8).contains(&mode)
                 };
                 assert_eq!(Request::decode(parent, &changed).is_ok(), permitted);
             }

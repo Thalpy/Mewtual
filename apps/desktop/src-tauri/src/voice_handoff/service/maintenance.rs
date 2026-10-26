@@ -213,6 +213,12 @@ pub(super) async fn run(context: Option<&Context>, registry: &Registry, clock: &
             return std::future::pending().await;
         };
         super::expire_at(clock, deadline).await;
+        // Live-lease terminal history must progress without another setup/close command.
+        // This synchronous bounded sweep is covered by turn_layout_bytes, holds no Route
+        // or authority guard, and returns immediately if another collector owns Drop.
+        if let Some(live) = context.upgrade() {
+            live.ledger.collect_media_history();
+        }
         let _ = cursor.turn(context, registry);
         cursor.urgent_ready(context, registry);
     }

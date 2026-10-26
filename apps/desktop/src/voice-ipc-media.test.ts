@@ -7,7 +7,7 @@ import type { VoiceSdpOriginal } from "./voice-ipc-sdp-actions.ts";
 const vectors = JSON.parse(readFileSync(new URL("../src-tauri/src/voice_handoff/requests/media-vectors.json", import.meta.url), "utf8")) as {
   original: VoiceSdpOriginal; mediaProof: string; requests: { name: string; operation: number; kind: number; logical: string; body: string }[];
 };
-test("native/browser media vectors preserve all u64s and all eight closed modes", () => {
+test("native/browser media vectors preserve all u64s and all nine closed modes", () => {
   for (const vector of vectors.requests) {
     const [family, mode] = vector.name.split("-");
     const encoded = family === "original" ? encodeVoiceMediaOriginal(vectors.original, mode as VoiceMediaOriginalKind) :

@@ -398,11 +398,7 @@ async fn discover(
                 key_ref: key.key_ref,
                 epoch,
             };
-            if live
-                .ledger
-                .lookup_original(selected, Purpose::Derive(selector))
-                .is_none()
-            {
+            if !live.ledger.derivation_known(selected, selector) {
                 // Only immutable fixed metadata leaves this scope. The actual Vec/proof
                 // observation and permit drop before pair/Phase/ledger publication begins.
                 return Ok(selector);

@@ -162,7 +162,7 @@ type Step =
   | { tag: "step"; name: "derive"; purpose: VoiceIpcPurpose }
   | { tag: "step"; name: "sdp-custody"; purpose: VoiceIpcPurpose; row: string; identity: VoiceIpcActionIdentity }
   | { tag: "step"; name: "child"; request: VoiceIpcConfirmationPurpose["request"] }
-  | { tag: "step"; name: "pump" | "close" | "wedge" | "pc-custody" | "rtc-round" | "rtc-round-loss" | "rtc-round-media" | "rtc-round-media-loss" | "media-revoked" | "media-retire" | "media-retire-loss" | "media-retire-start" | "media-retire-progress" | "media-retire-finish" };
+  | { tag: "step"; name: "pump" | "close" | "wedge" | "pc-custody" | "rtc-round" | "rtc-round-loss" | "rtc-round-media" | "rtc-round-media-loss" | "media-revoked" | "media-retire" | "media-retire-loss" | "media-retire-start" | "media-retire-progress" | "media-retire-finish" | "media-current-after-history" };
 async function step(value: Step): Promise<unknown> {
   switch (value.name) {
     case "pump": {
@@ -417,6 +417,17 @@ async function step(value: Step): Promise<unknown> {
       assert.ok(mediaCurrentObservations>observed); assert.equal(mediaPeerCalls.closed,0);
       if(testLostDetach) assert.ok(lostMediaModes.has(7));
       return {kind:"negotiation-retired",peers:1,closed:0,releasedBytes:65536};
+    }
+    case "media-current-after-history": {
+      assert.ok(mediaPeerCalls);
+      // Join any timer/observer flight that began before native history disappeared.
+      // The second call must start its own physical Current after that join returned.
+      await broker.completeNativeMediaHandoff(owner,channel,chain);
+      const before = mediaCurrentObservations;
+      await broker.completeNativeMediaHandoff(owner,channel,chain);
+      assert.ok(mediaCurrentObservations > before, "fresh authenticated Current after native history removal");
+      assert.equal(mediaPeerCalls.closed,0);
+      return { kind: "indexed-media-current", peers:1 };
     }
     case "media-revoked": {
       assert.ok(mediaPeerCalls);

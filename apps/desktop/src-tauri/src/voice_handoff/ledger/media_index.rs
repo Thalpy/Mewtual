@@ -9,6 +9,7 @@ use super::super::requests::{
 use super::media::Receipt;
 use super::*;
 use catcoms_sync::voice_v2::sdp::SdpMedia;
+mod history;
 
 /// Snapshot only fixed native bindings. No caller plaintext, reference or description.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -54,10 +55,19 @@ impl Binding {
         }
     }
 }
+/// Native history completion is independent of actual physical Session collection.
+/// The retained proof is the actual original Plan-final issuance, not a renderer flag.
+#[derive(Clone, Copy)]
+enum History {
+    Live,
+    Retiring([u8; 32]),
+    Collected { _final_proof: [u8; 32] },
+}
 struct State {
     closed: bool,
     released: bool,
     collected: bool,
+    history: History,
 }
 /// The selected snapshot has its own existing metadata Credit; it cannot keep its ended
 /// affine CallGrant alive. Session identity is fixed32B plus its Arc header. Everything
@@ -66,6 +76,7 @@ pub(super) struct Entry {
     selected: Arc<SelectedHandoffOwner>,
     session: Arc<SessionIdentity>,
     binding: Binding,
+    purpose: PairSelector,
     proof: [u8; 32],
     until: u64,
     state: Mutex<State>,
@@ -285,6 +296,9 @@ impl ResolvedRow {
         let (original, root, until) =
             super::media::migration_parts(self, &selected, &session, action, proof, mono)?;
         let binding = Binding::from_original(&original)?;
+        let Purpose::Derive(purpose) = self.row.key.purpose else {
+            return Err(VoiceError::Unauthorized);
+        };
         Ok(Prepared {
             #[cfg(test)]
             before_entry_drop: None,
@@ -292,12 +306,14 @@ impl ResolvedRow {
                 selected,
                 session,
                 binding,
+                purpose,
                 proof,
                 until,
                 state: Mutex::new(State {
                     closed: false,
                     released: false,
                     collected: false,
+                    history: History::Live,
                 }),
                 root,
             }),
@@ -430,6 +446,10 @@ impl ResolvedRow {
             selected,
             session,
             binding,
+            purpose: match self.row.key.purpose {
+                Purpose::Derive(purpose) => purpose,
+                _ => unreachable!(),
+            },
             proof: [251; 32],
             until,
             // This filler can never grant Current, even if a fixture probes its key.
@@ -437,6 +457,7 @@ impl ResolvedRow {
                 closed: true,
                 released: true,
                 collected: false,
+                history: History::Live,
             }),
             root,
         });

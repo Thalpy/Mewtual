@@ -24,6 +24,7 @@ const ROWS: usize = 32;
 // factory admission. The32-row,512KiB group and2MiB process ceilings are unchanged.
 const ROW_BYTES: usize = 2304;
 mod children;
+mod collection;
 mod continuation;
 mod key_session;
 mod media;
@@ -326,10 +327,14 @@ struct Index {
 }
 pub(crate) struct Ledger {
     index: Mutex<Index>,
+    // Covers unlink -> outside-Index last Drop -> completion. Competing/reentrant
+    // collectors never infer completion from another collector's temporary absence.
+    collecting: AtomicBool,
 }
 impl Default for Ledger {
     fn default() -> Self {
         Self {
+            collecting: AtomicBool::new(false),
             index: Mutex::new(Index {
                 serial: 0,
                 rows: std::array::from_fn(|_| None),
@@ -740,47 +745,7 @@ impl Ledger {
     /// Both retired-owner arrays coexist during collection and keep all destructors out
     /// of the index guard. Inventory them in the actual synchronous service maintenance.
     pub(super) const fn collection_layout_bytes() -> usize {
-        std::mem::size_of::<[Option<Arc<Row>>; ROWS]>()
-            + std::mem::size_of::<[Option<Arc<media_index::Entry>>; ROWS]>()
-    }
-    /// Bounded history reclamation, never uncertain-history eviction. Phase/engine/receipt
-    /// compaction and actual channel collection are separate prerequisites. An original live
-    /// Session must retain its purpose even after FinalACK, otherwise a fresh Begin could
-    /// allocate another pending factory on that same purpose. Dead leases cannot be revived.
-    /// Pending (including a possibly published Root pair), Live and final-unready rows remain
-    /// untouched. A later bounded collection hook observes Root readiness without a new wake.
-    pub(super) fn collect_retired(&self) {
-        self.close_retired_sdp();
-        let mut removed: [Option<Arc<Row>>; ROWS] = std::array::from_fn(|_| None);
-        let mut removed_media: [Option<Arc<media_index::Entry>>; ROWS] =
-            std::array::from_fn(|_| None);
-        {
-            let mut index = self.index.lock().unwrap_or_else(|error| error.into_inner());
-            for (slot, retired) in index.media.iter_mut().zip(&mut removed_media) {
-                if slot.as_ref().is_some_and(|entry| entry.reclaimable()) {
-                    *retired = slot.take();
-                }
-            }
-            for (slot, retired) in index.rows.iter_mut().zip(&mut removed) {
-                let reclaim = slot.as_ref().is_some_and(|row| {
-                    if row.key.lease.is_live() || Arc::strong_count(row) != 1 {
-                        return false;
-                    }
-                    let state = row.state.lock().unwrap_or_else(|error| error.into_inner());
-                    state.session_collected
-                        && (matches!(state.body, Body::Drained(..) | Body::ClosedPending)
-                            || sdp_rows::locally_drained(&state) == Some(true))
-                        && Self::root_retirement_ready(&state)
-                });
-                if reclaim {
-                    *retired = slot.take();
-                }
-            }
-        }
-        // Never run original credit/lease/weak-grant destruction under native index/state
-        // guards. The index serial deliberately survives collection and slot reuse.
-        drop(removed);
-        drop(removed_media);
+        std::mem::size_of::<collection::RemovalBatch<'static>>() + 64
     }
 
     /// Capacity ONLY after canonical header authentication. The opaque request fixes the
@@ -935,6 +900,16 @@ impl Ledger {
         parent: Option<&Arc<Row>>,
         index: &mut Index,
     ) -> Result<Begin, VoiceError> {
+        // The independently paid compact purpose survives heavyweight row removal. Check
+        // it BEFORE Pending resume as well as new allocation; late Begin cannot revive it.
+        if index
+            .media
+            .iter()
+            .flatten()
+            .any(|entry| entry.tombstones(&selected, purpose))
+        {
+            return Err(VoiceError::Unauthorized);
+        }
         if let Some(row) = index
             .rows
             .iter()

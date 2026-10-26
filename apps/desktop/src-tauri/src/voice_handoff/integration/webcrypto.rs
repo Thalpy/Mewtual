@@ -68,6 +68,8 @@ pub(crate) enum Round {
     LostMediaRetire,
     MediaHeldLower,
     NativeIndexDrop,
+    MediaHistory,
+    MediaHistoryCollector,
 }
 
 struct Callbacks {
@@ -492,6 +494,8 @@ impl Endpoint {
                 | Round::LostMedia
                 | Round::MediaRetire
                 | Round::LostMediaRetire
+                | Round::MediaHistory
+                | Round::MediaHistoryCollector
                 | Round::MediaHeldLower
         );
         assert!(parent.pc_test_intent().is_some());
@@ -542,7 +546,13 @@ impl Endpoint {
                 assert!(observed.admitted && !observed.closed && !observed.released);
                 assert!(!observed.current, "history is never a current permission");
                 self.media_http = true;
-                if matches!(round, Round::MediaRetire | Round::LostMediaRetire) {
+                if matches!(
+                    round,
+                    Round::MediaRetire
+                        | Round::LostMediaRetire
+                        | Round::MediaHistory
+                        | Round::MediaHistoryCollector
+                ) {
                     let original = parent.media_test_original(route.session().identity());
                     let proof = observed.proof;
                     drop(root); // Do not mask independent index custody with a test owner.
@@ -644,6 +654,179 @@ impl Endpoint {
                 });
             }
         }
+    }
+
+    /// Native-only history collection after the real browser retired its negotiation.
+    /// The browser fixed graph remains paid: this does not claim handle detachment or
+    /// mode8 HTTP acceptance. Actual Session/current-media transport remains unchanged.
+    pub(crate) async fn native_history_retirement(
+        &mut self,
+        parent: ledger::ResolvedRow,
+        selector: PairSelector,
+        held_collector: bool,
+    ) {
+        use super::super::requests::media::{ExistingKind, Request};
+        use catcoms_sync::voice_v2::VoiceError;
+        let selected = self.selected();
+        let route = (1..=64)
+            .find_map(|slot| {
+                self.state
+                    .voice_channels
+                    .route(slot)
+                    .ok()
+                    .filter(|route| Arc::ptr_eq(route.selected(), &selected))
+            })
+            .unwrap();
+        let original = parent.media_test_original(route.session().identity());
+        let proof = parent
+            .media_original_history(
+                route.session().identity(),
+                &original,
+                super::super::requests::media::OriginalKind::Resolve,
+            )
+            .unwrap()
+            .unwrap()
+            .proof;
+        let parent_id = parent.id();
+        let request = Request::Existing {
+            parent: parent_id,
+            action: original.pc.base.action,
+            proof,
+            kind: ExistingKind::RetireHistory,
+        };
+        let ledger = self.state.voice_handoff.clone();
+        let target = ledger
+            .indexed_media(&selected, route.session().identity(), &request)
+            .unwrap()
+            .unwrap();
+        // Real retained row owners, not renderer drained booleans, delay reclamation.
+        let child = ledger
+            .lookup_original(
+                &selected,
+                ledger::Purpose::Sdp {
+                    parent: parent_id,
+                    purpose: catcoms_sync::voice_v2::chain::sdp_handoff::NativeRowPurpose::Seal,
+                },
+            )
+            .unwrap();
+        assert!(matches!(target.retire_history(), Err(VoiceError::Capacity)));
+        assert!(ledger.derivation_known(&selected, selector));
+        assert!(
+            matches!(
+                ledger.begin(selected.clone(), ledger::Purpose::Derive(selector)),
+                Err(VoiceError::Unauthorized)
+            ),
+            "same-purpose Begin must not resume while history retires"
+        );
+        let clock = crate::voice_runtime(&self.state).clock();
+        let limit = clock.monotonic_ms() + 1000;
+        if held_collector {
+            let mut batch = loop {
+                if let Some(batch) = ledger.test_hold_collection() {
+                    break batch;
+                }
+                assert!(
+                    clock.monotonic_ms() < limit,
+                    "actual collector gate did not return"
+                );
+                clock.sleep(std::time::Duration::from_millis(5)).await;
+            };
+            drop((parent, child));
+            batch.next_pass(); // Actual child destruction precedes parent eligibility.
+            batch.next_pass(); // Parent is now unlinked but STILL retained in actual scratch.
+            assert!(
+                batch.contains(parent_id),
+                "barrier must retain the actual removed parent"
+            );
+            assert!(ledger.resolve_sdp_parent(&selected, parent_id).is_err());
+            // A genuinely different collector runs while A's original ticket is parked.
+            std::thread::scope(|scope| {
+                scope
+                    .spawn(|| ledger.collect_media_history())
+                    .join()
+                    .unwrap();
+            });
+            assert!(
+                matches!(target.retire_history(), Err(VoiceError::Capacity)),
+                "index absence must not overtake another collector's last destructor"
+            );
+            drop(batch); // Only actual ticket Drop may now publish completion.
+        } else {
+            drop(parent);
+            assert!(
+                matches!(target.retire_history(), Err(VoiceError::Capacity)),
+                "actual child projection still owns the original subtree"
+            );
+            assert!(ledger
+                .lookup_original(&selected, ledger::Purpose::Derive(selector))
+                .is_some());
+            drop(child);
+            // No bootstrap/setup/explicit-GC call follows. Ordinary service maintenance
+            // alone must make this same retained request observable as completed.
+        }
+        let receipt = loop {
+            match target.retire_history() {
+                Ok(receipt) => break receipt,
+                Err(VoiceError::Capacity) if clock.monotonic_ms() < limit => {
+                    clock.sleep(std::time::Duration::from_millis(5)).await
+                }
+                Err(error) => panic!("original native history retirement failed: {error:?}"),
+            }
+        };
+        assert!(receipt.admitted && !receipt.current && !receipt.closed && !receipt.released);
+        // Drop the successful observation. Exact repetition recovers completed tombstone,
+        // without requiring any of its erased rows or pretending Session collection.
+        let recovered = target.retire_history().unwrap();
+        assert_eq!(receipt.proof, recovered.proof);
+        assert!(ledger
+            .lookup_original(&selected, ledger::Purpose::Derive(selector))
+            .is_none());
+        assert!(ledger.resolve_sdp_parent(&selected, parent_id).is_err());
+        assert!(ledger.derivation_known(&selected, selector));
+        assert!(matches!(
+            ledger.begin(selected.clone(), ledger::Purpose::Derive(selector)),
+            Err(VoiceError::Unauthorized)
+        ));
+        let mut later = selector;
+        later.join[0] ^= 1;
+        assert!(
+            !ledger.derivation_known(&selected, later),
+            "discovery must continue past compact old purpose"
+        );
+        // Native index-only slot reuse keeps the monotonically increasing generation.
+        let registration = match ledger
+            .begin(selected.clone(), ledger::Purpose::Derive(later))
+            .unwrap()
+        {
+            ledger::Begin::Factory(value) => value,
+            _ => panic!("new purpose must reserve a reclaimed slot"),
+        };
+        let new_id = registration.id();
+        assert_ne!(new_id, parent_id);
+        assert_eq!(
+            &new_id.logical()[..8],
+            &parent_id.logical()[..8],
+            "same native slot, fresh serial"
+        );
+        drop(registration); // No Root factory was invoked for this capacity-only reservation.
+                            // Existing Registration semantics erase a provably unstarted reservation on Drop;
+                            // no published effect/history exists here and there is nothing left to close.
+        assert!(ledger
+            .resolve(&selected, ledger::Purpose::Derive(later), new_id)
+            .is_err());
+        assert!(ledger.resolve_sdp_parent(&selected, parent_id).is_err());
+        assert!(
+            !ledger.channel_may_close(&selected),
+            "indexed live media still owns physical Control"
+        );
+        drop(target);
+        // Same actual Node peer and authenticated HTTP Current remain usable after all
+        // original native rows disappear; browser fixed history is intentionally retained.
+        assert_eq!(
+            self.step(json!({"tag":"step","name":"media-current-after-history"}))
+                .await,
+            json!({"kind":"indexed-media-current","peers":1})
+        );
     }
 
     pub(crate) fn block_media_index(&self, parent: &ledger::ResolvedRow) -> impl Send + 'static {
