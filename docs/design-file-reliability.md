@@ -254,12 +254,17 @@ See [EXTERNAL-DOWNLOAD-RESUME](communication-recovery/EXTERNAL-DOWNLOAD-RESUME.m
 
 - Remote possession acknowledgements, automatic replication and holder-aware eviction are not
   implemented. A second device must explicitly keep/download a copy while a holder is reachable.
+  The per-server cache limit ([cache housekeeping](design-cache-housekeeping.md)) evicts by
+  listing order without a holder probe; Keep in progress, Downloads, own uploads, Studio
+  references and files in use are pinned, and a checked completed Keep copy replaces the cache's
+  duplicate.
 - Legacy/V2/V3 exact-only copies cannot fall back to candidates they never saved. New V4
   whole-variant fallback is implemented with focused integration checks and review in progress.
 - Indirect authenticated file service and private durable destination re-export have focused
   native evidence. The combined crash/load/mixed-version matrix and physical acceptance remain open.
 - Unlisted kept copies can be checked, repaired, served by ciphertext CID and explicitly released,
   but standalone export still requires a shared listing. This is disclosed in the copy manager;
-  independent recovery/export and server-leave cleanup remain follow-ups.
+  independent recovery/export remains a follow-up. Leaving a server now removes its Keep copies
+  and Downloads after a confirmation that names them (cache housekeeping).
 - A session verification is not continuous disk scrubbing. External deletion/corruption and loss of
   access to group keys can invalidate a saved copy; opening/repairing continues to authenticate bytes.

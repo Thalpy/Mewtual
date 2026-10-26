@@ -1771,6 +1771,35 @@ pub trait BlobStore {
 pub struct MemoryBlobStore;  pub struct FsBlobStore;  fn open(dir) -> Result<Self>;
 ```
 
+Cache housekeeping (PR #55) adds defaulted methods; stores without a size-limited cache refuse or
+answer `None`, which callers treat as "do not evict":
+
+```rust
+fn cache_scan(&mut self, recover: bool) -> Result<CacheScanReport>; // metadata-only scan; `recover` = mount
+fn cache_index(&self) -> Option<CacheIndex>;     // sizes + mount set + complete; None before a scan
+fn cache_usage(&self) -> Option<CacheUsage>;     // running total, cheap every actor turn
+fn protected_cids(&self) -> Option<BTreeSet<Cid>>; // Studio pins + live holds; None = unknown
+fn retained_chunks(&self) -> BTreeSet<Cid>;      // chunks of checked, completed Keep copies
+SealingBlobStore::open_cache(dir, key, rng)      // primary only: incoming/ + sync + rename writes
+```
+
+`catcoms_storage::cache` holds the temp naming (`<cid>.<pid>.<mount generation>.<seq>`, live
+generations registered process-wide), the scan, and the leave-cleanup steps
+(`write_leaving_marker`, `has_leaving_marker`, `finish_leaving`, `leaving_namespaces`,
+`remove_scratch`, `remove_kept_tree`), each returning freed bytes and failures without following
+links. `catcoms_app::cache_plan::plan` is the pure eviction planner and
+`catcoms_app::cache_housekeeping` the actor-side runtime (`CacheLimit`, `CacheStatus`,
+`CachePause`, `CacheSetting`). `ServerStore` gains `save_cache_setting` / `load_cache_setting`
+(sealed `servers/<id>.storage`, version 1: group, limit or none, origin; a record for another group
+reads as missing), `cache_namespace_dir`, `blobs_root`, `cache_only_blob_store` and
+`begin_leave_cleanup` (`LeaveCleanup::delete_batch` / `finish` → `LeaveReport`). Actor commands:
+`SetCacheLimit`, `CacheStatus`, `CacheProtectionChanged`; events `CacheStatusChanged`,
+`CacheNeedsStudioScan`. Desktop commands: `get_cache_status(server)` (account-read) and
+`set_cache_limit(server, bytes|null)` (account-write, 1 GiB to 1 TiB or null, sealed before the
+actor applies it); event `cache-status { server, status }`; `leave_server` now returns
+`{ freed_bytes, kept_bytes, failed }`. `StorageHealth` gains `not_cached_chunks`; `missing_chunks`
+counts only this device's own uploads, and Repair fetches only those and unreadable chunks.
+
 ---
 
 ## 2. Identity & crypto  *(catcoms-crypto)*
@@ -5205,7 +5234,9 @@ the original set before starting work. A successful fallback returns a fresh exa
 after selection publication, preserving global intent/allowance and revoking old lower effects.
 Completed projections remain bound to the committed winner. Old exact-only records are not enriched.
 See the file contract for migration, directory barriers, execution ceilings and current resume limits.
-Remote confirmations and automated retention/eviction are not part of this interface.
+Remote confirmations and holder-aware retention are not part of this interface. Size-limited cache
+eviction (PR #55) never touches Keep copies; it pins in-progress Keeps and drops a cache duplicate
+only for a completed copy checked in this mount (see `BlobStore::retained_chunks` above).
 
 ### Pre-upload video editing (frontend only)
 

@@ -1,5 +1,44 @@
 # Threat model; client integrity & enforcement boundaries
 
+## Cache housekeeping boundary (26 October, PR #55)
+
+Each server's encrypted cache on a device (`blobs/<group>/`) now has a per-device size limit,
+crash-safe writes and leave cleanup ([design](design-cache-housekeeping.md)).
+
+- **Local only.** The limit, the eviction order and the pins are local. Nothing is replicated or
+  sent to members, and there is no wire change: a member asking for an evicted chunk gets the
+  same empty reply, Absent or Unavailable as for a chunk this device never held.
+- **No holder probe.** Eviction does not check that another member still holds a file, so a small
+  limit can drop the last copy anyone has. This device's own verified uploads are pinned, which
+  covers the usual sole holder. Unsigned legacy uploads are not.
+- **Members influence order, not pins.** Order is listing position: the newest live row naming a
+  chunk. A member who can rewrite index rows at the CRDT level can reorder files or unlist them,
+  which is no more than unlisting already allows. A claimed timestamp is never trusted. Wiki
+  embeds and "Never expires" are circulation rules any member can set for everyone, so they are
+  deliberately not cache pins. A hostile listing can name another blob as a chunk of an old fake
+  file: profile images, pinned chunks and newer listings' chunks are protected, and anything
+  else it names can leave early and is fetched again on demand.
+- **Pins fail closed.** Keep in progress, Downloads, files in use, own uploads and Studio
+  protection are chunk-address sets from their owners' saved plans. An unreadable index,
+  unreadable Keep or Download plans, or unknown Studio protection pause eviction; rows past the
+  256-row cap or a missing profile document skip only the unclaimed class, so one member cannot
+  switch off everyone's limit. Studio's guard re-checks under its mutex through each unlink.
+- **Keep duplicates.** A cache chunk is dropped in favour of a completed Keep copy only after that
+  copy's whole-file check passed in this mount; after a restart the duplicate stays until a check
+  succeeds.
+- **Crash safety.** Primary cache writes go to `incoming/`, are synced and renamed, so a CID name
+  never holds a torn record. There is no per-write directory flush: power loss can lose a renamed
+  entry (fetched again), not tear it. Mount recovery removes temporary files no live handle owns
+  and sealed records shorter than 40 bytes. Keep's own stores keep their earlier write path.
+- **Saved files serve.** A verified Download chunk is also put in the shared cache, so a member
+  asking for it can learn this device holds the file, as for any file it has displayed.
+- **Leave cleanup** runs under an in-process claim per group (attach waits on it), deletes only
+  CIDs enumerated after a complete Studio scan, removes `kept/` wholesale under its lease, keeps
+  its marker while anything failed, and resumes after an unlock in which every server restored.
+  Leaving is confirmed in the UI with the Keep copies and unfinished Downloads it deletes.
+- **Not claimed:** physical power-loss evidence, filesystem allocation (usage counts sealed file
+  lengths), cleanup of caches left before this change, or expiry enforcement.
+
 ## Switchable V2 voice transport and pinned call mode (22 October, branch only)
 
 Kind-28 dispatch and the V2 scheduler (`catcoms-sync/src/voice_schedule.rs`) exist behind a local
@@ -576,7 +615,9 @@ prepayment and native/browser activation remain unimplemented and V2 dispatch st
 Sealed Download ownership has its own domain and canonical random-ID directory, sharing the
 retained quota and exclusive mount with Keeps. Purpose and full MLS group/device scope are checked
 before pending-journal reconciliation. A CID match grants no cross-purpose cleanup or run access.
-Public blob reads/source preparation exclude all Downloads, including completed copies. Private
+Public blob reads/source preparation exclude all Downloads, including completed copies (since cache
+housekeeping, each verified Download chunk is also copied into the ordinary cache, which does
+serve; the private record itself still never does). Private
 export requires exact issuing mount AND transfer-generation identity, saved chunk bounds and
 whole-file verification. Original actor freeze/thaw, Root/epoch, account/entry, Pause/removal and
 remount revoke old effects; cleanup of a committed export cannot remove a later verification run.
@@ -2807,9 +2848,10 @@ table with the commit that closed it.
   passive-fetch policy. Bytes fetched into the blob store occupy one authenticated,
   XChaCha20-Poly1305-sealed vault copy; explicit export creates a separate plaintext Downloads copy.
   This reduces unsolicited decoder exposure but does **not** sandbox a decoder or make a trusted
-  member's file benign. Automatic whole-share mirroring remains unimplemented because the sealing
-  disk store has no quota; enabling it first would permit storage exhaustion even by an opted-in
-  trusted member.
+  member's file benign. Automatic whole-share mirroring remains unimplemented. The sealing disk
+  store now has a per-server cache limit (see "Cache housekeeping boundary"), but that bounds the
+  cache by dropping old listings, so mirroring everything would still churn the cache and
+  amplify traffic; it is not enabled.
   Third-party HTTP(S) images always require a click, even under everyone mode: they have no file
   attestation, disclose the client address, and may target loopback/private-network services.
   **Third-party player frames** (cards in chat for any of the allow-listed embed hosts, and YouTube

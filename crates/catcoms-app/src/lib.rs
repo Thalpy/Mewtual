@@ -2857,20 +2857,22 @@ pub const FILE_EXPIRY_DEFAULT_MS: u64 = 30 * 24 * 60 * 60 * 1000;
 /// under two names/folders (content dedup in [`Server::add_file`]) carry two independent
 /// deadlines.
 ///
-/// **NOTHING ENFORCES THIS YET.** As of this change the deadline is *recorded and displayed*
-/// metadata only; no eviction, no drop-from-circulation, no GC consults it. `catcoms-storage`'s
-/// [`RetentionIndex`](catcoms_storage::RetentionIndex) is a complete 3-scope expiry + GC engine,
-/// but it is **not wired into this layer at all**: the shared-file index records expiry, the blob
-/// store evicts nothing, and an "expired" file keeps circulating exactly as before. The point of
-/// stamping it now is that the eventual enforcement pass has honest inputs; including
-/// [`Server::wiki_pinned_cids`], which it MUST consult (wiki-embedded files never decay).
+/// **Nothing enforces this deadline.** It is *recorded and displayed* metadata only; no
+/// drop-from-circulation consults it, and `catcoms-storage`'s
+/// [`RetentionIndex`](catcoms_storage::RetentionIndex) is not wired in. Separately, each device's
+/// cache follows its own per-server size limit ([`cache_plan`], [`cache_housekeeping`]), which
+/// drops the oldest listings first and ignores this field: "never expires" (`FileExpiry::Never`)
+/// and wiki embeds are circulation rules members set for everyone, so they are deliberately not
+/// cache pins. A future expiry-enforcement pass must still consult
+/// [`Server::wiki_pinned_cids`] (wiki-embedded files never drop out of circulation).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FileExpiry {
     /// No deadline was ever recorded; a listing written before this field existed, or by a peer
     /// that predates it. Distinct from [`FileExpiry::Never`]: we do not know what was intended,
     /// so the UI says "not recorded (older share)" rather than promising anything.
     Unrecorded,
-    /// Explicitly kept forever ("keep forever"): never drops out of circulation.
+    /// Explicitly "never expires" (the Properties button, formerly "Keep forever"): never drops
+    /// out of circulation. Not a cache pin; see the type docs.
     Never,
     /// Drops out of circulation at this absolute ms-epoch instant.
     At(u64),
@@ -6071,9 +6073,9 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
     /// the protocol residual is identical to invites and member removal.
     ///
     /// Setting a deadline does **not** cause anything to happen at that instant; see
-    /// [`FileExpiry`]: this records metadata for a retention pass that does not exist yet, and a
-    /// deadline on a wiki-embedded file is overridden by [`wiki_pinned_cids`](Self::wiki_pinned_cids)
-    /// in any case.
+    /// [`FileExpiry`]: this records circulation metadata that no pass enforces yet, and a deadline
+    /// on a wiki-embedded file is overridden by [`wiki_pinned_cids`](Self::wiki_pinned_cids) in any
+    /// case. Neither a deadline nor "never expires" changes what a device's cache limit drops.
     pub async fn set_file_expiry(
         &mut self,
         cid: &Cid,
@@ -6113,9 +6115,10 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
     /// either marker grammar (`![alt](cid:HEX)` embeds and `[label](file:HEX)` chips).
     ///
     /// **The never-decay set.** Product rule: a file embedded in a wiki page must never drop out
-    /// of circulation. Any future retention/GC pass; in this crate or in
-    /// `catcoms-storage`; **MUST** consult this set and treat a member of it as un-expirable,
-    /// whatever [`FileEntry::expires`] says.
+    /// of circulation. Any future *expiry* pass **MUST** consult this set and treat a member of it
+    /// as un-expirable, whatever [`FileEntry::expires`] says. This is not a local cache pin: any
+    /// member can embed any listed file (even in a pending edit), so the per-device cache limit
+    /// ([`cache_housekeeping`]) deliberately does not consult it.
     ///
     /// It is **derived, never stored**: the answer is recomputed from the wiki document every
     /// time, so editing the embed out of a page (or deleting the page) un-pins the file with no

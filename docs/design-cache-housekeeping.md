@@ -1,7 +1,7 @@
 # Cache housekeeping
 
 Status: design agreed on 24 October 2026 (owner answers and design-review fixes folded in);
-implementation in progress. This PR is stacked on PR #51 (`communication-external-download`). The
+implemented on 26 October 2026 (see `HANDOVER.md`); the complete suites run in CI. This PR is stacked on PR #51 (`communication-external-download`). The
 saved-files list PR is stacked on this one.
 
 ## Why
@@ -198,9 +198,9 @@ running on the actor handle.
 - **Where**: planning and deletes run on the server actor, which owns the index, the pin inputs and
   the blob handle. Deletes must use the actor's handle, because only it issues background read plans
   whose epoch a delete has to retire. At most 64 deletes per actor turn, so commands and sync keep
-  flowing. Before each batch the actor rechecks the pins and the index row identities it planned
-  from (not document heads, so junk edits cannot keep discarding plans); a change discards the rest
-  and replans at the next allowed pass.
+  flowing. Every batch is planned from fresh inputs (pins, rows, Keep state), so a change between
+  turns is always seen before the next delete; a pass ends when the plan has nothing left or a
+  batch deleted nothing.
 - **Numbers**: the store's size index covers its own writes. Studio and the desktop open other
   handles on the same directory, so before a pass that would delete, the actor refreshes the index
   with a metadata-only rescan (no recovery mid-session; Windows directory listings carry sizes, so
@@ -260,7 +260,7 @@ through the composite store.
   outside 1 GiB to 1 TiB natively. Both are registered in the command policy, the capability and the
   frontend security ledger.
 - **Settings page**: Server settings → **Storage** ("Storage on this device"), for servers and DMs:
-  the same bar, a limit picker (1, 2, 5, 10, 20, 50, 100 GB, 1 TB, No limit), what is pinned, and
+  the same bar, a limit picker (1, 2, 5, 10, 20, 50, 100 GiB, 1 TiB, No limit), what is pinned, and
   the leaving-soon count. Lowering below current usage confirms with what will go.
 - **Footer**: a segment on the right of the status bar, after the spacer and before the fingerprint,
   clear of the Transfers button PR #51 is changing. `CACHE`, a slim bar (`role="progressbar"`) and
@@ -272,7 +272,7 @@ through the composite store.
   Data: `get_cache_status` on server switch and a native `cache-status` event, at most once a
   second. No animation.
 - **Remove from Keep**: once a checked Keep copy has replaced the cache duplicate, releasing the
-  Keep copy deletes the device's last local copy; the release confirmation says so.
+  Keep copy deletes the device's last local copy; the Release button's explanation says so.
 
 ### 9. Crash-safe writes
 

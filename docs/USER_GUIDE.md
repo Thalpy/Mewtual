@@ -516,13 +516,40 @@ The **Files** tab is a folder browser:
   keep their copy). You can also **right-click any embedded image/video/audio or file chip**
   in chat, announcements, or a wiki page and pick **Properties**.
 - Properties also shows **Circulates until**; every shared file gets a **30-day circulation
-  window** (the date it stops being offered around automatically; nothing is ever deleted
-  from anyone's device, and it stays fetchable while any member holds a copy). The uploader
-  or an owner/admin can toggle **Keep forever**. A file **embedded in a wiki page never
-  expires** (marked 📌 in the file list); and **Used in** lists exactly where the file
-  appears: the wiki pages (click to open) plus chat/announcement reference counts.
+  window**. Today this date is displayed only: nothing acts on it yet. The uploader or an
+  owner/admin can switch a listing to **Never expires**. A file **embedded in a wiki page never
+  expires** either (marked 📌 in the file list); and **Used in** lists exactly where the file
+  appears: the wiki pages (click to open) plus chat/announcement reference counts. Circulation
+  is about the server as a whole; it is not a promise that your device keeps the bytes (see
+  **Cache on this device** below).
 - Files are **end-to-end encrypted**: stored as ciphertext under a per-group key, sealed at
   rest, and only members can open them.
+
+### Cache on this device
+
+Files you open, play or save stay in an encrypted cache on this device, so they show again
+without fetching, and this device can send them to other members who ask. Each server has its own
+**cache limit on this device**, set in **Server settings → Storage** (1 GiB to 1 TiB, or no limit;
+5 GiB unless you change it, or more if the cache was already bigger when you updated).
+
+- When the cache is over its limit, the files **shared longest ago leave first**; when you last
+  opened a file does not matter. Anyone who still has a file that left can send it again.
+- These always stay: files you **Keep**, files **you shared from this device** (signed uploads;
+  very old unsigned ones are not covered), files **Studio** work still uses, files on screen or
+  transferring right now, and unfinished downloads.
+- **Never expires** and wiki embeds keep a file in circulation, but they do not stop your cache
+  from dropping it. Use **Keep** to hold a copy here. A checked Keep copy replaces the cache's
+  duplicate, so releasing that Keep copy removes the file from this device.
+- The status bar shows the open server's **cache** bar. Past 90% it turns amber and says how many
+  files are **leaving soon**: the files the next tenth of the limit would push out. Click it to
+  change the limit. Lowering the limit below what is cached asks first, then removes the oldest
+  files straight away.
+- Without a check that someone else still has a file, a small limit can drop the last copy any
+  member has. Your own uploads are never dropped, which covers the usual case.
+- **Leaving a server** removes its cached files, Keep copies and unfinished downloads from this
+  device after a confirmation that names them, and reports the space freed. Files saved to your
+  folders are untouched, and anything Studio still uses stays. If some files cannot be removed,
+  Mewtual tries again after the next unlock.
 
 **Custom emoji** live in the `emoji/` folder. Add one in **Server settings → Emoji & Stickers**:
 type a `code`, choose its display size and upload an image. Then anyone types `:code:` to use it.
@@ -755,10 +782,14 @@ The two compact operations buttons above your profile provide local, evidence-ba
   visit per server runs once per app process and saves that point-in-time report; revisiting it or
   receiving a file event does not quietly rescan. It breaks the inventory down by media type,
   wiki-pinned content and largest files, clearly separating exact verified ciphertext bytes from
-  local/logical size estimates. **Repair from peers** is the explicit exception: it fetches missing
-  or corrupt chunks through the authenticated, content-address-checked member path and replaces the
-  cached report after verifying again. It cannot invent bytes when no reachable member holds them
-  or repair an invalid manifest. The same health summary is explicitly available in **Transfers**.
+  local/logical size estimates. Chunks of other members' files that this device never fetched, or
+  dropped under its cache limit, count as **not cached on this device**, which is normal; only
+  chunks missing from your own uploads count as damage. **Repair from peers** is the explicit
+  exception to "no fetching": it fetches corrupt chunks and chunks missing from your own uploads
+  through the authenticated, content-address-checked member path and replaces the cached report
+  after verifying again. It leaves merely uncached files alone (opening them fetches what they
+  need). It cannot invent bytes when no reachable member holds them or repair an invalid
+  manifest. The same health summary is explicitly available in **Transfers**.
 - **Connectivity** opens the **Connectivity assistant**, which explains what this device can
   actually observe: connected members, the current path evidence and existing network settings. It
   does not promise global reachability from a local observation. **Copy diagnostic** provides the
