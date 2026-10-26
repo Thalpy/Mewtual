@@ -243,6 +243,44 @@ async fn clearing_a_saved_private_row_forgets_only_its_own_entry() {
     drain.await.unwrap();
 }
 
+/// Adversarial review M1: a replace whose `forget(old)` write failed still renames the new entry
+/// onto the old copy's name. That rename must leave a list the next load can read, not two
+/// entries for one place (which reads as damaged and would cost every entry on "Start a new
+/// list").
+#[tokio::test]
+async fn a_rename_after_a_failed_forget_keeps_the_list_readable() {
+    let dir = tempfile::tempdir().unwrap();
+    let folder = dir.path().join("Downloads");
+    let state = AppState::default();
+    *state.store.lock().await = Some(store_in(dir.path()));
+    let (entry, task, drain) = crate::leaving::tests::running(564);
+    let actor = entry.actor.clone();
+    state.servers.lock().await.insert(1, entry);
+    for leaf in ["report.pdf", "report (1).pdf"] {
+        let save = plain(b"file", leaf, &folder);
+        assert!(matches!(
+            record_save(&state, 1, 564, save, None).await,
+            Recorded::Yes { .. }
+        ));
+    }
+    let SavedFilesLoad::Found(list) = stored(&state).await else {
+        panic!("list");
+    };
+    let new = list.entries()[1].id;
+
+    // The old entry was never forgotten; the rename still succeeds and replaces it.
+    assert!(rename_entry(&state, 1, 564, new, "report (1).pdf", "report.pdf").await);
+    let SavedFilesLoad::Found(list) = stored(&state).await else {
+        panic!("the list must still read after the rename");
+    };
+    assert_eq!(list.entries().len(), 1);
+    assert_eq!(list.entries()[0].id, new);
+    assert_eq!(list.entries()[0].location.leaf(), "report.pdf");
+    actor.shutdown().await;
+    task.await.unwrap();
+    drain.await.unwrap();
+}
+
 #[tokio::test]
 async fn a_replace_plan_comes_from_the_same_locked_read_that_records_the_save() {
     let dir = tempfile::tempdir().unwrap();
