@@ -42,6 +42,35 @@ let mediaStarted = 0, mediaCurrentObservations = 0;
 const mediaRecords: { plan: VoiceCryptoChain; parent: typeof parent; calls: { closed: number }; currents: number }[] = [];
 let mediaRequestParent: string | null = null, mediaRequestProof: string | null = null;
 let originalSession: { keys: unknown; bootstrap: unknown; tx: bigint } | null = null;
+// Separate bounded observations for the unscripted production coordinator. These counters
+// never grant a native operation and keep no plan, crypto key, SDP or Session reference.
+const coordinatedPeers: { local: number; remote: number; closed: number }[] = [];
+let previousCoordinatedRtc: typeof RTCPeerConnection | undefined;
+let coordinatedObserver: ReturnType<VoiceCryptoBroker["observeNativeLifecycle"]> | null = null;
+function installCoordinatedRtc(): void {
+  if (coordinatedObserver) return;
+  previousCoordinatedRtc = globalThis.RTCPeerConnection;
+  class Peer {
+    private local: "offer" | "answer" | null = null;
+    private remote: "offer" | "answer" | null = null;
+    private readonly calls = { local: 0, remote: 0, closed: 0 };
+    constructor() { assert.ok(coordinatedPeers.length < 2); coordinatedPeers.push(this.calls); }
+    iceGatheringState = "complete";
+    get localDescription() { assert.ok(this.local); return { type: this.local, sdp: "s".repeat(8192) }; }
+    addTransceiver() { assert.equal(this.remote, null); }
+    async setLocalDescription() {
+      assert.equal(++this.calls.local, 1); this.local = this.remote === "offer" ? "answer" : "offer";
+    }
+    async setRemoteDescription(value: RTCSessionDescriptionInit) {
+      assert.equal(++this.calls.remote, 1);
+      assert.equal(value.type, this.local === "offer" ? "answer" : "offer");
+      assert.equal(value.sdp, "s".repeat(8192)); this.remote = value.type as "offer" | "answer";
+    }
+    addEventListener() {} removeEventListener() {}
+    close() { this.calls.closed++; }
+  }
+  globalThis.RTCPeerConnection = Peer as unknown as typeof RTCPeerConnection;
+}
 function currentObservations(): number {
   const record = mediaRecords.find(record => record.plan === chain);
   assert.ok(record, "original actual media record required");
@@ -194,6 +223,7 @@ async function idle(): Promise<void> {
   }
 }
 type Step =
+  | { tag: "step"; name: "coordinator" | "coordinator-end"; peers: 1 | 2 }
   | { tag: "step"; name: "prepare"; owner: string; group: string }
   | { tag: "step"; name: "derive"; purpose: VoiceIpcPurpose }
   | { tag: "step"; name: "sdp-custody"; purpose: VoiceIpcPurpose; row: string; identity: VoiceIpcActionIdentity }
@@ -201,6 +231,36 @@ type Step =
   | { tag: "step"; name: "pump" | "close" | "wedge" | "pc-custody" | "rtc-round" | "rtc-round-loss" | "rtc-round-media" | "rtc-round-media-loss" | "media-revoked" | "media-retire" | "media-retire-loss" | "media-retire-start" | "media-retire-progress" | "media-retire-finish" | "media-current-after-history" | "media-history-pending" | "advance-pair" | "media-current-all" | "end-peers" };
 async function step(value: Step): Promise<unknown> {
   switch (value.name) {
+    case "coordinator": {
+      assert.ok(value.peers === 1 || value.peers === 2);
+      installCoordinatedRtc();
+      const observer = broker.observeNativeLifecycle(owner, channel, key);
+      if (coordinatedObserver) assert.equal(observer, coordinatedObserver);
+      coordinatedObserver = observer;
+      // Start only the normal production lifecycle. Native callbacks remain serviced by
+      // Rust during this entire step. The test merely observes completed browser history;
+      // Rust separately checks original native History::Collected, not this boolean.
+      const deadline = performance.now() + 55_000;
+      for (;;) {
+        const session = (broker as unknown as { ipcChannels: Map<string, {
+          retired: boolean; peers: Map<unknown, { compacted: boolean; compactionReturned: boolean; advanced: boolean }>;
+        }> }).ipcChannels.get(owner.token);
+        assert.ok(session && !session.retired, "production coordinator retired before completion");
+        const completed = [...session.peers.values()].filter(peer => peer.compacted && peer.compactionReturned && peer.advanced).length;
+        if (completed === value.peers) break;
+        assert.ok(performance.now() < deadline, `coordinator history stalled: completed=${completed} sdk=${coordinatedPeers.length}`);
+        await new Promise<void>(yes => setTimeout(yes, 25));
+      }
+      assert.equal(coordinatedPeers.length, value.peers);
+      for (const peer of coordinatedPeers) assert.deepEqual(peer, { local: 1, remote: 1, closed: 0 });
+      return { kind: "coordinated", peers: value.peers };
+    }
+    case "coordinator-end": {
+      assert.equal(coordinatedPeers.length, value.peers);
+      owner.retire();
+      for (const peer of coordinatedPeers) assert.equal(peer.closed, 1, "End must synchronously close every coordinated peer");
+      return { kind: "coordinator-ended", peers: value.peers };
+    }
     case "pump": {
       assert.equal(stopPump, null);
       let stopped = false;
@@ -572,6 +632,11 @@ async function step(value: Step): Promise<unknown> {
       owner.retire(); broker.retrySelectedJoinKeys();
       for (const record of mediaRecords) assert.equal(record.calls.closed, 1, "End synchronously closes EVERY original adopted peer");
       await channel.close(); await idle();
+      if (coordinatedObserver) {
+        await coordinatedObserver.close();
+        for (const peer of coordinatedPeers) assert.equal(peer.closed, 1);
+        globalThis.RTCPeerConnection = previousCoordinatedRtc!;
+      }
       assert.equal(broker.counts().bytes, 0, "actual original browser owners must collect");
       for (const record of mediaRecords) {
         const loss = mediaLosses.get(record.parent.row)!;

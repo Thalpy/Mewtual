@@ -374,6 +374,33 @@ impl Target<'_> {
     }
 }
 impl Ledger {
+    /// Read-only integration oracle: count completed original histories for this exact
+    /// selected allocation. No renderer flag, public label or test-selected RowId can
+    /// manufacture success. The ordinary Index -> Entry state lock order is preserved.
+    #[cfg(test)]
+    pub(in crate::voice_handoff) fn collected_media_count(
+        &self,
+        selected: &Arc<SelectedHandoffOwner>,
+    ) -> usize {
+        let index = self.index.lock().unwrap_or_else(|error| error.into_inner());
+        index
+            .media
+            .iter()
+            .flatten()
+            .filter(|entry| {
+                Arc::ptr_eq(&entry.selected, selected)
+                    && matches!(
+                        entry
+                            .state
+                            .lock()
+                            .unwrap_or_else(|error| error.into_inner())
+                            .history,
+                        History::Collected { .. }
+                    )
+            })
+            .count()
+    }
+
     /// Run BEFORE old-parent resolution, and OUTSIDE final UI/Coordinator/Route guards.
     /// Exact existing media survives parent compaction. Absence never proves Release.
     pub(in crate::voice_handoff) fn indexed_media(

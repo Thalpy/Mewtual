@@ -289,6 +289,30 @@ impl Endpoint {
         .await
         .0
     }
+    /// Start the production coordinator after authenticated selected/setup. This sends no
+    /// parent, role, storage/SDK/PC proof or phase hint. Native history is an independent
+    /// oracle after actual browser compaction, never permission for the next operation.
+    pub(crate) async fn coordinate_peers(&mut self, peers: usize) {
+        assert!((1..=2).contains(&peers));
+        assert_eq!(
+            self.step(json!({"tag":"step", "name":"coordinator", "peers":peers}))
+                .await,
+            json!({"kind":"coordinated", "peers":peers})
+        );
+        assert_eq!(
+            self.state
+                .voice_handoff
+                .collected_media_count(&self.selected()),
+            peers
+        );
+    }
+    pub(crate) async fn end_coordinated_peers(&mut self, peers: usize) {
+        assert_eq!(
+            self.step(json!({"tag":"step", "name":"coordinator-end", "peers":peers}))
+                .await,
+            json!({"kind":"coordinator-ended", "peers":peers})
+        );
+    }
     /// No public row/purpose/role is supplied. Keep servicing the one metadata callback
     /// until actual native history independently establishes all four completed actions.
     pub(crate) async fn automatic_confirmation(&mut self) {
@@ -1168,8 +1192,16 @@ async fn drive_streams(
     // This bounds a broken subprocess/harness, never a protocol deadline. Cancelling this
     // waiter drops its original pipe/process owners; admitted native work keeps its own
     // custody. No timeout creates a replacement key, action, Phase or channel.
+    // A coordinator step spans the formerly separate confirmation, Ready, SDP, RTC,
+    // media and two-sided retirement steps. Its aggregate observer bound is60s;
+    // each original protocol/physical deadline remains unchanged.
+    let bound = if step["name"] == "coordinator" {
+        60
+    } else {
+        30
+    };
     tokio::time::timeout(
-        std::time::Duration::from_secs(30),
+        std::time::Duration::from_secs(bound),
         drive_streams_inner(state, owner, port, input, output, callbacks, step),
     )
     .await
@@ -1185,6 +1217,7 @@ async fn drive_streams_inner(
     step: Value,
 ) -> (Value, Option<[u8; 32]>) {
     let automatic = step["name"] == "pump";
+    let coordinator = step["name"] == "coordinator";
     let rtc_round = matches!(
         step["name"].as_str(),
         Some("rtc-round" | "rtc-round-loss" | "rtc-round-media" | "rtc-round-media-loss")
@@ -1195,7 +1228,9 @@ async fn drive_streams_inner(
     // background Node readWork waits forever. The bound follows the pump's minimum50ms
     // cadence, maximum32-slot scan and unchanged30s outer harness bound. Ordinary steps
     // retain32. No budget, timeout or protocol attempt is renewed by this fixture.
-    let callbacks_bound = if automatic || rtc_round {
+    let callbacks_bound = if coordinator {
+        32 * (60_000 / 50)
+    } else if automatic || rtc_round {
         32 * (30_000 / 50)
     } else {
         32

@@ -1,5 +1,38 @@
 # Mewtual; Handover
 
+## Automatic browser lifecycle (26 October; native acceptance pending, App OFF)
+
+Broker38 adds one prepaid2KiB, coalesced Session lifecycle outside the confirmation pump.
+It observes opaque original generation/plan/stage metadata and calls the existing native-
+authorized leaves through confirmation, storage/SDK custody, PC, RTC, media, retirement,
+native/browser history collection and explicit next-negotiation advance. Every leaf repeats
+its own identity/negative/currentness fences. Scheduling observations grant no native effect.
+The loop joins the old confirmation pump before handoff and never holds that pump's turn
+while compaction waits for it. Closing the observer stops scheduling; only Session collection
+returns its fee. HMR37 requires reload.
+
+Per-request codec turns now separate Claim from key adoption and storage preparation from
+SDK admission. A failing-before regression proves that two returning3s calls cannot combine
+to starve an indexed peer's5s Current window. A separately held single request still expires
+old media normally and remains paid through actual return/End; its stale Claim cannot adopt.
+Clock tests cover callback reentrancy, stale timers, register-then-throw, failed cancellation,
+rollback/nonfinite readings, fractional clocks and finite values too large to represent the
+next250ms cadence. The latter also failed before correction. No attempt/deadline is renewed.
+
+Focused 321 tests pass in 8.02 s. Complete frontend 3,032 passes in 88.71 s; static checks
+and production build (50.75 s) pass. Strict TypeScript covers the Node endpoint and new
+lifecycle module/tests. Read-only adversarial review finds no remaining blocker/high/medium
+or material low in this diff; that static review does not establish native acceptance.
+The new native/TCP test is written but NOT YET RUN: it starts only the coordinator after
+authenticated setup, independently checks exact-selected native collected history, and
+passively requires browser compaction AND advance plus actual controlled SDK local/remote
+effects. Endpoint TCP is forbidden; helper owns no call. Its60s whole-step observer bound
+spans formerly separate phases and changes no physical/protocol deadline. Root validation
+of the preceding source is still using the shared target, so native checks remain queued.
+Real WebView/SDP/ICE/audio and media relay are not established by controlled RTC objects.
+Pre-compaction terminal failure still retires the Session; failed-peer isolation/renewal,
+production App integration, relay, combined and physical acceptance remain open.
+
 ## Variable voice progression funded before Derive (26 October; Root full run pending)
 
 The implementation checkout now uses one prepaid192KiB core plus independent32KiB Ready

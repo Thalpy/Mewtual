@@ -345,6 +345,81 @@ async fn native_webcrypto_cycle(
     scenario.close(&[0, 1, 2]).await;
 }
 
+/// Start only each production browser lifecycle after native selected/setup. All further
+/// discovery/confirmation/Ready/SDP/PC/media/history transitions run without test phase
+/// hints. Actual TCP forbids the endpoint edge; helper0 owns no voice endpoint or key.
+/// Controlled RTC validates custody, not ICE reachability or audible native media.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn production_browser_coordinator_completes_native_handoff_over_blocked_tcp_bridge() {
+    Box::pin(coordinated_browser_cycle()).await;
+}
+
+async fn coordinated_browser_cycle() {
+    let mut scenario = Scenario::new(false, isolate().await);
+    scenario.admit().await;
+    scenario.close(&[3, 4, 5]).await;
+    scenario.rules.drop_gossip.store(true, Ordering::Release);
+    for index in [0, 1, 2] {
+        enable(&scenario, index).await;
+    }
+    let endpoints = tokio::join!(
+        Box::pin(browser_endpoint(&scenario, 1, false)),
+        Box::pin(browser_endpoint(&scenario, 2, false))
+    );
+    let (mut a, mut c) = match endpoints {
+        (Ok(a), Ok(c)) => (a, c),
+        (Ok(mut a), Err(error)) => {
+            a.collect().await;
+            std::panic::resume_unwind(error)
+        }
+        (Err(error), Ok(mut c)) => {
+            c.collect().await;
+            std::panic::resume_unwind(error)
+        }
+        (Err(error), Err(_)) => std::panic::resume_unwind(error),
+    };
+    let cycle = catch_fixture(Box::pin(async {
+        tokio::join!(
+            Box::pin(a.coordinate_peers(1)),
+            Box::pin(c.coordinate_peers(1))
+        );
+        // No prior native End may make the synchronous browser fence trivially true.
+        a.end_coordinated_peers(1).await;
+        c.end_coordinated_peers(1).await;
+        scenario.rules.assert_graph();
+        let trace = scenario.rules.trace.lock().unwrap();
+        for edge in [(0, 1, 28), (1, 0, 28), (0, 2, 28), (2, 0, 28)] {
+            assert!(
+                trace.received_kinds.get(&edge).copied().unwrap_or(0) > 0,
+                "actual automatic negotiation must traverse unjoined helper: {edge:?}"
+            );
+        }
+    }))
+    .await;
+    if let Err(error) = cycle {
+        let (ar, cr) = tokio::join!(
+            Box::pin(catch_fixture(a.collect())),
+            Box::pin(catch_fixture(c.collect()))
+        );
+        assert!(
+            ar.is_ok() && cr.is_ok(),
+            "both failed coordinated endpoints must collect"
+        );
+        std::panic::resume_unwind(error);
+    }
+    let (ar, cr) = tokio::join!(
+        Box::pin(catch_fixture(a.close())),
+        Box::pin(catch_fixture(c.close()))
+    );
+    for result in [ar, cr] {
+        match result {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) | Err(error) => std::panic::resume_unwind(error),
+        }
+    }
+    scenario.close(&[0, 1, 2]).await;
+}
+
 /// Genuine second native peer on A's original selected key/HTTP Session. Only the RTC
 /// provider is controlled. The first A-B path is blocked and uses unjoined helper0;
 /// the second A-C path uses the existing permitted graph and claims no blocked edge.

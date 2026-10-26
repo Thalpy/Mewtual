@@ -1,5 +1,22 @@
 # Next voice milestone: native result recovery
 
+## Broker38 lifecycle acceptance (26 October; App OFF)
+
+The genuine sequential native two-peer case now passes (77.90 s), including actual native
+and browser history collection, original Session/key continuity, serial reuse and both
+indexed Current paths. Native admission fencing and shared variable prepayment resolved
+the reproduced second-peer capacity failure. Its fresh full native suite passes 884 tests;
+the matching full Root run remains in progress. Earlier pending descriptions below retain
+the implementation history; HANDOVER has current evidence.
+
+The next slice adds the coalesced automatic lifecycle across existing authorized leaves.
+Focused 321 and full frontend 3,032/static/build checks pass. Genuine post-setup automatic
+native/TCP acceptance is written but queued behind the Root run. It must prove both actual
+history collection and coordinator advance without phase/role/proof control hints. After
+that, the remaining software work includes failed-negotiation isolation/renewal, production
+App/native/real RTC/microphone composition, member media relay and combined acceptance.
+Do not enable V2 or mark physical acceptance complete based on controlled RTC providers.
+
 ## Current work: complete native multi-peer acceptance and failure isolation (26 October)
 
 Broker35 keeps SDK/provider work off the shared IPC codec with the existing two-position
