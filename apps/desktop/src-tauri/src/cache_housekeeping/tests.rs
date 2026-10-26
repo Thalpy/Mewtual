@@ -117,44 +117,70 @@ async fn leave_cleanup_empties_the_namespace_under_a_claim_and_reports_freed_byt
     assert!(!state.cache.claimed(&GROUP));
 }
 
-/// Review H1: a server that attached the namespace before the claim existed (a rejoin, or a join
-/// still being registered) holds its Keep lease. Neither the sweep nor a leave may then empty
-/// the namespace, and the marker goes so no later attach treats it as an interrupted leave.
+/// Review H1, as production reaches it: the group's server is running when the user joins the
+/// same group again, so the join attaches a second handle (which cannot get the Keep lease), and
+/// then the running server is left. Once its handle drops, neither that leave's cleanup nor the
+/// sweep may empty the namespace under the live joiner, and the marker stays for a later retry.
+/// When the joiner is gone too, the sweep finishes the leave.
 #[tokio::test]
-async fn cleanup_never_empties_a_namespace_a_live_server_attached_first() {
+async fn cleanup_never_empties_a_namespace_a_live_join_still_holds() {
     let dir = tempfile::tempdir().unwrap();
     let store = store_in(dir.path());
     let key = hex::encode(GROUP);
-    let cached = store.blob_store(&key).unwrap().put(&[2; 4000]).unwrap();
-    assert!(mark_leaving(&store, &GROUP).unwrap());
+    let (running, _) = prepare_blob_store(&store, Some(1), &GROUP).unwrap();
+    let (mut joiner, _) = prepare_blob_store(&store, None, &GROUP).unwrap();
+    let cached = joiner.put(&[2; 4000]).unwrap();
     let namespace = store.cache_namespace_dir(&key).unwrap();
-    // The attach of a joining server completed: it holds the store (and its Keep lease).
-    let (attached, _) = prepare_blob_store(&store, None, &GROUP).unwrap();
-    assert!(
-        !storage_cache::has_leaving_marker(&namespace),
-        "a rejoin takes the namespace back"
-    );
-    // Put the marker back as if the leave of an alias wrote it after that attach.
-    assert!(mark_leaving(&store, &GROUP).unwrap());
+    // `leave_server`: claim, marker, then the stopped server's handle drops.
     let state = AppState::default();
+    let claim = state.cache.claim(&GROUP).unwrap();
+    assert!(mark_leaving(&store, &GROUP).unwrap());
+    drop(running);
     *state.store.lock().await = Some(store);
+    let report = clean_namespace(&state, &claim, None, false).await;
+    assert_eq!(report.freed_bytes, 0);
+    assert!(report.failed > 0, "reported as not finished");
+    assert!(joiner.has(&cached), "the live joiner's cache survives");
+    assert!(
+        storage_cache::has_leaving_marker(&namespace),
+        "the marker stays: the holder could also be the leaver's own handle"
+    );
+    drop(claim);
+    // Not registered yet, so the sweep does try it, and meets the same open handle.
+    sweep_leaving(&state, None).await;
+    assert!(joiner.has(&cached), "the sweep leaves it alone too");
+    assert!(storage_cache::has_leaving_marker(&namespace));
+    drop(joiner);
     sweep_leaving(&state, None).await;
     assert!(
-        attached.has(&cached),
-        "the live server's cache survives the sweep"
+        !namespace.exists(),
+        "with every handle gone the leave finishes"
     );
+}
+
+/// A rejoin over a marker while another handle still has the namespace open must not remove that
+/// handle's live scratch or the marker: Keep stays off for the new attach and the next attach
+/// retries.
+#[test]
+fn a_rejoin_over_a_marker_leaves_a_namespace_another_handle_holds() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = store_in(dir.path());
+    let key = hex::encode(GROUP);
+    let mut open = store.blob_store(&key).unwrap();
+    let staged = open.put_staged(b"an upload being staged").unwrap();
+    let namespace = store.cache_namespace_dir(&key).unwrap();
+    assert!(mark_leaving(&store, &GROUP).unwrap());
+    let (rejoined, _) = prepare_blob_store(&store, Some(2), &GROUP).unwrap();
     assert!(
-        !storage_cache::has_leaving_marker(&namespace),
-        "an attached namespace is not an interrupted leave"
+        open.promote_staged(&staged).unwrap(),
+        "the open handle's staging survived"
     );
-    let claim = state.cache.claim(&GROUP).unwrap();
-    assert!(mark_leaving(state.store.lock().await.as_ref().unwrap(), &GROUP).unwrap());
-    let report = clean_namespace(&state, &claim, None, false).await;
-    assert!(!report.cleaned && report.freed_bytes == 0);
-    assert!(
-        attached.has(&cached),
-        "and survives a leave of an alias too"
-    );
+    assert!(storage_cache::has_leaving_marker(&namespace));
+    drop((open, rejoined));
+    // With nothing else open, the next attach finishes it.
+    let (_again, _) = prepare_blob_store(&store, Some(2), &GROUP).unwrap();
+    assert!(!storage_cache::has_leaving_marker(&namespace));
+    assert!(namespace.join(staged.to_hex()).exists(), "the cache stays");
 }
 
 #[test]

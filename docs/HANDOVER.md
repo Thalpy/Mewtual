@@ -28,6 +28,9 @@ cleanup on leave ([design](design-cache-housekeeping.md), owner decisions record
   persisted) empties the namespace in batches without the store lock, keeps Studio-referenced
   blobs, removes `kept/` wholesale and reports freed, kept and failed bytes. Interrupted cleanups
   resume after an unlock in which every server restored; a rejoin finishes the non-cache part.
+  Every primary cache handle holds `<namespace>/attach.lock` shared; cleanup needs it exclusively
+  (the Keep lease could not prove "unattached": a second attach of a group, such as a join while
+  the group's server runs, gets no lease). A busy lock deletes nothing and keeps the marker.
 - **Storage health** reports other members' absent chunks as not cached; Repair fetches only
   corrupt chunks and chunks missing from this device's own uploads.
 - **UI.** Footer cache segment (bar, %, "N leaving soon" past 90%), Server settings → Storage.

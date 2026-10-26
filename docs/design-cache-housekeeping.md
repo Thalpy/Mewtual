@@ -352,19 +352,36 @@ failed to restore, the sweep waits and logs which one.
 
 **Rejoin over a marker.** Attaching a group whose namespace still carries a marker first finishes
 the non-cache steps (removes `staging/`, `incoming/` and `kept/`), keeps the cache (it is the same
-group's content-addressed data), removes the marker, and only then opens the Keep store. If that
-removal fails, the marker stays and Keep is disabled for that mount (eviction pauses with it), so
-a half-deleted `kept/` is never loaded as whole and confirmed deletions are not resurrected.
+group's content-addressed data), removes the marker, and only then opens the Keep store. These
+steps run under the exclusive attach hold described next; if another handle still has the
+namespace open, or the removal fails, the marker stays and Keep is disabled for that mount
+(eviction pauses with it), so a live handle's scratch is never removed under it, a half-deleted
+`kept/` is never loaded as whole and confirmed deletions are not resurrected.
 
-**An attach that came first** (review H1). A claim only stops attaches that start after it; a
-rejoin or a join still being registered may already hold the namespace. So phase 1 also requires
-the marker to still be present (a rejoin removes it) and takes the namespace's Keep lease, which
-every attached server holds for its lifetime, and holds it to the end. A held lease means the
-namespace is in use: nothing is deleted, and the marker is cleared so no later attach treats it as
-an interrupted leave. A leave first waits up to three seconds for the just-stopped actor's handle
-to release the lease. A cleanup stopped by a session change skips scratch and `kept/` too, and
-keeps the marker. The leave report says `cleaned: false` whenever cleanup did not run, and the
-toast then says the files stay on this device.
+**An attach that came first** (review H1, corrected in re-review). A claim only stops attaches
+that start after it; a rejoin, or a join of the same group still being registered while the old
+server runs, may already hold the namespace. The Keep lease cannot prove that: only the first
+attach of a group gets it, and a second attach runs with a faulted Keep store and no lease. So
+every primary cache handle (`SealingBlobStore::open_cache`, used by every attach and every Studio
+per-request handle) holds `<namespace>/attach.lock` **shared** for its lifetime, and phase 1
+requires the marker to still be present (a rejoin removes it), then takes `attach.lock`
+**exclusively**, then the Keep lease, and holds both to the end. The cleanup's own handle opens
+under that exclusive hold (`open_cache_under`) rather than taking a shared one. All attempts are
+try-locks, and the lock file is unlinked only as the last step before the namespace is removed.
+
+A busy lock means some handle is open: a live server of the same group, or the leaving server's
+own handle still being dropped (the actor can take longer than the wait when its event channel is
+full). The two cannot be told apart, so nothing is deleted, the marker is **kept** and the leave
+reports a failure. That is safe either way: a live server's next attach treats the marker as a
+rejoin (the cache stays and the confirmed-deleted Keep copies go; its own Keep store is faulted
+for the mount it attached in, so it holds no copies of its own yet), the sweep skips groups a
+registered server uses, and otherwise the next unlock finishes the leave. A leave first waits up
+to three seconds for the just-stopped actor's handle to drop. A cleanup stopped by a session
+change skips scratch and `kept/` too, and keeps the marker. The leave report says `cleaned: false`
+whenever cleanup did not run.
+
+Residual: Linux emulates `flock` on NFS with per-process POSIX locks, under which a second lock in
+the same process succeeds; like the vault and Keep locks, this proof assumes a local filesystem.
 
 **Confirmation** (owner decision 4): every Leave entry point (the rail menu and the settings page)
 asks first, naming the Keep copies and unfinished Downloads it will permanently delete. If either

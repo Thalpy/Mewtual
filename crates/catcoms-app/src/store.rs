@@ -1752,6 +1752,10 @@ impl ServerStore {
     /// `key` is the server's stable group id (hex). Every blob is sealed at rest under the
     /// vault's `blob_key` (content-addressed by plaintext CID, so the mesh fetch is
     /// unchanged); the bytes survive restart and are opaque without the passphrase.
+    ///
+    /// The returned handle holds the namespace's attach lock shared for its lifetime (see
+    /// `catcoms_storage::cache::ATTACH_LOCK`), which is what keeps leave cleanup away from it, so
+    /// this fails (`VaultBusy`) while a cleanup is emptying the namespace.
     pub fn blob_store(&self, key: &str) -> Result<Box<dyn BlobStore + Send>, AppError> {
         validate_blob_namespace(key)?;
         let dir = self.dir.join("blobs").join(key);
@@ -1836,12 +1840,19 @@ impl ServerStore {
     }
 
     /// A Studio-protected handle on the primary cache **without** the Keep store, for leave
-    /// cleanup: it must not take the `kept/` lease, which the wholesale `kept/` removal needs.
-    /// Deletes through it still consult Studio protection under its mutex.
-    pub fn cache_only_blob_store(&self, key: &str) -> Result<Box<dyn BlobStore + Send>, AppError> {
+    /// cleanup: it must not take the `kept/` lease, which the wholesale `kept/` removal needs, nor
+    /// a shared attach hold, which would conflict with the cleanup's exclusive `held` (refused
+    /// unless it covers this very namespace). Deletes through it still consult Studio protection
+    /// under its mutex.
+    pub fn cache_only_blob_store(
+        &self,
+        key: &str,
+        held: &catcoms_storage::cache::AttachExclusive,
+    ) -> Result<Box<dyn BlobStore + Send>, AppError> {
         validate_blob_namespace(key)?;
         let dir = self.dir.join("blobs").join(key);
-        let store = SealingBlobStore::open_cache(&dir, self.keys.blob_key()?, OsCryptoRng)?;
+        let store =
+            SealingBlobStore::open_cache_under(&dir, self.keys.blob_key()?, OsCryptoRng, held)?;
         let group = hex::decode(key).unwrap_or_else(|_| key.as_bytes().to_vec());
         Ok(Box::new(creative_references::ProtectedBlobs {
             inner: Box::new(store),

@@ -621,13 +621,20 @@ fn leave_cleanup_keeps_studio_references_and_empties_the_rest() {
         report.freed_bytes >= 50,
         "Keep and the ordinary chunk were freed"
     );
-    let blobs = store.cache_only_blob_store(&key).unwrap();
-    assert!(blobs.has(&frame), "Studio still references the frame");
-    assert!(!blobs.has(&cached));
+    // Checked on disk: opening a handle would recreate `kept/` and the attach lock.
+    assert!(
+        dir.join(frame.to_hex()).exists(),
+        "Studio still references the frame"
+    );
+    assert!(!dir.join(cached.to_hex()).exists());
     assert!(!dir.join("kept").exists());
     assert!(
         !catcoms_storage::cache::has_leaving_marker(&dir),
         "nothing failed, so the marker went"
+    );
+    assert!(
+        !dir.join(catcoms_storage::cache::ATTACH_LOCK).exists(),
+        "the attach lock goes with the marker"
     );
     assert!(dir.exists(), "the pinned frame keeps the namespace");
 }
@@ -652,7 +659,7 @@ fn leave_cleanup_with_unknown_references_keeps_the_cache_and_the_marker() {
     while cleanup.delete_batch(16) {}
     let report = cleanup.finish();
     assert!(report.failed > 0);
-    assert!(store.cache_only_blob_store(&key).unwrap().has(&cached));
+    assert!(dir.join(cached.to_hex()).exists());
     assert!(catcoms_storage::cache::has_leaving_marker(&dir));
 }
 
@@ -663,33 +670,43 @@ fn ready(begun: crate::store::LeaveBegin) -> crate::store::LeaveCleanup {
     }
 }
 
-/// A server that attached the namespace before any claim existed (a rejoin, or a join still
-/// being registered) holds its Keep lease, and a rejoin removes the marker. Either one stops the
-/// cleanup before it deletes anything.
+/// Review H1: "attached" is the attach lock, not the Keep lease. A join of a group whose server
+/// still runs opens a second handle that cannot get the Keep lease. Once the old server leaves
+/// and its handle drops, the lease is free, but the joiner's handle still holds the attach lock,
+/// so the old server's leave cleanup deletes nothing and keeps its marker. A rejoin that removed
+/// the marker stops the cleanup too.
 #[test]
 fn leave_cleanup_never_touches_a_namespace_that_is_attached_or_taken_back() {
+    use catcoms_storage::cache::{self as storage_cache, LeaseAttempt};
     let root = tempfile::tempdir().unwrap();
     let mut store = open(root.path());
     let key = hex::encode([6u8; 32]);
-    let live = store.blob_store(&key).unwrap(); // holds kept/lease.lock, like a live server
-    let cid = {
-        let mut writer = store.cache_only_blob_store(&key).unwrap();
-        writer.put(b"a live server's cache").unwrap()
-    };
+    let leaving = store.blob_store(&key).unwrap(); // the running server: owns kept/lease.lock
+    let mut joiner = store.blob_store(&key).unwrap(); // the join: a faulted Keep, no lease
+    let cid = joiner.put(b"the joiner's cache").unwrap();
     let dir = store.cache_namespace_dir(&key).unwrap();
-    catcoms_storage::cache::write_leaving_marker(&dir).unwrap();
+    storage_cache::write_leaving_marker(&dir).unwrap(); // the running server's leave
+    drop(leaving);
+    assert!(
+        matches!(storage_cache::lock_kept(&dir), LeaseAttempt::Held(Some(_))),
+        "the Keep lease alone would call this namespace free"
+    );
     assert!(matches!(
         store.begin_leave_cleanup(&key).unwrap(),
         crate::store::LeaveBegin::Busy
     ));
-    assert!(live.has(&cid), "nothing was deleted");
-    drop(live);
+    assert!(joiner.has(&cid), "nothing of the live joiner was deleted");
+    assert!(
+        storage_cache::has_leaving_marker(&dir),
+        "the marker stays, so a later attach or unlock finishes the leave"
+    );
+    drop(joiner);
     std::fs::remove_file(dir.join("leaving")).unwrap(); // a rejoin took it back
     assert!(matches!(
         store.begin_leave_cleanup(&key).unwrap(),
         crate::store::LeaveBegin::NoMarker
     ));
-    assert!(store.cache_only_blob_store(&key).unwrap().has(&cid));
+    assert!(dir.join(cid.to_hex()).exists());
 }
 
 /// A session change mid-cleanup abandons it: the rest of the cache, scratch and `kept/` stay, and

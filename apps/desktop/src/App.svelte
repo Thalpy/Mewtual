@@ -29622,7 +29622,7 @@
               <ul class="leave-loss">{#each leaving.loss.downloads as name (name)}<li>{name}</li>{/each}</ul>
             {/if}
             {#if leaving.loss.unknown}
-              <p class="warn-t small">Kept copies or downloads could not be checked. Leaving deletes any this device has for this server.</p>
+              <p class="warn-t small">Keep copies or unfinished downloads could not be checked. Leaving may delete any this device has for this server.</p>
             {:else if !leaving.loss.keep.length && !leaving.loss.downloads.length}
               <p class="muted small">No Keep copies or unfinished downloads on this device.</p>
             {/if}

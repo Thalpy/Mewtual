@@ -96,7 +96,7 @@ export function cacheTone(status: CacheStatus): CacheTone {
 /** Short reasons for a paused cleanup, for the settings page. */
 export function cachePauseText(pause: CachePause): string {
   switch (pause) {
-    case "no-cache": return "This server's files are not cached on disk yet.";
+    case "no-cache": return "This server has no disk cache on this device.";
     case "not-ready": return "Measuring this device's cache.";
     case "scan-incomplete": return "Some cached files could not be measured, so nothing is removed for now.";
     case "setting-unreadable": return "The saved limit could not be read. Choose a limit again to resume cleanup.";
@@ -203,8 +203,10 @@ export function leaveReportText(
   report: { freed_bytes: number; kept_bytes: number; failed: number; cleaned: boolean } | null,
 ): string {
   if (!report) return `Left ${name}.`;
+  // Nothing was deleted and nothing is left to resume (the group is in use again, another entry
+  // shares it, or it had nothing on disk), so no "for now": these files are not removed later.
   if (!report.cleaned && report.failed === 0) {
-    return `Left ${name}. Its cached files stay on this device for now.`;
+    return `Left ${name}. Its files on this device stay, including any Keep copies and unfinished downloads.`;
   }
   const parts = [`Left ${name}.`];
   if (report.freed_bytes > 0) parts.push(`Freed ${cacheBytes(report.freed_bytes)} on this device.`);

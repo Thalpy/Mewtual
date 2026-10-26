@@ -1780,24 +1780,30 @@ fn cache_index(&self) -> Option<CacheIndex>;     // sizes + mount set + complete
 fn cache_usage(&self) -> Option<CacheUsage>;     // running total, cheap every actor turn
 fn protected_cids(&self) -> Option<BTreeSet<Cid>>; // Studio pins + live holds; None = unknown
 fn retained_chunks(&self) -> BTreeSet<Cid>;      // chunks of checked, completed Keep copies
-SealingBlobStore::open_cache(dir, key, rng)      // primary only: incoming/ + sync + rename writes
+SealingBlobStore::open_cache(dir, key, rng)      // primary only: incoming/ + sync + rename writes;
+                                                 // holds <dir>/attach.lock shared; VaultBusy while
+                                                 // a cleanup holds it exclusively
+SealingBlobStore::open_cache_under(dir, key, rng, &AttachExclusive) // cleanup's own handle
 ```
 
 `catcoms_storage::cache` holds the temp naming (`<cid>.<pid>.<mount generation>.<seq>`, live
-generations registered process-wide), the scan, and the leave-cleanup steps
-(`write_leaving_marker`, `has_leaving_marker`, `finish_leaving`, `leaving_namespaces`,
-`remove_scratch`, `remove_kept_tree`), each returning freed bytes and failures without following
-links. `catcoms_app::cache_plan::plan` is the pure eviction planner and
+generations registered process-wide), the scan, the attach lock (`attach_exclusive` →
+`AttachAttempt::{Held, Busy, Failed}`, `remove_attach_lock`; every primary handle holds it shared,
+so an exclusive hold proves the namespace unattached, which the Keep lease cannot: a second attach
+of a group gets no lease), and the leave-cleanup steps (`write_leaving_marker`,
+`has_leaving_marker`, `finish_leaving`, `leaving_namespaces`, `remove_scratch`, `lock_kept`,
+`remove_kept_tree`), each returning freed bytes and failures without following links. `catcoms_app::cache_plan::plan` is the pure eviction planner and
 `catcoms_app::cache_housekeeping` the actor-side runtime (`CacheLimit`, `CacheStatus`,
 `CachePause`, `CacheSetting`). `ServerStore` gains `save_cache_setting` / `load_cache_setting`
 (sealed `servers/<id>.storage`, version 1: group, limit or none, origin; a record for another group
-reads as missing), `cache_namespace_dir`, `blobs_root`, `cache_only_blob_store` and
-`begin_leave_cleanup` (`LeaveCleanup::delete_batch` / `finish` → `LeaveReport`). Actor commands:
+reads as missing), `cache_namespace_dir`, `blobs_root`, `cache_only_blob_store(key, &held)` and
+`begin_leave_cleanup` (`LeaveBegin::{Ready, NoMarker, Busy, Unavailable}`; `Busy` deletes nothing
+and keeps the marker; `LeaveCleanup::delete_batch` / `finish` → `LeaveReport`). Actor commands:
 `SetCacheLimit`, `CacheStatus`, `CacheProtectionChanged`; events `CacheStatusChanged`,
 `CacheNeedsStudioScan`. Desktop commands: `get_cache_status(server)` (account-read) and
 `set_cache_limit(server, bytes|null)` (account-write, 1 GiB to 1 TiB or null, sealed before the
 actor applies it); event `cache-status { server, status }`; `leave_server` now returns
-`{ freed_bytes, kept_bytes, failed }`. `StorageHealth` gains `not_cached_chunks`; `missing_chunks`
+`{ freed_bytes, kept_bytes, failed, cleaned }`. `StorageHealth` gains `not_cached_chunks`; `missing_chunks`
 counts only this device's own uploads, and Repair fetches only those and unreadable chunks.
 
 ---

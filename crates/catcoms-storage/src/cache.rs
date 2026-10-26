@@ -379,16 +379,6 @@ pub fn finish_leaving(namespace: &Path) -> Result<bool, StorageError> {
     Ok(fs::remove_dir(namespace).is_ok())
 }
 
-/// Remove only the marker: the namespace turned out to be attached again (in use), so it must not
-/// be cleaned, and a later attach must not mistake it for an interrupted leave.
-pub fn clear_leaving_marker(namespace: &Path) -> Result<(), StorageError> {
-    match fs::remove_file(namespace.join(LEAVING_MARKER)) {
-        Ok(()) => Ok(()),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(e) => Err(StorageError::Io(e.to_string())),
-    }
-}
-
 /// Namespaces under `blobs_root` that carry a leave marker, as `(directory name, path)`.
 /// Bounded; names are returned only if they are a plausible namespace (lowercase hex).
 pub fn leaving_namespaces(blobs_root: &Path) -> Vec<(String, PathBuf)> {
@@ -427,10 +417,115 @@ pub fn remove_scratch(namespace: &Path) -> Removal {
     removal
 }
 
-/// The namespace's Keep lease (`kept/lease.lock`), held by whoever owns the namespace's Keep store.
-/// Every attached server holds it for its whole lifetime, so taking it proves that no server in
-/// this process (and no other process) has the namespace attached. Leave cleanup takes it before
-/// deleting anything and holds it to the end.
+/// The namespace's attach lock file. Every primary cache handle ([`SealingBlobStore::open_cache`],
+/// so every attached server and every Studio per-request handle) holds it **shared** for its
+/// lifetime; leave cleanup and the rejoin-over-marker step take it **exclusively** before
+/// deleting anything and hold it to the end. Unlike the Keep lease, which only the first attach
+/// of a group can own (a second attach of the same group, such as a join while the group's server
+/// still runs, gets a faulted Keep store and no lease), this is held by every attachment, so an
+/// exclusive hold really proves no handle in this process has the namespace open.
+///
+/// Every attempt is a try-lock, so no caller ever waits on a lock file that cleanup is about to
+/// unlink. In-process, the desktop's cleanup claim keeps attaches out while a cleanup holds the
+/// lock; an attach that still meets it fails with [`StorageError::VaultBusy`] rather than opening
+/// a namespace that is being emptied.
+///
+/// Residual: Linux emulates `flock` on NFS with per-process POSIX locks, under which a second
+/// lock in the same process succeeds, so this proof (like the vault and Keep locks) assumes a
+/// local filesystem.
+///
+/// [`SealingBlobStore::open_cache`]: crate::SealingBlobStore::open_cache
+pub const ATTACH_LOCK: &str = "attach.lock";
+
+/// A primary handle's shared hold on [`ATTACH_LOCK`]; dropping it releases the hold.
+#[derive(Debug)]
+pub(crate) struct AttachShared {
+    _held: fs::File,
+}
+
+/// Take a shared hold on the namespace's attach lock. Fails with [`StorageError::VaultBusy`] while
+/// a cleanup holds it exclusively (a namespace being emptied must not be attached), and with
+/// [`StorageError::Io`] when the lock cannot be taken at all: a handle that could not prove it is
+/// attached must not exist, or a cleanup could empty the namespace under it.
+pub(crate) fn attach_shared(namespace: &Path) -> Result<AttachShared, StorageError> {
+    let file = attach_file(namespace)?;
+    match file.try_lock_shared() {
+        Ok(()) => Ok(AttachShared { _held: file }),
+        Err(fs::TryLockError::WouldBlock) => Err(StorageError::VaultBusy),
+        Err(fs::TryLockError::Error(e)) => Err(StorageError::Io(e.to_string())),
+    }
+}
+
+/// An exclusive hold on a namespace's [`ATTACH_LOCK`]: no primary handle is open while it lives.
+/// It remembers its namespace, so it can only vouch for that one
+/// (see [`SealingBlobStore::open_cache_under`](crate::SealingBlobStore::open_cache_under)).
+#[derive(Debug)]
+pub struct AttachExclusive {
+    namespace: PathBuf,
+    _held: fs::File,
+}
+
+impl AttachExclusive {
+    /// The namespace directory this hold covers.
+    pub fn namespace(&self) -> &Path {
+        &self.namespace
+    }
+}
+
+/// Outcome of trying to take the attach lock exclusively.
+#[derive(Debug)]
+pub enum AttachAttempt {
+    Held(AttachExclusive),
+    /// A primary handle is open: the namespace is attached, or a handle is still being dropped.
+    /// The two cannot be told apart here, so a caller keeps its data (and any marker) and retries.
+    Busy,
+    /// The lock file could not be opened or locked. Nothing may be deleted.
+    Failed,
+}
+
+/// Try to take the attach lock exclusively (see [`ATTACH_LOCK`]). Creates the lock file (but
+/// never the namespace directory) if it is absent.
+pub fn attach_exclusive(namespace: &Path) -> AttachAttempt {
+    let Ok(file) = attach_file(namespace) else {
+        return AttachAttempt::Failed;
+    };
+    match file.try_lock() {
+        Ok(()) => AttachAttempt::Held(AttachExclusive {
+            namespace: namespace.to_path_buf(),
+            _held: file,
+        }),
+        Err(fs::TryLockError::WouldBlock) => AttachAttempt::Busy,
+        Err(fs::TryLockError::Error(_)) => AttachAttempt::Failed,
+    }
+}
+
+fn attach_file(namespace: &Path) -> Result<fs::File, StorageError> {
+    fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .read(true)
+        .write(true)
+        .open(namespace.join(ATTACH_LOCK))
+        .map_err(|e| StorageError::Io(e.to_string()))
+}
+
+/// Release the exclusive hold and unlink the lock file, so an emptied namespace directory can be
+/// removed. Missing is fine. Call only as the last step before removing the namespace: from here
+/// on nothing proves the namespace unattached, which is safe only because the caller's cleanup
+/// claim still keeps every in-process attach out.
+pub fn remove_attach_lock(held: AttachExclusive) -> Result<(), StorageError> {
+    let path = held.namespace.join(ATTACH_LOCK);
+    drop(held);
+    match fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(StorageError::Io(e.to_string())),
+    }
+}
+
+/// The namespace's Keep lease (`kept/lease.lock`), held by whoever owns the namespace's Keep store
+/// (only the first attach of a group; see [`ATTACH_LOCK`] for the lock every attach holds). Leave
+/// cleanup takes it, after the attach lock, so the wholesale `kept/` removal owns the directory.
 #[derive(Debug)]
 pub struct KeptLease {
     /// Held only for its lock; dropping it releases the lease.
@@ -440,9 +535,12 @@ pub struct KeptLease {
 /// Outcome of trying to take the Keep lease.
 #[derive(Debug)]
 pub enum LeaseAttempt {
-    /// Taken (or there is no `kept/` at all, so no Keep store can be attached here).
+    /// Taken, or there is no `kept/` directory (absent, a file or a link), so no Keep store can
+    /// hold it. This says nothing about whether the namespace is attached: callers take the
+    /// [`ATTACH_LOCK`] exclusively first.
     Held(Option<KeptLease>),
-    /// Another handle holds it: the namespace is attached, so it must not be emptied.
+    /// Another handle holds it (a Keep store that has not been dropped yet). Nothing may be
+    /// removed from `kept/`.
     Busy,
     /// `kept/` is not a plain directory or the lease could not be opened.
     Failed,
@@ -519,7 +617,9 @@ pub fn remove_kept_tree_held(namespace: &Path, lease: Option<KeptLease>) -> Remo
         }
         Err(_) => removal.failed += 1,
     }
-    // Windows cannot delete a file another handle has open, so release the lease first.
+    // Close the lease handle before unlinking its file. std opens files with delete sharing, so
+    // the unlink itself would work while it is open, but under Windows' classic delete semantics
+    // the open file would only be marked for deletion and keep `kept/` non-empty for `remove_dir`.
     drop(lease);
     if removal.failed == 0
         && (fs::remove_file(&lease_path).is_err() || fs::remove_dir(&kept).is_err())

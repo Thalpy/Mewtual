@@ -33,14 +33,20 @@ crash-safe writes and leave cleanup ([design](design-cache-housekeeping.md)).
 - **Saved files serve.** A verified Download chunk is also put in the shared cache, so a member
   asking for it can learn this device holds the file, as for any file it has displayed.
 - **Leave cleanup** runs under an in-process claim per group (attach waits on it). It starts only
-  if the marker is still present and the namespace's Keep lease is free (every attached server
-  holds it), and holds that lease to the end, so a rejoin or an unregistered join that attached
-  first is never emptied. It deletes only CIDs enumerated after a complete Studio scan, removes
-  `kept/` wholesale, keeps its marker while anything failed, and resumes after an unlock in which
-  every server restored. Leaving is confirmed in the UI with the Keep copies and unfinished
-  Downloads it deletes, or a warning when those could not be checked.
+  if the marker is still present and it can take the namespace's `attach.lock` exclusively. Every
+  primary cache handle holds that lock shared for its lifetime, including a second attach of the
+  same group that could not get the Keep lease, so a rejoin or an unregistered join that attached
+  first is never emptied. The exclusive hold and the Keep lease are kept to the end. A busy lock
+  deletes nothing and keeps the marker (the holder may be the leaver's own handle still dropping),
+  and a rejoin over a marker skips its scratch and `kept/` removal while another handle is open.
+  It deletes only CIDs enumerated after a complete Studio scan, removes `kept/` wholesale, keeps
+  its marker while anything failed, and resumes after an unlock in which every server restored.
+  Leaving is confirmed in the UI with the Keep copies and unfinished Downloads it deletes, or a
+  warning when those could not be checked.
 - **Not claimed:** physical power-loss evidence, filesystem allocation (usage counts sealed file
-  lengths), cleanup of caches left before this change, or expiry enforcement.
+  lengths), cleanup of caches left before this change, expiry enforcement, or the attach lock on
+  NFS (Linux emulates `flock` there with per-process locks, so a second lock in the same process
+  succeeds; the vault and Keep locks share that assumption).
 
 ## Switchable V2 voice transport and pinned call mode (22 October, branch only)
 

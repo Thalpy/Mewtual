@@ -770,6 +770,11 @@ struct CacheMode {
     generation: crate::cache::MountGeneration,
     sequence: u64,
     index: Option<crate::cache::CacheIndex>,
+    /// The handle's shared hold on the namespace's attach lock, for its whole lifetime, so a leave
+    /// cleanup can prove the namespace unattached (see [`crate::cache::ATTACH_LOCK`]). `None` only
+    /// for the cleanup's own handle, opened under the exclusive hold by
+    /// [`SealingBlobStore::open_cache_under`].
+    _attach: Option<crate::cache::AttachShared>,
 }
 
 impl<R: CryptoRngCore> SealingBlobStore<R> {
@@ -809,12 +814,42 @@ impl<R: CryptoRngCore> SealingBlobStore<R> {
     /// Open the **primary cache** of a server: like [`open`](Self::open), plus crash-safe writes
     /// (temporary name in `incoming/`, sync, rename) and a size index filled by
     /// [`BlobStore::cache_scan`]. Only the primary may use this; see the `cache` field.
+    ///
+    /// The handle holds the namespace's attach lock shared for its lifetime. Fails with
+    /// [`StorageError::VaultBusy`] while a leave cleanup holds that lock exclusively.
     pub fn open_cache(dir: impl AsRef<Path>, key: [u8; 32], rng: R) -> Result<Self, StorageError> {
+        let mut store = Self::open(dir, key, rng)?;
+        let attach = crate::cache::attach_shared(&store.dir)?;
+        store.cache = Some(CacheMode {
+            generation: crate::cache::MountGeneration::register(),
+            sequence: 0,
+            index: None,
+            _attach: Some(attach),
+        });
+        Ok(store)
+    }
+
+    /// The leave cleanup's own primary handle on `dir`, opened while `held` (the exclusive attach
+    /// hold on that same namespace) proves nothing else has it open. It takes no shared hold of
+    /// its own, which would conflict with `held`. The caller keeps `held` alive for as long as it
+    /// uses this handle. Refuses a hold taken on another directory.
+    pub fn open_cache_under(
+        dir: impl AsRef<Path>,
+        key: [u8; 32],
+        rng: R,
+        held: &crate::cache::AttachExclusive,
+    ) -> Result<Self, StorageError> {
+        if held.namespace() != dir.as_ref() {
+            return Err(StorageError::Io(
+                "the attach hold covers another namespace".into(),
+            ));
+        }
         let mut store = Self::open(dir, key, rng)?;
         store.cache = Some(CacheMode {
             generation: crate::cache::MountGeneration::register(),
             sequence: 0,
             index: None,
+            _attach: None,
         });
         Ok(store)
     }

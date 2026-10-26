@@ -132,15 +132,26 @@ test("the leave toast claims only bytes actually removed", () => {
     leaveReportText("Lantern Room", { freed_bytes: 1.2 * GIB, kept_bytes: 0, failed: 0, cleaned: true }),
     "Left Lantern Room. Freed 1.2 GiB on this device.",
   );
+  const skipped = leaveReportText("Lantern Room", { freed_bytes: 0, kept_bytes: 0, failed: 0, cleaned: false });
   assert.equal(
-    leaveReportText("Lantern Room", { freed_bytes: 0, kept_bytes: 0, failed: 0, cleaned: false }),
-    "Left Lantern Room. Its cached files stay on this device for now.",
+    skipped,
+    "Left Lantern Room. Its files on this device stay, including any Keep copies and unfinished downloads.",
     "a skipped cleanup never reads as a clean one",
   );
+  assert.doesNotMatch(skipped, /for now|later|again/, "nothing will remove them later, so no promise of it");
   const partial = leaveReportText("Lantern Room", { freed_bytes: 0, kept_bytes: 2048, failed: 3, cleaned: true });
   assert.match(partial, /Kept 2 KiB that Studio still uses\./);
   assert.match(partial, /tries again after the next unlock/);
   assert.doesNotMatch(partial, /Freed/);
+  // A namespace still open after the wait: nothing deleted, the marker kept for a retry.
+  assert.equal(
+    leaveReportText("Lantern Room", { freed_bytes: 0, kept_bytes: 0, failed: 1, cleaned: false }),
+    "Left Lantern Room. Some files could not be removed yet; Mewtual tries again after the next unlock.",
+  );
+});
+
+test("a server without a disk cache is not promised one", () => {
+  assert.doesNotMatch(cachePauseText("no-cache"), /yet|soon|later/);
 });
 
 test("no separators or em dashes in any of this text", () => {

@@ -102,7 +102,8 @@ test("unreadable lists still ask, and say they could not check", async () => {
   });
   await load(faulted).requestLeave(1);
   assert.equal((faulted.leaveConfirm?.loss as { unknown: boolean }).unknown, true);
-  assert.match(source, /leaving\.loss\.unknown[\s\S]{0,200}could not be checked\. Leaving deletes any/);
+  // Named as the headings name them, and "may": another entry for the same group keeps them.
+  assert.match(source, /leaving\.loss\.unknown[\s\S]{0,200}Keep copies or unfinished downloads could not be checked\. Leaving may delete any/);
 });
 
 test("the leave report is validated before the toast claims anything", () => {

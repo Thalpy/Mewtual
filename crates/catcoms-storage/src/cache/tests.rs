@@ -305,6 +305,57 @@ fn scratch_and_kept_trees_are_removed_with_freed_bytes_counted() {
     );
 }
 
+/// Review H1: "attached" must not depend on who owns the Keep lease. Every primary handle holds
+/// the attach lock shared, so any one of them (here a second handle, as a join of a group whose
+/// server still runs would open) refuses the cleanup's exclusive hold, and that hold in turn keeps
+/// new handles out.
+#[test]
+fn every_primary_handle_holds_the_attach_lock_against_cleanup() {
+    let root = tempfile::tempdir().unwrap();
+    let namespace = root.path().join("ab12");
+    let first = primary(&namespace);
+    let mut second = primary(&namespace);
+    let cid = second.put(b"the joiner's chunk").unwrap();
+    assert!(matches!(attach_exclusive(&namespace), AttachAttempt::Busy));
+    drop(first);
+    assert!(
+        matches!(attach_exclusive(&namespace), AttachAttempt::Busy),
+        "the second handle alone still proves the namespace attached"
+    );
+    drop(second);
+    let AttachAttempt::Held(held) = attach_exclusive(&namespace) else {
+        panic!("no handle is open any more");
+    };
+    assert!(matches!(
+        SealingBlobStore::open_cache(&namespace, [7; 32], ChaCha20Rng::seed_from_u64(2)),
+        Err(StorageError::VaultBusy)
+    ));
+    // The cleanup's own handle opens under the hold, and only for the namespace it covers.
+    let other = root.path().join("cd34");
+    assert!(SealingBlobStore::open_cache_under(
+        &other,
+        [7; 32],
+        ChaCha20Rng::seed_from_u64(3),
+        &held
+    )
+    .is_err());
+    let mut cleanup = SealingBlobStore::open_cache_under(
+        &namespace,
+        [7; 32],
+        ChaCha20Rng::seed_from_u64(3),
+        &held,
+    )
+    .unwrap();
+    assert!(cleanup.delete(&cid).unwrap());
+    drop(cleanup);
+    remove_attach_lock(held).unwrap();
+    assert!(!namespace.join(ATTACH_LOCK).exists());
+    assert!(
+        primary(&namespace).cache_scan(true).is_ok(),
+        "attachable again"
+    );
+}
+
 #[cfg(unix)]
 #[test]
 fn tree_removal_never_follows_a_link_out_of_the_namespace() {

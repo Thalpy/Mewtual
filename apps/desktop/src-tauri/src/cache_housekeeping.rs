@@ -185,14 +185,32 @@ pub(super) fn prepare_blob_store(
     // A rejoin over a marker: the group is live again, so the cache (its own content-addressed
     // data) stays, but the Keep copies and Downloads the user confirmed deleting must go before
     // Keep opens, or a half-deleted `kept/` would fault it. The marker goes only if that worked.
+    // All of it happens under the exclusive attach hold: if another handle still has the
+    // namespace open (a server of the same group whose leave could not finish, or one still
+    // being dropped), its live `incoming/` and `staging/` must not be removed under it, so the
+    // step is skipped and retried at the next attach.
     let mut keep_unsafe = false;
     if let Ok(dir) = store.cache_namespace_dir(&key) {
         if storage_cache::has_leaving_marker(&dir) {
-            let mut removal = storage_cache::remove_scratch(&dir);
-            removal.add(storage_cache::remove_kept_tree(&dir));
-            if removal.failed == 0 {
-                let _ = storage_cache::finish_leaving(&dir);
-            } else {
+            let removal = match storage_cache::attach_exclusive(&dir) {
+                storage_cache::AttachAttempt::Held(held) => {
+                    let mut removal = storage_cache::remove_scratch(&dir);
+                    removal.add(storage_cache::remove_kept_tree(&dir));
+                    if removal.failed == 0 {
+                        // The held lock file keeps the namespace directory: only the marker goes.
+                        let _ = storage_cache::finish_leaving(&dir);
+                    }
+                    drop(held);
+                    removal
+                }
+                storage_cache::AttachAttempt::Busy | storage_cache::AttachAttempt::Failed => {
+                    storage_cache::Removal {
+                        freed_bytes: 0,
+                        failed: 1,
+                    }
+                }
+            };
+            if removal.failed > 0 {
                 // A half-deleted `kept/` must not be loaded as if it were whole, and copies the
                 // user confirmed deleting must not come back: Keep stays off for this mount (the
                 // marker stays, so the next attach tries again). Eviction then pauses too.
@@ -375,7 +393,8 @@ async fn studio_scan_once(app: AppHandle) {
     }
 }
 
-/// How long a leave waits for the stopped actor's blob handle to release the Keep lease.
+/// How long a leave waits for the stopped actor's blob handle to release the namespace's attach
+/// lock (and Keep lease).
 const LEASE_RELEASE_ATTEMPTS: u32 = 15;
 const LEASE_RELEASE_WAIT: Duration = Duration::from_millis(200);
 
@@ -384,11 +403,15 @@ const LEASE_RELEASE_WAIT: Duration = Duration::from_millis(200);
 /// start to finish and the store lock only for the reference scan and enumeration. `generation`
 /// is the unlocked session that asked; between batches the cleanup stops if it changed (tests
 /// with no session pass `None`). `await_release` gives a just-stopped actor's blob handle a few
-/// seconds to drop its Keep lease (leave); the sweep has no such actor and does not wait.
+/// seconds to drop (leave); the sweep has no such actor and does not wait.
 ///
-/// A namespace whose Keep lease stays held is attached by a live server (a rejoin, or a join
-/// not yet registered): its marker is cleared so no later attach mistakes it for an
-/// interrupted leave, and nothing is deleted.
+/// A namespace that stays open (`LeaveBegin::Busy`: some handle holds its attach lock) is never
+/// emptied, and its marker is **kept**: the holder may be a live server of the same group (a join
+/// that attached before the leave), or the leaving server's own handle still being dropped, and
+/// nothing here can tell them apart. Both are safe with the marker in place. A live server's next
+/// attach treats it as a rejoin (the cache stays, the confirmed-deleted Keep copies go; its Keep
+/// store is faulted for this mount, so it holds none of its own yet), and the sweep skips groups
+/// a registered server uses; otherwise the next unlock finishes the leave. Reported as a failure.
 pub(super) async fn clean_namespace(
     state: &AppState,
     claim: &CleanupClaim<'_>,
@@ -410,15 +433,7 @@ pub(super) async fn clean_namespace(
         let key = key.clone();
         let outcome = tokio::task::spawn_blocking(move || {
             let mut guard = guard;
-            let store = guard.as_mut()?;
-            let outcome = store.begin_leave_cleanup(&key).ok()?;
-            if matches!(outcome, LeaveBegin::Busy) && attempt + 1 == attempts {
-                // Still attached after the wait: the namespace is in use again.
-                if let Ok(dir) = store.cache_namespace_dir(&key) {
-                    let _ = storage_cache::clear_leaving_marker(&dir);
-                }
-            }
-            Some(outcome)
+            guard.as_mut()?.begin_leave_cleanup(&key).ok()
         })
         .await
         .ok()
@@ -435,9 +450,12 @@ pub(super) async fn clean_namespace(
     }
     let mut cleanup = match begun {
         Some(LeaveBegin::Ready(cleanup)) => cleanup,
-        // Taken back by a rejoin, or attached by a live server: its files stay, truthfully.
-        Some(LeaveBegin::NoMarker) | Some(LeaveBegin::Busy) => return LeaveReport::default(),
-        Some(LeaveBegin::Unavailable) | None => return LeaveReport::failed(),
+        // Taken back by a rejoin: its files stay, truthfully, and nothing is left to resume.
+        Some(LeaveBegin::NoMarker) => return LeaveReport::default(),
+        // Still open after the wait (see above), or unreadable: nothing deleted, marker kept.
+        Some(LeaveBegin::Busy) | Some(LeaveBegin::Unavailable) | None => {
+            return LeaveReport::failed()
+        }
     };
     let failed = LeaveReport::failed();
     // Phase 2, no store lock: bounded batches, checking between them that the unlocked session

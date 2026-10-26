@@ -9,14 +9,19 @@
 //! Claims on the namespace and session checks between batches belong to the bridge.
 //!
 //! Two checks make it safe against a server that attached the same group before the bridge's
-//! claim existed (a rejoin or a join still being registered): the `leaving` marker must still be
-//! present (a rejoining attach removes it), and the namespace's Keep lease must be free (every
-//! attached server holds it for its lifetime). The lease is then held until the end, so nothing
-//! can attach meanwhile. Every failure keeps data: an incomplete reference scan deletes no cache
-//! file, a failed delete keeps the marker, and only the bytes actually removed count as freed.
+//! claim existed (a rejoin, or a join still being registered while the group's old server runs):
+//! the `leaving` marker must still be present (a rejoining attach removes it), and the
+//! namespace's attach lock must be free exclusively. Every primary handle holds that lock shared
+//! for its lifetime, including a second attach of the group that could not get the Keep lease, so
+//! a free lock proves nothing has the namespace open. The exclusive hold, and then the Keep lease,
+//! are kept until the end, so nothing can attach meanwhile. Every failure keeps data: an
+//! incomplete reference scan deletes no cache file, a failed delete keeps the marker, and only the
+//! bytes actually removed count as freed.
 
 use super::*;
-use catcoms_storage::cache::{self as storage_cache, KeptLease, LeaseAttempt};
+use catcoms_storage::cache::{
+    self as storage_cache, AttachAttempt, AttachExclusive, KeptLease, LeaseAttempt,
+};
 use catcoms_storage::Cid;
 use std::collections::BTreeSet;
 
@@ -41,9 +46,12 @@ pub enum LeaveBegin {
     Ready(LeaveCleanup),
     /// No `leaving` marker: a rejoin already took the namespace back, or it was never marked.
     NoMarker,
-    /// Another handle holds the Keep lease: the namespace is attached right now. Nothing deleted.
+    /// A primary handle is open (the attach lock is held shared) or a Keep store has not been
+    /// dropped yet: the namespace is attached, or the leaving server's own handle is still being
+    /// dropped. The two look the same here, so nothing is deleted and the marker stays.
     Busy,
-    /// `kept/` or its lease could not be opened. Nothing deleted; the marker stays.
+    /// The attach lock, `kept/` or its lease could not be opened. Nothing deleted; the marker
+    /// stays.
     Unavailable,
 }
 
@@ -51,6 +59,9 @@ pub enum LeaveBegin {
 pub struct LeaveCleanup {
     dir: PathBuf,
     handle: Box<dyn BlobStore + Send>,
+    /// The exclusive attach hold that proves no other handle is open; released only in
+    /// [`LeaveCleanup::finish`] (or with the value, on an abandoned cleanup).
+    attach: Option<AttachExclusive>,
     lease: Option<KeptLease>,
     entries: Vec<(Cid, u64)>,
     protected: BTreeSet<Cid>,
@@ -69,9 +80,10 @@ impl std::fmt::Debug for LeaveCleanup {
 }
 
 impl ServerStore {
-    /// Phase 1, under the store's exclusive custody. Checks the marker and takes the Keep lease
-    /// (see the module docs), runs the complete Studio reference scan, opens a cache-only handle
-    /// (the protected primary without Keep, so it does not compete for the lease) and enumerates
+    /// Phase 1, under the store's exclusive custody. Checks the marker, takes the attach lock
+    /// exclusively and then the Keep lease (see the module docs; the same order every attach
+    /// uses), runs the complete Studio reference scan, opens a cache-only handle (the protected
+    /// primary without Keep or a shared attach hold, so it competes for neither) and enumerates
     /// the cache. If the scan fails or the cache cannot be fully listed, nothing in the cache will
     /// be deleted; scratch and `kept/` are still removed by [`LeaveCleanup::finish`] because
     /// nothing Studio references lives there.
@@ -80,13 +92,20 @@ impl ServerStore {
         if !storage_cache::has_leaving_marker(&dir) {
             return Ok(LeaveBegin::NoMarker);
         }
+        let attach = match storage_cache::attach_exclusive(&dir) {
+            AttachAttempt::Held(attach) => attach,
+            AttachAttempt::Busy => return Ok(LeaveBegin::Busy),
+            AttachAttempt::Failed => return Ok(LeaveBegin::Unavailable),
+        };
+        // A Keep store outlives its primary by a moment while it drops (its lease field drops
+        // last), so a held lease after a free attach lock is a handle still going away.
         let lease = match storage_cache::lock_kept(&dir) {
             LeaseAttempt::Held(lease) => lease,
             LeaseAttempt::Busy => return Ok(LeaveBegin::Busy),
             LeaseAttempt::Failed => return Ok(LeaveBegin::Unavailable),
         };
         let studio_known = self.creative_pinned_cids().is_ok();
-        let mut handle = self.cache_only_blob_store(key)?;
+        let mut handle = self.cache_only_blob_store(key, &attach)?;
         let scanned = handle.cache_scan(true).is_ok_and(|report| report.complete);
         let protected = handle.protected_cids();
         let mut report = LeaveReport {
@@ -107,6 +126,7 @@ impl ServerStore {
         Ok(LeaveBegin::Ready(LeaveCleanup {
             dir,
             handle,
+            attach: Some(attach),
             lease,
             entries,
             protected: protected.unwrap_or_default(),
@@ -153,7 +173,9 @@ impl LeaveCleanup {
     }
 
     /// Phase 3: drop the handle, remove `staging/`, `incoming/` and `kept/` (under the lease taken
-    /// in phase 1), and remove the marker (and the namespace, if empty) only when nothing failed.
+    /// in phase 1), and only when nothing failed remove the attach lock file, then the marker and
+    /// the namespace (if empty). After a failure the attach hold simply drops with `self`; its
+    /// file and the marker stay for the next unlock.
     pub fn finish(mut self) -> LeaveReport {
         if self.next < self.entries.len() {
             self.abandon();
@@ -161,7 +183,7 @@ impl LeaveCleanup {
         let dir = self.dir.clone();
         drop(self.handle);
         if self.abandoned {
-            return self.report; // the lease drops here; the marker stays for the next unlock
+            return self.report; // the holds drop here; the marker stays for the next unlock
         }
         let mut removal = storage_cache::remove_scratch(&dir);
         removal.add(storage_cache::remove_kept_tree_held(
@@ -170,7 +192,16 @@ impl LeaveCleanup {
         ));
         self.report.freed_bytes = self.report.freed_bytes.saturating_add(removal.freed_bytes);
         self.report.failed += removal.failed;
-        if self.report.failed == 0 && storage_cache::finish_leaving(&dir).is_err() {
+        if self.report.failed > 0 {
+            return self.report;
+        }
+        // The lock file has to go before the directory can. The bridge's claim still keeps every
+        // in-process attach out between releasing the hold and removing the namespace.
+        let unlocked = self
+            .attach
+            .take()
+            .map_or(Ok(()), storage_cache::remove_attach_lock);
+        if unlocked.is_err() || storage_cache::finish_leaving(&dir).is_err() {
             self.report.failed += 1;
         }
         self.report
