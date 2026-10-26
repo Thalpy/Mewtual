@@ -96,7 +96,12 @@
   import {
     completedDownload, downloadSavedNotice, guideSavedNotice, isSaveAsCancelled, saveGroupFile, resumeGroupFile, saveSpaceGuide,
   } from "./native-download";
-  import { acceptSaveProgress, checkedPrivateDownloads, checkedSavedCheck, privateDownloadActions, privateDownloadChatSave, privateDownloadDetail, privateDownloadOffers, privateDownloadSaveAsIsNewCopy, type PrivateDownload, type PrivateDownloadActionKind, type SavedCheck } from "./private-downloads";
+  import { acceptSaveProgress, checkedPrivateDownloads, checkedSavedCheck, privateDownloadChatLabel, privateDownloadChatSave, privateDownloadOffers, privateDownloadSaveAsIsNewCopy, type PrivateDownload, type PrivateDownloadActionKind, type SavedCheck } from "./private-downloads";
+  import { SAVED_ROW_GROUPS, TRANSFER_ICONS, confirmWords, groupSavedRows, savedRowTransitions, savedRowView, type SavedRowAction, type SavedRowGroup, type SavedRowLive, type TransferIcon } from "./transfer-rows";
+  import {
+    CACHE_LIMIT_CHOICES, cacheBytes, cacheFooter, cachePauseText, cacheShown, checkedCacheStatus, leaveLoss,
+    leaveReportText, limitLabel, lowerLimitWarning, pinnedSummary, type CacheStatus, type LeaveLoss,
+  } from "./cache-status";
   import {
     newVaultSecretError, vaultSecretChangeNotice, type VaultSecretChangeResult,
   } from "./vault-secret-change";
@@ -593,6 +598,7 @@
     { id: "joinlog", label: "Join Log", cat: "People" },
     { id: "emoji", label: "Emoji & Stickers", cat: "Content" },
     { id: "filetrust", label: "File Trust", cat: "Content" },
+    { id: "storage", label: "Storage", cat: "Content" },
     { id: "studio", label: "Studio", cat: "Content" },
     { id: "calls", label: "Calls & Relay", cat: "Voice" },
     { id: "leave", label: "Leave Server", cat: "Danger", danger: true },
@@ -3824,6 +3830,17 @@
   let hasPeers = $state(false);
   let keptFiles = $state<KeptFiles | null>(null);
   let privateDownloads = $state<PrivateDownload[]>([]);
+  // Cache housekeeping for the selected server, as the native planner reports it (footer segment
+  // and Storage settings page). Never recomputed here: the counts are what the planner would do.
+  let cacheStatus = $state<CacheStatus | null>(null);
+  let cacheStatusSeq = 0;
+  // The Storage page's limit picker: the chosen option's bytes as a string ("null" = No limit),
+  // plus whether the user has seen the "removes files now" warning for that choice.
+  let cacheLimitDraft = $state("");
+  let cacheLimitConfirming = $state(false);
+  let cacheLimitBusy = $state(false);
+  // Leave confirmation: what leaving will permanently delete from this device, loaded on request.
+  let leaveConfirm = $state<{ id: number; name: string; loss: LeaveLoss | null } | null>(null);
   // Second review R2-M1: the Pause/Remove/Keep (and pre-acquisition Resume) owner of each row, by
   // download ID. Native removal can wait indefinitely on an external folder, so one row's pending
   // mutation must never disable or refuse actions on another row; native also claims per download.
@@ -4365,7 +4382,9 @@
   }
   type StorageHealth = {
     listed_files: number; referenced_chunks: number; verified_chunks: number;
-    missing_chunks: number; unreadable_chunks: number; invalid_manifests: number;
+    // `missing` = absent chunks of this device's own uploads (damage); `not_cached` = absent
+    // chunks of other members' files, which is normal for a size-limited cache.
+    missing_chunks: number; not_cached_chunks: number; unreadable_chunks: number; invalid_manifests: number;
     verified_bytes: number; has_peers: boolean;
     checked_at_ms: number; unique_files: number; logical_bytes: number;
     local_estimated_bytes: number; pinned_files: number; pinned_logical_bytes: number;
@@ -7113,6 +7132,8 @@
     privateDownloadSaves = {};
     savedChecks = {};
     savedChecking = {};
+    confirmRemove = {};
+    revealingSaved = {};
     fileInventoryGate.invalidate();
     cancelKeptTransfer();
     wikiPinned = new Set();
@@ -7385,8 +7406,11 @@
     if (inCall && callServer === id) leaveVoice();
     const operation = { session, closed: false };
     leavingServers.set(id, operation);
+    // Captured now: once the leave lands the server is gone from the rail and its name with it.
+    const leftName = servers.find((s) => s.id === id)?.name ?? "the server";
+    let leaveReport: unknown = null;
     try {
-      await invoke("leave_server", { server: id });
+      leaveReport = await invoke("leave_server", { server: id });
     } catch (e) {
       const owns = leavingServers.get(id) === operation;
       if (owns) leavingServers.delete(id);
@@ -7406,6 +7430,103 @@
     fileTrustPolicies = remainingTrust;
     serverGone(id, true); // first, so the continuity saved next no longer carries its Studio work
     void saveUiStateImmediately();
+    toast(leaveReportText(leftName, checkedLeaveReport(leaveReport)), "ok", 6000);
+  }
+
+  /** Native's leave report, or `null` when it is missing or malformed (the toast then claims nothing). */
+  function checkedLeaveReport(raw: unknown): { freed_bytes: number; kept_bytes: number; failed: number; cleaned: boolean } | null {
+    if (!raw || typeof raw !== "object") return null;
+    const r = raw as Record<string, unknown>;
+    const n = (v: unknown) => typeof v === "number" && Number.isSafeInteger(v) && v >= 0;
+    return n(r.freed_bytes) && n(r.kept_bytes) && n(r.failed) && typeof r.cleaned === "boolean"
+      ? { freed_bytes: r.freed_bytes as number, kept_bytes: r.kept_bytes as number, failed: r.failed as number, cleaned: r.cleaned }
+      : null;
+  }
+
+  /** Every Leave entry point comes here first: load what leaving would permanently delete from
+   * this device (Keep copies and unfinished Downloads, by name) and ask before leaving. */
+  async function requestLeave(id: number) {
+    const name = servers.find((s) => s.id === id)?.name ?? "this server";
+    leaveConfirm = { id, name, loss: null };
+    const [kept, downloads, listed] = await Promise.allSettled([
+      invoke<KeptFiles>("get_kept_files", { server: id }),
+      invoke<unknown>("get_private_downloads", { server: id }).then(checkedPrivateDownloads),
+      invoke<UiFile[]>("get_files", { server: id }),
+    ]);
+    if (leaveConfirm?.id !== id) return; // dismissed or replaced meanwhile
+    leaveConfirm = {
+      id,
+      name,
+      // An inventory that could not be read is passed as null, so the dialog says it could not
+      // check instead of claiming there is nothing to lose.
+      loss: leaveLoss(
+        kept.status === "fulfilled" ? kept.value : null,
+        downloads.status === "fulfilled" ? downloads.value : null,
+        listed.status === "fulfilled" ? listed.value : [],
+      ),
+    };
+  }
+
+  function confirmLeave() {
+    const target = leaveConfirm;
+    if (!target) return;
+    leaveConfirm = null;
+    showServerSettings = false;
+    void leaveServer(target.id);
+  }
+
+  /** This server's cache status (cheap natively). A stale reply for another server is dropped. */
+  async function refreshCacheStatus(server: number | null = activeServerId) {
+    const seq = ++cacheStatusSeq;
+    if (server === null || locked) {
+      cacheStatus = null;
+      return;
+    }
+    try {
+      const status = checkedCacheStatus(await invoke<unknown>("get_cache_status", { server }));
+      if (seq === cacheStatusSeq && server === activeServerId) cacheStatus = status;
+    } catch {
+      if (seq === cacheStatusSeq) cacheStatus = null;
+    }
+  }
+
+  // The footer follows the selected server; native pushes changes as `cache-status` events.
+  $effect(() => {
+    const server = activeServerId;
+    untrack(() => void refreshCacheStatus(server));
+  });
+  // Opening the Storage page re-reads the status and seeds the picker with the current limit.
+  $effect(() => {
+    if (!showServerSettings || serverSettingsPage !== "storage") return;
+    untrack(() => {
+      cacheLimitConfirming = false;
+      void refreshCacheStatus().then(() => {
+        cacheLimitDraft = !cacheStatus ? "" : cacheStatus.unlimited ? "null" : String(cacheStatus.limit_bytes ?? "");
+      });
+    });
+  });
+
+  /** Apply the Storage page's limit. Lowering below what is cached asks once before applying. */
+  async function applyCacheLimit() {
+    const server = activeServerId;
+    if (server === null || !cacheStatus || cacheLimitBusy) return;
+    const bytes = cacheLimitDraft === "null" ? null : Number(cacheLimitDraft);
+    if (bytes !== null && !Number.isSafeInteger(bytes)) return;
+    if (lowerLimitWarning(cacheStatus, bytes) && !cacheLimitConfirming) {
+      cacheLimitConfirming = true;
+      return;
+    }
+    cacheLimitBusy = true;
+    try {
+      const status = checkedCacheStatus(await invoke<unknown>("set_cache_limit", { server, bytes }));
+      if (server === activeServerId) cacheStatus = status;
+      toast(`Cache limit on this device: ${limitLabel(bytes)}`, "ok", 3500);
+    } catch (e) {
+      toast(`Couldn't change the cache limit: ${e}`, "err", 6000);
+    } finally {
+      cacheLimitBusy = false;
+      cacheLimitConfirming = false;
+    }
   }
 
   /// `server-closed`: the server's actor stopped. During this server's own leave the leave decides
@@ -9665,11 +9786,16 @@
     });
   }
 
+  /** The plain save item's label for `f`: "Save to chosen place" while its row remembers a Save as
+   * choice that this item would use, else "Download" (`privateDownloadChatLabel`). */
+  function downloadLabel(f: UiFile): string {
+    return privateDownloadChatLabel(privateDownloads.find((row) => row.cid === f.cid));
+  }
   function fileMenu(f: UiFile): MenuItem[] {
     const items: MenuItem[] = [
       { head: true, kind: "file", title: f.name },
       { label: "Open details", icon: "info", onSelect: () => openFileInfo(f) },
-      { label: "Download", icon: "down", onSelect: () => downloadFile(f) },
+      { label: downloadLabel(f), icon: "down", onSelect: () => downloadFile(f) },
       { label: "Save as", icon: "down", onSelect: () => downloadFile(f, true) },
       { label: "Post to chat", icon: "reply", onSelect: () => appendToDraft(`![${f.name}](cid:${f.cid})`) },
       { divider: true },
@@ -9725,7 +9851,9 @@
       label: "Leave server",
       icon: "leave",
       danger: true,
-      onSelect: () => confirmInMenu(`Leave ${s.name}`, () => leaveServer(s.id)),
+      // A full confirmation, not the in-menu one: it has to name the Keep copies and unfinished
+      // Downloads that leaving permanently deletes from this device.
+      onSelect: () => void requestLeave(s.id),
     });
     return items;
   }
@@ -10066,7 +10194,7 @@
       }
       items.push({ label: "Properties", icon: "info", onSelect: () => openFileRef(cid) });
       if (embedded) {
-        items.push({ label: "Download", icon: "down", onSelect: () => downloadFile(embedded) });
+        items.push({ label: downloadLabel(embedded), icon: "down", onSelect: () => downloadFile(embedded) });
         items.push({ label: "Save as", icon: "down", onSelect: () => downloadFile(embedded, true) });
       }
       items.push({ label: "Copy address (CID)", icon: "fp", onSelect: () => copyText(cid) });
@@ -12147,7 +12275,7 @@
       const name = filesByCid.get(row.cid)?.name ?? `download-${row.cid.slice(0, 12)}`;
       const file = filesByCid.get(row.cid), started = Date.now();
       activeSaves[key] = operation;
-      downloads[key] = { server, cid: row.cid, name, operation, author: file?.author ?? "",
+      downloads[key] = { server, cid: row.cid, name, operation, author: file?.author ?? "", fresh: newCopy,
         status: "queued", progress: row.verifiedChunks / row.totalChunks, done: row.verifiedChunks,
         total: row.totalChunks, heldBefore: row.verifiedChunks, bytesDone: 0, bytesTotal: file?.size ?? 0,
         networkBytesDone: 0, speed: 0, lastRateAt: started, updatedAt: started, ts: started };
@@ -12264,6 +12392,198 @@
     return changePrivateDownload(row, true, kind === "keep");
   }
 
+  // Transfers UX (PR #51): one row per file. A save of a private download shows its live progress
+  // in that download's row (the renderer's own record of the active invocation, the same one the
+  // live list used to show), and the live list leaves that file out (`liveTransferList`). A save
+  // that finishes releases its record natively, so its row goes and the live list shows it done,
+  // as before; `savedRowView` takes any row, so keeping finished saves listed later only needs rows.
+  function liveSaveFor(row: PrivateDownload): SavedRowLive | null {
+    if (activeServerId === null) return null;
+    const key = dlKey(activeServerId, row.cid);
+    const live = downloads[key];
+    // Only once this save has written something: before that the row keeps native's state.
+    return live && activeSaves[key] === live.operation && live.savedDone !== undefined
+      ? { done: live.savedDone, total: live.total, bytesDone: live.savedBytes ?? 0, bytesTotal: live.bytesTotal,
+          fresh: live.fresh === true }
+      : null;
+  }
+  function savedRowName(row: PrivateDownload): string {
+    return filesByCid.get(row.cid)?.name ?? `File ${row.cid.slice(0, 12)}`;
+  }
+  let savedRowViews = $derived(privateDownloads.map((row) => savedRowView(row, savedCheckFor(row),
+    savedRowName(row), liveSaveFor(row),
+    { busy: !!privateDownloadBusy[row.id], saving: !!privateDownloadSaves[row.id] || saveInProgress(row.cid) })));
+  let savedRowGroups = $derived(groupSavedRows(savedRowViews));
+  let privateDownloadCids = $derived(new Set(privateDownloads.map((row) => row.cid)));
+
+  // Inline confirmation of Remove (or Clear) per row: the button becomes "Confirm remove" and
+  // "Cancel". It holds only while the row is still the state and revision it was asked for, so a
+  // row that changed meanwhile never confirms on stale terms; Escape and Cancel clear it.
+  let confirmRemove = $state<Record<string, string>>({});
+  const confirmToken = (row: PrivateDownload) => `${row.status}:${row.intent}`;
+  function confirmingRemove(row: PrivateDownload): boolean {
+    return confirmRemove[row.id] === confirmToken(row);
+  }
+  async function askRemove(row: PrivateDownload) {
+    confirmRemove[row.id] = confirmToken(row);
+    await tick();
+    document.querySelector<HTMLButtonElement>(`[data-sdl-confirm="${row.id}"]`)?.focus();
+  }
+  async function cancelRemove(row: PrivateDownload) {
+    delete confirmRemove[row.id];
+    await tick();
+    document.querySelector<HTMLButtonElement>(`[data-sdl-remove="${row.id}"]`)?.focus();
+  }
+  /** Where focus goes when the control that had it disappeared: while the row is still there, its
+   * Remove (back from a confirmation) or its first action; else the next row of the same group,
+   * the group's heading, the first row of any group, and last the tab's own heading. */
+  function rowFocusTarget(rowId: string, group: SavedRowGroup, nextId: string | undefined, fromConfirm: boolean): HTMLElement | null {
+    const remove = document.querySelector<HTMLElement>(`[data-sdl-row="${rowId}"] [data-sdl-remove]`);
+    const first = document.querySelector<HTMLElement>(`[data-sdl-row="${rowId}"] .sdl-act`);
+    return (fromConfirm ? remove ?? first : first)
+      ?? (nextId ? document.querySelector<HTMLElement>(`[data-sdl-row="${nextId}"] .sdl-act`) : null)
+      ?? document.getElementById(`sdl-${group}`)
+      ?? document.querySelector<HTMLElement>(".sdl-row .sdl-act")
+      ?? document.getElementById("transfers-title");
+  }
+  const focusLost = () => document.activeElement === document.body || !document.activeElement;
+  /** Run a row's action. Focus moves only when the control that had it was taken away (the
+   * confirmation, or the row itself) and focus fell to `<body>`, never otherwise: a long save that
+   * finishes while the user is elsewhere moves nothing. */
+  async function runSavedRowAction(row: PrivateDownload, action: SavedRowAction, group: SavedRowGroup) {
+    const had = document.activeElement instanceof HTMLElement && document.activeElement !== document.body
+      ? document.activeElement : null;
+    delete confirmRemove[row.id];
+    const rows = savedRowGroups[group];
+    const next = rows[rows.findIndex((view) => view.id === row.id) + 1];
+    await tick();
+    let holder = had;
+    // The confirmation that had focus is gone now; keep focus on this row meanwhile.
+    if (had && !had.isConnected && focusLost()) {
+      holder = rowFocusTarget(row.id, group, next?.id, action.confirm);
+      holder?.focus();
+    }
+    await runPrivateDownloadAction(row, action.kind);
+    await tick();
+    if (holder && !holder.isConnected && focusLost()) rowFocusTarget(row.id, group, next?.id, action.confirm)?.focus();
+  }
+  // A control that had focus can also disappear on its own, for example Confirm clear when a
+  // check finds the saved file present. Remember the focused row control and, when it leaves the
+  // page while focus falls to <body>, put focus back on that row (or its neighbours). Moving focus
+  // anywhere else, or leaving Transfers, forgets it, so nothing is restored the user did not lose.
+  let lastRowFocus: { element: HTMLElement; row: string; group: SavedRowGroup } | null = null;
+  function noteRowFocus(event: FocusEvent) {
+    const element = event.target instanceof HTMLElement ? event.target : null;
+    const row = element?.closest<HTMLElement>("[data-sdl-row]")?.dataset.sdlRow;
+    const group = savedRowViews.find((view) => view.id === row)?.group;
+    lastRowFocus = element && row && group ? { element, row, group } : null;
+  }
+  function forgetRowFocus(event: FocusEvent) {
+    const element = event.target;
+    // A control taken out of the page may report focus leaving too; only a control that is still
+    // there means the user moved away.
+    queueMicrotask(() => {
+      if (lastRowFocus?.element === element && element instanceof HTMLElement && element.isConnected) lastRowFocus = null;
+    });
+  }
+  function rowButtonClick(row: PrivateDownload, action: SavedRowAction, group: SavedRowGroup) {
+    if (action.disabled) return; // aria-disabled stays focusable, so its reason can be read
+    if (action.kind === "remove" && clearingSaved[row.id]) return; // Clear's re-check is running
+    if (action.confirm && !confirmingRemove(row)) return void askRemove(row);
+    // Clear of a Saved row is unconfirmed only while its file was found present, and that answer
+    // can be from earlier in this visit: check again before releasing the private copy.
+    if (!action.confirm && action.kind === "remove" && row.status === "saved") return void clearSavedRow(row, action, group);
+    void runSavedRowAction(row, action, group);
+  }
+  // Fix-the-lows round, review L9: Clear releases a Saved row's private copy, which is the only
+  // copy left once the saved file is gone. The row skips the confirmation when a check found the
+  // file present, but that check ran once per visit, so a file deleted since would be released
+  // without asking. Clear now checks the file again first and runs at once only on a fresh
+  // "present"; any other answer (missing, replaced, unknown, a refused or unreadable check) is
+  // recorded on the row and turns the press into the inline confirmation instead. The remaining
+  // window is this check's own round trip. While it runs (up to native's 3 s bound) the Clear
+  // button is marked busy, like Show in folder, and a second press does nothing.
+  let clearingSaved = $state<Record<string, boolean>>({});
+  async function clearSavedRow(row: PrivateDownload, action: SavedRowAction, group: SavedRowGroup) {
+    const server = activeServerId, gen = viewGeneration, visit = savedCheckVisit;
+    if (server === null || locked || clearingSaved[row.id]) return;
+    clearingSaved[row.id] = true;
+    let result: SavedCheck = "unknown";
+    try {
+      result = checkedSavedCheck(await invoke<unknown>("check_saved_download",
+        { server, download: row.id, expectedIntent: row.intent }));
+    } catch {
+      result = "unknown"; // a refused or failed check proves nothing, so it asks
+    } finally {
+      delete clearingSaved[row.id];
+    }
+    if (!unlockedViewCurrent(gen, server)) return;
+    // A row that changed while it was checked has other actions now; do nothing on stale terms.
+    const now = privateDownloads.find((other) => other.id === row.id);
+    if (!now || now.status !== "saved" || now.intent !== row.intent) return;
+    savedChecks[row.id] = { intent: row.intent, result, visit };
+    if (result === "present") return runSavedRowAction(now, action, group);
+    await askRemove(now);
+  }
+
+  // "Show in folder" for a Saved row: native checks the file read-only first and shows it selected
+  // in the system file manager. No path comes back; a refusal is one fixed sentence, and the row
+  // is checked again so it says what is there now.
+  let revealingSaved = $state<Record<string, boolean>>({});
+  async function revealSavedRow(row: PrivateDownload) {
+    const server = activeServerId, gen = viewGeneration;
+    if (server === null || locked || revealingSaved[row.id]) return;
+    revealingSaved[row.id] = true;
+    try {
+      await invoke("reveal_saved_download", { server, download: row.id, expectedIntent: row.intent });
+    } catch (e) {
+      if (!unlockedViewCurrent(gen, server)) return;
+      toast(String(e), "warn", 6000);
+      const checked = savedChecks[row.id];
+      if (checked) savedChecks[row.id] = { ...checked, visit: -1 };
+      void checkSavedRows();
+    } finally {
+      delete revealingSaved[row.id];
+    }
+  }
+
+  // State transitions, announced politely through one live region (never chunk ticks). The region
+  // is emptied first, so the same sentence later is read out again. Each refresh also drops
+  // confirmations that no longer match their row and restores focus lost with a removed control.
+  let transfersAnnouncement = $state("");
+  let announcedRowWords: Map<string, string> | null = null;
+  $effect(() => {
+    const views = savedRowViews;
+    const shown = view === "downloads";
+    untrack(() => {
+      for (const id of Object.keys(confirmRemove)) {
+        const row = privateDownloads.find((r) => r.id === id);
+        if (!row || confirmRemove[id] !== confirmToken(row)) delete confirmRemove[id];
+      }
+      if (!shown) {
+        announcedRowWords = null;
+        lastRowFocus = null;
+        return;
+      }
+      const { announcement, words } = savedRowTransitions(announcedRowWords, views);
+      announcedRowWords = words;
+      if (announcement) {
+        transfersAnnouncement = "";
+        void tick().then(() => { transfersAnnouncement = announcement; });
+      }
+      const lost = lastRowFocus;
+      void tick().then(() => {
+        if (lost && lastRowFocus === lost && !lost.element.isConnected && focusLost()) {
+          lastRowFocus = null;
+          const rows = savedRowGroups[lost.group];
+          const at = rows.findIndex((v) => v.id === lost.row);
+          rowFocusTarget(lost.row, lost.group, at >= 0 ? rows[at + 1]?.id : rows[0]?.id,
+            lost.element.hasAttribute("data-sdl-confirm"))?.focus();
+        }
+      });
+    });
+  });
+
   // The file info pane: click a file to inspect it (preview, availability, uploader, delete).
   let fileInfo = $state<UiFile | null>(null);
   let fileInfoKeptCopy = $derived(keptFiles?.files.find((copy) => copy.cid === fileInfo?.cid));
@@ -12305,8 +12625,9 @@
   }
 
   // The "Circulates until" row. Precedence: a wiki embed pins the file regardless of any recorded
-  // deadline; then an explicit keep-forever; then a date; then a legacy listing that never
-  // recorded one. `kind` drives the styling, `text` is the row's wording.
+  // deadline; then an explicit "never expires"; then a date; then a legacy listing that never
+  // recorded one. `kind` drives the styling, `text` is the row's wording. None of these is a
+  // cache pin: circulation is server-wide, while each device's cache follows its own limit.
   type ExpiryView = { kind: "pinned" | "forever" | "date" | "unknown"; text: string };
   let fileInfoExpiry = $derived.by((): ExpiryView => {
     const f = fileInfo;
@@ -12314,23 +12635,23 @@
     if (isPinned(f.cid) || fileInfoUsage?.pinned)
       return { kind: "pinned", text: "pinned: embedded in the wiki, never drops from sharing" };
     if (!f.expires_known) return { kind: "unknown", text: "not recorded (older share)" };
-    if (f.expires === null) return { kind: "forever", text: "forever" };
+    if (f.expires === null) return { kind: "forever", text: "never expires" };
     return { kind: "date", text: `${fmtDay(f.expires)} · ${relDay(f.expires, nowTick)}` };
   });
   // Expiry is per listing and the gate is uploader / owner / admin, matching the backend.
   let canSetExpiry = $derived(
     !!fileInfo && (fileInfo.author === myFp || myRole === "owner" || myRole === "admin")
   );
-  let keptForever = $derived(!!fileInfo && fileInfo.expires_known && fileInfo.expires === null);
+  let neverExpires = $derived(!!fileInfo && fileInfo.expires_known && fileInfo.expires === null);
 
-  /** Toggle this listing between "keep forever" and a fresh 30-day circulation window. */
-  async function toggleKeepForever() {
+  /** Toggle this listing between "never expires" and a fresh 30-day circulation window. */
+  async function toggleNeverExpires() {
     if (activeServerId === null || !fileInfo) return;
     const f = fileInfo;
-    const forever = !keptForever; // the state we're moving TO
+    const forever = !neverExpires; // the state we're moving TO
     const expires = forever ? null : Date.now() + FILE_EXPIRY_DEFAULT_MS;
     fileInfoExpiryBusy = true;
-    const tid = toast(forever ? "Keeping forever…" : "Restoring 30-day expiry…", "info", 0);
+    const tid = toast(forever ? "Marking it never expires…" : "Restoring 30-day expiry…", "info", 0);
     try {
       await invoke("set_file_expiry", { server: activeServerId, cid: f.cid, path: f.path, expires });
       await refreshFiles();
@@ -12340,7 +12661,7 @@
       updateToast(
         tid,
         forever
-          ? `${f.name} will be kept in circulation forever`
+          ? `${f.name} never expires from circulation`
           : `${f.name} circulates until ${fmtDay(expires as number)}`,
         "ok"
       );
@@ -12365,6 +12686,13 @@
     done: number;
     total: number;
     heldBefore: number;
+    /** Chunks and bytes this save has written to the file so far (Transfers UX), unset before
+     * any; `done` and `bytesDone` above also count chunks already held locally. */
+    savedDone?: number;
+    savedBytes?: number;
+    /** This save starts a new file (Save new copy, Save again, Save another copy, or Save as on a
+     * row with a journal): the row's durable saved counts belong to the earlier file. */
+    fresh?: boolean;
     bytesDone: number;
     bytesTotal: number;
     networkBytesDone: number;
@@ -12424,6 +12752,21 @@
       ...uploadList.map((u): TransferRow => ({ ...u, direction: "upload", key: `upload:${u.id}` })),
     ].sort((a, b) => b.ts - a.ts)
   );
+  // The Transfers tab's live list: everything except a download whose private row is listed
+  // above it, which carries that save's progress itself (one row per file). The status bar keeps
+  // counting every transfer.
+  let liveTransferList = $derived(
+    transferList.filter((t) => t.direction !== "download" || !privateDownloadCids.has(t.cid))
+  );
+  let liveMovingTransfers = $derived(
+    liveTransferList.filter((t) => transferIsActive(t) && transferConnected(t)).length
+  );
+  let liveWaitingTransfers = $derived(Math.max(0, liveTransferList.filter((t) =>
+    t.status === "queued" || t.status === "waiting" || t.status === "downloading" ||
+    t.status === "verifying" || t.status === "reading" || t.status === "uploading" ||
+    t.status === "publishing"
+  ).length - liveMovingTransfers));
+  let liveFinishedTransfers = $derived(liveTransferList.filter((t) => t.status === "done" || t.status === "failed").length);
   let activeTransfers = $derived(
     transferList.filter((t) =>
       t.status === "queued" || t.status === "waiting" || t.status === "downloading" ||
@@ -21719,6 +22062,12 @@
         // being viewed, which is precisely when the active-server refresh above does nothing.
         if (e.payload.server === callServer) void refreshCallProfiles();
       }),
+      listen<{ server: number; status: unknown }>("cache-status", (e) => {
+        if (e.payload.server !== activeServerId) return;
+        // Newer than any get_cache_status still in flight: retire those replies.
+        cacheStatusSeq++;
+        cacheStatus = checkedCacheStatus(e.payload.status);
+      }),
       listen<{ server: number }>("files-updated", (e) => {
         spaceActivityAt[e.payload.server] = Date.now();
         if (e.payload.server === activeServerId) {
@@ -21768,6 +22117,10 @@
         d.networkBytesDone = e.payload.network_bytes_done;
         d.total = e.payload.total;
         d.done = Math.max(d.heldBefore, e.payload.done);
+        // The chunks written to the file by this save (native emits these events only while
+        // writing), without the already-held floor above: the merged Transfers row counts them.
+        d.savedDone = Math.max(d.savedDone ?? 0, e.payload.done);
+        d.savedBytes = Math.max(d.savedBytes ?? 0, e.payload.bytes_done);
         d.bytesTotal = e.payload.bytes_total;
         d.bytesDone = Math.max(d.bytesDone, e.payload.bytes_done);
         d.progress = d.total > 0 ? Math.min(1, d.done / d.total) : 0;
@@ -23605,6 +23958,15 @@
   </svg>
 {/snippet}
 
+{#snippet transferIcon(name: TransferIcon)}
+  <!-- Transfers UX (PR #51): the 16x16 transfer state icons (design icons.md). The round caps turn
+       the `h.01` / `v.01` dots into discs, so keep this wrapper as it is. -->
+  <svg class="ico sdl-ico" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+    {#each TRANSFER_ICONS[name] as shape}
+      {#if "d" in shape}<path d={shape.d} />{:else}<rect x={shape.rect.x} y={shape.rect.y} width={shape.rect.width} height={shape.rect.height} rx={shape.rect.rx} />{/if}
+    {/each}
+  </svg>
+{/snippet}
 {#snippet icoStorage()}
   <svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
     <ellipse cx="12" cy="5.5" rx="8" ry="3" /><path d="M4 5.5v6c0 1.65 3.58 3 8 3s8-1.35 8-3v-6" /><path d="M4 11.5v6c0 1.65 3.58 3 8 3s8-1.35 8-3v-6" /><path d="m9 17.2 1.8 1.8 4-4" />
@@ -27522,7 +27884,7 @@
                 <div><h3>{!storageHealth.missing_chunks && !storageHealth.unreadable_chunks && !storageHealth.invalid_manifests ? "Storage is healthy" : "Storage needs attention"}</h3><p>{storageHealth.verified_chunks} of {storageHealth.referenced_chunks} unique chunks verified · {fmtSize(storageHealth.verified_bytes)} encrypted content</p></div>
               </div>
               <div class="health-cards">
-                <article><b>{fmtSize(storageHealth.verified_bytes)}</b><span>verified encrypted content</span></article><article><b>{storageHealth.unique_files}</b><span>unique files · {storageHealth.listed_files} listings</span></article><article><b>{storageHealth.missing_chunks}</b><span>missing chunks</span></article><article><b>{storageHealth.unreadable_chunks + storageHealth.invalid_manifests}</b><span>unreadable / invalid</span></article>
+                <article><b>{fmtSize(storageHealth.verified_bytes)}</b><span>verified encrypted content</span></article><article><b>{storageHealth.unique_files}</b><span>unique files · {storageHealth.listed_files} listings</span></article><article><b>{storageHealth.missing_chunks}</b><span>missing from your uploads</span></article><article><b>{storageHealth.not_cached_chunks ?? 0}</b><span>not cached on this device</span></article><article><b>{storageHealth.unreadable_chunks + storageHealth.invalid_manifests}</b><span>unreadable / invalid</span></article>
               </div>
               <div class="storage-breakdown">
                 <section class="storage-categories">
@@ -27775,7 +28137,7 @@
                 <div class="kept-copy-row">
                   <span>{files.find((f) => f.cid === copy.cid)?.name ?? `${copy.cid.slice(0, 16)}… (unlisted)`} · {keptCopyLabel(copy)}</span>
                   <button class="ghost small" disabled={!!keptTransfer || !!keptMutation || !!keptFiles.error} onclick={() => saved?.exhausted ? retryKeptFile(saved) : checkKeptFile(copy.cid)}>{saved?.exhausted ? "Retry check" : "Check and repair"}</button>
-                  <button class="ghost small" disabled={!!keptTransfer || !!keptMutation || !!keptFiles.error} onclick={() => forgetKeptFile(copy.cid)}>Release kept copy</button>
+                  <button class="ghost small" disabled={!!keptTransfer || !!keptMutation || !!keptFiles.error} onclick={() => forgetKeptFile(copy.cid)} title="Deletes this device's kept copy. A checked kept copy replaces the cache's duplicate, so this can remove the last copy on this device; members who still have the file can send it again.">Release kept copy</button>
                 </div>
               {/each}
               {#each keptTransferRows(keptFiles) as copy (copy.cid)}
@@ -28344,28 +28706,92 @@
             {/if}
           </div>
         {:else if view === "downloads"}
-          <h2>Transfers</h2>
-          <div class="downloads-tab tab-pane">
+          <h2 id="transfers-title" tabindex="-1">Transfers</h2>
+          <div class="downloads-tab tab-pane" onfocusin={noteRowFocus} onfocusout={forgetRowFocus}>
             {#if privateDownloadError}<p class="muted" role="status">{privateDownloadError}</p>{/if}
-            {#if privateDownloads.length}
-              <h3>Saved download progress</h3>
-              <p class="muted small">Resume continues a partly saved file only if it is still the file Mewtual created. Save new copy starts a separate file. Remove deletes saved progress and a partly saved file Mewtual created.</p>
-              <ul class="dl-list">
-                {#each privateDownloads as saved (saved.id)}
-                  <li class="dl-item">
-                    <b>{filesByCid.get(saved.cid)?.name ?? `File ${saved.cid.slice(0, 12)}`}</b>
-                    <span>{privateDownloadDetail(saved, savedCheckFor(saved))}</span>
-                    <div>
-                      {#each privateDownloadActions(saved, savedCheckFor(saved)) as action (action.kind)}
-                        <button class={action.ghost ? "ghost" : undefined}
-                          disabled={!!privateDownloadBusy[saved.id] || (action.needsIdle && (!!privateDownloadSaves[saved.id] || saveInProgress(saved.cid)))}
-                          onclick={() => runPrivateDownloadAction(saved, action.kind)}>{action.label}</button>
-                      {/each}
-                    </div>
-                  </li>
-                {/each}
-              </ul>
-            {/if}
+            <!-- Transfers UX (PR #51): one polite live region announces state changes of the rows
+                 below (never chunk ticks). -->
+            <div class="sdl-sr" aria-live="polite" aria-atomic="true">{transfersAnnouncement}</div>
+            {#each SAVED_ROW_GROUPS as group (group.id)}
+              {#if savedRowGroups[group.id].length}
+                <section class="sdl" aria-labelledby={`sdl-${group.id}`}>
+                  <h3 class="sdl-group" id={`sdl-${group.id}`} tabindex="-1">{group.heading}</h3>
+                  <ul class="sdl-list" aria-labelledby={`sdl-${group.id}`}>
+                    {#each savedRowGroups[group.id] as saved (saved.id)}
+                      {@const row = privateDownloads.find((r) => r.id === saved.id)}
+                      {#if row}
+                        <li class="sdl-row" data-sdl-row={saved.id} data-state={saved.state} data-tone={saved.tone}
+                          data-check={saved.check ?? undefined} aria-busy={saved.busy ? "true" : undefined}>
+                          <div class="sdl-head">
+                            <span class="sdl-name" title={saved.name}>{saved.name}</span>
+                            <span class="sdl-chip">{@render transferIcon(saved.icon)} <span>{saved.word}</span></span>
+                          </div>
+                          {#if saved.bar}
+                            <div class="sdl-bar" role="progressbar" aria-label={saved.bar.accessibleName}
+                              aria-valuemin="0" aria-valuemax={saved.bar.valueMax} aria-valuenow={saved.bar.valueNow}
+                              aria-valuetext={saved.bar.valueText}>
+                              <span class="sdl-bar-fill" style:--p={saved.bar.fraction}></span>
+                              {#if saved.bar.label}<span class="sdl-bar-label" aria-hidden="true">{saved.bar.label}</span>{/if}
+                            </div>
+                            <span class="sdl-chunks">{saved.chunks}</span>
+                          {/if}
+                          {#if saved.why}<p class="sdl-why">{saved.why}</p>{/if}
+                          <div class="sdl-actions">
+                            {#each saved.actions as action (action.kind)}
+                              {#if action.confirm && confirmingRemove(row)}
+                                {@const words = confirmWords(action, saved.name)}
+                                <!-- Escape on either button cancels, like Cancel. -->
+                                <span class="sdl-confirm" role="group" aria-label={words.group}>
+                                  <button class="sdl-act danger" type="button" data-sdl-confirm={saved.id}
+                                    aria-label={words.confirmName}
+                                    aria-disabled={action.disabled ? "true" : undefined}
+                                    aria-describedby={action.disabled ? `sdl-why-off-${saved.id}` : undefined}
+                                    title={action.disabledReason ?? undefined}
+                                    onkeydown={(e) => { if (e.key === "Escape") { e.stopPropagation(); void cancelRemove(row); } }}
+                                    onclick={() => rowButtonClick(row, action, saved.group)}>{words.confirm}</button>
+                                  <button class="sdl-act ghost" type="button" aria-label={words.cancelName}
+                                    onkeydown={(e) => { if (e.key === "Escape") { e.stopPropagation(); void cancelRemove(row); } }}
+                                    onclick={() => cancelRemove(row)}>Cancel</button>
+                                </span>
+                              {:else}
+                                <button
+                                  class="sdl-act"
+                                  class:ghost={action.ghost && action.kind !== "remove"}
+                                  class:danger={action.kind === "remove"}
+                                  type="button"
+                                  data-sdl-remove={action.kind === "remove" ? saved.id : undefined}
+                                  aria-label={action.accessibleName}
+                                  aria-disabled={action.disabled || (action.kind === "remove" && clearingSaved[saved.id]) ? "true" : undefined}
+                                  aria-busy={action.kind === "remove" && clearingSaved[saved.id] ? "true" : undefined}
+                                  aria-describedby={action.disabled ? `sdl-why-off-${saved.id}` : undefined}
+                                  title={action.kind === "remove" && clearingSaved[saved.id] ? "Checking the saved file" : action.disabledReason ?? undefined}
+                                  onclick={() => rowButtonClick(row, action, saved.group)}>{action.label}</button>
+                              {/if}
+                            {/each}
+                            {#if saved.actions.some((a) => a.disabled)}
+                              <span class="sdl-sr" id={`sdl-why-off-${saved.id}`}>{saved.actions.find((a) => a.disabled)?.disabledReason}</span>
+                            {/if}
+                          </div>
+                          {#if saved.where || saved.canReveal || saved.hint}
+                            <p class="sdl-where">
+                              {#if saved.where}<span>{saved.where}</span>{/if}
+                              {#if saved.canReveal}
+                                <button class="sdl-link" type="button" aria-label={`Show ${saved.name} in folder`}
+                                  aria-disabled={revealingSaved[saved.id] ? "true" : undefined}
+                                  aria-busy={revealingSaved[saved.id] ? "true" : undefined}
+                                  title={revealingSaved[saved.id] ? "Checking the saved file" : undefined}
+                                  onclick={() => revealSavedRow(row)}>{@render transferIcon("show-in-folder")} Show in folder</button>
+                              {/if}
+                              {#if saved.hint}<span class="sdl-hint">{saved.hint}</span>{/if}
+                            </p>
+                          {/if}
+                        </li>
+                      {/if}
+                    {/each}
+                  </ul>
+                </section>
+              {/if}
+            {/each}
             <button class="transfer-health" onclick={() => switchView("storage")}>
               {@render icoStorage()}
               {#if storageHealth}
@@ -28375,14 +28801,16 @@
               {/if}
               <i>Open →</i>
             </button>
-            {#if transferList.length === 0}
-              <p class="muted">No transfers yet. Shared files and downloads will appear here.</p>
+            {#if liveTransferList.length === 0}
+              {#if privateDownloads.length === 0}
+                <p class="muted">No transfers yet. Shared files and downloads will appear here.</p>
+              {/if}
             {:else}
               <div class="dl-toolbar">
                 <span class="muted small">
-                  {movingTransfers} active{#if waitingTransfers} · {waitingTransfers} waiting{/if} · {transferList.length} total
+                  {liveMovingTransfers} active{#if liveWaitingTransfers} · {liveWaitingTransfers} waiting{/if} · {liveTransferList.length} total
                 </span>
-                <button class="ghost small" disabled={finishedTransfers === 0} onclick={clearFinishedTransfers}>Clear finished</button>
+                <button class="ghost small" disabled={liveFinishedTransfers === 0} onclick={clearFinishedTransfers}>Clear finished</button>
               </div>
               <div class="transfer-legend" aria-label="Transfer piece colours">
                 <span><i class="transfer-piece held"></i>ready</span>
@@ -28391,7 +28819,7 @@
                 <span><i class="transfer-piece offline"></i>no connection</span>
               </div>
               <ul class="dl-list">
-                {#each transferList as d (d.key)}
+                {#each liveTransferList as d (d.key)}
                   {@const pieces = transferPieceStates(d)}
                   <li class="dl-item">
                     <div class="dl-item-main">
@@ -28506,6 +28934,22 @@
         </button>
       {/if}
       <span class="sb-spacer"></span>
+      {#if cur && !dmHome && !inboxView && cacheShown(cacheStatus)}
+        {@const foot = cacheFooter(cacheStatus)}
+        <button
+          class="seg sb-cache"
+          data-tone={foot.tone}
+          title={foot.title}
+          onclick={() => openServerSettings(activeServerId, "storage")}
+        >
+          <span class="sb-cache-label">cache</span>
+          {#if foot.bar !== null}
+            <span class="sb-cache-bar" role="progressbar" aria-label="Cache used on this device" aria-valuemin="0" aria-valuemax="100" aria-valuenow={foot.bar}><i style={`width:${foot.bar}%`}></i></span>
+          {/if}
+          <span class="sb-cache-value">{foot.value}</span>
+          {#if foot.chip}<span class="sb-cache-chip">{foot.chip}</span>{/if}
+        </button>
+      {/if}
       {#if myFp}<span class="seg" title="Your fingerprint on this server: click a member and compare out of band to verify">id {myFp.slice(0, 4)}·{myFp.slice(4, 8)}</span>{/if}
     </footer>
 
@@ -29154,6 +29598,40 @@
             </div>
           </div>
         {/if}
+      </div>
+    {/if}
+
+    {#if leaveConfirm}
+      {@const leaving = leaveConfirm}
+      <div class="overlay" role="presentation" use:dismissOnBackdrop={() => (leaveConfirm = null)}>
+        <div class="overlay-card leave-confirm" role="alertdialog" aria-modal="true" aria-labelledby="leave-confirm-title">
+          <header class="overlay-head">
+            <div><span class="name-studio-label">LEAVE // {leaving.name.toUpperCase()}</span><h2 id="leave-confirm-title">Leave {leaving.name}?</h2></div>
+            <button class="ghost" title="Stay" onclick={() => (leaveConfirm = null)}>✕</button>
+          </header>
+          <p>Leaving forgets this server on this device and removes its cached files from this device. Coming back needs a fresh invite. Studio work keeps the files it still uses.</p>
+          {#if !leaving.loss}
+            <p class="muted small">Checking what this device keeps for it…</p>
+          {:else}
+            {#if leaving.loss.keep.length}
+              <h3>These Keep copies will be permanently deleted</h3>
+              <ul class="leave-loss">{#each leaving.loss.keep as name (name)}<li>{name}</li>{/each}</ul>
+            {/if}
+            {#if leaving.loss.downloads.length}
+              <h3>These unfinished downloads will be permanently deleted</h3>
+              <ul class="leave-loss">{#each leaving.loss.downloads as name (name)}<li>{name}</li>{/each}</ul>
+            {/if}
+            {#if leaving.loss.unknown}
+              <p class="warn-t small">Keep copies or unfinished downloads could not be checked. Leaving may delete any this device has for this server.</p>
+            {:else if !leaving.loss.keep.length && !leaving.loss.downloads.length}
+              <p class="muted small">No Keep copies or unfinished downloads on this device.</p>
+            {/if}
+          {/if}
+          <div class="leave-confirm-actions">
+            <button class="ghost" onclick={() => (leaveConfirm = null)}>Stay</button>
+            <button class="danger-btn" disabled={!leaving.loss} onclick={confirmLeave}>Leave and delete</button>
+          </div>
+        </div>
       </div>
     {/if}
 
@@ -31412,13 +31890,60 @@
               </form>
               <p class="muted small">Size sets how big <code>:code:</code> renders in messages (reactions stay small).</p>
               </section>
+            {:else if serverSettingsPage === "storage"}
+              <div class="stx-crumb">SERVER // {cur?.name?.toUpperCase()} // STORAGE</div>
+              <h1>Storage on this device</h1>
+              <section class="set-section cache-set">
+                <h3>Cache</h3>
+                {#if cacheStatus}
+                  {@const foot = cacheFooter(cacheStatus)}
+                  <div class="cache-meter" data-tone={foot.tone}>
+                    {#if foot.bar !== null}
+                      <span class="cache-bar" role="progressbar" aria-label="Cache used" aria-valuemin="0" aria-valuemax="100" aria-valuenow={foot.bar}><i style={`width:${foot.bar}%`}></i></span>
+                    {/if}
+                    <b>{cacheBytes(cacheStatus.usage_bytes)}</b>
+                    <span class="muted small">{cacheStatus.unlimited ? "cached, no limit" : cacheStatus.limit_bytes !== null ? `of ${cacheBytes(cacheStatus.limit_bytes)}` : "cached"}</span>
+                    {#if foot.chip}<span class="cache-chip">{foot.chip}</span>{/if}
+                  </div>
+                  {#if cacheStatus.paused && cacheStatus.paused !== "not-ready"}
+                    <p class="warn-t small">{cachePauseText(cacheStatus.paused)}</p>
+                  {/if}
+                  {#if cacheStatus.leaving_soon_files > 0 && !cacheStatus.held_by_pins}
+                    <p class="small">{cacheStatus.leaving_soon_files} {cacheStatus.leaving_soon_files === 1 ? "file is" : "files are"} next to leave ({cacheBytes(cacheStatus.leaving_soon_bytes)}) when new files arrive.</p>
+                  {/if}
+                  <p class="muted small">{pinnedSummary(cacheStatus)}</p>
+                {:else}
+                  <p class="muted small">This device's cache has not been measured yet.</p>
+                {/if}
+                <p class="muted small">Files you open or save stay here so they show without fetching again, and this device can share them with members. Over the limit, the files shared longest ago leave first; anyone who still has them can send them again.</p>
+              </section>
+              <section class="set-section">
+                <h3>Limit on this device</h3>
+                <form class="rename-row" onsubmit={(e) => { e.preventDefault(); void applyCacheLimit(); }}>
+                  <select bind:value={cacheLimitDraft} onchange={() => (cacheLimitConfirming = false)} aria-label="Cache limit on this device" disabled={!cacheStatus || cacheLimitBusy}>
+                    {#if cacheStatus && !cacheStatus.unlimited && cacheStatus.limit_bytes !== null && !CACHE_LIMIT_CHOICES.some((c) => c.bytes === cacheStatus?.limit_bytes)}
+                      <option value={String(cacheStatus.limit_bytes)}>{limitLabel(cacheStatus.limit_bytes)}</option>
+                    {/if}
+                    {#each CACHE_LIMIT_CHOICES as choice (choice.label)}
+                      <option value={String(choice.bytes)}>{choice.label}</option>
+                    {/each}
+                  </select>
+                  <button class="ghost small" disabled={!cacheStatus || cacheLimitBusy || !cacheLimitDraft}>
+                    {cacheLimitBusy ? "Saving…" : cacheLimitConfirming ? "Remove and apply" : "Apply"}
+                  </button>
+                </form>
+                {#if cacheLimitConfirming && cacheStatus}
+                  <p class="warn-t small">{lowerLimitWarning(cacheStatus, cacheLimitDraft === "null" ? null : Number(cacheLimitDraft))}</p>
+                {/if}
+                <p class="muted small">Only this device. Other members choose their own, and nothing here changes what the server shares.</p>
+              </section>
             {:else if serverSettingsPage === "leave"}
               <div class="stx-crumb">SERVER // {cur?.name?.toUpperCase()} // LEAVE</div>
               <h1>Leave Server</h1>
               {#if activeServerId !== null}
                 <section class="set-section danger">
-                  <p class="muted small">Leaving forgets this server on this device. Coming back needs a fresh invite.</p>
-                  <button class="ghost leave" onclick={() => { const id = activeServerId; showServerSettings = false; if (id !== null) leaveServer(id); }}>
+                  <p class="muted small">Leaving forgets this server on this device and removes its cached files, Keep copies and unfinished downloads from this device. Coming back needs a fresh invite.</p>
+                  <button class="ghost leave" onclick={() => { const id = activeServerId; if (id !== null) void requestLeave(id); }}>
                     Leave this server
                   </button>
                 </section>
@@ -31454,7 +31979,7 @@
           </button>
           <button class="ghost small" onclick={() => lightbox && openFileRef(lightbox.cid)}>Properties</button>
           {#if lightboxFile}
-            <button class="ghost small" onclick={() => lightboxFile && downloadFile(lightboxFile)}>Download</button>
+            <button class="ghost small" onclick={() => lightboxFile && downloadFile(lightboxFile)}>{lightboxFile ? downloadLabel(lightboxFile) : "Download"}</button>
             <button class="ghost small" onclick={() => lightboxFile && downloadFile(lightboxFile, true)}>Save as</button>
           {/if}
           <span class="lightbox-div" aria-hidden="true"></span>
@@ -31675,11 +32200,19 @@
               {#if mediaKind(fileInfo.name, fileInfo.mime) === "pixa"}
                 <button class="primary" disabled={!mayFetchPixa(fileInfo.size)} onclick={() => fileInfo && openPixaViewer(fileInfo)}>Open flipnote</button>
               {/if}
-              <button class="primary" onclick={() => fileInfo && downloadFile(fileInfo)}>↓ Download</button>
+              <button class="primary" onclick={() => fileInfo && downloadFile(fileInfo)}>↓ {fileInfo ? downloadLabel(fileInfo) : "Download"}</button>
               <button class="ghost" onclick={() => fileInfo && downloadFile(fileInfo, true)}>Save as</button>
               {#if canSetExpiry}
-                <button class="ghost" disabled={fileInfoExpiryBusy} onclick={toggleKeepForever}>
-                  {fileInfoExpiryBusy ? "Saving…" : keptForever ? "Restore 30-day expiry" : "♾ Keep forever"}
+                <!-- "Never expires" is a server-wide circulation flag, not a promise that this or
+                     any device keeps the bytes: caches still drop it under their limit. Keep is
+                     the per-device pin. The old "Keep forever" label read as the latter. -->
+                <button
+                  class="ghost"
+                  disabled={fileInfoExpiryBusy}
+                  onclick={toggleNeverExpires}
+                  title={neverExpires ? "Give this listing a fresh 30-day circulation window" : "Keep this listing in circulation for everyone with no end date. Devices can still drop it from their cache; use Keep to hold a copy here."}
+                >
+                  {fileInfoExpiryBusy ? "Saving…" : neverExpires ? "Restore 30-day expiry" : "♾ Never expires"}
                 </button>
               {/if}
               {#if myRole === "owner" || myRole === "admin"}

@@ -574,7 +574,11 @@ Renderer commands (no new command names):
   itself (at most one at a time, starting in Downloads or at the OS default when none resolves),
   validates the result and remembers the choice in the sealed record; the command's parameter
   list is pinned by a test so no path, folder or destination parameter can be added. A Save as on
-  a file whose saved record already has a journal is refused before anything is resumed.
+  a file whose saved record already has a journal is refused before anything is resumed. A start
+  that names no record (no `resume`: the chat's one-click Download from a stale list) is refused
+  with "This file is being saved right now. Its progress is in Transfers." while that file's
+  journaled save is running (`ExportView::Writing { active: true }`), instead of resuming the
+  record and interrupting the save (fix-the-lows round); an interrupted save still resumes.
   Closing the dialog returns exactly "Save as was cancelled." with nothing started. A plain
   Resume first runs a destination preflight (before any allowance is spent on re-verification);
   it may return a verified saved result directly when the file was already published before a
@@ -587,10 +591,39 @@ Renderer commands (no new command names):
   removal is two-step (durable Deleting, native removal of only the proven partial, then release).
   `keepPartial` releases the record and leaves the file. The returned notice says when a file of
   the save stays on disk. Busy while another removal or Save new copy of the same Download is
-  running. A failed proven removal leaves the row in `removing`.
+  running. A failed proven removal leaves the row in `removing`. Its error and Keep's "already
+  gone" notice have a saved-row form (a Clear of a published save removes only a temporary copy of
+  the saved file) and name only "Keep": the renderer labels Keep "Keep the file" when the row's
+  `savedChunks` equals `totalChunks`, else "Keep partly saved file" (fix-the-lows round).
 - `get_private_downloads` rows add `savedChunks` (journal checkpoint), `chosenPlace` (boolean) and
   the statuses `saving`, `save-interrupted`, `save-paused`, `destination-unavailable`,
   `destination-changed` and `saved`. Rows never carry a path, file name or file identity.
+  Transfers UX (PR #51): rows also carry `receivedBytes`, `savedBytes` and `totalBytes` (plaintext
+  byte counts from the saved manifest and the journal's written bytes; all `null` together when
+  native cannot read the manifest) and `savedTo` on a saved row: `"downloads"` when the published
+  journal's recorded folder equals the resolved Downloads folder exactly, `"other"` when the
+  journal was read and its folder differs, `null` when that cannot be told (no resolvable
+  Downloads folder, an unreadable journal) and on every other row. The journal reads run outside
+  the session commit guard, followed by a generation check. The renderer accepts rows without
+  these fields as unknown and names no folder for `null`.
+- `reveal_saved_download(server, download, expectedIntent) -> ()` (Transfers UX, `os-facing`,
+  main window only): the same fenced, bounded, read-only identity check as `check_saved_download`
+  (check slot, 3 s sanctioned-clock wait, same revision and Saved journal before and after, UI
+  session and server entry unchanged), then the system file manager shows the saved file selected
+  (Windows `explorer /select,"<path>"` passed raw so a comma cannot split it, macOS `open -R`,
+  other Unix the folder through `xdg-open` with a trailing `/`; native `reveal_command` builds
+  each form, refuses a Windows path with `"`, and on that other Unix a path with no parent
+  folder). It never
+  opens or runs the file and never returns its path. Refusals are fixed sentences: missing ("The
+  saved file is no longer there."), replaced ("Another file is at the saved name now, so Mewtual
+  did not show it."), could not check, could not open the folder, or the stale-download text.
+  Storage: `saved_file_path(&ExportJournal) -> Result<PathBuf, SavedPresence>` and
+  `ExportJournal::is_in_folder(&Path)`, both native-only.
+- Renderer (fix-the-lows round): `privateDownloadChatLabel(row)` labels the plain save item (file
+  and embed menus, image viewer, file pane) "Save to chosen place" while the file's listed row
+  remembers a Save as choice that item would use, else "Download". Clear of a Saved row runs
+  `check_saved_download` again before it skips the confirmation (the button is `aria-busy` while
+  it runs), and asks unless the answer is `present`.
 
 Rust interfaces:
 
@@ -604,7 +637,12 @@ Rust interfaces:
   Every creation with a captured folder identity re-reads it after creating its partial and
   refuses a swapped folder; creation also requires the partial's name to hold the new partial (a
   read-only check made with the identity recheck through one held folder handle on both
-  platforms, whose failure is the same refusal as a changed folder).
+  platforms). Another folder or object there, or a path leading to no folder, is the
+  changed-folder refusal; a check that could not be made is `ExportError::Local` ("the new file in
+  that folder could not be checked (<system reason>)"), never `Unsupported` (fix-the-lows round,
+  re-review LOW-C).
+  The held folder is kept through creation, and on Windows a refused creation removes its empty
+  partial relative to it (`HeldFolder::remove_session`, re-review LOW-a).
 - The non-resumable fallback writer (native `stream_download_staged`, used when a fresh save
   cannot be journaled) also runs its staging, writes, sync, cleanup and publication link on the
   blocking pool, and `SaveSource::liveness` is rechecked when each queued staging or write worker
@@ -1732,6 +1770,41 @@ pub trait BlobStore {
 }
 pub struct MemoryBlobStore;  pub struct FsBlobStore;  fn open(dir) -> Result<Self>;
 ```
+
+Cache housekeeping (PR #55) adds defaulted methods; stores without a size-limited cache refuse or
+answer `None`, which callers treat as "do not evict":
+
+```rust
+fn cache_scan(&mut self, recover: bool) -> Result<CacheScanReport>; // metadata-only scan; `recover` = mount
+fn cache_index(&self) -> Option<CacheIndex>;     // sizes + mount set + complete; None before a scan
+fn cache_usage(&self) -> Option<CacheUsage>;     // running total, cheap every actor turn
+fn protected_cids(&self) -> Option<BTreeSet<Cid>>; // Studio pins + live holds; None = unknown
+fn retained_chunks(&self) -> BTreeSet<Cid>;      // chunks of checked, completed Keep copies
+SealingBlobStore::open_cache(dir, key, rng)      // primary only: incoming/ + sync + rename writes;
+                                                 // holds <dir>/attach.lock shared; VaultBusy while
+                                                 // a cleanup holds it exclusively
+SealingBlobStore::open_cache_under(dir, key, rng, &AttachExclusive) // cleanup's own handle
+```
+
+`catcoms_storage::cache` holds the temp naming (`<cid>.<pid>.<mount generation>.<seq>`, live
+generations registered process-wide), the scan, the attach lock (`attach_exclusive` →
+`AttachAttempt::{Held, Busy, Failed}`, `remove_attach_lock`; every primary handle holds it shared,
+so an exclusive hold proves the namespace unattached, which the Keep lease cannot: a second attach
+of a group gets no lease), and the leave-cleanup steps (`write_leaving_marker`,
+`has_leaving_marker`, `finish_leaving`, `leaving_namespaces`, `remove_scratch`, `lock_kept`,
+`remove_kept_tree`), each returning freed bytes and failures without following links. `catcoms_app::cache_plan::plan` is the pure eviction planner and
+`catcoms_app::cache_housekeeping` the actor-side runtime (`CacheLimit`, `CacheStatus`,
+`CachePause`, `CacheSetting`). `ServerStore` gains `save_cache_setting` / `load_cache_setting`
+(sealed `servers/<id>.storage`, version 1: group, limit or none, origin; a record for another group
+reads as missing), `cache_namespace_dir`, `blobs_root`, `cache_only_blob_store(key, &held)` and
+`begin_leave_cleanup` (`LeaveBegin::{Ready, NoMarker, Busy, Unavailable}`; `Busy` deletes nothing
+and keeps the marker; `LeaveCleanup::delete_batch` / `finish` → `LeaveReport`). Actor commands:
+`SetCacheLimit`, `CacheStatus`, `CacheProtectionChanged`; events `CacheStatusChanged`,
+`CacheNeedsStudioScan`. Desktop commands: `get_cache_status(server)` (account-read) and
+`set_cache_limit(server, bytes|null)` (account-write, 1 GiB to 1 TiB or null, sealed before the
+actor applies it); event `cache-status { server, status }`; `leave_server` now returns
+`{ freed_bytes, kept_bytes, failed, cleaned }`. `StorageHealth` gains `not_cached_chunks`; `missing_chunks`
+counts only this device's own uploads, and Repair fetches only those and unreadable chunks.
 
 ---
 
@@ -5167,7 +5240,9 @@ the original set before starting work. A successful fallback returns a fresh exa
 after selection publication, preserving global intent/allowance and revoking old lower effects.
 Completed projections remain bound to the committed winner. Old exact-only records are not enriched.
 See the file contract for migration, directory barriers, execution ceilings and current resume limits.
-Remote confirmations and automated retention/eviction are not part of this interface.
+Remote confirmations and holder-aware retention are not part of this interface. Size-limited cache
+eviction (PR #55) never touches Keep copies; it pins in-progress Keeps and drops a cache duplicate
+only for a completed copy checked in this mount (see `BlobStore::retained_chunks` above).
 
 ### Pre-upload video editing (frontend only)
 

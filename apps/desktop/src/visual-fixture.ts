@@ -3,6 +3,7 @@ import type { InvokeArgs } from "@tauri-apps/api/core";
 import { pageOfList, type PageRequest, type UnreadProbe } from "./message-paging.ts";
 import { visualStudioFixtureResponse } from "./visual-studio-fixture.ts";
 import { createVisualFileUploads } from "./visual-file-uploads.ts";
+import { visualTransfersResponse } from "./visual-transfers-fixture.ts";
 
 export const VISUAL_FIXTURE_NOW = Date.UTC(2026, 7, 20, 12, 0, 0);
 
@@ -161,11 +162,17 @@ const BRIDGED = "LOG.TRACING.EVENT";
  * call fail loudly. That is preferable to a screenshot which looks plausible while silently
  * omitting a newly-added backend dependency.
  */
-export function visualFixtureResponse(command: string, payload: InvokeArgs = {}, studio = false): unknown {
+export function visualFixtureResponse(command: string, payload: InvokeArgs = {}, studio = false, transfers = false): unknown {
   const args: Record<string, unknown> =
     Array.isArray(payload) || payload instanceof ArrayBuffer || payload instanceof Uint8Array
       ? {}
       : payload;
+  // `transfers=1`: one private download row in every Transfers state (Transfers UX, PR #51).
+  if (transfers) {
+    const response = visualTransfersResponse(command, args,
+      () => visualFixtureResponse("get_files", payload, studio) as { has_peers: boolean; files: Array<Record<string, unknown>> });
+    if (response.handled) return response.value;
+  }
   if (studio) {
     const response = visualStudioFixtureResponse(command, args, VISUAL_FIXTURE_NOW);
     if (response.handled) return response.value;
@@ -326,6 +333,8 @@ export function visualFixtureResponse(command: string, payload: InvokeArgs = {},
     // A Saved row's read-only file check: one of four words, never a path. The fixture lists no
     // saved rows, so this answers "present" if a captured state ever asks.
     case "check_saved_download": return "present";
+    // Show in folder: native checks the file and opens the system file manager; nothing returns.
+    case "reveal_saved_download": return null;
     case "save_group_file": {
       // Mirrors the native contract: the renderer sends a name and an optional `saveAs` flag,
       // never a path or folder. A fixture "Save as" behaves as if the user closed the dialog, so
@@ -338,9 +347,31 @@ export function visualFixtureResponse(command: string, payload: InvokeArgs = {},
       // A one-click save lands directly in Downloads, which native asserts with `inDownloads`.
       return { path: `C:\\Users\\fixture\\Downloads\\${name}`, displayed: true, inDownloads: true };
     }
+    case "get_cache_status":
+    case "set_cache_limit": {
+      // Lantern Room sits just past the 90% warning so the footer shows its amber bar and the
+      // leaving-soon chip; the DM is calm. A limit choice is echoed back, not persisted.
+      const GIB = 1024 ** 3;
+      const chosen = command === "set_cache_limit" ? (args.bytes as number | null) : 5 * GIB;
+      if (server !== 1) {
+        return { usage_bytes: Math.round(0.4 * GIB), limit_bytes: 5 * GIB, unlimited: false, pinned_bytes: 0,
+          leaving_soon_files: 0, leaving_soon_bytes: 0, nearly_full: false, over_limit: false,
+          held_by_pins: false, paused: null };
+      }
+      const usage = Math.round(4.6 * GIB);
+      return {
+        usage_bytes: usage, limit_bytes: chosen, unlimited: chosen === null,
+        pinned_bytes: Math.round(0.8 * GIB),
+        leaving_soon_files: chosen === null ? 0 : 3,
+        leaving_soon_bytes: chosen === null ? 0 : Math.round(0.4 * GIB),
+        nearly_full: chosen !== null && usage * 100 > chosen * 90,
+        over_limit: chosen !== null && usage > chosen,
+        held_by_pins: false, paused: null,
+      };
+    }
     case "get_storage_health":
       return { listed_files: 2, unique_files: 2, referenced_chunks: 2, verified_chunks: 2,
-        missing_chunks: 0, unreadable_chunks: 0, invalid_manifests: 0, verified_bytes: 2048,
+        missing_chunks: 0, not_cached_chunks: 0, unreadable_chunks: 0, invalid_manifests: 0, verified_bytes: 2048,
         has_peers: true, checked_at_ms: VISUAL_FIXTURE_NOW, logical_bytes: 2048,
         local_estimated_bytes: 2048, pinned_files: 0, pinned_logical_bytes: 0,
         pinned_local_estimated_bytes: 0, categories: [], largest_files: [], local_files: [] };
@@ -761,12 +792,13 @@ export function installVisualFixture(name: string): void {
   // The existing DEV+localhost entry point still owns availability and readiness. Nothing in
   // production recognizes this flag, and default chat fixtures remain byte-for-byte unchanged.
   const studio = new URLSearchParams(window.location.search).get("studio") === "1";
+  const transfers = new URLSearchParams(window.location.search).get("transfers") === "1";
   const uploads = studio ? createVisualFileUploads(ME.repeat(2)) : null;
   mockIPC(
     (command, payload) => {
       const args = payload as Record<string, unknown> ?? {};
       const fileResponse = uploads?.response(command, args);
-      let response = fileResponse?.handled ? fileResponse.value : visualFixtureResponse(command, payload, studio);
+      let response = fileResponse?.handled ? fileResponse.value : visualFixtureResponse(command, payload, studio, transfers);
       if (uploads && command === "get_files") {
         const list = response as { files: unknown[]; has_peers: boolean };
         response = { ...list, files: [...list.files, ...uploads.files(Number(args.server))] };

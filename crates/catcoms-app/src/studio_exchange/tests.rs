@@ -252,6 +252,7 @@ impl Pair {
                     messages_cache: Default::default(),
                     delivery_snapshot_revision: 0,
                     devices_sig: None,
+                    cache: Default::default(),
                 }
             } else {
                 Server::found(

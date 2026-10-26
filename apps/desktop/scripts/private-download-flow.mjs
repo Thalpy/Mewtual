@@ -49,10 +49,14 @@ export const privateDownloadFlowExpression = String.raw`(async () => {
   const tab = [...document.querySelectorAll('.surface-bar button')].find(b => [...b.childNodes]
     .some(node => node.nodeType === Node.TEXT_NODE && node.textContent.trim() === 'transfers'));
   if (!tab) throw new Error('Transfers tab missing'); tab.scrollIntoView({ block: 'nearest', inline: 'nearest' }); tab.click();
-  const rows = () => [...document.querySelectorAll('.downloads-tab .dl-item')];
+  // Transfers UX (PR #51): private downloads are .sdl-row cards (one row per file, carrying a
+  // save's live progress); the live list below keeps .dl-item rows. Disabled row actions use
+  // aria-disabled so their reason stays readable.
+  const rows = () => [...document.querySelectorAll('.downloads-tab .sdl-row, .downloads-tab .dl-item')];
   const row = name => rows().find(r => r.textContent.includes(name));
   const action = (name,label) => [...(row(name)?.querySelectorAll('button') ?? [])].find(b => b.textContent.trim() === label);
-  const click = async (name,label) => { await wait(() => action(name,label) && !action(name,label).disabled,label); action(name,label).click(); };
+  const off = button => !button || button.disabled || button.getAttribute('aria-disabled') === 'true';
+  const click = async (name,label) => { await wait(() => action(name,label) && !off(action(name,label)),label); action(name,label).click(); };
   await wait(() => row('Interrupted drawing.bin'),'saved progress after opening Transfers');
   const out = { disclosure: document.querySelector('.downloads-tab').textContent.includes('Save new copy starts a separate file') };
   await wait(() => row('Changed example.bin'),'changed destination row');
@@ -63,8 +67,8 @@ export const privateDownloadFlowExpression = String.raw`(async () => {
   await wait(() => saving && first.status === 'receiving' && action('Interrupted drawing.bin','Pause'),'active metadata before save reply');
   // While receiving, Resume is not offered at all (absent), so a duplicate save cannot start.
   const duplicate = action('Interrupted drawing.bin','Resume download');
-  out.duplicateDisabled = !duplicate || duplicate.disabled;
-  out.pauseAvailable = !action('Interrupted drawing.bin','Pause').disabled;
+  out.duplicateDisabled = off(duplicate);
+  out.pauseAvailable = !off(action('Interrupted drawing.bin','Pause'));
   await click('Interrupted drawing.bin','Pause');
   await wait(() => !saving && row('Interrupted drawing.bin').textContent.includes('Paused'),'paused encrypted progress');
   out.pausePreservesGrant = first.grant === '1' && first.verifiedChunks === 1;

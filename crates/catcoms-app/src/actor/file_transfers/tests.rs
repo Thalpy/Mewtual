@@ -2173,6 +2173,7 @@ async fn private_download_uses_real_acquisition_and_protected_store_without_publ
         cid,
         gate,
         entered: _entered,
+        clock,
         ..
     } = pair().await;
     let dir = tempfile::tempdir().unwrap();
@@ -2200,8 +2201,11 @@ async fn private_download_uses_real_acquisition_and_protected_store_without_publ
     assert!(requester.sync.kept_files().transfers.is_empty());
     assert!(requester.sync.automatic_keep_candidate(None).is_none());
     for chunk in &ready.manifest.chunks {
-        assert!(!requester.sync.has_blob(&chunk.ciphertext_cid));
-        assert!(requester.sync.get_blob(&chunk.ciphertext_cid).is_none());
+        // Contract changed with cache housekeeping ("saved files propagate"): each verified
+        // chunk is also copied into the shared cache, so this device serves it like a file it
+        // has displayed. The private record itself still never becomes a public source.
+        assert!(requester.sync.has_blob(&chunk.ciphertext_cid));
+        assert!(requester.sync.get_blob(&chunk.ciphertext_cid).is_some());
         let bytes = requester
             .sync
             .read_download_export(
@@ -2213,8 +2217,34 @@ async fn private_download_uses_real_acquisition_and_protected_store_without_publ
         requester.sync.open_file(&bytes, chunk).unwrap();
     }
     assert!(requester.sync.downloads().unwrap()[0].checked);
+    // The unfinished Download pins its cache chunks: even a 1-byte limit keeps them.
+    requester.sync.blob_cache_scan(true).unwrap();
+    requester.set_cache_limit(crate::cache_housekeeping::CacheLimit::Bytes(1));
+    requester.cache_pump();
+    for chunk in &ready.manifest.chunks {
+        assert!(
+            requester.sync.has_blob(&chunk.ciphertext_cid),
+            "pinned by the Download"
+        );
+    }
     requester.sync.cancel_download(ready.id()).unwrap();
     assert!(!ready.is_current());
+    // The read that acquired them still counts as in use for a while.
+    requester.cache_protection_changed();
+    requester.cache_pump();
+    for chunk in &ready.manifest.chunks {
+        assert!(
+            requester.sync.has_blob(&chunk.ciphertext_cid),
+            "recently in use"
+        );
+    }
+    // Once the record is gone and the read is old, they are ordinary cache entries and can leave.
+    clock.advance_ms(crate::cache_housekeeping::IN_USE_MS + 1);
+    requester.cache_protection_changed();
+    requester.cache_pump();
+    for chunk in &ready.manifest.chunks {
+        assert!(!requester.sync.has_blob(&chunk.ciphertext_cid));
+    }
     source.shutdown().await;
     bounded(source_task).await.unwrap();
 }

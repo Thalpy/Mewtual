@@ -15,6 +15,15 @@ export type PrivateDownload = {
   totalChunks: number;
   /** A "Save as" choice is remembered for the next save. Native never sends the place itself. */
   chosenPlace: boolean;
+  /** Plaintext bytes in the private copy, bytes the external save's checkpoint covers, and the
+   * declared size (Transfers UX). All `null` together when native could not read the manifest;
+   * the row then shows chunk counts only. Sizes only, never a path. */
+  receivedBytes: number | null;
+  savedBytes: number | null;
+  totalBytes: number | null;
+  /** Saved rows only: native proved the file sits in the resolved Downloads folder
+   * (`"downloads"`) or not (`"other"`). `null` for every other state. Never a folder name. */
+  savedTo: "downloads" | "other" | null;
 };
 const labels: Record<PrivateDownloadStatus, string> = {
   receiving: "Receiving", incomplete: "Interrupted", ready: "Ready to save",
@@ -76,7 +85,16 @@ const resume = (label: string): PrivateDownloadAction => ({ kind: "resume", labe
 const fresh = (label: string): PrivateDownloadAction => ({ kind: "fresh", label, ghost: false, needsIdle: true });
 const pause: PrivateDownloadAction = { kind: "pause", label: "Pause", ghost: false, needsIdle: false };
 const remove = (label: string): PrivateDownloadAction => ({ kind: "remove", label, ghost: true, needsIdle: false });
-const keep: PrivateDownloadAction = { kind: "keep", label: "Keep partly saved file", ghost: true, needsIdle: false };
+/** Keep on a Removing row releases the record and leaves the file where it is. Once every part
+ * was written (a Clear of a saved file, or a save that had finished writing) that file is
+ * complete, so it is not called partly saved (fix-the-lows round, follow-up "Clear on a saved row
+ * with an unplugged folder"). Native's messages say only "Keep", which fits both labels. */
+const keep = (download: PrivateDownload): PrivateDownloadAction => ({
+  kind: "keep",
+  label: download.savedChunks === download.totalChunks ? "Keep the file" : "Keep partly saved file",
+  ghost: true,
+  needsIdle: false,
+});
 /** "Save as": native opens the OS dialog and the user picks the folder and name for this save. */
 const saveAs: PrivateDownloadAction = { kind: "saveAs", label: "Save as", ghost: true, needsIdle: true };
 /** The actions each typed state offers, in display order. Resume never appears for a changed
@@ -98,7 +116,7 @@ export function privateDownloadActions(download: PrivateDownload, check: SavedCh
     case "destination-changed": return [fresh("Save new copy"), saveAs, remove("Remove")];
     case "saved":
       return [fresh(check === "missing" || check === "replaced" ? "Save again" : "Save another copy"), saveAs, remove("Clear")];
-    case "removing": return [remove("Remove"), keep];
+    case "removing": return [remove("Remove"), keep(download)];
   }
 }
 /** Whether `download` currently offers the resume, fresh-copy or Save as action. */
@@ -119,11 +137,33 @@ export function privateDownloadChatSave(download: PrivateDownload): "resume" | "
     ? "resume" : "transfers";
 }
 
+/** The label of the plain save item (chat and file menus, the image viewer, the file pane). A file
+ * whose row remembers a Save as choice saves to that place from this item too, because the choice
+ * is the destination of its next save until that save begins; the item says so instead of a plain
+ * "Download" (fix-the-lows round, picker review residual). Only where the item continues the row
+ * directly: a row that opens Transfers instead keeps "Download". */
+export function privateDownloadChatLabel(download: PrivateDownload | undefined): string {
+  return download?.chosenPlace && privateDownloadChatSave(download) === "resume" ? "Save to chosen place" : "Download";
+}
+
 /** Native save progress must belong to the exact active invocation. Preview reads and delayed
  * events from an older same-CID save cannot revive a completed/failed/replacement row. */
 export function acceptSaveProgress(transfer: { operation?: string; status: string }, progress: { cancellation: string | null }): boolean {
   return typeof transfer.operation === "string" && progress.cancellation === transfer.operation &&
     transfer.status !== "done" && transfer.status !== "failed";
+}
+/** The three byte counts, `null` together when absent (an older native or an unreadable
+ * manifest), else safe non-negative integers with received and saved within the total. Anything
+ * else is unreadable. */
+function checkedBytes(row: Record<string, unknown>): { receivedBytes: number | null; savedBytes: number | null; totalBytes: number | null } | null {
+  const fields = [row.receivedBytes, row.savedBytes, row.totalBytes];
+  if (fields.every((field) => field === undefined || field === null)) {
+    return { receivedBytes: null, savedBytes: null, totalBytes: null };
+  }
+  if (!fields.every((field) => Number.isSafeInteger(field) && (field as number) >= 0)) return null;
+  const [receivedBytes, savedBytes, totalBytes] = fields as number[];
+  if (receivedBytes > totalBytes || savedBytes > totalBytes) return null;
+  return { receivedBytes, savedBytes, totalBytes };
 }
 export function checkedPrivateDownloads(value: unknown): PrivateDownload[] {
   if (!Array.isArray(value) || value.length > 32) throw new Error("Download progress could not be read.");
@@ -141,10 +181,17 @@ export function checkedPrivateDownloads(value: unknown): PrivateDownload[] {
         row.savedChunks < 0 || row.savedChunks > row.totalChunks) {
       throw new Error("Download progress could not be read.");
     }
+    const bytes = checkedBytes(row);
+    // Where a saved file went: one of two words on a saved row, nothing on any other row.
+    const savedTo = row.savedTo ?? null;
+    if (bytes === null || (savedTo !== null &&
+        (row.status !== "saved" || (savedTo !== "downloads" && savedTo !== "other")))) {
+      throw new Error("Download progress could not be read.");
+    }
     seen.add(row.id);
     // Closed projection: unexpected native properties must not become renderer-held secrets.
     return { id: row.id, cid: row.cid, intent: row.intent, grant: row.grant, status: row.status,
       verifiedChunks: row.verifiedChunks, savedChunks: row.savedChunks, totalChunks: row.totalChunks,
-      chosenPlace: row.chosenPlace } as PrivateDownload;
+      chosenPlace: row.chosenPlace, ...bytes, savedTo } as PrivateDownload;
   });
 }

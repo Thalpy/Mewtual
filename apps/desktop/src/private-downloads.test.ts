@@ -1,12 +1,14 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import {
-  acceptSaveProgress, checkedPrivateDownloads, checkedSavedCheck, privateDownloadActions, privateDownloadChatSave,
+  acceptSaveProgress, checkedPrivateDownloads, checkedSavedCheck, privateDownloadActions, privateDownloadChatLabel,
+  privateDownloadChatSave,
   privateDownloadDetail, privateDownloadLabel, privateDownloadOffers, privateDownloadSaveAsIsNewCopy,
   type PrivateDownload, type SavedCheck,
 } from "./private-downloads.ts";
 const row = { id: "ab".repeat(32), cid: "cd".repeat(32), intent: "18446744073709551615", grant: "2",
-  status: "incomplete", verifiedChunks: 1, savedChunks: 0, totalChunks: 2, chosenPlace: false };
+  status: "incomplete", verifiedChunks: 1, savedChunks: 0, totalChunks: 2, chosenPlace: false,
+  receivedBytes: 8, savedBytes: 0, totalBytes: 16, savedTo: null };
 const statuses = ["receiving", "incomplete", "ready", "paused", "exhausted", "blocked", "removing",
   "saving", "save-interrupted", "save-paused", "destination-unavailable", "destination-changed", "saved"] as const;
 const as = (status: PrivateDownload["status"], extra: Partial<PrivateDownload> = {}): PrivateDownload =>
@@ -83,6 +85,25 @@ test("saving from the file list only continues obvious states and otherwise open
   for (const status of statuses) {
     assert.equal(privateDownloadChatSave(as(status)), resumes.has(status) ? "resume" : "transfers", status);
   }
+});
+test("the plain save item names a remembered choice it would use instead of a plain Download", () => {
+  // Fix-the-lows round (picker review residual): the item used to say "Download" while a
+  // remembered Save as choice redirected it.
+  const resumes = new Set(["ready", "incomplete", "paused", "blocked", "save-interrupted", "save-paused"]);
+  for (const status of statuses) {
+    assert.equal(privateDownloadChatLabel(as(status, { chosenPlace: true })),
+      resumes.has(status) ? "Save to chosen place" : "Download", status);
+    assert.equal(privateDownloadChatLabel(as(status)), "Download", `${status}: no choice remembered`);
+  }
+  assert.equal(privateDownloadChatLabel(undefined), "Download", "a file with no row");
+});
+test("Keep on a Removing row calls a complete file complete", () => {
+  // Fix-the-lows round (follow-up "Clear on a saved row with an unplugged folder").
+  const keep = (extra: Partial<PrivateDownload>) =>
+    privateDownloadActions(as("removing", extra)).find((a) => a.kind === "keep")!.label;
+  assert.equal(keep({ savedChunks: 2, totalChunks: 2 }), "Keep the file");
+  assert.equal(keep({ savedChunks: 1, totalChunks: 2 }), "Keep partly saved file");
+  assert.equal(keep({ savedChunks: 0, totalChunks: 2 }), "Keep partly saved file");
 });
 test("detail lines count the right progress and use no separators or dashes", () => {
   assert.equal(privateDownloadDetail(as("incomplete")), "Interrupted, 1 of 2 chunks received");

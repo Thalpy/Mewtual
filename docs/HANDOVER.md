@@ -1,5 +1,48 @@
 # Mewtual; Handover
 
+## Cache housekeeping (26 October, PR #55, stacked on #51)
+
+Each server's encrypted cache on a device now has a per-server size limit, crash-safe writes and
+cleanup on leave ([design](design-cache-housekeeping.md), owner decisions recorded there).
+
+- **Limit and order.** On by default at 5 GiB per server (1 GiB to 1 TiB or No limit, sealed in
+  `servers/<id>.storage`). Upgrades start at `max(5 GiB, usage / 0.8)`, or No limit above 1 TiB,
+  so nothing is dropped on update. Over the limit, unclaimed blobs from before the mount go first,
+  then listed chunks by the newest listing position naming them. A chunk a checked, completed
+  Keep copy holds is always dropped in favour of that copy.
+- **Pins** (chunk sets from owners' saved plans): Keep in progress, Downloads, files read in the
+  last ten minutes, this device's verified uploads, Studio protection. An unreadable index, Keep or
+  Download plans, or unknown Studio protection pause eviction; over-cap rows or a missing profile
+  document skip the unclaimed class only. Wiki embeds and "Never expires" (renamed from "Keep
+  forever") are not pins.
+- **Runtime.** The planner (`cache_plan`) is pure; the actor (`cache_housekeeping`) runs bounded
+  batches, at most one pass per 30 s plus a full evaluation per minute, and emits coalesced
+  `cache-status` events. A desktop Studio-reference service runs `creative_pinned_cids` per
+  unlock, after attaches and on request, rate-limited with backoff.
+- **Writes.** The primary cache writes `incoming/<cid>.<pid>.<generation>.<seq>`, syncs, renames;
+  mount recovery removes temps no live handle owns and torn sealed records. Keep's stores are
+  unchanged.
+- **Saved files propagate.** Verified Download chunks are also cached, so this device serves them.
+- **Leave.** Every Leave entry point confirms, naming Keep copies and unfinished Downloads. The
+  bridge claims the group, writes a marker before `remove_server`, then (after the registry
+  persisted) empties the namespace in batches without the store lock, keeps Studio-referenced
+  blobs, removes `kept/` wholesale and reports freed, kept and failed bytes. Interrupted cleanups
+  resume after an unlock in which every server restored; a rejoin finishes the non-cache part.
+  Every primary cache handle holds `<namespace>/attach.lock` shared; cleanup needs it exclusively
+  (the Keep lease could not prove "unattached": a second attach of a group, such as a join while
+  the group's server runs, gets no lease). A busy lock deletes nothing and keeps the marker.
+- **Storage health** reports other members' absent chunks as not cached; Repair fetches only
+  corrupt chunks and chunks missing from this device's own uploads.
+- **UI.** Footer cache segment (bar, %, "N leaving soon" past 90%), Server settings → Storage.
+- **Contract changes:** private Downloads now fill the cache (test and the six-client test
+  renamed); `leave_server` returns a report; Storage health's `missing_chunks` narrowed.
+- **Limits:** no holder probe; caches left before this change are not cleaned; usage counts sealed
+  file lengths; expiry unenforced.
+
+Validation (focused, per the CI-first process): storage, app and desktop cache tests, the
+contract-changed tests, command ACL, full frontend suite, `npm run check`/`build`, strict Clippy
+(root changed crates and desktop), fmt, ambient and raw-fs gates; complete suites run in CI.
+
 ## Validated proof retention and automatic cleanup retry (22 October)
 
 Frozen runtime `edf923c107f3d11bf635a3e58a04e0b673edd7c1` passed the current native/frontend/static/build gates.
@@ -1177,6 +1220,33 @@ Linux-only storage tests also pass in WSL Ubuntu (Rust 1.89 installed there for 
 manual: a real Save as dialog per OS, Pause/Lock during real writes, restart after an interrupted
 save, FAT/exFAT/SMB/ReFS/OneDrive volumes, power loss, and macOS. The acceptance ledger has the
 same summary.
+
+Transfers UX (24 October, on top of `95eaeda6`): one row per file (a save's live progress shows in
+its private download row, and the live list leaves that file out), rows grouped Needs you / In
+progress / Saved with an icon and a word per state, a byte bar ("3.1 MB / 12.4 MB", 1000-based,
+no percentage) plus the chunk count, one checked sentence per state, "Saved to Downloads" or
+"Saved to another folder" with Show in folder (new `os-facing` command `reveal_saved_download`),
+inline Confirm remove, file-specific accessible names, disabled reasons, one polite live region
+for state changes. Native rows carry byte counts and `savedTo`. Deferred to a follow-up PR (owner
+decision): "Replace my older saved copy", which needs a durable record of saved copies first. On
+hold (owner): keeping finished saves listed; a finished save still releases its row (and its
+private copy) and shows done in the live list, so a Saved row is only an interrupted cleanup's
+leftover. A row reads Saving from the first written byte of its save. An adversarial review and a
+re-review found no blocker or high; their mediums (Saving state, unproven "another folder", focus
+handling) are fixed. `cargo deny` now fails on RUSTSEC-2026-0387 (`crypto-bigint` through `p256`),
+published after `95eaeda6` and unrelated to this work. Details, dispositions and the ledger are in
+the design document's Transfers UX section.
+
+Fix-the-lows round (24 October, on top of `3f14ee2e`; focused checks only, CI runs the suites):
+Clear on a Saved row checks the file again before skipping its confirmation; Explorer gets
+`/select,"<path>"` (a comma no longer splits it) and `xdg-open` the folder with a trailing `/`
+(never the file itself); a name check that could not be made is no longer reported as "the folder
+changed"; on Windows a refused creation removes its empty partial through the held folder even
+after a junction retarget; a stale list's one-click start no longer interrupts a running
+journaled save; the plain save item reads "Save to chosen place" while a Save as choice would be
+used; a stuck Clear offers "Keep the file" and native's messages describe a temporary copy. The
+remaining items, each with its reason (no safe API, macOS, out of scope), are in the design
+document's "Fix-the-lows round" section.
 
 ## Chat history adversarial checkpoint (2026-10-20)
 
@@ -7846,10 +7916,11 @@ lives in `App.svelte`: it has been extracted into `apps/desktop/src/call-audio.t
   (9h-a), so files/avatars survive a restart and are encrypted at rest under `blob_key`;
   deleting a file reclaims its orphaned chunk blobs while keeping any chunk another file
   references (dedup-safe GC). `MemoryBlobStore` remains the pre-unlock/test path and is
-  size-bounded (`DEFAULT_BLOB_BUDGET` 128 MiB, **FIFO**, 8s). What's still missing is the
-  `catcoms-storage` **retention engine**: eviction is not holder-probe-aware, so it can
-  drop the **last copy** of a blob (re-fetchable only while some holder is online), and
-  there is no disk quota/expiry enforcement on the sealing store.
+  size-bounded (`DEFAULT_BLOB_BUDGET` 128 MiB, **FIFO**, 8s). Since PR #55 the sealing store
+  has a per-server cache limit (default 5 GiB, oldest listings first, pins for Keep, own
+  uploads, Studio, files in use and Downloads), crash-safe writes and leave cleanup; see the
+  top section. Still missing: the **holder probe** (the limit can drop the last copy of a
+  file other members uploaded) and any **expiry** enforcement; `RetentionIndex` stays unwired.
 - **Persistence + encryption-at-rest are DONE (Phase 9); the residuals are recovery
   ergonomics.** [`design-persistence.md`](design-persistence.md) is the design; it shipped
   as 9a–9h: a passphrase-sealed key vault, per-server snapshots (MLS + docs + routing +

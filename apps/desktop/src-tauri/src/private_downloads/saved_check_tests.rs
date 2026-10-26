@@ -157,6 +157,136 @@ async fn a_stale_check_never_relabels_a_newer_row() {
     );
 }
 
+/// "Show in folder" (Transfers UX): the saved-check fake plus a scripted locate and a recorded
+/// reveal.
+struct RevealFake {
+    check: Fake,
+    /// `None`: the check never answers.
+    located: StdMutex<Option<Result<PathBuf, SavedPresence>>>,
+    revealed: StdMutex<Vec<PathBuf>>,
+    reveal_fails: AtomicBool,
+}
+impl RevealFake {
+    fn new(
+        saved: Vec<Option<(u64, ExportJournal)>>,
+        located: Option<Result<PathBuf, SavedPresence>>,
+    ) -> Self {
+        Self {
+            check: Fake::new(saved, None),
+            located: StdMutex::new(located),
+            revealed: StdMutex::new(Vec::new()),
+            reveal_fails: AtomicBool::new(false),
+        }
+    }
+}
+#[async_trait::async_trait]
+impl SavedCheckPorts for RevealFake {
+    async fn saved(&self) -> Result<Option<(u64, ExportJournal)>, String> {
+        self.check.saved().await
+    }
+    async fn presence(&self, journal: ExportJournal) -> Result<SavedPresence, String> {
+        self.check.presence(journal).await
+    }
+    async fn wait(&self, delay: Duration) {
+        self.check.wait(delay).await;
+    }
+    async fn current(&self) -> bool {
+        self.check.current().await
+    }
+}
+#[async_trait::async_trait]
+impl SavedRevealPorts for RevealFake {
+    async fn locate(
+        &self,
+        _journal: ExportJournal,
+    ) -> Result<Result<PathBuf, SavedPresence>, String> {
+        let answer = self.located.lock().unwrap().clone();
+        match answer {
+            Some(answer) => Ok(answer),
+            None => std::future::pending().await,
+        }
+    }
+    fn reveal(&self, path: &Path) -> Result<(), String> {
+        if self.reveal_fails.load(AtomicOrdering::SeqCst) {
+            return Err(format!(
+                "could not start a file manager for {}",
+                path.display()
+            ));
+        }
+        self.revealed.lock().unwrap().push(path.to_owned());
+        Ok(())
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn show_in_folder_reveals_only_a_file_proven_ours_and_never_returns_its_path() {
+    let (root, journal, _) = journals();
+    let path = root.path().join("Downloads").join("notes.txt");
+    let saved = || Some((7, journal.clone()));
+    let fake = RevealFake::new(vec![saved(), saved()], Some(Ok(path.clone())));
+    assert_eq!(reveal_saved_sequence(&fake, 7).await, Ok(()));
+    assert_eq!(*fake.revealed.lock().unwrap(), vec![path.clone()]);
+    // Each refusal is a fixed sentence with no path, and nothing is revealed.
+    for (located, message) in [
+        (Err(SavedPresence::Missing), REVEAL_MISSING),
+        (Err(SavedPresence::Replaced), REVEAL_REPLACED),
+        (Err(SavedPresence::Unknown), REVEAL_UNCHECKED),
+    ] {
+        let fake = RevealFake::new(vec![saved(), saved()], Some(located));
+        assert_eq!(reveal_saved_sequence(&fake, 7).await, Err(message.into()));
+        assert!(fake.revealed.lock().unwrap().is_empty());
+        assert!(!message.contains("Downloads") && !message.contains("notes"));
+    }
+    // A file manager that cannot start reports the fixed sentence, not the OS error with a path.
+    let fake = RevealFake::new(vec![saved(), saved()], Some(Ok(path)));
+    fake.reveal_fails.store(true, AtomicOrdering::SeqCst);
+    assert_eq!(
+        reveal_saved_sequence(&fake, 7).await,
+        Err(REVEAL_FAILED.into())
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn show_in_folder_is_bounded_and_fenced_like_the_saved_check() {
+    let (root, journal, other) = journals();
+    let path = root.path().join("Downloads").join("notes.txt");
+    // A check that never answers ends with the bounded wait and reveals nothing.
+    let fake = RevealFake::new(
+        vec![Some((7, journal.clone())), Some((7, journal.clone()))],
+        None,
+    );
+    let answered = tokio::time::timeout(Duration::from_secs(20), reveal_saved_sequence(&fake, 7))
+        .await
+        .expect("the bounded wait ends it");
+    assert_eq!(answered, Err(REVEAL_UNCHECKED.into()));
+    assert!(fake.revealed.lock().unwrap().is_empty());
+    // A row that changed before or while it ran, or Lock: nothing is revealed.
+    for reads in [
+        vec![Some((8, journal.clone()))],
+        vec![None],
+        vec![Some((7, journal.clone())), Some((8, journal.clone()))],
+        vec![Some((7, journal.clone())), Some((7, other.clone()))],
+        vec![Some((7, journal.clone())), None],
+    ] {
+        let fake = RevealFake::new(reads, Some(Ok(path.clone())));
+        assert_eq!(
+            reveal_saved_sequence(&fake, 7).await,
+            Err(STALE_DOWNLOAD.into())
+        );
+        assert!(fake.revealed.lock().unwrap().is_empty());
+    }
+    let fake = RevealFake::new(
+        vec![Some((7, journal.clone())), Some((7, journal))],
+        Some(Ok(path)),
+    );
+    fake.check.current.store(false, AtomicOrdering::SeqCst);
+    assert_eq!(
+        reveal_saved_sequence(&fake, 7).await,
+        Err("The download is no longer active.".into())
+    );
+    assert!(fake.revealed.lock().unwrap().is_empty());
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn the_production_check_is_bounded_and_read_only() {
     let (root, journal, _) = journals();

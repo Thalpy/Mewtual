@@ -22,7 +22,7 @@ pub(super) enum WritePhase {
 
 /// Unlike the legacy file-flush-only storage seam, V2 allowance publication requires the
 /// directory barrier too. A failed/unsupported barrier cannot authorize a request or refund work.
-pub(super) fn directory_barrier(path: &Path) -> Result<(), StorageError> {
+pub(crate) fn directory_barrier(path: &Path) -> Result<(), StorageError> {
     // Review U-M6: directory-only and non-blocking, so a FIFO put at a destination folder path
     // fails at once instead of hanging the flush (which runs after the destination publication).
     #[cfg(unix)]

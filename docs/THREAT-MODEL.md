@@ -1,5 +1,59 @@
 # Threat model; client integrity & enforcement boundaries
 
+## Cache housekeeping boundary (26 October, PR #55)
+
+Each server's encrypted cache on a device (`blobs/<group>/`) now has a per-device size limit,
+crash-safe writes and leave cleanup ([design](design-cache-housekeeping.md)).
+
+- **Local only.** The limit, the eviction order and the pins are local. Nothing is replicated or
+  sent to members, and there is no wire change: a member asking for an evicted chunk gets the
+  same empty reply, Absent or Unavailable as for a chunk this device never held.
+- **No holder probe.** Eviction does not check that another member still holds a file, so a small
+  limit can drop the last copy anyone has. This device's own verified uploads are pinned, which
+  covers the usual sole holder. Unsigned legacy uploads are not.
+- **Members influence order, not pins.** Order is listing position: the newest live row naming a
+  chunk. A member who can rewrite index rows at the CRDT level can reorder files or unlist them,
+  which is no more than unlisting already allows. A claimed timestamp is never trusted. Wiki
+  embeds and "Never expires" are circulation rules any member can set for everyone, so they are
+  deliberately not cache pins. A hostile listing can name another blob as a chunk of an old fake
+  file: profile images, pinned chunks and newer listings' chunks are protected, and anything
+  else it names can leave early and is fetched again on demand.
+- **Pins fail closed.** Keep in progress, Downloads, files in use, own uploads and Studio
+  protection are chunk-address sets from their owners' saved plans. An unreadable index,
+  unreadable Keep or Download plans, or unknown Studio protection pause eviction; rows past the
+  256-row cap or a missing profile document skip only the unclaimed class, so one member cannot
+  switch off everyone's limit. Studio's guard re-checks under its mutex through each unlink.
+- **Keep duplicates.** A cache chunk is dropped in favour of a completed Keep copy only after that
+  copy's whole-file check passed in this mount; after a restart the duplicate stays until a check
+  succeeds.
+- **Crash safety.** Primary cache writes go to `incoming/`, are synced and renamed, so a CID name
+  never holds a torn record. There is no per-write directory flush: power loss can lose a renamed
+  entry (fetched again), not tear it. Mount recovery removes temporary files no live handle owns
+  and sealed records shorter than 40 bytes. Keep's own stores keep their earlier write path.
+- **Saved files serve.** A verified Download chunk is also put in the shared cache, so a member
+  asking for it can learn this device holds the file, as for any file it has displayed.
+- **Leave cleanup** runs under an in-process claim per group (attach waits on it), which a leave
+  takes before it stops the server, while that server's handle still holds the Keep lease. Any
+  handle still open at cleanup time therefore attached while the lease was held and has a faulted
+  Keep store with no copies of its own, which is what makes keeping the marker on a busy namespace
+  safe (residual: if the leaving server itself attached second and the lease owner has gone, a
+  third attach could get a healthy Keep; that needs three attaches of one group in one mount).
+  Alias rows left together run one after the other, and the last one cleans. It starts only
+  if the marker is still present and it can take the namespace's `attach.lock` exclusively. Every
+  primary cache handle holds that lock shared for its lifetime, including a second attach of the
+  same group that could not get the Keep lease, so a rejoin or an unregistered join that attached
+  first is never emptied. The exclusive hold and the Keep lease are kept to the end. A busy lock
+  deletes nothing and keeps the marker (the holder may be the leaver's own handle still dropping),
+  and a rejoin over a marker skips its scratch and `kept/` removal while another handle is open.
+  It deletes only CIDs enumerated after a complete Studio scan, removes `kept/` wholesale, keeps
+  its marker while anything failed, and resumes after an unlock in which every server restored.
+  Leaving is confirmed in the UI with the Keep copies and unfinished Downloads it deletes, or a
+  warning when those could not be checked.
+- **Not claimed:** physical power-loss evidence, filesystem allocation (usage counts sealed file
+  lengths), cleanup of caches left before this change, expiry enforcement, or the attach lock on
+  NFS (Linux emulates `flock` there with per-process locks, so a second lock in the same process
+  succeeds; the vault and Keep locks share that assumption).
+
 ## Switchable V2 voice transport and pinned call mode (22 October, branch only)
 
 Kind-28 dispatch and the V2 scheduler (`catcoms-sync/src/voice_schedule.rs`) exist behind a local
@@ -576,7 +630,9 @@ prepayment and native/browser activation remain unimplemented and V2 dispatch st
 Sealed Download ownership has its own domain and canonical random-ID directory, sharing the
 retained quota and exclusive mount with Keeps. Purpose and full MLS group/device scope are checked
 before pending-journal reconciliation. A CID match grants no cross-purpose cleanup or run access.
-Public blob reads/source preparation exclude all Downloads, including completed copies. Private
+Public blob reads/source preparation exclude all Downloads, including completed copies (since cache
+housekeeping, each verified Download chunk is also copied into the ordinary cache, which does
+serve; the private record itself still never does). Private
 export requires exact issuing mount AND transfer-generation identity, saved chunk bounds and
 whole-file verification. Original actor freeze/thaw, Root/epoch, account/entry, Pause/removal and
 remount revoke old effects; cleanup of a committed export cannot remove a later verification run.
@@ -621,6 +677,11 @@ writer keeps those properties.
   name with delete access and without delete sharing, without following a reparse point, verifies
   that handle and deletes through it, so nobody can rename, replace or delete the name meanwhile
   (guaranteed against every process); no attribute is ever changed, through a path or a handle.
+  One exception: a creation refused after its folder recheck removes its own empty partial
+  relative to the held folder handle (fix-the-lows round), and fs_at opens that name sharing
+  delete, so another process could rename it between the check and the delete. The delete still
+  goes through the handle whose identity was verified, so it can only remove that object, our
+  never-published empty partial.
   Unix has no delete-by-inode, so the guarantee is narrower: **automatic deletion is guaranteed
   only against processes running as other accounts.** In a folder other accounts can modify (owner
   neither us nor root, or group- or other-writable without the sticky bit; a group-writable folder
@@ -671,8 +732,14 @@ writer keeps those properties.
   otherwise, even if a file was planted at our name. The recheck reads the folder identity and the
   name through one held folder handle (Unix: a descriptor and `openat`; Windows: a directory handle
   and fs_at's handle-relative open), so a third swap, or a junction retargeted on the way, cannot
-  pass it, and a failed check is the same refusal as a changed folder (never a quiet switch to the
-  non-resumable writer). Before that, the Windows name check was the path-based link probe alone:
+  pass it. A check that finds another folder or another object, or a path that leads to no folder
+  any more, is the changed-folder refusal; one that cannot be made (descriptor exhaustion, an I/O
+  error, a folder its owner cannot read) says the new file could not be checked, with the
+  system's reason; neither is ever a quiet switch to the non-resumable writer.
+  The folder handle that passed is kept for the rest of creation: on Windows a junction retargeted
+  after the recheck (the link probe then reports a changed folder) no longer strands our empty
+  partial, which is removed relative to that handle, still only once its identity proves it ours.
+  Before that, the Windows name check was the path-based link probe alone:
   retargeting a junction to another folder just before it let the whole plaintext be written into
   that folder, with publication then halting and Remove unable to clean it there (the
   coordinator's review L1). The Unix name check was lost when PR51 M3 replaced the Unix link probe
@@ -694,8 +761,10 @@ writer keeps those properties.
 - **Save as.** Native opens the OS dialog itself; the renderer sends only a flag and the command's
   parameter list is pinned so no path can be added. The chosen place authorizes saves of that one
   Download only: it stays the destination of every save of it (a later plain one-click Download
-  of the same file included) until a save begins there, a newer Save as replaces it or the record
-  is released. It is never logged (`rfd` logs only in backends this build does not compile), and
+  of the same file included; its file and embed menu items, image viewer and file pane button then
+  read "Save to chosen place" when the Transfers list shows the row, while the attachment chip,
+  the .pixa viewer's button and Unlock copy still do not say so) until a save begins there, a
+  newer Save as replaces it or the record is released. It is never logged (`rfd` logs only in backends this build does not compile), and
   persists only in the sealed record. An explicit Resume of a completed copy checks a remembered
   place read-only before spending allowance. An existing name is refused even if the dialog asked to
   replace it. The peer-chosen suggestion is sanitized (Windows device names including `COM¹` and
@@ -711,6 +780,26 @@ writer keeps those properties.
   included (R2-M3). A cloud-synced or shared chosen folder (for example OneDrive Desktop or Documents)
   uploads the partial plaintext and the probe name as they are written. A chosen folder inside the
   app's own data or vault folder is not refused (documented, not enforced).
+- **Transfers rows and Show in folder (Transfers UX, PR #51).** The row projection now also
+  carries plaintext byte counts (received, saved, declared total) and, for a saved row, one word
+  saying whether its recorded folder is exactly the resolved Downloads folder. Sizes and that word
+  only: no path, folder or file name reaches the renderer through them. `reveal_saved_download`
+  is `os-facing`: it takes a Download ID and revision, runs the same bounded read-only identity
+  check as the saved-file check, then asks the system file manager to show the file selected; it
+  never opens or runs it and returns no path. The check and the reveal are separate steps, so
+  another account able to rename entries in that folder could swap the name between them; the
+  file manager then shows the swapped-in file selected, still without opening it. On Linux and
+  other non-macOS Unix the reveal hands the folder to `xdg-open`, with a trailing `/`, so a
+  launcher that resolves the path itself refuses a file swapped in for that folder in the same
+  window instead of opening it; a launcher that normalizes the path first (GIO may drop the slash)
+  would still open such a file (only someone able to rename the folder's parent could arrange it;
+  the complete fix is the file manager's D-Bus `ShowItems`, a new dependency, not taken). A path
+  with no parent folder is refused rather than handed to `xdg-open` itself. Windows passes the path
+  quoted inside `/select,"<path>"` (raw, so it is not quoted twice), which keeps a comma in the
+  saved name from splitting it; a path containing `"` (no Windows name can) is refused. A
+  compromised renderer can call it repeatedly: the two saved-check slots bound how many checks run
+  at once, not how many windows open, which matches opening links (`open_external_url` has no
+  bound either); the windows show Mewtual's own saved files only.
 - **Fences.** In-session journal transitions require the original export lease; the Resume
   preflight's edges require a preflight observation bound to the actor lifetime, Root authority,
   storage mount and transfer epoch, plus an exact journal CAS; all require the original native
@@ -2774,9 +2863,10 @@ table with the commit that closed it.
   passive-fetch policy. Bytes fetched into the blob store occupy one authenticated,
   XChaCha20-Poly1305-sealed vault copy; explicit export creates a separate plaintext Downloads copy.
   This reduces unsolicited decoder exposure but does **not** sandbox a decoder or make a trusted
-  member's file benign. Automatic whole-share mirroring remains unimplemented because the sealing
-  disk store has no quota; enabling it first would permit storage exhaustion even by an opted-in
-  trusted member.
+  member's file benign. Automatic whole-share mirroring remains unimplemented. The sealing disk
+  store now has a per-server cache limit (see "Cache housekeeping boundary"), but that bounds the
+  cache by dropping old listings, so mirroring everything would still churn the cache and
+  amplify traffic; it is not enabled.
   Third-party HTTP(S) images always require a click, even under everyone mode: they have no file
   attestation, disclose the client address, and may target loopback/private-network services.
   **Third-party player frames** (cards in chat for any of the allow-listed embed hosts, and YouTube
