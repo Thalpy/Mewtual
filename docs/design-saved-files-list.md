@@ -1,8 +1,9 @@
 # Saved-files list
 
 Status: owner's decisions recorded on 24 October 2026; concrete design added on 26 October 2026
-(below "Design"), before its read-only design review. This PR is stacked on the cache
-housekeeping PR, which is stacked on PR #51 (`communication-external-download`).
+(below "Design") and revised after its read-only design review (revision 2; dispositions at the
+end). This PR is stacked on the cache housekeeping PR, which is stacked on PR #51
+(`communication-external-download`).
 
 ## Why
 
@@ -62,7 +63,7 @@ storage crate constructs):
 ```
 bytes  domain     "mewtual/saved-files" (exact; a different record moved here reads as unreadable)
 u8     version    1
-bytes  group      1..=256 bytes; must equal the server's group id
+bytes  owner      1..=512 bytes: the server's group id followed by this device's member id in it
 u32    count      0..=256
 count times, oldest first:
   bytes  id         16 bytes, random (catcoms-rt RNG); the renderer's handle for actions
@@ -78,26 +79,43 @@ count times, oldest first:
     bytes file_id   25 bytes, likewise
 ```
 
-Rules checked on decode: ids unique, CIDs unique (**one entry per file**), count and lengths in
-bounds, no trailing bytes, and the whole plaintext at most 1 MiB (a 256-entry list of maximal paths
-would be about 4.5 MiB, so the size bound, not the count, is what caps a list of very long folder
-paths; typical entries are about 200 bytes). The reader reads at most 1 MiB plus the seal overhead.
+Rules checked on decode: ids unique, **one entry per saved copy** (no two entries name the same
+place: the same folder and name, or the same file identity), count and lengths in bounds, no
+trailing bytes, and the whole plaintext at most 1 MiB (a 256-entry list of maximal paths would be
+about 4.5 MiB, so the size bound, not the count, is what caps a list of very long folder paths;
+typical entries are about 200 bytes). The reader reads at most 1 MiB plus the seal overhead.
 
-**Cap: 256 entries per server** (proposed; it matches the file index's own 256-row cap, so a list
-can hold one entry for every file a server can list at once). Adding an entry first removes the
-existing entry for the same CID, appends the new one, then drops the oldest entries until both
-bounds hold. Dropping an entry only forgets it; it never touches a file.
+**Several copies of one file** (revision 2, review M1): saving the same file twice makes two copies
+on disk, so the list keeps two entries and Transfers shows two rows, each with its own name. A
+newer entry replaces an older one only when both name the same place (the same folder and name,
+compared case-insensitively for Windows entries, or the same file identity): that name now holds
+the newer copy, so the older entry's file is certainly not there any more. A replace that does not
+happen therefore never forgets the earlier copy.
+
+**Cap: 256 entries per server** (proposed; it matches the file index's own 256-row cap). Adding an
+entry appends it as the newest, then drops the oldest entries until both bounds hold. Dropping an
+entry only forgets it; it never touches a file.
+
+**Owner binding** (revision 2, review L3): the record names the group and this device's member id
+for it. Leaving and joining again makes a new member id, so a record that survived a leave (a failed
+`remove_server`, or one an older build left) reads as `Missing` and is written over instead of
+bringing back the old list.
 
 **Loading** returns one of:
 
-- `Missing`: no record, or a record naming another group (a stale file under a reused server
-  number). Reads as an empty list; the next save writes a fresh record over it.
+- `Missing`: no record, or a record naming another owner (another group, or an earlier membership
+  of this one). Reads as an empty list; the next save writes a fresh record over it.
 - `Found(list)`.
-- `Unreadable`: a damaged record, another domain, or a version this build does not know (a newer
-  Mewtual wrote it). **Non-destructive**: nothing writes, rewrites or removes it except leaving the
-  server. Saves still succeed but are not recorded (the result says so), Clear and Show in folder
-  refuse, no replace runs, and Transfers says the list could not be read. Going back to a build
-  that reads it restores everything.
+- `Newer`: a version this build does not know (a newer Mewtual wrote it). **Never written over or
+  removed** except by leaving the server; going back to a build that reads it restores everything.
+- `Damaged`: it unseals to something that is not a valid list, or does not unseal. Left alone too,
+  except by an explicit "Start a new list" in Transfers (revision 2, review L4), which replaces only
+  a record that still reads as `Damaged`.
+- `Unavailable`: it could not be read right now (an I/O error, for example another program holding
+  it). Left alone; the next attempt reads again.
+
+In the last three cases saves still succeed but are not recorded (the result says so), Clear and
+Show in folder refuse, no replace runs, and Transfers says the list could not be read.
 
 **Who writes it, and when.** Native, right after a save publishes, under the store lock and then
 the registry lock, after checking that the server entry is still the same incarnation (`instance`).
@@ -134,10 +152,11 @@ All four are fenced on the UI session generation and the server incarnation like
 
 | Command | Risk | Does |
 | --- | --- | --- |
-| `get_saved_files(server)` | account-read | `{ readable, files: [{ id, cid, name, savedAt, size, savedTo, checkable }] }`, newest first. `name` is the saved file's own name (the leaf, for example `report (1).pdf`), `savedTo` is `"downloads"` when the folder equals the resolved Downloads folder exactly, `"other"` otherwise, `null` when no Downloads folder resolves; `checkable` is "has identity". |
-| `check_saved_files(server)` | account-read | Checks every checkable entry read-only (folder identity, then a no-follow open of the leaf compared by identity), newest first, in **one** blocking worker holding one of PR #51's two check slots, for at most 5 s on the sanctioned clock (a stop flag ends the worker between entries); returns `{ id, name, check }` for each entry checked, only for entries unchanged in a re-read of the list afterwards. Anything not reached is left out (the renderer shows "could not check"). |
+| `get_saved_files(server)` | account-read | `{ state, files: [{ id, cid, name, savedAt, size, savedTo, checkable }] }`, newest first. `state` is `"ok"`, `"newer"`, `"damaged"` or `"unavailable"` (files only with `"ok"`). `name` is the saved file's own name (the leaf, for example `report (1).pdf`), `savedTo` is `"downloads"` when the folder equals the resolved Downloads folder exactly, `"other"` otherwise, `null` when no Downloads folder resolves; `checkable` is "has identity from this platform". |
+| `check_saved_files(server)` | account-read | Checks every checkable entry read-only, newest first: the folder is held by one handle and checked against its identity, then the name is opened relative to it with attributes-only access (revision 2, review L6: no read access, so antivirus and other programs' share modes do not delay it) and compared by identity. One blocking worker holding one of PR #51's two check slots, at most 5 s on the sanctioned clock (a stop flag ends the worker between entries); returns `{ id, name, check }` for each entry checked, only for entries unchanged in a re-read of the list afterwards. Entries not reached are left out and read as not checked yet, never as "could not check". |
 | `reveal_saved_file(server, entry)` | os-facing | PR #51's `reveal_saved_sequence` over an entry: the bounded read-only check (3 s), the list re-read and compared, the session rechecked, then the file manager shows the file selected. Same fixed refusals. |
-| `forget_saved_file(server, entry)` | account-write | Removes the entry (Clear). Never touches the file. Refused while the list is unreadable. |
+| `forget_saved_file(server, entry)` | account-write | Removes the entry (Clear). Never touches the file. Refused while the list is not readable; writes nothing when the entry is already gone. |
+| `reset_saved_files(server)` | account-write | "Start a new list": writes an empty list only while the record still reads as `Damaged`. Refused otherwise (a newer version's record is never replaced). |
 
 `save_group_file` gains `replace_older: Option<bool>` (a flag, never a value). The signature pin
 test is updated: still no path, folder or destination parameter.
@@ -147,10 +166,12 @@ test is updated: still no path, folder or destination parameter.
 - **Needs you** and **In progress** rows still come only from private Download records (the export
   journal), unchanged.
 - **Saved** shows list entries, newest first, plus any Saved private row (a Published record left
-  by an interrupted tidy-up, PR #51). A list entry with the same CID as a Saved private row is not
-  drawn separately: that private row is the file's one row and keeps its own actions. Clear of
-  such a private row also forgets the list entry whose identity equals the published journal's, so
-  Clear makes the row go away instead of revealing a second one.
+  by an interrupted tidy-up, PR #51). Native marks such a private row with the ID of the list entry
+  whose identity equals its published journal's (`savedEntry`), and that one entry is not drawn
+  separately: the private row is that copy's one row and keeps its own actions. Other copies of
+  the same file keep their own rows. Clear of such a private row also forgets that entry, once the
+  record is actually released (a Clear stuck in Removing forgets nothing), so Clear makes the row go
+  away instead of revealing a second one.
 - The live transfer list already leaves out files with a private row; it now also leaves out a
   finished download (`done`) whose CID has a list entry, so a finished save shows once, in Saved.
 - A list row reuses the `.sdl` row design and icons:
@@ -175,98 +196,127 @@ test is updated: still no path, folder or destination parameter.
 From the loaded list only (no network, no disk): file cards in chat, the Files list and the file
 details pane show a small "Saved" mark (the saved icon and the word) on a file whose CID has an
 entry, titled "You saved this file on this device. Transfers shows where." Cards built before the
-list loads are updated when it changes. The list reloads on server switch, after each save, after
-Clear, and on Transfers visits.
+list loads are updated when it changes, by a pass over the existing `.ref-card[data-file-cid]`
+elements that sets text and attributes only (never markup). The list reloads on server switch,
+after each save, after Clear, and on Transfers visits.
 
 ### 5. "Replace my older saved copy"
 
 **Setting.** Settings, App, Chat & Media, a "Saved files" section: a checkbox "Replace my older
 saved copy", off by default, kept in `localStorage` on this device (like the other device
 preferences), with the help text "When you save a file again, Mewtual replaces the copy it saved
-before, if that copy is still unchanged. Files Mewtual did not save are never replaced. Applies on
-this device, to every server." Every save (chat, Transfers, Save again, Save as) passes
-`replaceOlder: true` while it is on.
+before, if that copy is still unchanged. It replaces only a copy it can prove it saved. Applies on
+this device, to every server." (Revision 2, review M3(g): no absolute "never", because Unix has a
+documented same-account window.) Every save (chat, Transfers, Save again, Save as) passes
+`replaceOlder: true` while it is on. "Every server" also means every account on this device that
+uses the same Windows or Unix user.
 
 **When it runs.** All of these must hold, else the save is an ordinary new copy:
 
-1. `replace_older` was passed;
-2. the new copy was published by the journaled writer (it has an identity) and its private record
-   was released (a record kept for a leftover temporary name means "not finished tidying");
-3. the list held an entry for the same CID before this save's entry replaced it, with identity, on
-   this platform, whose folder identity equals the new copy's, and whose leaf differs from the new
-   copy's (equal means the old copy was already gone and the new copy took its name);
-4. the per-(server, CID) replace claim is free (two saves of one file at once: the second makes a
-   normal copy);
-5. the list is readable.
+1. `replace_older` was passed, and the per-(server, CID) replace claim was free when the save
+   recorded its entry (two saves of one file at once: the second makes a normal copy);
+2. the new copy was published by the journaled writer (it has an identity), **its entry was
+   durably recorded** (revision 2, review M4), and its private record was then released (a record
+   kept for a leftover temporary name means "not finished tidying");
+3. the list held, at the moment the new entry was recorded under the same lock, an older entry for
+   the same CID with identity from this platform whose folder identity equals the new copy's: the
+   newest such entry is the candidate. Other copies stay listed and untouched;
+4. the list is readable. A recovered save (the Resume preflight's crash-after-link path) records
+   its entry but never replaces.
 
-**Order inside `save_group_file`.** With the setting off, or when the conditions above fail early,
-the existing order is untouched (inspect and reveal, then release the record, then the final
-fence). When a replace will run, the record is released first (`finish_download_export`; if that
-fails, no replace), then the entry is recorded, the replace runs, and only then inspection and
-reveal run on the final path, fenced by `invocation_current` (the recovered-save path already uses
-that fence, because releasing the record retires the storage lease by design), followed by the
+**Which effect** (revision 2, review M2 and M3(d)):
+
+- the old name already holds the new copy (the old copy was gone and the new save took its name,
+  possibly differing only in case on Windows): nothing to delete; the older entry is forgotten (its
+  name is the new copy's now);
+- the new save started from the old copy's name (`base_name` of its journal equals the old leaf,
+  compared case-insensitively for Windows) and was numbered because that name was taken: delete the
+  old copy, then give the new copy the old name;
+- otherwise (a different listed name, or a name the user typed in Save as): delete the old copy and
+  leave the new copy's name alone. A name the user chose is never renamed.
+
+**Order inside `save_group_file`.** The entry is recorded right after publication in every case
+(revision 2, review L10). With the setting off, or when the conditions above fail, the rest of the
+existing order is untouched (inspect and reveal, then release the record, then the final fence).
+When a replace will run, the record is released next (`finish_download_export`; if that fails, no
+replace), the replace runs, and only then inspection and reveal run on the final path, fenced by
+`invocation_current` (the recovered-save path already uses that fence, because releasing the record
+retires the storage lease by design; the review checked that it weakens no fence), followed by the
 same final guarded fence.
 
-**Sequence** (storage, on the blocking pool with one of the four cleanup slots; native checks the
-invocation and server incarnation before each effect, and passes the same check in for the steps
-inside one worker):
+**Sequence** (storage, on the blocking pool with one cleanup slot held from step 1 to step 6; a
+`keep_going` check from native, the invocation and server incarnation plus a 2-minute deadline on
+the sanctioned clock, runs before each effect and every 1 MiB of hashing, revision 2, review L9):
 
 1. **Hold the folder** at the new copy's folder path, requiring the new copy's folder identity.
-   Unix: classify it (the existing `pin_folder(.., classify: true)`); a folder other accounts can
-   or may modify refuses here, before anything is touched.
+   Unix: classify it (the existing `pin_folder(.., classify: true)`), but act on "shared" only
+   after step 2 has seen that the old copy is there and ours (revision 2, review M3(a): never say
+   anything about a copy that may not exist).
 2. **Prove the old copy, read-only.**
    - Windows: open `folder/old_leaf` with `DELETE | FILE_READ_DATA | FILE_READ_ATTRIBUTES |
      SYNCHRONIZE`, share mode `FILE_SHARE_READ` only, `FILE_FLAG_OPEN_REPARSE_POINT |
-     FILE_FLAG_BACKUP_SEMANTICS`. A program that has it open for writing makes this fail (sharing
-     violation: "could not be checked"), and while it is held nobody can write, rename or delete
-     it, or rename its folders. Require a regular file, no reparse point of any kind, no read-only
-     attribute, link count 1, identity equal to the entry's, then read the whole content through
-     this handle: exact length equal to the entry's size and plaintext CID equal to the entry's.
+     FILE_FLAG_BACKUP_SEMANTICS`. A program that has it open for writing or deleting makes this
+     fail (sharing violation: "could not be checked"), and while it is held nobody can write,
+     rename or delete it, or rename its folders. Read the folder identity again by path and require
+     it (revision 2, review L1: the held leaf pins its ancestors, so this proves the same folder).
+     Require a regular file, no reparse point of any kind (a cloud placeholder or deduplicated file
+     reads "cannot check files in that folder", review M3(b)), no read-only attribute, link count 1,
+     identity equal to the entry's, then read the whole content through this handle: exact length
+     equal to the entry's size and plaintext CID equal to the entry's.
    - Unix: `openat` no-follow in the held folder; regular file, identity equal, link count 1, owner
-     write bit set (a read-only file is refused), then hash through that descriptor with its size
-     and modification time read before and after the hash (a change during the hash refuses).
+     write bit set and no group or other write bit (review L8: then only this account or root can
+     change it), then hash through that descriptor with its size, modification time and change
+     time read before and after the hash (a change during the hash refuses).
 3. **Delete the old copy through the verified object.** Windows: `delete_by_handle` on the handle
    that was just hashed (the PR #51 fs_at path). Unix: rename the name aside (no replace, random
    name from the RNG seam) relative to the held folder, open the aside name, require the same
    identity, size and modification time as when hashed, then `unlinkat`; anything else puts it back
    without replacing and refuses. Hashing happens before the rename (PR #51 review H3), so the
-   user's file is never hidden while it is read.
-4. **Give the new copy the old name, without replacing.** Pin the new copy (Windows: the
-   delete-denying pin of publication; Linux and Android: its descriptor) and require its identity,
-   then the existing no-replace `link_open` to `old_leaf`, then read `old_leaf` where it was linked
-   and require the new copy's identity. A taken name ("someone saved a file there meanwhile") stops
-   here: the new copy keeps its own name and the user is told.
+   user's file is never hidden while it is read. Native then forgets the old entry.
+4. **Give the new copy the old name, without replacing** (only in the rename case above). Pin the
+   new copy (Windows: the delete-denying pin of publication; Linux and Android: its descriptor) and
+   require its identity, then the existing no-replace `link_open` to `old_leaf`, then read
+   `old_leaf` where it was linked and require the new copy's identity. A taken name, or any other
+   failure, stops here: the new copy keeps its own name and the user is told.
 5. **Record the new name**: the list entry of this save changes its leaf from the new name to the
-   old one, compare-and-swap on entry id and leaf, under the store and registry locks.
-6. **Remove the new copy's first name** through `remove_verified` with the new identity (two names,
-   so one goes). If that fails, both names stay (the same file) and the user is told.
+   old one, compare-and-swap on entry id and leaf, under the store and registry locks. If this does
+   not succeed, step 6 does not run (review M4).
+6. **Remove the new copy's first name** through `remove_verified` in a **must-keep-another-name**
+   mode (revision 2, review H1): Windows requires a link count of at least 2 on the delete handle,
+   which denies delete sharing, so the other name cannot go between the check and the delete; Unix
+   requires it on the aside descriptor and otherwise puts the name back. Anything else leaves both
+   names (the same file) and the user is told.
 
-Notes added to the save result (no "·", no em dashes):
+Notes added to the save result (no "·", no em dashes; revision 2, review M3: none claims a copy
+exists unless step 2 saw it):
 
 | Outcome | Note |
 | --- | --- |
-| Replaced | "It replaced the copy Mewtual saved before." |
-| Old copy missing (or its name already reused by the new copy) | none |
-| Another folder | "Mewtual kept the copy it saved before, because this one went to another folder." |
-| Changed, read-only, more than one name, or another object at the name | "Mewtual kept the copy it saved before, because that copy was changed since or is not the one Mewtual saved." |
-| Shared folder | "Mewtual kept the copy it saved before, because other accounts may change that folder." |
-| Could not be checked (busy, held open, error, a second save of the same file) | "Mewtual kept the copy it saved before, because it could not be checked right now." |
-| No identity (either copy), unreadable list, record kept | "Mewtual kept the copy it saved before, because it cannot check files in that folder." (or "...could not be checked right now.") |
-| Old deleted, name taken | "Mewtual removed the copy it saved before, but another file now has its name, so this copy keeps its own name." |
-| Second name left | "This copy also kept its temporary name; you can delete one of the two." |
+| Replaced (renamed into place, or deleted beside a new name) | "It replaced the copy Mewtual saved before." |
+| Old copy missing, or its name already holds the new copy | none |
+| No candidate in this folder (only copies elsewhere) | "Mewtual did not replace the copy it saved before, because this one went to another folder." |
+| Changed, read-only, or another object at the name | "Mewtual did not replace the copy it saved before, because that copy was changed or is not the one Mewtual saved." |
+| More than one name | "Mewtual did not replace the copy it saved before, because that file has another name too." |
+| Shared folder (after seeing it is ours) | "Mewtual did not replace the copy it saved before, because other accounts may change that folder." |
+| Could not be checked (busy, held open, error, a second save of the same file, time out) | "Mewtual did not replace the copy it saved before, because it could not be checked right now." |
+| No identity (either copy), a reparse point, another platform | "Mewtual did not replace the copy it saved before, because it cannot check files in that folder." |
+| List not readable, entry not recorded, record kept | "Mewtual did not replace the copy it saved before this time." |
+| Old deleted, the move failed (name taken or otherwise) | "Mewtual removed the copy it saved before, but could not give this copy its name, so it keeps the name <new name>." |
+| Second name left | "The saved file also kept the name <new name>. Both names are the same file, so deleting either one keeps the other." |
+| Unix put-back failed | "Mewtual could not finish replacing the copy it saved before. It may be in that folder under a name starting with mewtual-removing-." |
 
 **Crash table** (the list is the only record; the new copy's private record is already released):
 
 | # | Crash after | State on disk | List | Next |
 | --- | --- | --- | --- | --- |
-| R1 | the new entry, before step 3 | old and new copies | new entry at the new name; old entry gone | The old copy stays, unlisted. |
-| R2 | step 3 (old deleted) | new copy at its own name | new entry at the new name | Consistent: one copy, under the numbered name. |
-| R3 | step 4 (linked), before step 5 | the new copy under both names | new entry at the new name (present) | A second name stays; consistent. |
-| R4 | step 5, before step 6 | both names | entry at the old name (present) | A second name stays; consistent. |
-| R5 | Unix, inside step 3 between the rename aside and the unlink | old copy at `mewtual-removing-<random>` | old entry gone | Residual: plaintext of the old (complete, verified) copy stays in that folder under a random name nothing records. Same residual as PR #51's writers without a journal. |
+| R1 | the new entry, before step 3 | old and new copies | both entries | Consistent: two copies, two rows. |
+| R2 | step 3 (old deleted), before the old entry is forgotten | new copy at its own name | both; the old one reads "missing" | The old row offers Clear. |
+| R3 | step 4 (linked), before step 5 | the new copy under both names | old entry gone, new at the new name (present) | A second name stays; consistent. |
+| R4 | step 5, before step 6 | both names | new entry at the old name (present) | A second name stays; consistent. |
+| R5 | Unix, inside step 3 between the rename aside and the unlink | old copy at `mewtual-removing-<random>` | the old entry is kept (it is forgotten only after step 3), reading "missing" | Residual: the old (complete, verified) copy stays in that folder under that random name; the old row's "missing" is literally true for its name. |
 
-Lock, a server change or the invocation ending stops the sequence before its next effect; every
-stopping point is one of the rows above.
+Lock, a server change, the invocation ending or the deadline stops the sequence before its next
+effect; every stopping point is one of the rows above.
 
 **Authority** (THREAT-MODEL): the setting is a renderer preference, so a compromised renderer can
 pass `replace_older` on any save. Native then deletes only an object that (a) the sealed list, which
@@ -275,35 +325,72 @@ file, (b) is that exact object by handle identity including birth time, (c) stil
 bytes Mewtual saved (length and plaintext CID, which equals the copy just published), (d) has one
 name, is not read-only and is not a reparse point, (e) is in the same folder as the new copy, and on
 Unix that folder is not one other accounts can modify. So flipping it can only delete Mewtual's own
-unchanged earlier output, after an identical copy was published beside it. `forget_saved_file` only
-drops list entries; `reveal_saved_file` is PR #51's read-only check and reveal.
+unchanged earlier output, after an identical copy was published beside it, and it never renames a
+name the user typed. `forget_saved_file` and `reset_saved_files` only change list entries;
+`reveal_saved_file` is PR #51's read-only check and reveal.
 
 **Residuals.** Replacing removes the old copy as a whole, including anything another program added
 that is not file content (Windows alternate data streams such as tags, extended attributes,
 permissions or timestamps); the content check covers the data only. A same-account process that
 already had the old copy open (Unix has no share modes) could change it between the hash and the
-unlink. The Windows 64-bit file index on ReFS and the Unix limits of PR #51 apply unchanged.
+unlink, and file timestamps are too coarse to catch a same-size write in the same tick. On Windows,
+a writable memory mapping made before step 2 is not covered by share modes, and a read-only
+attribute set after the step 2 check is ignored by the POSIX delete (attribute writes are not
+covered by share modes either). The Windows 64-bit file index on ReFS and the Unix limits of PR #51
+apply unchanged.
 
 ### 6. Compatibility
 
 - A new file; builds before this one never open it. A vault backup copies it as opaque bytes.
-- Version byte: a future version 2 is `Unreadable` here and stays untouched (above).
+- Version byte: a future version 2 is `Newer` here and stays untouched (above).
 - Going back to the #55 build: the record is ignored, and that build's `remove_server` does not
-  delete it, so leaving a server there leaves a sealed `.saved` behind (it names the group, so a
-  later server reusing the number ignores it and overwrites it on its first save). Documented.
+  delete it, so leaving a server there leaves a sealed `.saved` behind. It names the group and the
+  member id of that membership, so a later server reusing the number (even for the same group,
+  after joining again) reads it as `Missing` and overwrites it on its first save. Documented.
 
 ### 7. Verification
 
 - Storage: codec round trip, every bound, each malformed shape, unknown version, wrong domain,
-  one-per-CID upsert and both caps; read-only entry checks; the replace sequence for each
-  interleaving (old changed, replaced, missing, read-only, a second name, held open on Windows,
-  name taken, a swap before each step through test hooks), on Windows and in WSL Linux.
-- App: the sealed record round trip across a store reopen, other group, unreadable record left
+  same-place replacement of entries and both caps; read-only entry checks; the replace sequence for
+  each interleaving (old changed, replaced, missing, read-only, a second name, a reparse point, held
+  open on Windows, name taken, a case-only difference, the user's own name kept, a swap before each
+  step through test hooks, the other name removed between link and removal), on Windows and in WSL
+  Linux.
+- App: the sealed record round trip across a store reopen, another owner, each unreadable kind left
   byte-identical, `remove_server` deletes it.
 - Native: recording at each publication path and the incarnation fence; get, check (bounded,
-  stale entries dropped), reveal by ID, forget; Clear of a Saved private row forgets only the
-  matching entry; the replace orchestration's liveness stops.
-- Frontend: projection validation, row views, merge with private rows, the live-list filter, the
-  chat mark, the setting, and the App handlers; visual-fixture screenshots of the Saved group.
+  unreached entries left out, stale entries dropped), reveal by ID, forget, reset only when
+  damaged; Clear of a Saved private row forgets only the matching entry after release; the replace
+  orchestration's conditions and stops, including a failed entry write.
+- Frontend: projection validation, row views, merge with private rows by `savedEntry`, the
+  live-list filter, the chat mark on cards built before the list loaded, the setting, and the App
+  handlers; the visual fixture mocks the new commands; screenshots of the Saved group.
 - An adversarial review of the diff, as `AGENTS.md` requires. CI runs the complete suites,
   `test:startup` and `test:flows`.
+
+## Design review dispositions (revision 2, 26 October)
+
+Read-only review of `62a144c6`: no blocker; one HIGH, four MEDIUM, twelve LOW. It checked and found
+sound: releasing the record before a replace (and the `invocation_current` fence there), the list
+write's lock order against leave, incarnation-bound writes, hash and delete on one Windows handle,
+the cap and the byte bound.
+
+| Finding | Disposition |
+| --- | --- |
+| H1: step 6 could delete the new copy's only name if the old name went between link and removal | Taken: a must-keep-another-name removal (link count of at least 2 checked on the delete handle on Windows, on the aside descriptor on Unix), and step 6 runs only after step 5's compare-and-swap. Test planned with a hook between link and removal. |
+| M1: one entry per CID forgot the old copy before the replace was tried | Taken: one entry per saved copy; a newer entry replaces an older one only for the same place; the old entry is forgotten only after the old copy is gone. R5 is now visible as a "missing" row. |
+| M2: replace renamed a name the user chose | Taken: rename only when the new save started from the old copy's name; otherwise delete the old copy and keep the new name. |
+| M3: notes claimed things not shown (existence, reparse files, Mewtual's own second names, case, "temporary", move failures, "never") | Taken: notes say "did not replace" and are given only after the old copy was seen; reparse points read "cannot check files in that folder"; more names has its own note; the old name holding the new copy (any case) is checked by identity first; the second-name note names the file; a failed move has its own note; the help text drops "never". |
+| M4: replace after a failed entry write; step 6 after a failed step 5 | Taken: both are conditions now. |
+| L1: "same folder" not enforced on Windows | Taken: the folder identity is read again after the leaf is held. |
+| L2: claim, lock and permit ordering | Taken as stated (claim before recording, candidate from the same locked read, store lock across load, change and write, no write when nothing changed, no session guard under the store lock, one cleanup permit held throughout, recovered saves never replace). |
+| L3: a stale record could come back after a rejoin under the same number | Taken: the record names the group and this device's member id. |
+| L4: a damaged record had no recovery | Taken: "Start a new list" for a damaged record only; a newer version's record stays untouchable. |
+| L5: Clear of a Saved private row forgets its entry | Kept (Clear makes the row go away), but only after the record is actually released. |
+| L6: batch check wording, order and read access | Taken: unreached entries read as not checked yet; attributes-only opens relative to one held folder handle; entries from another platform are not checkable. Newest first stays (documented). |
+| L7: cards already built miss the mark | Taken: an explicit pass over existing file cards, text and attributes only. |
+| L8: Unix content check | Taken: group- or other-writable files are refused, change time is compared too, and a failed put-back has its own note; the same-tick residual is documented. |
+| L9: unbounded hash | Taken: `keep_going` every 1 MiB (liveness and a 2-minute deadline). |
+| L10: crash between release and entry write | Taken: the entry is recorded first in every case. |
+| L11: Windows residuals | Documented (memory mappings, a read-only attribute set after the check, "every server" means every account of the same OS user). |
+| L12: documentation drift and the fixture | Taken: cache housekeeping, HANDOVER, THREAT-MODEL, INTERFACES and the visual fixture are updated with the implementation. |
