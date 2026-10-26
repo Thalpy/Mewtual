@@ -124,14 +124,26 @@ Not adopted; listed in section 6 as the owner's decision.
   lifetime. One that is valid now but ends a minute later is admitted by the committer, then
   refused permanently by every member that processes the Add later: offline members, and anyone
   replaying the commit log. They stay at the old epoch until re-invited. This predates this
-  change, but it is the same failure. `MlsDevice::parse_key_package(bytes, now_ms)`, the one parse
-  every admission path in `catcoms-sync` uses, now also requires `not_after >= now + 60 days`
-  (`MIN_ADMITTED_KEY_PACKAGE_LIFETIME_MS`, `InviteError::KeyPackageExpiresTooSoon`). `now_ms`
-  comes from the caller's `Clock`. Honest KeyPackages carry 84 days and are admitted within an hour
-  of minting, so 24 days of slack absorb a slow joiner clock. Only `not_after` is checked: a
-  `not_before` of "just now" makes members whose clocks lag refuse the Add only until their clocks
-  pass it, which catch-up retries outlive. A `not_before` margin would also refuse every honest
-  KeyPackage in tests whose injected clock sits in 1970 while openmls stamps real time.
+  change, but it is the same failure. The five admission paths in `catcoms-sync` (`admit_now`, the
+  staged join, the admin-relayed add, `check_device_add`, `admit_device_now`) now parse through
+  `MlsDevice::parse_admitted_key_package(bytes, self.clock.now_ms())`, which adds two checks to
+  `parse_key_package` (unchanged, still used to identify joiners elsewhere):
+  - `not_after >= now + 30 days` (`MIN_ADMITTED_KEY_PACKAGE_LIFETIME_MS`,
+    `InviteError::KeyPackageExpiresTooSoon`). Honest KeyPackages carry 84 days and are admitted
+    within an hour of minting, so about 54 days of slack absorb a joiner clock that lags the
+    committer's. The floor is the trade between that tolerance and how long a member may be
+    offline and still replay a hostile joiner's Add; the owner may want a different value.
+  - total range `<= 84 days + 1 hour` (openmls's own `has_acceptable_range`, defined but not
+    enforced; `InviteError::KeyPackageLifetimeTooLong`), from the diff review: otherwise a joiner
+    can sign `not_after = u64::MAX`, and a later openmls that enforced the cap on processing would
+    strand members the same way. Honest KeyPackages sit exactly at the cap.
+
+  `not_before` is not floored: a `not_before` of "just now" makes members whose clocks lag refuse
+  the Add until their clocks pass it. That is not permanent, though in a quiet group the retry
+  waits for the next trigger (another commit, an op from a newer epoch, a reconnect). Flooring it
+  would refuse honest joiners whose clocks run fast. Each refusal is logged at warn with its reason
+  (`log_admission_refusal`), because several paths drop the error and the join-attempt ring shows
+  only `AdmissionFailed`.
 - Tests (`group/leaf_lifetime_tests.rs`), deterministic, with lifetimes that are already in the
   past and no sleeping:
   1. **Regression**: a Welcome whose tree holds an expired KeyPackage leaf joins, and the joiner
@@ -144,15 +156,20 @@ Not adopted; listed in section 6 as the owner's decision.
      the KeyPackage's private material.
   3. **Production shape**: three parties. The expired leaf belongs to a member who is neither the
      joiner nor the signer, and the Welcome comes from a path-carrying production `add_member`.
+     The joiner then follows a later commit like any member.
   4. **The kept protection**: `add_member` refuses a KeyPackage whose lifetime has already ended
      (and one not yet valid), the group does not advance, and a valid Add still succeeds after.
-  5. **The admission floor**: one second short of 60 days is refused, exactly 60 days is
-     admitted, an honest KeyPackage clears it even three weeks late, and an already-expired one is
-     refused on the wire.
-  6. Break-it checks: reverting `join` to `Verify` fails tests 1 and 3; removing the floor fails
-     test 5.
+  5. **The admission policy**: one second short of 30 days is refused, exactly 30 days is
+     admitted, an honest KeyPackage clears it even 50 days late, a 100-day range is refused, an
+     already-expired KeyPackage is refused on the wire, and `parse_key_package` keeps its contract.
+  6. **On the real join path** (`catcoms-sync/src/admission_lifetime_tests.rs`): with the
+     committer's `ManualClock` 55 days ahead of the KeyPackage's mint time, `serve_join` refuses an
+     honest KeyPackage (`AdmissionFailed`), makes no commit and leaves the invite unconsumed; with
+     the clocks in step the same invite admits.
+  7. Break-it checks: reverting `join` to `Verify` fails tests 1 and 3; removing the floor fails
+     test 5; passing time 0 at the `admit_now` parse fails test 6.
 - Docs: THREAT-MODEL dated section; HANDOVER entry; INTERFACES notes on `join` and
-  `parse_key_package`.
+  `parse_admitted_key_package`; MESSAGE-FLOW stranded bands.
 
 ## 4. Compatibility
 
@@ -162,16 +179,22 @@ Not adopted; listed in section 6 as the owner's decision.
 - **Mixed versions:** the join fix is entirely on the joiner. A joiner on this build joins any
   group; a joiner on an older build still fails on a group with an expired leaf, and still uses
   up the invite and leaves a leaf behind (section 5). Existing members' versions do not matter.
-  The admission floor is on the committer: an older committer still admits a short-lived
-  KeyPackage. Honest KeyPackages from any build pass it.
+  The admission policy is on the committer: an older committer still admits a short-lived or
+  over-long KeyPackage. Honest KeyPackages from any build pass it unless the joiner's clock lags
+  the committer's by more than about 54 days.
 - **Alpha data:** groups already past 84 days become joinable as soon as the joiner runs this
   build. Nothing stored needs migrating.
 - **PR #57 (openmls 0.9.2):** same API, same behaviour. #57 adds `create_with_lifetime`,
   `key_package_leaf_not_after` and test modules next to `join`; this change edits only the body of
-  `join` and adds its test module at the end of `group.rs`, so the two are expected to merge
-  without conflict (a trial merge is recorded in the PR). After both land, #57's never-expiring
-  fixture lifetimes are no longer needed for joins; they remain correct and are left alone, and
-  this test module's local founder helper can switch to #57's `create_with_lifetime`.
+  `join` and adds its test module at the end of `group.rs`. A trial merge into
+  `crypto-bigint-upgrade` (`git merge-tree`, then the merged tree built on Rust 1.94) merges the
+  code cleanly; only the newest-first top sections of HANDOVER and THREAT-MODEL conflict (keep
+  both). An earlier version of this change altered `parse_key_package`'s signature, which broke
+  #57's `suite_refusal_tests.rs` on the merged tree; the admission policy therefore lives in a new
+  `parse_admitted_key_package` and `parse_key_package` is unchanged. After both land, #57's
+  never-expiring fixture lifetimes are no longer needed for joins; they remain correct and are
+  left alone, and this test module's local founder helper can switch to #57's
+  `create_with_lifetime`.
 
 ## 5. Recovery of already-broken groups
 
@@ -188,7 +211,7 @@ Not adopted; listed in section 6 as the owner's decision.
 A member offline for longer than an added KeyPackage's remaining lifetime, whose gap is still
 inside a peer's commit log, cannot apply that Add: openmls has no production switch to skip the
 check on `process_message` (the `skip_validation` flags are test-only). The admission floor makes
-that remaining lifetime at least 60 days (about 84 for honest joiners) instead of whatever the
+that remaining lifetime at least 30 days (about 84 for honest joiners) instead of whatever the
 joiner chose. The member stays at the old epoch. Remedy today: re-invite.
 
 It is also misreported. If later records follow the refused Add in the same catch-up answer, they
@@ -212,10 +235,27 @@ No blocker. Findings and what was done:
 
 | Severity | Finding | Outcome |
 |---|---|---|
-| HIGH | A joiner-chosen short `not_after` strands every member that processes the Add later | Fixed: admission floor in `parse_key_package` (section 3), test 5 |
+| HIGH | A joiner-chosen short `not_after` strands every member that processes the Add later | Fixed: admission floor, now in `parse_admitted_key_package` (section 3), tests 5 and 6 |
 | MEDIUM | Section 6 wrongly said `MembershipChainGap` does not cover the replay failure; it misreports it | Section 6 corrected; distinct outcome is a follow-up |
 | MEDIUM | Fixture did not match the production Welcome shape | Test 3 added |
 | LOW | "Exactly two places"; delta understated (fabricated trees, Welcome age); old-build joiners still burn invites | Sections 1, 2A, 4 corrected |
 | LOW | Kept-protection test: no wire-path check, no follow-up valid Add, substring match | Wire path and follow-up Add added; openmls errors arrive as strings through `MlsError::Protocol`, so the match stays on text, now `Lifetime` |
 | LOW | Local test helpers duplicate #57's | Kept local to avoid merge conflicts; switch after both land |
 | LOW | Trial merge stated as done at design time | Reworded |
+
+## 8. Review of the implemented diff (AGENTS.md skeleton, read-only)
+
+No blocker, no high. Confirmed: `build_from_welcome(..).build()` differs from the old call only in
+the lifetime policy; every admission path checks the floor before it consumes an invite or
+certificate or changes the group; production `SystemClock` reads the same time as openmls.
+
+| Severity | Finding | Outcome |
+|---|---|---|
+| MEDIUM | The floor is never exercised by sync tests (their clocks sit near 1970), so a call site passing 0 would go unnoticed | Test 6 drives `serve_join` with the clock set relative to the KeyPackage; break-it with time 0 fails it |
+| MEDIUM | 60-day floor refuses honest joiners whose clock lags by more than about 24 days, and silently | Floor lowered to 30 days (about 54 days of slack); every refusal logged at warn; `AdmissionFailed` doc updated; the value is listed for the owner |
+| MEDIUM | No upper bound on the admitted range; a later openmls enforcing its cap would strand members | Range capped at openmls's 84 days + 1 hour; test 5 |
+| LOW | Floor also ran at two non-admission parses (helper forward, post-admission bookkeeping) | `parse_key_package` restored; `parse_admitted_key_package` only at the five admission paths |
+| LOW | Committed HEAD failed the ambient gate (a comment naming the forbidden call) | Comment reworded in the review-fix commit |
+| LOW | Docs claimed `cargo deny` and #57 results not yet obtained; "three weeks" was 20 days | HANDOVER and this note state only what ran; trial merge done (section 4); test wording fixed |
+| LOW | `not_before` reasoning assumed retries happen | Reworded: retries wait for the next trigger in a quiet group |
+| LOW | Joiner past an expired leaf not shown following later commits | Added to test 3. A tampered-tree Welcome test is not added: building one needs openmls internals the API does not expose; tree authenticity is openmls's own, unchanged check |

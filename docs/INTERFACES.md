@@ -1649,10 +1649,11 @@ pub struct MlsDevice;   // a device's MLS leaf identity (owns its openmls provid
   generate() -> Result<Self>;  device_id();  public_key_bytes()->Vec<u8>;  sign(&[u8])->Result<[u8;64]>;
   key_package() -> Result<KeyPackage>;
   key_package_for_invite(group_id, nonce:[u8;16]) -> Result<KeyPackage>;   // credential bound to (group, nonce)
-  parse_key_package(&[u8], now_ms) -> Result<KeyPackage>;                  // validate one off the wire; now_ms from the Clock.
-    // Also refuses a KeyPackage that expires within 60 days of now_ms
-    // (MIN_ADMITTED_KEY_PACKAGE_LIFETIME_MS, InviteError::KeyPackageExpiresTooSoon): every member re-checks
-    // an added KeyPackage's lifetime when it processes the Add, including when replaying it later.
+  parse_key_package(&[u8]) -> Result<KeyPackage>;                          // validate one off the wire (identification only)
+  parse_admitted_key_package(&[u8], now_ms) -> Result<KeyPackage>;         // every ADMISSION path; now_ms from the Clock.
+    // Also refuses a KeyPackage that expires within 30 days of now_ms (MIN_ADMITTED_KEY_PACKAGE_LIFETIME_MS,
+    // InviteError::KeyPackageExpiresTooSoon) or spans more than 84 days + 1 hour (KeyPackageLifetimeTooLong):
+    // every member re-checks an added KeyPackage's lifetime when it processes the Add, including when replaying it.
 pub fn serialize_key_package(&KeyPackage) -> Result<Vec<u8>>;
 
 pub struct ServerGroup;   // one MLS group == one server

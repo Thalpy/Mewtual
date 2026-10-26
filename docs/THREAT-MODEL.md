@@ -25,20 +25,23 @@ joiner. `ServerGroup::join` now uses openmls's `skip_lifetime_validation()` (RFC
   post-compromise security for quiet members. It needs the deferred 6d-2 proposal path and a
   catch-up format change; it is a follow-up.
 
-**Admitted KeyPackages must stay valid for 60 days.** A joiner chooses its own KeyPackage
-lifetime, and every member that processes the Add, including one replaying it from the commit
-log, re-checks it against its own clock. A KeyPackage valid now but expiring a minute later was
-admitted by the committer and then permanently refused by every member that was offline: they
-stayed at the old epoch until re-invited. `MlsDevice::parse_key_package(bytes, now_ms)`, the one
-parse every admission path uses, now refuses `not_after < now + 60 days`
-(`InviteError::KeyPackageExpiresTooSoon`), with `now_ms` from the `Clock`. Honest KeyPackages
-(84 days, admitted within an hour) pass with weeks of slack. Only `not_after` is checked: a late
-`not_before` delays lagging members only until their clocks pass it. An older committer does not
-enforce this.
+**Admitted KeyPackages must stay valid for 30 days, and span no more than 84 days and 1 hour.**
+A joiner chooses its own KeyPackage lifetime, and every member that processes the Add, including
+one replaying it from the commit log, re-checks it against its own clock. A KeyPackage valid now
+but expiring a minute later was admitted by the committer and then permanently refused by every
+member that was offline: they stayed at the old epoch until re-invited. The five admission paths
+(`admit_now`, the staged join, the admin-relayed add, `check_device_add`, `admit_device_now`) now
+parse through `MlsDevice::parse_admitted_key_package(bytes, clock.now_ms())`, which refuses
+`not_after < now + 30 days` (`KeyPackageExpiresTooSoon`) and a range above openmls's own unenforced
+cap (`KeyPackageLifetimeTooLong`: a later openmls that enforced it would strand members the same
+way). Honest KeyPackages (84 days, admitted within an hour) pass unless the joiner's clock lags
+the committer's by more than about 54 days; each refusal is logged at warn. `not_before` is not
+floored: a late one delays lagging-clock members until their clocks pass it and the next trigger
+retries. An older committer does not enforce any of this.
 
 **Residuals.**
 
-- A member offline for longer than an added KeyPackage's remaining lifetime (at least 60 days;
+- A member offline for longer than an added KeyPackage's remaining lifetime (at least 30 days;
   about 84 for honest joiners) still cannot replay that Add: openmls has no production switch for
   `process_message`. Commit catch-up then misreports it as `Stranded` (a `MembershipChainGap`
   blaming log retention) or as `Verified { applied: 0 }`. Remedy: re-invite.

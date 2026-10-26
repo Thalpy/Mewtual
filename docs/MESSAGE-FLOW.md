@@ -521,7 +521,7 @@ Which gives two distinct stranded states:
 
 A third way to be stuck inside 256 (26 October, `docs/design-mls-leaf-lifetime.md` section 6):
 openmls re-checks an added KeyPackage's lifetime against the wall clock when the Add is processed,
-so a member offline for longer than that KeyPackage's remaining lifetime (at least 60 days since
+so a member offline for longer than that KeyPackage's remaining lifetime (at least 30 days since
 admission enforces a floor; about 84 for honest joiners) cannot apply the Add however close the
 gap is. Catch-up then reports it wrongly: as `Stranded` with a `MembershipChainGap` if later records
 followed in the same answer, or as `Verified { applied: 0 }` if the Add was the newest. A typed

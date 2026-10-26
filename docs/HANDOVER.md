@@ -2,15 +2,16 @@
 
 ## Welcome joins past expired KeyPackage leaves (26 October, branch `mls-leaf-lifetime`)
 
-Base `chat-update-implementation` (openmls 0.8.1). Built so that it also holds on PR #57 (openmls
-0.9.2). Design: `docs/design-mls-leaf-lifetime.md`; boundary: THREAT-MODEL, 26 October.
+Base `chat-update-implementation` (openmls 0.8.1); also checked merged onto PR #57 (openmls 0.9.2,
+see the PR). Design: `docs/design-mls-leaf-lifetime.md`; boundary: THREAT-MODEL, 26 October.
 
 - `ServerGroup::join` skips openmls's lifetime check on the received tree's leaves. Groups older
   than 84 days, including alpha groups already broken, accept joiners on this build again. No wire
   or storage change.
-- Admission now refuses a joiner KeyPackage that expires within 60 days
-  (`parse_key_package(bytes, now_ms)`), so a short-lived KeyPackage cannot strand members that
-  replay the Add later.
+- Admission now refuses a joiner KeyPackage that expires within 30 days or spans more than 84 days
+  and 1 hour (`parse_admitted_key_package`, at the five admission paths), so a joiner-chosen
+  lifetime cannot strand members that replay the Add later. Refusals are logged at warn. The
+  30-day value trades joiner clock-skew tolerance (about 54 days) against that replay window.
 - Recovery for already-broken groups: nothing to do for new joins. Each earlier failed join left a
   leaf nobody operates; the owner removes it and sends a fresh invite.
 - Still open: a member offline past an added KeyPackage's remaining lifetime cannot replay that
@@ -20,9 +21,7 @@ Base `chat-update-implementation` (openmls 0.8.1). Built so that it also holds o
 - When PR #57 lands, its HANDOVER note on expired KeyPackage leaves ("not fixed here") is covered
   by this entry.
 
-Checks: catcoms-mls and catcoms-sync tests, Clippy and fmt for both, the ambient and raw-fs
-gates and `cargo deny`; the PR lists the results. Complete root, native and frontend suites:
-CI.
+Checks run locally are listed in the PR; complete root, native and frontend suites run in CI.
 
 ## Validated proof retention and automatic cleanup retry (22 October)
 
