@@ -947,7 +947,10 @@ pub fn remove_if_session(
             Verified::Removed { .. } => SessionRemoval::Removed,
             Verified::Missing => SessionRemoval::Missing,
             // Without a captured folder identity the folder cannot "change"; treat it as foreign.
-            Verified::NotOurs | Verified::FolderChanged => SessionRemoval::NotOurs,
+            // `OnlyName` comes only from `remove_second_name`, never from this call.
+            Verified::NotOurs | Verified::FolderChanged | Verified::OnlyName => {
+                SessionRemoval::NotOurs
+            }
             Verified::Shared => SessionRemoval::SharedFolder,
         }
     })
@@ -1485,7 +1488,7 @@ pub enum PartialRemoval {
 /// What a name holds, for [`remove_partial`]'s published-row decisions (PR51 review M-1). Unlike a
 /// plain "is it ours" boolean, a name that cannot be opened right now is `Unknown`, never "gone".
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum NameState {
+enum NameState {
     /// Our file (by persisted identity) is at the name.
     Ours,
     /// Nothing is at the name.
@@ -1496,8 +1499,7 @@ pub(super) enum NameState {
     Unknown,
 }
 
-/// Also the saved-files list's read-only check (`saved.rs`), so both say the same about a name.
-pub(super) fn name_state(path: &Path, ours: FileIdentity) -> NameState {
+fn name_state(path: &Path, ours: FileIdentity) -> NameState {
     match external::open_leaf(path, false) {
         Ok(Leaf::Opened(_, observed)) if observed.identity == ours => NameState::Ours,
         Ok(Leaf::Missing) => NameState::Absent,
@@ -1730,7 +1732,8 @@ pub fn remove_partial(
                 PartialRemoval::Removed
             })
         }
-        Ok(Verified::NotOurs) => Ok(PartialRemoval::LeftInPlace),
+        // `OnlyName` comes only from `remove_second_name`, never from this call.
+        Ok(Verified::NotOurs | Verified::OnlyName) => Ok(PartialRemoval::LeftInPlace),
         Ok(Verified::Shared) => Ok(PartialRemoval::SharedFolder),
         Ok(Verified::FolderChanged) => Ok(PartialRemoval::FolderChanged),
         Err(_) => Ok(PartialRemoval::Unchecked),

@@ -1405,15 +1405,23 @@ pub(in crate::store) use persistence::{
 };
 
 /// What [`ServerStore::load_saved_files`] found (PR #56, `docs/design-saved-files-list.md`).
+///
+/// Only `Missing` and `Found` may be written over. The other three are left exactly as they are
+/// (only leaving the server removes them), so a list a newer build wrote survives a downgrade and
+/// a record that merely could not be read right now is never lost; saves are then not recorded.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SavedFilesLoad {
-    /// No record, or a stale record naming another group: an empty list, safe to write over.
+    /// No record, or a stale record naming another owner (another group, or an earlier membership
+    /// of this one): an empty list, safe to write over.
     Missing,
-    /// A record that exists but cannot be read: damaged, not a saved-files record, or a version
-    /// this build does not know. **Never written over or removed** except by leaving the server,
-    /// so a list a newer build wrote survives a downgrade; saves are then not recorded.
-    Unreadable,
     Found(catcoms_storage::kept::SavedFiles),
+    /// A version this build does not know (a newer Mewtual wrote it). Never written over.
+    Newer,
+    /// It does not unseal, or unseals to something that is not a valid list. Written over only by
+    /// the user's explicit "Start a new list" ([`ServerStore::reset_saved_files`]).
+    Damaged,
+    /// It could not be read right now (an I/O error). The next attempt reads again.
+    Unavailable,
 }
 
 /// A passphrase-gated, on-disk store for a member's servers.
@@ -1860,20 +1868,20 @@ impl ServerStore {
     /// Seal + atomically write a server's saved-files list under the vault `db_key` (PR #56).
     ///
     /// The caller (native, under the store lock and then the registry lock, for the server
-    /// incarnation that saved) must only write a list it loaded as `Missing` or `Found`: an
-    /// `Unreadable` record is never overwritten, so a list a newer build wrote survives this one.
-    /// The list must name `group`; one naming another group is refused, so a record can never be
-    /// written under the wrong server number.
+    /// incarnation that saved) must only write a list it loaded as `Missing` or `Found` (see
+    /// [`SavedFilesLoad`]). The list must name `owner` (the group id followed by this device's
+    /// member id in it); one naming another owner is refused, so a record can never be written
+    /// under the wrong server number or membership.
     pub fn save_saved_files(
         &self,
         id: u64,
-        group: &[u8],
+        owner: &[u8],
         list: &catcoms_storage::kept::SavedFiles,
         rng: &mut impl CryptoRngCore,
     ) -> Result<(), AppError> {
-        if list.group() != group {
+        if list.owner() != owner {
             return Err(AppError::Invalid(
-                "the saved-files list names another group".into(),
+                "the saved-files list names another membership".into(),
             ));
         }
         let plain = Zeroizing::new(list.encode());
@@ -1881,31 +1889,56 @@ impl ServerStore {
         self.write_saved_files_record(id, &frame(&sealed))
     }
 
-    /// Read a server's saved-files list (PR #56). A missing record, or one naming another group (a
-    /// stale file under a reused server number), is `Missing`: an empty list the next save may
-    /// write over. A record that exists but cannot be read (damaged, another record's bytes, or a
-    /// version this build does not know) is `Unreadable`, and the caller must leave it exactly as
-    /// it is; only [`Self::remove_server`] removes it.
-    pub fn load_saved_files(&self, id: u64, group: &[u8]) -> SavedFilesLoad {
-        use catcoms_storage::kept::{SavedFiles, MAX_SAVED_LIST_BYTES};
+    /// "Start a new list" (PR #56 design review L4): replace a **damaged** record with an empty
+    /// list. Re-reads first and refuses anything that is not `Damaged` now, so a list a newer
+    /// build wrote, one that reads again, or one that could merely not be read right now is never
+    /// replaced. Returns whether it wrote.
+    pub fn reset_saved_files(
+        &self,
+        id: u64,
+        owner: &[u8],
+        rng: &mut impl CryptoRngCore,
+    ) -> Result<bool, AppError> {
+        if self.load_saved_files(id, owner) != SavedFilesLoad::Damaged {
+            return Ok(false);
+        }
+        self.save_saved_files(
+            id,
+            owner,
+            &catcoms_storage::kept::SavedFiles::new(owner),
+            rng,
+        )?;
+        Ok(true)
+    }
+
+    /// Read a server's saved-files list (PR #56); see [`SavedFilesLoad`] for what each answer lets
+    /// the caller do. A record naming another owner is `Missing`.
+    pub fn load_saved_files(&self, id: u64, owner: &[u8]) -> SavedFilesLoad {
+        use catcoms_storage::kept::{SavedFiles, SavedListError, MAX_SAVED_LIST_BYTES};
+        use catcoms_storage::StorageError;
         let path = self.saved_files_path(id);
         // The frame is the 24-byte nonce plus the ciphertext, which adds a 16-byte tag.
         let bytes = match catcoms_storage::blob::read_bounded(&path, MAX_SAVED_LIST_BYTES + 40) {
             Ok(Some(bytes)) => bytes,
             Ok(None) => return SavedFilesLoad::Missing,
-            Err(_) => return SavedFilesLoad::Unreadable,
+            // Larger than any list, or not a regular file: not a list this build can read.
+            Err(StorageError::BlobSizeLimit | StorageError::Malformed) => {
+                return SavedFilesLoad::Damaged
+            }
+            Err(_) => return SavedFilesLoad::Unavailable,
         };
         let Ok(key) = self.keys.db_key() else {
-            return SavedFilesLoad::Unreadable;
+            return SavedFilesLoad::Unavailable;
         };
         let plain = match unframe(&bytes).and_then(|sealed| Ok(unseal(&key, &sealed)?)) {
             Ok(plain) => Zeroizing::new(plain),
-            Err(_) => return SavedFilesLoad::Unreadable,
+            Err(_) => return SavedFilesLoad::Damaged,
         };
         match SavedFiles::decode(&plain) {
-            Ok(list) if list.group() == group => SavedFilesLoad::Found(list),
+            Ok(list) if list.owner() == owner => SavedFilesLoad::Found(list),
             Ok(_) => SavedFilesLoad::Missing,
-            Err(_) => SavedFilesLoad::Unreadable,
+            Err(SavedListError::Version(_)) => SavedFilesLoad::Newer,
+            Err(SavedListError::Malformed) => SavedFilesLoad::Damaged,
         }
     }
 
