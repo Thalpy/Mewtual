@@ -259,3 +259,14 @@ certificate or changes the group; production `SystemClock` reads the same time a
 | LOW | Docs claimed `cargo deny` and #57 results not yet obtained; "three weeks" was 20 days | HANDOVER and this note state only what ran; trial merge done (section 4); test wording fixed |
 | LOW | `not_before` reasoning assumed retries happen | Reworded: retries wait for the next trigger in a quiet group |
 | LOW | Joiner past an expired leaf not shown following later commits | Added to test 3. A tampered-tree Welcome test is not added: building one needs openmls internals the API does not expose; tree authenticity is openmls's own, unchanged check |
+
+Re-review of the fixes: no blocker, high or medium; every finding above resolved. Two notes:
+
+- "About 84 days" of replay window for honest joiners assumes agreeing clocks; it is 84 days less
+  the joiner's clock lag, never under 30. Wording fixed in `device.rs`.
+- New LOW: with `parse_key_package`'s signature unchanged, a merge with #57 that kept #57's version
+  of an admission site would compile and silently drop the policy there. On the trial-merged tree
+  all five admission sites call `parse_admitted_key_package` and only the two identification
+  parses call `parse_key_package` (checked by grep); whoever merges should re-check that. The sync
+  test covers `admit_now`; the staged join, admin-relayed add and the two device-add sites share
+  the same one-line call and are not separately tested (follow-up).

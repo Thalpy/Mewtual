@@ -32,7 +32,8 @@ pub fn serialize_key_package(key_package: &KeyPackage) -> Result<Vec<u8>, MlsErr
 /// admitted within an hour of being minted, so the slack (about 54 days) is how far the joiner's
 /// clock may lag the committer's before an honest join is refused. The floor itself is how long a
 /// member may be offline and still replay an Add from a hostile joiner; for honest joiners it is
-/// about 84 days. A member offline for longer still cannot replay that Add
+/// about 84 days less however far the joiner's clock lagged, and never under 30. A member offline
+/// for longer still cannot replay that Add
 /// (`docs/design-mls-leaf-lifetime.md` section 6).
 ///
 /// The `not_before` side is not floored. A `not_before` of "just now" makes members whose clocks
