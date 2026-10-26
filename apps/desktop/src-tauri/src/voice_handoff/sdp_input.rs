@@ -550,9 +550,38 @@ pub(super) async fn exercise(
             )
             .unwrap()
     };
-    let original = row()
-        .sdp_input_owners(route.session().identity(), action)
-        .unwrap();
+    let selected_row = row();
+    let canonical = selected_row.sdp_test_outcome();
+    assert_eq!(
+        selected_row.sdp_test_hold_state(|| selected_row
+            .sdp_input_owners(route.session().identity(), action)
+            .map(|_| ())),
+        Err(VoiceError::Capacity),
+        "actual row contention is a local metadata refusal, not missing original Input"
+    );
+    assert_eq!(selected_row.id(), child);
+    assert!(Arc::ptr_eq(&canonical, &selected_row.sdp_test_outcome()));
+    let clock = crate::voice_runtime(state).clock();
+    let mut owners = None;
+    for attempt in 0..32 {
+        match selected_row.sdp_input_owners(route.session().identity(), action) {
+            Ok(original) => {
+                owners = Some(original);
+                break;
+            }
+            Err(VoiceError::Capacity) if attempt < 31 => {
+                // Ordinary maintenance observes these same rows. All try-lock guards
+                // have returned; retry only this exact original metadata lookup. No
+                // Input loan, engine, factory, deadline or native attempt is created.
+                clock.sleep(std::time::Duration::from_millis(10)).await;
+            }
+            Err(error) => panic!("original SDP Input owner lookup refused: {error:?}"),
+        }
+    }
+    let original = owners.expect("original Input owner lookup within its fixed fixture bound");
+    assert!(Arc::ptr_eq(&canonical, &selected_row.sdp_test_outcome()));
+    drop(canonical);
+    drop(selected_row);
     let funding = original.funding.clone();
     let mut body = vec![8];
     body.extend_from_slice(&parent.logical());
