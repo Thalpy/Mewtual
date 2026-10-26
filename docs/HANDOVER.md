@@ -1,6 +1,6 @@
 # Mewtual; Handover
 
-## Sequential browser peers on one Session (26 October; inactive, native acceptance pending)
+## Sequential browser peers on one Session (26 October; inactive, native gates passed)
 
 Broker36 keeps exact per-peer media records after successful compaction. Explicit
 `advanceNativeNegotiation` publishes a new per-pair object only after the original compaction
@@ -17,8 +17,15 @@ A sole shared retry flight owns the timer/Signal. Review reproduced a joining-wa
 that could strand another cleanup; coalescing closes it. Public unchecked refund access was
 removed, and funded HMR35 plus the new API shape are rejected before reuse.
 
-All356 focused regressions pass6.50s; complete frontend3,003 tests64.98s and Svelte0errors/
-0warnings pass. Production build passes36.53s; native integration remains pending. Read-only re-review has
+The356 pre-timer focused regressions pass6.50s. After merging the three cadence/expiry
+regressions, complete frontend3,006 tests65.79s, Svelte0errors/0warnings and production build
+36.56s pass. Native check1m13s and strict Clippy1m40s pass. Actual HTTP history and
+second-collector cases pass42.71s/42.40s. The final complete Native rerun passes879
+(874unit +5ACL; unit body1862.30s). Its first attempt never reached tests: MSVC LNK1140
+reported the generated3.7GB debug database limit. The exact failed PDB was moved aside in
+its verified build directory; ordinary Cargo rebuilt a fresh PDB without compiler flags,
+source/test changes or disabled checks. Root full is rerunning serially on identical Root
+source in the existing warm custody checkout. The earlier842/32 run is recorded below. Read-only re-review has
 no remaining blocker/high/medium. The controlled framed/WebCrypto test completes two distinct
 peer negotiations with actual mock RTC objects on one Session, reuses a slot with a new full
 serial, refreshes both, and keeps peer2 alive after peer1 expiry. It proves this browser/native-
@@ -34,7 +41,8 @@ does not reclaim or reset that history. No limit or authority check was raised.
 
 Operational renewal, App RTC/tracks and activation, TURN/member relay, combined acceptance and
 independent physical audio/network tests remain open. App V2 stays OFF. External resume remains
-separate; only one desktop is available. The inherited crypto-bigint advisory remains unresolved.
+separate; only one desktop is available. The current cargo deny run still fails RUSTSEC-2026-0387 in crypto-bigint0.5.5; bans, licenses
+and sources pass. No ignore or dependency change was added.
 
 ## V2 SDK scheduling and negotiation ownership (26 October; inactive, validation in progress)
 
@@ -72,8 +80,9 @@ one <=1ms wake only before the unchanged actual deadline, and rechecks End after
 The old code fails and the fix passes; actual expiry still closes without another request,
 and a held new request cannot extend the original deadline or refund its fee early. Re-review
 has no blocker/high/medium. The exact previously failing native case passes45.54s/42.87s/41.43s.
-Full frontend3,000 tests62.97s, static0errors/0warnings and build35.82s pass. Final full Native
-validation will run on the integrated composition descendant; this failed run is not waived.
+Full frontend3,000 tests62.97s, static0errors/0warnings and build35.82s pass. The integrated
+composition descendant now passes the complete879-test Native rerun; the historical failure
+remains recorded rather than attributed to the independent cadence fix.
 
 Second-peer admission remains disabled. The next boundary is replacing the active negotiation
 only after original SDK/IO/final ACK and history disposal, retaining independent per-peer media.

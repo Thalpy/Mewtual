@@ -5,7 +5,9 @@
 Broker35 keeps SDK/provider work off the shared IPC codec with the existing two-position
 pool. Broker36 adds explicit post-return next-negotiation publication and independent paid
 compacted-peer media records on that Session. The controlled browser/framed/WebCrypto two-peer
-scenario passes; complete frontend3,003 and static checks pass. Build passes36.53s; native gates remain pending.
+scenario passes; complete frontend3,006 and static checks pass. Build36.56s/native check/strict Clippy pass;
+actual native HTTP42.71s/42.40s and complete Native879 gates pass. Root full is rerunning
+on identical source in the warm custody checkout.
 HANDOVER is authoritative for the exact current evidence and review findings.
 
 Next prove two real sequential Root/native peers over TCP on the SAME A Session: A-B media
@@ -24,6 +26,48 @@ Operational renewal/Ready, App native/RTC/tracks composition and legacy-mode iso
 TURN/member relay, combined acceptance and physical independent audio/network evidence still
 follow. App V2 stays OFF. One desktop cannot establish independent physical acceptance;
 external resume is separately owned. Earlier current-work sections below are historical.
+
+## Reviewed next native two-peer fixture (not implemented)
+
+Extend `six_client_recovery/voice_live.rs::native_webcrypto_cycle` using the existing real
+socket graph. Keep MLS members0-3 online and close4-5; introduce no new MLS member/epoch.
+Complete A-B first with clients1/2, then enable client3's voice endpoint C after BOTH A-B
+native mode8 and browser compaction return. Client0 stays an unjoined helper. The graph
+forbids1-2, proving that first path uses the helper; do not claim the second edge is blocked
+unless its actual transport policy is changed and asserted too.
+
+C can otherwise choose B first and occupy its only Workflow. Choose A as the lower ACTUAL
+DeviceId of1/2. In C's real Setup metadata handler, after Session installation but before
+returning setup/allowing Ready ACK, acquire an actually prepaid NativeHold. Wait for C's
+actual watcher to prove both A/B, then release it. FreshPeer ordering is by DeviceId and
+maintenance advances its cursor only on admission. This is a scheduling barrier, not a
+fabricated grant, incoming packet, selected peer or factory call. Release the hold before
+any failure End/collection.
+
+`integration/webcrypto.rs::{automatic_terminal,sdp_round_observation}` currently assume one
+parent anywhere in the ledger. Scope the step's Rust-only callback context to the actual
+expected parent/selector from native lookup. Unrelated B-C Pending may legitimately exist;
+leave it intact and require existing End/unseen-work cleanup to collect it. Do not accept a
+Node-supplied authority hint or treat unrelated Pending as completed/absent.
+
+The Node fixture needs at most two retained test records: original opaque plan, public
+parent identity, controlled peer counters and per-parent authenticated Current observations.
+Add closed `advance` and `media-current-all` steps; reuse the fresh ordinary pump without
+supplying a peer/row/purpose. Keep the original owner/key/channel/Session/counters. Avoid
+whole-broker `idle()` as negotiation drainage once independent media monitors are active.
+Join exact operations and native oracles instead.
+
+Preserve only A-B's scalar full RowId after actual collection. Compare A's ACTUAL next C
+parent: reclaimed slot, different serial. Do not substitute the older synthetic modified-join
+reservation probe. Test old Begin(false) with actual `recoverChannelHistory` on the same
+channel and old purpose/row; require a decrypted native Unauthorized refusal and unchanged
+tombstone/row absence. A generic uncertain JavaScript result is insufficient.
+
+Finally, collect ALL three successfully constructed Endpoints through `catch_fixture`, even
+when one fails. Release barriers/held rows first. A's Node End must close both actual peers
+synchronously, join original cleanup and reach zero browser payment. This remains controlled
+RTC/native TCP acceptance; it cannot establish WebView microphone, audible or physical-network
+behavior. Read-only design review found no protocol/authority blocker; this test is still TODO.
 
 ## Current work: live browser compaction reviewed; composition next (26 October)
 

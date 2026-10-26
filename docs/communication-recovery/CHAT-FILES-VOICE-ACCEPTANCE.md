@@ -1,9 +1,9 @@
 # Chat, files and voice implementation evidence
 
-## Inactive shared-Session browser composition (26 October; native acceptance pending)
+## Inactive shared-Session browser composition (26 October; native gates passed)
 
-Broker36 has356 passing focused and3,003 complete frontend regressions, with static0errors/
-0warnings. A controlled authenticated-frame/WebCrypto fixture completes two negotiations with
+Broker36 has356 pre-timer focused regressions; after the three timer regressions are merged,
+all3,006 frontend tests and static0errors/0warnings pass. A controlled authenticated-frame/WebCrypto fixture completes two negotiations with
 distinct peer contexts/full row serials on one Session, preserves keys/increasing counters,
 refreshes both actual mock RTC peers, and keeps peer2 alive after peer1 expires. Accounting-
 callback reentry cannot publish the next owner early; End in the final predicate cannot
@@ -14,7 +14,10 @@ Record markers transfer2KiB from original history; driver8KiB returns only after
 cleanup. Root's32 pending+terminal Actions per join remains unchanged (normal pair>=6), so
 16 metadata records is not supported-peer evidence. Failed/uncollected/precompaction work,
 operational renewal, App RTC/tracks/activation, relay and combined/physical acceptance remain
-open. App V2 stays OFF. Production build passes36.53s; HANDOVER records pending native gates and the dependency advisory.
+open. App V2 stays OFF. Production build36.56s, native check and strict Clippy pass. Final native HTTP/full gates
+pass: actual HTTP42.71s/42.40s and complete Native879 (874unit+5ACL, unit body1862.30s).
+Root full is rerunning on identical source; HANDOVER records the preceding debug-PDB-only
+link failure and its fresh rebuild. Current cargo deny still fails the inherited crypto-bigint advisory; see HANDOVER.
 
 ## Inactive live browser compaction checkpoint (26 October; current gates passed)
 
