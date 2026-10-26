@@ -98,11 +98,34 @@ impl ServerGroup {
             MlsMessageBodyIn::Welcome(w) => w,
             _ => return Err(MlsError::WrongMessageType),
         };
-        let group =
-            StagedWelcome::new_from_welcome(device.provider(), &join_config(), welcome, None)
-                .map_err(proto)?
-                .into_group(device.provider())
-                .map_err(proto)?;
+        // Leaf lifetimes in the received tree are NOT checked (docs/design-mls-leaf-lifetime.md).
+        //
+        // A leaf added from a KeyPackage keeps that KeyPackage's lifetime (openmls default: 84
+        // days) until its owner replaces it. Only the designated committer commits, and the app
+        // has no MLS Update flow, so every other member's leaf keeps its join-time lifetime for
+        // good. openmls's default join compares every such leaf with the wall clock, so 84 days
+        // after the first non-committer joined, every Welcome to the group failed. openmls offers
+        // this switch for exactly that case (RFC 9420 section 7.3; openmls issue #1810), with the
+        // same API on 0.8 and 0.9.
+        //
+        // Only the lifetime comparison on tree leaves is skipped. Still checked here: the
+        // GroupInfo signature, tree hash, parent hashes, leaf signatures, capabilities,
+        // credentials and key uniqueness, and the caller's own checks (Welcome signed by the
+        // invite's inviter or the granted owner, group id). Still checked elsewhere: the joiner's
+        // KeyPackage lifetime when it is admitted, by the committer and by every member that
+        // processes the Add, so a stale KeyPackage is still refused. An expired leaf is a member
+        // that has not rotated its leaf key, which every existing member already lives with;
+        // refusing to join never removed it.
+        //
+        // `build_from_welcome` consumes the KeyPackage's private material, as `new_from_welcome`
+        // did, so a refused join cannot be retried with the same Welcome.
+        let group = StagedWelcome::build_from_welcome(device.provider(), &join_config(), welcome)
+            .map_err(proto)?
+            .skip_lifetime_validation()
+            .build()
+            .map_err(proto)?
+            .into_group(device.provider())
+            .map_err(proto)?;
         Ok(Self {
             group,
             catalog: Default::default(),
@@ -782,3 +805,8 @@ mod m1_tests {
         assert_eq!(carol_group.designated_committer(), Some(alice.device_id()));
     }
 }
+
+// Expired KeyPackage leaves and Welcome joins (docs/design-mls-leaf-lifetime.md). Declared last so
+// the openmls-upgrade branch's test modules above `m1_tests` merge without touching this line.
+#[cfg(test)]
+mod leaf_lifetime_tests;
