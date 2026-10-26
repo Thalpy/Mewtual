@@ -27,7 +27,9 @@ build is unrun because its Linux engine is unavailable. Native command logic is 
 not Tauri/WebView serialization/CSP or audio. The real TCP failed-media preservation case
 passes74.13s; complete native suite is running. Packaged CSP/WebView, App/RTC/mic/tracks/data
 channels, renewal/lifetime capacity, relay and combined/physical acceptance remain open.
-V2 stays OFF.
+V2 stays OFF. Native `Host::prepare` already installs exact-port runtime CSP/devCsp before
+window creation; no CSP source defect was established by inspecting static JSON. Earlier
+packaged public-metadata Windows probe evidence does not cover the new authenticated facade.
 
 ## Broker41 browser media failure isolation (26 October; native acceptance pending)
 

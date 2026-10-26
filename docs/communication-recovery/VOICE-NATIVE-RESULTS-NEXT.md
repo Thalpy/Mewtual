@@ -16,8 +16,10 @@ Fresh dependency audit remains red on inherited crypto-bigint0.5.5/RUSTSEC-2026-
 
 This is still disconnected from App. Next add App lock/room/unmount ownership and private
 configured RTC/microphone/remote-audio/data-channel adoption without exposing SDK/SDP grants.
-Packaged CSP currently excludes the dynamic private loopback endpoint and requires a reviewed
-native/WebView correction. Operational renewal/lifetime history capacity, member media relay,
+Native `Host::prepare` already binds the private listener and adds only its exact port to
+both runtime CSP policies before window creation. The static tauri.conf.json is not the
+complete effective policy. The earlier packaged Windows public-metadata probe remains
+historical evidence; the new authenticated facade still needs actual WebView acceptance. Operational renewal/lifetime history capacity, member media relay,
 combined and independent physical acceptance remain open. App V2 remains OFF. HANDOVER has
 current exact validation; the sections below record preceding checkpoints.
 

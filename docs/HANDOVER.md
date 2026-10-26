@@ -33,13 +33,16 @@ is separately owned.
 The actual facade now passes real native command logic + WebCrypto/private HTTP bootstrap
 in0.94s, recovering a lost accepted activation as the SAME native join/lease with one key
 publication. Successful normal Work/Collect precedes forced fixture shutdown. This is not
-Tauri WebView/CSP/audio evidence. The real TCP failed-media/sibling preservation case also
+Tauri WebView/CSP/audio evidence. Native `Host::prepare` already adds the exact private
+port to runtime CSP/devCsp before window creation; the static JSON alone is not the effective
+policy. Historical packaged public-metadata probe evidence remains distinct from current
+authenticated-facade WebView acceptance. The real TCP failed-media/sibling preservation case also
 passes74.13s on the combined source. Complete native execution is now running. Exact Docker
 allow rules/context assertions include the Node/Svelte test dependencies; static input
 audit passes, but the actual Docker context build is unrun (Linux engine unavailable).
 `ready` is only historical authenticated bootstrap/lifecycle installation, never current
 media or connected UI evidence. Production App lock/room wiring, configured RTC/microphone/tracks/data channels,
-packaged CSP/WebView access, operational renewal/lifetime capacity, member relay and
+authenticated-facade WebView acceptance, operational renewal/lifetime capacity, member relay and
 combined/physical acceptance remain open. V2 stays OFF; external resume is separate.
 
 ## Broker41 peer-local media failure (26 October; native execution pending, App OFF)
