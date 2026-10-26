@@ -277,6 +277,12 @@ pub trait BlobStore {
         None
     }
 
+    /// Usage and completeness of this handle's cache index without copying it, or `None` like
+    /// [`cache_index`](BlobStore::cache_index). Cheap enough to check every actor turn.
+    fn cache_usage(&self) -> Option<crate::cache::CacheUsage> {
+        None
+    }
+
     /// Blobs this group must keep for Studio (durable references plus live job holds), or `None`
     /// while that set is unknown. Only the outermost reference-protecting adapter knows it; inner
     /// stores have no Studio state and answer the empty set. `None` must pause eviction.
@@ -468,7 +474,8 @@ const STAGING_DIR: &str = "staging";
 
 /// Inspect the opened file before reading. `take` also bounds a file that grows after metadata
 /// is checked. Never reserve from an untrusted on-disk length or fall back to `fs::read`.
-pub(crate) fn read_bounded(path: &Path, max_bytes: usize) -> Result<Option<Vec<u8>>, StorageError> {
+/// `Ok(None)` means the file does not exist; a directory or an oversized file is an error.
+pub fn read_bounded(path: &Path, max_bytes: usize) -> Result<Option<Vec<u8>>, StorageError> {
     let file = match std::fs::File::open(path) {
         Ok(file) => file,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
@@ -1016,6 +1023,13 @@ impl<R: CryptoRngCore> BlobStore for SealingBlobStore<R> {
 
     fn cache_index(&self) -> Option<crate::cache::CacheIndex> {
         self.cache.as_ref().and_then(|mode| mode.index.clone())
+    }
+
+    fn cache_usage(&self) -> Option<crate::cache::CacheUsage> {
+        self.cache
+            .as_ref()
+            .and_then(|mode| mode.index.as_ref())
+            .map(crate::cache::CacheIndex::summary)
     }
 
     fn cids(&self) -> Vec<Cid> {

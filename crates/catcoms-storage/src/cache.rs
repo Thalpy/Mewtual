@@ -126,12 +126,33 @@ pub struct CacheIndex {
     sizes: BTreeMap<Cid, u64>,
     mount: BTreeSet<Cid>,
     complete: bool,
+    /// Running sum of `sizes`, so the actor can compare usage with the limit every turn without
+    /// walking or cloning the index.
+    usage: u64,
+}
+
+/// The cheap facts the actor checks every turn.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct CacheUsage {
+    pub bytes: u64,
+    pub complete: bool,
+}
+
+fn total(sizes: &BTreeMap<Cid, u64>) -> u64 {
+    sizes.values().fold(0, |sum, n| sum.saturating_add(*n))
 }
 
 impl CacheIndex {
     /// Total sealed bytes of every indexed record.
     pub fn usage(&self) -> u64 {
-        self.sizes.values().fold(0, |sum, n| sum.saturating_add(*n))
+        self.usage
+    }
+    /// Usage and completeness together.
+    pub fn summary(&self) -> CacheUsage {
+        CacheUsage {
+            bytes: self.usage,
+            complete: self.complete,
+        }
     }
     /// Sealed length of each indexed record.
     pub fn sizes(&self) -> &BTreeMap<Cid, u64> {
@@ -149,21 +170,37 @@ impl CacheIndex {
     /// Test and planner constructor: an index over explicit sizes, all of them in the mount set.
     pub fn from_sizes(sizes: BTreeMap<Cid, u64>, complete: bool) -> Self {
         let mount = sizes.keys().copied().collect();
+        Self::with_mount(sizes, mount, complete)
+    }
+    /// Test and planner constructor with an explicit mount set. CIDs the index does not size are
+    /// dropped from the mount set, as the store itself would never hold them there.
+    pub fn with_mount(sizes: BTreeMap<Cid, u64>, mount: BTreeSet<Cid>, complete: bool) -> Self {
+        let mount = mount
+            .into_iter()
+            .filter(|cid| sizes.contains_key(cid))
+            .collect();
+        let usage = total(&sizes);
         Self {
             sizes,
             mount,
             complete,
+            usage,
         }
     }
     /// This handle stored `cid` with `len` sealed bytes. It leaves the mount set: it was written
     /// during this mount, so it can no longer be presumed unclaimed.
     pub(crate) fn note_written(&mut self, cid: Cid, len: u64) {
-        self.sizes.insert(cid, len);
+        if let Some(old) = self.sizes.insert(cid, len) {
+            self.usage = self.usage.saturating_sub(old);
+        }
+        self.usage = self.usage.saturating_add(len);
         self.mount.remove(&cid);
     }
     /// This handle removed `cid`.
     pub(crate) fn note_removed(&mut self, cid: &Cid) {
-        self.sizes.remove(cid);
+        if let Some(old) = self.sizes.remove(cid) {
+            self.usage = self.usage.saturating_sub(old);
+        }
         self.mount.remove(cid);
     }
 }
@@ -251,10 +288,11 @@ pub(crate) fn scan(
             })
             .unwrap_or_default()
     };
-    report.bytes = sizes.values().fold(0u64, |sum, n| sum.saturating_add(*n));
+    report.bytes = total(&sizes);
     report.complete = complete;
     (
         CacheIndex {
+            usage: report.bytes,
             sizes,
             mount,
             complete,
@@ -427,10 +465,10 @@ pub fn remove_kept_tree(namespace: &Path) -> Removal {
     }
     // Windows cannot delete a file another handle has open, so release the lease first.
     drop(lease);
-    if removal.failed == 0 {
-        if fs::remove_file(&lease_path).is_err() || fs::remove_dir(&kept).is_err() {
-            removal.failed += 1;
-        }
+    if removal.failed == 0
+        && (fs::remove_file(&lease_path).is_err() || fs::remove_dir(&kept).is_err())
+    {
+        removal.failed += 1;
     }
     removal
 }

@@ -511,6 +511,43 @@ impl BlobStore for ProtectedBlobs {
     fn clear_staging(&mut self) -> Result<usize, StorageError> {
         self.inner.clear_staging()
     }
+    fn cache_scan(
+        &mut self,
+        recover: bool,
+    ) -> Result<catcoms_storage::CacheScanReport, StorageError> {
+        self.inner.cache_scan(recover)
+    }
+    fn cache_index(&self) -> Option<catcoms_storage::CacheIndex> {
+        self.inner.cache_index()
+    }
+    fn cache_usage(&self) -> Option<catcoms_storage::CacheUsage> {
+        self.inner.cache_usage()
+    }
+    fn retained_chunks(&self) -> BTreeSet<Cid> {
+        self.inner.retained_chunks()
+    }
+    /// The group's durable references plus every live job hold, or `None` while the durable set
+    /// is unknown. This is what cache eviction plans around; `delete` above still re-checks under
+    /// the same mutex through each unlink, so a hold added after planning wins.
+    fn protected_cids(&self) -> Option<BTreeSet<Cid>> {
+        let mut guard = self.protection.lock().ok()?;
+        guard.reap();
+        let mut protected = guard
+            .pins
+            .as_ref()?
+            .groups
+            .get(&self.group)
+            .cloned()
+            .unwrap_or_default();
+        for hold in guard
+            .transient
+            .iter()
+            .filter(|hold| hold.owner.strong_count() != 0 && hold.group == self.group)
+        {
+            protected.extend(hold.cids.iter().copied());
+        }
+        Some(protected)
+    }
 }
 fn invalid() -> AppError {
     AppError::Invalid("creative reference scan incomplete, unsupported or over bound".into())

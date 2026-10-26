@@ -209,6 +209,14 @@ fn deletes_and_promotions_keep_the_index_current() {
     assert!(store.cache_index().unwrap().sizes().contains_key(&staged));
     assert!(store.delete(&staged).unwrap());
     assert!(store.cache_index().unwrap().sizes().is_empty());
+    assert_eq!(
+        store.cache_usage().unwrap(),
+        CacheUsage {
+            bytes: 0,
+            complete: true
+        },
+        "the running total follows deletes"
+    );
     let bounded = store.put_staged(b"bounded").unwrap();
     assert!(store.promote_staged_bounded(&bounded, 7).unwrap());
     assert!(store.cache_index().unwrap().sizes().contains_key(&bounded));

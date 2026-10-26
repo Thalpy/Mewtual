@@ -337,6 +337,14 @@ fn retained_chunks_are_exactly_the_completed_copies_reads_fall_back_to() {
     );
     assert!(store.delete(&p.cid).unwrap(), "the primary duplicate goes");
     assert_eq!(store.get(&p.cid).unwrap().unwrap(), b"kept bytes");
+    drop(store);
+    // After a restart the copy is unchecked: it still serves reads but replaces nothing.
+    let mut store = open(dir.path());
+    assert_eq!(store.get(&p.cid).unwrap().unwrap(), b"kept bytes");
+    assert!(
+        store.retained_chunks().is_empty(),
+        "unchecked evidence never authorizes dropping a duplicate"
+    );
     store.forget_kept(&p.cid).unwrap();
     assert!(store.retained_chunks().is_empty());
 }

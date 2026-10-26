@@ -35,7 +35,7 @@ use thiserror::Error;
 
 pub use blob::{BlobStore, FsBlobStore, MemoryBlobStore, SealingBlobStore};
 pub use blob_read::{BlobReadPlan, BlobReadResult};
-pub use cache::{CacheIndex, CacheScanReport, Removal};
+pub use cache::{CacheIndex, CacheScanReport, CacheUsage, Removal};
 pub use cid::{Cid, CidHasher};
 pub use filecrypto::{open_file, seal_file, FileManifest, FileRef, MAX_CHUNKS};
 // `FileRef::wrapped_key` is a public field of this type, so a caller cannot read or build a

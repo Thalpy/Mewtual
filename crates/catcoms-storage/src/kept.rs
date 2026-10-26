@@ -1788,18 +1788,23 @@ impl<R: CryptoRngCore> BlobStore for KeptBlobStore<R> {
     fn cache_index(&self) -> Option<crate::cache::CacheIndex> {
         self.primary.cache_index()
     }
+    fn cache_usage(&self) -> Option<crate::cache::CacheUsage> {
+        self.primary.cache_usage()
+    }
     fn protected_cids(&self) -> Option<std::collections::BTreeSet<Cid>> {
         self.primary.protected_cids()
     }
-    /// Exactly the chunks the public read paths above fall back to: completed winners' committed
-    /// plans and legacy completed copies, and only where the chunk is actually on disk. Private
-    /// Downloads and partial transfers never count, because reads never fall back to them.
+    /// The chunks the public read paths above fall back to (completed winners' committed plans and
+    /// legacy completed copies, on disk), restricted to copies whose whole file passed its check
+    /// in this store instance. Restart resets that evidence, so an unchecked copy never replaces a
+    /// cache duplicate: if one of its chunks were damaged, the duplicate is what repair would read.
+    /// Private Downloads and partial transfers never count, because reads never fall back to them.
     fn retained_chunks(&self) -> std::collections::BTreeSet<Cid> {
         let mut held = std::collections::BTreeSet::new();
-        if self.scope.is_none() {
+        if self.scope.is_none() || self.fault.is_some() {
             return held;
         }
-        for copy in &self.copies {
+        for copy in self.copies.iter().filter(|copy| copy.file.checked) {
             for (cid, _) in &copy.file.plan.chunks {
                 if copy.store.has(cid) {
                     held.insert(*cid);
@@ -1808,6 +1813,7 @@ impl<R: CryptoRngCore> BlobStore for KeptBlobStore<R> {
         }
         for transfer in &self.transfers {
             if transfer.poisoned
+                || !transfer.checked
                 || !transfer.record.public_retained()
                 || transfer.record.phase != KeepPhase::Completed
             {

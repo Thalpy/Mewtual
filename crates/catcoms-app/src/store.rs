@@ -67,6 +67,7 @@ pub(crate) use epoch_registry::{
 };
 mod epoch_studio;
 pub use creative_references::{CreativeReferences, MAX_CREATIVE_REFERENCES};
+mod leave_cleanup;
 pub(crate) use epoch_intents::inspection::{
     StudioInspectedDraft, StudioInspectionCapture, StudioInspectionPurpose, StudioInspectionStamp,
 };
@@ -123,6 +124,7 @@ pub(crate) use epoch_studio::{
     StudioOverlayCapture, StudioOverlayPlan, StudioOverlayStamp, StudioOverlayStart,
     StudioSourceCapture, MAX_SIGNING_TURNS_PER_VISIT, SIGNING_SLICE_BUDGET_MS,
 };
+pub use leave_cleanup::{LeaveCleanup, LeaveReport};
 // Flow R, the scheduled resolution of an interrupted Prepared handoff (Agent 1, design 6.4.2).
 pub(crate) use epoch_studio::{
     StudioResolveCapture, StudioResolvePlan, StudioResolveStart, StudioResolved,
@@ -1289,6 +1291,13 @@ mod persistence {
         pub(super) fn write_server_record(&self, id: u64, bytes: &[u8]) -> Result<(), AppError> {
             atomic_write(&self.server_path(id), bytes)
         }
+        pub(super) fn write_cache_setting_record(
+            &self,
+            id: u64,
+            bytes: &[u8],
+        ) -> Result<(), AppError> {
+            atomic_write(&self.cache_setting_path(id), bytes)
+        }
         pub(super) fn write_registry_record(&self, bytes: &[u8]) -> Result<(), AppError> {
             atomic_write(&self.registry_path(), bytes)
         }
@@ -1503,6 +1512,11 @@ impl ServerStore {
         self.dir.join("servers").join(format!("{id}.net"))
     }
 
+    /// The per-server, per-device cache limit record (never replicated).
+    fn cache_setting_path(&self, id: u64) -> PathBuf {
+        self.dir.join("servers").join(format!("{id}.storage"))
+    }
+
     fn registry_path(&self) -> PathBuf {
         self.dir.join("registry.bin")
     }
@@ -1705,14 +1719,17 @@ impl ServerStore {
         Ok(Zeroizing::new(unseal(&self.keys.db_key()?, &sealed)?))
     }
 
-    /// Delete a server's on-disk snapshot, its network record **and** its address cache (e.g. on
-    /// leave): leaving a stale identity seed behind would hand a re-founded server the old
-    /// server's peer id, and leaving the cache behind would have it dialling a group it left.
+    /// Delete a server's on-disk snapshot, its network record, its address cache **and** its cache
+    /// limit (e.g. on leave): leaving a stale identity seed behind would hand a re-founded server
+    /// the old server's peer id, and leaving the cache behind would have it dialling a group it
+    /// left. Its blob namespace is cleaned separately (see `cache_namespace_dir`), because that
+    /// cleanup must consult Studio references first.
     pub fn remove_server(&self, id: u64) -> Result<(), AppError> {
         for p in [
             self.server_path(id),
             self.server_net_path(id),
             self.address_cache_path(id),
+            self.cache_setting_path(id),
         ] {
             if p.exists() {
                 fs::remove_file(p).map_err(|e| AppError::Io(e.to_string()))?;
@@ -1736,18 +1753,11 @@ impl ServerStore {
     /// vault's `blob_key` (content-addressed by plaintext CID, so the mesh fetch is
     /// unchanged); the bytes survive restart and are opaque without the passphrase.
     pub fn blob_store(&self, key: &str) -> Result<Box<dyn BlobStore + Send>, AppError> {
-        // A namespace alias must not bypass full-group deletion protection. Legacy local/test
-        // names remain supported, but separators/dot components are never a blob namespace.
-        if key.is_empty()
-            || key.len() > 512
-            || !key
-                .bytes()
-                .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
-        {
-            return Err(AppError::Invalid("invalid blob namespace".into()));
-        }
+        validate_blob_namespace(key)?;
         let dir = self.dir.join("blobs").join(key);
-        let store = SealingBlobStore::open(&dir, self.keys.blob_key()?, OsCryptoRng)?;
+        // The primary cache writes crash-safely (temporary name, sync, rename). Keep's own stores
+        // below keep the plain path; see `SealingBlobStore::open_cache`.
+        let store = SealingBlobStore::open_cache(&dir, self.keys.blob_key()?, OsCryptoRng)?;
         let mut inner = catcoms_storage::kept::KeptBlobStore::open(
             Box::new(store),
             dir.join("kept"),
@@ -1764,6 +1774,77 @@ impl ServerStore {
         }
         Ok(Box::new(creative_references::ProtectedBlobs {
             inner: Box::new(inner),
+            group,
+            protection: self.creative_protection.clone(),
+        }))
+    }
+
+    /// Seal + atomically write a server's cache limit setting under the vault `db_key`.
+    pub fn save_cache_setting(
+        &self,
+        id: u64,
+        group: &[u8],
+        setting: &crate::cache_housekeeping::CacheSetting,
+        rng: &mut impl CryptoRngCore,
+    ) -> Result<(), AppError> {
+        let sealed = seal(&self.keys.db_key()?, &setting.encode_for(group), rng)?;
+        self.write_cache_setting_record(id, &frame(&sealed))
+    }
+
+    /// Read a server's cache limit setting. A missing record, or one naming another group (for
+    /// example a stale file left under a reused server number), reads as `Missing`, which the
+    /// caller migrates from current usage. A record that exists but cannot be read is
+    /// `Unreadable`, which keeps eviction off: a damaged setting must never shrink the cache.
+    pub fn load_cache_setting(
+        &self,
+        id: u64,
+        group: &[u8],
+    ) -> crate::cache_housekeeping::CacheSettingLoad {
+        use crate::cache_housekeeping::{CacheSetting, CacheSettingLoad};
+        let path = self.cache_setting_path(id);
+        let bytes = match catcoms_storage::blob::read_bounded(&path, 4096) {
+            Ok(Some(bytes)) => bytes,
+            Ok(None) => return CacheSettingLoad::Missing,
+            Err(_) => return CacheSettingLoad::Unreadable,
+        };
+        let Ok(key) = self.keys.db_key() else {
+            return CacheSettingLoad::Unreadable;
+        };
+        let plain = match unframe(&bytes).and_then(|sealed| Ok(unseal(&key, &sealed)?)) {
+            Ok(plain) => Zeroizing::new(plain),
+            Err(_) => return CacheSettingLoad::Unreadable,
+        };
+        match CacheSetting::decode(&plain) {
+            Some((record_group, setting)) if record_group == group => {
+                CacheSettingLoad::Found(setting)
+            }
+            Some(_) => CacheSettingLoad::Missing,
+            None => CacheSettingLoad::Unreadable,
+        }
+    }
+
+    /// The validated blob namespace directory of `key` (as [`Self::blob_store`] would open it),
+    /// for leave cleanup. Path only: the filesystem steps live in `catcoms_storage::cache`.
+    pub fn cache_namespace_dir(&self, key: &str) -> Result<PathBuf, AppError> {
+        validate_blob_namespace(key)?;
+        Ok(self.dir.join("blobs").join(key))
+    }
+
+    /// The directory holding every blob namespace, for the resumed leave-cleanup sweep.
+    pub fn blobs_root(&self) -> PathBuf {
+        self.dir.join("blobs")
+    }
+
+    /// A Studio-protected handle on the primary cache **without** the Keep store, for leave
+    /// cleanup: it must not take the `kept/` lease, which the wholesale `kept/` removal needs.
+    /// Deletes through it still consult Studio protection under its mutex.
+    pub fn cache_only_blob_store(&self, key: &str) -> Result<Box<dyn BlobStore + Send>, AppError> {
+        validate_blob_namespace(key)?;
+        let dir = self.dir.join("blobs").join(key);
+        let store = SealingBlobStore::open_cache(&dir, self.keys.blob_key()?, OsCryptoRng)?;
+        let group = hex::decode(key).unwrap_or_else(|_| key.as_bytes().to_vec());
+        Ok(Box::new(creative_references::ProtectedBlobs {
+            inner: Box::new(store),
             group,
             protection: self.creative_protection.clone(),
         }))
@@ -1811,6 +1892,20 @@ impl std::fmt::Debug for ServerStore {
             .field("dir", &self.dir)
             .finish_non_exhaustive()
     }
+}
+
+/// A namespace alias must not bypass full-group deletion protection. Legacy local/test names
+/// remain supported, but separators/dot components are never a blob namespace.
+fn validate_blob_namespace(key: &str) -> Result<(), AppError> {
+    if key.is_empty()
+        || key.len() > 512
+        || !key
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+    {
+        return Err(AppError::Invalid("invalid blob namespace".into()));
+    }
+    Ok(())
 }
 
 /// Frame a sealed blob for disk: `nonce(24) ‖ ciphertext`. (The AEAD authenticates it; a
