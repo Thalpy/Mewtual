@@ -19,7 +19,7 @@ pub fn serialize_key_package(key_package: &KeyPackage) -> Result<Vec<u8>, MlsErr
         .map_err(proto)
 }
 
-/// The shortest time a joiner's KeyPackage must remain valid after it is admitted: 60 days.
+/// The shortest time a joiner's KeyPackage must remain valid after it is admitted: 30 days.
 ///
 /// openmls checks an added KeyPackage's lifetime against the wall clock on **every** member that
 /// processes the Add, not only on the committer, and that includes a member replaying the Add from
@@ -28,20 +28,31 @@ pub fn serialize_key_package(key_package: &KeyPackage) -> Result<Vec<u8>, MlsErr
 /// member that was offline, or catches up later, can never apply that commit and stays at the old
 /// epoch until it is re-invited. The joiner chooses the lifetime, so this is checked at admission.
 ///
-/// Honest KeyPackages carry openmls's default 84 days and are admitted within an hour of being
-/// minted, so they clear this with weeks to spare; the slack also absorbs a joiner clock that is
-/// behind the committer's. What remains: a member offline for longer than the remaining lifetime
-/// (at least 60 days, about 84 for honest joiners) still cannot replay that Add
+/// The value trades two things. Honest KeyPackages carry openmls's default 84 days and are
+/// admitted within an hour of being minted, so the slack (about 54 days) is how far the joiner's
+/// clock may lag the committer's before an honest join is refused. The floor itself is how long a
+/// member may be offline and still replay an Add from a hostile joiner; for honest joiners it is
+/// about 84 days. A member offline for longer still cannot replay that Add
 /// (`docs/design-mls-leaf-lifetime.md` section 6).
 ///
-/// Only `not_after` is checked. A `not_before` set to "just now" makes members whose clocks lag
-/// refuse the Add only until their clocks pass it, which catch-up retries outlive; a short
-/// `not_after` is permanent.
-pub const MIN_ADMITTED_KEY_PACKAGE_LIFETIME_MS: u64 = 60 * 24 * 60 * 60 * 1000;
+/// The `not_before` side is not floored. A `not_before` of "just now" makes members whose clocks
+/// lag refuse the Add until their clocks pass it, and they only retry on a later trigger (another
+/// commit, an op from a newer epoch, a reconnect), so in a quiet group that can take a while; but
+/// it is not permanent, and flooring it would refuse honest joiners whose clocks run fast.
+pub const MIN_ADMITTED_KEY_PACKAGE_LIFETIME_MS: u64 = 30 * 24 * 60 * 60 * 1000;
 
 /// Refuse a KeyPackage lifetime that ends sooner than [`MIN_ADMITTED_KEY_PACKAGE_LIFETIME_MS`]
-/// after `now_ms`.
+/// after `now_ms`, or whose total range exceeds openmls's own cap (84 days and 1 hour,
+/// `Lifetime::has_acceptable_range`).
+///
+/// openmls 0.8 and 0.9 define that cap but do not enforce it, so a joiner can sign
+/// `not_after = u64::MAX`. RFC 9420 asks applications to enforce a maximum, and a later openmls
+/// that enforced it on processing would refuse the Add on every upgraded member: the same
+/// stranding as a short lifetime. Honest KeyPackages sit exactly at the cap and pass.
 fn check_admitted_lifetime(lifetime: &Lifetime, now_ms: u64) -> Result<(), InviteError> {
+    if !lifetime.has_acceptable_range() {
+        return Err(InviteError::KeyPackageLifetimeTooLong);
+    }
     let not_after_ms = lifetime.not_after().saturating_mul(1000);
     if not_after_ms < now_ms.saturating_add(MIN_ADMITTED_KEY_PACKAGE_LIFETIME_MS) {
         return Err(InviteError::KeyPackageExpiresTooSoon);
@@ -208,18 +219,28 @@ impl MlsDevice {
     /// Parse and validate a KeyPackage received over the wire (from a joiner),
     /// using this device's crypto backend.
     ///
-    /// `now_ms` comes from the caller's `catcoms-rt` `Clock`. Besides openmls's own checks
-    /// (signature, capabilities, and a lifetime covering the current time), the KeyPackage must
-    /// stay valid for at least [`MIN_ADMITTED_KEY_PACKAGE_LIFETIME_MS`] after `now_ms`; see that
-    /// constant for why.
-    pub fn parse_key_package(&self, bytes: &[u8], now_ms: u64) -> Result<KeyPackage, MlsError> {
+    /// For identifying a joiner only. Anything about to **admit** the KeyPackage must use
+    /// [`MlsDevice::parse_admitted_key_package`], which also applies the admission lifetime policy.
+    pub fn parse_key_package(&self, bytes: &[u8]) -> Result<KeyPackage, MlsError> {
         let message = MlsMessageIn::tls_deserialize(&mut &bytes[..]).map_err(proto)?;
-        let key_package = match message.extract() {
+        match message.extract() {
             MlsMessageBodyIn::KeyPackage(kp_in) => kp_in
                 .validate(self.provider.crypto(), ProtocolVersion::Mls10)
-                .map_err(proto)?,
-            _ => return Err(MlsError::WrongMessageType),
-        };
+                .map_err(proto),
+            _ => Err(MlsError::WrongMessageType),
+        }
+    }
+
+    /// [`MlsDevice::parse_key_package`] plus the admission lifetime policy: the KeyPackage must
+    /// stay valid for at least [`MIN_ADMITTED_KEY_PACKAGE_LIFETIME_MS`] after `now_ms`, and its
+    /// total lifetime must not exceed openmls's cap. `now_ms` comes from the caller's `catcoms-rt`
+    /// `Clock`. Every path that adds a joiner to the group parses through this.
+    pub fn parse_admitted_key_package(
+        &self,
+        bytes: &[u8],
+        now_ms: u64,
+    ) -> Result<KeyPackage, MlsError> {
+        let key_package = self.parse_key_package(bytes)?;
         check_admitted_lifetime(key_package.life_time(), now_ms)?;
         Ok(key_package)
     }

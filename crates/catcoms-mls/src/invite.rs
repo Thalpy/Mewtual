@@ -74,6 +74,11 @@ pub enum InviteError {
     /// its own clock, so a short one would strand them all.
     #[error("key package expires too soon after admission")]
     KeyPackageExpiresTooSoon,
+    /// The joiner's KeyPackage lifetime spans more than openmls's own cap (84 days and 1 hour).
+    /// openmls defines that cap without enforcing it; a later version that did would refuse the
+    /// Add on every upgraded member.
+    #[error("key package lifetime is longer than the allowed maximum")]
+    KeyPackageLifetimeTooLong,
 }
 
 /// The binding carried in a joining device's MLS leaf credential.
