@@ -29,6 +29,7 @@ mod export;
 mod external;
 mod persistence;
 mod record;
+mod saved;
 use downloads::Owner;
 pub use downloads::{
     DownloadBytes, DownloadExportLease, DownloadId, DownloadRun, DownloadStatus, DownloadStore,
@@ -46,6 +47,10 @@ pub(crate) use persistence::directory_barrier;
 use persistence::{Transfer, DELETING, FORMAT, FORMAT_CHARGE, TRANSFERS};
 pub use record::{
     KeepAllowance, KeepPhase, KeepRetry, KeepRetryReceipt, KeepScope, KEEP_EXECUTION_SLICE_MS,
+};
+pub use saved::{
+    saved_file_location, saved_file_presence, SavedFile, SavedFileId, SavedFiles, SavedListError,
+    SavedLocation, MAX_SAVED_FILES, MAX_SAVED_LIST_BYTES, SAVED_LIST_VERSION,
 };
 
 /// Opaque process-local run identity. It is not serialized or accepted from IPC. One checked

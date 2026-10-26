@@ -68,6 +68,8 @@ pub(crate) use epoch_registry::{
 mod epoch_studio;
 pub use creative_references::{CreativeReferences, MAX_CREATIVE_REFERENCES};
 mod leave_cleanup;
+#[cfg(test)]
+mod saved_files_tests;
 pub(crate) use epoch_intents::inspection::{
     StudioInspectedDraft, StudioInspectionCapture, StudioInspectionPurpose, StudioInspectionStamp,
 };
@@ -1298,6 +1300,13 @@ mod persistence {
         ) -> Result<(), AppError> {
             atomic_write(&self.cache_setting_path(id), bytes)
         }
+        pub(super) fn write_saved_files_record(
+            &self,
+            id: u64,
+            bytes: &[u8],
+        ) -> Result<(), AppError> {
+            atomic_write(&self.saved_files_path(id), bytes)
+        }
         pub(super) fn write_registry_record(&self, bytes: &[u8]) -> Result<(), AppError> {
             atomic_write(&self.registry_path(), bytes)
         }
@@ -1394,6 +1403,18 @@ pub(in crate::store) use persistence::{
     atomic_write_with_hook_and_sync_for_test, atomic_write_with_hook_for_test,
     create_staging_file_for_test, staging_candidate_for_test, write_for_test,
 };
+
+/// What [`ServerStore::load_saved_files`] found (PR #56, `docs/design-saved-files-list.md`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SavedFilesLoad {
+    /// No record, or a stale record naming another group: an empty list, safe to write over.
+    Missing,
+    /// A record that exists but cannot be read: damaged, not a saved-files record, or a version
+    /// this build does not know. **Never written over or removed** except by leaving the server,
+    /// so a list a newer build wrote survives a downgrade; saves are then not recorded.
+    Unreadable,
+    Found(catcoms_storage::kept::SavedFiles),
+}
 
 /// A passphrase-gated, on-disk store for a member's servers.
 pub struct ServerStore {
@@ -1515,6 +1536,11 @@ impl ServerStore {
     /// The per-server, per-device cache limit record (never replicated).
     fn cache_setting_path(&self, id: u64) -> PathBuf {
         self.dir.join("servers").join(format!("{id}.storage"))
+    }
+
+    /// The per-server, per-device saved-files list (PR #56; never replicated).
+    fn saved_files_path(&self, id: u64) -> PathBuf {
+        self.dir.join("servers").join(format!("{id}.saved"))
     }
 
     fn registry_path(&self) -> PathBuf {
@@ -1719,17 +1745,21 @@ impl ServerStore {
         Ok(Zeroizing::new(unseal(&self.keys.db_key()?, &sealed)?))
     }
 
-    /// Delete a server's on-disk snapshot, its network record, its address cache **and** its cache
-    /// limit (e.g. on leave): leaving a stale identity seed behind would hand a re-founded server
-    /// the old server's peer id, and leaving the cache behind would have it dialling a group it
-    /// left. Its blob namespace is cleaned separately (see `cache_namespace_dir`), because that
-    /// cleanup must consult Studio references first.
+    /// Delete a server's on-disk snapshot, its network record, its address cache, its cache limit
+    /// **and** its saved-files list (e.g. on leave): leaving a stale identity seed behind would
+    /// hand a re-founded server the old server's peer id, leaving the cache behind would have it
+    /// dialling a group it left, and the saved-files list names folders on this device that a
+    /// left server has no reason to keep (the saved files themselves are never touched). This is
+    /// also the only way an unreadable saved-files list (for example one a newer build wrote) is
+    /// ever removed. Its blob namespace is cleaned separately (see `cache_namespace_dir`), because
+    /// that cleanup must consult Studio references first.
     pub fn remove_server(&self, id: u64) -> Result<(), AppError> {
         for p in [
             self.server_path(id),
             self.server_net_path(id),
             self.address_cache_path(id),
             self.cache_setting_path(id),
+            self.saved_files_path(id),
         ] {
             if p.exists() {
                 fs::remove_file(p).map_err(|e| AppError::Io(e.to_string()))?;
@@ -1824,6 +1854,58 @@ impl ServerStore {
             }
             Some(_) => CacheSettingLoad::Missing,
             None => CacheSettingLoad::Unreadable,
+        }
+    }
+
+    /// Seal + atomically write a server's saved-files list under the vault `db_key` (PR #56).
+    ///
+    /// The caller (native, under the store lock and then the registry lock, for the server
+    /// incarnation that saved) must only write a list it loaded as `Missing` or `Found`: an
+    /// `Unreadable` record is never overwritten, so a list a newer build wrote survives this one.
+    /// The list must name `group`; one naming another group is refused, so a record can never be
+    /// written under the wrong server number.
+    pub fn save_saved_files(
+        &self,
+        id: u64,
+        group: &[u8],
+        list: &catcoms_storage::kept::SavedFiles,
+        rng: &mut impl CryptoRngCore,
+    ) -> Result<(), AppError> {
+        if list.group() != group {
+            return Err(AppError::Invalid(
+                "the saved-files list names another group".into(),
+            ));
+        }
+        let plain = Zeroizing::new(list.encode());
+        let sealed = seal(&self.keys.db_key()?, &plain, rng)?;
+        self.write_saved_files_record(id, &frame(&sealed))
+    }
+
+    /// Read a server's saved-files list (PR #56). A missing record, or one naming another group (a
+    /// stale file under a reused server number), is `Missing`: an empty list the next save may
+    /// write over. A record that exists but cannot be read (damaged, another record's bytes, or a
+    /// version this build does not know) is `Unreadable`, and the caller must leave it exactly as
+    /// it is; only [`Self::remove_server`] removes it.
+    pub fn load_saved_files(&self, id: u64, group: &[u8]) -> SavedFilesLoad {
+        use catcoms_storage::kept::{SavedFiles, MAX_SAVED_LIST_BYTES};
+        let path = self.saved_files_path(id);
+        // The frame is the 24-byte nonce plus the ciphertext, which adds a 16-byte tag.
+        let bytes = match catcoms_storage::blob::read_bounded(&path, MAX_SAVED_LIST_BYTES + 40) {
+            Ok(Some(bytes)) => bytes,
+            Ok(None) => return SavedFilesLoad::Missing,
+            Err(_) => return SavedFilesLoad::Unreadable,
+        };
+        let Ok(key) = self.keys.db_key() else {
+            return SavedFilesLoad::Unreadable;
+        };
+        let plain = match unframe(&bytes).and_then(|sealed| Ok(unseal(&key, &sealed)?)) {
+            Ok(plain) => Zeroizing::new(plain),
+            Err(_) => return SavedFilesLoad::Unreadable,
+        };
+        match SavedFiles::decode(&plain) {
+            Ok(list) if list.group() == group => SavedFilesLoad::Found(list),
+            Ok(_) => SavedFilesLoad::Missing,
+            Err(_) => SavedFilesLoad::Unreadable,
         }
     }
 
