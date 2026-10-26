@@ -1,4 +1,5 @@
 import { encodeVoiceMediaOriginal, encodeVoiceMediaExisting } from "./voice-ipc-media.ts";
+import { VOICE_SESSION_LIFECYCLE_BYTES } from "./voice-session-lifecycle.ts";
 import { encodeVoicePcIntent } from "./voice-ipc-pc.ts";
 import { encodeVoiceSdpPhase } from "./voice-ipc-sdp.ts";
 import { encodeVoiceSdkCustody } from "./voice-ipc-sdk.ts";
@@ -3311,8 +3312,9 @@ test("failed original RTC close retains broker payment and withholds native SDK 
 /** Real framing/AEAD with independent native stand-in; Rust TCP tests separately
  * establish actual native admission. Assert exact original bindings and release order. */
 async function framedMedia(t: TestContext, low = true,
-    prepared: Awaited<ReturnType<typeof establishedPcFixture>> | null = null) {
-  const f = await framedSdpRound(t, low, false, prepared), sdk = sdpRtcProvider(t, low); await f.round();
+    prepared: Awaited<ReturnType<typeof establishedPcFixture>> | null = null, driveRound = true) {
+  const f = await framedSdpRound(t, low, false, prepared), sdk = sdpRtcProvider(t, low);
+  if (driveRound) await f.round();
   const original = { parentRow: f.child.parent.row, identity: f.child.parent.identity,
     handshake: f.child.parent.binding.handshake, key: hash(99), sequence: "1",
     storage: hash(100), sdkGeneration: "1", sdkProof: hash(101), pcProof: hash(102) };
@@ -4062,4 +4064,150 @@ for (const seam of ["clock", "schedule"] as const) test(`intake cancellation at 
   assert.equal(parent.counts().inputReads, 0, "expired Input never reaches transport after the final callback");
   assert.equal(parent.counts().admissions, 0);
   f.owner.retire(); await channel.close(); assert.equal(f.broker.counts().bytes, 0);
+});
+
+
+for (const low of [true, false]) test(`Session coordinator drives RTC through actual compaction after authenticated PC; LOW=${low}`, async t => {
+  // This unit seam starts with authenticated confirmation/storage/PC already present.
+  // From here ONLY the coordinator drives RTC/media/retirement/compaction/advance.
+  // Native TCP acceptance must additionally start it directly after setup.
+  const f = await framedMedia(t, low, null, false), broker = f.f.broker;
+  const plan = f.child.ready.chain;
+  const channels = broker as unknown as { ipcChannels: Map<string, {
+    negotiation: object; peers: Map<unknown, { compacted: boolean; compactionReturned: boolean }>;
+  }> };
+  const session = channels.ipcChannels.get(f.f.owner.token)!, beforeGeneration = session.negotiation;
+  const before = broker.counts().bytes;
+  f.remaining(0); // Independent fake native declares its original sources already drained.
+  const observer = broker.observeNativeLifecycle(f.f.owner, f.child.channel, f.f.key);
+  assert.equal(broker.observeNativeLifecycle(f.f.owner, f.child.channel, f.f.key), observer);
+  assert.equal(broker.counts().bytes, before + VOICE_SESSION_LIFECYCLE_BYTES);
+  const deadline = performance.now() + 15_000;
+  while (session.negotiation === beforeGeneration) {
+    if (performance.now() >= deadline) throw new Error(`coordinator stalled: ${JSON.stringify(f.modes)}`);
+    // Drive only its scheduled cadence; SDK/IPC work advances through actual promises.
+    // No readiness/role/row or native result is fabricated by this timer control.
+    const delay = f.f.timers().delays.find(delay => delay > 0 && delay <= 250);
+    if (delay !== undefined) f.f.advance(delay);
+    await flush();
+  }
+  assert.equal(session.peers.get(plan)?.compacted, true);
+  assert.equal(session.peers.get(plan)?.compactionReturned, true);
+  assert.equal(f.sdk.calls.created, 1); assert.equal(f.sdk.calls.closed, 0);
+  assert.ok(f.modes.includes(7), "actual detach request");
+  await observer.close();
+  assert.equal(f.sdk.calls.closed, 0, "stopping scheduling does not close indexed media");
+  f.f.owner.retire(); assert.equal(f.sdk.calls.closed, 1);
+  await f.child.channel.close(); assert.equal(broker.counts().bytes, 0);
+});
+
+test("Session coordinator funding refuses before publication and its fee survives observer stop until End", async t => {
+  const f = await fixture(t), channel = f.channel(); await channel.status();
+  const privateBudget = f.broker as unknown as { charge(owner: typeof f.owner, bytes: number): void; refund(owner: typeof f.owner, bytes: number): void };
+  const pressure = 256 * 1024 - f.broker.counts().bytes - 1024;
+  const actualHeld = new Uint8Array(pressure); privateBudget.charge(f.owner, actualHeld.length);
+  const full = f.broker.counts().bytes;
+  assert.throws(() => f.broker.observeNativeLifecycle(f.owner, channel, f.key), /capacity/);
+  assert.equal(f.broker.counts().bytes, full);
+  privateBudget.refund(f.owner, actualHeld.length); actualHeld.fill(0);
+  const before = f.broker.counts().bytes;
+  const observer = f.broker.observeNativeLifecycle(f.owner, channel, f.key);
+  assert.equal(f.broker.counts().bytes, before + VOICE_SESSION_LIFECYCLE_BYTES);
+  await observer.close();
+  assert.equal(f.broker.counts().bytes, before + VOICE_SESSION_LIFECYCLE_BYTES);
+  assert.equal(f.broker.observeNativeLifecycle(f.owner, channel, f.key), observer, "stopped coordinator cannot be reconstructed");
+  f.owner.retire(); await channel.close(); assert.equal(f.broker.counts().bytes, 0);
+});
+
+test("funded Broker37 requires reload before operational coordinator reuse", async t => {
+  const f = await fixture(t), channel = f.channel(); await channel.status();
+  const previous = Object.create(f.broker); Object.defineProperty(previous, "version", { value: 37 });
+  const key = Symbol.for("mewtual.voice.crypto-broker.v2"), host = { [key]: previous };
+  const before = f.broker.counts().bytes;
+  assert.throws(() => windowVoiceCryptoBroker(f.admission, host, real), /reload required/);
+  assert.equal(host[key], previous); assert.equal(f.broker.counts().bytes, before);
+  f.owner.retire(); await channel.close();
+});
+
+
+test("new-peer Claim/adopt and storage/SDK admission yield codec turns to indexed media", async t => {
+  const originalRtc = globalThis.RTCPeerConnection;
+  const first = await framedMedia(t), f = first.f;
+  t.after(() => { globalThis.RTCPeerConnection = originalRtc; });
+  await first.media(); first.remaining(0); await first.retireNegotiation();
+  const firstPlan = first.child.ready.chain;
+  assert.equal(await f.broker.compactNativeNegotiation(f.owner, first.child.channel, firstPlan), true);
+  const oldResponder = f.actionHandler()!;
+  assert.equal(f.broker.advanceNativeNegotiation(f.owner, first.child.channel, firstPlan), true);
+  const child = await framedConfirmation(f, true, true, 2), custody = custodyReplies(f, child);
+  const nextResponder = f.actionHandler()!;
+  const delayed: number[] = [];
+  f.actions(async (header, body) => {
+    if (header.logical === first.child.parent.row) return oldResponder(header, body);
+    const reply = await nextResponder(header, body);
+    if ((header.operation === 10 || header.operation === 11 || header.operation === 12 || header.operation === 13) && body[1] === 0) {
+      delayed.push(header.operation);
+      // Each actual complete request returns within the unchanged5s physical bound.
+      // Two queued together would still starve an old peer's Current for6s.
+      f.advance(3000); await flush();
+    }
+    return reply;
+  });
+  const observer = f.broker.observeNativeLifecycle(f.owner, child.channel, f.key);
+  try {
+    await child.derive(); await child.handle().attempt();
+    await until(() => custody.keyCounts().adopted);
+    assert.equal(first.sdk.calls.closed, 0, "old Current must interleave between Claim and key-adopt");
+    const deadline = performance.now() + 15_000;
+    while (custody.effectCounts().sdkAdmissions === 0) {
+      if (performance.now() >= deadline) throw new Error(`SDK admission stalled after ${delayed}`);
+      const cadence = f.timers().delays.find(delay => delay > 0 && delay <= 250);
+      if (cadence !== undefined) f.advance(cadence);
+      await flush();
+    }
+    assert.equal(first.sdk.calls.closed, 0, "old Current must interleave between storage and SDK admission");
+    assert.deepEqual(delayed.slice(0, 4), [10, 11, 12, 13]);
+  } finally {
+    await observer.close(); f.owner.retire(); await child.channel.close();
+  }
+  assert.equal(f.broker.counts().bytes, 0);
+});
+
+
+test("one genuinely held admission RPC still expires old media and retains its actual work", async t => {
+  const originalRtc = globalThis.RTCPeerConnection;
+  const first = await framedMedia(t), f = first.f;
+  t.after(() => { globalThis.RTCPeerConnection = originalRtc; });
+  await first.media(); first.remaining(0); await first.retireNegotiation();
+  const firstPlan = first.child.ready.chain;
+  assert.equal(await f.broker.compactNativeNegotiation(f.owner, first.child.channel, firstPlan), true);
+  const oldResponder = f.actionHandler()!;
+  assert.equal(f.broker.advanceNativeNegotiation(f.owner, first.child.channel, firstPlan), true);
+  const child = await framedConfirmation(f, true, true, 2), custody = custodyReplies(f, child);
+  const nextResponder = f.actionHandler()!, held = gate(); let entered = false;
+  f.cleanup(() => held.release());
+  f.actions(async (header, body) => {
+    if (header.logical === first.child.parent.row) return oldResponder(header, body);
+    const reply = await nextResponder(header, body);
+    if (header.operation === 10 && body[1] === 0) { entered = true; await held.promise; }
+    return reply;
+  });
+  const observer = f.broker.observeNativeLifecycle(f.owner, child.channel, f.key);
+  try {
+    await child.derive(); await child.handle().attempt(); await until(() => entered);
+    f.advance(5000); await flush();
+    assert.equal(first.sdk.calls.closed, 1, "fair turns cannot extend one held request's freshness");
+    assert.equal(custody.keyCounts().adopted, false, "no later admission overtakes held work");
+    f.owner.retire(); const closing = child.channel.close(); let returned = false;
+    void closing.then(() => { returned = true; }); await flush();
+    assert.equal(returned, false); assert.equal(f.counts().collections, 0);
+    // End may release proven-unstarted chain capacity. The actual held physical work
+    // must still retain Control8KiB + metadata16KiB + this Session coordinator2KiB.
+    const heldPayment = f.broker.counts().bytes;
+    assert.ok(heldPayment >= 24 * 1024 + VOICE_SESSION_LIFECYCLE_BYTES);
+    await flush(); assert.equal(f.broker.counts().bytes, heldPayment);
+    held.release(); await observer.close(); await closing;
+    assert.equal(custody.keyCounts().adopted, false, "returned stale Claim must never adopt after End");
+    assert.equal(f.broker.counts().bytes, 0);
+  } finally { held.release(); f.owner.retire(); await child.channel.close(); }
 });

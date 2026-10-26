@@ -1,5 +1,23 @@
 # Mewtual; Architecture
 
+## Session lifecycle scheduling (26 October; inactive)
+
+Broker38 adds one coalesced lifecycle per authenticated Session. Its prepaid 2 KiB graph
+retains only opaque generation/plan/stage observations while scheduling existing authorized
+leaves. It lives outside NativeWorkPump: handoff joins that pump, and history compaction
+must never wait for the pump while holding its own transition turn. Native identity/proof
+admission remains in each existing leaf. Successful history collection leaves an opaque
+advance marker, then the explicit next-negotiation operation replaces the generation.
+
+The loop owns one actual task and at most one cadence registration. A Clock which registers
+then throws cannot return that payment without its original callback. Failed cancellation
+retains the original timer debt until cancellation or callback really returns. No finite
+clock reading may silently round the next 250 ms cadence to the present. End joins actual
+work outside codec/ledger guards; its 2 KiB fee returns only with Session collection.
+Claim/adopt and storage/SDK sequences retain their original single-flight authority while
+yielding the physical codec between complete requests, allowing indexed media to refresh.
+App activation, failed-negotiation isolation, real RTC and relay remain separate work.
+
 ## Prepaid variable voice progression (26 October; inactive, validation pending)
 
 Before a protected chain exposes Derive, it now prepays one192KiB core and independent32KiB

@@ -1,5 +1,21 @@
 # Threat model; client integrity & enforcement boundaries
 
+## Automatic voice scheduling is not authority (26 October; inactive)
+
+The lifecycle observer must not turn stale stage metadata into a fresh native grant.
+Every continuation repeats original generation/plan and negative fences after the final
+owner callback; existing native-authenticated custody still authorizes each actual effect.
+One paid observer/task/timer is coalesced per Session. Clock reentrancy, cancellation failure
+and lost timer registration cannot refund live work or recursively schedule unbounded work.
+Old callbacks cannot clear a newer registration. The observer keeps no complete old Phase,
+BrowserChain, SDK or negotiation across compaction/refund.
+
+Returning admission calls yield the shared codec separately so a new peer cannot monopolize
+an established peer's refresh window across several requests. An individually stalled call
+still has the unchanged physical deadline and may close old media; no freshness is invented.
+Current terminal failure behavior still ends the whole Session before compaction, so this
+change does not claim failed-peer isolation, operational renewal or production App activation.
+
 ## Voice phase capacity and abandoned transfers (26 October; inactive)
 
 A peer must not force an already exposed confirmation chain to find a second full variable

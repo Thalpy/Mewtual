@@ -13,6 +13,10 @@ export class VoicePcCustody {
   private admission: Readonly<Pick<Admission, "profile" | "ready" | "localIsLow">> | null = null;
   private deadline: number | null = null;
 
+  /** Scheduling history only; each effect still needs its fresh original native grant. */
+  get schedulingState(): "waiting" | "admitted" | "closed" {
+    return this.stopped || this.released ? "closed" : this.admission ? "admitted" : "waiting";
+  }
   get needsClose(): boolean { return this.attempted && !this.released; }
   get nativeClosed(): boolean { return !this.needsClose; }
   /** Original lookup metadata for media recovery/cleanup after Ready expiry. This is

@@ -1,5 +1,18 @@
 # Mewtual; Interfaces & Hooks Schema
 
+## Broker38 lifecycle observer (26 October; inactive)
+
+`observeNativeLifecycle(owner, channel, selectedKey)` requires the same live original
+selected key/channel/owner allocations and authenticated Ready setup. Repeated calls return
+the same observer. Its `close()` stops and joins scheduling, not native uncertainty or the
+Session itself; normal channel/owner End still owns cleanup. The one 2 KiB lifecycle graph
+is admitted before publication and stays charged until Session collection. Broker37 HMR
+state requires reload. Native IPC/wire grammar and existing effect grants are unchanged.
+
+Scheduling snapshots contain only an opaque generation, public plan handle and closed
+stage enum. A void leaf return may be busy/refused: the scheduler reobserves actual state.
+The PC scheduling getter reports retained history only; it cannot authorize RTC mutation.
+
 ## Variable capacity admission before Derive (26 October; inactive)
 
 Protected chain creation can now refuse for its complete variable192KiB core plus32KiB Ready
