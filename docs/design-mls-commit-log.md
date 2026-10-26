@@ -231,7 +231,7 @@ builds `SyncStats` literally.
 
 | Severity | Finding | Outcome |
 |---|---|---|
-| MEDIUM | catcoms-app rank-1 tests, sync integration tests and `cargo deny` not run; HANDOVER claimed checks | Run (results in the PR); HANDOVER states only that |
+| MEDIUM | catcoms-app rank-1 tests, sync integration tests and `cargo deny` not run; HANDOVER claimed checks | Run: catcoms-sync in full (925 unit plus integration), catcoms-app filtered to `succession`, `repair`, `commit`, `join` and `fork` (155 passed, 0 failed; the rest of catcoms-app is left to CI), `cargo deny check` ok. HANDOVER claims nothing beyond the PR |
 | LOW | ARCHITECTURE §4b/§4c still said `process_incoming` and understated forged future records | Updated |
 | LOW | THREAT-MODEL overstated ("everything" goes through `apply_commit`; key window) | Reworded: received records; key window on the in-order path |
 | LOW | HANDOVER said the leaf-lifetime fix was done | Reworded: in review |
