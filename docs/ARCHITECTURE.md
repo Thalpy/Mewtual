@@ -1,5 +1,25 @@
 # Mewtual; Architecture
 
+## Retiring a known failed negotiation (26 October; inactive)
+
+Broker39 separates a failed attached negotiation from its retained Session before any per-N
+media record exists. It fences that generation, joins its original work outside the codec,
+performs negative cleanup of observed obligations and uses original Plan final/ACK. Actual
+worker return precedes an explicit next-generation publication under the complete shared
+quiescence barrier. Old chain/action history stays paid; native/job/child adapters are severed
+before replacement so retained public history cannot keep an unpaid complete old N alive.
+
+Native outstanding-work projection and automatic parent admission share one exact indexed
+Plan-certificate predicate. It uses the immutable native-issued/ACKed full-retirement witness,
+not a fresh boolean Root observation which could report false on contention. Exact native
+row/child try-lock refusal remains Capacity. Rows are not removed; direct authenticated
+historical recovery is unchanged. Unknown children can be terminalized from the parent's
+certificate only after their actual local SDK/IO joins. This grants no fresh effect.
+
+Uncertain positive admissions need a new native negative fence before any recovery-shaped
+Admit can be safe on a live lease; this implementation quarantines them. Any per-N media
+record still uses whole-Session fallback. Operational renewal, App/RTC and relay remain open.
+
 ## Session lifecycle scheduling (26 October; inactive)
 
 Broker38 adds one coalesced lifecycle per authenticated Session. Its prepaid 2 KiB graph

@@ -1,5 +1,23 @@
 # Mewtual; Interfaces & Hooks Schema
 
+## Broker39 failed-plan retirement and outstanding work (26 October; inactive)
+
+`retireFailedNativeNegotiation(owner, channel, originalPlan)` is negative-only for an attached
+original plan with no per-N media record. Calls coalesce. A void return is not a fresh grant;
+`advanceNativeNegotiation` requires exact Plan-final/ACK, actual worker return and the full
+old-generation quiescence barrier. Uncertain positive admission remains retained/quarantined;
+owner/Session End still owns its cleanup. Fixed chain/action history and Root budgets remain.
+Broker38 HMR requires reload. This must ship with the matching native outstanding-work
+semantics before production activation; an older backend can keep returning retired metadata.
+
+Native `readWork` now selects outstanding work. It omits exact parent/descendant subtrees only
+after original Plan-kind final issuance and ACK certified full retirement. Pending, unissued,
+unACKed and Phase-kind histories remain visible/blocking. Direct original history lookup is
+unchanged; absence from `readWork` never proves browser cleanup. Wire fields/opcodes are
+unchanged. Both native automatic-admission and projection queries refuse Capacity on native
+row contention. Immutable issued proof avoids reinterpreting Root try-lock contention as an
+unretired historical parent.
+
 ## Broker38 lifecycle observer (26 October; inactive)
 
 `observeNativeLifecycle(owner, channel, selectedKey)` requires the same live original

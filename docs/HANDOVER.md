@@ -1,5 +1,53 @@
 # Mewtual; Handover
 
+## Broker39 failed-peer cleanup (known receipts; native validation in progress)
+
+An attached failed plan can now retire without replacing the selected key, Session or
+indexed peers, provided it has no per-negotiation media record and no uncertain positive
+admission. Cleanup closes only that plan, joins its actual SDK/RTC/IO/child work, completes
+ordinary Returns, releases observed custody, and obtains exact immutable Plan-final/ACK.
+The next generation waits for actual worker return and the same complete history/status/
+creation quiescence barrier used by successful compaction. No attempt, deadline, nonce,
+Root action budget or fixed history limit is reset.
+
+Native automatic discovery omits only exact indexed/selected Plan-certified retired parents
+and descendants. Issuance already required full Root/SDK/IO retirement; its immutable issued
+and ACKed certificate is the historical witness. Discovery does not resample boolean Root
+try-lock observers, which could temporarily expose an old terminal descriptor. Native row
+contention returns Capacity. Direct authenticated history and the retained rows remain.
+Omission never authorizes browser advancement; its own exact ACK/framed finally and actual
+cleanup return do. Quiet unknown children or lost local Return observations are covered by
+the parent's exact final certificate after actual local work joins.
+
+Old fixed chain/action history stays paid until End. Before replacing N, completion removes
+old native adapters, completed Job templates and child adapters that capture it; no complete
+old N is charged to a reused Session work envelope. A reentrant End keeps the old link until
+global cleanup can dispose it. End explicitly joins public failed workers even without the
+lifecycle observer. Four review findings were fixed and their regression tests catch removal
+of each fix. Final read-only re-review has no remaining blocker/high/medium in this narrow
+boundary; the native historical-witness design was separately reviewed.
+
+Restrictions are deliberate: uncertain Claim/key/storage/SDK admission remains quarantined
+while other indexed peers refresh. Replaying Admit on a live lease could create a first
+effect. A separate irreversible native closing fence is still needed for that recovery.
+Unknown parent publication remains quarantined. ANY per-N media record currently falls back
+to whole-Session retirement, including an offered record with no observed admission; this
+slice does not solve that case, operational renewal or real RTC/media relay. App V2 stays OFF.
+
+Focused 334 tests pass (7.22 s); complete frontend 3,045 (74.43 s), static checks and build
+(42.04 s) pass. Strict TypeScript covers the Node endpoint and lifecycle. Native finalization
+(17), contention (1) and projection (3) focused tests pass. The real TCP preservation case
+passes in 71.24 s; the unchanged successful two-peer baseline passes in 78.87 s. That case
+uses A-B's blocked edge/unjoined helper, then a permitted A-C edge with confirmed observed
+Claim/key and no SDP admission. It checks the exact retained native certificate, same Session
+keys/increasing counters, a refused late first storage request and fresh A-B Current; RTC
+objects remain controlled. Full new native validation is running, not yet claimed passed.
+Root code/lockfiles remain unchanged from the passing 3,679/24-ignore source; its construction
+gate scans native source and passes again (0.51 s). Fresh native check passes (43.15 s).
+The older 885 native result below predates this slice. Native full is running; strict lint
+follows it. Dependency advisory and
+external resume remain separately owned; physical independent testing still needs device two.
+
 ## Automatic browser lifecycle (26 October; complete suites pass, App OFF)
 
 Broker38 adds one prepaid2KiB, coalesced Session lifecycle outside the confirmation pump.

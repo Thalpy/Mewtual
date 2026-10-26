@@ -1,5 +1,26 @@
 # Chat, files and voice implementation evidence
 
+## Broker39 known failed-plan retirement (26 October; native focused passes, full pending)
+
+Focused 334 tests pass in 7.22 s; complete frontend 3,045 in 74.43 s, static checks and
+production build in 42.04 s pass. Failing-before evidence covers closing an established peer
+when a new plan fails. Additional regressions cover normal/lost Plan issuance and ACK,
+pre-Return failure, a public worker held during End without a lifecycle observer, history
+IO preventing replacement, End at SDK unlink, unknown quiet children and lost local Return
+observations. Removing each of four reviewed lifecycle fixes makes its regression fail.
+Actual positive admission/reply-loss seams at10/11/12/13 remain quarantined with admission
+counts unchanged and indexed media live; provisional Finish custody cannot create a Claim.
+
+Native finalization17/contention1/projection3 focused tests pass. The new TCP failure-
+preservation case passes71.24s; the unchanged successful two-peer native case passes78.87s.
+Direct history is retained and late first storage is refused by actual native authorization.
+Fresh native check and Root construction gate pass. The full native suite is running and
+strict lint follows; a new full result is not yet claimed.
+the passing 885 below covers Broker38. Matching Root code/lockfiles remain unchanged from
+3,679/24 existing ignores; its native-source construction scan passes again. App stays OFF. Known
+scope excludes ambiguous admission recovery, any per-N media record, renewal, real RTC/audio,
+relay, combined acceptance and independent physical evidence. HANDOVER records exact limits.
+
 ## Broker38 automatic lifecycle (26 October; complete suites pass, App OFF)
 
 The new lifecycle drives existing confirmation, storage/SDK, PC, RTC, media and history

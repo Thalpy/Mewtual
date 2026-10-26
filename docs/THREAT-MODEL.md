@@ -1,5 +1,30 @@
 # Threat model; client integrity & enforcement boundaries
 
+## Failed-plan certificates and admission ambiguity (26 October; inactive)
+
+Plan-kind final issuance already requires original action Return, closed children and full
+Root/SDK/IO retirement; ACK matches the issued proof and exact Session. The stored certificate
+is irreversible. Every future obligation must join issuance before proof creation, and no
+Begin/attach/Claim/key/storage/SDK/PC/child path may reopen it afterward. Native discovery uses
+that historical witness with exact indexed/selected parent identity and actual parent Arcs
+for descendants. It does not resample boolean Root Phase status: contention there can mean
+false without reversing retirement. Native row/child contention instead returns Capacity.
+This is selection only, never authority to forget rows or admit an SDK/RTC effect.
+
+Peer-local cleanup must not reuse ordinary Admit as a negative lookup while the lease is
+live: a lost reply or a never-started request can otherwise create new Claim/key/storage/SDK
+custody. This slice releases only observed obligations and quarantines uncertain admission.
+A future native early closing intent must preserve original Return/child/Session/final-kind
+checks and its own media/Source retirement barrier before permitting recovery. No Capacity,
+timeout, missing row or local failure flag can certify that fence or reset an attempt.
+
+Actual local workers and original final ACK/framed finally precede replacement. Exact parent
+certification can supersede a quiet child's missing local Return observation, but cannot
+supersede a running SDK/IO owner. Clearing retired adapters keeps old N out of the reused
+fixed work envelope; its chain/action history remains paid until End. Indexed media remains
+on its independent Current owner. Any per-N media record still falls back to Session End;
+this is a known isolation gap, not proof of complete failed-peer or media recovery.
+
 ## Automatic voice scheduling is not authority (26 October; inactive)
 
 The lifecycle observer must not turn stale stage metadata into a fresh native grant.

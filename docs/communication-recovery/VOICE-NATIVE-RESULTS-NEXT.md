@@ -1,5 +1,31 @@
 # Next voice milestone: native result recovery
 
+## Broker39 known-receipt retirement and the next native fence (26 October; App OFF)
+
+Known attached failed plans now have peer-local retirement, preserving original Session
+keys/counters and independent indexed media. Native projection omits only exact Plan-
+certified subtrees; proof issuance is the immutable full-retirement witness. Direct history
+and all fixed action/chain fees remain until End. Focused334/full frontend3045/static/build
+pass. Native finalization17/contention1/projection3, actual TCP failed-peer preservation71.24s
+and successful two-peer78.87s pass. Fresh native check and Root construction scan pass; the
+new full native/lint gates are running. HANDOVER holds exact current results.
+
+This slice quarantines uncertain positive Claim/key/storage/SDK admission. Ordinary Admit on
+a live lease can create work which never began. The next native change needs an irreversible
+original Plan closing intent AFTER ordinary parent Return/closed children/exact Session and
+immutable-kind checks, while retaining unreleased obligations. Root control may retire only
+after preserving that plan's own media/Source barrier (`negotiation_may_close`); a missing
+browser media object does not prove no native media admission occurred. Full final issuance
+must still wait for actual release/drainage. Only an authenticated original Pending/final
+fence response permits recovery-shaped admission calls; lost/Capacity replies retry the
+same fence first. Existing history must report Closing, and frozen-missing history must not
+fall through to new Actor preparation. No new wire opcode is necessary, but these native
+semantics and their late-attachment/lost-reply tests are NOT implemented yet.
+
+Any per-N media record still triggers whole-Session fallback. Unknown parent publication,
+operational renewal/Root lifetime capacity, production App/real RTC/tracks, relay, combined
+and independent physical acceptance remain open. External download resume is separate.
+
 ## Broker38 lifecycle acceptance (26 October; App OFF)
 
 The genuine sequential native two-peer case now passes (77.90 s), including actual native
@@ -18,7 +44,7 @@ ignores. Remaining software work includes failed-negotiation isolation/renewal, 
 App/native/real RTC/microphone composition, member media relay and combined acceptance.
 Do not enable V2 or mark physical acceptance complete based on controlled RTC providers.
 
-## Reviewed next slice: attached failed-parent retirement (not implemented)
+## Reviewed failed-parent design (known-receipt subset implemented)
 
 Read-only design review distinguishes an attached original Action/Plan from an unknown
 parent Pending. For the attached case, a generation-bound peer cleanup worker can preserve
@@ -31,14 +57,13 @@ Phase intent or invoke whole-Session cleanup/settleSetup. Retain failed native/b
 history and Root Actions under current bounds until End; general history forgetting is not
 required for this first slice.
 
-Two admission changes need separate regression coverage. Native automatic-parent admission
-currently blocks every retained Derive row. Its exception must require issued and ACKed
-original Plan final, full final-retirement/Root/Claim/SDK/Phase drainage and permanently frozen
-child admission. Ordinary drained/ClosedPending or a browser failure flag is insufficient.
-The new browser pump must skip only exact certified failed parents and descendants using a
-paid full RowId/Action/purpose/Session/generation record, never slot-only hints. The lifecycle
-needs pair cleanup rather than global `stopped`; owner/epoch/selected-key revocation and
-unusable Session transport remain global failures.
+The implemented native filter requires original Plan final issuance/ACK, which already
+certified full retirement and permanently closed child admission. Ordinary drained/Pending
+closure or a browser failure flag is insufficient. Exact indexed/selected parent identity
+and actual parent Arcs scope omission to that subtree; direct history remains. This native
+filter replaces the earlier proposed browser skip table, so no extra retained old-N graph
+is needed. Pair cleanup replaces `stopped` for this known-receipt path; owner/epoch/selected-
+key revocation and unusable Session transport remain global failures.
 
 An unknown parent without a captured Action/Plan remains quarantined. Local `close_pending`
 does not prove Root absence. Recover its original positive publication or add per-invocation
