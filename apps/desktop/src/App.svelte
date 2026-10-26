@@ -22061,7 +22061,10 @@
         if (e.payload.server === callServer) void refreshCallProfiles();
       }),
       listen<{ server: number; status: unknown }>("cache-status", (e) => {
-        if (e.payload.server === activeServerId) cacheStatus = checkedCacheStatus(e.payload.status);
+        if (e.payload.server !== activeServerId) return;
+        // Newer than any get_cache_status still in flight: retire those replies.
+        cacheStatusSeq++;
+        cacheStatus = checkedCacheStatus(e.payload.status);
       }),
       listen<{ server: number }>("files-updated", (e) => {
         spaceActivityAt[e.payload.server] = Date.now();

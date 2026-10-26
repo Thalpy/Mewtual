@@ -355,7 +355,13 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
             return Err(CachePause::PinsUnknown);
         }
         for transfer in &kept.transfers {
-            if transfer.phase == catcoms_storage::kept::KeepPhase::Completed {
+            // Completed: class 0 handles it. Deleting: being released, so it protects nothing
+            // and its saved plans are no longer readable (that must not pause eviction).
+            if matches!(
+                transfer.phase,
+                catcoms_storage::kept::KeepPhase::Completed
+                    | catcoms_storage::kept::KeepPhase::Deleting
+            ) {
                 continue;
             }
             let plans = self

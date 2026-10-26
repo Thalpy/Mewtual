@@ -5,7 +5,7 @@
 //! - **Crash-safe temporary names.** The primary cache writes each blob to
 //!   `incoming/<cid hex>.<process id>.<mount generation>.<sequence>`, syncs it and renames it into
 //!   place, so a CID-named file only ever appears with complete content. The mount generation is a
-//!   process-wide counter handed to each primary handle when it opens and kept in [`live`] until the
+//!   process-wide counter handed to each primary handle when it opens and kept in a live set until the
 //!   handle drops. Recovery can then tell an abandoned temporary file (another process, or a handle
 //!   that no longer exists) from one a live handle in this process is still writing.
 //! - **The cache scan.** One pass over the directory records each CID-named regular file and its
