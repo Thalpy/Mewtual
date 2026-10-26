@@ -509,18 +509,24 @@ fn attach_file(namespace: &Path) -> Result<fs::File, StorageError> {
         .map_err(|e| StorageError::Io(e.to_string()))
 }
 
-/// Release the exclusive hold and unlink the lock file, so an emptied namespace directory can be
-/// removed. Missing is fine. Call only as the last step before removing the namespace: from here
-/// on nothing proves the namespace unattached, which is safe only because the caller's cleanup
-/// claim still keeps every in-process attach out.
+/// Unlink the lock file while still holding it, then release the hold, so an emptied namespace
+/// directory can be removed. Missing is fine. Call only as the last step before removing the
+/// namespace.
+///
+/// Unlinking first leaves no moment where the lock is free under its old name: an opener that
+/// already has the old file still fails its try-lock until the hold drops, and one that opens the
+/// name afterwards creates a fresh lock file, which keeps the directory non-empty so the
+/// namespace is not removed under it. std opens files with delete sharing, so the unlink works on
+/// Windows while the hold is open; under classic delete semantics the file then goes when the
+/// hold closes, which is still before the caller's `remove_dir`.
 pub fn remove_attach_lock(held: AttachExclusive) -> Result<(), StorageError> {
-    let path = held.namespace.join(ATTACH_LOCK);
-    drop(held);
-    match fs::remove_file(path) {
+    let removed = match fs::remove_file(held.namespace.join(ATTACH_LOCK)) {
         Ok(()) => Ok(()),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
         Err(e) => Err(StorageError::Io(e.to_string())),
-    }
+    };
+    drop(held);
+    removed
 }
 
 /// The namespace's Keep lease (`kept/lease.lock`), held by whoever owns the namespace's Keep store

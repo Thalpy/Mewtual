@@ -97,8 +97,11 @@ pub(super) struct LeaveReport {
     kept_bytes: u64,
     /// Entries that could not be removed; cleanup resumes after the next unlock.
     failed: usize,
-    /// Whether cleanup ran. False: the files stay on this device (in use, shared by another
-    /// server entry, or never marked), and the toast must not claim otherwise.
+    /// Whether cleanup ran. False with `failed == 0`: nothing was deleted and nothing will be
+    /// (shared by another server entry, taken back by a rejoin, never on disk, or never marked),
+    /// and the toast must not claim otherwise. False with `failed > 0`: cleanup could not start
+    /// yet (the namespace was still open, or the leave is not durable yet) and its marker stays
+    /// for the next attach or unlock.
     cleaned: bool,
 }
 
@@ -114,7 +117,8 @@ impl From<catcoms_app::store::LeaveReport> for LeaveReport {
 }
 
 impl LeaveReport {
-    fn failed() -> Self {
+    /// Nothing removed yet, marker kept: the next attach or unlock carries the leave on.
+    pub(super) fn failed() -> Self {
         Self {
             failed: 1,
             ..Self::default()
@@ -123,8 +127,7 @@ impl LeaveReport {
 }
 
 /// Exclusive cleanup custody of one group's namespace, released on drop. Taken by `leave_server`
-/// before it writes the `leaving` marker (so a rejoin cannot slip between the marker and the
-/// deletes) and by the resume sweep.
+/// before it stops the server (see [`claim_for_leave`]) and by the resume sweep.
 pub(super) struct CleanupClaim<'a> {
     bridge: &'a CacheBridge,
     group: Vec<u8>,
@@ -196,9 +199,11 @@ pub(super) fn prepare_blob_store(
                 storage_cache::AttachAttempt::Held(held) => {
                     let mut removal = storage_cache::remove_scratch(&dir);
                     removal.add(storage_cache::remove_kept_tree(&dir));
-                    if removal.failed == 0 {
-                        // The held lock file keeps the namespace directory: only the marker goes.
-                        let _ = storage_cache::finish_leaving(&dir);
+                    // The held lock file keeps the namespace directory: only the marker goes. A
+                    // marker that cannot be removed counts as a failure, or Keep would open
+                    // healthy under it and the next attach would wipe copies made meanwhile.
+                    if removal.failed == 0 && storage_cache::finish_leaving(&dir).is_err() {
+                        removal.failed += 1;
                     }
                     drop(held);
                     removal
@@ -409,8 +414,9 @@ const LEASE_RELEASE_WAIT: Duration = Duration::from_millis(200);
 /// emptied, and its marker is **kept**: the holder may be a live server of the same group (a join
 /// that attached before the leave), or the leaving server's own handle still being dropped, and
 /// nothing here can tell them apart. Both are safe with the marker in place. A live server's next
-/// attach treats it as a rejoin (the cache stays, the confirmed-deleted Keep copies go; its Keep
-/// store is faulted for this mount, so it holds none of its own yet), and the sweep skips groups
+/// attach treats it as a rejoin (the cache stays, the confirmed-deleted Keep copies go; it
+/// attached while the leaving server held the Keep lease, which `claim_for_leave` guarantees, so
+/// its Keep store is faulted for this mount and holds none of its own), and the sweep skips groups
 /// a registered server uses; otherwise the next unlock finishes the leave. Reported as a failure.
 pub(super) async fn clean_namespace(
     state: &AppState,
@@ -524,6 +530,40 @@ pub(super) async fn sweep_leaving(state: &AppState, generation: Option<u64>) {
         let report = clean_namespace(state, &claim, generation, false).await;
         drop(claim);
         tracing::info!(target: "catcoms_app", namespace = %name, freed = report.freed_bytes, failed = report.failed, "STORAGE.CACHE.LEAVE_RESUMED");
+    }
+}
+
+/// Take the cleanup claim for `server`'s group while the server is still registered and running,
+/// before `leave_server` stops it. `None` when the server is not registered, or when another
+/// server entry (an alias) shares the group, whose namespace is then left alone entirely. Waits
+/// while another cleanup holds the claim (a concurrent leave of the same server; the sweep never
+/// claims a group a registered server uses).
+///
+/// Why before the stop: the server's own handle holds the namespace's Keep lease until the stop
+/// drops it, and from the claim on no attach of the group can start (attach waits on the claim).
+/// So any handle still open when the cleanup runs attached while this server held the lease, and
+/// has a faulted Keep store with no copies of its own. That is what makes keeping the marker on a
+/// busy namespace safe: the holder's next attach removes only the Keep copies the user confirmed
+/// deleting. A claim taken after the stop would let a join land in between with a healthy Keep,
+/// whose copies the kept marker would later wipe without asking.
+pub(super) async fn claim_for_leave(state: &AppState, server: u64) -> Option<CleanupClaim<'_>> {
+    loop {
+        let group = {
+            let servers = state.servers.lock().await;
+            let group = servers.get(&server)?.group_id.clone();
+            let alias = servers
+                .iter()
+                .any(|(id, entry)| *id != server && entry.group_id == group);
+            if alias {
+                return None;
+            }
+            // Claimed under the servers lock, as the sweep does, so the two cannot interleave.
+            if let Some(claim) = state.cache.claim(&group) {
+                return Some(claim);
+            }
+            group
+        };
+        state.cache.wait_unclaimed(&group).await;
     }
 }
 

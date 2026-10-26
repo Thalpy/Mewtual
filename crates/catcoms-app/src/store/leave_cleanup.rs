@@ -34,8 +34,9 @@ pub struct LeaveReport {
     pub kept_bytes: u64,
     /// Entries that could not be removed; the marker stays and cleanup resumes later.
     pub failed: usize,
-    /// Whether cleanup ran at all. False when the namespace was in use, never attached, shared
-    /// by another server entry, or could not be marked: its files then stay on this device.
+    /// Whether cleanup ran at all. Every report from [`LeaveCleanup::finish`] says true; the
+    /// desktop bridge reports false when it never got that far, with `failed > 0` when the marker
+    /// stays for a later attempt and `failed == 0` when nothing will be deleted.
     pub cleaned: bool,
 }
 
@@ -195,8 +196,9 @@ impl LeaveCleanup {
         if self.report.failed > 0 {
             return self.report;
         }
-        // The lock file has to go before the directory can. The bridge's claim still keeps every
-        // in-process attach out between releasing the hold and removing the namespace.
+        // The lock file has to go before the directory can. It is unlinked while still held, so
+        // an opener racing this step either fails its try-lock or creates a fresh lock file that
+        // keeps the namespace directory (see `remove_attach_lock`).
         let unlocked = self
             .attach
             .take()

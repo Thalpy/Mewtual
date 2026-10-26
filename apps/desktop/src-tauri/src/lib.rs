@@ -7382,6 +7382,9 @@ async fn leave_server(
 ) -> Result<cache_housekeeping::LeaveReport, String> {
     require_unlocked_session(&state).await?;
     let generation = unlocked_ui_session_generation(&state).await?;
+    // Claim the group's namespace while the server still runs, so no attach of the group can
+    // start between its stop and the marker (see `claim_for_leave` for why that matters).
+    let claim = cache_housekeeping::claim_for_leave(&state, server).await;
     // Stop application publication/authoring before native retirement. Keeping the row while
     // waiting also lets an in-flight Ready/save finish without confusing its incarnation fence.
     let Some(stopped) = leaving::stop_server(&state, server, &SystemClock).await? else {
@@ -7390,21 +7393,17 @@ async fn leave_server(
     // Drain older captured writes before deleting the file; none can recreate it after leave.
     let persist = persist_lock_for(&state, server).lock_owned().await;
     let session = require_ui_session_generation(&state, generation).await?;
-    let removed = {
+    let (removed, claim) = {
         let mut servers = state.servers.lock().await;
         let removed = stopped.remove(&mut servers)?;
-        // Claim the namespace before the marker is written, so no rejoin can attach it between
-        // the marker and the deletes. An alias row (another server number for the same group)
-        // still uses the namespace, so it is left alone entirely.
+        // A join that attached before the claim may have registered during the stop. It is an
+        // alias now (another server number for the same group) and still uses the namespace, so
+        // the namespace is left alone entirely.
         let alias = servers
             .values()
             .any(|entry| entry.group_id == removed.group_id);
-        let claim = (!alias)
-            .then(|| state.cache.claim(&removed.group_id))
-            .flatten();
-        (removed, claim)
+        (removed, claim.filter(|_| !alias))
     };
-    let (removed, claim) = removed;
     let mappings = state
         .media_mappings
         .lock()
@@ -7460,6 +7459,11 @@ async fn leave_server(
         (Some(claim), true, PersistOutcome::Durable) => {
             cache_housekeeping::clean_namespace(&state, claim, Some(generation), true).await
         }
+        // Marked, but the smaller registry is not durable yet: the marker stays and a later
+        // unlock or attach carries the leave on, so this is "not finished", not "kept".
+        (_, true, _) => cache_housekeeping::LeaveReport::failed(),
+        // Nothing was marked (an alias, nothing on disk, or the marker could not be written):
+        // nothing is deleted now or later.
         _ => Default::default(),
     };
     drop(claim);

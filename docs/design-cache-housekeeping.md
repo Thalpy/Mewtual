@@ -367,18 +367,29 @@ per-request handle) holds `<namespace>/attach.lock` **shared** for its lifetime,
 requires the marker to still be present (a rejoin removes it), then takes `attach.lock`
 **exclusively**, then the Keep lease, and holds both to the end. The cleanup's own handle opens
 under that exclusive hold (`open_cache_under`) rather than taking a shared one. All attempts are
-try-locks, and the lock file is unlinked only as the last step before the namespace is removed.
+try-locks, and the lock file is unlinked (while still held) only as the last step before the
+namespace is removed, so a racing opener either fails its try-lock or creates a fresh lock file
+that keeps the directory.
 
-A busy lock means some handle is open: a live server of the same group, or the leaving server's
-own handle still being dropped (the actor can take longer than the wait when its event channel is
-full). The two cannot be told apart, so nothing is deleted, the marker is **kept** and the leave
-reports a failure. That is safe either way: a live server's next attach treats the marker as a
-rejoin (the cache stays and the confirmed-deleted Keep copies go; its own Keep store is faulted
-for the mount it attached in, so it holds no copies of its own yet), the sweep skips groups a
-registered server uses, and otherwise the next unlock finishes the leave. A leave first waits up
-to three seconds for the just-stopped actor's handle to drop. A cleanup stopped by a session
-change skips scratch and `kept/` too, and keeps the marker. The leave report says `cleaned: false`
-whenever cleanup did not run.
+`leave_server` takes its claim **before** it stops the server, while that server's handle still
+holds the Keep lease. From then on no attach of the group can start, so any handle still open at
+cleanup time attached while the lease was held and has a faulted Keep store with no copies of its
+own. (A claim taken after the stop would let a join land in between with a healthy Keep.) A join
+that attached before the claim and registered during the stop is an alias by then, and the leave
+leaves the namespace alone.
+
+A busy lock means some handle is open: such an earlier attach of the same group, or the leaving
+server's own handle still being dropped (the actor can take longer than the wait when its event
+channel is full). The two cannot be told apart, so nothing is deleted, the marker is **kept** and
+the leave reports a failure. That is safe either way: a live server's next attach treats the
+marker as a rejoin (the cache stays and the confirmed-deleted Keep copies go; by the precondition
+above it holds no copies of its own), the sweep skips groups a registered server uses, and
+otherwise the next unlock finishes the leave. A rejoin whose marker cannot be removed also keeps
+Keep off for that mount, so no new copies are made under a marker. A leave first waits up to
+three seconds for the just-stopped actor's handle to drop. A cleanup stopped by a session change
+skips scratch and `kept/` too, and keeps the marker. The leave report says `cleaned: false`
+whenever cleanup did not run, with `failed > 0` when its marker stays for a later attempt (the
+namespace was busy, or the registry change was not durable yet).
 
 Residual: Linux emulates `flock` on NFS with per-process POSIX locks, under which a second lock in
 the same process succeeds; like the vault and Keep locks, this proof assumes a local filesystem.

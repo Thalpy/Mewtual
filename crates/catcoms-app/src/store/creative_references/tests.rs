@@ -701,6 +701,15 @@ fn leave_cleanup_never_touches_a_namespace_that_is_attached_or_taken_back() {
         "the marker stays, so a later attach or unlock finishes the leave"
     );
     drop(joiner);
+    // A Keep store a moment from dropping (its lease outlives its primary's attach hold) is busy
+    // too: the attach lock alone is free, but `kept/` is not removed under the lease.
+    let lease = storage_cache::lock_kept(&dir);
+    assert!(matches!(lease, LeaseAttempt::Held(Some(_))));
+    assert!(matches!(
+        store.begin_leave_cleanup(&key).unwrap(),
+        crate::store::LeaveBegin::Busy
+    ));
+    drop(lease);
     std::fs::remove_file(dir.join("leaving")).unwrap(); // a rejoin took it back
     assert!(matches!(
         store.begin_leave_cleanup(&key).unwrap(),

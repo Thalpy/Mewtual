@@ -169,11 +169,17 @@ fn a_rejoin_over_a_marker_leaves_a_namespace_another_handle_holds() {
     let mut open = store.blob_store(&key).unwrap();
     let staged = open.put_staged(b"an upload being staged").unwrap();
     let namespace = store.cache_namespace_dir(&key).unwrap();
+    let confirmed = namespace.join("kept").join("transfers-v2").join("d-1");
+    std::fs::create_dir_all(&confirmed).unwrap();
     assert!(mark_leaving(&store, &GROUP).unwrap());
     let (rejoined, _) = prepare_blob_store(&store, Some(2), &GROUP).unwrap();
     assert!(
         open.promote_staged(&staged).unwrap(),
         "the open handle's staging survived"
+    );
+    assert!(
+        confirmed.exists(),
+        "kept/ is not touched under an open handle"
     );
     assert!(storage_cache::has_leaving_marker(&namespace));
     drop((open, rejoined));
@@ -181,6 +187,81 @@ fn a_rejoin_over_a_marker_leaves_a_namespace_another_handle_holds() {
     let (_again, _) = prepare_blob_store(&store, Some(2), &GROUP).unwrap();
     assert!(!storage_cache::has_leaving_marker(&namespace));
     assert!(namespace.join(staged.to_hex()).exists(), "the cache stays");
+}
+
+/// Poll `future` once: whether it is still waiting.
+async fn still_pending<F: std::future::Future>(mut future: std::pin::Pin<&mut F>) -> bool {
+    std::future::poll_fn(|cx| std::task::Poll::Ready(future.as_mut().poll(cx).is_pending())).await
+}
+
+/// `leave_server` itself cannot run here (it needs a Tauri `State`), so pin the order in its
+/// source: the claim comes before the stop (see `claim_for_leave` for why).
+#[test]
+fn leave_server_claims_the_group_before_it_stops_the_server() {
+    let source = include_str!("../lib.rs");
+    let body = &source[source.find("async fn leave_server(").expect("leave_server")..];
+    let body = &body[..body.find("\n}\n").expect("end of leave_server")];
+    let claim = body.find("claim_for_leave(").expect("leave_server claims");
+    let stop = body.find("stop_server(").expect("leave_server stops");
+    assert!(
+        claim < stop,
+        "the claim must be taken while the server runs"
+    );
+}
+
+/// Re-review of 251ca05c: `leave_server` claims the group while the server still runs, before the
+/// stop drops its Keep lease, so no join can attach (with a healthy Keep whose copies a kept
+/// marker would later wipe) between the stop and the marker. A concurrent leave of the same server
+/// waits and then finds it gone, and an alias row is never claimed.
+#[tokio::test]
+async fn a_leave_claims_the_group_before_the_server_stops() {
+    let state = AppState::default();
+    let (entry, task, drain) = crate::leaving::tests::running(951);
+    let group = entry.group_id.clone();
+    let actor = entry.actor.clone();
+    state.servers.lock().await.insert(1, entry);
+    let claim = claim_for_leave(&state, 1)
+        .await
+        .expect("a registered server with no alias is claimed");
+    assert!(state.cache.claimed(&group));
+    let join = state.cache.wait_unclaimed(&group);
+    tokio::pin!(join);
+    assert!(
+        still_pending(join.as_mut()).await,
+        "a join of the same group cannot attach until the leave is done"
+    );
+    let second = claim_for_leave(&state, 1);
+    tokio::pin!(second);
+    assert!(still_pending(second.as_mut()).await);
+    state.servers.lock().await.remove(&1); // the first leave removed the row
+    drop(claim);
+    assert!(
+        second.await.is_none(),
+        "the second leave finds nothing to claim"
+    );
+    join.await;
+    actor.shutdown().await;
+    task.await.unwrap();
+    drain.await.unwrap();
+
+    let (two, two_task, two_drain) = crate::leaving::tests::running(952);
+    let (mut three, three_task, three_drain) = crate::leaving::tests::running(953);
+    three.group_id = two.group_id.clone();
+    let shared = two.group_id.clone();
+    let actors = [two.actor.clone(), three.actor.clone()];
+    state.servers.lock().await.insert(2, two);
+    state.servers.lock().await.insert(3, three);
+    assert!(claim_for_leave(&state, 2).await.is_none());
+    assert!(
+        !state.cache.claimed(&shared),
+        "an alias still uses the namespace"
+    );
+    for actor in actors {
+        actor.shutdown().await;
+    }
+    for handle in [two_task, two_drain, three_task, three_drain] {
+        handle.await.unwrap();
+    }
 }
 
 #[test]
