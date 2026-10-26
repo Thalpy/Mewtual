@@ -1,6 +1,6 @@
 # Mewtual; Handover
 
-## Automatic browser lifecycle (26 October; native acceptance pending, App OFF)
+## Automatic browser lifecycle (26 October; native TCP passes, full native run pending)
 
 Broker38 adds one prepaid2KiB, coalesced Session lifecycle outside the confirmation pump.
 It observes opaque original generation/plan/stage metadata and calls the existing native-
@@ -23,12 +23,14 @@ Focused 321 tests pass in 8.02 s. Complete frontend 3,032 passes in 88.71 s; sta
 and production build (50.75 s) pass. Strict TypeScript covers the Node endpoint and new
 lifecycle module/tests. Read-only adversarial review finds no remaining blocker/high/medium
 or material low in this diff; that static review does not establish native acceptance.
-The new native/TCP test is written but NOT YET RUN: it starts only the coordinator after
+The new native/TCP test passes in 40.68 s: it starts only the coordinator after
 authenticated setup, independently checks exact-selected native collected history, and
 passively requires browser compaction AND advance plus actual controlled SDK local/remote
 effects. Endpoint TCP is forbidden; helper owns no call. Its60s whole-step observer bound
-spans formerly separate phases and changes no physical/protocol deadline. Root validation
-of the preceding source is still using the shared target, so native checks remain queued.
+spans formerly separate phases and changes no physical/protocol deadline. Native check
+(67.89 s) and strict all-target/all-feature lint (111.66 s) pass. The complete native suite
+is running. Matching complete Root validation passes 3,679/24 existing ignores; this slice
+changes no Root source. Formatting also passes. The inherited dependency advisory remains.
 Real WebView/SDP/ICE/audio and media relay are not established by controlled RTC objects.
 Pre-compaction terminal failure still retires the Session; failed-peer isolation/renewal,
 production App integration, relay, combined and physical acceptance remain open.

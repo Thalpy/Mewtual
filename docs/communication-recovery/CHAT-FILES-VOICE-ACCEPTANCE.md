@@ -1,6 +1,6 @@
 # Chat, files and voice implementation evidence
 
-## Broker38 automatic lifecycle (26 October; native run queued)
+## Broker38 automatic lifecycle (26 October; native TCP passes, full native pending)
 
 The new lifecycle drives existing confirmation, storage/SDK, PC, RTC, media and history
 leaves, then explicit next-negotiation advance. Framed/WebCrypto tests cover both roles
@@ -12,12 +12,13 @@ rollback and representability of the next cadence. The focused 321 tests pass in
 complete frontend 3,032, static checks and build pass. Strict TypeScript also covers the Node
 endpoint and new lifecycle module/tests.
 
-The genuine blocked-TCP coordinator scenario is written but not yet run. It starts only the
+The genuine blocked-TCP coordinator scenario passes in 40.68 s. It starts only the
 production observer after selected/setup, uses no parent/phase/proof hints, and passively
 requires compacted/returned/advanced browser history with controlled SDK local/remote
 effects. Native independently checks exact-selected collected media history. The prior
-shared-variable/native-admission checkpoint passes all 884 native tests and strict lint;
-its Root full suite is still running. New native acceptance/full checks are queued behind it.
+shared-variable/native-admission checkpoint passes all 884 native tests and strict lint.
+Matching full Root 3,679/24 existing ignores, native check and strict native lint pass.
+The new complete native suite is running; this adds one case to the prior native source.
 App V2 remains OFF; this is not real ICE/audio, failed-peer isolation, relay or completion
 of combined/physical acceptance. External download resume remains separately owned.
 
