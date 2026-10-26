@@ -251,8 +251,62 @@ impl ConfirmationControl {
         retirement
     }
 }
+/// The sole close right follows the actual phase, including an abandoned extracted ticket.
+/// Arc reservation observations alone cannot close or refund another live phase's backing.
+/// Keep this owner before its enclosing retirement publisher in every retaining graph.
+pub(in crate::voice_v2) struct SdpCapacityClosing {
+    core: Arc<Reservation>,
+    ready: Arc<super::ready::capacity::ReadyCapacity>,
+}
+impl Drop for SdpCapacityClosing {
+    fn drop(&mut self) {
+        self.core.close();
+        self.ready.close();
+    }
+}
+struct ProgressCapacity {
+    // Declaration order closes lending first; the direct unused escrow then returns to
+    // the closed core. Actual old loans independently keep only their real debt paid.
+    closing: SdpCapacityClosing,
+    escrow: Credit,
+}
+struct ProgressCapacityOwner {
+    body: Option<Box<ProgressCapacity>>,
+    // OUTSIDE the Box and last: its existing4KiB fee survives body/escrow destruction
+    // AND actual Box deallocation. An anchor inside the Box would return too early.
+    _metadata: Arc<super::ready::capacity::ReadyCapacity>,
+}
+impl ProgressCapacityOwner {
+    fn new(closing: SdpCapacityClosing, escrow: Credit) -> Self {
+        Self {
+            // Evaluate this clone before moving closing or allocating the paid body.
+            _metadata: closing.ready.clone(),
+            body: Some(Box::new(ProgressCapacity { closing, escrow })),
+        }
+    }
+    fn capacity(&self) -> &ProgressCapacity {
+        self.body.as_deref().expect("original progress body")
+    }
+    fn into_parts(mut self) -> ProgressCapacity {
+        // Actual deallocation precedes this outer metadata anchor's destruction. The
+        // returned closing owner additionally retains Ready through its next affine move.
+        *self.body.take().expect("one original progress body")
+    }
+}
+impl Drop for ProgressCapacityOwner {
+    fn drop(&mut self) {
+        drop(self.body.take()); // Full body + deallocation while _metadata is still paid.
+    }
+}
+#[cfg(test)]
+pub(in crate::voice_v2) fn progress_capacity_metadata_bytes() -> usize {
+    std::mem::size_of::<ProgressCapacity>()
+}
 struct WorkflowState {
     closed: bool,
+    // None after ordinary closure OR actual affine transfer, never after preparation.
+    // This is the actual close-right owner, rather than an optimistic transferred flag.
+    progress: Option<ProgressCapacityOwner>,
     // Closing rights move with the lane. Actual old packet rows may occupy every original
     // claim; returning them after extraction must feed the SAME successor reservation.
     packets: Option<super::packets::ConfirmationCapacity>,
@@ -532,7 +586,29 @@ impl PreparedChain {
                 followups: None,
             }),
         });
-        let reserve = resources.reserve(binding.scope.group, VARIABLE_BYTES)?;
+        // Fund the complete variable progression BEFORE the first Derive can be exposed.
+        // Confirmation and SDP share one core, rather than paying both peaks at Ready.
+        // A DIRECT reservation loan sequesters the successor-only half: old borrowers still
+        // have precisely VARIABLE_BYTES, and this loan must never retain Workflow custody.
+        let reserve = resources.reserve(binding.scope.group, super::negotiation::EXCHANGE_BYTES)?;
+        let ready = Arc::new(super::ready::capacity::ReadyCapacity::new(
+            &resources,
+            binding.scope.group,
+        )?);
+        let closing = SdpCapacityClosing {
+            core: reserve.clone(),
+            ready,
+        };
+        let escrow = ByteBudget::Reserved(reserve.clone()).charge(
+            &resources,
+            binding.scope.group,
+            super::negotiation::EXCHANGE_BYTES - VARIABLE_BYTES,
+            ResourceKind::Retained,
+        )?;
+        // Ready's existing4KiB metadata pays this fixed heap before allocation. Keeping
+        // only fixed handles here preserves the original2KiB chain graph; the Ready growth
+        // guard counts the complete box and aligned shared Ready allocation together.
+        let progress = ProgressCapacityOwner::new(closing, escrow);
         let crypto = resources.reserve_crypto_lane(binding.scope.group)?;
         let lowers = resources.group_forward_lanes(binding.scope.group)?;
         let chain = Arc::new_cyclic(|control| Self {
@@ -549,6 +625,7 @@ impl PreparedChain {
                     reserve,
                     state: Mutex::new(WorkflowState {
                         closed: false,
+                        progress: Some(progress),
                         packets: Some(packets),
                         crypto: Some(crypto),
                         lowers: Some(lowers),
@@ -756,16 +833,20 @@ impl Workflow {
         }
     }
     fn close(&self) {
-        let (lowers, crypto, packets) = {
+        let (lowers, crypto, packets, progress) = {
             let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
             state.closed = true;
             (
                 state.lowers.take(),
                 state.crypto.take(),
                 state.packets.take(),
+                state.progress.take(),
             )
         };
-        self.reserve.close();
+        // An extracted ticket now owns the SAME core/Ready. Repeated old close/Drop may
+        // not close it. Before transfer, this actual owner closes unused bytes outside
+        // WorkflowState, then returns escrow; genuine old borrowers retain their debt.
+        drop(progress);
         if let Some(crypto) = crypto {
             crypto.close();
         }

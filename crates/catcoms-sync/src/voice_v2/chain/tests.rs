@@ -656,7 +656,8 @@ fn idle_close_releases_every_unused_byte_and_slot_despite_retained_handles() {
         pool.counts(),
         (
             ROWS * ROW_BYTES
-                + VARIABLE_BYTES
+                + crate::voice_v2::negotiation::EXCHANGE_BYTES
+                + crate::voice_v2::ready::capacity::BYTES
                 + METADATA_BYTES
                 + crate::voice_v2::resources::GROUP_FORWARD_METADATA_BYTES,
             1
@@ -897,7 +898,8 @@ fn concurrent_preparations_install_only_one_group_workflow_and_loser_returns_all
         pool.counts(),
         (
             ROWS * ROW_BYTES
-                + VARIABLE_BYTES
+                + crate::voice_v2::negotiation::EXCHANGE_BYTES
+                + crate::voice_v2::ready::capacity::BYTES
                 + METADATA_BYTES
                 + crate::voice_v2::resources::GROUP_FORWARD_METADATA_BYTES,
             1

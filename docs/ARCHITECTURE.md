@@ -1,5 +1,23 @@
 # Mewtual; Architecture
 
+## Prepaid variable voice progression (26 October; inactive, validation pending)
+
+Before a protected chain exposes Derive, it now prepays one192KiB core and independent32KiB
+Ready capacity. A direct96KiB escrow in the original Workflow leaves exactly its earlier96KiB
+lendable limit. Preparation borrows metadata from that same core without Workflow custody;
+refusal/abandonment preserves the original escrow and backing. Actual affine transfer moves
+capacity closing rights with the existing lane/packet owners before returning escrow outside
+guards. Old genuine loans retain Workflow custody and return directly to the shared core.
+Their last destruction still controls confirmation drainage; Exchange retains no Workflow.
+
+Ordinary close owns both reservations until transfer. A transferred ticket/Exchange owns their
+closure afterward, including abandoned construction and unwinding. Repeated old close cannot
+close successor backing. The512KiB group/2MiB process ceilings and96KiB confirmation loan
+limit are unchanged. This removes simultaneous reservation of separate96+192+32 variable
+peaks; it does not make fixed origin/member rows, history slots, later native storage, SDK,
+RTC or additional rounds universally admissible. Actual native second-peer acceptance and
+full checks remain pending. App V2 remains OFF.
+
 ## Exact Input cancellation ownership (26 October; inactive)
 
 The shared Session records which original intake owns its actual physical controller.

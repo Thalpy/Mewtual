@@ -215,9 +215,22 @@ mod tests {
         // Structural application graph, not allocator slack, SDK heap or RSS. Packet/Source
         // and route wrappers retain their separately declared stage payments. Exchange and
         // original group lanes/binding have their own existing metadata payments.
+        // ReadyCapacity is now shared between original preparation and successor.
+        // Count its eighth Arc allocation with actual header/value alignment. This
+        // producer maximum also dominates the earlier capacity-only/prepared stages;
+        // their enclosing owners have separate chain/successor metadata payments.
+        let shared_capacity = std::alloc::Layout::new::<[std::sync::atomic::AtomicUsize; 2]>()
+            .extend(std::alloc::Layout::new::<capacity::ReadyCapacity>())
+            .unwrap()
+            .0
+            .pad_to_align()
+            .size();
         let graph = size_of::<Producer>()
             + size_of::<CacheCapacity>()
-            + size_of::<capacity::ReadyCapacity>()
+            + shared_capacity
+            // The early capacity-only box is funded by the same Ready metadata. Adding
+            // it conservatively here also covers preparation before this Producer exists.
+            + crate::voice_v2::chain::progress_capacity_metadata_bytes()
             + size_of::<Reservation>()
             + 5 * size_of::<Loan>()
             + 7 * 2 * size_of::<usize>()
@@ -229,6 +242,7 @@ mod tests {
             // metadata fee exists. Sources clone it; they never allocate another watch.
             + size_of::<crate::voice_v2::LeaseState>()
             + 2 * size_of::<usize>();
+        eprintln!("Ready shared owner graph {graph}/{}", capacity::METADATA);
         assert!(
             graph < capacity::METADATA,
             "Ready owner graph grew to {graph}"

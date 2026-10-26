@@ -25,39 +25,36 @@ fn original_affine_successor_prepays_ready_and_never_acquires_another_crypto_lan
 }
 
 #[test]
-fn ready_prepayment_refusal_after_sdp_payment_keeps_original_confirmation_usable() {
+fn whole_successor_backing_is_prepaid_before_derivation_and_reused_under_pressure() {
     let (pool, chain, workflow, slots) = fixture();
     let control = workflow.confirmation_control();
     let group = chain.binding.scope.group;
-    // SDP reserve succeeds, but only half the separate Ready envelope remains. This is
-    // local pre-effect refusal: no lane/slot extraction, old closure or budget reset.
+    // Intentional contract change: ordinary pressure AFTER Derive admission cannot
+    // remove the promised variable SDP/Ready backing. Refusal moves before exposure.
     let pressure = pool
         .charge(
             group,
-            super::super::super::resources::GROUP_BYTES
-                - pool.counts().0
-                - super::super::super::negotiation::EXCHANGE_BYTES
-                - 16 * 1024,
+            super::super::super::resources::GROUP_BYTES - pool.counts().0,
             ResourceKind::Retained,
         )
         .unwrap();
     let before = pool.counts();
-    assert_eq!(
-        control.prepare_sdp_capacity().err(),
-        Some(VoiceError::Capacity)
-    );
-    assert_eq!(pool.counts(), before);
-    assert!(workflow.is_live());
-    assert!(!chain.binding.successor_busy.load(Ordering::Acquire));
-    assert!(!workflow.state.lock().unwrap().sdp_preparing);
-    drop(pressure);
     let prepared = control.prepare_sdp_capacity().unwrap();
+    let core = Arc::as_ptr(&prepared.inner._reserve);
+    let ready = Arc::as_ptr(&prepared.inner.ready);
+    assert_eq!(pool.counts(), before, "no late ordinary224KiB allocation");
+    drop(prepared);
+    assert!(!chain.binding.successor_busy.load(Ordering::Acquire));
+    let prepared = control.prepare_sdp_capacity().unwrap();
+    assert_eq!(Arc::as_ptr(&prepared.inner._reserve), core);
+    assert_eq!(Arc::as_ptr(&prepared.inner.ready), ready);
+    assert_eq!(pool.counts(), before);
     let whole = control.retire_all();
     drop(workflow);
     assert!(!whole.is_drained());
     drop(prepared);
     assert!(whole.is_drained());
-    drop((whole, chain));
+    drop((whole, chain, pressure));
     assert_eq!(pool.counts(), (0, 0));
     drop(slots.charge(ROWS).unwrap());
 }
@@ -243,12 +240,10 @@ fn failed_preparation_releases_its_guard_and_unpublished_abandonment_allows_same
     let (resources, chain, workflow, slots) = fixture();
     let control = workflow.confirmation_control();
     let group = chain.binding.scope.group;
-    let pressure = resources
-        .charge(
-            group,
-            super::super::super::resources::GROUP_BYTES - resources.counts().0,
-            ResourceKind::Retained,
-        )
+    // A real old-phase loan can occupy its original96KiB. The new metadata loan
+    // must refuse locally without closing/refunding that debt or latching preparation.
+    let pressure = workflow
+        .charge(&resources, group, VARIABLE_BYTES, ResourceKind::Retained)
         .unwrap();
     assert_eq!(
         control.prepare_sdp_capacity().err(),
@@ -633,12 +628,10 @@ fn failed_preparation_and_abandonment_preserve_original_confirmation() {
     let (resources, chain, workflow, slots) = fixture();
     let control = workflow.confirmation_control();
     let group = chain.binding.scope.group;
-    let fill = resources
-        .charge(
-            group,
-            super::super::super::resources::GROUP_BYTES - resources.counts().0,
-            ResourceKind::Retained,
-        )
+    // Original variable debt, rather than late ordinary headroom, can still refuse
+    // the preparation metadata. Keep the original loan until that local refusal returns.
+    let fill = workflow
+        .charge(&resources, group, VARIABLE_BYTES, ResourceKind::Retained)
         .unwrap();
     let full = resources.counts();
     assert_eq!(
@@ -729,5 +722,152 @@ fn successor_inert_exchange_consumes_exact_original_reserve_lane_slots_and_lower
         busy,
     ));
     assert_eq!(resources.counts(), (0, 0));
+    drop(slots.charge(ROWS).unwrap());
+}
+
+#[test]
+fn shared_core_does_not_expand_original_confirmation_allowance() {
+    let (pool, chain, workflow, slots) = fixture();
+    let group = chain.binding.scope.group;
+    let before = pool.counts();
+    let loan = workflow
+        .charge(&pool, group, VARIABLE_BYTES, ResourceKind::Retained)
+        .unwrap();
+    assert_eq!(pool.counts(), before);
+    assert_eq!(
+        workflow
+            .charge(&pool, group, 1, ResourceKind::Retained)
+            .err(),
+        Some(VoiceError::Capacity)
+    );
+    drop(loan);
+    let again = workflow
+        .charge(&pool, group, VARIABLE_BYTES, ResourceKind::Retained)
+        .unwrap();
+    drop((again, workflow, chain));
+    assert_eq!(pool.counts(), (0, 0));
+    drop(slots.charge(ROWS).unwrap());
+}
+
+#[test]
+fn whole_backing_refusal_precedes_first_chain_exposure_and_is_atomic() {
+    let pool = Arc::new(Resources::default());
+    let bound = binding(1);
+    let group = bound.scope.group;
+    let slots = Arc::new(slots::Slots::default());
+    // Leave less than the whole variable requirement, independently of fixed history.
+    let pressure = pool
+        .charge(
+            group,
+            super::super::super::resources::GROUP_BYTES
+                - super::super::super::negotiation::EXCHANGE_BYTES
+                - super::super::super::ready::capacity::BYTES
+                + 1,
+            ResourceKind::Retained,
+        )
+        .unwrap();
+    let before = pool.counts();
+    assert_eq!(
+        prepare_chain(pool.clone(), bound, slots.clone()).err(),
+        Some(VoiceError::Capacity)
+    );
+    assert_eq!(
+        pool.counts(),
+        before,
+        "no partially exposed chain or retained backing"
+    );
+    drop(slots.charge(32).unwrap());
+    drop(pressure);
+    let chain = prepare_chain(pool.clone(), binding(1), slots.clone()).unwrap();
+    drop(chain);
+    assert_eq!(pool.counts(), (0, 0));
+}
+
+#[test]
+fn old_repeated_close_cannot_close_transferred_backing_and_abandoned_ticket_closes_it() {
+    let (pool, chain, workflow, slots) = fixture();
+    let group = chain.binding.scope.group;
+    let control = workflow.confirmation_control();
+    let lower = workflow
+        .charge(&pool, group, 4096, ResourceKind::Forward)
+        .unwrap();
+    let prepared = control.prepare_sdp_capacity().unwrap();
+    let core = prepared.inner._reserve.clone();
+    let ready = prepared.inner.ready.clone();
+    let ticket = control.transfer_sdp_capacity(prepared).unwrap();
+    let old = ConfirmationRetirement {
+        binding: chain.binding.clone(),
+    };
+    workflow.close();
+    workflow.close();
+    let probe = ByteBudget::Reserved(core.clone())
+        .charge(&pool, group, 1, ResourceKind::Retained)
+        .unwrap();
+    drop(probe);
+    assert!(
+        !old.is_drained(),
+        "actual original Lower and observer remain"
+    );
+    drop(ticket); // No Exchange constructor: the affine ticket owns both close rights.
+    assert_eq!(
+        ByteBudget::Reserved(core.clone())
+            .charge(&pool, group, 1, ResourceKind::Retained)
+            .err(),
+        Some(VoiceError::Capacity)
+    );
+    assert_eq!(
+        ByteBudget::Reserved(ready.reserve.clone())
+            .charge(&pool, group, 1, ResourceKind::Retained)
+            .err(),
+        Some(VoiceError::Capacity)
+    );
+    drop(workflow);
+    assert!(
+        !old.is_drained(),
+        "abandonment does not refund actual Lower custody"
+    );
+    drop(lower);
+    assert!(old.is_drained());
+    drop((control, old, ready, core, chain));
+    assert_eq!(pool.counts(), (0, 0));
+    drop(slots.charge(ROWS).unwrap());
+}
+
+#[test]
+fn ordinary_progress_close_keeps_ready_metadata_through_actual_escrow_destruction() {
+    #[derive(Debug)]
+    struct EscrowDrop {
+        ready: Weak<super::super::super::ready::capacity::ReadyCapacity>,
+        observed: Arc<AtomicBool>,
+    }
+    impl Drop for EscrowDrop {
+        fn drop(&mut self) {
+            // Nonpanicking observer of ACTUAL Credit custody destruction, after its
+            // reservation return. Holding no strong Ready/Workflow cannot mask early fee return.
+            self.observed
+                .store(self.ready.upgrade().is_some(), Ordering::Release);
+        }
+    }
+    let (pool, chain, workflow, slots) = fixture();
+    let progress = workflow.state.lock().unwrap().progress.take().unwrap();
+    let ProgressCapacity { closing, escrow } = progress.into_parts();
+    let ready = Arc::downgrade(&closing.ready);
+    let observed = Arc::new(AtomicBool::new(false));
+    let escrow = escrow.with_custody(Arc::new(EscrowDrop {
+        ready: ready.clone(),
+        observed: observed.clone(),
+    })); // Test observer only: production escrow NEVER retains Workflow custody.
+    workflow.state.lock().unwrap().progress = Some(ProgressCapacityOwner::new(closing, escrow));
+    workflow.close();
+    assert!(
+        observed.load(Ordering::Acquire),
+        "fee must survive actual escrow last Drop"
+    );
+    assert!(
+        ready.upgrade().is_none(),
+        "outer anchor returns only after body deallocation"
+    );
+    drop((ready, workflow, chain));
+    assert_eq!(pool.counts(), (0, 0));
     drop(slots.charge(ROWS).unwrap());
 }

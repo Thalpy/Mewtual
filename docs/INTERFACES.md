@@ -1,5 +1,17 @@
 # Mewtual; Interfaces & Hooks Schema
 
+## Variable capacity admission before Derive (26 October; inactive)
+
+Protected chain creation can now refuse for its complete variable192KiB core plus32KiB Ready
+requirement before publishing Derive. The confirmation lender still permits only96KiB through
+a private direct escrow. `prepare_sdp_capacity` reuses the SAME core/Ready; it cannot allocate a
+second224KiB ordinary envelope after Finish. Its fallible metadata/slot admission remains a
+proven local refusal with no attempt refund or deadline extension. An untransferred prepared
+value does not own close rights. Actual transfer repeats allocation identity and moves the
+single closing owner to the affine ticket, then Exchange. Abandoning that ticket closes unused
+capacity while genuine old debts remain paid. Public wire/IPC grammar is unchanged. Fixed
+origin/member admission and operational replacement remain separate constraints.
+
 ## Broker37 Input retirement fence (26 October; inactive)
 
 Only the exact original Input intake may cancel its physical request. Queueing actionBusy

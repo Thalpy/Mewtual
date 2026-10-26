@@ -115,7 +115,10 @@ pub struct Exchange {
     successor: Option<super::chain::SuccessorProof>,
     // Present only on the protected affine path. Ordinary legacy SDP does not promise
     // causal Ready. Never store a Ready producer here: that owner retains Exchange one way.
-    ready: Option<super::ready::capacity::ReadyCapacity>,
+    ready: Option<Arc<super::ready::capacity::ReadyCapacity>>,
+    // Affine protected-capacity close right survives constructor unwinding/ticket loss.
+    // No Workflow backedge: genuine old loans alone retain their old retirement witness.
+    _capacity_closing: Option<super::chain::SdpCapacityClosing>,
     // Observers only. Actual inbox/canonical bytes remain outside Exchange to avoid cycles.
     ready_receive: std::sync::OnceLock<CallLease>,
     ready_publication: receive::PublicationCell,
@@ -255,6 +258,9 @@ impl Exchange {
             proof,
             lane,
             metadata,
+            // Last binding drops FIRST on constructor unwind: close unused backing
+            // before returning its metadata loan and before the last custody publisher.
+            closing,
         } = ticket.into_parts();
         let original = proof.binding();
         let binding = Binding {
@@ -294,6 +300,7 @@ impl Exchange {
             active_until: std::sync::atomic::AtomicU64::new(0),
             successor: Some(proof),
             ready: Some(ready),
+            _capacity_closing: Some(closing),
             ready_receive: std::sync::OnceLock::new(),
             ready_publication: std::sync::OnceLock::new(),
             low_ready,
@@ -440,6 +447,7 @@ impl Exchange {
             active_until: std::sync::atomic::AtomicU64::new(0),
             successor: None,
             ready: None,
+            _capacity_closing: None,
             ready_receive: std::sync::OnceLock::new(),
             ready_publication: std::sync::OnceLock::new(),
             low_ready: None,

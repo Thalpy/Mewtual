@@ -1,5 +1,21 @@
 # Threat model; client integrity & enforcement boundaries
 
+## Voice phase capacity and abandoned transfers (26 October; inactive)
+
+A peer must not force an already exposed confirmation chain to find a second full variable
+SDP/Ready envelope under ordinary-pool pressure. Protected chain creation now prepays shared
+192KiB core and32KiB Ready capacity before Derive exposure; direct96KiB escrow preserves the
+original confirmation borrowing limit. This is capacity only, not protocol or RTC authority.
+
+Preparation holds no closing right and cannot free or reconstruct the original backing on
+refusal. The single close owner moves under Control/Workflow fences after exact core/Ready
+allocation checks, before any callback-bearing outer destruction. Transferred-ticket loss
+closes unused capacity even if no Exchange is built. Repeated old Workflow close cannot revoke
+successor backing; actual old loan custody still gates confirmation retirement. No native
+attempt, nonce, epoch, deadline, group ceiling or history budget is reset. This addresses the
+variable-reservation overlap only. Ordinary fixed member/origin rows and complete native/App/
+RTC/relay/physical acceptance remain separate requirements; V2 stays disabled.
+
 ## Shared-session cross-peer cancellation (26 October; inactive)
 
 A queued next-peer intake must not abort an established peer's Current merely because its

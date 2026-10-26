@@ -17,7 +17,7 @@ struct PreparedCapacity {
     _reserve: Arc<Reservation>,
     _lowers: Arc<GroupForwardLanes>,
     _slots: Arc<slots::ReservedSlots>,
-    ready: super::super::ready::capacity::ReadyCapacity,
+    ready: Arc<super::super::ready::capacity::ReadyCapacity>,
     binding: Arc<PlanBinding>,
     _preparation: Preparation,
     // All capacity fields precede their metadata credit; only the fixed-plan publisher
@@ -50,6 +50,9 @@ impl Drop for Preparation {
 pub struct TransferredSdpCapacity {
     lane: Option<Arc<WorkLane>>,
     packets: Option<super::super::packets::ConfirmationCapacity>,
+    // Before Prepared's last SuccessorCustody: abandonment must close capacity before
+    // publishing whole-plan drainage, even when no Exchange constructor is ever called.
+    closing: Option<SdpCapacityClosing>,
     _prepared: Option<PreparedSdpCapacity>,
     retirement: ConfirmationRetirement,
 }
@@ -78,6 +81,10 @@ impl TransferredSdpCapacity {
             _preparation: preparation,
             _metadata: metadata,
         } = *prepared.inner;
+        let closing = self
+            .closing
+            .take()
+            .expect("one actual capacity close right");
         drop(preparation);
         TransferredParts {
             resources,
@@ -91,6 +98,7 @@ impl TransferredSdpCapacity {
                 .expect("one original packet reservation owner"),
             proof: SuccessorProof(binding),
             lane: self.lane.take().expect("one original idle lane"),
+            closing,
             metadata,
             custody,
         }
@@ -171,10 +179,11 @@ pub(in crate::voice_v2) struct TransferredParts {
     pub reserve: Arc<Reservation>,
     pub lowers: Arc<GroupForwardLanes>,
     pub slots: Arc<slots::ReservedSlots>,
-    pub ready: super::super::ready::capacity::ReadyCapacity,
+    pub ready: Arc<super::super::ready::capacity::ReadyCapacity>,
     pub packets: super::super::packets::ConfirmationCapacity,
     pub proof: SuccessorProof,
     pub lane: Arc<WorkLane>,
+    pub closing: SdpCapacityClosing,
     pub metadata: Credit,
     pub custody: SuccessorCustody,
 }
@@ -228,6 +237,9 @@ impl PreparedChain {
 }
 impl Drop for TransferredSdpCapacity {
     fn drop(&mut self) {
+        // Includes a lost/abandoned extracted ticket with a still-held old Lower. Closing
+        // refunds only unused backing; that genuine old debt survives until actual Drop.
+        drop(self.closing.take());
         if let Some(lane) = self.lane.take() {
             lane.close();
         }
@@ -252,7 +264,7 @@ impl ConfirmationControl {
         before_slots: impl FnOnce(),
     ) -> Result<PreparedSdpCapacity, VoiceError> {
         let chain = self.control.upgrade().ok_or(VoiceError::Unauthorized)?;
-        let (original_slots, preparation, custody) = {
+        let (original_slots, preparation, custody, reserve, ready) = {
             let control = chain.control.lock().unwrap_or_else(|e| e.into_inner());
             if control.closed
                 || !Arc::ptr_eq(&chain.binding, &self.binding)
@@ -265,17 +277,25 @@ impl ConfirmationControl {
             if state.closed || state.sdp_preparing {
                 return Err(VoiceError::Capacity);
             }
+            let progress = state
+                .progress
+                .as_ref()
+                .ok_or(VoiceError::Unauthorized)?
+                .capacity();
+            let reserve = progress.closing.core.clone();
+            let ready = progress.closing.ready.clone();
             let custody = SuccessorCustody::begin(&chain.binding)?;
             state.sdp_preparing = true;
             (
                 chain.history.slots.clone(),
                 Preparation(Arc::downgrade(workflow)),
                 custody,
+                reserve,
+                ready,
             )
         };
         let resources = self.binding.resources().clone();
         let group = self.binding.scope.group;
-        let reserve = resources.reserve(group, super::super::negotiation::EXCHANGE_BYTES)?;
         // The successor's existing 4 KiB metadata allowance covers these prepared/ticket
         // wrappers and child reservation too; no allocation precedes its payment.
         let metadata = ByteBudget::Reserved(reserve.clone()).charge(
@@ -284,9 +304,9 @@ impl ConfirmationControl {
             super::super::negotiation::METADATA_BYTES,
             ResourceKind::Retained,
         )?;
-        // Ready cache/Source/actual Lower/ACK work must survive ordinary-pool pressure.
-        // Pay before irreversible extraction; never borrow SDP's sole Source quota for it.
-        let ready = super::super::ready::capacity::ReadyCapacity::new(&resources, group)?;
+        // Both backings were funded before Derive exposure. This metadata borrows the
+        // original core directly (NO Workflow custody). Abandonment returns it and leaves
+        // the old escrow/close rights intact, so an exact retry needs no ordinary bytes.
         let lowers = resources.group_forward_lanes(group)?;
         before_slots();
         let slots = original_slots.subreserve(2).map_err(|error| {
@@ -362,6 +382,16 @@ impl ConfirmationControl {
             drop(control);
             return Err((VoiceError::Capacity, prepared));
         }
+        let matches_capacity = state.progress.as_ref().is_some_and(|progress| {
+            let progress = progress.capacity();
+            Arc::ptr_eq(&progress.closing.core, &prepared.inner._reserve)
+                && Arc::ptr_eq(&progress.closing.ready, &prepared.inner.ready)
+        });
+        if !matches_capacity {
+            drop(state);
+            drop(control);
+            return Err((VoiceError::Unauthorized, prepared));
+        }
         // All existing borrowers enter WorkflowState before the lane. Holding that fence
         // across idle observation, closure and take prevents an old engine preflight from
         // acquiring the lane in between. No callback/destructor/Engine entry is allowed here.
@@ -369,6 +399,10 @@ impl ConfirmationControl {
         // prepared Finish window too; phase extraction must never leave an old Open arm alive.
         chain.binding.transition.close();
         state.closed = true;
+        let progress = state
+            .progress
+            .take()
+            .expect("checked original capacity owner");
         let lane = state.crypto.take().expect("checked original idle lane");
         let packets = state
             .packets
@@ -381,6 +415,22 @@ impl ConfirmationControl {
         drop(state);
         drop(control);
 
+        // Publish the affine close owner BEFORE any callback-bearing drop. Abandonment,
+        // unwinding or caller loss now closes the shared backings through this ticket;
+        // the old Workflow no longer has that right. Actual old loans still keep its
+        // separate retirement publisher alive, and return directly to the same core.
+        let ProgressCapacity { closing, escrow } = progress.into_parts();
+        let retirement = ConfirmationRetirement {
+            binding: self.binding.clone(),
+        };
+        let ticket = TransferredSdpCapacity {
+            lane: Some(lane),
+            packets: Some(packets),
+            closing: Some(closing),
+            _prepared: Some(prepared),
+            retirement,
+        };
+        drop(escrow);
         // Never call chain.close() after setting closed: it would skip this actual cleanup.
         // The child slot reserve retains exactly the successor's two original positions.
         chain.history.close();
@@ -388,17 +438,9 @@ impl ConfirmationControl {
             action.retire_if_unstarted();
         }
         workflow.close();
-        let retirement = ConfirmationRetirement {
-            binding: self.binding.clone(),
-        };
         drop(original);
         drop(workflow);
-        Ok(TransferredSdpCapacity {
-            lane: Some(lane),
-            packets: Some(packets),
-            _prepared: Some(prepared),
-            retirement,
-        })
+        Ok(ticket)
     }
 }
 
