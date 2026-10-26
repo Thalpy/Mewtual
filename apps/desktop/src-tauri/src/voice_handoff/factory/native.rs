@@ -375,6 +375,9 @@ async fn discover(
         if !live.try_unlocked()? {
             return Err(Refused::Closed);
         }
+        if !live.ledger.automatic_parent_available(selected)? {
+            return Err(VoiceError::Capacity.into());
+        }
         let servers = live.servers.try_lock().map_err(|_| VoiceError::Capacity)?;
         let binding = selected.binding();
         let actor = servers
@@ -437,6 +440,14 @@ async fn execute_selected(worker: &Worker, selector: PairSelector) -> Result<Row
         route.require_open().map_err(|_| Refused::Closed)?;
     }
     let grant = selected.grant()?;
+    // Recheck AFTER the Actor/UI waits, before any new counted Pending or Root
+    // publication. Competing native/browser factories share this same UI commit.
+    // Classify exact known work first: do not strand its original attachment/retry.
+    if !context.ledger.derivation_known(&selected, selector)
+        && !context.ledger.automatic_parent_available(&selected)?
+    {
+        return Err(VoiceError::Capacity.into());
+    }
     let registration = match context
         .ledger
         .begin(selected.clone(), Purpose::Derive(selector))?

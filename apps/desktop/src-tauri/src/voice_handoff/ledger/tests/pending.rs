@@ -197,3 +197,74 @@ fn orphaned_unstarted_handle_can_never_close_or_mutate_history_after_slot_reuse(
     ));
     assert!(matches!(old.close_pending(), Err(VoiceError::Unauthorized)));
 }
+
+#[test]
+fn automatic_discovery_waits_for_registered_parent_but_preserves_original_pending_retry() {
+    let (_coordinator, selected, selector) = selection();
+    let ledger = Arc::new(Ledger::default());
+    assert!(ledger.automatic_parent_available(&selected).unwrap());
+    let registration = ticket(&ledger, selected.clone(), selector);
+    let id = registration.id();
+    assert!(!ledger.automatic_parent_available(&selected).unwrap());
+    drop(registration); // Proven unstarted: no Root handoff, actual row is unlinked.
+    assert!(ledger.automatic_parent_available(&selected).unwrap());
+    let registration = ticket(&ledger, selected.clone(), selector);
+    let id2 = registration.id();
+    assert_ne!(id, id2);
+    registration.mark_handoff().unwrap();
+    drop(registration);
+    assert!(!ledger.automatic_parent_available(&selected).unwrap());
+    let retry = ticket(&ledger, selected.clone(), selector);
+    assert_eq!(
+        retry.id(),
+        id2,
+        "same original Pending resumes, never another parent"
+    );
+    drop(retry);
+    let row = ledger
+        .resolve(&selected, Purpose::Derive(selector), id2)
+        .unwrap();
+    row.close_pending().unwrap();
+    assert!(
+        !ledger.automatic_parent_available(&selected).unwrap(),
+        "ClosedPending is not Root retirement and cannot admit unrelated work"
+    );
+}
+
+#[test]
+fn automatic_discovery_refuses_collection_ticket_even_when_index_has_no_parent() {
+    let (_coordinator, selected, selector) = selection();
+    let ledger = Arc::new(Ledger::default());
+    let registration = ticket(&ledger, selected.clone(), selector);
+    drop(registration);
+    let held = ledger.test_hold_collection().unwrap();
+    assert!(matches!(
+        ledger.automatic_parent_available(&selected),
+        Err(VoiceError::Capacity)
+    ));
+    drop(held);
+    assert!(ledger.automatic_parent_available(&selected).unwrap());
+    let index = ledger.index.lock().unwrap();
+    assert!(
+        matches!(
+            ledger.automatic_parent_available(&selected),
+            Err(VoiceError::Capacity)
+        ),
+        "index contention must never be classified as available capacity"
+    );
+    drop(index);
+}
+
+#[test]
+fn automatic_discovery_ignores_a_different_original_selection() {
+    let (_first_coordinator, first, selector) = selection();
+    let (_second_coordinator, second, _) = selection();
+    let ledger = Arc::new(Ledger::default());
+    let registration = ticket(&ledger, first.clone(), selector);
+    assert!(!ledger.automatic_parent_available(&first).unwrap());
+    assert!(
+        ledger.automatic_parent_available(&second).unwrap(),
+        "equal public labels do not identify the same original selected allocation"
+    );
+    drop(registration);
+}

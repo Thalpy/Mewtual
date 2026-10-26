@@ -76,6 +76,62 @@ async fn pending<F: Future>(future: std::pin::Pin<&mut F>) -> bool {
 }
 
 #[tokio::test]
+async fn automatic_parent_admission_rechecks_after_the_actual_ui_wait() {
+    let f = Fixture::new().await;
+    let context = Context::new(&f.state);
+    let (_, selected, selector) = selection(&f).await;
+    let route = channel_route(&f, &selected).await;
+    assert!(f
+        .state
+        .voice_handoff
+        .automatic_parent_available(&selected)
+        .unwrap());
+
+    // Discovery's available observation cannot authorize publication after a wait.
+    // Park the actual producer after its Actor preflight, at the shared UI commit.
+    let boundary = f.state.ui_session_commit.lock().await;
+    let mut producing = Box::pin(run_native(worker(&context, &route, selector)));
+    assert!(pending(producing.as_mut()).await);
+    f.actor.member_count().await;
+    assert!(pending(producing.as_mut()).await);
+
+    let mut competing = selector;
+    competing.join[0] ^= 1;
+    let Begin::Factory(registration) = f
+        .state
+        .voice_handoff
+        .begin(selected.clone(), Purpose::Derive(competing))
+        .unwrap()
+    else {
+        panic!("new competing original parent")
+    };
+    registration.mark_handoff().unwrap();
+    drop(registration); // Ambiguous original handoff remains counted and recoverable.
+    drop(boundary);
+
+    let completion = producing.await;
+    assert_eq!(
+        completion.result(),
+        Err(Refused::Protocol(VoiceError::Capacity))
+    );
+    assert!(
+        f.state
+            .voice_handoff
+            .lookup_original(&selected, Purpose::Derive(selector))
+            .is_none(),
+        "the stale observation must not create a second Pending or call Root"
+    );
+    drop(completion);
+    f.state
+        .voice_handoff
+        .lookup_original(&selected, Purpose::Derive(competing))
+        .unwrap()
+        .close_pending()
+        .unwrap();
+    f.close().await;
+}
+
+#[tokio::test]
 async fn native_preflight_and_uncollected_output_keep_the_original_payment_and_shutdown_owner() {
     let f = Fixture::new().await;
     let context = Context::new(&f.state);

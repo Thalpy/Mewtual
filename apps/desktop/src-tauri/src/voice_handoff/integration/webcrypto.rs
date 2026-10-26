@@ -78,6 +78,10 @@ struct Callbacks {
     collect_calls: usize,
     refuse_publish: bool,
     refuse_collect: bool,
+    // Rust-only observation scope, derived from actual native discovery, never Node input.
+    expected_parent: Option<ledger::RowId>,
+    pause_setup: bool,
+    discovery_hold: Option<super::super::channel::NativeHold>,
 }
 impl Default for Callbacks {
     fn default() -> Self {
@@ -87,6 +91,9 @@ impl Default for Callbacks {
             collect_calls: 0,
             refuse_publish: true,
             refuse_collect: true,
+            expected_parent: None,
+            pause_setup: false,
+            discovery_hold: None,
         }
     }
 }
@@ -113,6 +120,23 @@ impl Endpoint {
     /// Complete the actual selected-key publication and channel Status before starting a
     /// protected pair. A slow process launch/setup cannot consume the original pair deadline.
     pub(crate) async fn prepare(state: Arc<AppState>, owner: String) -> Result<Self, Failure> {
+        Self::prepare_inner(state, owner, false).await
+    }
+
+    /// Pause only the actual native factory position before delivering Setup/Ready ACK.
+    /// This gives ordinary discovery time to observe both already-published endpoints.
+    pub(crate) async fn prepare_paused(
+        state: Arc<AppState>,
+        owner: String,
+    ) -> Result<Self, Failure> {
+        Self::prepare_inner(state, owner, true).await
+    }
+
+    async fn prepare_inner(
+        state: Arc<AppState>,
+        owner: String,
+        pause_setup: bool,
+    ) -> Result<Self, Failure> {
         let runtime = crate::voice_runtime(&state);
         let bound = match service::BoundServer::bind_application(
             state.voice_channels.clone(),
@@ -203,7 +227,10 @@ impl Endpoint {
             server: Some(server),
             port,
             selected: None,
-            callbacks: Callbacks::default(),
+            callbacks: Callbacks {
+                pause_setup,
+                ..Callbacks::default()
+            },
             media_fixture_grant: None,
             media_http: false,
         };
@@ -267,8 +294,79 @@ impl Endpoint {
     pub(crate) async fn automatic_confirmation(&mut self) {
         let answer = self.step(json!({"tag":"step", "name":"pump"})).await;
         assert_eq!(answer, json!({"kind":"observed"}));
-        assert!(automatic_terminal(&self.state, &self.selected()));
+        assert!(automatic_terminal(
+            &self.state,
+            &self.selected(),
+            self.callbacks.expected_parent
+        ));
     }
+    /// Scope only the independent test oracle; the normal browser work pump still chooses
+    /// its own metadata. The expected full RowId comes from actual native discovery.
+    pub(crate) async fn automatic_pair(&mut self, selector: PairSelector) -> ledger::ResolvedRow {
+        let parent = self.wait_native_derivation(selector).await;
+        self.callbacks.expected_parent = Some(parent.id());
+        self.automatic_confirmation().await;
+        parent
+    }
+
+    pub(crate) fn release_discovery(&mut self) {
+        assert!(self.callbacks.discovery_hold.take().is_some());
+    }
+
+    pub(crate) async fn advance_pair(&mut self) {
+        assert_eq!(
+            self.step(json!({"tag":"step","name":"advance-pair"})).await,
+            json!({"kind":"advanced"})
+        );
+        self.callbacks.expected_parent = None;
+    }
+
+    pub(crate) async fn end_browser_peers(&mut self, count: usize) {
+        assert_eq!(
+            self.step(json!({"tag":"step","name":"end-peers"})).await,
+            json!({"kind":"peers-ended","peers":count})
+        );
+    }
+
+    /// Bounded aggregate composition evidence, never a grant or a drainage assertion.
+    pub(crate) fn ready_diagnostic(&self, parent: &ledger::ResolvedRow) -> String {
+        let selected = self.selected();
+        let pool = selected.resources();
+        let mut from = 0;
+        let mut parents = 0;
+        let mut pending = 0;
+        while from < 32 {
+            let projection = self
+                .state
+                .voice_handoff
+                .project_work(&selected, from)
+                .unwrap();
+            from = projection.next_slot;
+            if let Some(work) = projection.metadata.as_ref() {
+                if matches!(work.purpose, ledger::Purpose::Derive(_)) {
+                    parents += 1;
+                }
+                if work.action.is_none() {
+                    pending += 1;
+                }
+            }
+        }
+        format!(
+            "ready={:?}; group={:?}; process={:?}; native parents={parents}, pending={pending}",
+            parent.ready_test_observation(),
+            pool.group_counts(selected.binding().scope.group),
+            pool.counts()
+        )
+    }
+
+    pub(crate) async fn current_peers(&mut self, count: usize) {
+        assert_eq!(
+            self.step(json!({"tag":"step","name":"media-current-all"}))
+                .await,
+            json!({"kind":"all-media-current","peers":count})
+        );
+    }
+
     pub(crate) async fn derive(&mut self, selector: PairSelector) -> ledger::ResolvedRow {
         let selected = self.selected();
         let bootstrap::Status::Ready(public) = bootstrap::ensure(
@@ -520,7 +618,14 @@ impl Endpoint {
             json!({"kind":"sdp-round", "peers":1, "local":1, "remote":1,
                 "lost":if lose_replies { 4 } else { 0 }})
         );
-        assert!(sdp_round_terminal(&self.state, &self.selected()));
+        assert!(
+            sdp_round_observation(
+                &self.state,
+                &self.selected(),
+                self.callbacks.expected_parent
+            )
+            .complete
+        );
         assert_eq!(parent.sdk_test_released(), Some(false));
         {
             let selected = self.selected();
@@ -673,6 +778,45 @@ impl Endpoint {
         selector: PairSelector,
         held_collector: bool,
     ) {
+        self.history_retirement(parent, selector, held_collector, true)
+            .await;
+    }
+
+    pub(crate) async fn collect_pair_history(
+        &mut self,
+        parent: ledger::ResolvedRow,
+        selector: PairSelector,
+    ) -> [u8; 16] {
+        let id = parent.id().logical();
+        self.history_retirement(parent, selector, false, false)
+            .await;
+        id
+    }
+
+    /// Observe only the original native tombstone; do not export a creating ledger
+    /// operation or widen production visibility merely for the external TCP fixture.
+    pub(crate) fn assert_collected_pair_known(&self, selector: PairSelector) {
+        let selected = self.selected();
+        assert!(self
+            .state
+            .voice_handoff
+            .lookup_original(&selected, ledger::Purpose::Derive(selector))
+            .is_none());
+        assert!(
+            self.state
+                .voice_handoff
+                .derivation_known(&selected, selector),
+            "permanent old-purpose tombstone survives next peer admission"
+        );
+    }
+
+    async fn history_retirement(
+        &mut self,
+        parent: ledger::ResolvedRow,
+        selector: PairSelector,
+        held_collector: bool,
+        probe_unused_slot: bool,
+    ) {
         use super::super::requests::media::{ExistingKind, Request};
         use catcoms_sync::voice_v2::VoiceError;
         let selected = self.selected();
@@ -754,6 +898,8 @@ impl Endpoint {
                 "barrier must retain the actual removed parent"
             );
             assert!(ledger.resolve_sdp_parent(&selected, parent_id).is_err());
+            assert!(matches!(ledger.automatic_parent_available(&selected), Err(VoiceError::Capacity)),
+                "unlinked actual parent must not admit discovery before collector/destructor return");
             // A genuinely different collector runs while A's original ticket is parked.
             std::thread::scope(|scope| {
                 scope
@@ -802,34 +948,36 @@ impl Endpoint {
             ledger.begin(selected.clone(), ledger::Purpose::Derive(selector)),
             Err(VoiceError::Unauthorized)
         ));
-        let mut later = selector;
-        later.join[0] ^= 1;
-        assert!(
-            !ledger.derivation_known(&selected, later),
-            "discovery must continue past compact old purpose"
-        );
-        // Native index-only slot reuse keeps the monotonically increasing generation.
-        let registration = match ledger
-            .begin(selected.clone(), ledger::Purpose::Derive(later))
-            .unwrap()
-        {
-            ledger::Begin::Factory(value) => value,
-            _ => panic!("new purpose must reserve a reclaimed slot"),
-        };
-        let new_id = registration.id();
-        assert_ne!(new_id, parent_id);
-        assert_eq!(
-            &new_id.logical()[..8],
-            &parent_id.logical()[..8],
-            "same native slot, fresh serial"
-        );
-        drop(registration); // No Root factory was invoked for this capacity-only reservation.
-                            // Existing Registration semantics erase a provably unstarted reservation on Drop;
-                            // no published effect/history exists here and there is nothing left to close.
-        assert!(ledger
-            .resolve(&selected, ledger::Purpose::Derive(later), new_id)
-            .is_err());
-        assert!(ledger.resolve_sdp_parent(&selected, parent_id).is_err());
+        if probe_unused_slot {
+            let mut later = selector;
+            later.join[0] ^= 1;
+            assert!(
+                !ledger.derivation_known(&selected, later),
+                "discovery must continue past compact old purpose"
+            );
+            // Native index-only slot reuse keeps the monotonically increasing generation.
+            let registration = match ledger
+                .begin(selected.clone(), ledger::Purpose::Derive(later))
+                .unwrap()
+            {
+                ledger::Begin::Factory(value) => value,
+                _ => panic!("new purpose must reserve a reclaimed slot"),
+            };
+            let new_id = registration.id();
+            assert_ne!(new_id, parent_id);
+            assert_eq!(
+                &new_id.logical()[..8],
+                &parent_id.logical()[..8],
+                "same native slot, fresh serial"
+            );
+            drop(registration); // No Root factory was invoked for this capacity-only reservation.
+                                // Existing Registration semantics erase a provably unstarted reservation on Drop;
+                                // no published effect/history exists here and there is nothing left to close.
+            assert!(ledger
+                .resolve(&selected, ledger::Purpose::Derive(later), new_id)
+                .is_err());
+            assert!(ledger.resolve_sdp_parent(&selected, parent_id).is_err());
+        }
         assert!(
             !ledger.channel_may_close(&selected),
             "indexed live media still owns physical Control"
@@ -913,6 +1061,7 @@ impl Endpoint {
     /// drainage. It revokes this original native owner, then observes actual process/IO
     /// retirement before returning a test failure. Original application history is retained.
     pub(crate) async fn collect(&mut self) -> bool {
+        drop(self.callbacks.discovery_hold.take()); // Release real factory custody before failure End.
         let ended = catch_fixture(tokio::time::timeout(
             std::time::Duration::from_secs(10),
             crate::end_voice_owner_inner(&self.state, &self.owner),
@@ -1080,7 +1229,9 @@ async fn drive_streams_inner(
                                 .selected_handoff_owner(owner, executor)
                                 .ok()
                         })
-                        .is_some_and(|selected| automatic_terminal(state, &selected));
+                        .is_some_and(|selected| {
+                            automatic_terminal(state, &selected, callbacks.expected_parent)
+                        });
                 let refuse = match method {
                     Method::PublishKey => {
                         callbacks.publish_calls += 1;
@@ -1111,8 +1262,35 @@ async fn drive_streams_inner(
                 let reply = if refuse {
                     Err(())
                 } else {
-                    metadata(state, owner, port, method, args).await
+                    metadata(state, owner, port, method, args, callbacks.expected_parent).await
                 };
+                if matches!(method, Method::Setup) && reply.is_ok() && callbacks.pause_setup {
+                    // Setup has installed the actual Session, but Node cannot ACK it until
+                    // this reply returns. Reserve its existing sole factory position here;
+                    // neither a fabricated pair nor a renderer authority hint is involved.
+                    let publication = callbacks.publication.as_ref().unwrap();
+                    let executor = hex::decode(&publication.executor)
+                        .unwrap()
+                        .try_into()
+                        .unwrap();
+                    let selected = state
+                        .voice_authority
+                        .lock()
+                        .unwrap()
+                        .selected_handoff_owner(owner, executor)
+                        .unwrap();
+                    let route = (1..=64)
+                        .find_map(|slot| {
+                            state
+                                .voice_channels
+                                .route(slot)
+                                .ok()
+                                .filter(|route| Arc::ptr_eq(route.selected(), &selected))
+                        })
+                        .unwrap();
+                    callbacks.discovery_hold = Some(route.session().native_hold().unwrap());
+                    callbacks.pause_setup = false;
+                }
                 if let Ok(reply) = &reply {
                     if let Some(executor) = reply.executor {
                         published_executor = Some(executor);
@@ -1139,7 +1317,11 @@ async fn drive_streams_inner(
 /// Independent original native history, not the pump's public metadata or JS progress.
 /// Both endpoints must retain exactly one Derived parent and three original confirmation
 /// actions, with actual terminal receipt, exact ACK, settlement and ordinary Return.
-fn automatic_terminal(state: &AppState, selected: &SelectedHandoffOwner) -> bool {
+fn automatic_terminal(
+    state: &AppState,
+    selected: &SelectedHandoffOwner,
+    expected: Option<ledger::RowId>,
+) -> bool {
     use catcoms_sync::voice_v2::crypto_actions::CryptoOutcome;
     let mut from = 0;
     let mut parent = None;
@@ -1150,6 +1332,16 @@ fn automatic_terminal(state: &AppState, selected: &SelectedHandoffOwner) -> bool
         let Some(metadata) = projection.metadata.as_ref() else {
             continue;
         };
+        if let Some(expected) = expected {
+            let relevant = match metadata.purpose {
+                ledger::Purpose::Derive(_) => metadata.row == expected,
+                ledger::Purpose::Confirmation { parent, .. } => parent == expected,
+                ledger::Purpose::Sdp { .. } => false,
+            };
+            if !relevant {
+                continue;
+            }
+        }
         let row = state
             .voice_handoff
             .resolve(selected, metadata.purpose, metadata.row)
@@ -1218,6 +1410,7 @@ struct SdpRoundObservation {
 fn sdp_round_observation(
     state: &AppState,
     selected: &Arc<SelectedHandoffOwner>,
+    expected: Option<ledger::RowId>,
 ) -> SdpRoundObservation {
     use catcoms_sync::voice_v2::chain::sdp_handoff::NativeRowPurpose;
     use catcoms_sync::voice_v2::crypto_actions::CryptoOutcome;
@@ -1239,7 +1432,9 @@ fn sdp_round_observation(
         };
         from = projection.next_slot;
         if let Some(metadata) = &projection.metadata {
-            if matches!(metadata.purpose, ledger::Purpose::Derive(_)) {
+            if matches!(metadata.purpose, ledger::Purpose::Derive(_))
+                && expected.is_none_or(|id| id == metadata.row)
+            {
                 if parent.is_some() {
                     return SdpRoundObservation::default();
                 }
@@ -1320,9 +1515,6 @@ fn sdp_round_observation(
             .is_some_and(|row| row.accepted && row.drained && row.applied);
     result
 }
-fn sdp_round_terminal(state: &AppState, selected: &Arc<SelectedHandoffOwner>) -> bool {
-    sdp_round_observation(state, selected).complete
-}
 
 struct MetadataReply {
     value: Value,
@@ -1336,6 +1528,7 @@ async fn metadata(
     port: u16,
     method: Method,
     args: Metadata,
+    expected: Option<ledger::RowId>,
 ) -> Result<MetadataReply, ()> {
     if args.owner != owner {
         return Err(());
@@ -1434,7 +1627,8 @@ async fn metadata(
                 .unwrap()
                 .selected_handoff_owner(owner, executor)
                 .map_err(|_| ())?;
-            serde_json::to_value(sdp_round_observation(state, &selected)).map_err(|_| ())?
+            serde_json::to_value(sdp_round_observation(state, &selected, expected))
+                .map_err(|_| ())?
         }
     };
     Ok(MetadataReply {

@@ -14,6 +14,27 @@ pub(in crate::voice_handoff) struct Continuation {
 }
 
 impl Ledger {
+    /// The current browser coordinator can advance only one original negotiation at a
+    /// time. Do not automatically prepay another parent/Root pair while that subtree is
+    /// registered: its otherwise unused preparation can consume the current Ready budget.
+    /// This is only a scheduling observation. Final new-parent admission repeats it under
+    /// the same UI commit as begin; exact known Pending/history recovery bypasses this gate.
+    pub(in crate::voice_handoff) fn automatic_parent_available(
+        &self,
+        selected: &SelectedHandoffOwner,
+    ) -> Result<bool, VoiceError> {
+        let index = super::transition::try_lock(&self.index)?;
+        // A collector unlinks before dropping real owners outside Index. Absence during
+        // that ticket is not actual history collection and cannot admit a successor early.
+        if self.collecting.load(Ordering::Acquire) {
+            return Err(VoiceError::Capacity);
+        }
+        Ok(!index.rows.iter().flatten().any(|row| {
+            matches!(row.key.purpose, Purpose::Derive(_))
+                && row.key.matches(selected, row.key.purpose)
+        }))
+    }
+
     /// Rotate through the finite original table. Pending work wins at its own slot,
     /// including after proof expiry; an uncertain Incoming without an actual publication
     /// must instead be rediscovered from Root's paid snapshot, never from its role alone.

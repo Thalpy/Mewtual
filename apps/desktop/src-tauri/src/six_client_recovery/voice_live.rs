@@ -2,7 +2,7 @@
 //! pair state is injected. This test proves signalling custody, not audible WebRTC media.
 use super::*;
 use crate::voice_authority::SelectedHandoffOwner;
-use crate::voice_handoff::integration::webcrypto::Round;
+use crate::voice_handoff::integration::webcrypto::{catch_fixture, Endpoint, Failure, Round};
 use catcoms_sync::voice_v2::presence::{PairSelector, VoicePairConfirmation};
 use catcoms_sync::voice_v2::{Body, CallGrant};
 use serde_json::json;
@@ -32,61 +32,73 @@ async fn native_ready_is_automatic_over_blocked_tcp_member_bridge_after_browser_
     native_webcrypto_cycle(false, true, true, None).await;
 }
 
+async fn confirmation_observation(
+    actor: &catcoms_app::ServerActor,
+    clock: &dyn catcoms_rt::Clock,
+    grant: &Arc<CallGrant>,
+    selector: PairSelector,
+    handshake: [u8; 32],
+) -> VoicePairConfirmation {
+    bounded("exact native pair confirmation observation", async {
+        loop {
+            match actor
+                .voice_pair_confirmation(grant.clone(), selector, handshake)
+                .await
+            {
+                Ok(state) => return state,
+                // Real final Group/Policy contention is a proven pre-observation refusal.
+                // Retry ONLY that same identity; neither wrong state nor a stale grant is
+                // success. The outer bound also covers an Actor reply which never arrives.
+                Err(catcoms_app::VoiceEndpointError::Protocol(
+                    catcoms_sync::voice_v2::VoiceError::Capacity,
+                )) => clock.sleep(std::time::Duration::from_millis(20)).await,
+                Err(error) => panic!("native pair observation refused: {error:?}"),
+            }
+        }
+    })
+    .await
+}
+async fn browser_endpoint(
+    scenario: &Scenario,
+    index: usize,
+    paused: bool,
+) -> Result<Endpoint, Failure> {
+    let state = scenario.online(index).state.clone();
+    let owner = catch_fixture(async {
+        let controller = prepare_voice_controller_inner(&state).await.unwrap();
+        activate_voice_owner_inner(&state, controller.clone())
+            .await
+            .unwrap();
+        let owner =
+            prepare_voice_owner_inner(&state, controller, 1, channel_id("general").to_string())
+                .await
+                .unwrap();
+        activate_voice_owner_inner(&state, owner.clone())
+            .await
+            .unwrap();
+        owner
+    })
+    .await?;
+    match catch_fixture(async {
+        if paused {
+            Endpoint::prepare_paused(state, owner).await
+        } else {
+            Endpoint::prepare(state, owner).await
+        }
+    })
+    .await
+    {
+        Ok(result) => result,
+        Err(error) => Err(error),
+    }
+}
+
 async fn native_webcrypto_cycle(
     end_before_input: bool,
     automatic_browser: bool,
     exercise_ready: bool,
     exercise_sdp: Option<Round>,
 ) {
-    use crate::voice_handoff::integration::webcrypto::{catch_fixture, Endpoint, Failure};
-    async fn observation(
-        actor: &catcoms_app::ServerActor,
-        clock: &dyn catcoms_rt::Clock,
-        grant: &Arc<CallGrant>,
-        selector: PairSelector,
-        handshake: [u8; 32],
-    ) -> VoicePairConfirmation {
-        bounded("exact native pair confirmation observation", async {
-            loop {
-                match actor
-                    .voice_pair_confirmation(grant.clone(), selector, handshake)
-                    .await
-                {
-                    Ok(state) => return state,
-                    // Real final Group/Policy contention is a proven pre-observation refusal.
-                    // Retry ONLY that same identity; neither wrong state nor a stale grant is
-                    // success. The outer bound also covers an Actor reply which never arrives.
-                    Err(catcoms_app::VoiceEndpointError::Protocol(
-                        catcoms_sync::voice_v2::VoiceError::Capacity,
-                    )) => clock.sleep(std::time::Duration::from_millis(20)).await,
-                    Err(error) => panic!("native pair observation refused: {error:?}"),
-                }
-            }
-        })
-        .await
-    }
-    async fn endpoint(scenario: &Scenario, index: usize) -> Result<Endpoint, Failure> {
-        let state = scenario.online(index).state.clone();
-        let owner = catch_fixture(async {
-            let controller = prepare_voice_controller_inner(&state).await.unwrap();
-            activate_voice_owner_inner(&state, controller.clone())
-                .await
-                .unwrap();
-            let owner =
-                prepare_voice_owner_inner(&state, controller, 1, channel_id("general").to_string())
-                    .await
-                    .unwrap();
-            activate_voice_owner_inner(&state, owner.clone())
-                .await
-                .unwrap();
-            owner
-        })
-        .await?;
-        match catch_fixture(Endpoint::prepare(state, owner)).await {
-            Ok(result) => result,
-            Err(error) => Err(error),
-        }
-    }
     let mut scenario = Scenario::new(false, isolate().await);
     scenario.admit().await;
     scenario.close(&[3, 4, 5]).await;
@@ -96,7 +108,10 @@ async fn native_webcrypto_cycle(
     }
     // B owns no controller, endpoint key, call owner or crypto broker. Actual TCP policy
     // forbids A-C; only the original member helper path can deliver the signed envelopes.
-    let endpoints = tokio::join!(endpoint(&scenario, 1), endpoint(&scenario, 2));
+    let endpoints = tokio::join!(
+        browser_endpoint(&scenario, 1, false),
+        browser_endpoint(&scenario, 2, false)
+    );
     let (mut a, mut c) = match endpoints {
         (Ok(a), Ok(c)) => (a, c),
         (Ok(mut a), Err(error)) => {
@@ -151,14 +166,14 @@ async fn native_webcrypto_cycle(
             let a_clock = crate::voice_runtime(&scenario.online(1).state).clock();
             let c_clock = crate::voice_runtime(&scenario.online(2).state).clock();
             let (a_state, c_state) = tokio::join!(
-                observation(
+                confirmation_observation(
                     &scenario.online(1).actor,
                     a_clock.as_ref(),
                     &ag,
                     discovered[0].1,
                     ap.confirmation_handshake().unwrap()
                 ),
-                observation(
+                confirmation_observation(
                     &scenario.online(2).actor,
                     c_clock.as_ref(),
                     &cg,
@@ -264,14 +279,14 @@ async fn native_webcrypto_cycle(
         let c_clock = crate::voice_runtime(&scenario.online(2).state).clock();
         let observations = || async {
             let (a, c) = tokio::join!(
-                observation(
+                confirmation_observation(
                     &scenario.online(1).actor,
                     a_clock.as_ref(),
                     &ag,
                     discovered[0].1,
                     a_handshake
                 ),
-                observation(
+                confirmation_observation(
                     &scenario.online(2).actor,
                     c_clock.as_ref(),
                     &cg,
@@ -328,6 +343,260 @@ async fn native_webcrypto_cycle(
         }
     }
     scenario.close(&[0, 1, 2]).await;
+}
+
+/// Genuine second native peer on A's original selected key/HTTP Session. Only the RTC
+/// provider is controlled. The first A-B path is blocked and uses unjoined helper0;
+/// the second A-C path uses the existing permitted graph and claims no blocked edge.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn native_browser_two_peers_share_original_session_after_actual_history_collection() {
+    // Three full endpoint lifecycle futures are substantially larger than their metadata.
+    // Keep this test coordinator small on the standard harness stack; runtime budgets and
+    // actual application/actor futures remain unchanged.
+    Box::pin(two_browser_peer_cycle()).await;
+}
+
+async fn two_browser_peer_cycle() {
+    eprintln!("two-peer fixture: initial admission");
+    let mut scenario = Scenario::new(false, isolate().await);
+    scenario.admit().await;
+    // Keep C an already-admitted MLS member, but offline for the first round so
+    // helper0 is the ONLY permitted bridge. Reopen does not commit membership/epoch.
+    scenario.close(&[3, 4, 5]).await;
+    scenario.rules.drop_gossip.store(true, Ordering::Release);
+    for index in [0, 1, 2] {
+        enable(&scenario, index).await;
+    }
+    // C's ordinary FreshPeer ordering must select A before B. These are actual admitted
+    // device identities, not fixed RNG input or a synthetic selected-peer instruction.
+    let (ai, bi) = if scenario.clients[1].identity.as_ref().unwrap().1
+        < scenario.clients[2].identity.as_ref().unwrap().1
+    {
+        (1, 2)
+    } else {
+        (2, 1)
+    };
+    let endpoints = tokio::join!(
+        Box::pin(browser_endpoint(&scenario, ai, false)),
+        Box::pin(browser_endpoint(&scenario, bi, false))
+    );
+    let (mut a, mut b) = match endpoints {
+        (Ok(a), Ok(b)) => (a, b),
+        (Ok(mut a), Err(error)) => {
+            a.collect().await;
+            std::panic::resume_unwind(error)
+        }
+        (Err(error), Ok(mut b)) => {
+            b.collect().await;
+            std::panic::resume_unwind(error)
+        }
+        (Err(error), Err(_)) => std::panic::resume_unwind(error),
+    };
+    let mut newcomer = None;
+    let cycle = catch_fixture(Box::pin(async {
+        let ab = discovered_browser_pair(&scenario, &a, ai, &b, bi).await;
+        eprintln!("two-peer fixture: first complete pair");
+        let old = Box::pin(complete_browser_media_pair(&mut a, &mut b, ab)).await;
+        a.current_peers(1).await;
+        b.current_peers(1).await;
+        // Both native mode8 and browser compaction actually returned before next peer
+        // admission. Late old Begin goes over actual authenticated HTTP in this step.
+        eprintln!("two-peer fixture: first history collected; advance");
+        a.advance_pair().await;
+        scenario.reopen(&[3]).await;
+        enable(&scenario, 3).await;
+        eprintln!("two-peer fixture: newcomer setup");
+        let c = match Box::pin(browser_endpoint(&scenario, 3, true)).await {
+            Ok(c) => c,
+            Err(error) => std::panic::resume_unwind(error),
+        };
+        newcomer = Some(c);
+        let c = newcomer.as_mut().unwrap();
+        let c_owner = c.selected();
+        let cg = c_owner.grant().unwrap();
+        let a_owner = a.selected();
+        let b_owner = b.selected();
+        let clock = crate::voice_runtime(&scenario.online(3).state).clock();
+        bounded(
+            "new endpoint proves both actual existing voice members before factory release",
+            async {
+                loop {
+                    let (ca, cb) = tokio::join!(
+                        fresh(
+                            &scenario,
+                            3,
+                            &cg,
+                            &a_owner,
+                            scenario.clients[ai].identity.as_ref().unwrap().1
+                        ),
+                        fresh(
+                            &scenario,
+                            3,
+                            &cg,
+                            &b_owner,
+                            scenario.clients[bi].identity.as_ref().unwrap().1
+                        )
+                    );
+                    if ca.is_some() && cb.is_some() {
+                        break;
+                    }
+                    clock.sleep(Duration::from_millis(20)).await;
+                }
+            },
+        )
+        .await;
+        eprintln!("two-peer fixture: newcomer discovered both; release");
+        c.release_discovery();
+        let ac = discovered_browser_pair(&scenario, &a, ai, c, 3).await;
+        assert_eq!(
+            ab[0].epoch, ac[0].epoch,
+            "reopening an existing member must not create a new MLS epoch"
+        );
+        eprintln!("two-peer fixture: second complete pair");
+        let next = Box::pin(complete_browser_media_pair(&mut a, c, ac)).await;
+        assert_ne!(
+            old.0, next.0,
+            "genuine second native parent has a different full serial"
+        );
+        assert_eq!(
+            &old.0[..8],
+            &next.0[..8],
+            "genuine next peer reuses a collected native slot"
+        );
+        a.assert_collected_pair_known(ab[0]);
+        eprintln!("two-peer fixture: both histories collected; verify peers");
+        a.current_peers(2).await;
+        b.current_peers(1).await;
+        c.current_peers(1).await;
+        a.end_browser_peers(2).await;
+        scenario.rules.assert_graph();
+        let trace = scenario.rules.trace.lock().unwrap();
+        for edge in [(0, 1, 28), (1, 0, 28), (0, 2, 28), (2, 0, 28)] {
+            assert!(
+                trace.received_kinds.get(&edge).copied().unwrap_or(0) > 0,
+                "first actual pair must traverse the unjoined helper: {edge:?}"
+            );
+        }
+    }))
+    .await;
+    if let Err(error) = cycle {
+        // Every constructed endpoint is attempted even if a sibling cleanup panics. Its
+        // collector releases any real scheduling hold before native End, outside guards.
+        let (ar, br, cr) = tokio::join!(
+            Box::pin(catch_fixture(a.collect())),
+            Box::pin(catch_fixture(b.collect())),
+            async {
+                if let Some(c) = &mut newcomer {
+                    Box::pin(catch_fixture(c.collect())).await
+                } else {
+                    Ok(true)
+                }
+            }
+        );
+        assert!(
+            ar.is_ok() && br.is_ok() && cr.is_ok(),
+            "all failed two-peer endpoints must collect"
+        );
+        std::panic::resume_unwind(error);
+    }
+    eprintln!("two-peer fixture: close all endpoints");
+    let c = newcomer.unwrap();
+    let (ar, br, cr) = tokio::join!(
+        Box::pin(catch_fixture(a.close())),
+        Box::pin(catch_fixture(b.close())),
+        Box::pin(catch_fixture(c.close()))
+    );
+    for result in [ar, br, cr] {
+        match result {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) | Err(error) => std::panic::resume_unwind(error),
+        }
+    }
+    scenario.close(&[0, 1, 2, 3]).await;
+}
+
+async fn discovered_browser_pair(
+    scenario: &Scenario,
+    a: &Endpoint,
+    ai: usize,
+    b: &Endpoint,
+    bi: usize,
+) -> [PairSelector; 2] {
+    let ao = a.selected();
+    let bo = b.selected();
+    let ag = ao.grant().unwrap();
+    let bg = bo.grant().unwrap();
+    let clock = crate::voice_runtime(&scenario.online(ai).state).clock();
+    bounded(
+        "both exact original native watchers discover the next browser pair",
+        async {
+            loop {
+                let (ab, ba) = tokio::join!(
+                    fresh(
+                        scenario,
+                        ai,
+                        &ag,
+                        &bo,
+                        scenario.clients[bi].identity.as_ref().unwrap().1
+                    ),
+                    fresh(
+                        scenario,
+                        bi,
+                        &bg,
+                        &ao,
+                        scenario.clients[ai].identity.as_ref().unwrap().1
+                    )
+                );
+                if let (Some(ab), Some(ba)) = (ab, ba) {
+                    return [ab.1, ba.1];
+                }
+                clock.sleep(Duration::from_millis(20)).await;
+            }
+        },
+    )
+    .await
+}
+
+async fn complete_browser_media_pair(
+    a: &mut Endpoint,
+    b: &mut Endpoint,
+    selectors: [PairSelector; 2],
+) -> ([u8; 16], [u8; 16]) {
+    let (ap, bp) = tokio::join!(
+        Box::pin(a.automatic_pair(selectors[0])),
+        Box::pin(b.automatic_pair(selectors[1]))
+    );
+    assert_eq!(
+        ap.confirmation_handshake().unwrap(),
+        bp.confirmation_handshake().unwrap()
+    );
+    eprintln!(
+        "two-peer Ready start: A {}; other {}",
+        a.ready_diagnostic(&ap),
+        b.ready_diagnostic(&bp)
+    );
+    tokio::select! {
+        _ = async {
+            while !ap.ready_test_complete() || !bp.ready_test_complete() {
+                SystemClock.sleep(Duration::from_millis(20)).await;
+            }
+        } => {},
+        _ = SystemClock.sleep(Duration::from_secs(30)) => {
+            panic!("scoped native Ready stalled: A {}; other {}", a.ready_diagnostic(&ap), b.ready_diagnostic(&bp));
+        },
+    }
+    tokio::join!(Box::pin(a.sdp_custody(&ap)), Box::pin(b.sdp_custody(&bp)));
+    tokio::join!(Box::pin(a.pc_custody(&ap)), Box::pin(b.pc_custody(&bp)));
+    tokio::join!(
+        Box::pin(a.sdp_round(&ap, Round::MediaHistory)),
+        Box::pin(b.sdp_round(&bp, Round::MediaHistory))
+    );
+    // No synthetic changed-join reservation here: next slot reuse is asserted against
+    // the real second Root factory, selected by normal discovery on the same Session.
+    tokio::join!(
+        Box::pin(a.collect_pair_history(ap, selectors[0])),
+        Box::pin(b.collect_pair_history(bp, selectors[1]))
+    )
 }
 
 async fn enable(scenario: &Scenario, index: usize) {
