@@ -365,6 +365,64 @@ impl Endpoint {
         parent.id().logical()
     }
 
+    /// Real HTTP media Close/Release plus original Plan-final/ACK, while another
+    /// indexed peer remains current. The Node command carries no row/proof/SDP hint.
+    pub(crate) async fn fail_attached_media_pair(
+        &mut self,
+        peers: usize,
+        parent: &ledger::ResolvedRow,
+    ) -> [u8; 16] {
+        assert!(peers <= 1);
+        let root = parent.media_test_root().unwrap();
+        assert!(root.was_admitted() && root.is_current());
+        drop(root); // A test observer must not retain real progress across its cleanup.
+        let selected = self.selected();
+        let route = (1..=64)
+            .find_map(|slot| {
+                self.state
+                    .voice_channels
+                    .route(slot)
+                    .ok()
+                    .filter(|route| Arc::ptr_eq(route.selected(), &selected))
+            })
+            .unwrap();
+        let request = parent.media_test_original(route.session().identity());
+        assert_eq!(
+            self.step(json!({"tag":"step","name":"fail-media","peers":peers}))
+                .await,
+            json!({"kind":"failed-media-retired","peers":peers,"closed":1})
+        );
+        let history = parent
+            .media_original_history(
+                route.session().identity(),
+                &request,
+                super::super::requests::media::OriginalKind::Resolve,
+            )
+            .unwrap()
+            .unwrap();
+        assert!(history.admitted && history.closed && history.released && !history.current);
+        if let Some(root) = parent.media_test_root() {
+            assert!(!root.is_current());
+        }
+        assert!(parent.retired_plan_test_observation(&selected).unwrap());
+        self.callbacks.expected_parent = None;
+        parent.id().logical()
+    }
+
+    /// Keep successful all-peer baseline checks unchanged. A failed-media scenario
+    /// additionally retains its terminal observation while acting on exactly A-B.
+    pub(crate) async fn surviving_peer(&mut self, end: bool) {
+        let (name, result) = if end {
+            ("end-survivor", "survivor-ended")
+        } else {
+            ("current-survivor", "survivor-current")
+        };
+        assert_eq!(
+            self.step(json!({"tag":"step","name":name,"peers":1})).await,
+            json!({"kind":result,"peers":1,"terminal":1})
+        );
+    }
+
     pub(crate) async fn end_browser_peers(&mut self, count: usize) {
         assert_eq!(
             self.step(json!({"tag":"step","name":"end-peers"})).await,

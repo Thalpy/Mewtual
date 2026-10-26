@@ -41,7 +41,7 @@ const mediaEvents: string[] = [];
 let mediaStarted = 0, mediaCurrentObservations = 0;
 // At most two actual peers in this fixture. Public parent IDs only label observations;
 // they are never supplied as an authority hint to the ordinary discovery pump.
-const mediaRecords: { plan: VoiceCryptoChain; parent: typeof parent; calls: { closed: number }; currents: number }[] = [];
+const mediaRecords: { plan: VoiceCryptoChain; parent: typeof parent; calls: { closed: number }; currents: number; terminal: boolean }[] = [];
 let mediaRequestParent: string | null = null, mediaRequestProof: string | null = null;
 let originalSession: { keys: unknown; bootstrap: unknown; tx: bigint } | null = null;
 // Separate bounded observations for the unscripted production coordinator. These counters
@@ -226,6 +226,8 @@ async function idle(): Promise<void> {
 }
 type Step =
   | { tag: "step"; name: "fail-attached"; peers: 0 | 1 }
+  | { tag: "step"; name: "fail-media"; peers: 0 | 1 }
+  | { tag: "step"; name: "current-survivor" | "end-survivor"; peers: 1 }
   | { tag: "step"; name: "coordinator" | "coordinator-end"; peers: 1 | 2 }
   | { tag: "step"; name: "prepare"; owner: string; group: string }
   | { tag: "step"; name: "derive"; purpose: VoiceIpcPurpose }
@@ -234,6 +236,51 @@ type Step =
   | { tag: "step"; name: "pump" | "close" | "wedge" | "pc-custody" | "rtc-round" | "rtc-round-loss" | "rtc-round-media" | "rtc-round-media-loss" | "media-revoked" | "media-retire" | "media-retire-loss" | "media-retire-start" | "media-retire-progress" | "media-retire-finish" | "media-current-after-history" | "media-history-pending" | "advance-pair" | "media-current-all" | "end-peers" };
 async function step(value: Step): Promise<unknown> {
   switch (value.name) {
+    case "fail-media": {
+      const session = (broker as unknown as { ipcChannels: Map<string, {
+        keys: unknown; bootstrap: unknown; tx: bigint;
+        negotiation: { linked: { handle: VoiceCryptoChain } | null; media: { adopted: boolean } | null };
+      }> }).ipcChannels.get(owner.token)!;
+      const plan = session.negotiation.linked?.handle;
+      assert.ok(plan && session.negotiation.media?.adopted, "actual original media must be adopted before failure");
+      const failed = mediaRecords.find(record => record.plan === plan);
+      assert.ok(failed); assert.equal(mediaRecords.length, value.peers + 1);
+      const keys = session.keys, bootstrap = session.bootstrap, before = session.tx;
+      plan.close();
+      await broker.retireFailedNativeNegotiation(owner, channel, plan);
+      assert.equal(failed.calls.closed, 1);
+      for (const record of mediaRecords) {
+        if (record === failed) continue;
+        assert.equal(record.calls.closed, 0);
+        const previous: number = record.currents;
+        await broker.completeNativeMediaHandoff(owner, channel, record.plan);
+        assert.ok(record.currents > previous, "indexed sibling's authenticated Current must actually return");
+      }
+      assert.equal(session.keys, keys); assert.equal(session.bootstrap, bootstrap);
+      assert.ok(session.tx > before, "negative cleanup retains original increasing Session counters");
+      assert.equal(broker.advanceNativeNegotiation(owner, channel, plan), true);
+      failed.terminal = true; // Retain closed==1 evidence; never count it as a live peer.
+      return { kind: "failed-media-retired", peers: value.peers, closed: 1 };
+    }
+    case "current-survivor":
+    case "end-survivor": {
+      const active = mediaRecords.filter(record => !record.terminal);
+      const terminal = mediaRecords.filter(record => record.terminal);
+      assert.equal(active.length, value.peers); assert.equal(terminal.length, 1);
+      for (const record of terminal) assert.equal(record.calls.closed, 1);
+      for (const record of active) assert.equal(record.calls.closed, 0);
+      if (value.name === "current-survivor") {
+        for (const record of active) {
+          const before: number = record.currents;
+          await broker.completeNativeMediaHandoff(owner, channel, record.plan);
+          assert.ok(record.currents > before, "the exact surviving peer must receive fresh authenticated Current");
+        }
+        return { kind: "survivor-current", peers: value.peers, terminal: 1 };
+      }
+      owner.retire();
+      for (const record of mediaRecords) assert.equal(record.calls.closed, 1);
+      return { kind: "survivor-ended", peers: value.peers, terminal: 1 };
+    }
     case "fail-attached": {
       const session = (broker as unknown as { ipcChannels: Map<string, {
         keys: unknown; bootstrap: unknown; tx: bigint;
@@ -567,7 +614,7 @@ async function step(value: Step): Promise<unknown> {
           mediaPeerCalls = calls;
           assert.ok(mediaRecords.length < 2, "bounded actual peer observations");
           assert.ok(!mediaRecords.some(record => record.plan === chain));
-          mediaRecords.push({ plan: chain, parent, calls, currents: 0 });
+          mediaRecords.push({ plan: chain, parent, calls, currents: 0, terminal: false });
           if (originalSession) {
             const session = (broker as unknown as { ipcChannels: Map<string, { keys: unknown; bootstrap: unknown; tx: bigint }> }).ipcChannels.get(owner.token)!;
             assert.equal(session.keys, originalSession.keys); assert.equal(session.bootstrap, originalSession.bootstrap);

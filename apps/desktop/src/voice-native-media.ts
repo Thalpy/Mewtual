@@ -295,10 +295,18 @@ export class VoiceNativeMedia {
   close(): void {
     const first = !this.#closed;
     this.#closed = true; this.#status?.close();
-    this.#source?.close();
-    try { this.#peer?.close(); } catch { /* Actual custody survives for cleanup retry. */ }
-    try { this.#cancel(); } catch { /* Keep the original uncertain handle. */ }
-    if (first) this.#context.stopped();
+    try {
+      // Publish the owning negotiation's negative state before SDK/cancel callbacks
+      // can reenter it. The private closed/status fence already holds here. Even a
+      // throwing owner callback must not prevent the real SDK/timer close attempts.
+      if (first) this.#context.stopped();
+    } finally {
+      try { this.#source?.close(); }
+      finally {
+        try { this.#peer?.close(); } catch { /* Actual custody survives for cleanup retry. */ }
+        try { this.#cancel(); } catch { /* Keep the original uncertain handle. */ }
+      }
+    }
   }
   /** Called OUTSIDE the shared physical lane, BEFORE unseen-parent/old SDK cleanup.
    * A lost Release recovers the exact released claim via original Close; no refill or

@@ -20,6 +20,7 @@ async function fixture(t: TestContext) {
   let inCurrent = false, expireInCurrent = false;
   let heldMode: number | null = null, held: ReturnType<typeof gate> | null = null;
   let onSchedule: (() => void) | null = null, onCancel: (() => void) | null = null, onNow: (() => void) | null = null;
+  let onStopped: (() => void) | null = null;
   const timers = new Map<object, { due: number; work: () => void }>();
   const requests: number[] = [], counts = { created: 0, closed: 0, active: 0, refund: 0, paid: VOICE_NATIVE_MEDIA_BYTES, stops: 0 };
   let admitted = false, nativeClosed = false, released = false;
@@ -39,7 +40,7 @@ async function fixture(t: TestContext) {
     schedule(work: () => void, delay: number) { const handle = {}; timers.set(handle, { work, due: now + delay }); onSchedule?.(); return handle; },
     cancel(handle: unknown) { onCancel?.(); timers.delete(handle as object); },
   };
-  const source = new VoiceSdpRtcOwner(true, () => {
+  const source: VoiceSdpRtcOwner = new VoiceSdpRtcOwner(true, (): boolean => {
     inCurrent = true;
     try { return driver?.transferCurrent(source) ?? ready; }
     finally { inCurrent = false; }
@@ -49,7 +50,7 @@ async function fixture(t: TestContext) {
   driver = new VoiceNativeMedia(original, source, { clock, live: () => { if (inCurrent && expireInCurrent) now = 6000; return live; },
     begin: () => { counts.active++; }, end: () => { counts.active--; },
     refund: () => { counts.refund++; counts.paid = 0; },
-    stopped: () => { counts.stops++; live = false; },
+    stopped: () => { counts.stops++; live = false; onStopped?.(); },
     request: async (request, cleanup) => {
       const mode = request.body[1]; requests.push(mode);
       assert.equal(cleanup, mode !== 0 && mode !== 4 && mode !== 7);
@@ -80,6 +81,7 @@ async function fixture(t: TestContext) {
     failClose(value: boolean) { failClose = value; },
     onSchedule(hook: () => void) { onSchedule = hook; }, onCancel(hook: () => void) { onCancel = hook; },
     onNow(hook: () => void) { onNow = hook; },
+    onStopped(hook: () => void) { onStopped = hook; },
     ready(value: boolean) { ready = value; }, time(value: number) { now = value; },
     expireFromCurrentPredicate() { expireInCurrent = true; },
     advance(delta: number) {
@@ -98,6 +100,18 @@ test("one native handoff transfers the same peer, monitors it and releases only 
   await f.driver.cleanup(); assert.equal(f.counts.closed, 1); assert.equal(f.counts.paid, 0);
   assert.equal(f.counts.refund, 1); assert.equal(f.counts.active, 0); assert.deepEqual(f.requests.slice(-2), [2, 3]);
   await f.driver.cleanup(); assert.equal(f.counts.refund, 1);
+});
+
+test("media close publishes owner failure before SDK callbacks and still closes after a throwing observer", async t => {
+  const f = await fixture(t); await f.driver.start();
+  f.onStopped(() => {
+    assert.equal(f.driver.closed, true); assert.equal(f.counts.closed, 0);
+    throw new Error("observer failed after publishing its negative state");
+  });
+  assert.throws(() => f.driver.close(), /observer failed/);
+  assert.equal(f.counts.closed, 1); assert.equal(f.timers.size, 0);
+  await f.driver.cleanup();
+  assert.equal(f.counts.stops, 1); assert.equal(f.counts.refund, 1); assert.equal(f.counts.active, 0);
 });
 for (const mode of [0, 4]) test(`acquisition expiry closes the real peer while native mode${mode} ignores cancellation`, async t => {
   const f = await fixture(t), held = f.hold(mode), work = f.driver.start();

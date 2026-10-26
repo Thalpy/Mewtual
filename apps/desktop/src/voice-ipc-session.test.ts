@@ -4278,6 +4278,220 @@ async function indexedMediaFixture(t: TestContext) {
   assert.equal(f.broker.advanceNativeNegotiation(f.owner, first.child.channel, firstPlan), true);
   return { first, f, oldResponder };
 }
+
+async function failingMediaFixture(t: TestContext) {
+  const originalRtc = globalThis.RTCPeerConnection;
+  const { first, f, oldResponder } = await indexedMediaFixture(t);
+  const prepared = await establishedPcFixture(t, true, f, 2);
+  const next = await framedMedia(t, true, prepared);
+  const nextResponder = f.actionHandler()!;
+  f.actions((header, body) => header.logical === first.child.parent.row ? oldResponder(header, body) : nextResponder(header, body));
+  t.after(() => { globalThis.RTCPeerConnection = originalRtc; });
+  return { first, f, next };
+}
+
+for (const loss of [-1, 0, 2, 3]) test(`failed attached media releases only its own peer; lost mode=${loss}`, async t => {
+  const { first, f, next } = await failingMediaFixture(t);
+  if (loss === 0) next.lose(0);
+  await next.media();
+  if (loss > 0) next.lose(loss);
+  const oldPlan = first.child.ready.chain, plan = next.child.ready.chain;
+  type Peer = { media: unknown; refund(): void };
+  type Session = { negotiation: { media: unknown }; peers: Map<unknown, Peer> };
+  const session = (f.broker as unknown as { ipcChannels: Map<string, Session> }).ipcChannels.get(f.owner.token)!;
+  const peer = session.peers.get(plan)!, refund = peer.refund;
+  let refunded = false;
+  peer.refund = () => {
+    assert.equal(session.negotiation.media, null); assert.equal(peer.media, null);
+    assert.equal(session.peers.has(plan), false, "failed registry marker has no transferred payment");
+    assert.equal(session.peers.has(oldPlan), true);
+    assert.equal(f.broker.advanceNativeNegotiation(f.owner, next.child.channel, plan), false);
+    refunded = true; refund();
+  };
+  plan.close();
+  assert.equal(f.owner.isCurrent(), true); assert.equal(first.sdk.calls.closed, 0);
+  const currents = first.modes.filter(mode => mode === 4).length;
+  let returned = false;
+  const work = f.broker.retireFailedNativeNegotiation(f.owner, next.child.channel, plan).then(() => { returned = true; });
+  const untilReturned = performance.now() + 5000;
+  while (!returned) {
+    assert.ok(performance.now() < untilReturned, "failed original media did not drain");
+    await f.broker.completeNativeMediaHandoff(f.owner, next.child.channel, oldPlan);
+    await settledVoiceRpc(f); f.advance(250); await flush();
+  }
+  await work;
+  assert.equal(refunded, true); assert.equal(first.sdk.calls.closed, 0); assert.equal(next.sdk.calls.closed, 1);
+  assert.ok(first.modes.filter(mode => mode === 4).length > currents);
+  assert.equal(next.child.parent.finalCounts().finalAcknowledged, true);
+  assert.equal(f.broker.advanceNativeNegotiation(f.owner, next.child.channel, plan), true);
+  f.owner.retire(); await next.child.channel.close(); assert.equal(f.broker.counts().bytes, 0);
+});
+
+async function finishFailedMedia(f: Awaited<ReturnType<typeof failingMediaFixture>>, work: Promise<void>, done: () => boolean) {
+  const untilReturned = performance.now() + 5000;
+  while (!done()) {
+    assert.ok(performance.now() < untilReturned, "same failed media worker did not return");
+    await f.f.broker.completeNativeMediaHandoff(f.f.owner, f.next.child.channel, f.first.child.ready.chain);
+    await settledVoiceRpc(f.f); f.f.advance(250); await flush();
+  }
+  await work;
+}
+
+for (const mode of [7, 8]) test(`failed media recovers native mode${mode} commit with lost reply and skips collected parent queries`, async t => {
+  const fixture = await failingMediaFixture(t), { first, f, next } = fixture;
+  await next.media(); next.remaining(0);
+  let oldWork: Promise<unknown>, parentCollected = false, orphanQueries = 0;
+  const handler = f.actionHandler()!;
+  f.actions(async (header, body) => {
+    if (header.logical === next.child.parent.row && parentCollected && header.operation !== 28) {
+      orphanQueries++; throw new Error("test native parent already collected");
+    }
+    // This fixture's loss is AFTER the modeled native commit. Preserve that separate
+    // fact even when the response throws; otherwise this case would never test absence.
+    const collect = header.logical === next.child.parent.row && header.operation === 28 && body[1] === 8;
+    try { return await handler(header, body); }
+    finally { if (collect) parentCollected = true; }
+  });
+  const held = next.hold(mode); next.lose(mode);
+  if (mode === 7) oldWork = next.retireNegotiation();
+  else {
+    await next.retireNegotiation();
+    oldWork = f.broker.compactNativeNegotiation(f.owner, next.child.channel, next.child.ready.chain);
+  }
+  await until(() => next.modes.includes(mode));
+  const plan = next.child.ready.chain; plan.close();
+  let done = false;
+  const work = f.broker.retireFailedNativeNegotiation(f.owner, next.child.channel, plan).then(() => { done = true; });
+  await flush();
+  assert.equal(done, false); assert.equal(first.sdk.calls.closed, 0);
+  held.release(); await oldWork;
+  await finishFailedMedia(fixture, work, () => done);
+  if (mode === 8) assert.equal(parentCollected, true);
+  assert.equal(orphanQueries, 0); assert.equal(first.sdk.calls.closed, 0); assert.equal(next.sdk.calls.closed, 1);
+  assert.equal(f.broker.advanceNativeNegotiation(f.owner, next.child.channel, plan), true);
+  f.owner.retire(); await next.child.channel.close(); assert.equal(f.broker.counts().bytes, 0);
+});
+
+for (const end of [false, true]) test(`failed own media joins held Current before cleanup/refund; End=${end}`, async t => {
+  const fixture = await failingMediaFixture(t), { first, f, next } = fixture;
+  await next.media(); const previous = next.modes.filter(mode => mode === 4).length;
+  const held = next.hold(4), current = next.media();
+  await until(() => next.modes.filter(mode => mode === 4).length > previous);
+  const paid = f.broker.counts().bytes, plan = next.child.ready.chain; plan.close();
+  let done = false, ended = false;
+  const work = f.broker.retireFailedNativeNegotiation(f.owner, next.child.channel, plan).then(() => { done = true; });
+  let closing: Promise<void> | null = null;
+  if (end) { f.owner.retire(); closing = next.child.channel.close().then(() => { ended = true; }); }
+  await flush();
+  assert.equal(done, false); assert.equal(ended, false); assert.equal(f.broker.counts().bytes, paid);
+  assert.equal(next.custody.effectCounts().sdkReleases, 0);
+  assert.equal(first.sdk.calls.closed, Number(end));
+  held.release(); await current;
+  if (end) { await work; await closing; }
+  else {
+    await finishFailedMedia(fixture, work, () => done);
+    assert.equal(first.sdk.calls.closed, 0);
+    assert.equal(f.broker.advanceNativeNegotiation(f.owner, next.child.channel, plan), true);
+    f.owner.retire(); await next.child.channel.close();
+  }
+  assert.equal(f.broker.counts().bytes, 0);
+});
+
+test("failed media SDK close remains paid until actual success and ignores its stale stopped callback", async t => {
+  const fixture = await failingMediaFixture(t), { first, f, next } = fixture;
+  await next.media();
+  const prototype = globalThis.RTCPeerConnection.prototype, actual = prototype.close;
+  let refuse = true, attempts = 0;
+  prototype.close = function () { attempts++; if (refuse) throw new Error("actual SDK close refused"); actual.call(this); };
+  f.cleanup(() => { refuse = false; prototype.close = actual; });
+  type Peer = { media: unknown };
+  type Session = { negotiation: object; peers: Map<unknown, Peer>; mediaStopped(peer: Peer): void };
+  const session = (f.broker as unknown as { ipcChannels: Map<string, Session> }).ipcChannels.get(f.owner.token)!;
+  const plan = next.child.ready.chain, peer = session.peers.get(plan)!; plan.close();
+  let done = false;
+  const work = f.broker.retireFailedNativeNegotiation(f.owner, next.child.channel, plan).then(() => { done = true; });
+  await until(() => attempts > 2); await flush();
+  assert.equal(done, false); assert.equal(next.sdk.calls.closed, 0); assert.equal(first.sdk.calls.closed, 0);
+  assert.equal(next.custody.effectCounts().sdkReleases, 0); assert.ok(peer.media);
+  refuse = false; // Only the existing paid retry cadence resumes actual cleanup.
+  await finishFailedMedia(fixture, work, () => done);
+  assert.equal(next.sdk.calls.closed, 1); assert.equal(f.broker.advanceNativeNegotiation(f.owner, next.child.channel, plan), true);
+  const replacement = session.negotiation;
+  session.mediaStopped(peer);
+  assert.equal(session.negotiation, replacement); assert.equal(first.sdk.calls.closed, 0); assert.equal(f.owner.isCurrent(), true);
+  await f.broker.completeNativeMediaHandoff(f.owner, next.child.channel, first.child.ready.chain);
+  prototype.close = actual;
+  f.owner.retire(); await next.child.channel.close(); assert.equal(f.broker.counts().bytes, 0);
+});
+
+test("failed media cleanup coalesces SDK-close reentry before publishing its one worker", async t => {
+  const fixture = await failingMediaFixture(t), { first, f, next } = fixture;
+  await next.media();
+  const prototype = globalThis.RTCPeerConnection.prototype, actual = prototype.close;
+  let nested: Promise<void> | null = null;
+  prototype.close = function () {
+    nested = f.broker.retireFailedNativeNegotiation(f.owner, next.child.channel, next.child.ready.chain);
+    actual.call(this);
+  };
+  f.cleanup(() => { prototype.close = actual; });
+  let done = false;
+  const original = f.broker.retireFailedNativeNegotiation(f.owner, next.child.channel, next.child.ready.chain);
+  assert.equal(original, nested);
+  const work = original.then(() => { done = true; });
+  await finishFailedMedia(fixture, work, () => done);
+  assert.equal(next.sdk.calls.closed, 1); assert.equal(first.sdk.calls.closed, 0);
+  prototype.close = actual;
+  f.owner.retire(); await next.child.channel.close(); assert.equal(f.broker.counts().bytes, 0);
+});
+
+test("failed media recovers the same lost Phase refusal before choosing Plan final", async t => {
+  const fixture = await failingMediaFixture(t), { first, f, next } = fixture;
+  await next.media(); next.remaining(0);
+  let lost = false;
+  f.onResponse(async header => {
+    if (!lost && header.logical === next.child.parent.row && header.operation === 6 && next.child.parent.planCalls() === 0) {
+      lost = true; throw new Error("actual definite Phase refusal lost before browser observation");
+    }
+  });
+  const retiring = next.retireNegotiation(); await until(() => lost);
+  const plan = next.child.ready.chain; plan.close();
+  let done = false;
+  const work = f.broker.retireFailedNativeNegotiation(f.owner, next.child.channel, plan).then(() => { done = true; });
+  await finishFailedMedia(fixture, work, () => done); await retiring;
+  assert.equal(next.child.parent.finalCounts().retireCalls, 2, "repeat exact ambiguous Phase once; authenticated refusal alone permits Plan");
+  assert.equal(next.child.parent.finalCounts().finalAcknowledged, true); assert.equal(first.sdk.calls.closed, 0);
+  assert.equal(f.broker.advanceNativeNegotiation(f.owner, next.child.channel, plan), true);
+  f.owner.retire(); await next.child.channel.close(); assert.equal(f.broker.counts().bytes, 0);
+});
+
+test("completed compaction keeps its funded marker when that media stops before advance", async t => {
+  const { first, f, next } = await failingMediaFixture(t);
+  await next.media(); next.remaining(0); await next.retireNegotiation();
+  const plan = next.child.ready.chain;
+  assert.equal(await f.broker.compactNativeNegotiation(f.owner, next.child.channel, plan), true);
+  type Peer = { media: { close(): void } | null; cleanup: Promise<void> | null; compacted: boolean };
+  type Session = { negotiation: { failed: boolean }; peers: Map<unknown, Peer> };
+  const session = (f.broker as unknown as { ipcChannels: Map<string, Session> }).ipcChannels.get(f.owner.token)!;
+  const peer = session.peers.get(plan)!; assert.equal(peer.compacted, true);
+  peer.media!.close(); await peer.cleanup;
+  assert.equal(session.negotiation.failed, false); assert.equal(session.peers.has(plan), true);
+  assert.equal(peer.media, null); assert.equal(first.sdk.calls.closed, 0);
+  assert.equal(f.broker.advanceNativeNegotiation(f.owner, next.child.channel, plan), true);
+  f.owner.retire(); await next.child.channel.close(); assert.equal(f.broker.counts().bytes, 0);
+});
+
+test("owner End inside failed-media refund joins the worker and cannot publish next N", async t => {
+  const fixture = await failingMediaFixture(t), { f, next } = fixture;
+  await next.media();
+  type Peer = { refund(): void };
+  const session = (f.broker as unknown as { ipcChannels: Map<string, { peers: Map<unknown, Peer> }> }).ipcChannels.get(f.owner.token)!;
+  const plan = next.child.ready.chain, peer = session.peers.get(plan)!, actual = peer.refund;
+  peer.refund = () => { actual(); f.owner.retire(); };
+  await f.broker.retireFailedNativeNegotiation(f.owner, next.child.channel, plan);
+  assert.equal(f.owner.isCurrent(), false);
+  assert.equal(f.broker.advanceNativeNegotiation(f.owner, next.child.channel, plan), false);
+  await next.child.channel.close(); assert.equal(f.broker.counts().bytes, 0);
+});
 /** Observe actual preceding codec finally owners before advancing a simulated clock.
  * This is a test-only empty FIFO turn, never an RPC, grant or production scheduling hint. */
 async function settledVoiceRpc(f: Awaited<ReturnType<typeof fixture>>): Promise<void> {

@@ -428,17 +428,29 @@ async fn native_browser_two_peers_share_original_session_after_actual_history_co
     // Three full endpoint lifecycle futures are substantially larger than their metadata.
     // Keep this test coordinator small on the standard harness stack; runtime budgets and
     // actual application/actor futures remain unchanged.
-    Box::pin(two_browser_peer_cycle(false)).await;
+    Box::pin(two_browser_peer_cycle(SecondPeer::Complete)).await;
 }
 
 /// Actual native failure of C before storage/SDK/media admission must leave A-B's
 /// original indexed media, keys/counters and Current usable. RTC remains controlled.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn native_browser_failed_attached_peer_preserves_original_session_and_indexed_peer() {
-    Box::pin(two_browser_peer_cycle(true)).await;
+    Box::pin(two_browser_peer_cycle(SecondPeer::FailedAttached)).await;
 }
 
-async fn two_browser_peer_cycle(fail_second: bool) {
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn native_browser_failed_media_peer_preserves_original_session_and_indexed_sibling() {
+    Box::pin(two_browser_peer_cycle(SecondPeer::FailedMedia)).await;
+}
+
+#[derive(Clone, Copy)]
+enum SecondPeer {
+    Complete,
+    FailedAttached,
+    FailedMedia,
+}
+
+async fn two_browser_peer_cycle(second: SecondPeer) {
     eprintln!("two-peer fixture: initial admission");
     let mut scenario = Scenario::new(false, isolate().await);
     scenario.admit().await;
@@ -534,7 +546,7 @@ async fn two_browser_peer_cycle(fail_second: bool) {
             ab[0].epoch, ac[0].epoch,
             "reopening an existing member must not create a new MLS epoch"
         );
-        if fail_second {
+        if !matches!(second, SecondPeer::Complete) {
             eprintln!(
                 "two-peer fixture: fail confirmed attached pair without touching indexed peer"
             );
@@ -542,17 +554,47 @@ async fn two_browser_peer_cycle(fail_second: bool) {
                 Box::pin(a.automatic_pair(ac[0])),
                 Box::pin(c.automatic_pair(ac[1]))
             );
-            let (failed_id, _) = tokio::join!(
-                Box::pin(a.fail_attached_pair(1, &ap)),
-                Box::pin(c.fail_attached_pair(0, &cp))
-            );
+            let (failed_id, _) = if matches!(second, SecondPeer::FailedMedia) {
+                bounded(
+                    "both genuine failed-peer Ready/core owners drain before RTC",
+                    async {
+                        while !ap.ready_test_complete() || !cp.ready_test_complete() {
+                            clock.sleep(Duration::from_millis(20)).await;
+                        }
+                    },
+                )
+                .await;
+                tokio::join!(Box::pin(a.sdp_custody(&ap)), Box::pin(c.sdp_custody(&cp)));
+                tokio::join!(Box::pin(a.pc_custody(&ap)), Box::pin(c.pc_custody(&cp)));
+                tokio::join!(
+                    Box::pin(a.sdp_round(&ap, Round::Media)),
+                    Box::pin(c.sdp_round(&cp, Round::Media))
+                );
+                tokio::join!(
+                    Box::pin(a.fail_attached_media_pair(1, &ap)),
+                    Box::pin(c.fail_attached_media_pair(0, &cp))
+                )
+            } else {
+                tokio::join!(
+                    Box::pin(a.fail_attached_pair(1, &ap)),
+                    Box::pin(c.fail_attached_pair(0, &cp))
+                )
+            };
             // Retained failed rows still carry the exact original parent identities.
             assert_eq!(failed_id[..8], old.0[..8]);
             assert_ne!(failed_id, old.0);
             a.assert_collected_pair_known(ab[0]);
-            a.current_peers(1).await;
+            if matches!(second, SecondPeer::FailedMedia) {
+                a.surviving_peer(false).await;
+            } else {
+                a.current_peers(1).await;
+            }
             b.current_peers(1).await;
-            a.end_browser_peers(1).await;
+            if matches!(second, SecondPeer::FailedMedia) {
+                a.surviving_peer(true).await;
+            } else {
+                a.end_browser_peers(1).await;
+            }
         } else {
             eprintln!("two-peer fixture: second complete pair");
             let next = Box::pin(complete_browser_media_pair(&mut a, c, ac)).await;
