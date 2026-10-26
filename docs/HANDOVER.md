@@ -1,5 +1,50 @@
 # Mewtual; Handover
 
+## Saved-files list (26 October, PR #56, stacked on #55)
+
+Finished saves of shared files are now remembered per server on this device
+([design](design-saved-files-list.md), owner decisions and both reviews recorded there).
+
+- **Record.** `servers/<id>.saved`, sealed under the vault `db_key`, version 1, bound to the
+  group and this device's member id, one entry per saved copy (256 entries, 1 MiB). Written by
+  native right after each publication (journaled, recovered and non-resumable writers) under the
+  store and registry locks for the saving incarnation; identities only from a journal. Newer,
+  damaged or unreadable records are never written over; "Start a new list" replaces only a damaged
+  one; `remove_server` (leave) deletes it. Not a cache pin.
+- **Transfers.** The Saved group shows list rows (newest first) in PR #51's row design: Saved,
+  Saved file missing or replaced (with Save again while the file is listed), could not check, or
+  cannot check (no identity). Show in folder works by entry ID with PR #51's read-only check; Clear
+  forgets the entry. A Saved private row stands for its own entry (`savedEntry`) and its Clear
+  forgets it; a finished download whose file is listed leaves the live list.
+- **Chat mark.** "Saved" on file cards in chat (also cards built earlier), the Files list and the
+  file details, from the list only.
+- **Replace my older saved copy** (Settings, Chat & Media, off by default, a `localStorage`
+  preference passed as `replaceOlder`). Native replaces only the newest older listed copy of the
+  same file in the same folder that it proves is its own and unchanged (identity, one name, not
+  read-only, no reparse point, exact length and CID; Unix not writable by other accounts), deletes
+  it through the verified object (Windows: the hashed handle; Unix: rename aside, recheck,
+  unlinkat), and gives the new copy the old name by a no-replace link only for a one-click save that
+  asked for that name. The first name goes only while the old name still holds the copy. Every
+  refusal keeps the old copy and says why.
+- **Found:** on Windows a delete-denying handle on one hard link does not protect another link of
+  the same file; the replace pins the other name. PR #51's Clear of a published row deletes the
+  staging name after checking the final name without such a pin (follow-up for #51's code, in
+  THREAT-MODEL). Inherited from #55, not changed here: the native tests
+  `six_client_recovery::files::private_download_bridges_fills_the_cache_and_exports_after_solo_native_reopen`
+  and `..::interrupted_private_download_retains_spend_and_resumes_through_d_after_native_restart`
+  still assert `!file_available` after acquisition, which #55's "saved files fill the cache"
+  makes false; they fail the same way on the #55 binary.
+- **Contract changes:** `save_group_file` gains `replace_older` (signature pin updated);
+  private download rows gain `savedEntry`; four commands plus `reset_saved_files`; the Transfers
+  refresh also checks the list; PR #51's "no trace of the replace setting" assertion became a
+  positive one.
+- **Limits:** see the design's residuals (old copy's streams and metadata go with it, Unix
+  same-account windows, Windows memory mappings and late read-only attribute, Unix crash leftover
+  at a `mewtual-removing-` name, unreached entries stay unchecked, `save_group_file` itself is
+  covered by its port seams and a text-order test, not end to end).
+
+Validation: see the design's ledger.
+
 ## Cache housekeeping (26 October, PR #55, stacked on #51)
 
 Each server's encrypted cache on a device now has a per-server size limit, crash-safe writes and

@@ -1,5 +1,56 @@
 # Threat model; client integrity & enforcement boundaries
 
+## Saved-files list and "Replace my older saved copy" (26 October, PR #56)
+
+Each server now has a sealed list of finished saves on this device, `servers/<id>.saved`, and an
+opt-in setting that may replace Mewtual's own earlier copy of a file saved again
+([design](design-saved-files-list.md)).
+
+- **Local, sealed, native-written.** The list is sealed under the vault `db_key` like the other
+  per-server records and never replicated. Only native writes it, only after a real publication,
+  under the store lock and the registry lock for the server incarnation that saved (a save racing
+  a leave or an account switch writes nothing). The record names the group and this device's
+  member id, so a record left behind (an older build, a failed removal) never applies to a later
+  membership. It holds folder paths, file names and file identities: new persisted metadata, sealed
+  at rest, redacted from `Debug`, never sent to the renderer, logs or diagnostics.
+- **Renderer surface.** `get_saved_files` returns entry IDs, CIDs, the saved file's own name,
+  dates, sizes, "Downloads or another folder" and "checkable"; never a folder or identity.
+  `check_saved_files` and `reveal_saved_file` are PR #51's bounded read-only identity checks (one
+  blocking worker per batch, two check slots, a 5 s or 3 s bound); `reveal_saved_file` takes only
+  an entry ID. `forget_saved_file` only drops an entry. `reset_saved_files` writes an empty list
+  only while native reads the record as damaged. None takes a path.
+- **Non-destructive with unknown records.** A newer version, a damaged record or one that cannot
+  be read right now is never written over; saves are then not recorded and say so. Only leaving the
+  server removes it (`remove_server`), and only a damaged one can be started anew by the user.
+- **Replace authority.** The setting is a renderer preference (`localStorage`) passed as
+  `replace_older` on a save, so a compromised renderer can ask on every save. Native then deletes
+  only an object that (a) the sealed list names as this server's earlier saved copy of the same
+  file, recorded under the same lock as the new copy, (b) is that exact object by handle identity
+  including birth time, (c) still has exactly the bytes Mewtual saved (length and plaintext CID,
+  equal to the copy just published), (d) has one name, is not read-only and is not a reparse point
+  of any kind, (e) sits in the same folder as the new copy, and on Unix that folder and file are
+  not writable by other accounts. Windows hashes and deletes through one handle that shares only
+  reading; Unix hashes first, then renames aside, rechecks and unlinks. The new copy takes the old
+  name only through a no-replace link, only when a one-click save asked for exactly that name, and
+  its first name is removed only while the old name still holds it (held by a delete-denying pin
+  on Windows). So flipping it can only delete Mewtual's own unchanged earlier output after an
+  identical copy was published beside it, and it never renames a name the user typed. A copy that
+  cannot be proven is kept and the save result says so.
+- **Found while building it:** on Windows a delete-denying handle on one hard link does not stop
+  another link of the same file from being deleted (share access is checked per name here). The
+  replace pins the other name itself. PR #51's removal of a published row's `.mewtual-part` name
+  checks the final name and then deletes the staging name without such a pin, so a final name
+  deleted in that gap would leave no copy; recorded as a follow-up for PR #51's code.
+- **Residuals.** Replacing removes the old copy as a whole, including what the content check does
+  not cover (alternate data streams, extended attributes, permissions, timestamps). On Unix a
+  process of the same account that already had the old copy open could change it between the hash
+  and the unlink, or remove the other name before the first name goes; timestamps are too coarse to
+  see a same-size write in one tick. On Windows a writable memory mapping made before the check,
+  or a read-only attribute set after it, is not covered by share modes. A Unix crash between the
+  rename aside and the unlink leaves the old copy at a `mewtual-removing-` name (its entry stays,
+  reading "missing"). "Every server" in the setting means every account using the same OS user.
+  The ReFS file index and the other PR #51 limits apply unchanged.
+
 ## Cache housekeeping boundary (26 October, PR #55)
 
 Each server's encrypted cache on a device (`blobs/<group>/`) now has a per-device size limit,

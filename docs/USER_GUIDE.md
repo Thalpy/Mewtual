@@ -591,10 +591,33 @@ access list gives anyone else write access; if that cannot be shown (for example
 come from a directory service, or Mewtual running in a container), and always on macOS, Mewtual
 treats the folder as shared.
 
-Usually a finished save leaves nothing behind in Transfers: once the file is saved, Mewtual drops
-its private encrypted copy and the row goes. A **Saved** row stays only when that tidy-up did not
-finish, for example when the temporary `.mewtual-part` name could not be removed yet, or the app
-was locked or closed at that moment. Such a row keeps its private copy until you clear it. When
+Once a file is saved, Mewtual drops its private encrypted copy and remembers where the file went
+on this device, for each server: the **Saved** group lists your finished saves, newest first, with
+the date and whether the file went to your Downloads folder or another folder. These rows survive
+restarts. When Transfers is open Mewtual checks each listed file, read-only, and says when it is no
+longer there or a different file now has its name; **Save again** (while the file is still shared)
+saves a fresh copy, **Show in folder** opens your file manager with the file selected after the
+same check, and **Clear** only forgets the row (the file stays where it is). Files saved to a
+network folder, or by a save that could not be resumed there, are listed but cannot be checked.
+Files you have saved show a small **Saved** mark in chat, in the Files list and in the file details;
+the mark comes from this list and says what this device recorded, not whether the file is still
+there. Saving the same file twice makes two copies and two rows. Leaving a server forgets its list;
+the saved files stay where they are.
+
+**Replace my older saved copy** (Settings → Chat & Media → Saved files, off by default, on this
+device for every server): when you save a file again, Mewtual replaces the copy it saved before,
+if it can prove that copy is its own and still unchanged (same file, same content, one name, not
+read-only, in the same folder as the new copy). When you saved from the chat or Transfers, the new
+copy then takes the old name; a name you typed in **Save as** is kept. If the older copy cannot be
+proven (it was changed, renamed, is read-only, has another name, sits in another folder, is a
+cloud placeholder, or on Linux and macOS sits in a folder other accounts can change), Mewtual keeps
+it, saves the new copy beside it as usual and says why. Replacing removes the old copy as a whole,
+including any tags or other properties another program added to it.
+
+A **Saved** row of the older kind, with its private copy still kept, appears only when the tidy-up
+after a save did not finish, for example when the temporary `.mewtual-part` name could not be
+removed yet, or the app was locked or closed at that moment. Such a row keeps its private copy until
+you clear it, and clearing it also forgets the copy from the list. When
 Transfers is open, Mewtual checks the file of each Saved row. If it is no longer there, or a
 different file now has its name, the row says so and offers **Save again**, which saves a new copy
 from that private copy under a free name. If the file could not be checked (the drive is unplugged,

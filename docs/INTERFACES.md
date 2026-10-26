@@ -624,6 +624,30 @@ Renderer commands (no new command names):
   remembers a Save as choice that item would use, else "Download". Clear of a Saved row runs
   `check_saved_download` again before it skips the confirmation (the button is `aria-busy` while
   it runs), and asks unless the answer is `present`.
+- Saved-files list (PR #56, [design](design-saved-files-list.md)). Record: `servers/<id>.saved`,
+  sealed under the vault `db_key`, version 1 plaintext (domain `mewtual/saved-files`, version
+  byte, owner = group id followed by this device's member id, up to 256 entries and 1 MiB; each
+  entry an ID, the plaintext CID, size, saved time, platform, folder, file name and, for a journaled
+  save, folder and file identities). `ServerStore::{save_saved_files, load_saved_files,
+  reset_saved_files}`; `load_saved_files` answers `SavedFilesLoad::{Missing, Found, Newer, Damaged,
+  Unavailable}` and only the first two may be written over; `remove_server` deletes it. Storage:
+  `kept::{SavedFiles, SavedFile, SavedFileId, SavedLocation, NoCandidate, saved_file_presence,
+  saved_file_location, ReplaceRequest, ReplaceOutcome, ReplaceRefusal, replace_older_copy,
+  drop_first_name}` and `ExportPlan::{cid, total}`.
+  Commands (main window only, none takes a path): `get_saved_files(server) -> { state: "ok" |
+  "newer" | "damaged" | "unavailable", files: [{ id, cid, name, savedAt, size, savedTo, checkable
+  }] }` (account-read, newest first); `check_saved_files(server) -> [{ id, name, check }]`
+  (account-read; one blocking worker with a check slot, at most 5 s, entries not reached left out,
+  answers only for entries unchanged afterwards); `reveal_saved_file(server, entry)` (os-facing;
+  `reveal_saved_download`'s check, fences and refusals over an entry); `forget_saved_file(server,
+  entry)` (account-write; never touches the file); `reset_saved_files(server)` (account-write;
+  only while the record reads as damaged). `save_group_file` gains `replaceOlder` (a flag) and its
+  result may carry these notes in `warning`: not listed, replaced, or why the older copy was not
+  replaced. Private download rows gain `savedEntry` (saved rows only: the list entry with the
+  published journal's identity, which the renderer draws as that row). Clear of a Saved row
+  (`cancel_private_download`) also forgets that entry once the record is released. Renderer:
+  `saved-files.ts` (validation, `savedListRows`, `savedListRowView`, `liveTransferShown`, the mark
+  and the replace preference, `localStorage` key `catcoms.saves.replaceOlder`).
 
 Rust interfaces:
 
