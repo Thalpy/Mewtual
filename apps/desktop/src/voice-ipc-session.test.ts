@@ -3370,7 +3370,7 @@ test("framed lost media admission recovers original claim without a second peer 
   assert.equal(f.sdk.calls.created, 1); assert.equal(f.sdk.calls.closed, 0); assert.equal(f.f.broker.counts().bytes, paid + 8192);
   f.f.owner.retire(); await f.child.channel.close(); assert.equal(f.f.broker.counts().bytes, 0);
 });
-for (const version of [28,29,30,31,32,33,34,35]) test(`HMR refuses funded broker${version} without waking incompatible cleanup`, async t => {
+for (const version of [28,29,30,31,32,33,34,35,36]) test(`HMR refuses funded broker${version} without waking incompatible cleanup`, async t => {
   const f = await framedMedia(t), previous = Object.create(f.f.broker);
   Object.defineProperty(previous, "version", { value: version }); let wakes = 0; previous.retrySelectedJoinKeys = () => { wakes++; };
   const key = Symbol.for("mewtual.voice.crypto-broker.v2"), host = { [key]: previous };
@@ -3997,4 +3997,69 @@ test("cleanup waiters share one timer owner and cannot strand each other on a jo
   assert.equal(joiningSchedule, false, "joining another cleanup must not become a second timer owner");
   assert.equal(a, b); f.onSchedule(() => {}); f.advance(1000); await a; await b;
   f.owner.retire(); await handle.close(); assert.equal(f.broker.counts().bytes, 0);
+});
+
+
+test("queued intake cancellation cannot abort an indexed peer's actual Current", async t => {
+  const first = await framedMedia(t), f = first.f;
+  await first.media(); first.remaining(0); await first.retireNegotiation();
+  const plan = first.child.ready.chain;
+  assert.equal(await f.broker.compactNativeNegotiation(f.owner, first.child.channel, plan), true);
+  const firstResponder = f.actionHandler()!;
+  assert.equal(f.broker.advanceNativeNegotiation(f.owner, first.child.channel, plan), true);
+  const purpose = { ...historyPurpose, peer: hash(107), join: hash(108), keyRef: hash(109) };
+  const parent = await framedDerivation(f, true, 2, purpose), secondResponder = f.actionHandler()!;
+  f.actions((header, body) => header.logical === first.child.parent.row ? firstResponder(header, body) : secondResponder(header, body));
+  const intake = f.broker.nativeDerivationFromChannel(f.owner, first.child.channel, f.key, purpose, parent.row, parent.identity);
+  type Channel = { controller: AbortController | null; negotiation: { actionBusy: boolean } };
+  const session = (f.broker as unknown as { ipcChannels: Map<string, Channel> }).ipcChannels.get(f.owner.token)!;
+  // Keep the established peer current while the unused new descriptor ages. Its
+  // real fifteen-second timer must expire DURING a fresh held Current (<5s), not
+  // after the established peer's own network deadline could legitimately abort it.
+  for (let n = 0; n < 14; n++) { f.advance(1000); await first.media(); }
+  const initial = first.modes.filter(mode => mode === 4).length, held = first.hold(4);
+  const refresh = first.media();
+  await until(() => first.modes.filter(mode => mode === 4).length > initial);
+  const currentSignal = session.controller!.signal;
+  const input = intake.attempt(); await until(() => session.negotiation.actionBusy);
+  try {
+    assert.equal(parent.counts().inputReads, 0, "new intake is only queued behind actual Current");
+    f.advance(1000); // Actual intake timer enters the original retirement cell.
+    assert.equal(currentSignal.aborted, false, "cancelling the queued peer must not abort the established peer");
+  } finally { held.release(); }
+  await refresh;
+  assert.equal((await input).kind, "retired");
+  assert.equal(parent.counts().inputReads, 0, "cancelled queued Input cannot submit after its negative fence");
+  assert.equal(parent.counts().admissions, 0);
+  assert.equal(first.sdk.calls.closed, 0);
+  await first.media();
+  f.owner.retire(); await first.child.channel.close(); assert.equal(f.broker.counts().bytes, 0);
+});
+
+test("actual intake cancellation aborts only its own request and keeps payment through cancellation return", async t => {
+  const f = await fixture(t), channel = f.channel(); await channel.status();
+  const parent = await framedDerivation(f), intake = f.broker.nativeDerivationFromChannel(f.owner, channel, f.key, historyPurpose, parent.row, parent.identity);
+  f.advance(14_000);
+  const held = f.hangFetch(), input = intake.attempt(); await until(held.entered);
+  const paid = f.broker.counts().bytes;
+  f.advance(1000); assert.equal(held.aborted(), true);
+  await flush(); assert.equal(f.broker.counts().bytes, paid, "abort is not actual request/cancel retirement");
+  held.release(); assert.equal((await input).kind, "retired");
+  f.owner.retire(); await channel.close(); assert.equal(f.broker.counts().bytes, 0);
+});
+
+
+for (const seam of ["clock", "schedule"] as const) test(`intake cancellation at final ${seam} cannot reach abort-resistant transport`, async t => {
+  const f = await fixture(t), channel = f.channel(); await channel.status();
+  const parent = await framedDerivation(f), intake = f.broker.nativeDerivationFromChannel(f.owner, channel, f.key, historyPurpose, parent.row, parent.identity);
+  f.advance(14_000);
+  let entered = false;
+  const expire = () => { entered = true; f.advance(1000); };
+  // The ordinary fixture transport ignores AbortSignal. Only the original negative
+  // admission check can exclude Input here; setting an abort flag is insufficient.
+  if (seam === "clock") f.onNow(expire); else f.onSchedule(expire);
+  assert.equal((await intake.attempt()).kind, "retired"); assert.equal(entered, true);
+  assert.equal(parent.counts().inputReads, 0, "expired Input never reaches transport after the final callback");
+  assert.equal(parent.counts().admissions, 0);
+  f.owner.retire(); await channel.close(); assert.equal(f.broker.counts().bytes, 0);
 });

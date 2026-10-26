@@ -1,5 +1,15 @@
 # Threat model; client integrity & enforcement boundaries
 
+## Shared-session cross-peer cancellation (26 October; inactive)
+
+A queued next-peer intake must not abort an established peer's Current merely because its
+local action flag is busy. Cancellation now identifies the actual original Input owner of
+the physical controller. An abort-resistant transport cannot receive fresh expired Input
+after a reentrant Clock/timer callback: the final native-request handoff repeats captured
+intake/generation and negative fences. Global End still closes the whole Session. Actual
+SDK/read/cancel owners remain paid until return; no nonce, native attempt or fee is refunded
+by cancellation. Four framed regressions pin the two ordering cases and final callbacks.
+
 ## Successful shared-Session peer composition (26 October; inactive)
 
 Compaction cannot authorize another generation until its full observer/finally returns.

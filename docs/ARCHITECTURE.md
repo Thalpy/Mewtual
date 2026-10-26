@@ -1,5 +1,14 @@
 # Mewtual; Architecture
 
+## Exact Input cancellation ownership (26 October; inactive)
+
+The shared Session records which original intake owns its actual physical controller.
+A different queued negotiation cannot cancel indexed media's Current. Every Input admission
+rechecks its captured intake/generation and negative flags after callbacks, including the
+last Clock/timer callback before transport. Aborting the correct signal does not substitute
+for that admission check. Existing byte/position/wire bounds are unchanged. HMR37 refuses
+older retained layouts. This is separate from peer-local failed-plan retirement.
+
 ## Successful peer composition on a shared Session (26 October; inactive)
 
 Broker36 retains each compacted original media driver in an exact bounded record. Its next

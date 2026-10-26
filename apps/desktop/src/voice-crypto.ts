@@ -484,7 +484,7 @@ function context(label: string, transcript: Uint8Array): Uint8Array<ArrayBuffer>
  * unsettled work. Revoking an owner never frees a running promise; only its real settlement does.
  * A derive pipeline uses one permit for sequential import/ECDH/HKDF work, never parallel calls. */
 export class VoiceCryptoBroker {
-  readonly version = 36;
+  readonly version = 37;
   readonly subtle: SubtleCrypto;
   private readonly native: VoiceCryptoAdmission;
   private active = 0;
@@ -2232,6 +2232,9 @@ class RetainedIpcChannel {
   private tx = 0n;
   private rx = 0n;
   private controller: AbortController | null = null;
+  // The physical controller may belong to indexed media while a new intake waits for
+  // the codec. Only that exact Input owner may cancel it; actionBusy is merely queueing.
+  private controllerIntake: ChainIntake | null = null;
 
   constructor(selected: SelectedKeyRecord, native: VoiceIpcNative,
     transport: typeof fetch, subtle: SubtleCrypto, clock: VoiceIpcClock, custody: IpcCustody) {
@@ -2366,7 +2369,8 @@ class RetainedIpcChannel {
     pairState.terminalAction = Object.freeze({ purpose: intake.purpose, row: intake.row, identity: intake.identity });
   }
   cancelIntake(intake: ChainIntake): void {
-    const pairState = this.negotiation; if (pairState.intake === intake && pairState.actionBusy) this.controller?.abort(); }
+    if (this.controllerIntake === intake) this.controller?.abort();
+  }
   releaseIntake(intake: ChainIntake): void {
     const pairState = this.negotiation; if (pairState.intake === intake) pairState.intake = null; }
   matchesParent(chain: BrowserChain, purpose: VoiceIpcConfirmationPurpose): boolean {
@@ -2554,7 +2558,7 @@ class RetainedIpcChannel {
       if (kind === 0) return decodeVoiceIpcActionReply(opened, intake.row);
       return decodeVoiceIpcDerivationInput(opened, { row: intake.row, identity: intake.identity, purpose: intake.purpose,
         bootstrap: this.bootstrap!, localPoint: this.selected.key.point, localKey: this.selected.key.key! });
-    });
+    }, null, intake);
   }
   /** These adapters retain the exact native purpose/row. No stock IPC carries Input/results,
    * and post-End requests can only clean original history, never admit another engine. */
@@ -2606,7 +2610,7 @@ class RetainedIpcChannel {
   private async actionRpc<T>(purpose: VoiceIpcPurpose, row: string, action: VoiceIpcActionRequest,
     response: "input" | "permit" | "status", afterEnd: boolean,
     decode: (opened: Uint8Array<ArrayBuffer>, kind: VoiceIpcHeader["kind"]) => T,
-    child: VoiceIpcConfirmationPurpose | null = null): Promise<T> {
+    child: VoiceIpcConfirmationPurpose | null = null, inputIntake: ChainIntake | null = null): Promise<T> {
     const pairState = this.negotiation;
     const unknownBegin = child !== null && action.kind === "begin" && row === "0".repeat(32);
     if (pairState.actionBusy || this.request || this.historyRequest || (!unknownBegin && !isVoiceIpcActionRow(row)) ||
@@ -2619,7 +2623,7 @@ class RetainedIpcChannel {
       const owned = encoded;
       return await this.execution.run(() => this.framed(owned.operation, owned.kind, row, owned.body, afterEnd,
         (kind, length) => (kind === 0 && (length === 19 || length === 258 || (response === "permit" && length === 94))) ||
-          (response === "input" && kind === 1 && length >= (child ? 446 : 557) && length <= 2064), decode));
+          (response === "input" && kind === 1 && length >= (child ? 446 : 557) && length <= 2064), decode, undefined, inputIntake ?? undefined));
     } finally { encoded?.body.fill(0); pairState.actionBusy = false; }
   }
   /** Borrow before native admission. End cancels queued work; a granted loan remains
@@ -3563,7 +3567,7 @@ class RetainedIpcChannel {
   private framed<T>(operation: VoiceIpcHeader["operation"], kind: VoiceIpcHeader["kind"],
     logical: string, plaintext: Uint8Array<ArrayBuffer>, afterEnd: boolean,
     allowed: (kind: VoiceIpcHeader["kind"], length: number) => boolean,
-    decode: (opened: Uint8Array<ArrayBuffer>, kind: VoiceIpcHeader["kind"]) => T): Promise<T>;
+    decode: (opened: Uint8Array<ArrayBuffer>, kind: VoiceIpcHeader["kind"]) => T, input?: undefined, inputIntake?: ChainIntake): Promise<T>;
   private framed<T>(operation: VoiceIpcHeader["operation"], kind: VoiceIpcHeader["kind"],
     logical: string, plaintext: Uint8Array<ArrayBuffer>, afterEnd: boolean,
     allowed: (kind: VoiceIpcHeader["kind"], length: number) => boolean,
@@ -3573,11 +3577,17 @@ class RetainedIpcChannel {
     logical: string, plaintext: Uint8Array<ArrayBuffer>, afterEnd: boolean,
     allowed: (kind: VoiceIpcHeader["kind"], length: number) => boolean,
     decode: (opened: Uint8Array<ArrayBuffer>, kind: VoiceIpcHeader["kind"]) => T,
-    input?: Readonly<{ loan: VoiceSdpInputLoan; expected: VoiceSdpInputExpectation; current(): void }>): Promise<T | null> {
+    input?: Readonly<{ loan: VoiceSdpInputLoan; expected: VoiceSdpInputExpectation; current(): void }>, inputIntake?: ChainIntake): Promise<T | null> {
     const keys = this.keys, bootstrap = this.bootstrap;
     const check = () => {
       if (!keys || !bootstrap || this.keys !== keys || this.bootstrap !== bootstrap || this.drained) throw new Error("original voice channel unavailable");
       if (!afterEnd) this.check();
+      // Repeat after the owner callback and every physical await. Cancellation while
+      // queued must not submit a fresh Input when this same codec turn eventually starts.
+      if (inputIntake && (inputIntake.retired || inputIntake.released || inputIntake.transferred ||
+          this.negotiation.intake !== inputIntake || this.negotiation.generation !== inputIntake.generation)) {
+        throw new Error("original prepaid intake retired");
+      }
     };
     const step = async <V>(promise: Promise<V>): Promise<V> => { const value = await promise; check(); return value; };
     check();
@@ -3590,7 +3600,7 @@ class RetainedIpcChannel {
     let sealed: Uint8Array<ArrayBuffer> | null = null, opened: Uint8Array<ArrayBuffer> | null = null;
     let body: Uint8Array<ArrayBuffer> | null = null, response: Response | null = null;
     let result: T | null = null, transfer = false;
-    const controller = new AbortController(); this.controller = controller;
+    const controller = new AbortController(); this.controller = controller; this.controllerIntake = inputIntake ?? null;
     let timer: unknown = null;
     try { try {
       sealed = new Uint8Array(await this.subtle.encrypt({ name: "AES-GCM", iv: voiceIpcNonce(request), additionalData: header }, keys!.requestBody, plaintext));
@@ -3604,6 +3614,7 @@ class RetainedIpcChannel {
         else timer = this.clock.schedule(expire, remaining);
       };
       timer = this.clock.schedule(expire, 5_000);
+      check(); // Clock callbacks may retire the intake; AbortSignal alone is not admission.
       response = await this.transport("http://127.0.0.1:" + this.port + "/voice/v2", {
         method: "POST", mode: "cors", credentials: "omit", redirect: "error", cache: "no-store",
         referrerPolicy: "no-referrer", keepalive: false, signal: controller.signal,
@@ -3635,7 +3646,7 @@ class RetainedIpcChannel {
       finally {
         if (timer !== null) this.clock.cancel(timer);
         plaintext.fill(0); sealed?.fill(0); body?.fill(0);
-        if (this.controller === controller) this.controller = null;
+        if (this.controller === controller) { this.controller = null; this.controllerIntake = null; }
       }
     }
       if (transfer) {
@@ -3914,7 +3925,7 @@ export function windowVoiceCryptoBroker(
   const host = window as Record<symbol, unknown>;
   const previous = host[BROKER] as VoiceCryptoBroker | undefined;
   if (previous) {
-    if (previous.version !== 36 || typeof previous.advanceNativeNegotiation !== "function" || typeof previous.compactNativeNegotiation !== "function" || typeof previous.collectNativeNegotiationHistory !== "function" || typeof previous.retireNativeNegotiation !== "function" || typeof previous.completeNativeMediaHandoff !== "function" || typeof previous.completeNativeSdpRtcRound !== "function" || typeof previous.prepareNativeSdpRtc !== "function" || typeof previous.prepareNativeSdpCrypto !== "function" || typeof previous.prepareNativePcIntent !== "function" || typeof previous.prepareNativeSdpHandoff !== "function" || typeof previous.observeNativeWork !== "function" || typeof previous.returnNativeDerivation !== "function" || typeof previous.nativeConfirmationFromChannel !== "function" || typeof previous.nativeDerivationFromChannel !== "function" || typeof previous.recoverChannelHistory !== "function" || typeof previous.prepareChainFromChannel !== "function" || typeof previous.nativeChannel !== "function" || typeof previous.run !== "function" || typeof previous.selectJoinKey !== "function" || typeof previous.retrySelectedJoinKeys !== "function" ||
+    if (previous.version !== 37 || typeof previous.advanceNativeNegotiation !== "function" || typeof previous.compactNativeNegotiation !== "function" || typeof previous.collectNativeNegotiationHistory !== "function" || typeof previous.retireNativeNegotiation !== "function" || typeof previous.completeNativeMediaHandoff !== "function" || typeof previous.completeNativeSdpRtcRound !== "function" || typeof previous.prepareNativeSdpRtc !== "function" || typeof previous.prepareNativeSdpCrypto !== "function" || typeof previous.prepareNativePcIntent !== "function" || typeof previous.prepareNativeSdpHandoff !== "function" || typeof previous.observeNativeWork !== "function" || typeof previous.returnNativeDerivation !== "function" || typeof previous.nativeConfirmationFromChannel !== "function" || typeof previous.nativeDerivationFromChannel !== "function" || typeof previous.recoverChannelHistory !== "function" || typeof previous.prepareChainFromChannel !== "function" || typeof previous.nativeChannel !== "function" || typeof previous.run !== "function" || typeof previous.selectJoinKey !== "function" || typeof previous.retrySelectedJoinKeys !== "function" ||
         typeof previous.registerProtectedConfirmation !== "function" ||
         typeof previous.registerProtectedDerivation !== "function" || typeof previous.registerConfirmation !== "function" || typeof previous.createPair !== "function") {
       throw new Error("voice crypto broker version changed; reload required");

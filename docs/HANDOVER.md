@@ -1,5 +1,23 @@
 # Mewtual; Handover
 
+## Exact intake cancellation on shared Sessions (26 October; inactive, gates pending)
+
+Broker37 tags the physical Input controller with its actual original intake. Expiry of a
+queued next-peer intake cannot abort an indexed peer's Current. The captured intake,
+generation and negative flags are rechecked after owner/Clock callbacks and physical awaits,
+including immediately before transport. Global End still aborts the actual shared request.
+Retirement cannot refund Input/cancel ownership before actual return. The one optional
+pointer is retained in existing fixed Session metadata; budgets/wire/counters are unchanged.
+HMR36 requires reload.
+
+Real framed/WebCrypto regressions reproduce the cross-peer abort before the fix, and two
+Clock/schedule regressions reproduce post-retirement Input submission to an abort-resistant
+transport. All363 focused tests pass after both corrections; static0errors/0warnings passed
+before the two additional Clock tests. Read-only re-review has no remaining blocker/high/medium;
+final static/full gates remain pending.
+This does not implement failed-negotiation retirement/replacement. App V2 stays OFF; Root full
+is still running serially and the real native two-peer fixture is queued behind it.
+
 ## Sequential browser peers on one Session (26 October; inactive, native gates passed)
 
 Broker36 keeps exact per-peer media records after successful compaction. Explicit

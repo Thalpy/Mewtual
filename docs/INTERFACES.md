@@ -1,5 +1,13 @@
 # Mewtual; Interfaces & Hooks Schema
 
+## Broker37 Input retirement fence (26 October; inactive)
+
+Only the exact original Input intake may cancel its physical request. Queueing actionBusy
+is not request ownership. Expired/cancelled queued Input never reaches transport; a started
+Input retains original payment through actual return/cancellation. Every final callback is
+followed by an original intake/generation check. Public APIs and native wire grammar remain
+unchanged. HMR36 requires reload; App V2 remains OFF.
+
 ## Broker36 explicit next negotiation (26 October; inactive)
 
 `advanceNativeNegotiation(owner, channel, originalPlan): boolean` recognizes only an exact
