@@ -19,7 +19,7 @@ async function fixture(t: TestContext) {
   let historyResponse: "ok" | "current" | "absent" | "refuse" = "ok";
   let inCurrent = false, expireInCurrent = false;
   let heldMode: number | null = null, held: ReturnType<typeof gate> | null = null;
-  let onSchedule: (() => void) | null = null, onCancel: (() => void) | null = null;
+  let onSchedule: (() => void) | null = null, onCancel: (() => void) | null = null, onNow: (() => void) | null = null;
   const timers = new Map<object, { due: number; work: () => void }>();
   const requests: number[] = [], counts = { created: 0, closed: 0, active: 0, refund: 0, paid: VOICE_NATIVE_MEDIA_BYTES, stops: 0 };
   let admitted = false, nativeClosed = false, released = false;
@@ -35,7 +35,7 @@ async function fixture(t: TestContext) {
   }
   globalThis.RTCPeerConnection = Peer as unknown as typeof RTCPeerConnection;
   t.after(() => { globalThis.RTCPeerConnection = old; held?.release(); });
-  const clock = { now: () => now,
+  const clock = { now: () => { const hook = onNow; onNow = null; hook?.(); return now; },
     schedule(work: () => void, delay: number) { const handle = {}; timers.set(handle, { work, due: now + delay }); onSchedule?.(); return handle; },
     cancel(handle: unknown) { onCancel?.(); timers.delete(handle as object); },
   };
@@ -79,6 +79,7 @@ async function fixture(t: TestContext) {
     loseAdmit() { loseAdmit = true; }, loseRelease() { loseRelease = true; }, loseDetach() { loseDetach = true; },
     failClose(value: boolean) { failClose = value; },
     onSchedule(hook: () => void) { onSchedule = hook; }, onCancel(hook: () => void) { onCancel = hook; },
+    onNow(hook: () => void) { onNow = hook; },
     ready(value: boolean) { ready = value; }, time(value: number) { now = value; },
     expireFromCurrentPredicate() { expireInCurrent = true; },
     advance(delta: number) {
@@ -290,4 +291,43 @@ test("End before the published history observer starts cannot send native histor
   const observer=f.driver.collectNativeHistory(); f.driver.close(); const cleanup=f.driver.cleanup();
   assert.equal(f.counts.closed,1); assert.equal(await observer,false); await cleanup;
   assert.equal(f.requests.includes(8),false); assert.equal(f.counts.refund,1);
+});
+
+
+test("an early refresh wake crossing its cadence during rearm does not close a current peer", async t => {
+  const f = await fixture(t); await f.driver.start();
+  const [handle, timer] = [...f.timers][0]; f.timers.delete(handle);
+  f.time(1999.9); let crossed = false;
+  f.onCancel(() => { if (!crossed) { crossed = true; f.time(2000.1); } });
+  timer.work();
+  assert.equal(crossed, true);
+  assert.equal(f.driver.closed, false, "refresh cadence is not the authenticated freshness deadline");
+  assert.equal(f.counts.closed, 0); assert.equal(f.timers.size, 1);
+  f.onCancel(() => {}); const held = f.hold(4); f.advance(1);
+  await until(() => f.requests.filter(mode => mode === 4).length === 2);
+  // The newly STARTED request has not returned. Rearming a refresh must not extend the
+  // original1000+5000 observation, even if the new request could later authorize more.
+  f.time(6000); f.advance(0); assert.equal(f.driver.closed, true); assert.equal(f.counts.closed, 1);
+  const cleanup = f.driver.cleanup(); await turn(); assert.equal(f.counts.refund, 0);
+  held.release(); await cleanup; assert.equal(f.counts.refund, 1);
+});
+
+
+test("crossing the actual native freshness deadline during early rearm closes without another Current", async t => {
+  const f = await fixture(t); await f.driver.start();
+  const [handle, timer] = [...f.timers][0]; f.timers.delete(handle); f.time(1999.9);
+  f.onCancel(() => f.time(6000)); timer.work();
+  assert.equal(f.driver.closed, true); assert.equal(f.counts.closed, 1);
+  assert.deepEqual(f.requests, [0, 4]); assert.equal(f.timers.size, 0);
+  f.onCancel(() => {}); await f.driver.cleanup(); assert.equal(f.counts.refund, 1);
+});
+
+test("End inside the rearm Clock prevents any new timer registration", async t => {
+  const f = await fixture(t); await f.driver.start();
+  const [handle, timer] = [...f.timers][0]; f.timers.delete(handle); f.time(1999.9);
+  let schedules = 0;
+  f.onSchedule(() => { schedules++; });
+  f.onCancel(() => f.onNow(() => f.driver.close())); timer.work();
+  assert.equal(f.driver.closed, true); assert.equal(schedules, 0); assert.equal(f.timers.size, 0);
+  f.onCancel(() => {}); await f.driver.cleanup(); assert.equal(f.counts.refund, 1);
 });

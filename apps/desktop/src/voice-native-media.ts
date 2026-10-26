@@ -232,8 +232,18 @@ export class VoiceNativeMedia {
     try {
       this.#cancel();
       if (this.#closed) return;
-      const remaining = this.#due - this.#now();
-      if (!Number.isFinite(remaining) || remaining <= 0) { this.close(); return; }
+      const now = this.#now();
+      if (this.#closed) return; // Clock callbacks can synchronously End this owner.
+      let remaining = this.#due - now;
+      if (!Number.isFinite(remaining)) { this.close(); return; }
+      if (remaining <= 0) {
+        // An early callback can cross the polling cadence during cancellation/Clock
+        // entry. That cadence is not expiry. Defer ONE ordinary refresh wake without
+        // changing due, the native observation or its original absolute deadline.
+        const until = this.#status?.deadline ?? this.#acquireUntil;
+        if (until === null || !Number.isFinite(until) || now >= until) { this.close(); return; }
+        remaining = Math.min(1, until - now);
+      }
       this.#installing = true;
       const generation = {}, cell = this.#cell;
       this.#timerGeneration = generation;
