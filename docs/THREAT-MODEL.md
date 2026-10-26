@@ -51,7 +51,8 @@ opt-in setting that may replace Mewtual's own earlier copy of a file saved again
   and the unlink, or remove the other name before the first name goes; timestamps are too coarse to
   see a same-size write in one tick. On Unix a descriptor does not keep the new copy's name, so a
   same-account process removing the new copy between the last check and the unlink leaves no copy
-  at a name (Windows' pin closes that window). On Windows a writable memory mapping made before
+  at a name (Windows' pin closes that window). The pin shares writing, so a program may edit the
+  new copy in place meanwhile; the old copy then goes beside a copy that is there but may differ. On Windows a writable memory mapping made before
   the check, or a read-only attribute set after it, is not covered by share modes. The list's bulk
   check can hold both PR #51 check slots for up to 5 s per call (bounded; a spamming renderer
   delays PR #51's checks and reveals). A Unix crash between the

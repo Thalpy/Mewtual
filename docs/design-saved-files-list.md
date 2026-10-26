@@ -299,8 +299,11 @@ the sanctioned clock, runs before each effect and every 1 MiB of hashing, revisi
 6. **Remove the new copy's first name** through `remove_verified` in a **must-keep-another-name**
    mode (revision 2, review H1): Windows requires a link count of at least 2 on the delete handle,
    which denies delete sharing, so the other name cannot go between the check and the delete; Unix
-   requires it on the aside descriptor and otherwise puts the name back. Anything else leaves both
-   names (the same file) and the user is told.
+   requires it on the aside descriptor and otherwise puts the name back. When nothing was removed,
+   both names are looked at again, read-only and by file identity (`FirstNameDrop`, re-review
+   MEDIUM): the result names a second name only if both were seen to hold the copy; if only the
+   first name holds it (the old name went or holds another file), the entry moves back to the first
+   name and the result points there; if neither can be shown, no name is claimed.
 
 Notes added to the save result (no "·", no em dashes; revision 2, review M3: none claims a copy
 exists unless step 2 saw it):
@@ -314,13 +317,15 @@ exists unless step 2 saw it):
 | Read-only | "Mewtual did not replace the copy it saved before, because that copy is read-only." |
 | More than one name | "Mewtual did not replace the copy it saved before, because that file has another name too." |
 | Shared folder or file (after seeing it is ours) | "Mewtual did not replace the copy it saved before, because other accounts may change it there." |
-| Could not be checked (busy, held open, error, a second save of the same file, time out, the folder moved; adversarial review L2) | "Mewtual did not replace the copy it saved before, because it could not be checked right now." |
+| Could not be checked (busy, held open, a name that could not be read, a second save of the same file, time out, a folder found changed once the new copy was pinned; adversarial review L2, re-review LOW 1) | "Mewtual did not replace the copy it saved before, because it could not be checked right now." |
 | No identity (either copy), a reparse point, another platform | "Mewtual did not replace the copy it saved before, because it cannot check files in that folder." |
-| The new copy went before the delete (adversarial review H1) | "Mewtual did not replace the copy it saved before, because the new copy was moved or deleted meanwhile." |
+| The new copy was not at its name (or not its size) when the replace started, or went before the delete; a folder that moved lands here, since the new copy moved with it (adversarial review H1, re-review LOW 2 and 5) | "Mewtual did not replace the copy it saved before, because the new copy was moved, changed or deleted meanwhile." |
 | List not readable, entry not recorded, record kept, a recovered save | "Mewtual did not replace any earlier copy this time." (adversarial review L3: no claim that an earlier copy exists) |
-| Old deleted, the move failed (name taken or otherwise) | "Mewtual removed the copy it saved before, but could not give this copy its name, so it keeps the name <new name>." |
-| Old deleted, the move failed and the new copy's own name is gone too | "Mewtual removed the copy it saved before, but the new copy was moved or deleted meanwhile." |
-| Second name left | "The saved file also kept the name <new name>. Both names are the same file, so deleting either one keeps the other." |
+| Old deleted, the move failed (name taken or otherwise), the new copy seen at its own name; or, after the link, only the first name still holds the copy | "Mewtual removed the copy it saved before, but could not give this copy its name, so it keeps the name <new name>." |
+| Old deleted, the move failed and the new copy's own name was seen gone too | "Mewtual removed the copy it saved before, but the new copy was moved or deleted meanwhile." |
+| Old deleted, the move failed and the new copy's own name could not be read (re-review LOW 1) | "Mewtual removed the copy it saved before, but could not give this copy its name." |
+| Second name left (both names seen to hold the copy) | "The saved file also kept the name <new name>. Both names are the same file, so deleting either one keeps the other." |
+| After the link, neither name could be shown to hold the copy (re-review MEDIUM) | "Mewtual could not confirm which name this saved file has now." |
 | Unix put-back failed | "Mewtual could not finish replacing the copy it saved before. It may be in that folder under a name starting with mewtual-removing-." |
 
 **Crash table** (the list is the only record; the new copy's private record is already released):
@@ -359,7 +364,10 @@ a writable memory mapping made before step 2 is not covered by share modes, and 
 attribute set after the step 2 check is ignored by the POSIX delete (attribute writes are not
 covered by share modes either). On Unix the new copy's descriptor does not stop its name going, so
 a same-account process that removes or renames the new copy between the last check and the unlink
-(a few system calls) leaves neither copy at a name; Windows has no such window. The list's bulk
+(a few system calls) leaves neither copy at a name; Windows has no such window. The new copy's pin
+keeps its name but shares writing (as publication's pin does), so another program may edit the new
+copy in place during the replace: the old copy is then removed beside a copy that is still there,
+but no longer necessarily identical. The list's bulk
 check can hold both of PR #51's shared check slots for up to 5 s per call, so a renderer that
 spams it delays PR #51's checks and reveals (bounded, adversarial review L7). Recording holds the
 registry lock across sealing and the `fsync` of the list (as `persist_captured` does); a
@@ -444,3 +452,51 @@ or em dash in app text. Fixes in `5466c28e` and `702fa266`; every new regression
 | L5: no crash row between the link and `forget(old)` | Taken: crash row R3. |
 | L6: the registry lock is held across sealing and `fsync` | Recorded as a residual: performance only, the same shape as `persist_captured`; narrowing it would change the leave fence this design relies on. |
 | L7: a spamming renderer can hold both shared check slots | Recorded as a residual: bounded by the 5 s wait per call. |
+
+### Re-review of the fixes
+
+Read-only re-review of `8ad6ce7a..702fa266`: no blocker or high; H1, M1 and M2 hold on every path
+it traced (the pin does not block the link, the post-link check or step 6; every delete is preceded
+by a name check; `started_from` has one source; the decode backstop cannot stop recording). One
+MEDIUM (from `b1b4d67c`, before the fixes) and five LOW, all fixed in `5c5af307` with break-checked
+regressions.
+
+| Finding | Disposition |
+| --- | --- |
+| MEDIUM: after the link, a failed step 6 always said "both names" and pointed the result at the old name, even when the old name had gone (then deleting the first name loses the only copy) or the first name had | Taken: `drop_first_name` returns `FirstNameDrop` from a read-only look at both names; native names a second name only for `BothNames`, moves the entry back and points at the first name for `OnlyFirst`, and claims no name for `Unknown`. Tests: storage `the_first_name_stays_when_the_old_name_went_after_the_link` (now `OnlyFirst`, and `Unknown` when both went), native `the_replace_sequence_changes_the_list_only_after_each_effect` (each answer). |
+| LOW 1: an unreadable new-copy name read as "gone" | Taken: `still_named` returns a `Result`; before a delete an error refuses as "could not be checked" (on Unix after putting the old copy back); `RemovedNotMoved` carries `Option<bool>` and `None` names nothing. |
+| LOW 2: "moved or deleted" missed a size change | Taken: "moved, changed or deleted". |
+| LOW 3: a stop before the link asserted the new copy still had its name | Taken: it is checked. |
+| LOW 4: the Unix check before the unlink and `still_named: Some(false)` had no test | Taken: `unix_the_new_copy_gone_after_the_rename_aside_puts_the_old_copy_back` and `the_new_copys_own_name_is_never_claimed_once_it_went_before_the_link` (Windows: the pinned copy cannot be deleted, so it links). |
+| LOW 5: doc drift (a moved folder shows the new-copy note; `started_from` docs) | Taken: the notes table and the doc comments. |
+| Design question: the Windows pin shares write access and checks only identity and size, so the new copy can be edited in place during the replace | Accepted and documented as a residual: it cannot be renamed, replaced or deleted, which is what keeps a copy; a stricter pin would refuse saves another program opens at once. |
+
+## Ledger (26 October)
+
+Branch `saved-files-list`, stacked on #55: merged at `0c32f7ae` (`0cf3d56e`) and again at
+`bc891185` (`4bc47b1a`, clean). Commits: plan `804d8b1b`; design `62a144c6`, revision 2
+`28a82504`; record and codec `4da7fef9`; one entry per copy and the verified replace `8bf24457`;
+candidate reasons and plan accessors `93da0dbb`; native recording and orchestration `b1b4d67c`;
+renderer, chat mark, setting and fixture `21c65ec2`; docs `8ad6ce7a`; adversarial fixes
+`5466c28e`, `702fa266`; review record `249ec864`; re-review fixes `5c5af307`; then this ledger.
+
+Focused checks run locally (CI runs the complete suites, `test:startup` and `test:flows`, which
+were not run here, as briefed):
+
+| Check | Result |
+| --- | --- |
+| `cargo test -p catcoms-storage --lib kept::` (Windows) | 192 passed |
+| the same in WSL Ubuntu (`--locked`), plus strict Clippy for `catcoms-storage` there | 199 passed; Clippy clean |
+| `cargo test -p catcoms-app --lib store::saved_files_tests` | 5 passed |
+| `cargo test -p catcoms-app --lib actor::file_transfers` (after the second merge) | 64 passed with 4 threads; a run at full parallelism timed out five export tests in their 5 s `bounded()` helper, a known load flake (each passes alone) |
+| native `cargo test --lib` filters: `saved_files`, `private_downloads`, `keep_session`, `cache_housekeeping`, `publish`, `fallback`, `reveal`, `six_client_recovery::files` (after the second merge) | 15, 47, 14, 10, 20, 7, 6 and 7 passed |
+| `npm test` (complete frontend unit suite) | 2596 passed |
+| `npm run check`, `npm run build` (after the last renderer change) | 0 errors, 0 warnings; built |
+| strict Clippy (`-D warnings`, all targets and features): root `-p catcoms-storage -p catcoms-app`, and the native workspace | clean |
+| `cargo fmt --all -- --check` and the native `cargo fmt -- --check` | clean |
+| `scripts/check-no-ambient.sh`, `scripts/check-store-raw-fs.sh` | passed |
+| `cargo deny check` | only RUSTSEC-2026-0387 (the advisory the brief ignores); bans, licences and sources ok |
+
+Every regression added for a review finding was break-checked: it fails with its guard removed and
+passes with it restored. Screenshots of the fixture states (900 by 640, headless Edge over CDP,
+after `html[data-visual-ready="chat"]`) are kept outside the repository with the handoff.

@@ -30,11 +30,10 @@ Finished saves of shared files are now remembered per server on this device
 - **Found:** on Windows a delete-denying handle on one hard link does not protect another link of
   the same file; the replace pins the other name. PR #51's Clear of a published row deletes the
   staging name after checking the final name without such a pin (follow-up for #51's code, in
-  THREAT-MODEL). Inherited from #55, not changed here: the native tests
-  `six_client_recovery::files::private_download_bridges_fills_the_cache_and_exports_after_solo_native_reopen`
-  and `..::interrupted_private_download_retains_spend_and_resumes_through_d_after_native_restart`
-  still assert `!file_available` after acquisition, which #55's "saved files fill the cache"
-  makes false; they fail the same way on the #55 binary.
+  THREAT-MODEL). #55's `bc891185` (a Download fills the cache only once its save publishes) is
+  merged here; it also fixed the two six-client private download tests that failed on #55's
+  earlier head. A replace releases the record (`FinishDownloadExport`, which now promotes the
+  staged chunks) before it runs, exactly as an ordinary save does afterwards.
 - **Contract changes:** `save_group_file` gains `replace_older` (signature pin updated);
   private download rows gain `savedEntry`; four commands plus `reset_saved_files`; the Transfers
   refresh also checks the list; PR #51's "no trace of the replace setting" assertion became a
