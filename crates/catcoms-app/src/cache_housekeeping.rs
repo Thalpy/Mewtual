@@ -572,8 +572,14 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
                     pump.studio_scan = true;
                 }
                 self.cache.in_pass = false;
+                // A paused attempt counts as a pass for spacing: otherwise an over-limit cache
+                // that cannot evict would replan on every actor turn.
+                self.cache.last_pass = Some(now);
             }
-            Err(_) => self.cache.in_pass = false,
+            Err(_) => {
+                self.cache.in_pass = false;
+                self.cache.last_pass = Some(now);
+            }
             Ok((plan, inputs)) => {
                 let batch: Vec<Cid> = plan
                     .duplicates

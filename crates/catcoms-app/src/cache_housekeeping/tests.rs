@@ -5,7 +5,7 @@ use super::*;
 use crate::store::ServerStore;
 use crate::{write_file_entry, FileExpiry, Server};
 use catcoms_mls::MlsDevice;
-use catcoms_rt::{Hub, ManualClock, MemNetwork, PeerId};
+use catcoms_rt::{Clock, Hub, ManualClock, MemNetwork, PeerId};
 use catcoms_storage::FileRef;
 use rand_chacha::ChaCha20Rng;
 use rand_core::SeedableRng;
@@ -176,6 +176,13 @@ async fn unknown_studio_protection_pauses_eviction_and_asks_for_a_scan() {
     assert!(f.server.sync.has_blob(&a));
     // Asked at most once per interval, however often the actor turns.
     assert!(!f.server.cache_pump().studio_scan);
+    // An over-limit cache that cannot evict must not replan every turn: the next wake is spaced.
+    let now = f.clock.monotonic_ms();
+    let next = f.server.cache_pump().next_due.unwrap();
+    assert!(
+        next >= now + PASS_INTERVAL_MS,
+        "a paused pass schedules its retry {PASS_INTERVAL_MS} ms out, not immediately"
+    );
 }
 
 #[tokio::test]
