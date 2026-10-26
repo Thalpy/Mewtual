@@ -1,6 +1,6 @@
 # Chat, files and voice implementation evidence
 
-## Inactive live browser compaction checkpoint (26 October; full native rerun pending)
+## Inactive live browser compaction checkpoint (26 October; current gates passed)
 
 The extended real HTTP/native mode8 cases pass41.13s/41.41s through browser history
 compaction, exact refund, same Session keys/counters and fresh Current. Full frontend2,967,
@@ -12,7 +12,8 @@ remains unattributed; these changes and later passes do not prove its original c
 The preceding3f2e6941 full Native run passes879. The first current full run passed863/failed11:
 one primary local Capacity unwrapped in a test-only SDP metadata lookup and ten isolation
 cascades. A held-row regression and bounded exact-original Capacity retries now pass9.55s;
-strict Native Clippy passes1m11s. A fresh full Native rerun is running. Read-only review has
+strict Native Clippy passes1m11s. The fresh complete Native rerun passes879 tests
+(874unit+5ACL; test body1795.29s); Root/native formatting and ambient checks pass. Read-only review has
 no remaining blocker/high/medium. Root runtime remains the matching3,675pass/24ignored source.
 
 No multi-peer admission, operational renewal, App activation/tracks, relay or physical

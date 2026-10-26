@@ -1,6 +1,6 @@
 # Mewtual; Handover
 
-## Live browser compaction and native acceptance (26 October; full rerun pending)
+## Live browser compaction and native acceptance (26 October; current gates passed)
 
 Broker33 compacts the exact original browser negotiation after variable retirement and
 native mode8 history collection, preserving the indexed peer and shared Session keys/counters.
@@ -26,8 +26,9 @@ fixture-isolation cascades. It did not establish which individual mutex was cont
 The fixture now deterministically holds the actual row mutex, requires that local refusal,
 and retries only the same original metadata lookup within32 attempts. No new Input, engine,
 authority deadline or native attempt is created. The focused regression passes9.55s;
-strict Native Clippy passes1m11s. The fresh full Native rerun is running serially. Review
-found no blocker/high/medium;32 attempts with31 Clock sleeps are not a strict elapsed deadline.
+strict Native Clippy passes1m11s. The fresh complete Native rerun passes879 tests
+(874unit+5ACL; test body1795.29s), with Root/native formatting and ambient checks passing.
+Review found no blocker/high/medium;32 attempts with31 Clock sleeps are not a strict elapsed deadline.
 
 Operational renewal, per-pair/multi-peer admission, App RTC/tracks, TURN/member media relay,
 combined acceptance and independent physical audio/network testing remain open. Root runtime
