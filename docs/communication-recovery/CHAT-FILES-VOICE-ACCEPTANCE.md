@@ -1,5 +1,24 @@
 # Chat, files and voice implementation evidence
 
+## Genuine native second peer and shared variable funding (26 October; full gates pending)
+
+The actual native/TCP + Node/WebCrypto two-peer case passes77.90s after shared variable
+prepayment. A completes A-B, actual native mode8 and browser history collection, then A-C
+on the same keys/Session/increasing counters. The real reclaimed native slot has a new
+full serial, late old-purpose Begin is refused, both indexed Current paths progress, and
+End closes both controlled RTC peers before all three Endpoints collect. First1-2 traffic
+uses the unjoined helper0 over the enforced graph; the second C edge is not forbidden.
+This is actual native signalling/control evidence with controlled RTC, not audible media.
+
+Root's192KiB core +32KiB Ready are funded before Derive with a direct96KiB escrow retaining
+the original confirmation ceiling. Explicit affine closing rights cover abandonment and
+old-close races; actual escrow destruction pins metadata lifetime. All695 focused voice
+regressions pass19.65s. Graphs1968/2048 and1968/4096 pass original bounds. Eight native
+admission-focused tests pass29.10s. Full frontend3011/static/build pass. Fresh Root/native
+full/lint gates remain pending; preceding full results are historical for this new source.
+App V2 stays OFF; production composition, operational/failure recovery, relay and combined/
+physical acceptance remain open. See HANDOVER and TWO-COMPUTER-ACCEPTANCE.md.
+
 ## Exact intake cancellation (26 October; inactive, native acceptance pending)
 
 Broker37 reproduces and fixes a queued intake aborting another indexed peer's Current.

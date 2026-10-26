@@ -1,5 +1,38 @@
 # Mewtual; Handover
 
+## Variable voice progression funded before Derive (26 October; validation pending)
+
+The implementation checkout now uses one prepaid192KiB core plus independent32KiB Ready
+capacity before exposing protected Derive. A direct96KiB escrow preserves the original96KiB
+confirmation lending ceiling. Preparation reuses the same core/Ready; actual transfer moves
+one closing-right owner before escrow returns. Abandoned tickets close unused capacity;
+repeated old close cannot close a successor. Genuine old loans retain their actual custody.
+The progress Box is paid by Ready metadata through an OUTSIDE anchor covering full destruction
+and deallocation; allocation/declaration order and actual escrow Drop are regression-tested.
+No global cap, attempt, nonce or deadline was raised or reset.
+
+Current695 focused voice tests pass19.65s, including the actual metadata-lifetime probe;
+chain graph1968/2048B and Ready graph1968/4096B pass unchanged guards. The native admission
+fence's8 focused tests pass29.10s. Read-only design/adversarial re-review has no remaining
+blocker/high/medium; identified allocation/lifetime findings were corrected. Complete frontend
+3011 passes107.85s, static checks and production build42.40s pass. The final genuine native
+two-peer case passes77.90s: A-B through the forbidden1-2 edge's unjoined helper, actual mode8
+and browser collection, same-Session A-C with reused slot/new serial, both indexed Current
+paths, synchronous two-peer End and all-three-endpoint cleanup. C's direct edge was not
+forbidden. RTC objects are controlled, not audible WebView/physical media evidence.
+Fresh native check/strict lint/full and Root strict lint/full are now running serially on
+this NEW Root source. Root validation uses the warm custody checkout at dbb0a2ae: all728 Root
+files match after LF normalization; five differ only in line endings. The3675/24ignored and
+879 results below predate variable-reservation changes and cannot sign off the new code.
+Later ordinary member/origin records, fixed history, native storage and operational replacement
+remain separate constraints; this is not universal Ready admission or App activation.
+
+The published PR #58/#59 checkpoints stop at21522d46; new local implementation commits are
+69b2ce65 (Root variable prepayment) and833dfc9d (native admission/actual two-peer acceptance).
+They are not yet pushed; final gate results remain required.
+App V2 remains OFF. Production App/RTC/tracks, failure isolation/renewal, relay, combined and
+physical acceptance remain open. External resume and dependency upgrades are separate branches.
+
 ## Review branches and current native blocker (26 October)
 
 The reviewed inactive checkpoints are published as [PR #58, native SDP/media custody](https://github.com/Thalpy/Mewtual/pull/58)

@@ -27,7 +27,13 @@ TURN/member relay, combined acceptance and physical independent audio/network ev
 follow. App V2 stays OFF. One desktop cannot establish independent physical acceptance;
 external resume is separately owned. Earlier current-work sections below are historical.
 
-## Reviewed next native two-peer fixture (not implemented)
+## Reviewed native two-peer fixture (implemented; acceptance pending)
+
+The new fixture implements the recipe below. It reproduced a real second-peer variable
+capacity failure after first-pair history collection. Shared core/Ready prepayment and a
+single-parent native admission fence are now implemented;695 focused voice tests pass and
+the actual three-Endpoint/two-peer scenario passes77.90s. Complete gates remain pending. The following reviewed
+recipe is retained to explain its barriers and evidence boundaries.
 
 Extend `six_client_recovery/voice_live.rs::native_webcrypto_cycle` using the existing real
 socket graph. Keep MLS members0-3 online and close4-5; introduce no new MLS member/epoch.
