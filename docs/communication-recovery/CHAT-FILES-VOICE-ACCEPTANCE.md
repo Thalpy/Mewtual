@@ -16,7 +16,7 @@ preservation case passes71.24s; the unchanged successful two-peer native case pa
 Direct history is retained and late first storage is refused by actual native authorization.
 Fresh native check and Root construction gate pass. The full native suite is running and
 strict lint follows; a new full result is not yet claimed.
-the passing 885 below covers Broker38. Matching Root code/lockfiles remain unchanged from
+The passing 885 below covers Broker38. Matching Root code/lockfiles remain unchanged from
 3,679/24 existing ignores; its native-source construction scan passes again. App stays OFF. Known
 scope excludes ambiguous admission recovery, any per-N media record, renewal, real RTC/audio,
 relay, combined acceptance and independent physical evidence. HANDOVER records exact limits.

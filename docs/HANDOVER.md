@@ -45,8 +45,8 @@ objects remain controlled. Full new native validation is running, not yet claime
 Root code/lockfiles remain unchanged from the passing 3,679/24-ignore source; its construction
 gate scans native source and passes again (0.51 s). Fresh native check passes (43.15 s).
 The older 885 native result below predates this slice. Native full is running; strict lint
-follows it. Dependency advisory and
-external resume remain separately owned; physical independent testing still needs device two.
+follows it. Dependency advisory and external resume remain separately owned; physical
+independent testing still needs device two.
 
 ## Automatic browser lifecycle (26 October; complete suites pass, App OFF)
 
