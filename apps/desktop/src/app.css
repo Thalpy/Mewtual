@@ -18689,3 +18689,95 @@ button.id-pick .avatar { width: 28px; height: 28px; flex: none; }
 .composer-attach button:hover {
   color: var(--danger);
 }
+
+/* ============================================================
+   Cache housekeeping: the footer segment, the Storage settings page and the leave confirmation.
+   Tokens only. Nothing here animates, so [data-motion="off"] needs no override; the footer's
+   own compact and terminal rules apply to the segment like any other.
+   ============================================================ */
+.statusbar .sb-cache {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0 4px;
+  border: none;
+  border-radius: var(--r);
+  background: transparent;
+  font: inherit;
+  letter-spacing: inherit;
+  text-transform: inherit;
+  color: var(--faint);
+  cursor: pointer;
+}
+.statusbar .sb-cache:hover { background: var(--bg-elev); color: var(--text-2); }
+.sb-cache-bar,
+.cache-bar {
+  position: relative;
+  display: inline-block;
+  width: 56px;
+  height: 5px;
+  overflow: hidden;
+  border: 1px solid var(--border-soft);
+  border-radius: 999px;
+  background: var(--bg-0);
+}
+.cache-bar { width: min(220px, 50%); height: 8px; }
+.sb-cache-bar i,
+.cache-bar i {
+  display: block;
+  height: 100%;
+  background: var(--ok);
+}
+.sb-cache[data-tone="warn"] .sb-cache-bar i,
+.cache-meter[data-tone="warn"] .cache-bar i { background: var(--warn); }
+.sb-cache[data-tone="over"] .sb-cache-bar i,
+.cache-meter[data-tone="over"] .cache-bar i { background: var(--danger); }
+.sb-cache[data-tone="paused"] .sb-cache-bar i,
+.cache-meter[data-tone="paused"] .cache-bar i { background: var(--faint); }
+.sb-cache[data-tone="warn"] .sb-cache-value { color: var(--warn); }
+.sb-cache[data-tone="over"] .sb-cache-value { color: var(--danger); }
+.sb-cache-chip,
+.cache-chip {
+  padding: 0 6px;
+  border: 1px solid currentColor;
+  border-radius: 999px;
+  color: var(--warn);
+}
+.sb-cache[data-tone="over"] .sb-cache-chip,
+.cache-meter[data-tone="over"] .cache-chip { color: var(--danger); }
+.sb-cache[data-tone="paused"] .sb-cache-chip,
+.cache-meter[data-tone="paused"] .cache-chip,
+.sb-cache[data-tone="ok"] .sb-cache-chip { color: var(--muted); }
+:root[data-chrome="terminal"] .statusbar .sb-cache-bar { border-radius: 0; }
+:root[data-chrome="terminal"] .cache-bar { border-radius: 0; }
+:root[data-density="compact"] .statusbar .sb-cache-bar { width: 40px; }
+
+.cache-meter {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin: 6px 0 4px;
+}
+.cache-meter b { font-family: var(--mono); color: var(--text); }
+.cache-chip { font-family: var(--mono); font-size: 0.7rem; text-transform: uppercase; letter-spacing: 0.08em; }
+
+.overlay-card.leave-confirm { padding: 0 18px 16px; gap: 8px; overflow-y: auto; }
+.overlay-card.leave-confirm h3 {
+  margin: 10px 0 2px;
+  font-size: 0.78rem;
+  color: var(--danger);
+}
+.leave-loss {
+  margin: 0;
+  padding-left: 18px;
+  max-height: 140px;
+  overflow-y: auto;
+  color: var(--text-2);
+}
+.leave-confirm-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 12px;
+}

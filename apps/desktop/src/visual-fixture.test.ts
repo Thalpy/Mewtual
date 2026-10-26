@@ -151,6 +151,22 @@ test("file fixture separates cached bytes from explicitly kept copies", () => {
   });
 });
 
+test("cache fixture shows a nearly full server and a calm DM, both valid native statuses", async () => {
+  const { checkedCacheStatus, cacheFooter } = await import("./cache-status.ts");
+  const lantern = checkedCacheStatus(visualFixtureResponse("get_cache_status", { server: 1 }));
+  assert.ok(lantern, "the fixture status passes the same validation as native's");
+  assert.equal(lantern.nearly_full, true);
+  assert.equal(cacheFooter(lantern).chip, "3 leaving soon");
+  const dm = checkedCacheStatus(visualFixtureResponse("get_cache_status", { server: 2 }));
+  assert.equal(dm?.nearly_full, false);
+  assert.equal(cacheFooter(dm!).chip, null);
+  const unlimited = checkedCacheStatus(visualFixtureResponse("set_cache_limit", { server: 1, bytes: null }));
+  assert.equal(unlimited?.unlimited, true);
+  assert.equal(unlimited?.leaving_soon_files, 0);
+  const health = visualFixtureResponse("get_storage_health") as { not_cached_chunks: number };
+  assert.equal(health.not_cached_chunks, 0);
+});
+
 test("visual fixture role maps name exact roster identities", () => {
   const members = visualFixtureResponse("get_members", { server: 1 }) as Array<{ identity: string; you: boolean; fingerprint: string }>;
   const roles = visualFixtureResponse("get_roles", { server: 1 }) as Record<string, string>;

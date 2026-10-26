@@ -347,9 +347,31 @@ export function visualFixtureResponse(command: string, payload: InvokeArgs = {},
       // A one-click save lands directly in Downloads, which native asserts with `inDownloads`.
       return { path: `C:\\Users\\fixture\\Downloads\\${name}`, displayed: true, inDownloads: true };
     }
+    case "get_cache_status":
+    case "set_cache_limit": {
+      // Lantern Room sits just past the 90% warning so the footer shows its amber bar and the
+      // leaving-soon chip; the DM is calm. A limit choice is echoed back, not persisted.
+      const GIB = 1024 ** 3;
+      const chosen = command === "set_cache_limit" ? (args.bytes as number | null) : 5 * GIB;
+      if (server !== 1) {
+        return { usage_bytes: Math.round(0.4 * GIB), limit_bytes: 5 * GIB, unlimited: false, pinned_bytes: 0,
+          leaving_soon_files: 0, leaving_soon_bytes: 0, nearly_full: false, over_limit: false,
+          held_by_pins: false, paused: null };
+      }
+      const usage = Math.round(4.6 * GIB);
+      return {
+        usage_bytes: usage, limit_bytes: chosen, unlimited: chosen === null,
+        pinned_bytes: Math.round(0.8 * GIB),
+        leaving_soon_files: chosen === null ? 0 : 3,
+        leaving_soon_bytes: chosen === null ? 0 : Math.round(0.4 * GIB),
+        nearly_full: chosen !== null && usage * 100 > chosen * 90,
+        over_limit: chosen !== null && usage > chosen,
+        held_by_pins: false, paused: null,
+      };
+    }
     case "get_storage_health":
       return { listed_files: 2, unique_files: 2, referenced_chunks: 2, verified_chunks: 2,
-        missing_chunks: 0, unreadable_chunks: 0, invalid_manifests: 0, verified_bytes: 2048,
+        missing_chunks: 0, not_cached_chunks: 0, unreadable_chunks: 0, invalid_manifests: 0, verified_bytes: 2048,
         has_peers: true, checked_at_ms: VISUAL_FIXTURE_NOW, logical_bytes: 2048,
         local_estimated_bytes: 2048, pinned_files: 0, pinned_logical_bytes: 0,
         pinned_local_estimated_bytes: 0, categories: [], largest_files: [], local_files: [] };
