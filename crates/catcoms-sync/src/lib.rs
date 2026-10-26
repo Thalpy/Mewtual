@@ -41,8 +41,9 @@ use catcoms_discovery::{
     PolicyConfig, RouteHost, Source,
 };
 use catcoms_mls::{
-    key_package_signature_key, restore_server, serialize_key_package, snapshot_server, Incoming,
-    InviteError, InviteLedger, InviteToken, MlsDevice, ServerGroup,
+    commit_header, key_package_signature_key, restore_server, serialize_key_package,
+    snapshot_server, AppliedCommit, CommitRefusal, InviteError, InviteLedger, InviteToken,
+    MlsDevice, MlsError, ServerGroup,
 };
 use catcoms_replication::{AppliedOp, EncryptedDoc, SealedOp};
 use catcoms_rt::{
@@ -1052,6 +1053,10 @@ fn id_prefix(bytes: &[u8]) -> String {
 pub struct SyncStats {
     /// Membership commits successfully applied (advancing the epoch).
     pub commits_applied: u64,
+    /// Signed commit records refused because their bytes were not this group's next commit (an
+    /// application message, a proposal, an external commit, the wrong group or epoch). Never
+    /// applied, counted as applied, or recorded in the commit log.
+    pub commit_records_refused: u64,
     /// Out-of-order membership commits buffered awaiting a predecessor.
     pub commits_buffered: u64,
     /// Commit-catch-up bundles this node served to peers.
@@ -3787,6 +3792,15 @@ impl CommitRecord {
         *h.finalize().as_bytes()
     }
 
+    /// Whether `mls_commit`'s cleartext MLS header says it is a commit for this record's group,
+    /// built at this record's `commit_epoch`. A header-only check: it decrypts nothing and proves
+    /// nothing about whether the commit applies.
+    fn header_matches_label(&self) -> bool {
+        commit_header(&self.mls_commit).is_ok_and(|header| {
+            header.group_id == self.group_id && header.epoch == self.commit_epoch
+        })
+    }
+
     /// The bytes the committer signs / a verifier re-derives for this record.
     fn auth_transcript(&self) -> Vec<u8> {
         commit_auth_transcript(
@@ -5167,6 +5181,12 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             let doc = EncryptedDoc::restore_for_actor(snap, &this.device.device_id())?;
             this.docs.insert((doc.doc_type(), doc.doc_id()), doc);
         }
+        // An older build recorded any successful `process_incoming` as a commit, so a persisted
+        // log may hold a record whose bytes are not a commit, or not for the epoch it is labelled
+        // with. Drop those by header alone (nothing is decrypted), so this build never serves them.
+        // A record whose header matches but would not apply cannot be told apart here; a
+        // requester on this build refuses it when it tries (`apply_commit_in_order`).
+        commit_log.retain(CommitRecord::header_matches_label);
         this.commit_log = commit_log;
         // A snapshot's documents are as old as the process that wrote them, and nothing else will
         // notice that. See `first_proof_sweep_owed`; discharged by the first member that proves
@@ -7699,11 +7719,11 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
     /// [`Self::note_removal_applied`] directly, since `commit_remove_now` is always a removal and
     /// already knows the target.)
     ///
-    /// `before` is the roster as it stood immediately before `process_incoming`; MLS reports only
+    /// `before` is the roster as it stood immediately before `apply_commit`; MLS reports only
     /// *whether* a commit removed anyone, so the departed devices are recovered by diffing. That
     /// costs one roster clone per applied commit, which is bounded by the group size.
-    fn note_commit_applied(&mut self, incoming: &Incoming, before: &[DeviceId]) {
-        if matches!(incoming, Incoming::CommitApplied { removed: true }) {
+    fn note_commit_applied(&mut self, applied: AppliedCommit, before: &[DeviceId]) {
+        if applied.removed {
             self.note_removal_applied(before);
         }
     }
@@ -11782,6 +11802,20 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         if !self.authorize_committer(&record) {
             return;
         }
+        // Only a record whose bytes are a commit for its own label may compete. Otherwise an
+        // in-window committer could wrap an application message or proposal, grind its
+        // `commit_id` below the real candidate's, and win: every node would then abort its own
+        // staged commit for a winner that cannot apply, and nobody would advance. A header-valid
+        // commit that still fails to apply can win the same way (docs/design-mls-commit-log.md
+        // section 6); this closes only the cheap version.
+        if !record.header_matches_label() {
+            self.stats.commit_records_refused += 1;
+            tracing::warn!(
+                commit_epoch = record.commit_epoch,
+                "fork candidate is not a commit for its epoch; refused"
+            );
+            return;
+        }
         let our_base = self.group.epoch_authenticator_id();
         if record.base_authenticator != our_base {
             tracing::warn!(
@@ -11867,15 +11901,18 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
                 if let Err(e) = self.group.abort_staged(&self.device) {
                     tracing::error!(error = %e, "abort of losing staged commit failed");
                 }
+                // `apply_commit`, never `process_incoming`: the winner is about to be recorded, so
+                // it must really be this epoch's commit (see `apply_commit_in_order`).
                 match self.with_observed_mls_transition(|node| {
                     node.group
-                        .process_incoming(&node.device, &p.best.mls_commit)
+                        .apply_commit(&node.device, &p.best.mls_commit, p.best.commit_epoch)
                 }) {
-                    Ok(inc) => {
-                        self.note_commit_applied(&inc, &before);
+                    Ok(applied) => {
+                        self.note_commit_applied(applied, &before);
                         true
                     }
                     Err(e) => {
+                        self.note_commit_refused(&e);
                         tracing::error!(error = %e, "applying the fork winner failed");
                         false
                     }
@@ -11883,14 +11920,15 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             }
             None => match self.with_observed_mls_transition(|node| {
                 node.group
-                    .process_incoming(&node.device, &p.best.mls_commit)
+                    .apply_commit(&node.device, &p.best.mls_commit, p.best.commit_epoch)
             }) {
                 // Pure applier: apply the winner.
-                Ok(inc) => {
-                    self.note_commit_applied(&inc, &before);
+                Ok(applied) => {
+                    self.note_commit_applied(applied, &before);
                     true
                 }
                 Err(e) => {
+                    self.note_commit_refused(&e);
                     tracing::error!(error = %e, "applying the fork winner failed");
                     false
                 }
@@ -11950,9 +11988,24 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
     /// Apply a commit that is exactly the next one (`commit_epoch == current`),
     /// capturing the soon-to-be-superseded epoch's keys first. Returns whether it
     /// applied.
+    ///
+    /// **Only a merged commit is recorded.** The committer's signature covers whatever bytes it
+    /// put in `mls_commit`, so an authorized committer can sign an application message, a
+    /// proposal or a relabelled old commit. `process_incoming` reports success for the first two,
+    /// and this function used to record any success into the log that catch-up serves to lagging
+    /// members. `apply_commit` succeeds only for a `PrivateMessage` commit built at
+    /// `record.commit_epoch` that merged and moved the group exactly one epoch on; everything else
+    /// is refused, counted in `SyncStats::commit_records_refused`, and leaves the epoch, the
+    /// key window and the log as they were (`docs/design-mls-commit-log.md`).
     fn apply_commit_in_order(&mut self, record: &CommitRecord) -> bool {
         debug_assert_eq!(record.commit_epoch, self.group.epoch());
         if !self.authorize_committer(record) {
+            return false;
+        }
+        // The header check `apply_commit` repeats, run first so that a refused record does not
+        // even snapshot this epoch's keys into the past-key window.
+        if let Some(refusal) = self.commit_record_refusal(record) {
+            self.note_commit_refused(&refusal.into());
             return false;
         }
         self.snapshot_epoch_keys();
@@ -11961,11 +12014,11 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         let before = self.group.member_device_ids();
         match self.with_observed_mls_transition(|node| {
             node.group
-                .process_incoming(&node.device, &record.mls_commit)
+                .apply_commit(&node.device, &record.mls_commit, record.commit_epoch)
         }) {
-            Ok(inc) => {
+            Ok(applied) => {
                 self.evict_past_keys();
-                self.note_commit_applied(&inc, &before);
+                self.note_commit_applied(applied, &before);
                 self.record_commit(record.clone());
                 self.stats.commits_applied += 1;
                 tracing::info!(
@@ -11976,6 +12029,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
                 true
             }
             Err(e) => {
+                self.note_commit_refused(&e);
                 tracing::warn!(
                     error = %e,
                     commit_epoch = record.commit_epoch,
@@ -11983,6 +12037,37 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
                 );
                 false
             }
+        }
+    }
+
+    /// Why `record` cannot be this group's next commit, judged from the MLS header alone (no
+    /// decryption, no state change), or `None` if it may be. `apply_commit` makes the same checks
+    /// and more; this exists so a refusal can happen before any side effect.
+    fn commit_record_refusal(&self, record: &CommitRecord) -> Option<CommitRefusal> {
+        let header = match commit_header(&record.mls_commit) {
+            Ok(header) => header,
+            Err(refusal) => return Some(refusal),
+        };
+        if header.group_id != record.group_id || header.group_id != self.group.group_id() {
+            return Some(CommitRefusal::WrongGroup);
+        }
+        let current = self.group.epoch();
+        if header.epoch != record.commit_epoch || record.commit_epoch != current {
+            return Some(CommitRefusal::WrongEpoch {
+                expected: record.commit_epoch,
+                found: header.epoch,
+                current,
+            });
+        }
+        None
+    }
+
+    /// Count and log a commit record that was refused because it is not this epoch's commit. Other
+    /// apply failures (openmls refusing a genuine-looking commit) are logged by the caller only.
+    fn note_commit_refused(&mut self, error: &MlsError) {
+        if let MlsError::NotACommit(refusal) = error {
+            self.stats.commit_records_refused += 1;
+            tracing::warn!(%refusal, "refused a commit record that is not this epoch's commit");
         }
     }
 
@@ -16383,7 +16468,7 @@ mod tests {
     }
 
     /// Frame a commit record as a control-topic message (tagged envelope).
-    fn framed_commit(r: &CommitRecord) -> Vec<u8> {
+    pub(super) fn framed_commit(r: &CommitRecord) -> Vec<u8> {
         let mut v = vec![CTRL_COMMIT];
         v.extend_from_slice(&r.encode());
         v
@@ -17972,7 +18057,7 @@ mod tests {
     /// Serve only this explicit exchange: `run_once` also starts independent queued recovery
     /// whose responses these fixtures do not serve. Her stream carries whatever else the fixture
     /// left on it, so this drains to the commit request rather than assuming it is first.
-    async fn commit_catchup_between(
+    pub(super) async fn commit_catchup_between(
         bob: &mut Member,
         alice: &mut Member,
         alice_peer: PeerId,
@@ -26531,3 +26616,7 @@ mod tests {
 
 #[cfg(test)]
 mod kept_key_tests;
+
+// Only merged commits enter the commit log (docs/design-mls-commit-log.md).
+#[cfg(test)]
+mod commit_log_tests;
