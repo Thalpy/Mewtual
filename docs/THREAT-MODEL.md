@@ -18,8 +18,10 @@ are recorded after its own stage-and-merge, as before. Before any decryption `ap
 refuses whatever is not exactly one `PrivateMessage` with content type `Commit`, for this group,
 built at the record's epoch, which must be the current one. The cleartext header is bound into the
 AEAD, so it cannot lie. It then runs the existing own-leaf, external-sender, credential-binding and
-M-1 checks and merges. A refusal leaves the epoch, the log and `commits_applied` as they were and
-increments `SyncStats::commit_records_refused`; on the in-order path the header check runs before
+M-1 checks and merges. A refusal leaves the epoch, the log and `commits_applied` as they were. A
+header refusal (not a commit for this group and epoch) also increments
+`SyncStats::commit_records_refused`; openmls's own refusals of commit-shaped records (own-leaf,
+M-1, credential binding, undecryptable) are logged but not counted there. On the in-order path the header check runs before
 the past-key snapshot, so the key window is untouched too. The fork contest (rank >= 1) refuses a
 record that is not a commit for its own label, so a wrapped non-commit cannot win the tie-break. A
 restore drops such records from a persisted log. A real commit with bytes appended is refused too:
