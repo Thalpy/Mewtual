@@ -69,6 +69,39 @@ synchronously, join original cleanup and reach zero browser payment. This remain
 RTC/native TCP acceptance; it cannot establish WebView microphone, audible or physical-network
 behavior. Read-only design review found no protocol/authority blocker; this test is still TODO.
 
+## Reviewed operational retirement path (not implemented)
+
+The present sequential path waits for the remaining ORIGINAL Ready window, followed by
+actual Source/cache/Lower/SDK/native drainage. It is not a new fixed20-second wait after
+media adoption. Ready artifacts are capped15s; Source and packet caches may retain Exchange
+through signed expiry plus skew. Native mode7 preserves and checks immutable Claim.until.
+Read-only review found no defect in that conservative TTL fallback.
+
+Local media admission proves local Seal/Open settlement/ACK and local Open Applied. On HIGH,
+that means Offer applied and Answer sealed: LOW may still be waiting for Answer through a
+helper. HelperQueued cannot establish endpoint delivery. Do not enable early retirement on
+renderer adopted/connected or local completion alone.
+
+A successful fast path needs native-authenticated exact remote evidence. A bounded signed
+Applied ACK, emitted recoverably from canonical LOW Open-Answer Applied, should bind scope,
+epoch, both joins/key references, handshake, round, OfferId and Answer message/hash. Its own
+fixed payment/retries must survive old Exchange retirement. Lost/unsupported ACK retains TTL
+fallback without renewing the original deadline or attempts.
+
+Then add a typed original-round negative retirement witness: fence ONLY that original round,
+preserve admitted media Current and drop obsolete Source/cache/producer references. Existing
+Phase/Exchange closure and retire_outgoing primitives do not compose the complete capability.
+Source confirmed only stops scheduling; active flights, outgoing cache and sdp_successor can
+still retain Exchange. Actual held Lower/SDK/IO/reply owners must remain charged until Drop.
+Keep Plan-final/ACK gates unchanged. Native Detach may accept original expiry OR this genuine
+Root witness; never rebase until or equate revoked authority with drainage.
+
+Required proof: HIGH Answer still retries through a helper without ACK; exact ACK permits
+retirement before expiry; forged/stale/wrong-round ACK cannot affect another pair; lost ACK
+and native replies recover idempotently; held owners block finalisation/refunds; late packets
+cannot restart old work; indexed Current and same Session counters survive next-peer admission.
+The separate Root32-action lifetime capacity and failed/unattached Pending recovery remain open.
+
 ## Current work: live browser compaction reviewed; composition next (26 October)
 
 Broker33 now compacts one original browser negotiation after exact native mode8 history and
