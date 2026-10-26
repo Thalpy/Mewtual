@@ -191,7 +191,7 @@ test("decrypted results stay charged and private until exact native confirmation
   await new Promise<void>(resolve => setImmediate(resolve)); assert.equal(f.broker.counts().bytes, 0);
 });
 
-for (const version of [2, 3, 39, 40]) test("incompatible retained broker v" + version + " refuses without replacing its unresolved pool", async () => {
+for (const version of [2, 3, 39, 40, 41]) test("incompatible retained broker v" + version + " refuses without replacing its unresolved pool", async () => {
   const f = fixture(), window = {}, gate = deferred<number>();
   const broker = windowVoiceCryptoBroker(f.admission, window, subtle);
   const pending = broker.run(f.owner, "derive", 64, () => gate.promise);

@@ -1,5 +1,24 @@
 # Mewtual; Interfaces & Hooks Schema
 
+## Native call facade (26 October; Broker42, App inactive)
+
+`windowVoiceAppCalls(invoke)` retains the exact native adapters/broker/controller across
+remounts; changed invoke or incompatible retained code requires reload. `prepare(server,
+room)` returns an opaque call with `start`, `resume`, `close` and a fixed phase snapshot.
+One active/closing original is retained; an equal room reuses it and a conflicting room
+cannot allocate until actual closure returns. `start` coalesces; uncertain activation
+retries only its original candidate. `close` is negative first and joins actual work.
+`ready` records authenticated channel/bootstrap/lifecycle installation only: no current
+native/RTC/media or connected-state authority is implied. App must close originals on lock,
+room replacement and teardown. The App does not yet instantiate this facade.
+
+`retireNativeOwner(originalOwner)` coalesces exact-owner teardown and finds internally
+published keys/channels even without a returned handle. It joins actual key settlement,
+queue-job return/release and channel collection, not an early retired observer outcome.
+No generic plaintext IPC, native command, wire field or allowance is added. Broker41 HMR
+requires reload. The facade's separate8KiB process reservation remains for window lifetime;
+its accepted-group charge is released only after complete original cleanup.
+
 ## Broker41 failed media cleanup (26 October; inactive)
 
 `retireFailedNativeNegotiation` also accepts its exact attached un-compacted media allocation.

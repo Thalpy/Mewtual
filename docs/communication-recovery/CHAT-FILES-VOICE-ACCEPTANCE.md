@@ -1,5 +1,23 @@
 # Chat, files and voice implementation evidence
 
+## Broker42 native bootstrap composition (26 October; App OFF)
+
+Implemented a separately paid window-retained metadata/controller/selected-key/channel/
+lifecycle facade. Existing native commands and private action channel are reused; no generic
+plaintext path, wire field, attempt, capacity or deadline is added. End issues exact native
+revocation before and after pending activation, joins internally retained broker work and
+keeps group payment until actual cleanup/cadence/handle return. Selected-key fees/lookup now
+last through actual job return; a review-discovered early-release gap is corrected.
+
+Cross-layer focused408 tests pass10.34s; six adapter tests including actual broker held setup
+and hidden-channel constructor failure pass; strict TypeScript passes. Two mutation checks
+catch early key release and late native End. Final read-only review has no actionable finding.
+Complete frontend3099 passes84.23s, static checks have zero diagnostics and build passes39.89s.
+Matching full Root/parent-native checks remain in progress.
+Native command replies are simulated in these new composition tests; actual native command
+execution through this facade, packaged CSP/WebView, App/RTC/mic/tracks/data channels,
+renewal/lifetime capacity, relay and combined/physical acceptance remain open. V2 stays OFF.
+
 ## Broker41 browser media failure isolation (26 October; native acceptance pending)
 
 Exact current un-compacted media can now close without ending independent indexed peers.

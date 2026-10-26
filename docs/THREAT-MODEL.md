@@ -1,5 +1,22 @@
 # Threat model; client integrity & enforcement boundaries
 
+## Retained bootstrap and End versus activation (26 October; inactive)
+
+A component remount must not activate a second controller beside original unresolved work.
+The new facade retains exact adapters and one active/closing call. Native prepare/activate
+replies are closed-shape public metadata; only the original candidate retries. On End,
+known native identities are revoked BEFORE joining activation, then again after its actual
+return. Original-controller End fences unknown call preparation; a late returned candidate
+is cancelled without activation. Native generation/actor/selection checks remain final.
+
+An early key `retired` observation is not settlement or worker return. Exact-owner teardown
+looks up internally retained owners; selected-key lookup and fixed/operation fees stay until
+actual queue-job/position return. A constructor that throws after channel publication cannot
+hide its paid cleanup. Independent8KiB metadata payment precedes invokes and group binding
+precedes key admission; actual native/broker/cadence/handle finally precedes group refund.
+Process payment stays for window lifetime. Bootstrap-ready is historical, never present-time
+media. App/RTC/mic/CSP integration, renewal, relay and physical evidence remain separate.
+
 ## Own-media failure and reentrant cleanup (26 October; inactive)
 
 An exact attached un-compacted media failure must not revoke an independent indexed peer.

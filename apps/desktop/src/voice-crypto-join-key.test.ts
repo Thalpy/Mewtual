@@ -241,3 +241,54 @@ test("fixed native key adapter uses exact public commands and never sends a priv
     { command: "settle_voice_join_key", args: { owner: "owner", executorId: hash(1) } },
   ]);
 });
+
+for (const stage of ["Engine", "Publish", "Settle"] as const) test("native owner join waits for actual selected-key " + stage, async t => {
+  const f = fixture(t), selected = f.select();
+  const held = stage === "Engine" ? f.holdEngine() : stage === "Publish" ? f.holdPublish() : f.holdSettle();
+  const attempt = selected.attempt();
+  await until(() => stage === "Engine" ? f.counts().generates === 1 : stage === "Publish" ? f.counts().publications === 1 : f.counts().settlements === 1);
+  const close = f.broker.retireNativeOwner(f.owner);
+  assert.equal(f.broker.retireNativeOwner(f.owner), close);
+  assert.equal((await attempt).kind, "retired"); // Logical outcome is deliberately early.
+  let returned = false; void close.then(() => { returned = true; });
+  await new Promise<void>(yes => setImmediate(yes));
+  assert.equal(returned, false); assert.ok(f.broker.counts().bytes > 0); assert.equal(f.broker.counts().active, 1);
+  held.release(); await close;
+  assert.equal(f.broker.counts().active, 0); assert.equal(f.broker.counts().bytes, 0);
+  assert.equal(f.counts().settlements, 1);
+});
+
+test("native owner retirement is published before callbacks and closes an unstarted key", async t => {
+  const f = fixture(t); f.select();
+  let reentered: Promise<void> | null = null;
+  f.owner.onRetired(() => { reentered = f.broker.retireNativeOwner(f.owner); });
+  const closed = f.broker.retireNativeOwner(f.owner);
+  assert.equal(reentered, closed); await closed;
+  assert.equal(f.broker.counts().bytes, 0); assert.equal(f.counts().generates, 0); assert.equal(f.counts().admissions, 0);
+});
+
+test("equal owner text cannot retire another allocation's selected key", async t => {
+  const f = fixture(t); f.select();
+  const foreign = createVoiceCryptoOwner(f.owner.token, f.owner.group, () => true);
+  assert.throws(() => f.broker.retireNativeOwner(foreign), /original native voice owner/);
+  assert.equal(f.owner.isCurrent(), true);
+  await f.broker.retireNativeOwner(f.owner);
+});
+
+test("first owner join at selected-key fee return cannot miss a still-running job", async t => {
+  const f = fixture(t), held = f.holdSettle(), selected = f.select();
+  const attempt = selected.attempt(); await until(() => f.counts().settlements === 1);
+  const accounting = f.broker as unknown as { refund(owner: typeof f.owner, bytes: number): void };
+  const refund = accounting.refund.bind(f.broker);
+  let observedActive = -1, operationActive = -1, firstJoin: Promise<void> | null = null;
+  accounting.refund = (owner, bytes) => {
+    refund(owner, bytes);
+    if (bytes === 128) operationActive = f.broker.counts().active;
+    if (bytes === 4096) { observedActive = f.broker.counts().active; firstJoin = f.broker.retireNativeOwner(f.owner); }
+  };
+  f.owner.retire(); assert.equal((await attempt).kind, "retired");
+  held.release(); await until(() => firstJoin !== null); await firstJoin;
+  assert.equal(operationActive, 0, "the operation fee also stays paid through actual job return");
+  assert.equal(observedActive, 0, "retain the exact owner lookup/payment until the original job actually returned");
+  assert.deepEqual(f.broker.counts(), { active: 0, queued: 0, bytes: 0 });
+});

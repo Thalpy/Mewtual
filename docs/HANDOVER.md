@@ -1,5 +1,35 @@
 # Mewtual; Handover
 
+## Broker42 retained native call bootstrap (26 October; App OFF)
+
+A new window-retained `windowVoiceAppCalls` facade composes original native controller/call
+prepare and activation, selected key, private channel Ready and lifecycle scheduling. It
+exposes opaque start/resume/close/bootstrap-phase handles, no keys, SDP, PC or generic crypto.
+Same-room remounts reuse the exact handle; one active/closing call bounds pending graphs.
+Lost activation retries the same candidate. End revokes known native identities before
+joining activation and repeats afterward; unknown call preparation is fenced by its original
+controller. A delayed reply cannot advance stopped work. Failed prepare is never retried as
+an automatic fresh candidate. This module is NOT yet wired to App or actual microphone/RTC.
+
+Its own8KiB metadata reservation precedes every invoke, stays process-paid for the retained
+window lifetime and binds the SAME fee to the accepted native group before key admission.
+Group payment lasts through all actual native/broker/outer/cadence/handle cleanup. The new
+exact-owner broker join finds internally retained keys/channels even if no handle returned.
+Both selected-key fees/lookup survive actual job and active-position return; an early
+`retired` outcome cannot substitute for settlement. A review-discovered early fee/lookup
+release is fixed and pinned by a first-join-at-fee-return regression. Read-only final review
+has no remaining actionable finding. Mutation checks catch early key release and late End.
+
+Cross-layer frontend408 tests pass10.34s; the additional real hidden-channel regression and
+six native-adapter tests pass, and strict TypeScript passes. Complete frontend3099 passes
+(84.23s), static checks report zero diagnostics and production build passes39.89s. Real broker tests cover held setup, publication/settlement, constructor failure,
+remounts and process/full-group refusal; native command outcomes are simulated there.
+Matching full Root validation and parent native acceptance remain pending. `ready` is only
+historical authenticated bootstrap/lifecycle installation, never current media or connected
+UI evidence. Production App lock/room wiring, configured RTC/microphone/tracks/data channels,
+packaged CSP/WebView access, operational renewal/lifetime capacity, member relay and
+combined/physical acceptance remain open. V2 stays OFF; external resume is separate.
+
 ## Broker41 peer-local media failure (26 October; native execution pending, App OFF)
 
 The browser can retire the exact current un-compacted negotiation after its own media

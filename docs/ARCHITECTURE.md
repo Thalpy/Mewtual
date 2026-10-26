@@ -1,5 +1,20 @@
 # Mewtual; Architecture
 
+## Retained application bootstrap (26 October; inactive V2)
+
+Broker42 constructs one window-retained native-call facade under a separate8KiB process
+reservation, then binds that SAME reservation to the accepted native group before key work.
+One active/closing call owns bounded controller/candidate metadata, actual startup/End tasks
+and cadence. Same-room remounts reuse originals. The facade composes existing main-window
+public metadata commands and the private selected-key/channel/lifecycle path; generic crypto
+admission fails closed and no SDP, PC, key or mutable drainage flag is exposed.
+
+End fences browser adoption, issues exact native End before joining pending activation,
+repeats afterward and joins the broker's internally retained original owners outside the
+codec. Selected-key lookup and both fees persist through actual job/position return. Group
+payment ends only after native/broker/cadence/handle joins; the fixed process graph remains
+paid for the window lifetime. This module is not App activation or RTC/track integration.
+
 ## Isolating an attached media failure (26 October; inactive V2)
 
 Broker41 permits failure retirement of the exact current un-compacted media allocation,

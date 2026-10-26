@@ -1,3 +1,4 @@
+import { VoiceAppSession, VOICE_APP_SESSION_BYTES, type VoiceAppCalls, type VoiceAppNative } from "./voice-app-session.ts";
 import { VoiceHandleCell } from "./voice-handle-cell.ts";
 import { VoiceSharedExecution } from "./voice-shared-execution.ts";
 import { VoiceSdkPositions, type VoiceSdkPositionRequest } from "./voice-sdk-positions.ts";
@@ -91,7 +92,7 @@ const encoder = new TextEncoder();
 // direction prefix. Current native pair_transcript is smaller; refuse larger projections
 // before admission instead of permanently burning a derive identity at deriveKey.
 const MAX_DERIVATION_CONTEXT = 1024 - encoder.encode("mewtual/voice/v2/aes-gcm/high-to-low\0").length;
-type Job = { owner: VoiceCryptoOwner; bytes: number; start(): Promise<void>; refuse(): void };
+type Job = { owner: VoiceCryptoOwner; bytes: number; start(): Promise<void>; refuse(): void; returned?(): void };
 const CONFIRM_COMPUTE = Symbol("native confirmation computation");
 const SDP_COMPUTE = Symbol("original native SDP computation");
 const MAX_ACTIONS = 32;
@@ -208,7 +209,7 @@ type SelectedKeyRecord = {
   outcome: VoiceSelectedKeyOutcome | null; handle: VoiceSelectedKeyHandle;
   wake: object;
   started: boolean; drained: boolean; retired: boolean; released: boolean;
-  channelUsers: number;
+  channelUsers: number; jobReturned: boolean; closed: Signal<void>;
   unsubscribe: () => void;
 };
 // Application-owned generation state, key and fixed public-metadata projections. This is not
@@ -486,7 +487,7 @@ function context(label: string, transcript: Uint8Array): Uint8Array<ArrayBuffer>
  * unsettled work. Revoking an owner never frees a running promise; only its real settlement does.
  * A derive pipeline uses one permit for sequential import/ECDH/HKDF work, never parallel calls. */
 export class VoiceCryptoBroker {
-  readonly version = 41;
+  readonly version = 42;
   readonly subtle: SubtleCrypto;
   private readonly native: VoiceCryptoAdmission;
   private active = 0;
@@ -499,6 +500,8 @@ export class VoiceCryptoBroker {
   private readonly joinKeys = new WeakMap<VoiceJoinKeyHandle, JoinKeyRecord>();
   private readonly keys = new Set<JoinKeyRecord>();
   private readonly selectedKeys = new Map<string, SelectedKeyRecord>();
+  private appSession: { native: VoiceAppNative; selected: VoiceSelectedKeyNative; ipc: VoiceIpcNative; transport: typeof fetch; handle: VoiceAppCalls } | null = null;
+  private readonly ownerRetirements = new WeakMap<VoiceCryptoOwner, Promise<void>>();
   private selectedExecutor: string | null = null;
   private readonly ipcChannels = new Map<string, RetainedIpcChannel>();
   private ipcPositions = 0;
@@ -571,7 +574,7 @@ export class VoiceCryptoBroker {
       owner, key, native, executor: this.selectedExecutor, permit: null, join: null,
       attempt: null, retry: null, outcome: null, handle: null!, started: false, drained: true,
       retired: false, released: false, unsubscribe: () => {}, wake: {},
-      channelUsers: 0,
+      channelUsers: 0, jobReturned: true, closed: signal<void>(),
     };
     record.handle = Object.freeze({ attempt: () => this.attemptSelectedKey(record) });
     this.selectedKeys.set(owner.token, record); this.keys.add(key);
@@ -588,12 +591,15 @@ export class VoiceCryptoBroker {
 
   private releaseSelectedKey(record: SelectedKeyRecord): void {
     // End cannot erase/refund the original selected key while an actual local-channel SDK
-    // promise still borrows it. The channel releases this reference after real drainage.
-    if (record.released || record.channelUsers) return;
+    // promise still borrows it. Keep its exact lookup/payment through actual queue-job
+    // return too: a first teardown request after map removal must not miss an old worker.
+    // The channel releases its separate borrow after real drainage.
+    if (record.released || record.channelUsers || !record.jobReturned) return;
     record.released = true; record.unsubscribe();
     record.key.privateKey = null; record.key.point.fill(0);
     this.keys.delete(record.key); this.selectedKeys.delete(record.owner.token);
     this.refund(record.owner, SELECTED_KEY_BYTES);
+    if (record.jobReturned) record.closed.resolve();
   }
 
   private attemptSelectedKey(record: SelectedKeyRecord): Promise<VoiceSelectedKeyOutcome> {
@@ -610,20 +616,90 @@ export class VoiceCryptoBroker {
     }
     try { this.charge(record.owner, 128); }
     catch { record.attempt.resolve(Object.freeze({ kind: "busy" })); record.attempt = null; return attempt; }
-    record.started = true; record.drained = false;
+    record.started = true; record.drained = false; record.jobReturned = false;
     const finish = () => {
-      record.drained = true; this.refund(record.owner, 128);
+      record.drained = true;
       if (record.retired || !record.owner.isCurrent()) this.releaseSelectedKey(record);
     };
     this.queue.push({ owner: record.owner, bytes: 128,
       refuse: () => { record.retired = true; record.attempt?.resolve(Object.freeze({ kind: "retired" })); record.attempt = null; finish(); },
       start: async () => { try { await this.driveSelectedKey(record); } finally { finish(); } },
+      returned: () => {
+        record.jobReturned = true; this.refund(record.owner, 128);
+        if (record.retired || !record.owner.isCurrent()) this.releaseSelectedKey(record);
+        if (record.released) record.closed.resolve();
+      },
     });
     this.pump(); return attempt;
   }
 
   private wakeSelectedKey(record: SelectedKeyRecord): void {
     record.wake = {}; record.retry?.resolve();
+  }
+
+  /** One retained application session fa?ade. Its fixed8KiB metadata graph is paid
+   * BEFORE construction/invoke and stays process-paid for this broker/window lifetime.
+   * A call binds the SAME reservation to its native group before key admission; only
+   * actual outer/native/broker cleanup can remove that group charge. No other fee or
+   * execution allowance is enlarged, and this fa?ade never exposes generic crypto APIs. */
+  nativeAppCalls(native: VoiceAppNative, selected: VoiceSelectedKeyNative, ipc: VoiceIpcNative,
+    transport: typeof fetch = globalThis.fetch): VoiceAppCalls {
+    const previous = this.appSession;
+    if (previous) {
+      if (previous.native !== native || previous.selected !== selected || previous.ipc !== ipc || previous.transport !== transport)
+        throw new Error("voice application transport changed; reload required");
+      return previous.handle;
+    }
+    if (this.bytes + VOICE_APP_SESSION_BYTES > MAX_BYTES) throw new Error("voice application capacity reached");
+    this.bytes += VOICE_APP_SESSION_BYTES;
+    let group: string | null = null;
+    const session = new VoiceAppSession(native, {
+      clock: this.ipcClock,
+      bindGroup: value => {
+        if (group !== null || !/^[0-9a-f]{64}$/.test(value)) throw new Error("voice application group changed");
+        const bytes = this.groupBytes.get(value) ?? 0;
+        if (bytes + VOICE_APP_SESSION_BYTES > MAX_GROUP_BYTES) throw new Error("voice application group capacity reached");
+        this.groupBytes.set(value, bytes + VOICE_APP_SESSION_BYTES); group = value;
+      },
+      unbindGroup: () => {
+        if (group === null) return;
+        const bytes = this.groupBytes.get(group)! - VOICE_APP_SESSION_BYTES;
+        if (bytes) this.groupBytes.set(group, bytes); else this.groupBytes.delete(group);
+        group = null;
+      },
+      owner: createVoiceCryptoOwner,
+      select: owner => this.selectJoinKey(owner, selected),
+      channel: (owner, key) => this.nativeChannel(owner, key, ipc, transport),
+      observe: (owner, channel, key) => this.observeNativeLifecycle(owner, channel, key),
+      retire: owner => this.retireNativeOwner(owner),
+      resume: () => this.retrySelectedJoinKeys(),
+    });
+    this.appSession = { native, selected, ipc, transport, handle: session.handle };
+    return session.handle;
+  }
+
+  /** Trusted call-session teardown. Observer outcomes (including `retired`) are NOT
+   * actual key/SDK/native settlement completion. Find exact internally published owners,
+   * including a channel whose handle never reached its caller, then join outside the
+   * shared codec. Publish completion before retirement callbacks can synchronously reenter.
+   * Availability wakes retry only original cleanup; callers must keep their own fixed
+   * session graph paid until this promise and their ordinary native End have returned. */
+  retireNativeOwner(owner: VoiceCryptoOwner): Promise<void> {
+    const previous = this.ownerRetirements.get(owner); if (previous) return previous;
+    const selected = this.selectedKeys.get(owner.token), channel = this.ipcChannels.get(owner.token);
+    if ((selected && selected.owner !== owner) || (channel && !channel.owns(owner)))
+      throw new Error("original native voice owner required");
+    const work = Promise.resolve().then(async () => {
+      // Channel collection releases its original selected-key borrow. Neither join is
+      // entered while owning SharedIpcExecution, and actual job return remains separate
+      // from its earlier finally/outcome publication.
+      if (channel) await channel.handle.close();
+      if (selected) await selected.closed.promise;
+    });
+    this.ownerRetirements.set(owner, work);
+    owner.retire();
+    this.retrySelectedJoinKeys();
+    return work;
   }
 
   /** One bounded availability wake for existing flights, including orphan cleanup after End.
@@ -1756,10 +1832,10 @@ export class VoiceCryptoBroker {
       try { live = job.owner.isCurrent(); } catch { /* Invalid owner is a refusal. */ }
       if (!live) {
         try { job.refuse(); }
-        finally { this.active--; this.sdkPositions.pump(); }
+        finally { this.active--; job.returned?.(); this.sdkPositions.pump(); }
         continue;
       }
-      void job.start().finally(() => { this.active--; this.pump(); });
+      void job.start().finally(() => { this.active--; job.returned?.(); this.pump(); });
     }
   }
 
@@ -4277,7 +4353,7 @@ export function windowVoiceCryptoBroker(
   const host = window as Record<symbol, unknown>;
   const previous = host[BROKER] as VoiceCryptoBroker | undefined;
   if (previous) {
-    if (previous.version !== 41 || typeof previous.retireFailedNativeNegotiation !== "function" || typeof previous.observeNativeLifecycle !== "function" || typeof previous.advanceNativeNegotiation !== "function" || typeof previous.compactNativeNegotiation !== "function" || typeof previous.collectNativeNegotiationHistory !== "function" || typeof previous.retireNativeNegotiation !== "function" || typeof previous.completeNativeMediaHandoff !== "function" || typeof previous.completeNativeSdpRtcRound !== "function" || typeof previous.prepareNativeSdpRtc !== "function" || typeof previous.prepareNativeSdpCrypto !== "function" || typeof previous.prepareNativePcIntent !== "function" || typeof previous.prepareNativeSdpHandoff !== "function" || typeof previous.observeNativeWork !== "function" || typeof previous.returnNativeDerivation !== "function" || typeof previous.nativeConfirmationFromChannel !== "function" || typeof previous.nativeDerivationFromChannel !== "function" || typeof previous.recoverChannelHistory !== "function" || typeof previous.prepareChainFromChannel !== "function" || typeof previous.nativeChannel !== "function" || typeof previous.run !== "function" || typeof previous.selectJoinKey !== "function" || typeof previous.retrySelectedJoinKeys !== "function" ||
+    if (previous.version !== 42 || typeof previous.nativeAppCalls !== "function" || typeof previous.retireNativeOwner !== "function" || typeof previous.retireFailedNativeNegotiation !== "function" || typeof previous.observeNativeLifecycle !== "function" || typeof previous.advanceNativeNegotiation !== "function" || typeof previous.compactNativeNegotiation !== "function" || typeof previous.collectNativeNegotiationHistory !== "function" || typeof previous.retireNativeNegotiation !== "function" || typeof previous.completeNativeMediaHandoff !== "function" || typeof previous.completeNativeSdpRtcRound !== "function" || typeof previous.prepareNativeSdpRtc !== "function" || typeof previous.prepareNativeSdpCrypto !== "function" || typeof previous.prepareNativePcIntent !== "function" || typeof previous.prepareNativeSdpHandoff !== "function" || typeof previous.observeNativeWork !== "function" || typeof previous.returnNativeDerivation !== "function" || typeof previous.nativeConfirmationFromChannel !== "function" || typeof previous.nativeDerivationFromChannel !== "function" || typeof previous.recoverChannelHistory !== "function" || typeof previous.prepareChainFromChannel !== "function" || typeof previous.nativeChannel !== "function" || typeof previous.run !== "function" || typeof previous.selectJoinKey !== "function" || typeof previous.retrySelectedJoinKeys !== "function" ||
         typeof previous.registerProtectedConfirmation !== "function" ||
         typeof previous.registerProtectedDerivation !== "function" || typeof previous.registerConfirmation !== "function" || typeof previous.createPair !== "function") {
       throw new Error("voice crypto broker version changed; reload required");

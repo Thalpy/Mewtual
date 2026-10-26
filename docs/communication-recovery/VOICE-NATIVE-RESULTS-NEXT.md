@@ -1,5 +1,22 @@
 # Next voice milestone: native result recovery
 
+## Broker42 bootstrap composed; App/RTC adoption next (26 October)
+
+The retained production metadata/controller facade now composes native activation, selected
+key, private channel Ready and lifecycle observation under its own8KiB process/group fee.
+End fences and joins exact original native/broker work, including lost activation replies
+and internally published channels without returned handles. Actual selected-key job return
+retains both fees and lookup; early retired outcomes are not cleanup. Focused408 plus actual
+broker/adapter regressions and strict checks pass; complete frontend3099/static/build pass
+(84.23s/zero diagnostics/39.89s).
+
+This is still disconnected from App. Next add App lock/room/unmount ownership and private
+configured RTC/microphone/remote-audio/data-channel adoption without exposing SDK/SDP grants.
+Packaged CSP currently excludes the dynamic private loopback endpoint and requires a reviewed
+native/WebView correction. Operational renewal/lifetime history capacity, member media relay,
+combined and independent physical acceptance remain open. App V2 remains OFF. HANDOVER has
+current exact validation; the sections below record preceding checkpoints.
+
 ## Broker41 media failure isolation implemented; native execution next (26 October)
 
 The exact attached un-compacted media allocation can now retire peer-locally. Actual
