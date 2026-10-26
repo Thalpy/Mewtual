@@ -1,6 +1,6 @@
 # Mewtual; Handover
 
-## Variable voice progression funded before Derive (26 October; validation pending)
+## Variable voice progression funded before Derive (26 October; Root full run pending)
 
 The implementation checkout now uses one prepaid192KiB core plus independent32KiB Ready
 capacity before exposing protected Derive. A direct96KiB escrow preserves the original96KiB
@@ -20,16 +20,20 @@ two-peer case passes77.90s: A-B through the forbidden1-2 edge's unjoined helper,
 and browser collection, same-Session A-C with reused slot/new serial, both indexed Current
 paths, synchronous two-peer End and all-three-endpoint cleanup. C's direct edge was not
 forbidden. RTC objects are controlled, not audible WebView/physical media evidence.
-Fresh native check/strict lint/full and Root strict lint/full are now running serially on
-this NEW Root source. Root validation uses the warm custody checkout at dbb0a2ae: all728 Root
+Fresh native check, strict native lint and complete native tests pass:879 unit tests plus
+5 ACL integration tests,884 total; the unit body took1935.39s. Strict Root lint also passes.
+The complete Root suite is still running serially on this NEW Root source. Root validation
+uses the warm custody checkout at dbb0a2ae: all728 Root
 files match after LF normalization; five differ only in line endings. The3675/24ignored and
 879 results below predate variable-reservation changes and cannot sign off the new code.
 Later ordinary member/origin records, fixed history, native storage and operational replacement
 remain separate constraints; this is not universal Ready admission or App activation.
 
-The published PR #58/#59 checkpoints stop at21522d46; new local implementation commits are
-69b2ce65 (Root variable prepayment) and833dfc9d (native admission/actual two-peer acceptance).
-They are not yet pushed; final gate results remain required.
+PR #59 is being advanced from21522d46 with69b2ce65 (Root variable prepayment) and833dfc9d
+(native admission/actual two-peer acceptance). Its Root full-suite result remains pending;
+the draft must not be treated as complete validation. Fresh `cargo deny check` still fails
+only on inherited RUSTSEC-2026-0387 (`crypto-bigint`0.5.5); no ignore/dependency change was
+added here. The dependency upgrade remains separately owned.
 App V2 remains OFF. Production App/RTC/tracks, failure isolation/renewal, relay, combined and
 physical acceptance remain open. External resume and dependency upgrades are separate branches.
 
