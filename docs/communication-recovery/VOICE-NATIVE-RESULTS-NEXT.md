@@ -17,6 +17,40 @@ that, the remaining software work includes failed-negotiation isolation/renewal,
 App/native/real RTC/microphone composition, member media relay and combined acceptance.
 Do not enable V2 or mark physical acceptance complete based on controlled RTC providers.
 
+## Reviewed next slice: attached failed-parent retirement (not implemented)
+
+Read-only design review distinguishes an attached original Action/Plan from an unknown
+parent Pending. For the attached case, a generation-bound peer cleanup worker can preserve
+the original Session and indexed media while joining only the failed negotiation's actual
+intake/SDK/RTC/Result/RPC owners outside the shared codec. It must recover exact child/parent
+receipts, ACKs, own-executor settlement and ordinary Returns, then release the original
+Claim/key/PC/SDK/storage obligations. Choose Plan-kind final BEFORE the first terminal intent;
+recover its immutable proof and ACK through actual framed finally. Do not relabel a lost
+Phase intent or invoke whole-Session cleanup/settleSetup. Retain failed native/browser fixed
+history and Root Actions under current bounds until End; general history forgetting is not
+required for this first slice.
+
+Two admission changes need separate regression coverage. Native automatic-parent admission
+currently blocks every retained Derive row. Its exception must require issued and ACKed
+original Plan final, full final-retirement/Root/Claim/SDK/Phase drainage and permanently frozen
+child admission. Ordinary drained/ClosedPending or a browser failure flag is insufficient.
+The new browser pump must skip only exact certified failed parents and descendants using a
+paid full RowId/Action/purpose/Session/generation record, never slot-only hints. The lifecycle
+needs pair cleanup rather than global `stopped`; owner/epoch/selected-key revocation and
+unusable Session transport remain global failures.
+
+An unknown parent without a captured Action/Plan remains quarantined. Local `close_pending`
+does not prove Root absence. Recover its original positive publication or add per-invocation
+Actor/Root outcome evidence distinguishing definitive non-entry/refusal from ambiguous entry,
+following the SDP recorded-outcome pattern. No missing reply or elapsed deadline can stand
+in for that witness. Historical work with another executor unsettled also cannot advance.
+
+Pin A-B Current while C fails before Finish, during held WebCrypto and during RTC apply;
+lost Return/final/ACK recovery; D admission only after C's actual cleanup return and exact
+certificate; monotonic original counters and permanently closed C effects; existing capacity
+refusal with all history retained; unknown/unsettled cases refusing advancement; and global
+End during peer cleanup. This design is a roadmap, not implemented acceptance.
+
 ## Current work: complete native multi-peer acceptance and failure isolation (26 October)
 
 Broker35 keeps SDK/provider work off the shared IPC codec with the existing two-position
