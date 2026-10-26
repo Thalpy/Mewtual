@@ -18781,3 +18781,11 @@ button.id-pick .avatar { width: 28px; height: 28px; flex: none; }
   gap: 8px;
   margin-top: 12px;
 }
+/* The global button rule paints accent; a destructive confirm reads as danger instead. */
+.leave-confirm-actions .danger-btn {
+  background: var(--danger-dim);
+  color: var(--danger-hi);
+  border: 1px solid var(--danger-brd);
+}
+.leave-confirm-actions .danger-btn:hover:not(:disabled) { border-color: var(--danger-hi); }
+.leave-confirm-actions .danger-btn:disabled { opacity: 0.55; }
