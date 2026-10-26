@@ -5652,15 +5652,20 @@ where
                             let bytes = server.sync.read_download_export(&ready.lease, &reference.ciphertext_cid, bound).map_err(|e| e.to_string())?;
                             let plaintext = server.sync.open_file(&bytes, reference).map_err(|e| e.to_string())?;
                             if !valid() { return Err("The download is no longer active.".to_string()); }
+                            // Staged only, for propagation once the save publishes (see
+                            // `file_transfers/propagate.rs`); not served until then.
+                            server.stage_export_chunk(&reference.ciphertext_cid, &bytes);
                             Ok(DownloadChunk { bytes: plaintext, _custody: custody })
                         })();
                         let _ = reply.send(result);
                     }
                     Some(AppCommand::Downloads { reply }) => { let _ = reply.send(server.sync.downloads().map_err(|e| e.to_string())); }
-                    Some(AppCommand::FinishDownloadExport { ready, reply }) => { let _ = reply.send(server.sync.finish_download_export(&ready.lease).map_err(|e| e.to_string())); let _ = event_tx.send(AppEvent::FilesUpdated).await; }
+                    // Native sends this only after the save published: the one point where a
+                    // Download's chunks propagate into the shared cache.
+                    Some(AppCommand::FinishDownloadExport { ready, reply }) => { let _ = reply.send(server.finish_download_export_and_propagate(&ready).map_err(|e| e.to_string())); let _ = event_tx.send(AppEvent::FilesUpdated).await; }
                     Some(AppCommand::SetDownloadPaused { id, expected_intent, paused, reply }) => { let _ = reply.send(server.sync.set_download_paused(id, expected_intent, paused).map_err(|e| e.to_string())); let _ = event_tx.send(AppEvent::FilesUpdated).await; }
                     Some(AppCommand::RetryDownload { id, request, reply }) => { let _ = reply.send(server.sync.retry_download(id, request).map_err(|e| e.to_string())); let _ = event_tx.send(AppEvent::FilesUpdated).await; }
-                    Some(AppCommand::CancelDownload { id, reply }) => { let _ = reply.send(server.sync.cancel_download(id).map_err(|e| e.to_string())); let _ = event_tx.send(AppEvent::FilesUpdated).await; }
+                    Some(AppCommand::CancelDownload { id, reply }) => { let _ = reply.send(server.cancel_download_and_unstage(id).map_err(|e| e.to_string())); let _ = event_tx.send(AppEvent::FilesUpdated).await; }
                     Some(AppCommand::FinishDownloadCleanup { id, reply }) => { let _ = reply.send(server.sync.finish_download_cleanup(id).map_err(|e| e.to_string())); let _ = event_tx.send(AppEvent::FilesUpdated).await; }
                     Some(AppCommand::DownloadExportState { id, reply }) => { let _ = reply.send(server.sync.download_export_state(id).map_err(|e| e.to_string())); }
                     Some(AppCommand::DownloadExportTransition { ready, transition, cancel, reply }) => {

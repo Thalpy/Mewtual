@@ -15,6 +15,7 @@ use tokio::task::JoinSet;
 
 use super::*;
 use crate::{file_resolution, CHUNK_BYTES};
+mod propagate;
 mod saved;
 use saved::SavedRun;
 
@@ -1473,9 +1474,6 @@ impl FileTransfers {
                             .ok()
                             .flatten()
                     });
-                    // A chunk found in the private store (a resumed Download) is copied into the
-                    // shared cache below; one found in the cache is already there.
-                    let from_private = retained.is_some();
                     if let Some(ciphertext) =
                         retained.or_else(|| server.sync.get_blob(&reference.ciphertext_cid))
                     {
@@ -1500,9 +1498,6 @@ impl FileTransfers {
                                 if let Err(error) = keep.token.put(server, &ciphertext) {
                                     job.fail(server, error.to_string());
                                     return;
-                                }
-                                if from_private {
-                                    keep.token.fill_cache(server, &ciphertext);
                                 }
                             }
                             held = Some(bytes);
@@ -2245,9 +2240,6 @@ impl FileTransfers {
                         if let Err(error) = stored {
                             job.fail(server, error.to_string());
                             return;
-                        }
-                        if let Some(keep) = &job.keep {
-                            keep.token.fill_cache(server, &ciphertext);
                         }
                         drop(_accounting);
                         if let Some(next) = job.accept(server, bytes, Some(provider)) {

@@ -558,7 +558,9 @@ and `cancel_private_download` mutate only that saved local owner under the origi
 entry fence. Retry uses the existing exact latest-receipt CAS contract. Metadata updates are
 owner-specific and coalesced around actual actor progress, so a same-CID Keep cannot mask them.
 Completed ciphertext is private; only native `DownloadReady`/export leases can read it. Successful
-external publication remains committed if encrypted cleanup fails, with a visible warning.
+external publication remains committed if encrypted cleanup fails, with a visible warning. Since
+cache housekeeping, a published save's chunks are promoted into the shared cache at
+`finish_download_export` (see the cache housekeeping section); nothing propagates earlier.
 
 ## Journaled external Download export (21 October; Save as and review fixes 22 October; focused checks, full suites pending)
 
@@ -1829,6 +1831,16 @@ and keeps the marker; `LeaveCleanup::delete_batch` / `finish` → `LeaveReport`)
 actor applies it); event `cache-status { server, status }`; `leave_server` now returns
 `{ freed_bytes, kept_bytes, failed, cleaned }`. `StorageHealth` gains `not_cached_chunks`; `missing_chunks`
 counts only this device's own uploads, and Repair fetches only those and unreadable chunks.
+
+Saved files propagate only once saved (owner decision 2): `acquire_download` (network or the
+restart recheck) writes only the private store. `read_download_chunk` additionally stages the
+chunk's ciphertext in the primary cache's `staging/` unless already held (invisible to
+`has_blob`/`get_blob`/serving/`file_available`). `finish_download_export(ready)`, which native
+calls only after the save published, releases the record and then promotes those staged chunks
+into the shared cache if the lease was still current and the release succeeded, otherwise drops
+them. `cancel_download(id)` drops whatever that Download staged. Stage/promote failures are logged
+and never fail the call. A Download that is in progress, paused, failed, cancelled or removed
+therefore never makes this device a source.
 
 ---
 
