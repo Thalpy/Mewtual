@@ -270,6 +270,18 @@ impl SavedFile {
     }
 }
 
+/// Why [`SavedFiles::replace_candidate`] found nothing to replace.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NoCandidate {
+    /// No older copy of this file is listed (nothing to say).
+    NoneSaved,
+    /// Older copies are listed, checkable, but only in other folders.
+    Elsewhere,
+    /// Older copies are listed but none can be proven: one side has no identity (the
+    /// non-resumable writer, a network folder) or was saved on another platform.
+    Unprovable,
+}
+
 /// Why a record could not be read. Either way the caller must leave it untouched.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SavedListError {
@@ -327,28 +339,35 @@ impl SavedFiles {
     /// The copy "Replace my older saved copy" may act on when `new` is recorded: the newest older
     /// entry for the same file, checkable here, in the folder `new` went to (same folder
     /// identity), and not at `new`'s own place. Read before [`Self::record`] under the same lock,
-    /// so it is exactly what the list held when this save finished. `Err(true)` when there is no
-    /// such entry but the same file has a checkable copy in another folder (the note says so);
-    /// `Err(false)` when there is nothing to replace at all.
-    pub fn replace_candidate(&self, new: &SavedFile) -> Result<SavedFile, bool> {
-        let Some((new_folder, _)) = new.location.identity else {
-            return Err(false);
+    /// so it is exactly what the list held when this save finished. Otherwise why not, so the
+    /// note can say so without claiming anything it has not seen.
+    pub fn replace_candidate(&self, new: &SavedFile) -> Result<SavedFile, NoCandidate> {
+        let older = || {
+            self.entries.iter().rev().filter(|entry| {
+                entry.cid == new.cid
+                    && entry.id != new.id
+                    && !entry.location.same_place(&new.location)
+            })
+        };
+        if older().next().is_none() {
+            return Err(NoCandidate::NoneSaved);
+        }
+        let Some((new_folder, _)) = new.location.identity.filter(|_| new.location.checkable())
+        else {
+            return Err(NoCandidate::Unprovable);
         };
         let mut elsewhere = false;
-        for entry in self.entries.iter().rev() {
-            if entry.cid != new.cid
-                || entry.id == new.id
-                || !entry.location.checkable()
-                || entry.location.same_place(&new.location)
-            {
-                continue;
-            }
+        for entry in older().filter(|entry| entry.location.checkable()) {
             match entry.location.identity {
                 Some((folder, _)) if folder == new_folder => return Ok(entry.clone()),
                 _ => elsewhere = true,
             }
         }
-        Err(elsewhere)
+        Err(if elsewhere {
+            NoCandidate::Elsewhere
+        } else {
+            NoCandidate::Unprovable
+        })
     }
 
     /// Forget one entry (Clear, or an old copy a replace removed). Returns whether it was there.

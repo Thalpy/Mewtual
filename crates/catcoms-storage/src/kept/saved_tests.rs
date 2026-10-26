@@ -343,13 +343,36 @@ fn the_replace_candidate_is_the_newest_older_copy_in_the_same_folder() {
     // Only a copy elsewhere: no candidate, and the note can say why.
     let mut only_elsewhere = SavedFiles::new(&OWNER);
     only_elsewhere.record(entry(3, b"file", SavedLocation::from_journal(&there)));
-    assert_eq!(only_elsewhere.replace_candidate(&new_entry), Err(true));
-    // No identity on either side, or nothing of this file: nothing to replace.
+    assert_eq!(
+        only_elsewhere.replace_candidate(&new_entry),
+        Err(NoCandidate::Elsewhere)
+    );
+    // An older copy that cannot be proven (no identity on either side).
     let mut plain = SavedFiles::new(&OWNER);
     plain.record(entry(5, b"file", plain_location("report.pdf")));
-    assert_eq!(plain.replace_candidate(&new_entry), Err(false));
+    assert_eq!(
+        plain.replace_candidate(&new_entry),
+        Err(NoCandidate::Unprovable)
+    );
     let unidentified_new = entry(9, b"file", plain_location("report (3).pdf"));
-    assert_eq!(list.replace_candidate(&unidentified_new), Err(false));
+    assert_eq!(
+        list.replace_candidate(&unidentified_new),
+        Err(NoCandidate::Unprovable)
+    );
+    // Nothing of this file listed (another file only, or nothing at all): nothing to say.
+    let mut others = SavedFiles::new(&OWNER);
+    others.record(entry(4, b"other", plain_location("x.txt")));
+    assert_eq!(
+        others.replace_candidate(&new_entry),
+        Err(NoCandidate::NoneSaved)
+    );
+    // The new entry's own place is never its own candidate (the name already holds it).
+    let mut same = SavedFiles::new(&OWNER);
+    same.record(entry(6, b"file", SavedLocation::from_journal(&new)));
+    assert_eq!(
+        same.replace_candidate(&new_entry),
+        Err(NoCandidate::NoneSaved)
+    );
 }
 
 #[test]

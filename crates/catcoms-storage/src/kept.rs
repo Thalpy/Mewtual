@@ -49,9 +49,9 @@ pub use record::{
     KeepAllowance, KeepPhase, KeepRetry, KeepRetryReceipt, KeepScope, KEEP_EXECUTION_SLICE_MS,
 };
 pub use saved::{
-    drop_first_name, replace_older_copy, saved_file_location, saved_file_presence, ReplaceOutcome,
-    ReplaceRefusal, ReplaceRequest, SavedFile, SavedFileId, SavedFiles, SavedListError,
-    SavedLocation, MAX_SAVED_FILES, MAX_SAVED_LIST_BYTES, SAVED_LIST_VERSION,
+    drop_first_name, replace_older_copy, saved_file_location, saved_file_presence, NoCandidate,
+    ReplaceOutcome, ReplaceRefusal, ReplaceRequest, SavedFile, SavedFileId, SavedFiles,
+    SavedListError, SavedLocation, MAX_SAVED_FILES, MAX_SAVED_LIST_BYTES, SAVED_LIST_VERSION,
 };
 
 /// Opaque process-local run identity. It is not serialized or accepted from IPC. One checked
