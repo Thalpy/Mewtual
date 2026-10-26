@@ -1,6 +1,6 @@
 # Chat, files and voice implementation evidence
 
-## Broker38 automatic lifecycle (26 October; native TCP passes, full native pending)
+## Broker38 automatic lifecycle (26 October; complete suites pass, App OFF)
 
 The new lifecycle drives existing confirmation, storage/SDK, PC, RTC, media and history
 leaves, then explicit next-negotiation advance. Framed/WebCrypto tests cover both roles
@@ -18,7 +18,8 @@ requires compacted/returned/advanced browser history with controlled SDK local/r
 effects. Native independently checks exact-selected collected media history. The prior
 shared-variable/native-admission checkpoint passes all 884 native tests and strict lint.
 Matching full Root 3,679/24 existing ignores, native check and strict native lint pass.
-The new complete native suite is running; this adds one case to the prior native source.
+The complete native suite passes 880 unit + 5 ACL tests (885 total; unit body 1990.57 s),
+completed 16:20:13 UTC on runtime c18b100d. This adds one case to the prior native source.
 App V2 remains OFF; this is not real ICE/audio, failed-peer isolation, relay or completion
 of combined/physical acceptance. External download resume remains separately owned.
 

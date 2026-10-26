@@ -12,8 +12,9 @@ the implementation history; HANDOVER has current evidence.
 The next slice adds the coalesced automatic lifecycle across existing authorized leaves.
 Focused 321 and full frontend 3,032/static/build checks pass. Genuine post-setup automatic
 native/TCP acceptance passes in 40.68 s. It proves both actual
-history collection and coordinator advance without phase/role/proof control hints. After
-that, the remaining software work includes failed-negotiation isolation/renewal, production
+history collection and coordinator advance without phase/role/proof control hints. Matching
+native check/strict lint and all 885 native tests pass, alongside Root 3,679/24 existing
+ignores. Remaining software work includes failed-negotiation isolation/renewal, production
 App/native/real RTC/microphone composition, member media relay and combined acceptance.
 Do not enable V2 or mark physical acceptance complete based on controlled RTC providers.
 

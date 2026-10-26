@@ -1,6 +1,6 @@
 # Mewtual; Handover
 
-## Automatic browser lifecycle (26 October; native TCP passes, full native run pending)
+## Automatic browser lifecycle (26 October; complete suites pass, App OFF)
 
 Broker38 adds one prepaid2KiB, coalesced Session lifecycle outside the confirmation pump.
 It observes opaque original generation/plan/stage metadata and calls the existing native-
@@ -28,8 +28,9 @@ authenticated setup, independently checks exact-selected native collected histor
 passively requires browser compaction AND advance plus actual controlled SDK local/remote
 effects. Endpoint TCP is forbidden; helper owns no call. Its60s whole-step observer bound
 spans formerly separate phases and changes no physical/protocol deadline. Native check
-(67.89 s) and strict all-target/all-feature lint (111.66 s) pass. The complete native suite
-is running. Matching complete Root validation passes 3,679/24 existing ignores; this slice
+(67.89 s) and strict all-target/all-feature lint (111.66 s) pass. Complete native tests pass
+880 unit + 5 ACL cases (885 total; unit body 1990.57 s), completed 16:20:13 UTC on runtime
+source c18b100d. Matching complete Root validation passes 3,679/24 existing ignores; this slice
 changes no Root source. Formatting also passes. The inherited dependency advisory remains.
 Real WebView/SDP/ICE/audio and media relay are not established by controlled RTC objects.
 Pre-compaction terminal failure still retires the Session; failed-peer isolation/renewal,
