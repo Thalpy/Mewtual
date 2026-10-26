@@ -16,7 +16,9 @@ use crate::invite::{membership_from_key_package, InviteError, InviteLedger, Invi
 use crate::{proto, MlsError};
 
 mod commit_gate;
-pub use commit_gate::{commit_header, AppliedCommit, CommitHeader, CommitRefusal};
+pub use commit_gate::{
+    check_commit_header, commit_header, AppliedCommit, CommitHeader, CommitRefusal,
+};
 
 mod catalog;
 pub use catalog::{

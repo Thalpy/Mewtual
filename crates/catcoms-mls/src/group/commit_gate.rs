@@ -85,6 +85,30 @@ pub fn commit_header(bytes: &[u8]) -> Result<CommitHeader, CommitRefusal> {
     })
 }
 
+/// The header-only part of [`ServerGroup::apply_commit`], for callers that want to refuse before
+/// any side effect of their own: `bytes` must be exactly one `PrivateMessage` commit for
+/// `group_id`, built at `expected_epoch`, and `expected_epoch` must be `current_epoch`.
+/// `apply_commit` runs this same function, so the two cannot drift apart.
+pub fn check_commit_header(
+    bytes: &[u8],
+    group_id: &[u8],
+    expected_epoch: u64,
+    current_epoch: u64,
+) -> Result<(), CommitRefusal> {
+    let header = commit_header(bytes)?;
+    if header.group_id != group_id {
+        return Err(CommitRefusal::WrongGroup);
+    }
+    if header.epoch != expected_epoch || expected_epoch != current_epoch {
+        return Err(CommitRefusal::WrongEpoch {
+            expected: expected_epoch,
+            found: header.epoch,
+            current: current_epoch,
+        });
+    }
+    Ok(())
+}
+
 /// A commit that [`ServerGroup::apply_commit`] merged.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AppliedCommit {
@@ -109,19 +133,7 @@ impl ServerGroup {
         bytes: &[u8],
         expected_epoch: u64,
     ) -> Result<AppliedCommit, MlsError> {
-        let header = commit_header(bytes)?;
-        if header.group_id != self.group_id() {
-            return Err(CommitRefusal::WrongGroup.into());
-        }
-        let current = self.epoch();
-        if header.epoch != expected_epoch || expected_epoch != current {
-            return Err(CommitRefusal::WrongEpoch {
-                expected: expected_epoch,
-                found: header.epoch,
-                current,
-            }
-            .into());
-        }
+        check_commit_header(bytes, &self.group_id(), expected_epoch, self.epoch())?;
         match self.process_incoming(device, bytes)? {
             Incoming::CommitApplied { removed } => {
                 // openmls advances by exactly one on every merge, so no test can break this. It is

@@ -41,9 +41,9 @@ use catcoms_discovery::{
     PolicyConfig, RouteHost, Source,
 };
 use catcoms_mls::{
-    commit_header, key_package_signature_key, restore_server, serialize_key_package,
-    snapshot_server, AppliedCommit, CommitRefusal, InviteError, InviteLedger, InviteToken,
-    MlsDevice, MlsError, ServerGroup,
+    check_commit_header, commit_header, key_package_signature_key, restore_server,
+    serialize_key_package, snapshot_server, AppliedCommit, CommitRefusal, InviteError,
+    InviteLedger, InviteToken, MlsDevice, MlsError, ServerGroup,
 };
 use catcoms_replication::{AppliedOp, EncryptedDoc, SealedOp};
 use catcoms_rt::{
@@ -12044,22 +12044,17 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
     /// decryption, no state change), or `None` if it may be. `apply_commit` makes the same checks
     /// and more; this exists so a refusal can happen before any side effect.
     fn commit_record_refusal(&self, record: &CommitRecord) -> Option<CommitRefusal> {
-        let header = match commit_header(&record.mls_commit) {
-            Ok(header) => header,
-            Err(refusal) => return Some(refusal),
-        };
-        if header.group_id != record.group_id || header.group_id != self.group.group_id() {
+        let group_id = self.group.group_id();
+        if record.group_id != group_id {
             return Some(CommitRefusal::WrongGroup);
         }
-        let current = self.group.epoch();
-        if header.epoch != record.commit_epoch || record.commit_epoch != current {
-            return Some(CommitRefusal::WrongEpoch {
-                expected: record.commit_epoch,
-                found: header.epoch,
-                current,
-            });
-        }
-        None
+        check_commit_header(
+            &record.mls_commit,
+            &group_id,
+            record.commit_epoch,
+            self.group.epoch(),
+        )
+        .err()
     }
 
     /// Count and log a commit record that was refused because it is not this epoch's commit. Other

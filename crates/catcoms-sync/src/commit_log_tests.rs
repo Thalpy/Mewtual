@@ -56,15 +56,22 @@ fn log_is_clean(node: &Member, bytes: &[&[u8]]) {
 }
 
 /// An application message, a proposal and an external commit, each signed into a record by the
-/// authorized committer at the right epoch, are all refused on the live control path. The real
-/// commit for that epoch then applies.
+/// authorized committer at the right epoch, are all refused on the live control path, without
+/// touching the past-key window. The real commit for that epoch then applies.
+///
+/// The proposal is Carol's, not Bob's: #57's own-leaf rule already refused a proposal Bob wrote
+/// himself, while another member's proposal was what `process_incoming` reported as `Ok(Other)`.
 #[tokio::test]
 async fn a_non_commit_from_the_authorized_committer_is_refused_and_never_logged() {
-    let (_hub, mut members, _) = build_members(2).await;
+    let (_hub, mut members, _) = build_members(3).await;
     converge_and_publish_test_routes(&mut members);
+    let mut carol = members.pop().unwrap();
     let mut bob = members.pop().unwrap();
     let mut alice = members.pop().unwrap();
     let alice_peer = alice.local_peer();
+    // An open document, so a refusal that wrongly snapshotted epoch keys would show.
+    bob.open_channel(DocType::Channel, 1).await.unwrap();
+    let past_keys = bob.past_keys.len();
     let here = bob.epoch();
     let log_len = bob.commit_log.len();
     let applied = bob.stats().commits_applied;
@@ -73,7 +80,10 @@ async fn a_non_commit_from_the_authorized_committer_is_refused_and_never_logged(
         .group
         .create_application_message(&alice.device, b"not a commit")
         .unwrap();
-    let proposal = bob.group.test_self_update_proposal(&bob.device).unwrap();
+    let proposal = carol
+        .group
+        .test_self_update_proposal(&carol.device)
+        .unwrap();
     let outsider = MlsDevice::generate().unwrap();
     let external = alice
         .group
@@ -90,6 +100,11 @@ async fn a_non_commit_from_the_authorized_committer_is_refused_and_never_logged(
             "case {i}: nothing counted"
         );
         assert_eq!(bob.stats().commit_records_refused, i as u64 + 1);
+        assert_eq!(
+            bob.past_keys.len(),
+            past_keys,
+            "case {i}: key window untouched"
+        );
     }
 
     // The application message was refused on its header, so it was never decrypted here.
@@ -108,7 +123,50 @@ async fn a_non_commit_from_the_authorized_committer_is_refused_and_never_logged(
     assert_eq!(bob.epoch(), here + 1, "the real commit still applies");
     assert_eq!(bob.commit_log.len(), log_len + 1);
     assert_eq!(bob.stats().commits_applied, applied + 1);
+    assert!(
+        bob.past_keys.len() > past_keys,
+        "a real commit does snapshot the old epoch's keys, so the check above can fail"
+    );
     log_is_clean(&bob, &junk);
+}
+
+/// The buffered-drain path with a record that only the new guard refuses: an application message
+/// from the epoch ahead, labelled with that epoch. Bob buffers it, then applies the real commit,
+/// and the drain offers him the buffered record at exactly its label. Before this change
+/// `process_incoming` decrypted it, returned `Ok(Application)`, and the drain logged it.
+#[tokio::test]
+async fn a_buffered_non_commit_is_refused_when_the_drain_reaches_it() {
+    let (_hub, mut members, _) = build_members(2).await;
+    converge_and_publish_test_routes(&mut members);
+    let mut bob = members.pop().unwrap();
+    let mut alice = members.pop().unwrap();
+    let alice_peer = alice.local_peer();
+    let here = bob.epoch();
+    let applied = bob.stats().commits_applied;
+
+    let real = admit_quietly(&mut alice, 46);
+    let application = alice
+        .group
+        .create_application_message(&alice.device, b"sealed one epoch ahead")
+        .unwrap();
+    bob.on_control(
+        alice_peer,
+        &framed_commit(&signed(&alice, here + 1, &application)),
+    );
+    assert_eq!(bob.epoch(), here, "a future label is only buffered");
+    bob.on_control(alice_peer, &framed_commit(&real));
+    assert_eq!(bob.epoch(), here + 1);
+    assert_eq!(
+        bob.stats().commits_applied,
+        applied + 1,
+        "only the real commit"
+    );
+    assert_eq!(bob.stats().commit_records_refused, 1);
+    assert!(
+        bob.pending_commits.is_empty(),
+        "the drain consumed the slot"
+    );
+    log_is_clean(&bob, &[&application]);
 }
 
 /// A commit labelled one epoch ahead of what it is gets buffered (the label is all a buffer can

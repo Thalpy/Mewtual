@@ -301,3 +301,31 @@ fn foreign_and_non_protocol_bytes_are_refused() {
             .unwrap()
     );
 }
+
+/// Older builds: the frozen openmls 0.8.1 fixtures (`persist/compat_tests.rs`). A member snapshot
+/// written by 0.8.1 refuses the 0.8.1 application message on the commit path (without consuming
+/// it) and applies the 0.8.1 commit through `apply_commit`, so the gate does not strand state or
+/// traffic from builds before it.
+#[test]
+fn openmls_0_8_1_traffic_passes_the_gate_and_its_application_message_does_not() {
+    let (bob, mut group) = crate::persist::restore_server(include_bytes!(
+        "../persist/fixtures/openmls-0.8.1/member.snapshot"
+    ))
+    .unwrap();
+    let application = include_bytes!("../persist/fixtures/openmls-0.8.1/member_app.msg");
+    let commit = include_bytes!("../persist/fixtures/openmls-0.8.1/member_commit.msg");
+    let epoch = group.epoch();
+    assert_eq!(commit_header(commit).unwrap().epoch, epoch);
+
+    match group.apply_commit(&bob, application, epoch) {
+        Err(MlsError::NotACommit(CommitRefusal::NotCommitContent("application"))) => {}
+        other => panic!("expected a header refusal, got {other:?}"),
+    }
+    match group.process_incoming(&bob, application).unwrap() {
+        Incoming::Application(plain) => assert_eq!(plain, b"written by openmls 0.8.1"),
+        other => panic!("the 0.8.1 message must still be readable, got {other:?}"),
+    }
+    let applied = group.apply_commit(&bob, commit, epoch).unwrap();
+    assert_eq!(applied, AppliedCommit { removed: false });
+    assert_eq!(group.epoch(), epoch + 1);
+}
