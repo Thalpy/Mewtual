@@ -143,3 +143,33 @@ test("owner join finds a published channel even when constructor subscription th
   held.release(); await close;
   assert.equal(collections, 1); assert.deepEqual(broker.counts(), { active: 0, queued: 0, bytes: 0 });
 });
+
+test("retained application facade cannot bypass broker version or allocation checks during remount", async () => {
+  const invoke = async <T>() => undefined as T;
+  for (const change of ["version", "allocation", "deleted", "undefined", "null"] as const) {
+    const host: Record<symbol, unknown> = {}, calls = windowVoiceAppCalls(invoke, host);
+    const broker = windowVoiceCryptoBroker(unavailable, host), call = calls.prepare(1, "2");
+    if (change === "version") Object.defineProperty(broker, "version", { value: 41 });
+    else if (change === "allocation") host[Symbol.for("mewtual.voice.crypto-broker.v2")] = new VoiceCryptoBroker(unavailable);
+    else if (change === "deleted") delete host[Symbol.for("mewtual.voice.crypto-broker.v2")];
+    else host[Symbol.for("mewtual.voice.crypto-broker.v2")] = change === "null" ? null : undefined;
+    const own = Object.hasOwn(host, Symbol.for("mewtual.voice.crypto-broker.v2"));
+    const originalSlot = host[Symbol.for("mewtual.voice.crypto-broker.v2")];
+    assert.throws(() => windowVoiceAppCalls(invoke, host), /reload required/);
+    assert.equal(Object.hasOwn(host, Symbol.for("mewtual.voice.crypto-broker.v2")), own);
+    assert.equal(host[Symbol.for("mewtual.voice.crypto-broker.v2")], originalSlot, "lookup refusal must never construct/publish another pool");
+    assert.equal(broker.counts().bytes, VOICE_APP_SESSION_BYTES, "refusal keeps original reservation/graph");
+    await call.close(); assert.equal(call.snapshot().phase, "closed");
+  }
+});
+
+test("accessor-backed retained metadata cannot turn expected-allocation validation into construction", async () => {
+  const invoke = async <T>() => undefined as T, originalHost = {};
+  const calls = windowVoiceAppCalls(invoke, originalHost), broker = windowVoiceCryptoBroker(unavailable, originalHost);
+  const call = calls.prepare(1, "2"); let reads = 0;
+  const host = { [Symbol.for("mewtual.voice.app-session.v1")]: Object.freeze({ version: 2, invoke, calls,
+    get broker() { return ++reads === 1 ? broker : undefined; } }) };
+  assert.throws(() => windowVoiceAppCalls(invoke, host), /reload required/);
+  assert.equal(reads, 1); assert.equal(Object.hasOwn(host, Symbol.for("mewtual.voice.crypto-broker.v2")), false);
+  assert.equal(broker.counts().bytes, VOICE_APP_SESSION_BYTES); await call.close();
+});

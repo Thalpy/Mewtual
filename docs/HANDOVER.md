@@ -1,5 +1,37 @@
 # Mewtual; Handover
 
+## Validated communication checkpoint (26 October; App V2 OFF)
+
+PRs65/66 add peer-local failed-media retirement and retained native call bootstrap/shutdown.
+The final facade remount checks preserve the exact broker/version before any constructing
+lookup, including missing/null/accessor-backed cache state. All required current suites have
+finished: Root3683 passed/24 existing ignores; native890 library+5 ACL passed; frontend3101
+passed. Strict Root/native Clippy, both formatting checks, native cargo check, current-native
+construction scan, strict helper TypeScript, frontend static checks (zero diagnostics) and
+production build (40.94s) pass. Root ran on byte-identical Rust/Cargo/lock/toolchain inputs in
+the warm custody checkout; the source scanner was rerun here against current native code.
+Root/full/native/Clippy gates ran serially, with no duplicate Rust suite.
+
+Native facade/real command logic/WebCrypto/authenticated HTTP passes0.94s; actual TCP
+failed-media preservation passes74.13s. Final full native reruns both successfully. Two
+read-only reviews and re-reviews have no remaining actionable finding in these slices.
+Source controls, original identities, immutable final meaning, actual worker/SDK/IO joins,
+finite native execution allowances and original Source attempts remain intact.
+
+Fresh cargo-deny FAILS inherited RUSTSEC-2026-0387/crypto-bigint0.5.5; bans/licenses/sources
+pass. No waiver was added; the upgrade is separately owned. Exact Docker context inputs pass
+static audit; actual Docker build is unrun because its Linux engine is unavailable. No new
+setup/window/send/friend flow was introduced; the new frontend path remains inactive in App.
+Prior public-metadata Windows startup/CSP probe evidence retains its original source/date.
+
+Still open: Root action-history retirement/reservation headroom, operational renewal, App
+native call lifecycle + configured RTC/mic/audio/data-channel adoption, actual authenticated
+facade WebView acceptance, member media relay, combined acceptance and independent physical
+network/audio tests. Native exact-port CSP is already implemented. One desktop is available;
+physical acceptance is not claimed. External download resume remains separately owned.
+The dated entries below preserve prior implementation/failure evidence; this checkpoint
+supersedes their pending gate statuses, not their explicit software/physical limitations.
+
 ## Broker42 retained native call bootstrap (26 October; App OFF)
 
 A new window-retained `windowVoiceAppCalls` facade composes original native controller/call
@@ -44,6 +76,16 @@ audit passes, but the actual Docker context build is unrun (Linux engine unavail
 media or connected UI evidence. Production App lock/room wiring, configured RTC/microphone/tracks/data channels,
 authenticated-facade WebView acceptance, operational renewal/lifetime capacity, member relay and
 combined/physical acceptance remain open. V2 stays OFF; external resume is separate.
+
+Final remount regression exposed a cached-facade bypass of broker compatibility checks.
+Facade bundlev2 now retains/samples the actual broker once and validates expected allocation
+BEFORE a constructing lookup. Changed versions, swapped/deleted/null/undefined slots and
+accessor-backed metadata refuse without installing another pool; original cleanup stays.
+Both missing checks fail before correction; final focused78/strict checks pass. Complete
+frontend3101/static/build now pass on this correction. Read-only re-review found no remaining B/H/M
+after the one-time snapshot correction. Root history capacity is also confirmed still open:
+mode8 does not remove Root actions, and12-position reservation headroom can refuse before
+its32-entry map is full. NEXT records the reviewed explicit-certification design.
 
 ## Broker41 peer-local media failure (26 October; native execution pending, App OFF)
 

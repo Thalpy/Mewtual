@@ -8,10 +8,10 @@ End fences and joins exact original native/broker work, including lost activatio
 and internally published channels without returned handles. Actual selected-key job return
 retains both fees and lookup; early retired outcomes are not cleanup. Focused408 plus actual
 broker/adapter regressions and strict checks pass; complete frontend3099/static/build pass
-(84.23s/zero diagnostics/39.89s). Actual native command logic + WebCrypto/private HTTP
+(final remount correction: frontend3101/zero diagnostics/build40.94s). Actual native command logic + WebCrypto/private HTTP
 bootstrap passes0.94s, including lost accepted activation and normal Work/Collect before
 forced teardown. Actual TCP failed-media/sibling preservation passes74.13s. Root3683/24,
-Clippy/fmt/no-ambient pass; native full/check/lint/current-source scan remain pending.
+Clippy/fmt/no-ambient pass; native full895, check/strict lint/fmt and current-source scan now pass.
 Fresh dependency audit remains red on inherited crypto-bigint0.5.5/RUSTSEC-2026-0387.
 
 This is still disconnected from App. Next add App lock/room/unmount ownership and private
@@ -22,6 +22,17 @@ complete effective policy. The earlier packaged Windows public-metadata probe re
 historical evidence; the new authenticated facade still needs actual WebView acceptance. Operational renewal/lifetime history capacity, member media relay,
 combined and independent physical acceptance remain open. App V2 remains OFF. HANDOVER has
 current exact validation; the sections below record preceding checkpoints.
+
+A current source audit confirms Root ActionQueue never removes published history; native
+mode8 collects native rows only. Its32-entry map and per-chain12-position reservation can
+refuse further work before the map reaches32; do not infer a supported peer count. Future
+Root collection needs an exact original capability captured before native parent removal,
+then the issued/ACKed Plan + actual mode8 row/destructor witness. Root whole-closed/drained
+and map-only Arc ownership alone are insufficient: ordinary Return already drops several
+Root Action references before native final issuance. Keep pair.chain, native tombstones,
+serials/replay/counters and Source attempt history; drop only ACKed/settled/no-input history
+outside guards after actual remaining owners return. Funding/worker composition and actual
+post-collection admission are required regressions; this extension is NOT implemented.
 
 ## Broker41 media failure isolation implemented; native execution next (26 October)
 

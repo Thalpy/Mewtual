@@ -3,7 +3,12 @@
 ## Native call facade (26 October; Broker42, App inactive)
 
 `windowVoiceAppCalls(invoke)` retains the exact native adapters/broker/controller across
-remounts; changed invoke or incompatible retained code requires reload. `prepare(server,
+remounts; changed invoke or incompatible retained code requires reload. Its version2 retained
+bundle stores the actual broker allocation. Cached lookup also validates that broker's API/
+version before reuse; an absent/null/swapped slot refuses BEFORE constructing any pool.
+The broker reference is sampled once, including for unsupported accessor-backed bundles.
+Version1 facade state requires reload; original negative cleanup remains available.
+`prepare(server,
 room)` returns an opaque call with `start`, `resume`, `close` and a fixed phase snapshot.
 One active/closing original is retained; an equal room reuses it and a conflicting room
 cannot allocate until actual closure returns. `start` coalesces; uncertain activation

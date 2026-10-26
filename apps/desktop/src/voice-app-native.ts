@@ -1,6 +1,6 @@
 /** Stable production composition. Ordinary IPC carries only fixed public owner/key
  * metadata; all byte-bearing action work stays in the retained authenticated channel. */
-import { windowVoiceCryptoBroker, type VoiceCryptoAdmission } from "./voice-crypto.ts";
+import { windowVoiceCryptoBroker, type VoiceCryptoAdmission, type VoiceCryptoBroker } from "./voice-crypto.ts";
 import { voiceJoinKeyNative } from "./voice-join-native.ts";
 import { voiceIpcNative } from "./voice-ipc-native.ts";
 import type { VoiceAppActivation, VoiceAppCalls, VoiceAppNative } from "./voice-app-session.ts";
@@ -19,19 +19,25 @@ export function voiceAppNative(invoke: Invoke): VoiceAppNative {
   });
 }
 const SLOT = Symbol.for("mewtual.voice.app-session.v1");
-type Retained = Readonly<{ version: 1; invoke: Invoke; calls: VoiceAppCalls }>;
+type Retained = Readonly<{ version: 2; invoke: Invoke; broker: VoiceCryptoBroker; calls: VoiceAppCalls }>;
 /** Remounts reuse the exact façade, adapters, broker, call and pending native work.
  * Replacing invoke or an incompatible retained implementation requires a reload. */
 export function windowVoiceAppCalls(invoke: Invoke, host: object = globalThis): VoiceAppCalls {
   const previous = (host as Record<symbol, Retained | undefined>)[SLOT];
   if (Object.hasOwn(host, SLOT)) {
-    if (!previous || previous.version !== 1 || previous.invoke !== invoke || !Object.isFrozen(previous) ||
-        !previous.calls || !Object.isFrozen(previous.calls) || typeof previous.calls.prepare !== "function" ||
-        typeof previous.calls.resume !== "function" || typeof previous.calls.close !== "function")
+    const broker = previous?.broker, calls = previous?.calls;
+    if (!previous || previous.version !== 2 || previous.invoke !== invoke || !Object.isFrozen(previous) ||
+        !broker || !calls || !Object.isFrozen(calls) || typeof calls.prepare !== "function" ||
+        typeof calls.resume !== "function" || typeof calls.close !== "function")
       throw new Error("voice application session changed; reload required");
-    return previous.calls;
+    // Do not let this outer cache bypass the retained broker's own version/API
+    // fence. Another allocation must never replace a pool with unresolved work.
+    if (windowVoiceCryptoBroker(privateOnly, host, undefined, broker) !== broker)
+      throw new Error("voice application broker changed; reload required");
+    return calls;
   }
-  const calls = windowVoiceCryptoBroker(privateOnly, host).nativeAppCalls(voiceAppNative(invoke), voiceJoinKeyNative(invoke), voiceIpcNative(invoke));
-  Object.defineProperty(host, SLOT, { value: Object.freeze({ version: 1, invoke, calls }) });
+  const broker = windowVoiceCryptoBroker(privateOnly, host);
+  const calls = broker.nativeAppCalls(voiceAppNative(invoke), voiceJoinKeyNative(invoke), voiceIpcNative(invoke));
+  Object.defineProperty(host, SLOT, { value: Object.freeze({ version: 2, invoke, broker, calls }) });
   return calls;
 }

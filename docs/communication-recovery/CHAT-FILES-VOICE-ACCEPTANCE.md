@@ -1,5 +1,23 @@
 # Chat, files and voice implementation evidence
 
+## Current combined validation (26 October; inactive V2)
+
+Root3683 passed/24 existing ignores; native890+5 ACL passed; frontend3101 passed. Strict
+Root/native Clippy, both fmt checks, native cargo check, current-native construction scan,
+no-ambient, strict helper TypeScript, frontend static checks and build40.94s pass. Root
+runtime/Cargo/locks/toolchain match the warm custody run byte-for-byte; the construction
+scanner was rerun against current native source. Native full includes actual facade bootstrap,
+failed-media preservation, onward discovery, signed-history recovery and notification receipt.
+Final remount lookup validates the original broker before construction; missing/null/swapped/
+accessor-backed cache state cannot publish another pool. Facadev1 HMR requires reload.
+
+Fresh cargo-deny FAILS inherited crypto-bigint0.5.5/RUSTSEC-2026-0387; bans/licenses/sources
+pass, no waiver. Docker static input audit passes; actual image/context build is unrun
+(Linux engine unavailable). Read-only review/re-review has no remaining actionable finding.
+App V2 stays OFF. These current checks supersede older pending/failed validation status;
+Root history capacity/renewal, App/actual RTC/mic/data channels, authenticated WebView,
+member relay and combined/physical acceptance remain open. No physical audio is established.
+
 ## Broker42 native bootstrap composition (26 October; App OFF)
 
 Implemented a separately paid window-retained metadata/controller/selected-key/channel/

@@ -3,7 +3,10 @@
 ## Retained bootstrap and End versus activation (26 October; inactive)
 
 A component remount must not activate a second controller beside original unresolved work.
-The new facade retains exact adapters and one active/closing call. Native prepare/activate
+The new facade retains exact adapters and one active/closing call. A cached facade also
+requires the same actual retained broker and its current version/API. Missing/null/deleted
+or swapped slots refuse before pool construction. Sampling the expected broker once keeps
+accessor-backed unsupported metadata from disabling that non-constructing check. Native prepare/activate
 replies are closed-shape public metadata; only the original candidate retries. On End,
 known native identities are revoked BEFORE joining activation, then again after its actual
 return. Original-controller End fences unknown call preparation; a late returned candidate
