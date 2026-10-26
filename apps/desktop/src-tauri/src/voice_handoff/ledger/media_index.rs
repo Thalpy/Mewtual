@@ -68,6 +68,18 @@ struct State {
     released: bool,
     collected: bool,
     history: History,
+    // Independently paid small provenance, never an Action/Row/Workflow backedge.
+    // Native row collection only requests Root GC; actual record return is separate.
+    root_history: Option<catcoms_sync::voice_v2::crypto_actions::PlanActionHistory>,
+}
+impl State {
+    fn history_collected(&self) -> bool {
+        matches!(self.history, History::Collected { .. })
+            && self
+                .root_history
+                .as_ref()
+                .is_some_and(|history| history.is_collected())
+    }
 }
 /// The selected snapshot has its own existing metadata Credit; it cannot keep its ended
 /// affine CallGrant alive. Session identity is fixed32B plus its Arc header. Everything
@@ -314,6 +326,7 @@ impl ResolvedRow {
                     released: false,
                     collected: false,
                     history: History::Live,
+                    root_history: None,
                 }),
                 root,
             }),
@@ -389,14 +402,11 @@ impl Ledger {
             .flatten()
             .filter(|entry| {
                 Arc::ptr_eq(&entry.selected, selected)
-                    && matches!(
-                        entry
-                            .state
-                            .lock()
-                            .unwrap_or_else(|error| error.into_inner())
-                            .history,
-                        History::Collected { .. }
-                    )
+                    && entry
+                        .state
+                        .lock()
+                        .unwrap_or_else(|error| error.into_inner())
+                        .history_collected()
             })
             .count()
     }
@@ -485,6 +495,7 @@ impl ResolvedRow {
                 released: true,
                 collected: false,
                 history: History::Live,
+                root_history: None,
             }),
             root,
         });

@@ -22,6 +22,11 @@ pub(in crate::voice_v2) struct ActionBinding {
 }
 redacted_debug!(ActionBinding, Direction);
 impl ActionBinding {
+    pub(in crate::voice_v2) fn original_plan_binding(
+        &self,
+    ) -> &Arc<super::super::chain::PlanBinding> {
+        self.intent.original.plan_binding()
+    }
     /// Call only after the original affine direction issue is held and before publication.
     /// Equal header/round labels never establish authority: the creating LocalJoin must also
     /// resolve its SAME stored intent and actual unpublished outgoing or retained token.

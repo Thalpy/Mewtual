@@ -1,6 +1,22 @@
 # Chat, files and voice implementation evidence
 
-## Current combined validation (26 October; inactive V2)
+## Root history extension under validation (26 October; inactive)
+
+Exact original Plan/native final ACK plus actual row collection now schedules Root terminal
+history GC through ordinary maintenance. Mode8 also waits for actual Action/delivery fixed
+funding return. No cap, attempt, identity, replay, namespace or Source allowance resets.
+Focused707 V2 Rust pass19.24s; earlier fixture failures are corrected using the actual
+Finish plan and public original-expiry collection. Actual native HTTP/TCP passes43.05s
+(scratch and independent Root owner),41.97s (automatic collection),78.88s (two peers on
+original Session), with controlled RTC. Both original metadata layout gates pass. Complete
+frontend3101/static/build35.22s, both formatting and no-ambient pass. Native check/strict
+lint and full native/Root suites are running serially. Fresh dependency audit still FAILS
+inherited RUSTSEC-2026-0387; no waiver. Final gates remain pending; source fd474bc6 below
+remains the last completely validated checkpoint. Read-only re-review has no open finding.
+App/RTC/mic/audio/data channels, renewal, authenticated WebView, member relay and combined/
+physical acceptance remain open. External resume and dependency remediation are separate.
+
+## Prior combined validation fd474bc6 (26 October; inactive V2)
 
 Root3683 passed/24 existing ignores; native890+5 ACL passed; frontend3101 passed. Strict
 Root/native Clippy, both fmt checks, native cargo check, current-native construction scan,

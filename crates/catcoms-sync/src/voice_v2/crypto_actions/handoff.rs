@@ -36,6 +36,15 @@ pub struct ProtectedCryptoPlan {
 redacted_debug!(ProtectedCryptoPlan);
 
 impl ProtectedCryptoPlan {
+    /// Capture the exact already-retired plan without retaining its native parent.
+    /// Native must NOT request collection until its Plan final is issued/ACKed and
+    /// every removed native row/destructor has returned. Ordinary Return is insufficient.
+    pub fn action_history(
+        &self,
+        retirement: &PlanRetirement,
+    ) -> Result<super::super::chain::PlanActionHistory, VoiceError> {
+        super::super::chain::PlanActionHistory::capture(&self.binding, retirement)
+    }
     /// Retain only the existing confirmed key domain after authenticated native adoption.
     /// This consumes no progress capacity and renews no finite Claim/action permission.
     /// The trusted adapter must bind the exact original Session/parent/Claim receipt and

@@ -23,16 +23,19 @@ historical evidence; the new authenticated facade still needs actual WebView acc
 combined and independent physical acceptance remain open. App V2 remains OFF. HANDOVER has
 current exact validation; the sections below record preceding checkpoints.
 
-A current source audit confirms Root ActionQueue never removes published history; native
-mode8 collects native rows only. Its32-entry map and per-chain12-position reservation can
-refuse further work before the map reaches32; do not infer a supported peer count. Future
-Root collection needs an exact original capability captured before native parent removal,
-then the issued/ACKed Plan + actual mode8 row/destructor witness. Root whole-closed/drained
-and map-only Arc ownership alone are insufficient: ordinary Return already drops several
-Root Action references before native final issuance. Keep pair.chain, native tombstones,
-serials/replay/counters and Source attempt history; drop only ACKed/settled/no-input history
-outside guards after actual remaining owners return. Funding/worker composition and actual
-post-collection admission are required regressions; this extension is NOT implemented.
+The next Root history slice is implemented but its final gates remain pending. Exact
+native issued/ACKed Plan-final proof captures an original PlanActionHistory capability;
+only actual native collector/scratch destruction requests Root GC. Existing maintenance
+unlinks eligible settled/ACKed/no-input/no-permit/no-lender records and the SDP seal cache,
+outside Engine/native guards. A last-field real RecordFunding counter keeps mode8 pending
+through retained Action and delivery observers until complete fixed-credit destruction.
+Pair.chain, original intent/issuance stamps, native tombstones, serial/cursor/replay/counters,
+namespaces and Source attempts remain; the first SDP namespace never becomes unused again.
+Request means irreversible forget-in-progress: registered lookup may refuse after unlinking
+before actual external-owner return; direct metadata on the retained Action survives.
+No Actor RPC, capacity/attempt/deadline reset or universal peer allowance is added. Its
+32-slot/12-position reservation can still refuse before the map reaches32; other pair/media/
+namespace lifetime bounds remain. HANDOVER records current focused and pending gates.
 
 ## Broker41 media failure isolation implemented; native execution next (26 October)
 
@@ -173,10 +176,10 @@ Then isolate FAILED precompaction negotiation cleanup without whole-Session tear
 rows remain discoverable; no generic terminal skip, slot-only filter, attempt refund or fresh
 authority may replace exact old final proof and actual drainage.
 
-Root retains32 combined pending/terminal Actions per join; normal complete pair consumes6.
-Mode8 does not free that Root budget. Measure supported capacity before native admission;
-16-incarnation/record limits are not16 supported completed peers, much less50. Preserve all
-caps until a separately reviewed Root history-retirement design exists.
+Root has32 combined pending/terminal Action positions and12-position original reservations.
+The new, not-yet-finally-validated mode8 retirement reclaims exact certified fixed history
+after real owners return. It resets neither pair/namespace/media limits nor any allowance;
+16-incarnation/record limits do not establish16 supported completed peers, much less50.
 
 Operational renewal/Ready, App native/RTC/tracks composition and legacy-mode isolation,
 TURN/member relay, combined acceptance and physical independent audio/network evidence still

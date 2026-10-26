@@ -22,6 +22,7 @@ const CONTEXT_BYTES: usize = 4096;
 const CONFIRM_BYTES: usize = 512;
 const RECORD_BYTES: usize = 1024;
 mod handoff;
+mod history;
 mod results;
 mod sdp_engine;
 mod sdp_input;
@@ -34,7 +35,7 @@ pub use snapshot::{CryptoActionSnapshot, CryptoActionSnapshotPermit, CryptoActio
 pub(crate) mod slots;
 pub use super::chain::{
     ConfirmationControl, ConfirmationCustody, ConfirmationRetirement, EstablishedKeyCustody,
-    HandoffLoan, PlanRetirement,
+    HandoffLoan, PlanActionHistory, PlanRetirement,
 };
 pub use handoff::{ProtectedCryptoBinding, ProtectedCryptoPlan};
 pub(in crate::voice_v2) use results::ObservedSdpResult;
@@ -166,6 +167,9 @@ struct Engine {
 /// never retain a progress-backed PhaseLoan or the action itself. Keep it last in observers.
 pub(in crate::voice_v2) struct RecordFunding {
     _credit: Credit,
+    // LAST, after the actual fixed credit. Delivery/result observers share this record
+    // without retaining an Action, and must delay certified collection until real Drop.
+    _history: Option<super::chain::ActionHistoryCustody>,
 }
 
 #[must_use = "retain the preparation loan until all actual work and copies have drained"]
@@ -969,6 +973,12 @@ impl ActionQueue {
             Input::SealSdp(flight) => (CryptoOperation::SealSdp, flight.plaintext.len() + 16),
             Input::OpenSdp(packet) => (CryptoOperation::OpenSdp, packet.ciphertext().len() - 16),
         };
+        let history = prepared.binding.clone().or_else(|| {
+            prepared
+                .sdp_binding
+                .as_ref()
+                .map(|binding| binding.original_plan_binding().clone())
+        });
         let action = Arc::new(CryptoAction {
             serial: prepared.serial,
             input_tag,
@@ -993,6 +1003,7 @@ impl ActionQueue {
             _slot: prepared.slot,
             _record: Arc::new(RecordFunding {
                 _credit: prepared.record,
+                _history: history.map(super::chain::ActionHistoryCustody::begin),
             }),
         });
         (prepared.key, action, prepared.issue)

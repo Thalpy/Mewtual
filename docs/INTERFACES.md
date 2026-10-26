@@ -1,5 +1,22 @@
 # Mewtual; Interfaces & Hooks Schema
 
+## Original Plan Root history collection (26 October; inactive, gates pending)
+
+Trusted Rust `ProtectedCryptoPlan::action_history(&PlanRetirement)` captures an opaque
+one-pointer `PlanActionHistory` only for the SAME allocation after irreversible whole-plan
+closure and actual old/successor drainage. Native retains it in the independently funded
+media entry before parent removal. `request_collection()` is permitted only after native
+checks its exact issued-and-ACKed Plan-kind proof AND its removal scratch really returns.
+The method merely latches existing Root maintenance work. `is_collected()` requires that
+request, zero actual fixed funding owners and continued real plan drainage; no current
+lease/Clock/renderer boolean substitutes for that observation.
+
+Mode8's positive receipt now certifies native row destruction AND actual Root fixed-record
+return. Capacity is retryable on the SAME capability. Once requested, forgetting is
+irreversible: registered-action wrappers can refuse after unlinking while external owners
+still delay completion. Direct historical metadata on their actual Action remains. No
+new wire fields, cap/attempt/identity/deadline resets or new actor RPC are introduced.
+
 ## Native call facade (26 October; Broker42, App inactive)
 
 `windowVoiceAppCalls(invoke)` retains the exact native adapters/broker/controller across

@@ -3,7 +3,7 @@
 //! late child/history replies and final channel collection. No Action or Workflow is retained.
 use super::*;
 use catcoms_sync::voice_v2::crypto_actions::{
-    ConfirmationControl, PlanRetirement, ProtectedCryptoPlan,
+    ConfirmationControl, PlanActionHistory, PlanRetirement, ProtectedCryptoPlan,
 };
 
 pub(super) struct Plan {
@@ -16,6 +16,12 @@ pub(super) struct Plan {
     pub(super) transition: Option<super::transition::Claim>,
 }
 impl Plan {
+    /// Fixed original identity only. Caller must additionally certify the exact native
+    /// Plan-final delivery/ACK and actual native row collection before requesting GC.
+    pub(super) fn action_history(&self) -> Result<PlanActionHistory, VoiceError> {
+        self.identity
+            .action_history(self.retirement.as_ref().ok_or(VoiceError::Capacity)?)
+    }
     pub(super) fn capture(action: &CryptoAction) -> Result<Self, VoiceError> {
         Ok(Self {
             identity: action.protected_plan()?,

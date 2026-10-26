@@ -1,5 +1,22 @@
 # Threat model; client integrity & enforcement boundaries
 
+## Root history certification versus real return (26 October; inactive, gates pending)
+
+Whole closure, map absence, Arc counts, ordinary Return and elapsed time are insufficient
+to forget Root terminal history. Only a same-Plan/same-retirement capability, exact native
+issued/ACKed Plan proof and actual affine row-collector destruction can request it. Root
+then requires settled/non-preparing/no-input/no-permit/no-lender and exact terminal ACK,
+with try-lock refusal preserving history. Fixed-funding last-owner custody publishes only
+after complete Credit destruction, including independent retained SDP-delivery observers.
+Weak upgrades retain real Action/slot/funding and cannot make mode8 complete early.
+
+Forgetting is irreversible; registry historical lookup may refuse during progress, without
+granting a fresh action. Original chain/intent and issuance stamps, native tombstone, replay,
+namespaces, packet counters, serials and Source attempts remain. SDP cache removal preserves
+the closed first-namespace stamp. No label-only/legacy match, general terminal eviction,
+attempt refund, capacity increase, or authority renewal is introduced. Other lifetime caps
+and the inactive App/RTC/relay/physical boundaries remain separate.
+
 ## Retained bootstrap and End versus activation (26 October; inactive)
 
 A component remount must not activate a second controller beside original unresolved work.

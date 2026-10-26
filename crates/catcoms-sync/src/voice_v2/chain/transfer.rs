@@ -116,6 +116,9 @@ pub(in crate::voice_v2) struct SuccessorProof(Arc<PlanBinding>);
 #[derive(Clone)]
 pub(in crate::voice_v2) struct OriginalPlanObservation(Arc<PlanBinding>);
 impl OriginalPlanObservation {
+    pub(in crate::voice_v2) fn plan_binding(&self) -> &Arc<PlanBinding> {
+        &self.0
+    }
     pub(in crate::voice_v2) fn belongs_to(&self, binding: &Arc<PlanBinding>) -> bool {
         Arc::ptr_eq(&self.0, binding)
     }

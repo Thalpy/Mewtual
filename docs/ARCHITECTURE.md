@@ -1,5 +1,21 @@
 # Mewtual; Architecture
 
+## Certified Root history collection (26 October; inactive, gates pending)
+
+After exact native Plan-final issuance/ACK and actual native row destruction, a small
+original PlanBinding capability requests collection through existing Root maintenance.
+Callback-free try-Engine/try-input checks select only settled, non-preparing, ACKed Actions
+without input/permit/lender. Each map/cache Arc drops outside those guards. Last-field
+custody in the original fixed RecordFunding counts actual Action/delivery owners through
+complete credit destruction; native mode8 waits for that real return as well as native GC.
+No Actor await, new scheduling pool or Row/Workflow/Exchange/Phase backedge is added.
+
+Irreversible forget-in-progress may refuse registered historical recovery before the final
+positive collection receipt, while direct retained Action metadata remains readable.
+Original closed chain/intent/issuance stamps, serial/cursor, namespaces/replay/counters and
+Source attempts remain. SDP's cache clears without making its first namespace unused.
+Existing limits/reservation headroom and all independent lifetime bounds still apply.
+
 ## Retained application bootstrap (26 October; inactive V2)
 
 Broker42 constructs one window-retained native-call facade under a separate8KiB process

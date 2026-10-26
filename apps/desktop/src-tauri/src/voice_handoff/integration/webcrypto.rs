@@ -953,6 +953,8 @@ impl Endpoint {
             .indexed_media(&selected, route.session().identity(), &request)
             .unwrap()
             .unwrap();
+        let root_history_owner =
+            held_collector.then(|| ledger.hold_root_history_for_test(&selected, parent_id));
         // Real retained row owners, not renderer drained booleans, delay reclamation.
         let child = ledger
             .lookup_original(
@@ -980,7 +982,10 @@ impl Endpoint {
             "same-purpose Begin must not resume while history retires"
         );
         let clock = crate::voice_runtime(&self.state).clock();
-        let limit = clock.monotonic_ms() + 1000;
+        // Mode8 now certifies TWO real collectors: native's250ms cadence (possibly
+        // child then parent) and Root's1000ms cadence. Bound the composed operation,
+        // retaining the deterministic negative barriers rather than relying on timing.
+        let limit = clock.monotonic_ms() + 3000;
         if held_collector {
             let mut batch = loop {
                 if let Some(batch) = ledger.test_hold_collection() {
@@ -1014,6 +1019,15 @@ impl Endpoint {
                 "index absence must not overtake another collector's last destructor"
             );
             drop(batch); // Only actual ticket Drop may now publish completion.
+            assert!(target.native_history_collected_for_test());
+            assert!(
+                matches!(target.retire_history(), Err(VoiceError::Capacity)),
+                "native row destruction cannot overtake the actual independent Root Action owner"
+            );
+            let original = root_history_owner.as_ref().unwrap();
+            assert!(original.is_settled());
+            assert!(original.input().is_err());
+            assert!(original.admit_engine(original.engine_bytes()).is_err());
         } else {
             drop(parent);
             assert!(
@@ -1027,13 +1041,17 @@ impl Endpoint {
             // No bootstrap/setup/explicit-GC call follows. Ordinary service maintenance
             // alone must make this same retained request observable as completed.
         }
+        drop(root_history_owner); // Only actual last Root ownership can complete its GC.
         let receipt = loop {
             match target.retire_history() {
                 Ok(receipt) => break receipt,
                 Err(VoiceError::Capacity) if clock.monotonic_ms() < limit => {
                     clock.sleep(std::time::Duration::from_millis(5)).await
                 }
-                Err(error) => panic!("original native history retirement failed: {error:?}"),
+                Err(error) => panic!(
+                    "original history retirement failed: {error:?}; native_collected={}; Root funding still pending",
+                    target.native_history_collected_for_test()
+                ),
             }
         };
         assert!(receipt.admitted && !receipt.current && !receipt.closed && !receipt.released);

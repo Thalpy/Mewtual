@@ -1,6 +1,42 @@
 # Mewtual; Handover
 
-## Validated communication checkpoint (26 October; App V2 OFF)
+## Root terminal history retirement (26 October; implementation, validation pending)
+
+Native mode8 now captures one small exact `PlanActionHistory` from the original protected
+Plan and SAME fully drained `PlanRetirement`, after checking its issued/ACKed Plan-final
+proof. Only the affine native collector, after actual row/scratch destruction, requests
+Root collection. Existing Root maintenance removes settled, non-preparing, ACKed history
+with no input/permit/lender, including the independent SDP-seal cache. Every actual Action
+slot and fixed payment returns through its existing destructor. A last-field guard counts
+the actual `RecordFunding`, including retained SDP delivery observers; mode8 stays Capacity
+until native collection AND real Root record return. No extra Actor/RPC task is introduced.
+
+Requesting collection is irreversible forget-in-progress: registry wrappers may refuse an
+unlinked Action before its final external observer returns. Direct metadata on that actual
+retained Action survives. Pair/chain/intent identity, issuance stamps, serial/cursor, replay,
+namespace/counters and Source attempts are preserved; old requests cannot recreate work.
+The32-slot/12-position reservation and512KiB/2MiB limits are unchanged. This reclaims one
+class of history; it establishes no universal completed-peer or renewed-call allowance.
+
+Read-only design/adversarial review and short re-review have no remaining actionable
+finding. Focused707 V2 Rust tests pass19.24s, including actual SDP/cache/delivery custody,
+unpublished unwind, pressure retry on the same binding and observation INSIDE fixed Credit
+destruction. Earlier new-fixture failures are corrected: capture the real Finish plan and
+drive public packet collection through its original expiry before asserting drainage.
+Native authenticated HTTP/TCP acceptance passes: scratch/independent Root-owner barrier
+43.05s, ordinary automatic collection41.97s and two original-Session peers78.88s. RTC is
+controlled; these establish neither actual browser media nor audible/network acceptance.
+The native2KiB index and infrastructure layout gates pass, with no fee/cap increase.
+Complete frontend3101 passes101.08s; static checks have zero diagnostics; production build
+passes35.22s. Both formatting and no-ambient gates pass. Native check/strict lint and full
+native/Root suites are running serially; final validation is not yet complete. Fresh audit
+still FAILS inherited RUSTSEC-2026-0387/crypto-bigint0.5.5; no waiver. Prior fully validated
+checkpoint below is source fd474bc6.
+App integration, configured RTC/mic/audio/data channels, operational renewal, authenticated
+WebView acceptance, member media relay and combined/independent physical acceptance remain
+unfinished. App V2 remains OFF; one desktop is available. External resume is separately owned.
+
+## Prior validated communication checkpoint fd474bc6 (26 October; App V2 OFF)
 
 PRs65/66 add peer-local failed-media retirement and retained native call bootstrap/shutdown.
 The final facade remount checks preserve the exact broker/version before any constructing

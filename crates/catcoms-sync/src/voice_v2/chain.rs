@@ -13,7 +13,7 @@ use super::resources::{
     ByteBudget, Credit, GroupForwardLanes, Reservation, ResourceKind, Resources, WorkLane,
 };
 use super::{CallLease, DeviceId, Nonce, Scope, VoiceError};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, Weak};
 
 pub(super) const ROW_BYTES: usize = 1536;
@@ -29,6 +29,7 @@ mod established;
 /// Separately prepaid native SDP storage; no SDK or protocol permission by itself.
 pub mod sdp_handoff;
 pub use established::EstablishedKeyCustody;
+mod history;
 mod lifecycle;
 mod outgoing;
 mod ready;
@@ -37,6 +38,8 @@ mod transfer;
 mod transition;
 pub(crate) use admission::ConfirmationAdmission;
 pub(super) use admission::ConfirmationConsent;
+pub(in crate::voice_v2) use history::ActionHistoryCustody;
+pub use history::PlanActionHistory;
 pub use lifecycle::PlanRetirement;
 pub(in crate::voice_v2) use lifecycle::SuccessorCustody;
 pub(in crate::voice_v2) use start::{StartAdmission, StartCandidate};
@@ -108,6 +111,12 @@ pub(super) struct PlanBinding {
     // Set only by exact authenticated LOW Ready publication. Local Finish/ACK/Established
     // never imply remote readiness. This stops old Source work without closing Await.
     low_ready: AtomicBool,
+    // Native certifies terminal history only AFTER its exact Plan-final ACK and actual
+    // row destruction. This request never grants an effect or resets an issued position.
+    history_requested: AtomicBool,
+    // Actual independently funded records, including result/delivery observers which
+    // outlive their Action. The last-field publisher runs after their fixed fee returns.
+    history_records: AtomicUsize,
     _metadata: Credit,
 }
 impl PlanBinding {
@@ -570,6 +579,8 @@ impl PreparedChain {
             whole_closed: AtomicBool::new(false),
             successor_busy: AtomicBool::new(false),
             low_ready: AtomicBool::new(false),
+            history_requested: AtomicBool::new(false),
+            history_records: AtomicUsize::new(0),
         });
         let history = Arc::new(HistoryPlan {
             binding: binding.clone(),

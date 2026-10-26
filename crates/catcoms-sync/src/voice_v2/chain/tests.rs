@@ -129,6 +129,10 @@ fn fixed_metadata_allowance_covers_retained_owner_layouts() {
         size_of::<PlanRetirement>(),
         PlanRetirement::OBSERVER_MEMORY_BYTES
     );
+    assert_eq!(
+        size_of::<PlanActionHistory>(),
+        PlanActionHistory::OBSERVER_MEMORY_BYTES
+    );
 }
 
 #[test]
@@ -604,6 +608,15 @@ fn publish_unregistered(
     slots: &Arc<slots::Slots>,
 ) -> (ActionQueue, Arc<CryptoAction>) {
     let mut queue = ActionQueue::with_slots(slots.clone());
+    let action = publish_into(chain, pool, &mut queue);
+    (queue, action)
+}
+/// Several original plans on the SAME bounded join table, without creating a new pool.
+pub(super) fn publish_into(
+    chain: &Arc<PreparedChain>,
+    pool: &Arc<Resources>,
+    queue: &mut ActionQueue,
+) -> Arc<CryptoAction> {
     let (history, budget) = chain.prepare_derive().unwrap();
     let (payload_bytes, engine_bytes) = super::super::crypto_actions::derive_bytes(64).unwrap();
     let prepared = queue
@@ -630,7 +643,7 @@ fn publish_unregistered(
     .unwrap()
     .with_pending(chain.lease())
     .unwrap();
-    let action = queue
+    queue
         .publish_chain_derive(
             prepared,
             PairSetup {
@@ -642,8 +655,7 @@ fn publish_unregistered(
             },
             authority,
         )
-        .unwrap();
-    (queue, action)
+        .unwrap()
 }
 
 #[test]

@@ -951,6 +951,20 @@ impl LocalJoin {
                 // Same arm-versus-close CAS as process Workflow collection. Keeping transfer
                 // custody alive does not change pair.deadline or any old action/source grant.
                 chain.collect_expired(clock.monotonic_ms());
+                if let Some(binding) = chain.requested_action_history() {
+                    // This separate lost-reply cache owns the same paid Action. Drop it
+                    // only at native-certified irreversible forgetting, under the same
+                    // settled/ACK eligibility as the queue. Original intent/chain/issue
+                    // stamps stay, so an old request cannot allocate a replacement.
+                    if pair
+                        .sdp_seal
+                        .as_ref()
+                        .is_some_and(|action| action.certified_history_removable(binding))
+                    {
+                        drop(pair.sdp_seal.take());
+                    }
+                    self.actions.collect_plan_history(binding);
+                }
                 if chain.retired_whole_confirmation_binding().is_some() {
                     // No new old-plan publication can be authorized. Cache owners
                     // must not pin a closed Workflow until signed expiry; actual

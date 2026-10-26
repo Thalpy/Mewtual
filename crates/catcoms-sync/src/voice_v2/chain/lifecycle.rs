@@ -14,8 +14,11 @@ impl PlanRetirement {
     pub fn is_drained(&self) -> bool {
         plan_drained(&self.binding)
     }
+    pub(super) fn belongs_to(&self, binding: &Arc<PlanBinding>) -> bool {
+        Arc::ptr_eq(&self.binding, binding)
+    }
 }
-fn plan_drained(binding: &PlanBinding) -> bool {
+pub(super) fn plan_drained(binding: &PlanBinding) -> bool {
     binding.workflow_drained.load(Ordering::Acquire)
         && !binding.successor_busy.load(Ordering::Acquire)
 }

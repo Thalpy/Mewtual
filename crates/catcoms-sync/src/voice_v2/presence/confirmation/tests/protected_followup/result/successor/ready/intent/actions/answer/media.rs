@@ -13,9 +13,10 @@ struct Completed {
     receipt: CryptoResultReceipt,
     keys: EstablishedKeyCustody,
     control: Option<crate::voice_v2::chain::ConfirmationControl>,
+    plan: crate::voice_v2::crypto_actions::ProtectedCryptoPlan,
 }
 fn completed(ack: bool, settle: bool) -> Completed {
-    let (mut p, keys) = confirmed_with_keys();
+    let (mut p, keys, plan) = confirmed_with_keys_and_plan();
     let control = p.f.high.join.confirmations.pairs[&p.f.id]
         .chain
         .as_ref()
@@ -78,6 +79,7 @@ fn completed(ack: bool, settle: bool) -> Completed {
         receipt,
         keys,
         control: Some(control),
+        plan,
     }
 }
 fn prepare(c: &Completed) -> Result<Arc<SdpMedia>, VoiceError> {
@@ -200,6 +202,69 @@ fn admitted_media_survives_only_old_negotiation_retirement_not_call_revocation()
     c.p.f.high.lease.revoke();
     assert!(!media.is_current());
     assert!(media.was_admitted());
+}
+
+#[test]
+fn certified_root_history_releases_sdp_cache_but_delivery_and_issued_stamp_survive() {
+    let mut c = completed(true, true);
+    let media = prepare(&c).unwrap();
+    admit(&c, &media, |step| step.commit()).unwrap();
+    let delivery = c
+        .open
+        .recover_sdp_open_history()
+        .unwrap()
+        .unwrap()
+        .delivery
+        .unwrap();
+    c.phase.close();
+    c.keys.close_successor_effects();
+    let retirement = c.control.take().unwrap().retire_all();
+    // Native Plan final already requires actual old packet/Source drainage. This unit
+    // fixture has no transport flights, but still owns ordinary SDP packet caches until
+    // their ORIGINAL expiry. Drive the public collector; elapsed time alone is no proof.
+    c.p.f.clock.advance_ms(30_000);
+    c.p.f.high.join.collect_expired(&c.p.f.clock);
+    assert!(retirement.is_drained());
+    let history = c.plan.action_history(&retirement).unwrap();
+    let pair = &c.p.f.high.join.confirmations.pairs[&c.p.f.id];
+    assert!(
+        pair.sdp_seal.is_some(),
+        "ordinary retirement retains historical cache"
+    );
+    history.request_collection(); // Trusted native certification is supplied by this fixture.
+    c.p.f.high.join.collect_confirmations(&c.p.f.clock);
+    assert!(c.p.f.high.join.confirmations.pairs[&c.p.f.id]
+        .sdp_seal
+        .is_none());
+    assert!(c.p.f.high.join.actions.key_of(&c.seal).is_none());
+    assert!(c.p.f.high.join.actions.key_of(&c.open).is_none());
+    assert!(
+        c.p.f.high.join.has_initial_sdp_seal(c.p.f.id),
+        "forgetting cannot reserve a fresh namespace"
+    );
+    assert!(
+        !history.is_collected(),
+        "actual outside Action owners still retain their original fees"
+    );
+    let before = c.p._runtimes[1].resources().counts();
+    assert!(answer(&mut c.p, &c.intent, &delivery, b"v=0\r\n", |_, _| Ok(())).is_err());
+    assert_eq!(
+        c.p._runtimes[1].resources().counts(),
+        before,
+        "old factory cannot renew work or payment"
+    );
+    assert!(
+        media.is_current(),
+        "Root history is independent from admitted indexed media"
+    );
+    drop((c.seal, c.open));
+    assert!(
+        !history.is_collected(),
+        "actual retained SdpDelivery keeps its same fixed payment"
+    );
+    drop(delivery);
+    assert!(history.is_collected());
+    assert!(media.is_current());
 }
 
 #[test]

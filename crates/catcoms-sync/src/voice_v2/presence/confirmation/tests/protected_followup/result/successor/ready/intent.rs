@@ -6,6 +6,14 @@ use crate::voice_v2::chain::EstablishedKeyCustody;
 use crate::voice_v2::sdp::InitialSdpIntent;
 
 fn confirmed_with_keys() -> (ProtectedFixture, EstablishedKeyCustody) {
+    let (p, key, _) = confirmed_with_keys_and_plan();
+    (p, key)
+}
+fn confirmed_with_keys_and_plan() -> (
+    ProtectedFixture,
+    EstablishedKeyCustody,
+    crate::voice_v2::crypto_actions::ProtectedCryptoPlan,
+) {
     let (mut p, finish) = super::super::super::transition::ready_to_finish();
     let (object, plain) = protected_seal(&mut p.f.low, &p.low, &finish, &p.f.clock);
     let (_, action) = admit(&mut p.f.high, &p.high, object, &p.f.clock);
@@ -23,7 +31,7 @@ fn confirmed_with_keys() -> (ProtectedFixture, EstablishedKeyCustody) {
     );
     let custody = plan.confirmation_custody(&control, 1_000).unwrap();
     let key = plan.established_key_custody(&custody, 1_000).unwrap();
-    (p, key)
+    (p, key, plan)
 }
 fn prepare_native_ready(p: &mut ProtectedFixture) {
     let signer = Signer::original(p);

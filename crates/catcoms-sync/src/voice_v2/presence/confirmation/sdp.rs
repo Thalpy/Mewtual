@@ -90,7 +90,16 @@ impl LocalJoin {
         self.confirmations
             .pairs
             .get(&handshake)
-            .is_some_and(|pair| pair.sdp_seal.is_some())
+            .is_some_and(|pair| {
+                // A certified forgotten first round is permanently closed, not unused.
+                // In particular the Root wrapper must not reserve another Answer
+                // namespace merely because the old heavyweight Action was collected.
+                pair.sdp_seal.is_some()
+                    || pair
+                        .chain
+                        .as_ref()
+                        .is_some_and(|chain| chain.requested_action_history().is_some())
+            })
     }
 
     /// One native LOW Offer on the original inactive successor. All input/packet/history
