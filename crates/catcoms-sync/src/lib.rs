@@ -13534,7 +13534,10 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         // The helper does not trust the KeyPackage, but it does need the leaf identity to prove
         // that it has actually applied this exact Add before it becomes the new member's first
         // catch-up path. Full admission validation remains exclusively the inviter's job.
-        let Ok(key_package) = self.device.parse_key_package(&kp_bytes) else {
+        let Ok(key_package) = self
+            .device
+            .parse_key_package(&kp_bytes, self.clock.now_ms())
+        else {
             return Vec::new();
         };
         let joiner_device =
@@ -14184,7 +14187,10 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         self.record_join_attempt(&from, nonce.as_ref(), outcome);
         if outcome == JoinOutcome::Admitted {
             if let Ok((_, key_package)) = decode_join_req(data) {
-                if let Ok(package) = self.device.parse_key_package(&key_package) {
+                if let Ok(package) = self
+                    .device
+                    .parse_key_package(&key_package, self.clock.now_ms())
+                {
                     self.note_member_finalization_candidate(
                         from,
                         DeviceId::from_public_key_bytes(&key_package_signature_key(&package)),
@@ -14327,7 +14333,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         }
         let key_package = self
             .device
-            .parse_key_package(&kp_bytes)
+            .parse_key_package(&kp_bytes, now)
             .map_err(|_| JoinOutcome::AdmissionFailed)?;
         self.group
             .validate_invite_binding(&key_package, &invite)
@@ -14380,7 +14386,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         if !self.invite_policy_matches(invite) {
             return None;
         }
-        let key_package = self.device.parse_key_package(kp_bytes).ok()?;
+        let key_package = self.device.parse_key_package(kp_bytes, now).ok()?;
         let base_authenticator = self.group.epoch_authenticator_id();
         self.snapshot_epoch_keys();
         let outcome = self
@@ -14589,7 +14595,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         if self.ledger.check(&invite, now).is_err() {
             return;
         }
-        let Ok(key_package) = self.device.parse_key_package(&kp_bytes) else {
+        let Ok(key_package) = self.device.parse_key_package(&kp_bytes, now) else {
             return;
         };
         if self
@@ -14831,8 +14837,8 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         // 9. The expensive part: the KeyPackage parses, its leaf key is the request key, and its
         //    credential binds it to (this group, THIS certificate); so a relay cannot swap a
         //    KeyPackage minted against a different certificate into this admission.
-        let Ok(key_package) = self.device.parse_key_package(kp_bytes) else {
-            return Err("malformed key package");
+        let Ok(key_package) = self.device.parse_key_package(kp_bytes, self.clock.now_ms()) else {
+            return Err("malformed or too short-lived key package");
         };
         if catcoms_mls::key_package_signature_key(&key_package) != pubkey {
             return Err("key package leaf key does not match the request");
@@ -14947,7 +14953,10 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         kp_bytes: &[u8],
     ) -> Option<(Vec<u8>, Vec<u8>, [u8; 64])> {
         self.policy_admission_ready().ok()?;
-        let key_package = self.device.parse_key_package(kp_bytes).ok()?;
+        let key_package = self
+            .device
+            .parse_key_package(kp_bytes, self.clock.now_ms())
+            .ok()?;
         let bind = device_bind_nonce(cert);
         // Re-check the leaf binding at the moment of the Add (a queued request may have waited).
         self.group

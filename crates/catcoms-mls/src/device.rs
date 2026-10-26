@@ -9,7 +9,7 @@ use openmls_rust_crypto::OpenMlsRustCrypto;
 use tls_codec::{Deserialize as _, Serialize as _};
 
 use crate::config::{capabilities, CIPHERSUITE};
-use crate::invite::MembershipCredential;
+use crate::invite::{InviteError, MembershipCredential};
 use crate::{proto, MlsError};
 
 /// Serialize a KeyPackage for transport (so a joiner can send it to an inviter).
@@ -17,6 +17,36 @@ pub fn serialize_key_package(key_package: &KeyPackage) -> Result<Vec<u8>, MlsErr
     MlsMessageOut::from(key_package.clone())
         .tls_serialize_detached()
         .map_err(proto)
+}
+
+/// The shortest time a joiner's KeyPackage must remain valid after it is admitted: 60 days.
+///
+/// openmls checks an added KeyPackage's lifetime against the wall clock on **every** member that
+/// processes the Add, not only on the committer, and that includes a member replaying the Add from
+/// the commit log long afterwards. There is no production switch to skip it. So a joiner that signs
+/// a KeyPackage valid now but expiring a minute later is admitted by the committer, and then every
+/// member that was offline, or catches up later, can never apply that commit and stays at the old
+/// epoch until it is re-invited. The joiner chooses the lifetime, so this is checked at admission.
+///
+/// Honest KeyPackages carry openmls's default 84 days and are admitted within an hour of being
+/// minted, so they clear this with weeks to spare; the slack also absorbs a joiner clock that is
+/// behind the committer's. What remains: a member offline for longer than the remaining lifetime
+/// (at least 60 days, about 84 for honest joiners) still cannot replay that Add
+/// (`docs/design-mls-leaf-lifetime.md` section 6).
+///
+/// Only `not_after` is checked. A `not_before` set to "just now" makes members whose clocks lag
+/// refuse the Add only until their clocks pass it, which catch-up retries outlive; a short
+/// `not_after` is permanent.
+pub const MIN_ADMITTED_KEY_PACKAGE_LIFETIME_MS: u64 = 60 * 24 * 60 * 60 * 1000;
+
+/// Refuse a KeyPackage lifetime that ends sooner than [`MIN_ADMITTED_KEY_PACKAGE_LIFETIME_MS`]
+/// after `now_ms`.
+fn check_admitted_lifetime(lifetime: &Lifetime, now_ms: u64) -> Result<(), InviteError> {
+    let not_after_ms = lifetime.not_after().saturating_mul(1000);
+    if not_after_ms < now_ms.saturating_add(MIN_ADMITTED_KEY_PACKAGE_LIFETIME_MS) {
+        return Err(InviteError::KeyPackageExpiresTooSoon);
+    }
+    Ok(())
 }
 
 /// The raw Ed25519 **leaf signature key** of a parsed KeyPackage.
@@ -177,14 +207,21 @@ impl MlsDevice {
 
     /// Parse and validate a KeyPackage received over the wire (from a joiner),
     /// using this device's crypto backend.
-    pub fn parse_key_package(&self, bytes: &[u8]) -> Result<KeyPackage, MlsError> {
+    ///
+    /// `now_ms` comes from the caller's `catcoms-rt` `Clock`. Besides openmls's own checks
+    /// (signature, capabilities, and a lifetime covering the current time), the KeyPackage must
+    /// stay valid for at least [`MIN_ADMITTED_KEY_PACKAGE_LIFETIME_MS`] after `now_ms`; see that
+    /// constant for why.
+    pub fn parse_key_package(&self, bytes: &[u8], now_ms: u64) -> Result<KeyPackage, MlsError> {
         let message = MlsMessageIn::tls_deserialize(&mut &bytes[..]).map_err(proto)?;
-        match message.extract() {
+        let key_package = match message.extract() {
             MlsMessageBodyIn::KeyPackage(kp_in) => kp_in
                 .validate(self.provider.crypto(), ProtocolVersion::Mls10)
-                .map_err(proto),
-            _ => Err(MlsError::WrongMessageType),
-        }
+                .map_err(proto)?,
+            _ => return Err(MlsError::WrongMessageType),
+        };
+        check_admitted_lifetime(key_package.life_time(), now_ms)?;
+        Ok(key_package)
     }
 
     /// Sign raw bytes with this device's MLS leaf key (used for invite tokens).

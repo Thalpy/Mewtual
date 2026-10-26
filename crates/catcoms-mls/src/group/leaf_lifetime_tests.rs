@@ -12,6 +12,7 @@
 
 use super::*;
 use crate::config::{capabilities, CIPHERSUITE};
+use crate::invite::InviteError;
 use catcoms_wire::DocType;
 
 /// A lifetime that ended in 1970: expired whenever the test runs.
@@ -251,4 +252,73 @@ fn admitting_a_key_package_outside_its_lifetime_is_still_refused() {
         .add_member(&alice, kp)
         .expect("a fresh KeyPackage is still admitted after the refusals");
     assert_eq!(group.epoch(), epoch + 1);
+}
+
+/// The time an honest KeyPackage was minted, in ms: openmls back-dates `not_before` by one hour.
+/// Taken from the KeyPackage so no test reads a clock.
+fn minted_at_ms(key_package: &KeyPackage) -> u64 {
+    (key_package.life_time().not_before() + 3_600) * 1_000
+}
+
+fn wire(key_package: &KeyPackage) -> Vec<u8> {
+    crate::device::serialize_key_package(key_package).unwrap()
+}
+
+/// A joiner chooses its own KeyPackage lifetime. One that is valid now but ends soon would be
+/// admitted by the committer and then refused, permanently, by every member that processes the
+/// Add later (see `MIN_ADMITTED_KEY_PACKAGE_LIFETIME_MS`). The admission parse refuses it.
+///
+/// openmls still checks these KeyPackages against the real clock, so their windows are placed
+/// around an honest KeyPackage's mint time with days of margin; the policy itself is checked
+/// against an explicit `now_ms`.
+#[test]
+fn admission_refuses_a_key_package_that_expires_too_soon() {
+    use crate::device::MIN_ADMITTED_KEY_PACKAGE_LIFETIME_MS as FLOOR;
+    let alice = MlsDevice::generate().unwrap();
+    let group = ServerGroup::create(&alice).unwrap();
+    let joiner = MlsDevice::generate().unwrap();
+
+    // An honest KeyPackage clears the floor at its mint time and for weeks after.
+    let honest = joiner
+        .key_package_for_invite(&group.group_id(), [1; 16])
+        .unwrap();
+    let now = minted_at_ms(&honest);
+    alice.parse_key_package(&wire(&honest), now).unwrap();
+    alice
+        .parse_key_package(&wire(&honest), now + 20 * 24 * 3_600 * 1_000)
+        .expect("an honest KeyPackage admitted three weeks late still clears the floor");
+
+    // One second short of the floor is refused, exactly at it is admitted.
+    let not_before = honest.life_time().not_before();
+    let floor_secs = FLOOR / 1_000;
+    for (not_after, admitted) in [
+        (now / 1_000 + floor_secs - 1, false),
+        (now / 1_000 + floor_secs, true),
+    ] {
+        let kp = key_package_with_lifetime(
+            &joiner,
+            &group.group_id(),
+            Lifetime::init(not_before, not_after),
+        );
+        let parsed = alice.parse_key_package(&wire(&kp), now).map(|_| ());
+        if admitted {
+            parsed.expect("a KeyPackage valid for exactly the floor is admitted");
+        } else {
+            assert!(
+                matches!(
+                    parsed,
+                    Err(MlsError::Invite(InviteError::KeyPackageExpiresTooSoon))
+                ),
+                "a KeyPackage one second short of the floor must be refused, got {parsed:?}"
+            );
+        }
+    }
+
+    // Already expired: openmls's own wire validation refuses it before the floor is consulted.
+    let expired_kp = key_package_with_lifetime(&joiner, &group.group_id(), expired());
+    let parsed = alice.parse_key_package(&wire(&expired_kp), now).map(|_| ());
+    assert!(
+        matches!(&parsed, Err(MlsError::Protocol(e)) if e.contains("ifetime")),
+        "an expired KeyPackage is refused on the wire, got {parsed:?}"
+    );
 }

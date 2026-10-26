@@ -68,6 +68,12 @@ pub enum InviteError {
     /// operator and a test can tell this hostile commit shape from an ordinary binding mismatch.
     #[error("commit removes the designated committer and re-adds the same device (M-1)")]
     CommitterReAdded,
+    /// The joiner's KeyPackage stops being valid too soon after admission
+    /// ([`crate::device::MIN_ADMITTED_KEY_PACKAGE_LIFETIME_MS`]). Every member that processes the
+    /// Add later, including one replaying it from the commit log, re-checks that lifetime against
+    /// its own clock, so a short one would strand them all.
+    #[error("key package expires too soon after admission")]
+    KeyPackageExpiresTooSoon,
 }
 
 /// The binding carried in a joining device's MLS leaf credential.
