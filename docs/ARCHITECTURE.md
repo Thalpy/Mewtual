@@ -1,6 +1,6 @@
 # Mewtual; Architecture
 
-## Prepaid variable voice progression (26 October; inactive, validation pending)
+## Prepaid variable voice progression (26 October; inactive, complete suites pass)
 
 Before a protected chain exposes Derive, it now prepays one192KiB core and independent32KiB
 Ready capacity. A direct96KiB escrow in the original Workflow leaves exactly its earlier96KiB
@@ -16,7 +16,8 @@ close successor backing. The512KiB group/2MiB process ceilings and96KiB confirma
 limit are unchanged. This removes simultaneous reservation of separate96+192+32 variable
 peaks; it does not make fixed origin/member rows, history slots, later native storage, SDK,
 RTC or additional rounds universally admissible. Actual native second-peer acceptance and
-full checks remain pending. App V2 remains OFF.
+complete Root/native/frontend suites pass; HANDOVER records counts and the inherited
+dependency-audit failure. App V2 remains OFF.
 
 ## Exact Input cancellation ownership (26 October; inactive)
 
