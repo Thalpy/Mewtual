@@ -1,5 +1,20 @@
 # Next voice milestone: native result recovery
 
+## Current work: finish consumer gates, then browser terminal-handle detachment (26 October)
+
+Broker31 now uses real authenticated mode8, retains uncertainty/payment on pending or lost
+replies, and coalesces all observers under existing media custody. HANDOVER records the current
+HTTP pass, pending collector variant and final suites. The current browser fixed history still
+retains old handle graphs and remains paid. Do not refund it merely because native rows left.
+
+Next detach public plan/derivation/confirmation handles into independently paid terminal cells
+and sever every old heavy/native/chain backedge after actual joins and exact native collection.
+Then make one generation-bound active negotiation replaceable while indexed media persists on
+ONE paid physical Session/keys/counters/executor. Add bounded fair refresh and pair-local failure;
+whole End closes all peers first. Preserve actual Root16-incarnation/browser256KiB bounds and
+measure supported capacity before native Begin. Operational renewal, App/RTC tracks, relay and
+combined/physical acceptance follow. App V2 stays OFF; external download resume is separate.
+
 ## Current work: validate native history collection, then detach browser handles (26 October)
 
 Native mode8 and compact full-purpose tombstones now support removal after exact Plan-final/

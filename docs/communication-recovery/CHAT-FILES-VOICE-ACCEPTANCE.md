@@ -1,5 +1,24 @@
 # Chat, files and voice implementation evidence
 
+## 26 October: browser mode8 HTTP consumer and lost completion
+
+All288 framed/driver regressions pass, including coalesced observers, held IO, pre-start End,
+and retained payment. Final current HTTP cases pass42.00s/43.34s through End/bytes0, including pending
+actual rows, lost authenticated completion, same claim recovery and fresh post-join Current.
+The final negative-fence adjustment has before/after evidence and is included in those HTTP runs.
+Full frontend2,943/Svelte/build, separate native check and strict Native Clippy pass. The parent
+Native full suite passes879tests; the full current consumer suite is running serially. HANDOVER records the earlier independently unattributed HTTP early-return
+failure; one later passing repetition is not a cause or waiver.
+
+A separate concrete starvation regression fails before and passes after per-complete-RPC lane
+yielding. It advances the injected clock1200ms per returning cleanup response across a batch
+longer than5s; Current now interleaves without closing the peer. An actually held RPC retains
+normal5s expiry and payment ownership. No deadline or cap was raised. The positive Detach fence
+also makes old negotiation noncurrent before held metadata cleanup, with all old payment kept.
+
+No browser fixed-history refund, per-pair composition, App activation, renewal, relay or physical
+acceptance is claimed. App V2 remains OFF. Older HTTP-mode8 TODOs below describe prior checkpoints.
+
 ## 26 October: native-row retirement implementation; final evidence pending
 
 Mode8 has a retained full-selector tombstone, exact native Plan-final/ACK latch and separate

@@ -1,5 +1,60 @@
 # Mewtual; Handover
 
+## Authenticated browser history consumer (26 October; final checks pending)
+
+Broker31 adds `collectNativeNegotiationHistory` for the exact original owner/channel/chain
+AFTER variable negotiation retirement. It uses the SAME paid media status flight to submit
+compact mode8 and recover the same native tombstone. Only an authenticated admitted historical
+receipt with matching proof counts as completion. Capacity, absence, current-only or lost
+replies retain uncertainty. This does not refund browser fixed history or activate another pair.
+The existing Current deadline stays armed during held history IO; End closes the real peer
+before joining that IO and its observation. Broker30 HMR is refused without waking/replacing
+its funded pool, because it lacks this cleanup shape.
+
+Review found an unbounded observer tail: repeated calls attached fresh reactions to held IO.
+One observation Promise is now published before callback seams and returned unchanged to all
+callers. Cleanup joins it before refund. Regressions make2,000 calls before/during held IO,
+check one promise/request, immediate real-peer close and fees held through actual return.
+A pre-start End regression sends no mode8. All288 framed/driver tests pass24.68s after the final fairness/fencing regressions.
+Full frontend validation passes2,943 tests73.99s, Svelte0errors/0warnings and build37.06s. Read-only
+re-review has no remaining blocker/high/medium or material low. The fixture's exact loss-set
+assertion now includes mode8 in its actual position before Release; it was not loosened.
+
+Final current-source native/browser HTTP cases pass42.00s/43.34s through End/bytes0,
+including the collector barrier and final early negative fence. Real parent/child rows are held BEFORE browser mode8; native reports
+pending, then collects only after their return. The first positively authenticated completed
+reply is lost and the SAME claim recovers. A newly started Current after joining old flights
+keeps the original peer usable. The complete Native consumer suite is now running serially after its parent's successful full run. Earlier fixture loss-set
+failures remain recorded, and the strict expected order is preserved.
+
+One HTTP repetition returned from retirement before its completion marker. Its diagnostic
+rerun passed43.81s; that individual failure remains independently unattributed. Separate
+adversarial testing did reproduce a concrete starvation defect: the old cleanup batch held
+one physical lane across several returning requests, collectively exceeding5s. Each complete
+RPC now yields (encoding through body-clear finally), allowing queued Current between cleanup
+requests. A deterministic1200ms-per-response regression fails before and passes after; a
+single actually held RPC still expires the peer and retains its fee through actual return.
+No freshness or IO limit grows. Do not claim this proves the earlier HTTP failure's cause.
+
+Positive joined Detach now immediately fences old browser negotiation, before held pump/SDK
+joins. This is negative-only; it grants no current media authority or early refund. Its held-
+pump regression fails before (old isCurrent=true) and passes after, while35s of injected fresh
+Current keeps the indexed peer open and original64KiB remains paid. Read-only review accepts
+the fence and per-RPC fairness boundary. Final frontend/static/build checks pass. Separate native check passes55.96s and strict Native
+Clippy95.85s after fixing narrow test/style findings: synchronous Store-observer guard release
+before awaiting Store, production item ordering, and a Drop-observer type alias. Native runtime
+behavior is unchanged by those lint fixes. The full current Native suite is still running;
+there is only one heavy Rust suite running.
+
+The complete Root source remains byte-identical to the3,675pass/24ignored run. The Native production algorithm is unchanged from f95257c0; that checkpoint's full Native
+suite passes874 unit+5ACL tests (879total),0failed/ignored, in38m27s including compile.
+This consumer changes the native test fixture and browser, so its additional current-source
+native HTTP cases are separate evidence; do not describe the earlier full run as full validation
+of these latest fixtures. Shared Session/per-pair composition, detachable browser terminal
+handles/history, renewal, App tracks, TURN/member relay and combined acceptance remain open.
+App V2 stays OFF. Only one desktop is available; external download resume remains separate.
+Older mode8-HTTP TODOs below are superseded only by the passing cases recorded here.
+
 ## Native terminal-history reclamation (26 October; validation in progress)
 
 Control28/version9 adds compact mode8 RetireHistory on an EXISTING indexed media claim.

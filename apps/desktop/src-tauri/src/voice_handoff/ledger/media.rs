@@ -996,95 +996,6 @@ impl ResolvedRow {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    fn inert() -> Claim {
-        let mut logical = [0; 16];
-        logical[15] = 1;
-        Claim::new(&Identity {
-            parent: RowId::from_logical(logical).unwrap(),
-            session: Arc::new(SessionIdentity([1; 32])),
-            action: Action {
-                serial: 1,
-                version: 1,
-                input_tag: [2; 32],
-            },
-            pc: [3; 32],
-            proof: [4; 32],
-        })
-    }
-    #[test]
-    fn never_admitted_refusal_or_close_has_no_new_sdk_release_debt() {
-        let mut claim = inert();
-        assert!(
-            claim.whole_drained(),
-            "a refused inert preparation has no media PC"
-        );
-        claim.close();
-        assert!(claim.closed);
-        assert!(!claim.admitted());
-        assert!(
-            claim.whole_drained(),
-            "old SDK/key drain must not be stranded by a negative marker"
-        );
-    }
-    #[test]
-    fn actual_native_preparation_must_retire_even_for_never_admitted_or_released_state() {
-        let mut claim = inert();
-        claim.worker = true;
-        assert!(!claim.whole_drained());
-        claim.close();
-        claim.released = true;
-        assert!(
-            !claim.whole_drained(),
-            "a release reply is not actual worker completion"
-        );
-        claim.worker = false;
-        assert!(claim.whole_drained());
-    }
-    #[test]
-    fn admitted_media_requires_separate_release_even_after_close_and_negotiation_retirement() {
-        let mut claim = inert();
-        claim.admitted = true;
-        claim.until = 9000;
-        assert!(!claim.whole_drained());
-        claim.close();
-        claim.retire_allowed = true;
-        assert!(
-            !claim.whole_drained(),
-            "Close/old Source expiry cannot claim the browser peer drained"
-        );
-        claim.released = true;
-        assert!(claim.whole_drained());
-        assert!(
-            receipt(&claim, false).admitted,
-            "release keeps original admission history"
-        );
-    }
-    #[test]
-    fn source_retirement_uses_original_deadline_and_survives_a_lost_current_reply() {
-        let mut claim = inert();
-        claim.admitted = true;
-        claim.until = 9000;
-        assert_eq!(claim.observe_expiry(8999), Ok(1));
-        assert!(!claim.negotiation_may_close());
-        assert_eq!(claim.observe_expiry(9000), Ok(0));
-        assert!(claim.negotiation_may_close());
-        // Discard the projection: the actual old deadline/latch survives a lost reply.
-        {
-            let _lost = receipt(&claim, false);
-        }
-        assert_eq!(claim.observe_expiry(9500), Ok(0));
-        assert_eq!(claim.until, 9000);
-        assert_eq!(
-            claim.observe_expiry(1),
-            Ok(0),
-            "a different/rolled-back sample cannot rearm it"
-        );
-    }
-}
-
 /// Snapshot the same original claim before allocating its independently paid index entry.
 pub(super) fn migration_parts(
     parent: &ResolvedRow,
@@ -1191,4 +1102,93 @@ pub(super) fn migration_claim<'a>(
     let media = mutable(state);
     media.observe_expiry(mono)?;
     Ok(media)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    fn inert() -> Claim {
+        let mut logical = [0; 16];
+        logical[15] = 1;
+        Claim::new(&Identity {
+            parent: RowId::from_logical(logical).unwrap(),
+            session: Arc::new(SessionIdentity([1; 32])),
+            action: Action {
+                serial: 1,
+                version: 1,
+                input_tag: [2; 32],
+            },
+            pc: [3; 32],
+            proof: [4; 32],
+        })
+    }
+    #[test]
+    fn never_admitted_refusal_or_close_has_no_new_sdk_release_debt() {
+        let mut claim = inert();
+        assert!(
+            claim.whole_drained(),
+            "a refused inert preparation has no media PC"
+        );
+        claim.close();
+        assert!(claim.closed);
+        assert!(!claim.admitted());
+        assert!(
+            claim.whole_drained(),
+            "old SDK/key drain must not be stranded by a negative marker"
+        );
+    }
+    #[test]
+    fn actual_native_preparation_must_retire_even_for_never_admitted_or_released_state() {
+        let mut claim = inert();
+        claim.worker = true;
+        assert!(!claim.whole_drained());
+        claim.close();
+        claim.released = true;
+        assert!(
+            !claim.whole_drained(),
+            "a release reply is not actual worker completion"
+        );
+        claim.worker = false;
+        assert!(claim.whole_drained());
+    }
+    #[test]
+    fn admitted_media_requires_separate_release_even_after_close_and_negotiation_retirement() {
+        let mut claim = inert();
+        claim.admitted = true;
+        claim.until = 9000;
+        assert!(!claim.whole_drained());
+        claim.close();
+        claim.retire_allowed = true;
+        assert!(
+            !claim.whole_drained(),
+            "Close/old Source expiry cannot claim the browser peer drained"
+        );
+        claim.released = true;
+        assert!(claim.whole_drained());
+        assert!(
+            receipt(&claim, false).admitted,
+            "release keeps original admission history"
+        );
+    }
+    #[test]
+    fn source_retirement_uses_original_deadline_and_survives_a_lost_current_reply() {
+        let mut claim = inert();
+        claim.admitted = true;
+        claim.until = 9000;
+        assert_eq!(claim.observe_expiry(8999), Ok(1));
+        assert!(!claim.negotiation_may_close());
+        assert_eq!(claim.observe_expiry(9000), Ok(0));
+        assert!(claim.negotiation_may_close());
+        // Discard the projection: the actual old deadline/latch survives a lost reply.
+        {
+            let _lost = receipt(&claim, false);
+        }
+        assert_eq!(claim.observe_expiry(9500), Ok(0));
+        assert_eq!(claim.until, 9000);
+        assert_eq!(
+            claim.observe_expiry(1),
+            Ok(0),
+            "a different/rolled-back sample cannot rearm it"
+        );
+    }
 }

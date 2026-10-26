@@ -31,7 +31,7 @@ let loseMediaReplies = false, mediaRequestMode = -1;
 const lostMediaModes = new Set<number>();
 const mediaEvents: string[] = [];
 let mediaStarted = 0, mediaCurrentObservations = 0;
-function mediaEvent(value: string): void { if (mediaEvents.length < 6) mediaEvents.push(value + "@" + Math.floor(performance.now() - mediaStarted)); }
+function mediaEvent(value: string): void { if (mediaEvents.length === 6) mediaEvents.shift(); mediaEvents.push(value + "@" + Math.floor(performance.now() - mediaStarted)); }
 // Test control only: Rust stops a long-lived automatic cycle after independently observing
 // actual native receipts/ACKs/Returns. No row, role, input or key is passed into this step.
 let stopPump: (() => void) | null = null;
@@ -53,6 +53,12 @@ const provider = new Proxy(webcrypto.subtle as unknown as SubtleCrypto, { get(ta
       if (name === "decrypt" && view.length === 39 && view[0] === 9 && view[1] === 0) {
         stage(`media:${mediaRequestMode}/${view[2]}`); mediaEvent("<" + view[2]);
         if(mediaRequestMode===4 && view[2]===9) mediaCurrentObservations++;
+      }
+      if (testLostHistory && mediaRequestMode===8 && name==="decrypt" && view.length===39 &&
+          view[0]===9 && view[1]===0 && view[2]===1 && !lostMediaModes.has(8)) {
+        // Lose only a positively authenticated completed native history observation.
+        // Capacity/absence never satisfy this case, and no proof/plaintext is retained.
+        lostMediaModes.add(8); view.fill(0); throw new Error("test-only completed native history reply lost");
       }
       if (loseMediaReplies && name === "decrypt" && view.length === 39 && view[0] === 9 && view[1] === 0 &&
           !lostMediaModes.has(mediaRequestMode) &&
@@ -110,7 +116,7 @@ const native: VoiceIpcNative = Object.freeze({
 const realFetch = globalThis.fetch;
 let loseSdpReplies = false;
 let mediaPeerCalls: { closed: number } | null = null;
-let testLostDetach = false;
+let testLostDetach = false, testLostHistory = false;
 let retirementWork:Promise<void>|null=null, retirementDone=false, retirementFailed=false, retirementBefore=0;
 const replyLoss = new NativeSdpReplyLoss();
 // Node does not supply a WebView Origin. This is the sole fetch shim: actual HTTP,
@@ -162,7 +168,7 @@ type Step =
   | { tag: "step"; name: "derive"; purpose: VoiceIpcPurpose }
   | { tag: "step"; name: "sdp-custody"; purpose: VoiceIpcPurpose; row: string; identity: VoiceIpcActionIdentity }
   | { tag: "step"; name: "child"; request: VoiceIpcConfirmationPurpose["request"] }
-  | { tag: "step"; name: "pump" | "close" | "wedge" | "pc-custody" | "rtc-round" | "rtc-round-loss" | "rtc-round-media" | "rtc-round-media-loss" | "media-revoked" | "media-retire" | "media-retire-loss" | "media-retire-start" | "media-retire-progress" | "media-retire-finish" | "media-current-after-history" };
+  | { tag: "step"; name: "pump" | "close" | "wedge" | "pc-custody" | "rtc-round" | "rtc-round-loss" | "rtc-round-media" | "rtc-round-media-loss" | "media-revoked" | "media-retire" | "media-retire-loss" | "media-retire-start" | "media-retire-progress" | "media-retire-finish" | "media-current-after-history" | "media-history-pending" };
 async function step(value: Step): Promise<unknown> {
   switch (value.name) {
     case "pump": {
@@ -347,7 +353,7 @@ async function step(value: Step): Promise<unknown> {
           assert.equal(value.sdp, "s".repeat(8192)); this.remote = value.type as "offer" | "answer";
         }
         addEventListener() {} removeEventListener() {}
-        close() { calls.closed++; }
+        close() { calls.closed++; mediaEvent("peer-close"); }
       }
       globalThis.RTCPeerConnection = Peer as unknown as typeof RTCPeerConnection;
       const before = broker.counts().bytes;
@@ -407,7 +413,8 @@ async function step(value: Step): Promise<unknown> {
       const before=broker.counts().bytes;
       await broker.retireNativeNegotiation(owner,channel,chain);
       const retained=(broker as unknown as {ipcChannels:Map<string,{negotiationRetired:boolean}>}).ipcChannels.get(owner.token)!;
-      assert.equal(retained.negotiationRetired,true); assert.equal(mediaPeerCalls.closed,0);
+      assert.equal(retained.negotiationRetired,true,"original retirement returned before completion; peerClosed="+mediaPeerCalls.closed);
+      assert.equal(mediaPeerCalls.closed,0);
       assert.equal(chain.isCurrent(),false); assert.equal(broker.counts().bytes,before-65536);
       // First join any earlier flight, then require a NEW actual authenticated Current
       // after SDK/key/Plan retirement. A historical admitted receipt cannot satisfy this.
@@ -418,8 +425,20 @@ async function step(value: Step): Promise<unknown> {
       if(testLostDetach) assert.ok(lostMediaModes.has(7));
       return {kind:"negotiation-retired",peers:1,closed:0,releasedBytes:65536};
     }
+    case "media-history-pending": {
+      testLostHistory=true;
+      assert.equal(await broker.collectNativeNegotiationHistory(owner,channel,chain),false);
+      return {kind:"history-pending"};
+    }
     case "media-current-after-history": {
       assert.ok(mediaPeerCalls);
+      const paid=broker.counts().bytes, deadline=performance.now()+5000;
+      while (!await broker.collectNativeNegotiationHistory(owner,channel,chain)) {
+        assert.ok(performance.now()<deadline,"same native history collection did not recover");
+        await new Promise<void>(yes=>setTimeout(yes,25));
+      }
+      assert.ok(lostMediaModes.has(8),"actual completed authenticated mode8 reply was lost and recovered");
+      assert.equal(broker.counts().bytes,paid,"native history does not refund browser fixed graph");
       // Join any timer/observer flight that began before native history disappeared.
       // The second call must start its own physical Current after that join returned.
       await broker.completeNativeMediaHandoff(owner,channel,chain);
@@ -446,7 +465,12 @@ async function step(value: Step): Promise<unknown> {
       if (mediaPeerCalls) assert.equal(mediaPeerCalls.closed, 1, "End synchronously closes original adopted peer");
       await channel.close(); await idle();
       assert.equal(broker.counts().bytes, 0, "actual original browser owners must collect");
-      if (mediaPeerCalls) assert.deepEqual([...lostMediaModes], loseMediaReplies ? (testLostDetach ? [0, 4, 7, 3] : [0, 4, 3]) : []);
+      if (mediaPeerCalls) {
+        const expectedLostModes = loseMediaReplies ? (testLostDetach ? [0,4,7] : [0,4]) : [];
+        if (testLostHistory) expectedLostModes.push(8); // History completes BEFORE End/Release.
+        if (loseMediaReplies) expectedLostModes.push(3);
+        assert.deepEqual([...lostMediaModes], expectedLostModes);
+      }
       loseMediaReplies = false;
       return { kind: "closed", bytes: broker.counts().bytes };
     }
@@ -478,7 +502,8 @@ function accept(value: unknown): void {
     }, error => {
       stepRunning = false;
       // Fixed-size diagnostics only: no Input/Result/body bytes are ever serialized here.
-      send({ tag: "failed", reason: (String(error instanceof Error ? error.message : "endpoint failed").slice(0, 100) + " stages=" + stages.join(",")).slice(0, 256) });
+      send({ tag: "failed", reason: ("step="+currentStep+" "+String(error instanceof Error ? error.message : "endpoint failed").slice(0,160)+
+        " stages="+stages.join(",")+" media="+mediaEvents.join(",")).slice(0,512) });
     });
   }
 }

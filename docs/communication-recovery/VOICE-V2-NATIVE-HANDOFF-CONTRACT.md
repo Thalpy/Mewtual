@@ -1,5 +1,16 @@
 # V2 call and native handoff contract
 
+## Current inactive handoff checkpoint (26 October)
+
+Broker31 now completes the original native-authorized Offer/Answer, same-peer media handoff,
+variable negotiation retirement and authenticated native-history collection. Control28/version9
+modes0-8 retain their exact original bindings and bounded physical Session. History observations
+do not grant currentness or refund browser fixed graphs. HANDOVER/INTERFACES record the current
+implementation, tests and remaining gates; earlier absent-consumer statements below are historical.
+The complete App VoiceV2Native adapter, browser terminal-handle detachment/shared composition,
+operational renewal, real tracks/TURN/member relay and combined/physical acceptance remain open.
+App selection stays OFF; controlled RTC/HTTP tests are not audible WebView/media evidence.
+
 24 October continuation: the application-bound encrypted handoff now dispatches typed
 effects in ordinary code and independently schedules native Derive/confirmation work. Context-
 free service construction remains Status-only. Exact native pending/publication ownership,

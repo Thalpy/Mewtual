@@ -144,6 +144,7 @@ async function fixture(t: TestContext, sharedBroker?: VoiceCryptoBroker, identit
       if (loseCollection) { loseCollection = false; throw new Error("collection reply lost"); }
     },
   };
+  let responseHook: ((header: VoiceIpcHeader, mode: number) => Promise<void>) | null = null;
   const transport: typeof fetch = async (input, init) => {
     assert.equal(input, "http://127.0.0.1:43210/voice/v2");
     assert.equal(init!.credentials, "omit"); assert.equal(init!.redirect, "error");
@@ -163,6 +164,7 @@ async function fixture(t: TestContext, sharedBroker?: VoiceCryptoBroker, identit
     requestSequences.push(request.header.sequence);
     const opened = new Uint8Array(await real.decrypt({ name: "AES-GCM", iv: voiceIpcNonce(request.header), additionalData: request.bytes }, requestBody, init!.body as Uint8Array<ArrayBuffer>));
     operations.push(request.header.operation);
+    const requestMode=opened[1]; // Closed public request-mode metadata only, not body retention.
     let actionReply: ActionResponse | null = null;
     if (request.header.operation === 9) {
       assert.deepEqual(opened, new Uint8Array(Buffer.concat([Buffer.from([1]), session, transcriptHash])));
@@ -199,6 +201,7 @@ async function fixture(t: TestContext, sharedBroker?: VoiceCryptoBroker, identit
     }, async cancel() { cancelEntered = true; if (cancelGate) await cancelGate.promise; } } as UnderlyingByteSource);
     const result = new Response(stream, { headers: { "content-length": String(wire.length), "x-voice-admission": "hostile".repeat(hostileHeaders ? 65536 : 1) } });
     if (hostileHeaders) result.headers.get = () => { throw new Error("must not materialize hostile header values"); };
+    if (responseHook) await responseHook(request.header,requestMode);
     return result;
   };
   engineEnabled = true;
@@ -211,6 +214,7 @@ async function fixture(t: TestContext, sharedBroker?: VoiceCryptoBroker, identit
   return {
     owner, broker, native, transport, key: selected.key, admission,
     onOwnerCheck(hook: () => void) { ownerHook = hook; },
+    onResponse(hook: (header: VoiceIpcHeader, mode: number) => Promise<void>) { responseHook=hook; },
     cleanup(work: () => void) { cleanups.push(work); },
     channel() { return broker.nativeChannel(owner, selected.key, native, transport); },
     counts: () => ({ ordinary, setups, settlements, collections, steps: [...engineSteps], tx: [...requestSequences], reads: bodyReads.length }),
@@ -3228,7 +3232,7 @@ async function framedMedia(t: TestContext, low = true) {
   f.custody.mediaReplies(async (header, opened) => {
     const mode = opened[1]; modes.push(mode); assert.equal(header.logical, original.parentRow);
     const expected = mode <= 3 ? encodeVoiceMediaOriginal(original, (["admit", "resolve", "close", "release"] as const)[mode])
-      : encodeVoiceMediaExisting(original.parentRow, original.identity, proof, (["current", "close", "release", "detach"] as const)[mode - 4]);
+      : encodeVoiceMediaExisting(original.parentRow, original.identity, proof, (["current", "close", "release", "detach", "retirehistory"] as const)[mode - 4]);
     assert.deepEqual(opened, expected.body);
     if (mode === busy) return {kind:0,body:Uint8Array.of(9,2,2,7)};
     if (mode === 0) admitted = true;
@@ -3245,6 +3249,7 @@ async function framedMedia(t: TestContext, low = true) {
   }, () => !admitted || released || indexed);
   return { ...f, sdk, modes, media: () => f.f.broker.completeNativeMediaHandoff(f.f.owner, f.child.channel, f.child.ready.chain),
     remaining(value: number) { remaining=value; }, busy(mode: number) { busy=mode; },
+    collectHistory: () => f.f.broker.collectNativeNegotiationHistory(f.f.owner,f.child.channel,f.child.ready.chain),
     retireNegotiation: () => f.f.broker.retireNativeNegotiation(f.f.owner,f.child.channel,f.child.ready.chain),
     lose(mode: number) { lost = mode; }, hold(mode: number) { hold = mode; held = gate(); return held; } };
 }
@@ -3275,7 +3280,7 @@ test("framed lost media admission recovers original claim without a second peer 
   assert.equal(f.sdk.calls.created, 1); assert.equal(f.sdk.calls.closed, 0); assert.equal(f.f.broker.counts().bytes, paid + 8192);
   f.f.owner.retire(); await f.child.channel.close(); assert.equal(f.f.broker.counts().bytes, 0);
 });
-for (const version of [28,29]) test(`HMR refuses funded broker${version} without waking incompatible cleanup`, async t => {
+for (const version of [28,29,30]) test(`HMR refuses funded broker${version} without waking incompatible cleanup`, async t => {
   const f = await framedMedia(t), previous = Object.create(f.f.broker);
   Object.defineProperty(previous, "version", { value: version }); let wakes = 0; previous.retrySelectedJoinKeys = () => { wakes++; };
   const key = Symbol.for("mewtual.voice.crypto-broker.v2"), host = { [key]: previous };
@@ -3388,4 +3393,96 @@ test("refused detach keeps the original negotiation paid until actual index admi
   f.busy(-1); f.f.advance(1000); await work;
   assert.equal(f.custody.effectCounts().sdkReleases,1); assert.equal(f.f.broker.counts().bytes,paid-64*1024);
   f.f.owner.retire(); await f.child.channel.close(); assert.equal(f.f.broker.counts().bytes,0);
+});
+
+test("framed exact native history collection retains fixed browser graph and original peer", async t=>{
+  const f=await framedMedia(t); await f.media(); assert.throws(()=>f.collectHistory(),/retired original/);
+  f.remaining(0); await f.retireNegotiation(); const paid=f.f.broker.counts().bytes;
+  assert.equal(await f.collectHistory(),true); assert.equal(f.modes.filter(mode=>mode===8).length,1);
+  assert.equal(f.f.broker.counts().bytes,paid); assert.equal(f.sdk.calls.closed,0);
+  assert.throws(()=>f.f.broker.collectNativeNegotiationHistory(f.f.owner,{...f.child.channel},f.child.ready.chain),/original native history/);
+  assert.throws(()=>f.f.broker.collectNativeNegotiationHistory(f.f.owner,f.child.channel,{...f.child.ready.chain}),/original native history/);
+  f.f.owner.retire(); await f.child.channel.close(); assert.equal(f.f.broker.counts().bytes,0);
+});
+test("framed lost history reply recovers original tombstone and keeps fixed fees", async t=>{
+  const f=await framedMedia(t); await f.media(); f.remaining(0); await f.retireNegotiation(); f.lose(8);
+  const paid=f.f.broker.counts().bytes; assert.equal(await f.collectHistory(),false);
+  assert.equal(await f.collectHistory(),true); assert.equal(f.modes.filter(mode=>mode===8).length,2);
+  assert.equal(f.f.broker.counts().bytes,paid); f.f.owner.retire(); await f.child.channel.close();
+});
+test("End closes actual peer before joining retained history IO", async t=>{
+  const f=await framedMedia(t); await f.media(); f.remaining(0); await f.retireNegotiation();
+  const held=f.hold(8), work=f.collectHistory(); await until(()=>f.modes.includes(8));
+  const paid=f.f.broker.counts().bytes; f.f.owner.retire(); assert.equal(f.sdk.calls.closed,1);
+  let done=false; const cleanup=f.child.channel.close().then(()=>{done=true;}); await new Promise<void>(yes=>setImmediate(yes));
+  assert.equal(done,false); assert.equal(f.f.broker.counts().bytes,paid);
+  held.release(); await work; await cleanup; assert.equal(f.f.broker.counts().bytes,0);
+});
+
+test("public native history observers coalesce before and during actual held framing", async t=>{
+  const f=await framedMedia(t); await f.media(); f.remaining(0); await f.retireNegotiation();
+  const held=f.hold(8), first=f.collectHistory();
+  for(let n=0;n<1000;n++) assert.equal(f.collectHistory(),first);
+  await until(()=>f.modes.includes(8));
+  for(let n=0;n<1000;n++) assert.equal(f.collectHistory(),first);
+  const paid=f.f.broker.counts().bytes; f.f.owner.retire(); assert.equal(f.sdk.calls.closed,1);
+  let done=false; const cleanup=f.child.channel.close().then(()=>{done=true;});
+  await new Promise<void>(yes=>setImmediate(yes)); assert.equal(done,false); assert.equal(f.f.broker.counts().bytes,paid);
+  held.release(); await first; await cleanup; assert.equal(f.f.broker.counts().bytes,0);
+});
+
+test("returning retirement RPCs yield the physical lane to original media Current", async t=>{
+  const f=await framedMedia(t); await f.media(); f.remaining(0);
+  const before=f.f.broker.counts().bytes, trace:string[]=[]; let elapsed=0, active=true;
+  f.f.onResponse(async(header,mode)=>{
+    if(!active || !f.modes.includes(7)) return;
+    if(header.operation===28){trace.push("media"+mode);return;}
+    trace.push("cleanup"+header.operation); elapsed+=1200; f.f.advance(1200);
+    await new Promise<void>(yes=>setImmediate(yes));
+  });
+  try {
+    await f.retireNegotiation();
+    assert.ok(elapsed>5000,"the batch must span more than one original freshness window");
+    assert.equal(f.sdk.calls.closed,0,"returning individual RPCs must allow timely Current");
+    assert.equal(f.child.parent.finalCounts().finalAcknowledged,true);
+    assert.equal(f.f.broker.counts().bytes,before-65536);
+    const first=trace.findIndex(value=>value.startsWith("cleanup"));
+    const refresh=trace.findIndex((value,index)=>index>first && value==="media4");
+    assert.ok(refresh>first && trace.slice(refresh+1).some(value=>value.startsWith("cleanup")),
+      "authenticated Current must physically run between old cleanup requests");
+  } finally {active=false;f.f.owner.retire();await f.child.channel.close();}
+});
+test("one actually held retirement RPC still expires media and retains payment until return", async t=>{
+  const f=await framedMedia(t); await f.media(); f.remaining(0);
+  const held=gate(); f.f.cleanup(held.release); let entered=false, done=false;
+  f.f.onResponse(async(header)=>{if(header.operation===14 && f.modes.includes(7)){entered=true;await held.promise;}});
+  const paid=f.f.broker.counts().bytes, retirement=f.retireNegotiation().then(()=>{done=true;});
+  await until(()=>entered); f.f.advance(5000);
+  assert.equal(f.sdk.calls.closed,1); assert.equal(done,false);
+  assert.equal(f.f.broker.counts().bytes,paid);
+  held.release();await retirement;f.f.owner.retire();await f.child.channel.close();
+  assert.equal(f.f.broker.counts().bytes,0);
+});
+
+test("authenticated detachment fences old negotiation before held work-pump close", async t=>{
+  const f=await framedMedia(t); await f.media();
+  const held=gate(); f.f.cleanup(held.release); let entered=false;
+  f.f.native.readWork=async(owner,executor)=>{entered=true;await held.promise;
+    return {kind:"snapshot",owner,executor,nextSlot:32,work:null};};
+  const observer=f.f.broker.observeNativeWork(f.f.owner,f.child.channel,f.f.key);
+  await until(()=>entered); f.remaining(0); const paid=f.f.broker.counts().bytes;
+  let done=false; const retirement=f.retireNegotiation().then(()=>{done=true;});
+  try {
+    await until(()=>f.modes.includes(7)); await f.media();
+    assert.equal(f.child.ready.chain.isCurrent(),false,
+      "physically joined native detachment must fence old browser negotiation before metadata joins");
+    for(let n=0;n<35;n++){
+      f.f.advance(1000); await f.media(); f.f.broker.collectChains();
+      assert.equal(f.sdk.calls.closed,0,"indexed peer must remain independently current during old metadata cleanup");
+    }
+    assert.equal(done,false,"actual metadata owner must still keep retirement pending");
+    assert.equal(f.f.broker.counts().bytes,paid,"old graph remains paid through held pump return");
+  } finally {
+    held.release();await retirement;await observer.close();f.f.owner.retire();await f.child.channel.close();
+  }
 });

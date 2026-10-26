@@ -15,7 +15,8 @@ async function until(condition: () => boolean) { for (let n = 0; n < 200; n++) {
 async function fixture(t: TestContext) {
   const old = globalThis.RTCPeerConnection;
   let driver: VoiceNativeMedia | null = null, now = 1000, live = true, ready = true;
-  let failClose = false, loseAdmit = false, loseRelease = false, loseDetach = false;
+  let failClose = false, loseAdmit = false, loseRelease = false, loseDetach = false, loseHistory = false;
+  let historyResponse: "ok" | "current" | "absent" | "refuse" = "ok";
   let inCurrent = false, expireInCurrent = false;
   let heldMode: number | null = null, held: ReturnType<typeof gate> | null = null;
   let onSchedule: (() => void) | null = null, onCancel: (() => void) | null = null;
@@ -56,6 +57,12 @@ async function fixture(t: TestContext) {
       if (mode === heldMode) await held!.promise; // deliberately ignores abort/Close
       if (mode === 0 && loseAdmit) { loseAdmit = false; throw new Error("lost Admit"); }
       if (mode === 7 && loseDetach) { loseDetach = false; throw new Error("lost Detach"); }
+      if (mode === 8) {
+        if (loseHistory) { loseHistory=false; throw new Error("lost positive native history result"); }
+        if (historyResponse === "refuse") throw new Error("native history pending");
+        if (historyResponse === "absent") return null;
+        if (historyResponse === "current") return receipt(true);
+      }
       if (mode === 2) nativeClosed = true;
       if (mode === 3) {
         assert.ok(nativeClosed); assert.ok(counts.closed > 0, "native Release follows actual SDK drain");
@@ -67,6 +74,8 @@ async function fixture(t: TestContext) {
   });
   return { driver, source, counts, requests, timers,
     hold(mode: number) { heldMode = mode; held = gate(); return held; },
+    historyReply(value: typeof historyResponse) { historyResponse=value; },
+    loseHistory() { loseHistory=true; },
     loseAdmit() { loseAdmit = true; }, loseRelease() { loseRelease = true; }, loseDetach() { loseDetach = true; },
     failClose(value: boolean) { failClose = value; },
     onSchedule(hook: () => void) { onSchedule = hook; }, onCancel(hook: () => void) { onCancel = hook; },
@@ -229,4 +238,56 @@ test("a refreshed deadline stays monitored while the same flight waits on detach
   f.advance(1000); assert.equal(f.driver.closed, true); assert.equal(f.counts.closed, 1);
   const cleanup=f.driver.cleanup(); await turn(); assert.equal(f.counts.refund, 0);
   held.release(); await request; await cleanup; assert.equal(f.counts.refund, 1);
+});
+
+test("native history collection needs exact detachment and keeps browser payment and peer", async t => {
+  const f=await fixture(t); assert.throws(() => f.driver.collectNativeHistory(), /unavailable/);
+  await f.driver.start(); assert.throws(() => f.driver.collectNativeHistory(), /unavailable/);
+  await f.driver.requestDetach(); assert.equal(await f.driver.collectNativeHistory(),true);
+  assert.deepEqual(f.requests,[0,4,4,7,4,8]);
+  assert.equal(f.counts.paid,VOICE_NATIVE_MEDIA_BYTES); assert.equal(f.counts.closed,0);
+  const calls=f.requests.length; assert.equal(await f.driver.collectNativeHistory(),true);
+  assert.equal(f.requests.length,calls,"completed history needs no replacement request");
+  await f.driver.cleanup(); assert.equal(f.counts.refund,1);
+});
+for (const response of ["absent","refuse","current"] as const) test(`native history ${response} cannot count as completed removal`, async t => {
+  const f=await fixture(t); await f.driver.start(); await f.driver.requestDetach(); f.historyReply(response);
+  assert.equal(await f.driver.collectNativeHistory(),false);
+  assert.equal(f.counts.closed,0); assert.equal(f.counts.paid,VOICE_NATIVE_MEDIA_BYTES);
+  f.historyReply("ok"); assert.equal(await f.driver.collectNativeHistory(),true);
+  await f.driver.cleanup();
+});
+test("lost positive history response recovers the same claim without admission or refund", async t => {
+  const f=await fixture(t); await f.driver.start(); await f.driver.requestDetach(); f.loseHistory();
+  assert.equal(await f.driver.collectNativeHistory(),false); assert.equal(await f.driver.collectNativeHistory(),true);
+  assert.equal(f.requests.filter(mode=>mode===0).length,1); assert.equal(f.requests.filter(mode=>mode===8).length,2);
+  assert.equal(f.counts.created,1); assert.equal(f.counts.closed,0); assert.equal(f.counts.refund,0);
+  await f.driver.cleanup();
+});
+test("history IO remains paid and monitored through expiry and actual return", async t => {
+  const f=await fixture(t); await f.driver.start(); await f.driver.requestDetach();
+  const held=f.hold(8), work=f.driver.collectNativeHistory(); await until(()=>f.requests.includes(8));
+  f.advance(5000); assert.equal(f.counts.closed,1); assert.equal(f.driver.closed,true);
+  let done=false; const cleanup=f.driver.cleanup().then(()=>{done=true;}); await turn();
+  assert.equal(done,false); assert.equal(f.counts.refund,0); held.release(); await work; await cleanup;
+  assert.equal(f.counts.refund,1); assert.equal(f.counts.closed,1);
+});
+
+test("held history has one observer for repeated callers and joins before refund", async t=>{
+  const f=await fixture(t); await f.driver.start(); await f.driver.requestDetach();
+  const held=f.hold(8), first=f.driver.collectNativeHistory();
+  for(let n=0;n<1000;n++) assert.equal(f.driver.collectNativeHistory(),first);
+  await until(()=>f.requests.includes(8));
+  for(let n=0;n<1000;n++) assert.equal(f.driver.collectNativeHistory(),first);
+  assert.equal(f.requests.filter(mode=>mode===8).length,1);
+  f.driver.close(); const cleanup=f.driver.cleanup(); assert.equal(f.counts.closed,1); await turn();
+  assert.equal(f.counts.refund,0); held.release(); await first; await cleanup;
+  assert.equal(f.counts.refund,1); assert.equal(f.counts.active,0);
+});
+
+test("End before the published history observer starts cannot send native history work", async t=>{
+  const f=await fixture(t); await f.driver.start(); await f.driver.requestDetach();
+  const observer=f.driver.collectNativeHistory(); f.driver.close(); const cleanup=f.driver.cleanup();
+  assert.equal(f.counts.closed,1); assert.equal(await observer,false); await cleanup;
+  assert.equal(f.requests.includes(8),false); assert.equal(f.counts.refund,1);
 });

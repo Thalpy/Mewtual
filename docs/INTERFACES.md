@@ -1,5 +1,24 @@
 # Mewtual; Interfaces & Hooks Schema
 
+## Broker31 native-history observation (26 October; inactive)
+
+`collectNativeNegotiationHistory(owner, channel, chain): Promise<boolean>` requires exact
+original objects and completed variable negotiation retirement. True is same-claim historical
+native collection, never current authority or browser-history refund. False retains pending/
+unknown state. All callers share ONE paid observation while its actual IO is held; publication
+precedes callback seams. End joins it after closing the real peer. A completed observation
+requires no replacement admission. Broker30 HMR is refused without waking its funded state.
+
+Live negotiation retirement yields the physical lane between complete cleanup requests,
+including encode/decode/body-clear finally. The original negotiation flight/payment remain
+owned until all exact final gates finish. End keeps its lane-owned cleanup default and joins
+the retirement flight first. Positive joined Detach fences old negotiation before pump/SDK
+joins; this is negative-only and does not accelerate refund or media authority.
+
+The request uses existing Control28/version9 mode8 and unchanged caps. The real HTTP fixture
+now covers pending original rows and a lost completed reply, plus same-peer Current afterward;
+HANDOVER records exact passing/pending results. Browser handle detachment and composition remain open.
+
 ## Native RetireHistory mode8 (26 October; inactive)
 
 Compact Control28/version9 mode8 uses the existing82B parent/Action/media-proof request.

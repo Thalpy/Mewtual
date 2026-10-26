@@ -733,7 +733,10 @@ async fn indexed_current_rechecks_store_and_resumable_under_actual_ui_commit_wit
             .load(std::sync::atomic::Ordering::Acquire);
         drop(hook);
         if remove_store {
-            *f.state.store.lock().await = mounted.lock().unwrap().take().unwrap();
+            // Restore after releasing the synchronous observation guard; never retain
+            // that guard while awaiting the actual async Store mutex.
+            let original = mounted.lock().unwrap().take().unwrap();
+            *f.state.store.lock().await = original;
         } else {
             *f.state.session_resumable.lock().await = true;
         }

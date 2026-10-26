@@ -189,12 +189,15 @@ impl Entry {
         })
     }
 }
+#[cfg(test)]
+type DropObserver = Box<dyn FnOnce((usize, usize))>;
+
 /// Candidate allocation is prepared outside UI/Coordinator/Route/Index/Row guards.
 /// Its root clone keeps the independent payment through unused-candidate destruction.
 pub(in crate::voice_handoff) struct Prepared {
     entry: Arc<Entry>,
     #[cfg(test)]
-    before_entry_drop: Option<Box<dyn FnOnce((usize, usize))>>,
+    before_entry_drop: Option<DropObserver>,
 }
 #[cfg(test)]
 impl Drop for Prepared {
@@ -211,10 +214,7 @@ impl Prepared {
     /// Observe BEFORE Entry/Root field destruction; the caller separately checks a Weak
     /// after Prepared returns to establish actual last-owner destruction.
     #[cfg(test)]
-    pub(in crate::voice_handoff) fn observe_drop(
-        &mut self,
-        observer: Box<dyn FnOnce((usize, usize))>,
-    ) {
+    pub(in crate::voice_handoff) fn observe_drop(&mut self, observer: DropObserver) {
         self.before_entry_drop = Some(observer);
     }
     pub(in crate::voice_handoff) fn commit(

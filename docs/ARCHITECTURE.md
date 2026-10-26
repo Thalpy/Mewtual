@@ -1,5 +1,14 @@
 # Mewtual; Architecture
 
+## Browser consumer for native history collection (26 October; inactive)
+
+Broker31 drives mode8 through the existing independent media driver and physical Session.
+Current freshness remains request-start bounded while historical cleanup waits. One coalesced
+observation is published before callbacks; actual IO and observer finally return before media
+payment can leave. Native collection does not refund browser fixed graphs. The same peer and
+Session remain intact. HANDOVER separates actual HTTP loss/recovery evidence from pending full
+gates and from still-unimplemented browser handle detachment/per-pair composition. V2 stays OFF.
+
 ## Live-lease native history collection (26 October; inactive)
 
 An indexed media entry retains full Derive selector, original parent/Action/Session and an

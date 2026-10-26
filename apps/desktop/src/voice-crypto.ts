@@ -446,7 +446,7 @@ function context(label: string, transcript: Uint8Array): Uint8Array<ArrayBuffer>
  * unsettled work. Revoking an owner never frees a running promise; only its real settlement does.
  * A derive pipeline uses one permit for sequential import/ECDH/HKDF work, never parallel calls. */
 export class VoiceCryptoBroker {
-  readonly version = 30;
+  readonly version = 31;
   readonly subtle: SubtleCrypto;
   private readonly native: VoiceCryptoAdmission;
   private active = 0;
@@ -745,6 +745,16 @@ export class VoiceCryptoBroker {
     if (!channel || channel.handle!==handle || !channel.owns(owner) || !chain || chain.owner!==owner || chain.channel!==channel)
       throw new Error("original native negotiation required");
     return channel.retireNegotiation(chain);
+  }
+
+  /** Recover exact native terminal-history collection. True is historical evidence
+   * for this original claim only; it is not currentness or a browser-history refund. */
+  collectNativeNegotiationHistory(owner: VoiceCryptoOwner, handle: VoiceIpcChannel,
+    plan: VoiceCryptoChain): Promise<boolean> {
+    const channel=this.ipcChannels.get(owner.token), chain=this.chains.get(plan);
+    if (!channel || channel.handle!==handle || !channel.owns(owner) || !chain || chain.owner!==owner || chain.channel!==channel)
+      throw new Error("original native history required");
+    return channel.collectNegotiationHistory(chain);
   }
 
   /** Attempt the original native PC intent only after separate SDK/storage custody.
@@ -2314,7 +2324,10 @@ class RetainedIpcChannel {
   }
   /** Caller already owns the physical lane. Claim also recovers history after End;
    * native independently enforces first-Claim admission against its actual UI/plan. */
-  private async transitionRpc(chain: BrowserChain, request: VoiceTransitionRequest["request"]): Promise<void> {
+  private async transitionRpc(chain: BrowserChain, request: VoiceTransitionRequest["request"], separate = false): Promise<void> {
+    // Live retirement yields BETWEEN complete physical RPCs, including body-clear finally.
+    // The default is already lane-owned (notably End cleanup); never reacquire recursively.
+    if (separate) return this.execution.run(() => this.transitionRpc(chain, request));
     const original = this.terminalAction, custody = chain.custody;
     if (this.linked !== chain || !original || !custody || !this.keys || !this.bootstrap) throw new Error("original voice custody required");
     const expected = { parentRow: original.row, purpose: original.purpose, identity: original.identity, handshake: chain.binding.handshake };
@@ -2349,7 +2362,10 @@ class RetainedIpcChannel {
   /** Caller owns the SAME paid Control/physical lane. Adopt is recovery-only after End;
    * first intent was installed while the original keys were alive. No new phase permission
    * is inferred from Current; a later SDK operation must obtain its own native authority. */
-  private async keySessionRpc(chain: BrowserChain, request: VoiceKeySessionRequest["request"]): Promise<void> {
+  private async keySessionRpc(chain: BrowserChain, request: VoiceKeySessionRequest["request"], separate = false): Promise<void> {
+    // Live retirement yields BETWEEN complete physical RPCs, including body-clear finally.
+    // The default is already lane-owned (notably End cleanup); never reacquire recursively.
+    if (separate) return this.execution.run(() => this.keySessionRpc(chain, request));
     const original = this.terminalAction, custody = chain.custody, claim = custody?.receipt;
     if (this.linked !== chain || !original || !custody || !claim || !this.keys || !this.bootstrap ||
         (request.kind === "adopt" && !custody.needsKeyRecovery)) throw new Error("original key adoption required");
@@ -2518,6 +2534,12 @@ class RetainedIpcChannel {
     } catch (error) { if (!this.media) this.custody.mediaReleased(); throw error; }
   }
 
+  collectNegotiationHistory(chain: BrowserChain): Promise<boolean> {
+    if (this.linked!==chain || !this.negotiationRetired || !this.media)
+      throw new Error("retired original negotiation required");
+    return this.media.collectNativeHistory();
+  }
+
   retireNegotiation(chain: BrowserChain): Promise<void> {
     if (this.linked!==chain || !this.media?.adopted) throw new Error("adopted original media required");
     if (this.negotiationFlight) return this.negotiationFlight;
@@ -2537,6 +2559,10 @@ class RetainedIpcChannel {
           if (!media || media.closed) return;
           await media.requestDetach();
           if (!media.detached) throw new Error("original source still retained");
+          // Positive authenticated Detach has physically joined. Fence old negotiation
+          // immediately, before any held metadata/SDK join. This grants NO media effect;
+          // its independent Current still controls the peer and all old fees remain paid.
+          chain.mediaIndexed=true;
           // Stop old metadata adoption before releasing its keys. This joins native IPC
           // outside the shared lane; the independently paid media monitor keeps running.
           if (this.workPump) { await this.workPump.close(); this.workPump=null; }
@@ -2544,15 +2570,16 @@ class RetainedIpcChannel {
           if (this.sdpFlight) await this.sdpFlight;
           if (this.sdpRtc) await this.sdpRtc.drain(); // source has no peer after transfer
           if (!this.live()) return;
-          chain.mediaIndexed=true;
-          await this.execution.run(async () => {
-            await this.cleanupConfirmationIntents();
-            await this.cleanupSdp(chain);
-            const custody=chain.custody!;
-            if (custody.needsKeyRelease) await this.keySessionRpc(chain,{kind:"release",receipt:custody.keyReceipt!.receipt});
-            if (custody.needsRelease) await this.transitionRpc(chain,{kind:"release",receipt:custody.receipt!.receipt});
-            if (!this.finalAcknowledged) await this.retireOriginalAction();
-          });
+          // Retain this original negotiation flight/fee, but not the physical lane
+          // across the batch. Each FULL RPC (encode through body-clear finally) yields
+          // to an already queued media Current before the next cleanup request starts.
+          // End joins negotiationFlight before its separate lane-owned cleanup path.
+          await this.cleanupConfirmationIntents(true);
+          await this.cleanupSdp(chain,true);
+          const custody=chain.custody!;
+          if (custody.needsKeyRelease) await this.keySessionRpc(chain,{kind:"release",receipt:custody.keyReceipt!.receipt},true);
+          if (custody.needsRelease) await this.transitionRpc(chain,{kind:"release",receipt:custody.receipt!.receipt},true);
+          if (!this.finalAcknowledged) await this.retireOriginalAction(true);
           // Actual old IO finally and native Plan-final/ACK precede the64KiB refund.
           // Retain fixed history, shared keys/counters and media custody until actual End.
           const phase=chain.sdp;
@@ -2707,7 +2734,10 @@ class RetainedIpcChannel {
   }
   /** Caller holds the original physical lane. After End, Prepare is exact recovery only;
    * native independently refuses first admission. No retry manufactures another identity. */
-  private async sdpRpc(chain: BrowserChain, request: VoiceSdpPhaseRequest["request"]): Promise<void> {
+  private async sdpRpc(chain: BrowserChain, request: VoiceSdpPhaseRequest["request"], separate = false): Promise<void> {
+    // Live retirement yields BETWEEN complete physical RPCs, including body-clear finally.
+    // The default is already lane-owned (notably End cleanup); never reacquire recursively.
+    if (separate) return this.execution.run(() => this.sdpRpc(chain, request));
     const phase = chain.sdp!, expected = this.sdpIdentity(chain), encoded = encodeVoiceSdpPhase({ ...expected, request });
     try {
       await this.framed(encoded.operation, encoded.kind, encoded.logical, encoded.body, true,
@@ -2724,7 +2754,10 @@ class RetainedIpcChannel {
         });
     } finally { encoded.body.fill(0); }
   }
-  private async sdkRpc(chain: BrowserChain, request: VoiceSdkRequest["request"]): Promise<void> {
+  private async sdkRpc(chain: BrowserChain, request: VoiceSdkRequest["request"], separate = false): Promise<void> {
+    // Live retirement yields BETWEEN complete physical RPCs, including body-clear finally.
+    // The default is already lane-owned (notably End cleanup); never reacquire recursively.
+    if (separate) return this.execution.run(() => this.sdkRpc(chain, request));
     const phase = chain.sdp!, storage = phase.storage;
     if (!storage) throw new Error("native SDP storage required");
     const expected = { ...this.sdpIdentity(chain), storage: storage.proof }, encoded = encodeVoiceSdkCustody({ ...expected, request });
@@ -2743,7 +2776,10 @@ class RetainedIpcChannel {
         });
     } finally { encoded.body.fill(0); }
   }
-  private async pcRpc(chain: BrowserChain, request: "admit" | "close"): Promise<void> {
+  private async pcRpc(chain: BrowserChain, request: "admit" | "close", separate = false): Promise<void> {
+    // Live retirement yields BETWEEN complete physical RPCs, including body-clear finally.
+    // The default is already lane-owned (notably End cleanup); never reacquire recursively.
+    if (separate) return this.execution.run(() => this.pcRpc(chain, request));
     const phase = chain.sdp!, storage = phase.storage, sdk = phase.sdk;
     if (!storage || !sdk) throw new Error("original native PC custody required");
     const requestStarted = this.clock.now();
@@ -2764,15 +2800,16 @@ class RetainedIpcChannel {
         });
     } finally { encoded.body.fill(0); }
   }
-  /** Only after actual local admission/SDK/IO finally; this method already owns the lane. */
-  private async cleanupSdp(chain: BrowserChain): Promise<void> {
+  /** Only after actual local admission/SDK/IO finally. End already owns the lane;
+   * live retirement instead gives each complete RPC its own physical turn. */
+  private async cleanupSdp(chain: BrowserChain, separate = false): Promise<void> {
     const phase = chain.sdp; if (!phase) return;
     phase.close();
-    if (phase.needsStorageRecovery) await this.sdpRpc(chain, { kind: "prepare" });
-    if (phase.needsSdkRecovery) await this.sdkRpc(chain, { kind: "admit" });
-    if (phase.pc.needsClose) await this.pcRpc(chain, "close");
-    if (phase.needsSdkRelease) await this.sdkRpc(chain, { kind: "release", generation: phase.sdk!.generation, proof: phase.sdk!.proof });
-    if (phase.needsStorageRelease) await this.sdpRpc(chain, { kind: "release", proof: phase.storage!.proof });
+    if (phase.needsStorageRecovery) await this.sdpRpc(chain, { kind: "prepare" }, separate);
+    if (phase.needsSdkRecovery) await this.sdkRpc(chain, { kind: "admit" }, separate);
+    if (phase.pc.needsClose) await this.pcRpc(chain, "close", separate);
+    if (phase.needsSdkRelease) await this.sdkRpc(chain, { kind: "release", generation: phase.sdk!.generation, proof: phase.sdk!.proof }, separate);
+    if (phase.needsStorageRelease) await this.sdpRpc(chain, { kind: "release", proof: phase.storage!.proof }, separate);
     if (!phase.nativeReleased) throw new Error("native SDK cleanup unresolved");
   }
   wakeToken(): object { return this.wakeIdentity; }
@@ -3274,23 +3311,27 @@ class RetainedIpcChannel {
     this.cleanupWork = null;
   }
 
-  /** Already inside the original execution lane, after actual local SDK/I/O drained.
+  /** After actual local SDK/I/O drained. End already owns the original execution lane;
+   * live retirement instead schedules each complete physical RPC separately.
    * History-only Begin(false) advances the SAME Session request floor, fencing a delayed
    * old Begin. Missing/refused history stays unresolved: parent Plan-final must still check
    * every actual child and freeze new adoption before its exact final ACK covers absence.
-   * Do not recurse through actionRpc/execution.run or wait here for that parent proof. */
-  private async cleanupConfirmationIntents(): Promise<void> {
+   * Never recursively acquire the lane-owned default or wait here for parent final proof. */
+  private async cleanupConfirmationIntents(separate = false): Promise<void> {
     const chain = this.linked;
     if (!chain || this.finalAcknowledged) return;
     for (const intake of chain.confirmations.values()) {
       if (intake.returned) continue;
       if (intake.running || (intake.record && !intake.record.drained)) throw new Error("actual child work still running");
       const rpc = async (request: VoiceIpcConfirmationRequest, row: string): Promise<VoiceIpcActionReply> => {
-        const encoded = encodeVoiceIpcConfirmationAction(intake.purpose, request);
-        try { return await this.framed(encoded.operation, encoded.kind, row, encoded.body, true,
-          (kind, length) => kind === 0 && (length === 19 || length === 258),
-          opened => decodeVoiceIpcActionReply(opened, intake.row)); }
-        finally { encoded.body.fill(0); }
+        const physical = async () => {
+          const encoded = encodeVoiceIpcConfirmationAction(intake.purpose, request);
+          try { return await this.framed(encoded.operation, encoded.kind, row, encoded.body, true,
+            (kind, length) => kind === 0 && (length === 19 || length === 258),
+            opened => decodeVoiceIpcActionReply(opened, intake.row)); }
+          finally { encoded.body.fill(0); }
+        };
+        return separate ? this.execution.run(physical) : physical();
       };
       try {
         if (!intake.identity) this.observeConfirmationBegin(intake, await rpc({ kind: "begin", retry: false }, "0".repeat(32)));
@@ -3310,17 +3351,20 @@ class RetainedIpcChannel {
     }
   }
 
-  /** Already inside the SAME execution lane, after intake/SDK/result settlement drainage.
-   * Preserve original keys and monotonic counters across Pending and lost final/ACK replies.
-   * Never use actionRpc here: acquiring the lane recursively would deadlock cleanup. */
-  private async retireOriginalAction(): Promise<void> {
+  /** After intake/SDK/result settlement drainage. End owns the SAME execution lane;
+   * live retirement gives each physical RPC a separate turn so Current can interleave.
+   * Preserve original keys/counters and never recursively acquire the lane-owned default. */
+  private async retireOriginalAction(separate = false): Promise<void> {
     const original = this.terminalAction!;
     const exchange = async <T>(request: VoiceIpcActionRequest, length: number,
       decode: (opened: Uint8Array<ArrayBuffer>) => T): Promise<T> => {
-      const encoded = encodeVoiceIpcAction(original.purpose, request);
-      try { return await this.framed(encoded.operation, encoded.kind, original.row, encoded.body, true,
-        (kind, actual) => kind === 0 && (actual === 19 || actual === length + 16), decode); }
-      finally { encoded.body.fill(0); }
+      const physical = async () => {
+        const encoded = encodeVoiceIpcAction(original.purpose, request);
+        try { return await this.framed(encoded.operation, encoded.kind, original.row, encoded.body, true,
+          (kind, actual) => kind === 0 && (actual === 19 || actual === length + 16), decode); }
+        finally { encoded.body.fill(0); }
+      };
+      return separate ? this.execution.run(physical) : physical();
     };
     const status = (opened: Uint8Array<ArrayBuffer>) => {
       const reply = decodeVoiceIpcActionReply(opened, original.row);
@@ -3382,7 +3426,7 @@ export function windowVoiceCryptoBroker(
   const host = window as Record<symbol, unknown>;
   const previous = host[BROKER] as VoiceCryptoBroker | undefined;
   if (previous) {
-    if (previous.version !== 30 || typeof previous.retireNativeNegotiation !== "function" || typeof previous.completeNativeMediaHandoff !== "function" || typeof previous.completeNativeSdpRtcRound !== "function" || typeof previous.prepareNativeSdpRtc !== "function" || typeof previous.prepareNativeSdpCrypto !== "function" || typeof previous.prepareNativePcIntent !== "function" || typeof previous.prepareNativeSdpHandoff !== "function" || typeof previous.observeNativeWork !== "function" || typeof previous.returnNativeDerivation !== "function" || typeof previous.nativeConfirmationFromChannel !== "function" || typeof previous.nativeDerivationFromChannel !== "function" || typeof previous.recoverChannelHistory !== "function" || typeof previous.prepareChainFromChannel !== "function" || typeof previous.nativeChannel !== "function" || typeof previous.run !== "function" || typeof previous.selectJoinKey !== "function" || typeof previous.retrySelectedJoinKeys !== "function" ||
+    if (previous.version !== 31 || typeof previous.collectNativeNegotiationHistory !== "function" || typeof previous.retireNativeNegotiation !== "function" || typeof previous.completeNativeMediaHandoff !== "function" || typeof previous.completeNativeSdpRtcRound !== "function" || typeof previous.prepareNativeSdpRtc !== "function" || typeof previous.prepareNativeSdpCrypto !== "function" || typeof previous.prepareNativePcIntent !== "function" || typeof previous.prepareNativeSdpHandoff !== "function" || typeof previous.observeNativeWork !== "function" || typeof previous.returnNativeDerivation !== "function" || typeof previous.nativeConfirmationFromChannel !== "function" || typeof previous.nativeDerivationFromChannel !== "function" || typeof previous.recoverChannelHistory !== "function" || typeof previous.prepareChainFromChannel !== "function" || typeof previous.nativeChannel !== "function" || typeof previous.run !== "function" || typeof previous.selectJoinKey !== "function" || typeof previous.retrySelectedJoinKeys !== "function" ||
         typeof previous.registerProtectedConfirmation !== "function" ||
         typeof previous.registerProtectedDerivation !== "function" || typeof previous.registerConfirmation !== "function" || typeof previous.createPair !== "function") {
       throw new Error("voice crypto broker version changed; reload required");

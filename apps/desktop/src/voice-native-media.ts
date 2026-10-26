@@ -33,6 +33,9 @@ export class VoiceNativeMedia {
   #nativeReleased = false;
   #detachRequested = false;
   #detached = false;
+  #historyRequested = false;
+  #historyCollected = false;
+  #historyObservation: Promise<boolean> | null = null;
   #closed = false;
   #refunded = false;
   #transferring = false;
@@ -72,6 +75,23 @@ export class VoiceNativeMedia {
   requestDetach(): Promise<void> {
     if (!this.adopted || this.#closed) return unavailable();
     this.#detachRequested = true; return this.start();
+  }
+  /** Historical native-row removal only. This neither closes the peer nor refunds
+   * browser fixed history. One existing status flight/timer owns lost/pending replies;
+   * exact repetition observes the SAME paid native tombstone without new admission. */
+  collectNativeHistory(): Promise<boolean> {
+    if (this.#historyObservation) return this.#historyObservation;
+    if (this.#historyCollected) return Promise.resolve(true);
+    if (!this.adopted || !this.#detached || this.#closed) return unavailable();
+    this.#historyRequested = true;
+    // Publish the ONE observer before start can run Clock/provider/liveness callbacks.
+    // Repeated callers must not attach reactions to an abort-resistant shared flight.
+    const observation = Promise.resolve().then(async () => {
+      try { await this.start(); return this.#historyCollected; }
+      finally { this.#historyObservation = null; }
+    });
+    this.#historyObservation = observation;
+    return observation;
   }
   /** Used ONLY by the original RTC current closure during the synchronous transfer.
    * The flag is set after an actual same-record Current physical finally. It is never
@@ -184,6 +204,14 @@ export class VoiceNativeMedia {
       this.#observe(indexed);
       if (!this.#closed && this.#status.currentAt(this.#now()) && indexed?.current && indexed.retireInMs === 0) this.#detached = true;
     }
+    if (!this.#closed && this.#detached && this.#historyRequested && !this.#historyCollected) {
+      // Historical cleanup cannot refresh freshness. The ordinary Current above and
+      // its unchanged request-start deadline remain monitored while this RPC is held.
+      const history = await this.#rpc(encodeVoiceMediaExisting(this.#original.parentRow,
+        this.#original.identity, this.#proof!, "retirehistory"), true);
+      this.#observe(history);
+      if (history?.admitted && !history.current && history.retireInMs === null) this.#historyCollected = true;
+    }
   }
   #cancel(): void {
     if (!this.#timerSet || this.#cancelling) return;
@@ -271,9 +299,11 @@ export class VoiceNativeMedia {
   }
   async #cleanup(): Promise<void> {
     this.close();
+    const historyObservation = this.#historyObservation;
     if (this.#flight) {
       try { await this.#flight; } catch { /* Actual flight returned; recover original native uncertainty below. */ }
     }
+    if (historyObservation) await historyObservation; // Actual observer finally precedes refund.
     this.#cancel();
     if (this.#source) await this.#source.drain();
     if (this.#peer) await this.#peer.drain();
@@ -290,7 +320,7 @@ export class VoiceNativeMedia {
     // Join synchronous timer/cancel/provider/consumer finally frames, including a
     // reentrant cleanup launched inside their callbacks, before releasing payment.
     await Promise.resolve();
-    if (this.#arming || this.#cancelling || this.#callbackDepth !== 0 || this.#flight || this.#timerSet || this.#registrationUnknown) return unavailable();
+    if (this.#arming || this.#cancelling || this.#callbackDepth !== 0 || this.#flight || this.#historyObservation || this.#timerSet || this.#registrationUnknown) return unavailable();
     this.#cell.work = null;
     this.#source = null; this.#peer = null;
     if (!this.#refunded) { this.#refunded = true; this.#context.refund(); }

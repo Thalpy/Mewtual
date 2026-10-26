@@ -1,5 +1,22 @@
 # Threat model; client integrity & enforcement boundaries
 
+## Browser native-history observation (26 October; inactive)
+
+Live cleanup cannot monopolize the physical lane across multiple returning requests and
+starve media freshness. Each complete old RPC yields to an already queued Current, while a
+single actually hung physical request remains subject to the unchanged freshness bound.
+Positive joined Detach immediately makes the old negotiation noncurrent before metadata
+joins, without changing its retained ownership/payment or independent media enforcement.
+
+Native-history completion is accepted only on the exact original authenticated channel/claim,
+after variable retirement. Historical receipts cannot refresh peer freshness or stand in for
+current permission. Missing/refused/lost replies cannot refund fixed browser custody. One paid
+observation coalesces repeated callers, including before callback seams; otherwise a held IPC
+could accumulate unlimited Promise reactions. End closes the actual peer before joining held
+IO/observation, and the refund fence requires both returned. HMR30 cannot reuse the incompatible
+cleanup shape. Actual HTTP pending/lost-completion tests use controlled RTC, not audible media.
+HANDOVER states remaining gates; App V2 and broader composition remain disabled/unimplemented.
+
 ## Native terminal-history removal boundary (26 October; inactive)
 
 The live-lease GC exception requires an exact independently indexed claim, actual original

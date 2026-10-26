@@ -657,8 +657,9 @@ impl Endpoint {
     }
 
     /// Native-only history collection after the real browser retired its negotiation.
-    /// The browser fixed graph remains paid: this does not claim handle detachment or
-    /// mode8 HTTP acceptance. Actual Session/current-media transport remains unchanged.
+    /// The browser fixed graph remains paid; no handle detachment is claimed. Native
+    /// barriers hold real rows while actual HTTP mode8 requests pending/complete history
+    /// and recovers a lost authenticated completion. Actual Session and peer are unchanged.
     pub(crate) async fn native_history_retirement(
         &mut self,
         parent: ledger::ResolvedRow,
@@ -709,6 +710,13 @@ impl Endpoint {
                 },
             )
             .unwrap();
+        // Both real row owners are held BEFORE the browser submits its first actual
+        // authenticated mode8. Native must latch that original request and report pending.
+        assert_eq!(
+            self.step(json!({"tag":"step","name":"media-history-pending"}))
+                .await,
+            json!({"kind":"history-pending"})
+        );
         assert!(matches!(target.retire_history(), Err(VoiceError::Capacity)));
         assert!(ledger.derivation_known(&selected, selector));
         assert!(
