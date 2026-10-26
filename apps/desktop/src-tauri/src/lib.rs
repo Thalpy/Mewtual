@@ -7396,9 +7396,10 @@ async fn leave_server(
     let (removed, claim) = {
         let mut servers = state.servers.lock().await;
         let removed = stopped.remove(&mut servers)?;
-        // A join that attached before the claim may have registered during the stop. It is an
-        // alias now (another server number for the same group) and still uses the namespace, so
-        // the namespace is left alone entirely.
+        // An alias (another server number for the same group: one that was already registered,
+        // or a join that attached before the claim and registered during the stop) still uses
+        // the namespace, so it is left alone entirely and the claim goes. Its own leave claims
+        // next (it may be waiting on this claim right now) and cleans up.
         let alias = servers
             .values()
             .any(|entry| entry.group_id == removed.group_id);

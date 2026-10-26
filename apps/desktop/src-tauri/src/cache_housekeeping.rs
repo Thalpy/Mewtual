@@ -534,10 +534,13 @@ pub(super) async fn sweep_leaving(state: &AppState, generation: Option<u64>) {
 }
 
 /// Take the cleanup claim for `server`'s group while the server is still registered and running,
-/// before `leave_server` stops it. `None` when the server is not registered, or when another
-/// server entry (an alias) shares the group, whose namespace is then left alone entirely. Waits
-/// while another cleanup holds the claim (a concurrent leave of the same server; the sweep never
-/// claims a group a registered server uses).
+/// before `leave_server` stops it. `None` only when the server is not registered. Waits while
+/// another leave holds the claim: a concurrent leave of the same server, or of an alias row (the
+/// sweep never claims a group a registered server uses). The claim is taken even when an alias
+/// shares the group; `leave_server` drops it after removing the row if an alias still remains.
+/// That way two aliases left together run one after the other, and the last one removed claims
+/// while it still runs and cleans the namespace, instead of each seeing the other and neither
+/// marking it (which would leave the cache and Keep copies on disk with nothing to resume).
 ///
 /// Why before the stop: the server's own handle holds the namespace's Keep lease until the stop
 /// drops it, and from the claim on no attach of the group can start (attach waits on the claim).
@@ -546,17 +549,16 @@ pub(super) async fn sweep_leaving(state: &AppState, generation: Option<u64>) {
 /// busy namespace safe: the holder's next attach removes only the Keep copies the user confirmed
 /// deleting. A claim taken after the stop would let a join land in between with a healthy Keep,
 /// whose copies the kept marker would later wipe without asking.
+///
+/// Residual: that argument assumes the leaving server owns the lease. If it attached second in
+/// this mount (its Keep faulted) and the owner has since gone, a join of the same group could
+/// attach before this claim with a healthy Keep and, if still unregistered at cleanup, sit under
+/// the kept marker. That needs three attaches of one group in one mount.
 pub(super) async fn claim_for_leave(state: &AppState, server: u64) -> Option<CleanupClaim<'_>> {
     loop {
         let group = {
             let servers = state.servers.lock().await;
             let group = servers.get(&server)?.group_id.clone();
-            let alias = servers
-                .iter()
-                .any(|(id, entry)| *id != server && entry.group_id == group);
-            if alias {
-                return None;
-            }
             // Claimed under the servers lock, as the sweep does, so the two cannot interleave.
             if let Some(claim) = state.cache.claim(&group) {
                 return Some(claim);

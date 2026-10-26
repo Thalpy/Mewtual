@@ -513,10 +513,13 @@ fn attach_file(namespace: &Path) -> Result<fs::File, StorageError> {
 /// directory can be removed. Missing is fine. Call only as the last step before removing the
 /// namespace.
 ///
-/// Unlinking first leaves no moment where the lock is free under its old name: an opener that
-/// already has the old file still fails its try-lock until the hold drops, and one that opens the
-/// name afterwards creates a fresh lock file, which keeps the directory non-empty so the
-/// namespace is not removed under it. std opens files with delete sharing, so the unlink works on
+/// Unlinking first leaves no moment where the lock is free under its old name, and an opener that
+/// opens the name afterwards creates a fresh lock file, which keeps the directory non-empty so the
+/// namespace is not removed under it. One that already had the old file open fails its try-lock
+/// while the hold lasts, but could lock the orphaned file after it drops (Unix, or Windows with
+/// POSIX delete semantics) and the directory could then go under it. Only openers that skip the
+/// cleanup claim could do that, which leaves Studio per-request handles, and those open only
+/// groups a live server uses. std opens files with delete sharing, so the unlink works on
 /// Windows while the hold is open; under classic delete semantics the file then goes when the
 /// hold closes, which is still before the caller's `remove_dir`.
 pub fn remove_attach_lock(held: AttachExclusive) -> Result<(), StorageError> {

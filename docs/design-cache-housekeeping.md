@@ -374,9 +374,15 @@ that keeps the directory.
 `leave_server` takes its claim **before** it stops the server, while that server's handle still
 holds the Keep lease. From then on no attach of the group can start, so any handle still open at
 cleanup time attached while the lease was held and has a faulted Keep store with no copies of its
-own. (A claim taken after the stop would let a join land in between with a healthy Keep.) A join
-that attached before the claim and registered during the stop is an alias by then, and the leave
-leaves the namespace alone.
+own. (A claim taken after the stop would let a join land in between with a healthy Keep.) The
+claim is taken even when an alias row shares the group, and dropped after the row's removal if an
+alias still remains: a join that attached before the claim and registered during the stop is such
+an alias, and two alias rows left together run one after the other, so the last one cleans
+instead of each seeing the other and neither marking the namespace. Residual: the argument
+assumes the leaving server owns the Keep lease. If it attached second in its mount and the owner
+has since gone, a third attach of the group could get a healthy Keep before the claim and, if
+still unregistered at cleanup, sit under the kept marker. Accepted as a follow-up (a found or
+join attach could disable retention whenever a registered entry already uses the group).
 
 A busy lock means some handle is open: such an earlier attach of the same group, or the leaving
 server's own handle still being dropped (the actor can take longer than the wait when its event

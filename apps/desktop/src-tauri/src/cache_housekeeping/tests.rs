@@ -212,7 +212,8 @@ fn leave_server_claims_the_group_before_it_stops_the_server() {
 /// Re-review of 251ca05c: `leave_server` claims the group while the server still runs, before the
 /// stop drops its Keep lease, so no join can attach (with a healthy Keep whose copies a kept
 /// marker would later wipe) between the stop and the marker. A concurrent leave of the same server
-/// waits and then finds it gone, and an alias row is never claimed.
+/// waits and then finds it gone. Two alias rows left together run one after the other, so the last
+/// one claims (re-review of 62d7cbdc: before, each saw the other and neither marked or cleaned).
 #[tokio::test]
 async fn a_leave_claims_the_group_before_the_server_stops() {
     let state = AppState::default();
@@ -251,11 +252,23 @@ async fn a_leave_claims_the_group_before_the_server_stops() {
     let actors = [two.actor.clone(), three.actor.clone()];
     state.servers.lock().await.insert(2, two);
     state.servers.lock().await.insert(3, three);
-    assert!(claim_for_leave(&state, 2).await.is_none());
+    let first = claim_for_leave(&state, 2)
+        .await
+        .expect("an alias row is claimed too");
+    let last = claim_for_leave(&state, 3);
+    tokio::pin!(last);
     assert!(
-        !state.cache.claimed(&shared),
-        "an alias still uses the namespace"
+        still_pending(last.as_mut()).await,
+        "the other alias's leave waits"
     );
+    // `leave_server` for row 2: removed, an alias remains, so its claim goes unused.
+    state.servers.lock().await.remove(&2);
+    drop(first);
+    let last = last
+        .await
+        .expect("the last alias left claims while it still runs");
+    assert!(state.cache.claimed(&shared));
+    drop(last);
     for actor in actors {
         actor.shutdown().await;
     }

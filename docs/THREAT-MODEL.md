@@ -32,7 +32,13 @@ crash-safe writes and leave cleanup ([design](design-cache-housekeeping.md)).
   and sealed records shorter than 40 bytes. Keep's own stores keep their earlier write path.
 - **Saved files serve.** A verified Download chunk is also put in the shared cache, so a member
   asking for it can learn this device holds the file, as for any file it has displayed.
-- **Leave cleanup** runs under an in-process claim per group (attach waits on it). It starts only
+- **Leave cleanup** runs under an in-process claim per group (attach waits on it), which a leave
+  takes before it stops the server, while that server's handle still holds the Keep lease. Any
+  handle still open at cleanup time therefore attached while the lease was held and has a faulted
+  Keep store with no copies of its own, which is what makes keeping the marker on a busy namespace
+  safe (residual: if the leaving server itself attached second and the lease owner has gone, a
+  third attach could get a healthy Keep; that needs three attaches of one group in one mount).
+  Alias rows left together run one after the other, and the last one cleans. It starts only
   if the marker is still present and it can take the namespace's `attach.lock` exclusively. Every
   primary cache handle holds that lock shared for its lifetime, including a second attach of the
   same group that could not get the Keep lease, so a rejoin or an unregistered join that attached
