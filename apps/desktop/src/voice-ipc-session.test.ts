@@ -228,6 +228,7 @@ async function fixture(t: TestContext, sharedBroker?: VoiceCryptoBroker, identit
     counts: () => ({ ordinary, setups, settlements, collections, steps: [...engineSteps], tx: [...requestSequences], reads: bodyReads.length }),
     historyBytes(value: Uint8Array) { historyBody = Buffer.from(value); },
     actions(responder: typeof actionResponder) { actionResponder = responder; },
+    actionHandler() { return actionResponder; },
     historyReply(name: string) { historyBody = Buffer.from(historyVector(name).plaintext, "hex"); },
     responseChange(value: Partial<VoiceIpcHeader> | null) { responseChange = value; },
     operations: () => [...operations], bodyReads: () => [...bodyReads],
@@ -309,18 +310,20 @@ async function linkedDerivation(f: Awaited<ReturnType<typeof fixture>>, channel 
 
 /** Independent fixed native projection for browser transport tests. Unlike native integration
  * tests this fixture grants no Actor/MLS authority; its fake keyRef belongs to its mock signer. */
-async function framedDerivation(f: Awaited<ReturnType<typeof fixture>>, localIsLow = true) {
+async function framedDerivation(f: Awaited<ReturnType<typeof fixture>>, localIsLow = true, serial = 1,
+    selectedPurpose: VoiceIpcPurpose = historyPurpose) {
+  const historyPurpose = selectedPurpose, extra = BigInt(serial - 1) * 1000n;
   const peer = await real.generateKey({ name: "ECDH", namedCurve: "P-256" }, false, ["deriveBits"]);
   const point = new Uint8Array(await real.exportKey("raw", peer.publicKey));
-  const transcript = utf8.encode("original native framed action");
-  const row = "0".repeat(31) + "1";
-  const identity = Object.freeze({ action: "9007199254741007", version: "1", inputTag: hash(11) });
+  const transcript = utf8.encode("original native framed action" + (serial === 1 ? "" : ` peer ${serial}`));
+  const row = "0".repeat(16) + serial.toString(16).padStart(16, "0");
+  const identity = Object.freeze({ action: (9007199254741007n + extra).toString(), version: "1", inputTag: hash(11) });
   const engineBytes = 3 * transcript.length + 4096 + 256;
-  const binding = { chain: "1", epoch: historyPurpose.epoch, localDevice: "06".repeat(32), localJoin: hash(2), localKey: hash(3),
-    peerDevice: historyPurpose.peer, peerJoin: historyPurpose.join, peerKey: historyPurpose.keyRef, handshake: hash(10),
+  const binding = { chain: String(serial), epoch: historyPurpose.epoch, localDevice: "06".repeat(32), localJoin: hash(2), localKey: hash(3),
+    peerDevice: historyPurpose.peer, peerJoin: historyPurpose.join, peerKey: historyPurpose.keyRef, handshake: hash(10 + (serial - 1) * 100),
     generation: "9007199254741011", nativeDeadline: "500000", localIsLow };
   const data = Buffer.concat([Buffer.from([1, 5]), Buffer.from(row, "hex"), integer(BigInt(identity.action), 8), integer(1n, 8), Buffer.from(identity.inputTag, "hex"),
-    integer(1n, 8), Buffer.from(f.owner.group, "hex"), Buffer.from([0]), Buffer.alloc(32), integer(1n, 16), integer(BigInt(binding.epoch), 8),
+    integer(BigInt(serial), 8), Buffer.from(f.owner.group, "hex"), Buffer.from([0]), Buffer.alloc(32), integer(1n, 16), integer(BigInt(binding.epoch), 8),
     ...[binding.localDevice, binding.localJoin, binding.localKey, binding.peerDevice, binding.peerJoin, binding.peerKey, binding.handshake].map(s => Buffer.from(s, "hex")),
     integer(BigInt(binding.generation), 8), integer(BigInt(binding.nativeDeadline), 8), Buffer.from([Number(localIsLow)]), integer(BigInt(engineBytes), 4), Buffer.from([0]),
     f.key.publicKey(), point, integer(BigInt(transcript.length), 2), transcript]);
@@ -463,13 +466,15 @@ async function framedDerivation(f: Awaited<ReturnType<typeof fixture>>, localIsL
 
 /** Mock native signer/Root only; actual original-channel framing, P256/HKDF/AEAD, bounded
  * stream reads, broker ownership and native-action adapters execute unchanged. */
-async function framedConfirmation(f: Awaited<ReturnType<typeof fixture>>, finish = false, localIsLow = true) {
+async function framedConfirmation(f: Awaited<ReturnType<typeof fixture>>, finish = false, localIsLow = true, serial = 1) {
+  const extra = serial - 1;
+  const selectedPurpose = extra ? { ...historyPurpose, peer: hash(7 + 100 * extra), join: hash(8 + 100 * extra), keyRef: hash(9 + 100 * extra) } : historyPurpose;
   const channel = f.channel(); await channel.status();
-  const parent = await framedDerivation(f, localIsLow);
-  const ready = await f.broker.nativeDerivationFromChannel(f.owner, channel, f.key, historyPurpose, parent.row, parent.identity).attempt();
+  const parent = await framedDerivation(f, localIsLow, serial, selectedPurpose);
+  const ready = await f.broker.nativeDerivationFromChannel(f.owner, channel, f.key, selectedPurpose, parent.row, parent.identity).attempt();
   assert.equal(ready.kind, "ready"); if (ready.kind !== "ready") throw new Error("original chain required");
-  let row = "00000000000000010000000000000001", identity = { action: "9007199254741027", version: "3", inputTag: hash(91) };
-  let purpose: VoiceIpcConfirmationPurpose = { parent: historyPurpose, parentRow: parent.row, request: { kind: "start", predecessor: null } };
+  let row = "0000000000000001" + serial.toString(16).padStart(16, "0"), identity = { action: (9007199254741027n + BigInt(extra) * 1000n).toString(), version: "3", inputTag: hash(91) };
+  let purpose: VoiceIpcConfirmationPurpose = { parent: selectedPurpose, parentRow: parent.row, request: { kind: "start", predecessor: null } };
   const aad = utf8.encode("native signed Hello header"), body = localIsLow ? utf8.encode("native closed Hello")
     : await parent.incoming(utf8.encode("native closed Hello"), aad, 1n);
   const engineBytes = 4 * (aad.length + body.length + (localIsLow ? 16 : 0)) + 3 * 512 + 2048;
@@ -598,6 +603,8 @@ async function framedConfirmation(f: Awaited<ReturnType<typeof fixture>>, finish
 /** Independent mock native lifecycle; actual channel HMAC/AEAD, SDK/IO and broker cleanup
  * execute unchanged. Real Root/Finish/Session evidence is covered by the Rust TCP fixture. */
 function custodyReplies(f: Awaited<ReturnType<typeof fixture>>, child: Awaited<ReturnType<typeof framedConfirmation>>) {
+  const b = child.parent.binding;
+  const historyPurpose: VoiceIpcPurpose = { peer: b.peerDevice, join: b.peerJoin, keyRef: b.peerKey, epoch: b.epoch };
   let sdpResponder: Parameters<typeof f.actions>[0] = null;
   let mediaResponder: typeof sdpResponder = null;
   let mediaReleased: (() => boolean) | null = null;
@@ -2654,8 +2661,9 @@ test("End during authenticated Current key reply cannot revive keys and still re
 });
 
 
-async function establishedSdpFixture(t: TestContext, localIsLow = true) {
-  const f = await fixture(t), child = await framedConfirmation(f, true, localIsLow), custody = custodyReplies(f, child);
+async function establishedSdpFixture(t: TestContext, localIsLow = true,
+    original: Awaited<ReturnType<typeof fixture>> | null = null, serial = 1) {
+  const f = original ?? await fixture(t), child = await framedConfirmation(f, true, localIsLow, serial), custody = custodyReplies(f, child);
   await child.derive(); await child.handle().attempt();
   await until(() => custody.keyCounts().adopted && f.broker.counts().active === 0);
   const prepare = () => f.broker.prepareNativeSdpHandoff(f.owner, child.channel, child.ready.chain);
@@ -2718,8 +2726,9 @@ test("HMR refuses fully shaped funded broker24 without waking or replacing its o
 });
 
 
-async function establishedPcFixture(t: TestContext, localIsLow = true) {
-  const fixture = await establishedSdpFixture(t, localIsLow); await fixture.prepare();
+async function establishedPcFixture(t: TestContext, localIsLow = true,
+    original: Awaited<ReturnType<typeof fixture>> | null = null, serial = 1) {
+  const fixture = await establishedSdpFixture(t, localIsLow, original, serial); await fixture.prepare();
   const { f, child } = fixture;
   return { ...fixture, admitPc: () => f.broker.prepareNativePcIntent(f.owner, child.channel, child.ready.chain) };
 }
@@ -2732,8 +2741,8 @@ async function framedSdpOffer(t: TestContext, localIsLow = true, plaintextLength
   const f = shared ?? await establishedPcFixture(t, localIsLow); if (!shared) await f.admitPc();
   const localSeal = answer ? !localIsLow : localIsLow;
   const { child, custody } = f;
-  const parentRow = child.parent.row, row = answer ? "00000000000000030000000000000001" : "00000000000000020000000000000001";
-  const identity = { action: answer ? "9007199254741102" : "9007199254741101", version: "1", inputTag: hash(110) };
+  const parentRow = child.parent.row, row = (answer ? "0000000000000003" : "0000000000000002") + parentRow.slice(16);
+  const identity = { action: ((answer ? 9007199254741102n : 9007199254741101n) + (BigInt("0x" + parentRow.slice(16)) - 1n) * 1000n).toString(), version: "1", inputTag: hash(110) };
   const original = { parentRow, identity: child.parent.identity, handshake: child.parent.binding.handshake,
     key: hash(99), sequence: "1", storage: hash(100), sdkGeneration: "1", sdkProof: hash(101), pcProof: hash(102) };
   const selector = { parentRow, row, purpose: localSeal ? "seal" as const : "open" as const };
@@ -3137,8 +3146,10 @@ test("LOW RTC transfer excludes reentrant status until its original UTF8 slot is
 });
 
 
-async function framedSdpRound(t: TestContext, low: boolean, badOffer = false) {
-  const offer = await framedSdpOffer(t, low, 8192, badOffer);
+async function framedSdpRound(t: TestContext, low: boolean, badOffer = false,
+    prepared: Awaited<ReturnType<typeof establishedPcFixture>> | null = null) {
+  if (prepared) await prepared.admitPc();
+  const offer = await framedSdpOffer(t, low, 8192, badOffer, prepared);
   const answer = await framedSdpOffer(t, low, 8192, false, offer, true);
   let onAnswer: (() => void) | null = null;
   offer.custody.sdpReplies(async (header, opened) => {
@@ -3299,8 +3310,9 @@ test("failed original RTC close retains broker payment and withholds native SDK 
 
 /** Real framing/AEAD with independent native stand-in; Rust TCP tests separately
  * establish actual native admission. Assert exact original bindings and release order. */
-async function framedMedia(t: TestContext, low = true) {
-  const f = await framedSdpRound(t, low), sdk = sdpRtcProvider(t, low); await f.round();
+async function framedMedia(t: TestContext, low = true,
+    prepared: Awaited<ReturnType<typeof establishedPcFixture>> | null = null) {
+  const f = await framedSdpRound(t, low, false, prepared), sdk = sdpRtcProvider(t, low); await f.round();
   const original = { parentRow: f.child.parent.row, identity: f.child.parent.identity,
     handshake: f.child.parent.binding.handshake, key: hash(99), sequence: "1",
     storage: hash(100), sdkGeneration: "1", sdkProof: hash(101), pcProof: hash(102) };
@@ -3358,7 +3370,7 @@ test("framed lost media admission recovers original claim without a second peer 
   assert.equal(f.sdk.calls.created, 1); assert.equal(f.sdk.calls.closed, 0); assert.equal(f.f.broker.counts().bytes, paid + 8192);
   f.f.owner.retire(); await f.child.channel.close(); assert.equal(f.f.broker.counts().bytes, 0);
 });
-for (const version of [28,29,30,31,32,33,34]) test(`HMR refuses funded broker${version} without waking incompatible cleanup`, async t => {
+for (const version of [28,29,30,31,32,33,34,35]) test(`HMR refuses funded broker${version} without waking incompatible cleanup`, async t => {
   const f = await framedMedia(t), previous = Object.create(f.f.broker);
   Object.defineProperty(previous, "version", { value: version }); let wakes = 0; previous.retrySelectedJoinKeys = () => { wakes++; };
   const key = Symbol.for("mewtual.voice.crypto-broker.v2"), host = { [key]: previous };
@@ -3578,7 +3590,7 @@ test("live history compaction keeps the same peer and Session with only paid ine
   const compact = () => broker.compactNativeNegotiation(f.f.owner, f.child.channel, plan);
   const first = compact(); for (let n = 0; n < 2000; n++) assert.equal(compact(), first);
   assert.equal(await first, true);
-  assert.equal(broker.counts().bytes, paid - oldFixed + 1024);
+  assert.equal(broker.counts().bytes, paid - oldFixed + 2048);
   assert.equal(state.chains.has(plan), false); assert.equal(old.records.size, 0);
   assert.equal(old.channel, null); assert.equal(old.origin, null);
   for (const row of rows) { assert.equal(row.native, null); assert.equal(row.chain, null); }
@@ -3608,7 +3620,7 @@ for (const fault of ["capacity", "lost"] as const) test(`live compaction retains
   assert.equal(original.cell.detached, false); assert.equal(f.sdk.calls.closed, 0);
   f.busy(-1);
   assert.equal(await broker.compactNativeNegotiation(f.f.owner, f.child.channel, plan), true);
-  assert.equal(broker.counts().bytes, paid - fixed + 1024);
+  assert.equal(broker.counts().bytes, paid - fixed + 2048);
   assert.equal(f.modes.filter(mode => mode === 8).length, 2, "the same native claim recovers after refusal/loss");
   f.f.owner.retire(); await f.child.channel.close(); assert.equal(broker.counts().bytes, 0);
 });
@@ -3892,5 +3904,97 @@ test("a queued SDK grant cannot publish a loan into a replacement negotiation", 
     assert.equal(release, null, "old owner's granted position must return before publication");
     assert.equal(original.sdkPosition, null); assert.equal(replacement.sdkPosition, null);
   } finally { release?.(); channel.negotiation = original; }
+  f.owner.retire(); await handle.close(); assert.equal(f.broker.counts().bytes, 0);
+});
+
+
+test("two sequential framed RTC peers share one Session and close independently after compaction", async t => {
+  const originalRtc = globalThis.RTCPeerConnection;
+  const first = await framedMedia(t), f = first.f;
+  // Restore the real initial constructor after both providers' individual fixture hooks.
+  t.after(() => { globalThis.RTCPeerConnection = originalRtc; });
+  await first.media(); first.remaining(0); await first.retireNegotiation();
+  const firstPlan = first.child.ready.chain;
+  const state = f.broker as unknown as { ipcChannels: Map<string, { keys: unknown; bootstrap: unknown; tx: bigint; negotiation: object }> };
+  const session = state.ipcChannels.get(f.owner.token)!, keys = session.keys, bootstrap = session.bootstrap, old = session.negotiation;
+  assert.equal(f.broker.advanceNativeNegotiation(f.owner, first.child.channel, firstPlan), false);
+  assert.equal(await f.broker.compactNativeNegotiation(f.owner, first.child.channel, firstPlan), true);
+  const firstResponder = f.actionHandler()!;
+  assert.equal(f.broker.advanceNativeNegotiation(f.owner, first.child.channel, firstPlan), true);
+  assert.notEqual(session.negotiation, old); const newOwner = session.negotiation;
+  assert.equal(f.broker.advanceNativeNegotiation(f.owner, first.child.channel, firstPlan), true);
+  assert.equal(session.negotiation, newOwner, "old repeated marker cannot advance again");
+  const tx = session.tx;
+  const prepared = await establishedPcFixture(t, true, f, 2);
+  const second = await framedMedia(t, true, prepared), secondResponder = f.actionHandler()!;
+  f.actions((header, body) => header.logical === first.child.parent.row ? firstResponder(header, body) : secondResponder(header, body));
+  await second.media(); second.remaining(0); await second.retireNegotiation();
+  assert.equal(await f.broker.compactNativeNegotiation(f.owner, second.child.channel, second.child.ready.chain), true);
+  assert.equal(session.keys, keys); assert.equal(session.bootstrap, bootstrap); assert.ok(session.tx > tx);
+  assert.notEqual(first.child.parent.row, second.child.parent.row, "full serial differs when native slot is reused");
+  assert.equal(first.sdk.calls.created, 1); assert.equal(second.sdk.calls.created, 1);
+  for (let n = 0; n < 7; n++) { f.advance(1000); await first.media(); await second.media(); }
+  assert.equal(first.sdk.calls.closed, 0); assert.equal(second.sdk.calls.closed, 0);
+  first.busy(4);
+  for (let n = 0; n < 5; n++) { f.advance(1000); await second.media(); await flush(); }
+  assert.equal(first.sdk.calls.closed, 1, "expired first peer closes synchronously");
+  assert.equal(second.sdk.calls.closed, 0, "first peer failure cannot close another indexed peer");
+  assert.equal(f.owner.isCurrent(), true); await second.media();
+  f.owner.retire(); assert.equal(second.sdk.calls.closed, 1); await first.child.channel.close(); assert.equal(f.broker.counts().bytes, 0);
+});
+
+
+test("next negotiation waits for actual compaction accounting return and rejects copied markers", async t => {
+  const f = await framedMedia(t); await f.media(); f.remaining(0); await f.retireNegotiation();
+  const broker = f.f.broker, plan = f.child.ready.chain;
+  type Channel = { custody: { compactionReturned(bytes: number): void }; negotiation: object };
+  const state = broker as unknown as { ipcChannels: Map<string, Channel> };
+  const channel = state.ipcChannels.get(f.f.owner.token)!, old = channel.negotiation;
+  const returned = channel.custody.compactionReturned; let callbacks = 0;
+  channel.custody.compactionReturned = bytes => {
+    callbacks++; assert.equal(broker.advanceNativeNegotiation(f.f.owner, f.child.channel, plan), false,
+      "accounting reentry is earlier than original compaction/finally return");
+    assert.equal(channel.negotiation, old); returned(bytes);
+  };
+  assert.equal(await broker.compactNativeNegotiation(f.f.owner, f.child.channel, plan), true);
+  assert.equal(callbacks, 1);
+  assert.equal(broker.advanceNativeNegotiation(f.f.owner, f.child.channel, { ...plan }), false);
+  assert.equal(channel.negotiation, old);
+  assert.equal(broker.advanceNativeNegotiation(f.f.owner, f.child.channel, plan), true);
+  assert.notEqual(channel.negotiation, old);
+  f.f.owner.retire(); await f.child.channel.close(); assert.equal(broker.counts().bytes, 0);
+});
+
+test("End in the final next-owner predicate closes the peer and cannot publish another negotiation", async t => {
+  const f = await framedMedia(t); await f.media(); f.remaining(0); await f.retireNegotiation();
+  const broker = f.f.broker, plan = f.child.ready.chain;
+  await broker.compactNativeNegotiation(f.f.owner, f.child.channel, plan);
+  const state = broker as unknown as { ipcChannels: Map<string, { negotiation: object }> };
+  const channel = state.ipcChannels.get(f.f.owner.token)!, old = channel.negotiation;
+  f.f.onOwnerCheck(() => f.f.owner.retire());
+  assert.equal(broker.advanceNativeNegotiation(f.f.owner, f.child.channel, plan), false);
+  assert.equal(channel.negotiation, old); assert.equal(f.sdk.calls.closed, 1);
+  await f.child.channel.close(); assert.equal(broker.counts().bytes, 0);
+});
+
+test("compacted peer record and cleanup wrappers fit the transferred2KiB marker", () => {
+  const cell = 128, closures = 256, completedDispatch = 128, compactionReturn = 128;
+  const record = 256, cleanup = 128, generation = 64, feeReturn = 256, mapEntry = 64, reserve = 640;
+  assert.equal(cell + closures + completedDispatch + compactionReturn + record + cleanup + generation + feeReturn + mapEntry + reserve, 2048);
+});
+
+
+test("cleanup waiters share one timer owner and cannot strand each other on a joining scheduler fault", async t => {
+  const f = await fixture(t), handle = f.channel(); await handle.status();
+  type Signal = { resolve(): void };
+  type Channel = { retry: Signal | null; wakeToken(): object; waitCleanupWake(token: object): Promise<void> };
+  const state = f.broker as unknown as { ipcChannels: Map<string, Channel> }, channel = state.ipcChannels.get(f.owner.token)!;
+  const token = channel.wakeToken(), a = channel.waitCleanupWake(token); await flush();
+  const original = channel.retry!; let joiningSchedule = false;
+  f.cleanup(() => { f.onSchedule(() => {}); original.resolve(); });
+  f.onSchedule(() => { joiningSchedule = true; throw new Error("joining timer refused"); });
+  const b = channel.waitCleanupWake(token); void b.catch(() => {}); await flush();
+  assert.equal(joiningSchedule, false, "joining another cleanup must not become a second timer owner");
+  assert.equal(a, b); f.onSchedule(() => {}); f.advance(1000); await a; await b;
   f.owner.retire(); await handle.close(); assert.equal(f.broker.counts().bytes, 0);
 });

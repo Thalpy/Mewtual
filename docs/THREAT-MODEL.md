@@ -1,5 +1,23 @@
 # Threat model; client integrity & enforcement boundaries
 
+## Successful shared-Session peer composition (26 October; inactive)
+
+Compaction cannot authorize another generation until its full observer/finally returns.
+Owner callbacks may reenter End; final publication repeats private negative/identity checks.
+The original driver remains continuously owned by an exact paid record when the old per-pair
+object is cleared. Compacted-peer failure affects only that driver; Global End closes every
+actual peer before waiting. Fees remain through SDK/IO/timer and cleanup-worker return.
+
+Multiple cleanup waiters share one published retry flight, not independent timer owners of
+a mutable Signal. This prevents one joining scheduler failure from detaching another waiter's
+wake. An affine private refund callback prevents bypassing the paid latch through a public
+budget-decrement API. The2KiB record inventory includes finalizer/map/generation wrappers.
+Root32-Action join history and native tombstones remain authoritative and are not reset.
+
+Controlled framed/WebCrypto two-peer tests are not real Root/TCP or physical acceptance.
+A failed precompaction negotiation still ends the Session; robust peer-local failure handling,
+App activation/RTC tracks and relay remain open. App V2 remains OFF. HANDOVER has exact gates.
+
 ## Browser SDK/codec scheduling boundary (26 October; inactive)
 
 Owner/Clock predicates can reenter admission or End. Ordinary execution reserves its

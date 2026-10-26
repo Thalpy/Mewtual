@@ -1,5 +1,19 @@
 # Mewtual; Architecture
 
+## Successful peer composition on a shared Session (26 October; inactive)
+
+Broker36 retains each compacted original media driver in an exact bounded record. Its next
+negotiation is published explicitly after the old compaction observer's actual return and
+all old effect/IPC gates are clear. Keys, counters and shared codec survive unchanged. Driver
+callbacks capture the exact record; compacted-peer expiry does not end another peer. Global
+End closes every actual driver before joins. Each media fee returns after real cleanup and
+its heavy worker return. Shared cleanup observers join one timer/Signal owner.
+
+A2KiB record marker transfers from old history; each driver retains its original8KiB. Sixteen
+records is only an upper bound. Root's unchanged32-Action lifetime budget can refuse earlier;
+mode8 reclaims native rows, not Root terminal history. Failed precompaction retirement and
+real native/TCP multi-peer acceptance remain unfinished. App V2 stays OFF; see HANDOVER.
+
 ## Shared codec and independent browser SDK execution (26 October; inactive)
 
 Broker35 retains one per-negotiation state object and fences captured callbacks by that

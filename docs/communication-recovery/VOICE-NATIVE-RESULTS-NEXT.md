@@ -1,5 +1,30 @@
 # Next voice milestone: native result recovery
 
+## Current work: complete native multi-peer acceptance and failure isolation (26 October)
+
+Broker35 keeps SDK/provider work off the shared IPC codec with the existing two-position
+pool. Broker36 adds explicit post-return next-negotiation publication and independent paid
+compacted-peer media records on that Session. The controlled browser/framed/WebCrypto two-peer
+scenario passes; complete frontend3,003 and static checks pass. Build passes36.53s; native gates remain pending.
+HANDOVER is authoritative for the exact current evidence and review findings.
+
+Next prove two real sequential Root/native peers over TCP on the SAME A Session: A-B media
+persists while A-C negotiates; fresh discovery ignores truly collected old rows, old-purpose
+Begin stays closed, full row serial reuse stays distinct, and both Current paths survive.
+Then isolate FAILED precompaction negotiation cleanup without whole-Session teardown. Such
+rows remain discoverable; no generic terminal skip, slot-only filter, attempt refund or fresh
+authority may replace exact old final proof and actual drainage.
+
+Root retains32 combined pending/terminal Actions per join; normal complete pair consumes6.
+Mode8 does not free that Root budget. Measure supported capacity before native admission;
+16-incarnation/record limits are not16 supported completed peers, much less50. Preserve all
+caps until a separately reviewed Root history-retirement design exists.
+
+Operational renewal/Ready, App native/RTC/tracks composition and legacy-mode isolation,
+TURN/member relay, combined acceptance and physical independent audio/network evidence still
+follow. App V2 stays OFF. One desktop cannot establish independent physical acceptance;
+external resume is separately owned. Earlier current-work sections below are historical.
+
 ## Current work: live browser compaction reviewed; composition next (26 October)
 
 Broker33 now compacts one original browser negotiation after exact native mode8 history and

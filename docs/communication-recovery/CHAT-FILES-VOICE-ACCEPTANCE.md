@@ -1,5 +1,21 @@
 # Chat, files and voice implementation evidence
 
+## Inactive shared-Session browser composition (26 October; native acceptance pending)
+
+Broker36 has356 passing focused and3,003 complete frontend regressions, with static0errors/
+0warnings. A controlled authenticated-frame/WebCrypto fixture completes two negotiations with
+distinct peer contexts/full row serials on one Session, preserves keys/increasing counters,
+refreshes both actual mock RTC peers, and keeps peer2 alive after peer1 expires. Accounting-
+callback reentry cannot publish the next owner early; End in the final predicate cannot
+publish it. A reproduced shared-cleanup retry race is fixed and re-reviewed. Native/TCP
+two-peer and physical audio evidence are not established by this fixture.
+
+Record markers transfer2KiB from original history; driver8KiB returns only after actual
+cleanup. Root's32 pending+terminal Actions per join remains unchanged (normal pair>=6), so
+16 metadata records is not supported-peer evidence. Failed/uncollected/precompaction work,
+operational renewal, App RTC/tracks/activation, relay and combined/physical acceptance remain
+open. App V2 stays OFF. Production build passes36.53s; HANDOVER records pending native gates and the dependency advisory.
+
 ## Inactive live browser compaction checkpoint (26 October; full native rerun pending)
 
 The extended real HTTP/native mode8 cases pass41.13s/41.41s through browser history

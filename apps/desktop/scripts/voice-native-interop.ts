@@ -457,7 +457,7 @@ async function step(value: Step): Promise<unknown> {
       const session = state.ipcChannels.get(owner.token)!;
       const keys = session.keys, bootstrap = session.bootstrap, tx = session.tx;
       assert.equal(await broker.compactNativeNegotiation(owner,channel,chain),true);
-      assert.equal(broker.counts().bytes,paid-fixed+1024);
+      assert.equal(broker.counts().bytes,paid-fixed+2048);
       assert.equal(state.chains.has(chain),false); assert.equal(chain.isCurrent(),false);
       assert.equal(session.keys,keys); assert.equal(session.bootstrap,bootstrap); assert.ok(session.tx>=tx);
       assert.throws(()=>broker.compactNativeNegotiation(owner,channel,{...chain}),/original browser history/);

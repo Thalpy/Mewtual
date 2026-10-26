@@ -1,5 +1,41 @@
 # Mewtual; Handover
 
+## Sequential browser peers on one Session (26 October; inactive, native acceptance pending)
+
+Broker36 keeps exact per-peer media records after successful compaction. Explicit
+`advanceNativeNegotiation` publishes a new per-pair object only after the original compaction
+worker, accounting callbacks and completion/finally return. Old flights/pump/SDK/creation and
+shared request/history/retry state must be clear. Opaque generation identity fences delayed
+callbacks; repeated old markers cannot advance twice. Session keys/counters never reset.
+
+The same media driver is retained in its paid record before the old owner loses it. Each
+record retains2KiB transferred from original history (remeasured for registry/finalizer fields)
+and its own affine8KiB media fee. Compacted-peer expiry closes/cleans that peer only. Global End
+fences admission and synchronously closes every actual peer before joins. Driver cleanup and
+timer/IO/SDK return precede clearing its link; a separate completion returns the8KiB once.
+A sole shared retry flight owns the timer/Signal. Review reproduced a joining-waiter failure
+that could strand another cleanup; coalescing closes it. Public unchecked refund access was
+removed, and funded HMR35 plus the new API shape are rejected before reuse.
+
+All356 focused regressions pass6.50s; complete frontend3,003 tests64.98s and Svelte0errors/
+0warnings pass. Production build passes36.53s; native integration remains pending. Read-only re-review has
+no remaining blocker/high/medium. The controlled framed/WebCrypto test completes two distinct
+peer negotiations with actual mock RTC objects on one Session, reuses a slot with a new full
+serial, refreshes both, and keeps peer2 alive after peer1 expiry. It proves this browser/native-
+adapter boundary, not two genuine Root/native peers over TCP or audible WebView media.
+
+Native/TCP two-peer acceptance remains required: preserve A's actual Session while completing
+A-B then A-C, freshly discover C after mode8, reject late old-purpose Begin and keep both indexed
+Current paths working. Failed/uncollected rows still block replacement; a precompaction failure
+still tears down the Session. Peer-local failed-negotiation retirement remains unfinished.
+The16-record bound is metadata capacity, not16 supported peers: Root retains at most32 combined
+pending/terminal Actions per LocalJoin, and a normal completed pair consumes at least6. Mode8
+does not reclaim or reset that history. No limit or authority check was raised.
+
+Operational renewal, App RTC/tracks and activation, TURN/member relay, combined acceptance and
+independent physical audio/network tests remain open. App V2 stays OFF. External resume remains
+separate; only one desktop is available. The inherited crypto-bigint advisory remains unresolved.
+
 ## V2 SDK scheduling and negotiation ownership (26 October; inactive, validation in progress)
 
 Broker35 separates the retained per-pair negotiation object from shared Session keys,

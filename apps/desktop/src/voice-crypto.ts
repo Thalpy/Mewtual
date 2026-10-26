@@ -262,11 +262,12 @@ export type VoiceIpcChannel = Readonly<{
 export type VoiceIpcClock = Readonly<{
   now(): number; schedule(work: () => void, milliseconds: number): unknown; cancel(handle: unknown): void;
 }>;
-// Compacted ownership keeps ONLY one inert plan handle/cell:128 cell bytes,256 for its
-// two closures,128 for a possible completed dispatch Promise,128 object/reference slots,
-// and384 conservative wrapper/alignment reserve. All selector/Action/final-proof strings
-// are discarded; the existing8KiB media driver independently pays its original claim.
-const COMPACT_PLAN_BYTES = 1024;
+// A compacted peer keeps an inert plan/cell plus its registry scalars and completion
+// wrappers. Transfer2KiB from original history; no fresh charge or cap increase. Inventory:
+// cell128 + handle closures256 + completed dispatch128 + return observation128 + record256
+// + cleanup promise128 + opaque generation64 + fee-return closures256 + map entry64 + slack640.
+const COMPACT_PLAN_BYTES = 2 * 1024;
+const MAX_RETAINED_MEDIA = 16; // Metadata ceiling; Root's32-Action join budget may refuse earlier.
 const compactedHistory = Promise.resolve(true);
 const voiceNoop = () => {};
 type PreparedBrowserHistory = { commit(): number; abort(): void };
@@ -483,7 +484,7 @@ function context(label: string, transcript: Uint8Array): Uint8Array<ArrayBuffer>
  * unsettled work. Revoking an owner never frees a running promise; only its real settlement does.
  * A derive pipeline uses one permit for sequential import/ECDH/HKDF work, never parallel calls. */
 export class VoiceCryptoBroker {
-  readonly version = 35;
+  readonly version = 36;
   readonly subtle: SubtleCrypto;
   private readonly native: VoiceCryptoAdmission;
   private active = 0;
@@ -658,7 +659,7 @@ export class VoiceCryptoBroker {
     }
     this.charge(owner, IPC_SETUP_BYTES + IPC_CONTROL_BYTES + IPC_WORK_BYTES);
     this.ipcPositions++; selected.channelUsers++;
-    let setupPaid = true, position = true, historyPaid = true, mediaPaid = false, compactPaid = false;
+    let setupPaid = true, position = true, historyPaid = true, compactPaid = 0;
     const channel = new RetainedIpcChannel(selected, native, transport, this.subtle, this.ipcClock, {
       execute: work => this.ipcExecution.run(work),
       reserveSdk: () => this.sdkPositions.request(),
@@ -670,17 +671,17 @@ export class VoiceCryptoBroker {
         if (selected.retired && selected.drained) this.releaseSelectedKey(selected);
       },
       collected: () => {
-        if (compactPaid) { compactPaid = false; this.refund(owner, COMPACT_PLAN_BYTES); }
+        if (compactPaid) { this.refund(owner, compactPaid * COMPACT_PLAN_BYTES); compactPaid = 0; }
         if (historyPaid) { historyPaid = false; this.refund(owner, IPC_CONTROL_BYTES + IPC_WORK_BYTES); }
         this.ipcChannels.delete(owner.token);
       },
       prepareCompaction: async chain => {
-        if (compactPaid) throw new Error("original browser history already compacted");
+        if (compactPaid >= MAX_RETAINED_MEDIA) throw new Error("voice peer history capacity reached");
         const prepared = await this.prepareChainCompaction(chain);
         return { abort: () => prepared.abort(), commit: () => {
           // Ownership transfers directly from the old fixed reservation. There is no
           // refund/recharge gap in which another admission can spend these same bytes.
-          compactPaid = true; return prepared.commit();
+          const refund = prepared.commit(); compactPaid++; return refund;
         } };
       },
       compactionReturned: bytes => this.refund(owner, bytes),
@@ -702,11 +703,8 @@ export class VoiceCryptoBroker {
       finishInput: chain => this.retainFinishCustody(chain),
       transitionUpdated: chain => { this.drainChain(chain); if (this.chainCurrent(chain)) this.armChain(chain); },
       mediaPrepared: () => {
-        if (mediaPaid) throw new Error("original media payment already exists");
-        this.charge(owner, VOICE_NATIVE_MEDIA_BYTES); mediaPaid = true;
-      },
-      mediaReleased: () => {
-        if (mediaPaid) { mediaPaid = false; this.refund(owner, VOICE_NATIVE_MEDIA_BYTES); }
+        this.charge(owner, VOICE_NATIVE_MEDIA_BYTES);
+        return originalMediaFee(this.refund.bind(this, owner, VOICE_NATIVE_MEDIA_BYTES));
       },
     });
     this.ipcChannels.set(owner.token, channel);
@@ -863,6 +861,14 @@ export class VoiceCryptoBroker {
         selected.owner !== owner || selected.outcome?.kind !== "accepted" || selected.outcome.key !== key ||
         this.joinKeys.get(key) !== selected.key) throw new Error("original selected voice channel required");
     return channel.observeWork(this, key);
+  }
+
+  /** Start a fresh browser negotiation after the actual previous compaction observer
+   * returned. This grants no native action/RTC authority and never resets Session nonces. */
+  advanceNativeNegotiation(owner: VoiceCryptoOwner, handle: VoiceIpcChannel, plan: VoiceCryptoChain): boolean {
+    const channel = this.ipcChannels.get(owner.token);
+    if (!channel || channel.handle !== handle || !channel.owns(owner)) throw new Error("original voice channel required");
+    return channel.advanceNegotiation(plan);
   }
 
   /** Reserve the original group/row/variable position BEFORE Input fetch or materialization.
@@ -2101,6 +2107,18 @@ export class VoiceCryptoBroker {
 }
 
 type IpcKeys = Readonly<{ requestMac: CryptoKey; requestBody: CryptoKey; responseMac: CryptoKey; responseBody: CryptoKey }>;
+function originalMediaFee(refund: () => void): () => void {
+  let paid = true;
+  return () => { if (paid) { paid = false; refund(); } };
+}
+type RetainedNativePeer = {
+  readonly plan: VoiceCryptoChain; readonly generation: object; readonly refund: () => void;
+  media: VoiceNativeMedia | null; compacted: boolean; compactionReturned: boolean;
+  advanced: boolean; closing: boolean; refundReady: boolean; cleanup: Promise<void> | null;
+};
+function compactionReturned(work: Promise<boolean>, peer: RetainedNativePeer): Promise<boolean> {
+  return work.then(result => { if (result) peer.compactionReturned = true; return result; });
+}
 type IpcCustody = Readonly<{
   execute<T>(work: () => Promise<T>): Promise<T>;
   reserveSdk(): VoiceSdkPositionRequest;
@@ -2111,7 +2129,7 @@ type IpcCustody = Readonly<{
   finishInput(chain: BrowserChain): void;
   transitionUpdated(chain: BrowserChain): void;
   sdpUnlinked(chain: BrowserChain, phase: VoiceSdpSdkCustody): void;
-  mediaPrepared(): void; mediaReleased(): void;
+  mediaPrepared(): () => void;
 }>;
 // Separate factory: returning a provider position must not retain SDK inputs/results.
 function enginePositionReturn(channel: RetainedIpcChannel, pairState: RetainedNativeNegotiation,
@@ -2183,7 +2201,7 @@ class RetainedIpcChannel {
   private readonly clock: VoiceIpcClock;
   private readonly custody: IpcCustody;
   private readonly execution: Pick<VoiceSharedExecution, "run">;
-  private compactedPlan: VoiceCryptoChain | null = null;
+  private readonly peers = new Map<VoiceCryptoChain, RetainedNativePeer>();
   private cleanupStarted = false;
   // Drivers and SDK borrowers keep channel activity independently of the provider pool.
   // Keep that lifecycle activity through the last finally; a returned SDK position is
@@ -2201,6 +2219,7 @@ class RetainedIpcChannel {
   private terminal: VoiceIpcStatus | null = null;
   private unsubscribe: () => void = () => {};
   private retry: Signal<void> | null = null;
+  private cleanupWakeFlight: Promise<void> | null = null;
   private wakeIdentity: object = {};
   private readonly completion = signal<void>();
   // Installed before the first engine await. Failure is terminal; the same original selected
@@ -2327,7 +2346,7 @@ class RetainedIpcChannel {
     // claim without linking a chain, but cannot let another row overwrite its final cleanup.
     const sameTerminal = pairState.terminalAction === null || (intake !== null && pairState.terminalAction.row === intake.row &&
       pairState.terminalAction.purpose === intake.purpose && pairState.terminalAction.identity === intake.identity);
-    return sameTerminal && !this.driving && !this.request && !this.historyRequest && !this.retry && !pairState.sdkPosition && !pairState.compactFlight && !this.compactedPlan && !this.retired && !this.drained && this.keys !== null && pairState.linked === null && (pairState.intake === null || pairState.intake === intake);
+    return sameTerminal && !this.driving && !this.request && !this.historyRequest && !this.retry && !pairState.sdkPosition && !pairState.compactFlight && !pairState.negotiationRetired && this.peers.size < MAX_RETAINED_MEDIA && !this.retired && !this.drained && this.keys !== null && pairState.linked === null && (pairState.intake === null || pairState.intake === intake);
   }
   link(chain: BrowserChain, intake: ChainIntake | null = null): void {
     const pairState = this.negotiation;
@@ -2844,37 +2863,80 @@ class RetainedIpcChannel {
     if (pairState.media) return pairState.media.start();
     if (pairState.linked !== chain || !chain.sdp || chain.sdpRows!==2 || !pairState.sdpRtc || pairState.sdpRoundStage !== "done" ||
         pairState.rtcFlight || pairState.sdpFlight || pairState.actionBusy || this.retired || this.drained) throw new Error("completed original RTC round required");
-    this.custody.mediaPrepared(); // BEFORE construction, Clock, SDK or native callbacks.
+    if (this.peers.size >= MAX_RETAINED_MEDIA || this.peers.has(chain.handle)) throw new Error("voice media capacity reached");
+    const refund = this.custody.mediaPrepared(); // BEFORE constructor/Clock/SDK/native callbacks.
+    const peer: RetainedNativePeer = { plan: chain.handle, generation: pairState.generation, refund,
+      media: null, compacted: false, compactionReturned: false, advanced: false, closing: false, refundReady: false, cleanup: null };
     try {
       const phase = chain.sdp, storage = phase.storage, sdk = phase.sdk;
       if (!storage || !sdk) throw new Error("original media storage unavailable");
       const original = { ...this.sdpIdentity(chain, pairState), storage: storage.proof,
         sdkGeneration: sdk.generation, sdkProof: sdk.proof, pcProof: phase.pc.originalProof() };
-      const media = new VoiceNativeMedia(original, pairState.sdpRtc, this.mediaContext());
-      pairState.media = media; // Publish before start can invoke any provider/Clock callback.
+      const media = new VoiceNativeMedia(original, pairState.sdpRtc, this.mediaContext(peer));
+      peer.media = media; this.peers.set(peer.plan, peer);
+      pairState.media = media; // Registry and original owner both exist before callbacks.
       return media.start();
-    } catch (error) { if (!pairState.media) this.custody.mediaReleased(); throw error; }
+    } catch (error) { if (!peer.media) refund(); throw error; }
   }
 
   /** Scope contains only shared Session infrastructure, never an old chain/Phase/SDK. */
-  private mediaContext(): VoiceNativeMediaContext {
+  private mediaContext(peer: RetainedNativePeer): VoiceNativeMediaContext {
     return { clock: this.clock, live: () => this.live(),
       begin: () => this.beginActivity(), end: () => this.endActivity(),
-      stopped: () => this.retire(), refund: () => this.custody.mediaReleased(),
+      stopped: () => this.mediaStopped(peer), refund: () => { peer.refundReady = true; },
       request: (encoded, cleanup) => this.execution.run(() => this.framed(
         encoded.operation, encoded.kind, encoded.logical, encoded.body, cleanup,
         (kind, length) => kind === 0 && (length === 18 || length === 20 || length === 55), decodeVoiceMedia)) };
   }
-  compacted(plan: VoiceCryptoChain): boolean { return this.compactedPlan !== null && this.compactedPlan === plan; }
+  private mediaStopped(peer: RetainedNativePeer): void {
+    peer.closing = true;
+    if (this.retired) return; // Global End owns the coalesced joins after closing ALL peers.
+    if (!peer.compacted) { this.retire(); return; } // Original phase cleanup still owns this case.
+    void this.cleanupPeer(peer);
+  }
+  private cleanupPeer(peer: RetainedNativePeer): Promise<void> {
+    if (peer.cleanup) return peer.cleanup;
+    if (!peer.media) return Promise.resolve();
+    const work = Promise.resolve().then(async () => {
+      for (;;) {
+        const observed = this.wakeIdentity;
+        try { await peer.media!.cleanup(); break; }
+        catch { await this.waitCleanupWake(observed); }
+      }
+      if (!peer.refundReady) throw new Error("actual media cleanup has not returned");
+      peer.media = null;
+    });
+    // Separate completion scope follows actual driver cleanup and heavy-worker return.
+    peer.cleanup = this.peerCleanupReturned(work, peer); return peer.cleanup;
+  }
+  private peerCleanupReturned(work: Promise<void>, peer: RetainedNativePeer): Promise<void> {
+    return work.then(() => { peer.refund(); }).finally(() => { peer.cleanup = null; });
+  }
+  compacted(plan: VoiceCryptoChain): boolean { return this.peers.get(plan)?.compacted === true; }
   compactedMedia(plan: VoiceCryptoChain): Promise<void> {
-    const pairState = this.negotiation;
-    if (!this.compacted(plan) || !pairState.media) throw new Error("original compacted media required");
-    return pairState.media.start();
+    const peer = this.peers.get(plan);
+    if (!peer?.compacted || !peer.media) throw new Error("original compacted media required");
+    return peer.media.start();
+  }
+  /** Publication is explicit after the public compaction observer returns, never inside
+   * old accounting/finally callbacks. Repeating an old marker cannot advance a newer owner. */
+  advanceNegotiation(plan: VoiceCryptoChain): boolean {
+    const peer = this.peers.get(plan), pairState = this.negotiation;
+    if (this.retired || this.drained || !peer?.compacted || !peer.compactionReturned) return false;
+    if (peer.advanced) return true;
+    if (!this.negotiationCurrent(pairState)) return false;
+    if (this.negotiation !== pairState || this.retired || this.drained || !this.keys || peer.generation !== pairState.generation ||
+        this.driving || this.request || this.historyRequest || this.retry ||
+        pairState.compactFlight || pairState.sdkPosition || pairState.workPump || pairState.linked || pairState.intake || pairState.media ||
+        pairState.transitionFlight || pairState.derivationReturn || pairState.sdpFlight || pairState.rtcFlight || pairState.negotiationFlight ||
+        pairState.actionBusy || pairState.rtcCreating || pairState.sdpCreating || pairState.sdpRtc || pairState.sdpAction || !pairState.negotiationRetired) return false;
+    const next = new RetainedNativeNegotiation(); // Inert, no callback between checks/publication.
+    peer.advanced = true; this.negotiation = next; return true;
   }
   compactNegotiation(chain: BrowserChain): Promise<boolean> {
     const pairState = this.negotiation;
     if (pairState.compactFlight) return pairState.compactFlight;
-    if (this.compactedPlan === chain.handle) return compactedHistory;
+    if (this.compacted(chain.handle)) return compactedHistory;
     if (pairState.linked !== chain || !pairState.negotiationRetired || !pairState.media?.detached || !pairState.finalAcknowledged)
       throw new Error("retired original browser history required");
     const media = pairState.media, plan = chain.handle;
@@ -2891,18 +2953,22 @@ class RetainedIpcChannel {
         catch { return -1; } // Same old history remains paid; no new native admission.
         // Last callback precedes ALL private final checks and the synchronous tail.
         if (!this.live() || this.retired || this.drained || pairState.linked !== chain || pairState.media !== media || media.closed) return -1;
-        pairState.linked = null; this.compactedPlan = plan;
+        const peer = this.peers.get(plan);
+        if (!peer || peer.media !== media || peer.compacted) return -1;
+        const refund = prepared.commit(); prepared = null;
+        peer.compacted = true; // Same driver remains continuously owned by this paid record.
+        pairState.linked = null; pairState.media = null;
         // Native mode8 already proves exact parent-final/ACK and actual destruction.
-        // Drop old scalar history as well; canLink stays closed by compactedPlan.
+        // Drop old scalar history; explicit post-return publication opens the next owner.
         pairState.terminalAction = null; pairState.finalProof = null; pairState.finalAcknowledged = false;
         pairState.cleanupWork = null; pairState.cleanupParent = null;
-        const refund = prepared.commit(); prepared = null;
         return refund;
       } finally { prepared?.abort(); }
     });
     // The public/coalesced completion is created in a DIFFERENT method scope. It cannot
     // retain this function's chain/rows/prepared closures after the heavy worker returns.
-    const flight = this.compactionCompletion(work);
+    const peer = this.peers.get(plan)!;
+    const flight = compactionReturned(this.compactionCompletion(work), peer);
     pairState.compactFlight = flight; return flight;
   }
   private compactionCompletion(work: Promise<number>): Promise<boolean> {
@@ -3202,6 +3268,7 @@ class RetainedIpcChannel {
   wakeToken(): object { return this.wakeIdentity; }
   async waitWake(observed: object): Promise<void> {
     if (this.wakeIdentity !== observed) return;
+    if (this.cleanupWakeFlight) return this.cleanupWakeFlight;
     const waiting = this.retry ??= signal<void>();
     try { await waiting.promise; }
     finally { if (this.retry === waiting) this.retry = null; }
@@ -3225,7 +3292,16 @@ class RetainedIpcChannel {
    * on remount/availability. Timer and availability resolve the SAME Signal: racing two
    * asynchronous waiters would leak a waitWake continuation on every expired interval.
    * This is cleanup only, after actual SDK/IO/linked drainage; it grants no action authority. */
-  private async waitCleanupWake(observed: object): Promise<void> {
+  private waitCleanupWake(observed: object): Promise<void> {
+    if (this.wakeIdentity !== observed) return Promise.resolve();
+    if (this.cleanupWakeFlight) return this.cleanupWakeFlight;
+    // Publish the shared flight BEFORE Clock/scheduler callbacks. Joining peers do not
+    // acquire timer cleanup ownership: a joining fault cannot detach another waiter.
+    const work = Promise.resolve().then(() => this.driveCleanupWake(observed));
+    const flight = work.finally(() => { if (this.cleanupWakeFlight === flight) this.cleanupWakeFlight = null; });
+    this.cleanupWakeFlight = flight; return flight;
+  }
+  private async driveCleanupWake(observed: object): Promise<void> {
     if (this.wakeIdentity !== observed) return;
     const waiting = this.retry ??= signal<void>();
     const deadline = this.clock.now() + IPC_CLEANUP_RETRY_MS;
@@ -3276,7 +3352,10 @@ class RetainedIpcChannel {
     const pairState = this.negotiation;
     if (!this.retired) { this.retired = true; this.controller?.abort(); }
     pairState.sdkPosition?.cancel();
-    pairState.media?.close(); // Real peer closes BEFORE any join of abort-resistant IO.
+    for (const peer of this.peers.values()) {
+      peer.closing = true;
+      try { peer.media?.close(); } catch { /* Continue closing every actual peer; cleanup retries custody. */ }
+    }
     pairState.sdpRtc?.close();
     pairState.sdpAction?.close();
     void pairState.workPump?.close();
@@ -3293,7 +3372,7 @@ class RetainedIpcChannel {
   }
   private collect(): void {
     if (this.collected || !this.drained || this.activity !== 0 || this.selected.owner.isCurrent()) return;
-    this.collected = true; this.unsubscribe(); this.compactedPlan = null; this.custody.collected();
+    this.collected = true; this.unsubscribe(); this.peers.clear(); this.custody.collected();
   }
   private status(): Promise<VoiceIpcStatus> {
     const pairState = this.negotiation;
@@ -3363,11 +3442,8 @@ class RetainedIpcChannel {
         // Media debt blocks native parent Final. Finish it BEFORE unseen-parent/old SDK
         // cleanup, and never own SharedIpcExecution while joining SDK or current work.
         if (pairState.compactFlight) await pairState.compactFlight;
-        while (pairState.media) {
-          const observed = this.wakeIdentity;
-          try { await pairState.media.cleanup(); pairState.media = null; break; }
-          catch { await this.waitCleanupWake(observed); }
-        }
+        for (const peer of this.peers.values()) await this.cleanupPeer(peer);
+        pairState.media = null;
         // A failed SDK close is not actual drainage. Keep the original paid peer and
         // retry cleanup; never release native SDK custody merely because End was seen.
         while (pairState.sdpRtc) {
@@ -3838,7 +3914,7 @@ export function windowVoiceCryptoBroker(
   const host = window as Record<symbol, unknown>;
   const previous = host[BROKER] as VoiceCryptoBroker | undefined;
   if (previous) {
-    if (previous.version !== 35 || typeof previous.compactNativeNegotiation !== "function" || typeof previous.collectNativeNegotiationHistory !== "function" || typeof previous.retireNativeNegotiation !== "function" || typeof previous.completeNativeMediaHandoff !== "function" || typeof previous.completeNativeSdpRtcRound !== "function" || typeof previous.prepareNativeSdpRtc !== "function" || typeof previous.prepareNativeSdpCrypto !== "function" || typeof previous.prepareNativePcIntent !== "function" || typeof previous.prepareNativeSdpHandoff !== "function" || typeof previous.observeNativeWork !== "function" || typeof previous.returnNativeDerivation !== "function" || typeof previous.nativeConfirmationFromChannel !== "function" || typeof previous.nativeDerivationFromChannel !== "function" || typeof previous.recoverChannelHistory !== "function" || typeof previous.prepareChainFromChannel !== "function" || typeof previous.nativeChannel !== "function" || typeof previous.run !== "function" || typeof previous.selectJoinKey !== "function" || typeof previous.retrySelectedJoinKeys !== "function" ||
+    if (previous.version !== 36 || typeof previous.advanceNativeNegotiation !== "function" || typeof previous.compactNativeNegotiation !== "function" || typeof previous.collectNativeNegotiationHistory !== "function" || typeof previous.retireNativeNegotiation !== "function" || typeof previous.completeNativeMediaHandoff !== "function" || typeof previous.completeNativeSdpRtcRound !== "function" || typeof previous.prepareNativeSdpRtc !== "function" || typeof previous.prepareNativeSdpCrypto !== "function" || typeof previous.prepareNativePcIntent !== "function" || typeof previous.prepareNativeSdpHandoff !== "function" || typeof previous.observeNativeWork !== "function" || typeof previous.returnNativeDerivation !== "function" || typeof previous.nativeConfirmationFromChannel !== "function" || typeof previous.nativeDerivationFromChannel !== "function" || typeof previous.recoverChannelHistory !== "function" || typeof previous.prepareChainFromChannel !== "function" || typeof previous.nativeChannel !== "function" || typeof previous.run !== "function" || typeof previous.selectJoinKey !== "function" || typeof previous.retrySelectedJoinKeys !== "function" ||
         typeof previous.registerProtectedConfirmation !== "function" ||
         typeof previous.registerProtectedDerivation !== "function" || typeof previous.registerConfirmation !== "function" || typeof previous.createPair !== "function") {
       throw new Error("voice crypto broker version changed; reload required");

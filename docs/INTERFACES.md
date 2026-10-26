@@ -1,5 +1,21 @@
 # Mewtual; Interfaces & Hooks Schema
 
+## Broker36 explicit next negotiation (26 October; inactive)
+
+`advanceNativeNegotiation(owner, channel, originalPlan): boolean` recognizes only an exact
+compacted plan in the original Session. False leaves ownership unchanged. True either
+observes its prior transition or publishes one fresh browser owner after actual original
+compaction completion and all old flights/gates have returned. It confers no native action,
+key, SDP, RTC or current-media authority. Copied/unset plans do not match; stale callbacks
+retain their old generation. Session keys and request/response counters are unchanged.
+
+Compacted media APIs resolve the original registry record, independently of the current
+negotiation. End closes all drivers synchronously before cleanup. Record2KiB transfers from
+original fixed history; per-driver8KiB refunds follow real cleanup-worker return. The shared
+retry flight has a sole timer owner. HMR35 or a missing advance API requires reload. Native
+wire formats and caps are unchanged. Native/TCP two-peer acceptance and precompaction failure
+isolation remain open;16 records does not imply16 supported Root negotiations. App V2 is OFF.
+
 ## Broker35 local execution and captured negotiation contract (26 October; inactive)
 
 This changes retained browser internals only; incompatible HMR brokers require reload.
