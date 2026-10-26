@@ -1,5 +1,20 @@
 # Next voice milestone: native result recovery
 
+## Current work: live browser compaction reviewed; composition next (26 October)
+
+Broker33 now compacts one original browser negotiation after exact native mode8 history and
+actual browser joins. It transfers a conservative inert-plan fee and refunds only after the
+heavy worker returns. The original media peer/physical Session/keys/counters persist. Browser
+focused/full/static/build gates pass; actual extended HTTP/native evidence is queued and must
+be reconciled before sign-off. HANDOVER records review and explicit limits.
+
+Next replace the blocked active negotiation with a generation-bound owner, retain bounded
+independent peer media records on ONE Session, and provide fair refresh plus peer-local failure.
+Prove two serial/overlapping original negotiations without counter/key/budget reset and End
+closing every peer before cleanup. Preserve actual16-incarnation/256KiB limits. Operational
+renewal, App/RTC tracks, TURN/member relay and combined/physical acceptance remain open. App V2
+is OFF; external download resume is separately owned and only one desktop is available.
+
 ## Current work: End cells reviewed; live compaction and composition next (26 October)
 
 Broker32 now detaches caller-retained negotiation handles/timer cells after actual End cleanup,

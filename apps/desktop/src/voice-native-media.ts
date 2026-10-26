@@ -1,6 +1,7 @@
 /** One prepaid original-peer media handoff on the retained authenticated IPC Session.
  * One-pair negotiation can retire into independent native custody; shared Session and
- * fixed old history remain paid until End. This is not multiparty compaction. The opaque destination and
+ * old browser history has a separate explicit compaction transaction. This driver stays
+ * paid through actual peer/native/IO cleanup and does not admit another pair. The opaque destination and
  * passive status contain no driver/old-chain callbacks; only this paid driver does. */
 import { encodeVoiceMediaOriginal, encodeVoiceMediaExisting, type VoiceMediaReceipt } from "./voice-ipc-media.ts";
 import type { VoiceSdpOriginal } from "./voice-ipc-sdp-actions.ts";

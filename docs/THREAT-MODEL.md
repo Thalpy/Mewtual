@@ -1,5 +1,20 @@
 # Threat model; client integrity & enforcement boundaries
 
+## Live browser-history compaction boundary (26 October; inactive)
+
+Only exact original owner/channel/plan plus completed native mode8 history may start live
+reclamation. Native absence alone is insufficient. A paid exclusive disposal owner fences
+End's ordinary cleanup during actual cell/SDK/action/intake joins. Callback-bearing work ends
+before final identity checks and private unlink/metadata commit. Null sentinels cannot stand
+for a real plan. Historical completion cannot refresh media or authorize a replacement peer.
+
+One inert original plan remains under transferred fixed custody; all old scalar final history
+and native/chain adapters leave. The full original fee covers transaction snapshots through
+actual heavy worker return; an independently scoped finalizer refunds once afterward. End
+closes the real peer before joining this flight and native cleanup. Actual channel collection
+releases the marker fee. Shared Session keys/nonces survive unchanged; second-pair admission
+stays closed. Native HTTP execution of this new consumer remains pending; App V2 remains OFF.
+
 ## End-only browser handle detachment (26 October; inactive)
 
 Caller-retained handles and queued timer callbacks must not pin unpaid native/SDK graphs after

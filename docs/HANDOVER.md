@@ -1,5 +1,39 @@
 # Mewtual; Handover
 
+## Live browser history compaction (26 October; Native acceptance queued)
+
+Broker33 adds exact-original `compactNativeNegotiation` after variable negotiation retirement
+and authenticated native mode8 collection. One coalesced transaction keeps the shared physical
+Session, keys, monotonic counters and same actual media peer. It reserves old history disposal,
+joins actual old SDK/actions/intakes and detachable cells, then removes browser indexes and
+native/chain adapters. End closes the peer first and joins this transaction before cleanup.
+Capacity/lost history retains the original graph/payment. A final-owner-check End returns
+ownership to ordinary cleanup. Runtime null/undefined and copied plans cannot match history.
+
+The callback-free private commit unlinks the original chain and clears old selector/Action/
+final-proof history. Only an inert original plan marker remains, conservatively charged1KiB
+from the original fixed reservation; the existing8KiB media driver pays its own original claim.
+All original fixed bytes remain charged THROUGH the heavy worker/commit/finally return. A
+separate small completion scope then refunds only the difference. This avoids assuming that
+old snapshot overlap fits the shared16KiB workspace. Actual channel collection after activity
+return and End releases the marker fee; repeated observers cannot refund twice. Media callback
+construction has its own scope containing shared infrastructure, not old Phase/SDK locals.
+
+Focused311 tests pass5.90s and the additional actual-commit refund regression passes1.64s.
+Complete frontend passes2,958 tests65.54s, Svelte0errors/0warnings and build37.16s. Read-only
+re-review has no remaining blocker/high/medium or material low. Existing real HTTP mode8
+pending/lost-completion acceptance is extended to perform browser compaction, exact refund,
+same keys/counters and a newly started Current afterward. THAT extension has not run yet.
+Native validation is queued after the separate frozen fixture full run (one heavy suite).
+Do not substitute its existing native-history tests for execution of this new browser step.
+
+Second-peer admission is intentionally still blocked by the inert marker. Generation-bound
+active negotiation replacement, bounded multi-peer refresh, operational renewal, App tracks,
+TURN/member media relay and combined/physical acceptance remain open. App V2 stays OFF. Root
+runtime source is unchanged from3,675pass/24ignored. Cargo deny still fails the inherited
+crypto-bigint0.5.5 RUSTSEC-2026-0387; it is neither ignored nor resolved here. External download
+resume remains separate; one available desktop cannot prove independent physical audio/network.
+
 ## Browser terminal-handle disposal after End (26 October; Native full pending)
 
 Broker32 gives plan/action/derivation and confirmation intake handles detachable dispatch

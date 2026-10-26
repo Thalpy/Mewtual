@@ -1,5 +1,19 @@
 # Mewtual; Interfaces & Hooks Schema
 
+## Broker33 explicit browser history compaction (26 October; inactive)
+
+`compactNativeNegotiation(owner, channel, plan): Promise<boolean>` requires exact original
+objects, completed negotiation retirement and authenticated native mode8 collection. One
+coalesced flight joins actual browser custody; true is historical reclamation, not current
+media permission or another peer admission. Capacity/loss returns false with original fees
+held. After success, only the exact original inert plan can address existing media/history;
+null, undefined and copied handles fail. Action handles remain terminal. HMR32 is refused.
+
+Compaction transfers1KiB from existing fixed custody without recharge. Heavy worker return
+precedes the separate refund finalizer. End joins compaction after closing the peer; actual
+channel collection releases the retained marker fee. Session keys/counters never reset, and
+canLink remains blocked. HANDOVER separates passing browser gates from queued native HTTP proof.
+
 ## Broker32 terminal handle contract after End (26 October; inactive)
 
 After actual disposal, retained plan handles report noncurrent and close idempotently. Action

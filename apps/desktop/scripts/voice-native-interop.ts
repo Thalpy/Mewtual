@@ -446,6 +446,26 @@ async function step(value: Step): Promise<unknown> {
       await broker.completeNativeMediaHandoff(owner,channel,chain);
       assert.ok(mediaCurrentObservations > before, "fresh authenticated Current after native history removal");
       assert.equal(mediaPeerCalls.closed,0);
+      // Native independently held/collected the original parent and child, and the first
+      // authenticated mode8 completion was lost above. Now exercise the actual browser
+      // transaction on that SAME Session rather than treating native absence as JS refund.
+      const state = broker as unknown as { chains: WeakMap<object, {fixedBytes: number}>;
+        ipcChannels: Map<string, {keys: unknown; bootstrap: unknown; tx: bigint}> };
+      const old = state.chains.get(chain)!;
+      assert.ok(old); const fixed = old.fixedBytes;
+      const session = state.ipcChannels.get(owner.token)!;
+      const keys = session.keys, bootstrap = session.bootstrap, tx = session.tx;
+      assert.equal(await broker.compactNativeNegotiation(owner,channel,chain),true);
+      assert.equal(broker.counts().bytes,paid-fixed+1024);
+      assert.equal(state.chains.has(chain),false); assert.equal(chain.isCurrent(),false);
+      assert.equal(session.keys,keys); assert.equal(session.bootstrap,bootstrap); assert.ok(session.tx>=tx);
+      assert.throws(()=>broker.compactNativeNegotiation(owner,channel,{...chain}),/original browser history/);
+      // Old metadata is gone; exact original media still resolves independently. Require
+      // another physically started Current after compaction, not an old joined observer.
+      await broker.completeNativeMediaHandoff(owner,channel,chain);
+      const afterCompaction=mediaCurrentObservations;
+      await broker.completeNativeMediaHandoff(owner,channel,chain);
+      assert.ok(mediaCurrentObservations>afterCompaction); assert.equal(mediaPeerCalls.closed,0);
       return { kind: "indexed-media-current", peers:1 };
     }
     case "media-revoked": {

@@ -3355,7 +3355,7 @@ test("framed lost media admission recovers original claim without a second peer 
   assert.equal(f.sdk.calls.created, 1); assert.equal(f.sdk.calls.closed, 0); assert.equal(f.f.broker.counts().bytes, paid + 8192);
   f.f.owner.retire(); await f.child.channel.close(); assert.equal(f.f.broker.counts().bytes, 0);
 });
-for (const version of [28,29,30,31]) test(`HMR refuses funded broker${version} without waking incompatible cleanup`, async t => {
+for (const version of [28,29,30,31,32]) test(`HMR refuses funded broker${version} without waking incompatible cleanup`, async t => {
   const f = await framedMedia(t), previous = Object.create(f.f.broker);
   Object.defineProperty(previous, "version", { value: version }); let wakes = 0; previous.retrySelectedJoinKeys = () => { wakes++; };
   const key = Symbol.for("mewtual.voice.crypto-broker.v2"), host = { [key]: previous };
@@ -3560,4 +3560,121 @@ test("authenticated detachment fences old negotiation before held work-pump clos
   } finally {
     held.release();await retirement;await observer.close();f.f.owner.retire();await f.child.channel.close();
   }
+});
+
+
+test("live history compaction keeps the same peer and Session with only paid inert history", async t => {
+  const f = await framedMedia(t); await f.media(); f.remaining(0); await f.retireNegotiation();
+  const broker = f.f.broker, plan = f.child.ready.chain;
+  type Chain = { fixedBytes: number; records: Map<unknown, {native: unknown; chain: unknown}>; channel: unknown; origin: unknown };
+  type Session = { keys: unknown; bootstrap: unknown; tx: bigint; linked: unknown; terminalAction: unknown; finalProof: unknown };
+  const state = broker as unknown as { chains: WeakMap<object, Chain>; ipcChannels: Map<string, Session> };
+  const old = state.chains.get(plan)!, rows = [...old.records.values()], oldFixed = old.fixedBytes;
+  const session = state.ipcChannels.get(f.f.owner.token)!, keys = session.keys, bootstrap = session.bootstrap, tx = session.tx;
+  const paid = broker.counts().bytes;
+  const compact = () => broker.compactNativeNegotiation(f.f.owner, f.child.channel, plan);
+  const first = compact(); for (let n = 0; n < 2000; n++) assert.equal(compact(), first);
+  assert.equal(await first, true);
+  assert.equal(broker.counts().bytes, paid - oldFixed + 1024);
+  assert.equal(state.chains.has(plan), false); assert.equal(old.records.size, 0);
+  assert.equal(old.channel, null); assert.equal(old.origin, null);
+  for (const row of rows) { assert.equal(row.native, null); assert.equal(row.chain, null); }
+  assert.equal(session.linked, null); assert.equal(session.terminalAction, null); assert.equal(session.finalProof, null);
+  assert.equal(session.keys, keys); assert.equal(session.bootstrap, bootstrap); assert.ok(session.tx > tx);
+  assert.equal(f.sdk.calls.created, 1); assert.equal(f.sdk.calls.closed, 0);
+  assert.equal(plan.isCurrent(), false); assert.equal(f.child.ready.derivation.pair(), null);
+  assert.equal((await f.child.ready.derivation.attempt()).kind, "retired");
+  const after = broker.counts().bytes; assert.equal(await compact(), true); assert.equal(broker.counts().bytes, after);
+  assert.throws(() => broker.compactNativeNegotiation(f.f.owner, f.child.channel, {...plan}), /original browser history/);
+  assert.throws(() => broker.completeNativeMediaHandoff(f.f.owner, f.child.channel, {...plan}), /original native media/);
+  await f.media(); assert.equal(f.sdk.calls.closed, 0); assert.equal(session.keys, keys);
+  assert.throws(() => broker.nativeDerivationFromChannel(f.f.owner, f.child.channel, f.f.key, historyPurpose, f.child.parent.row, f.child.parent.identity), /ready voice channel|capacity/);
+  f.f.owner.retire(); assert.equal(f.sdk.calls.closed, 1); await f.child.channel.close();
+  assert.equal(broker.counts().bytes, 0);
+});
+
+
+for (const fault of ["capacity", "lost"] as const) test(`live compaction retains the same graph/payment after ${fault} native history`, async t => {
+  const f = await framedMedia(t); await f.media(); f.remaining(0); await f.retireNegotiation();
+  const broker = f.f.broker, plan = f.child.ready.chain;
+  const state = broker as unknown as {chains: WeakMap<object, {fixedBytes: number; cell: {detached: boolean}}>};
+  const original = state.chains.get(plan)!, paid = broker.counts().bytes, fixed = original.fixedBytes;
+  if (fault === "capacity") f.busy(8); else f.lose(8);
+  assert.equal(await broker.compactNativeNegotiation(f.f.owner, f.child.channel, plan), false);
+  assert.equal(broker.counts().bytes, paid); assert.equal(state.chains.get(plan), original);
+  assert.equal(original.cell.detached, false); assert.equal(f.sdk.calls.closed, 0);
+  f.busy(-1);
+  assert.equal(await broker.compactNativeNegotiation(f.f.owner, f.child.channel, plan), true);
+  assert.equal(broker.counts().bytes, paid - fixed + 1024);
+  assert.equal(f.modes.filter(mode => mode === 8).length, 2, "the same native claim recovers after refusal/loss");
+  f.f.owner.retire(); await f.child.channel.close(); assert.equal(broker.counts().bytes, 0);
+});
+
+test("End closes the actual peer before a live compaction history request returns", async t => {
+  const f = await framedMedia(t); await f.media(); f.remaining(0); await f.retireNegotiation();
+  const broker = f.f.broker, held = f.hold(8);
+  const pending = broker.compactNativeNegotiation(f.f.owner, f.child.channel, f.child.ready.chain);
+  await until(() => f.modes.includes(8)); const paid = broker.counts().bytes;
+  f.f.owner.retire(); assert.equal(f.sdk.calls.closed, 1);
+  let finished = false; const closing = f.child.channel.close().then(() => { finished = true; });
+  await flush(); assert.equal(finished, false); assert.equal(broker.counts().bytes, paid);
+  held.release(); assert.equal(await pending, false); await closing; await flush();
+  assert.equal(broker.counts().bytes, 0);
+});
+
+test("End at the final live compaction owner check returns ownership to ordinary cleanup", async t => {
+  const f = await framedMedia(t); await f.media(); f.remaining(0); await f.retireNegotiation();
+  const broker = f.f.broker, plan = f.child.ready.chain;
+  const state = broker as unknown as {chains: WeakMap<object, {historyDisposing: boolean; cell: {detached: boolean}}>};
+  const original = state.chains.get(plan)!; let ended = false;
+  const atPrepared = () => {
+    if (!ended && original.historyDisposing && original.cell.detached) { ended = true; f.f.owner.retire(); }
+    else if (!ended) f.f.onOwnerCheck(atPrepared);
+  };
+  f.f.onOwnerCheck(atPrepared);
+  assert.equal(await broker.compactNativeNegotiation(f.f.owner, f.child.channel, plan), false);
+  assert.equal(ended, true); assert.equal(f.sdk.calls.closed, 1);
+  await f.child.channel.close(); await flush(); assert.equal(broker.counts().bytes, 0);
+});
+
+
+test("unset runtime plans never match an empty compacted-history slot", async t => {
+  const f = await fixture(t), channel = f.channel(); await channel.status();
+  const calls = f.operations();
+  for (const value of [null, undefined]) {
+    const plan = value as unknown as Parameters<typeof f.broker.compactNativeNegotiation>[2];
+    assert.throws(() => f.broker.compactNativeNegotiation(f.owner, channel, plan), /original browser history/);
+    assert.throws(() => f.broker.collectNativeNegotiationHistory(f.owner, channel, plan), /original native history/);
+    assert.throws(() => f.broker.retireNativeNegotiation(f.owner, channel, plan), /original native negotiation/);
+    assert.throws(() => f.broker.completeNativeMediaHandoff(f.owner, channel, plan), /original native media/);
+  }
+  assert.deepEqual(f.operations(), calls, "unset plans neither collect history nor submit native work");
+});
+
+
+test("live compaction retains the full fixed fee until its heavy commit frame returns", async t => {
+  const f = await framedMedia(t); await f.media(); f.remaining(0); await f.retireNegotiation();
+  const broker = f.f.broker, plan = f.child.ready.chain, paid = broker.counts().bytes;
+  type Prepared = { commit(): number; abort(): void };
+  type Custody = { prepareCompaction(chain: unknown): Promise<Prepared>; compactionReturned(bytes: number): void };
+  const state = broker as unknown as { ipcChannels: Map<string, {custody: Custody}> };
+  const custody = state.ipcChannels.get(f.f.owner.token)!.custody;
+  const prepare = custody.prepareCompaction, returned = custody.compactionReturned;
+  let commitReturned = false, refunds = 0;
+  custody.prepareCompaction = async chain => {
+    const prepared = await prepare(chain);
+    return { abort: () => prepared.abort(), commit: () => {
+      const refund = prepared.commit();
+      assert.equal(broker.counts().bytes, paid, "actual entered commit/worker metadata still owns the original fixed fee");
+      commitReturned = true; return refund;
+    } };
+  };
+  custody.compactionReturned = bytes => {
+    assert.equal(commitReturned, true, "small finalizer runs after heavy commit returned");
+    refunds++; returned(bytes);
+  };
+  assert.equal(await broker.compactNativeNegotiation(f.f.owner, f.child.channel, plan), true);
+  assert.equal(refunds, 1); assert.ok(broker.counts().bytes < paid);
+  assert.equal(await broker.compactNativeNegotiation(f.f.owner, f.child.channel, plan), true); assert.equal(refunds, 1);
+  f.f.owner.retire(); await f.child.channel.close(); assert.equal(broker.counts().bytes, 0);
 });

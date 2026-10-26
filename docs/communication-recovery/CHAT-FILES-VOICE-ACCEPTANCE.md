@@ -1,5 +1,19 @@
 # Chat, files and voice implementation evidence
 
+## Inactive live browser compaction checkpoint (26 October; native extension queued)
+
+Broker33's exact mode8-to-browser disposal transaction has passing browser focused coverage,
+2,958 complete frontend tests, zero static errors/warnings and a passing production build.
+Read-only review has no remaining blocker/high/medium or material low. Tests cover original
+Session/peer preservation, monotonic counters, pending/lost history, End during held IO and
+final owner checks, copied/unset plan rejection, coalescing and post-heavy-return accounting.
+
+The real HTTP/TCP history scenario now additionally performs browser compaction and fresh
+Current after removal, but that extension is queued behind a frozen Native full run and has
+not passed yet. Existing mode8 native-history evidence does not close this new acceptance.
+No multi-peer, renewed generation, App tracks, media relay or physical network/audio completion
+is claimed. App V2 stays OFF. HANDOVER records exact gates and inherited dependency-audit failure.
+
 ## 26 October: browser mode8 HTTP consumer and lost completion
 
 All288 framed/driver regressions pass, including coalesced observers, held IO, pre-start End,

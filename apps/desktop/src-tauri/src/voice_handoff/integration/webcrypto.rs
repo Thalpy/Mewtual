@@ -829,7 +829,8 @@ impl Endpoint {
         );
         drop(target);
         // Same actual Node peer and authenticated HTTP Current remain usable after all
-        // original native rows disappear; browser fixed history is intentionally retained.
+        // original native rows disappear. The browser then explicitly compacts its own
+        // joined handles while preserving that same peer/Session and fresh Current.
         assert_eq!(
             self.step(json!({"tag":"step","name":"media-current-after-history"}))
                 .await,

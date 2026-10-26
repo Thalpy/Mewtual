@@ -1,5 +1,16 @@
 # Mewtual; Architecture
 
+## Original-peer live browser compaction (26 October; inactive)
+
+Broker33 can retire browser negotiation history while indexed original media persists. Exact
+native history completion precedes an exclusive, coalesced browser disposal transaction. Old
+SDK/IO/action/intake and entered-cell joins precede its private metadata commit. Only a paid
+inert plan marker and the independently paid media driver survive; old final/selector history
+is cleared. A separate small completion scope refunds after heavy transaction frames actually
+return. Shared Session keys/counters stay unchanged. End closes the actual peer before joining
+compaction and cleanup. Another negotiation is still blocked; this is not multi-peer support.
+HANDOVER records passing browser gates and queued actual HTTP/native acceptance. App V2 is OFF.
+
 ## End-only browser terminal disposal (26 October; inactive)
 
 Broker32 wraps public negotiation handles and queued plan/intake callbacks in detachable cells.
