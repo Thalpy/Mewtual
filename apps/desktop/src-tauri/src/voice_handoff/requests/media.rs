@@ -20,6 +20,8 @@ pub(in crate::voice_handoff) enum OriginalKind {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(in crate::voice_handoff) enum ExistingKind {
     Current,
+    /// Move existing admitted custody after original source expiry; never admit a PC.
+    Detach,
     Close,
     Release,
 }
@@ -116,6 +118,7 @@ impl Request {
                 4 => ExistingKind::Current,
                 5 => ExistingKind::Close,
                 6 => ExistingKind::Release,
+                7 => ExistingKind::Detach,
                 _ => return Err(VoiceError::Malformed),
             };
             Self::Existing {
@@ -221,7 +224,7 @@ mod tests {
                 let permitted = if body.len() == ORIGINAL_BYTES {
                     mode <= 3
                 } else {
-                    (4..=6).contains(&mode)
+                    (4..=7).contains(&mode)
                 };
                 assert_eq!(Request::decode(parent, &changed).is_ok(), permitted);
             }

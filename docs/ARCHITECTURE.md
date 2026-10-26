@@ -1,5 +1,17 @@
 # Mewtual; Architecture
 
+## Independent native media index (25 October; inactive)
+
+Control28 mode7 Detach moves the SAME expired-negotiation media Root into 32 fixed native
+slots. Actual selected/Session and original parent/Action/proof survive without a strong
+Row/Phase/Intent backedge. Entry/candidate/index/GC storage is prepaid within existing caps.
+Broker30 retains old SDK/Source/Lower and physical IO through native Plan-final/ACK before
+64 KiB refund, while an independent 8 KiB monitor keeps the same peer current. Fixed history
+and shared Session keys/counters remain paid until End. This is variable negotiation
+retirement, not history reuse or multi-peer composition. Current mounted-state checks now
+run under UI commit before Coordinator. HANDOVER records tests, review and pending gates.
+App V2 stays OFF; renewal, App tracks, relay and combined/physical acceptance remain open.
+
 ## Inactive one-pair media driver (25 October)
 
 Broker29 connects the original completed RTC round to authenticated Control28. A separate

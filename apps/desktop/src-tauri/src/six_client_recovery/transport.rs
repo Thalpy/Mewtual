@@ -315,7 +315,18 @@ pub(super) struct NetworkRules {
     /// One actual first kind29 response can wait for an explicit test-controlled release.
     /// The surrounding cancellable request retains the original owner while this latch waits.
     pub file_reply: StdMutex<Option<HeldFileReply>>,
+    /// One bounded test observer of an ACTUAL original endpoint Source Flight. It copies
+    /// no packet/body and sends only after the real TCP request successfully returns.
+    pub voice_lower: StdMutex<Option<VoiceLowerCapture>>,
     pub trace: StdMutex<Trace>,
+}
+
+pub(super) struct VoiceLowerCapture {
+    pub endpoint: usize,
+    pub issuer: DeviceId,
+    pub join: [u8; 32],
+    pub handshake: [u8; 32],
+    pub sent: tokio::sync::oneshot::Sender<catcoms_rt::SharedRequestKeepalive>,
 }
 
 pub(super) struct HeldFileReply {
@@ -577,11 +588,32 @@ impl MeshTransport for Transport {
         mut cancellation: RequestCancellation,
     ) -> Result<Bytes, TransportError> {
         let kind = data.first().copied().unwrap_or(0);
+        let mut lower_capture = None;
         if kind == 28 {
             let mut frame = catcoms_wire::Decoder::new(&data);
             if frame.get_u8().is_ok() {
                 if let Ok(inner) = frame.get_bytes() {
                     if let Ok(envelope) = catcoms_sync::voice_v2::Envelope::decode(inner) {
+                        if let catcoms_sync::voice_v2::Body::Encrypted { header, .. } =
+                            envelope.object().body()
+                        {
+                            let eligible = {
+                                let held = self.rules.voice_lower.lock().unwrap();
+                                held.as_ref().is_some_and(|capture| {
+                                    capture.endpoint == self.index
+                                        && capture.issuer == envelope.object().issuer()
+                                        && capture.join == header.source_join
+                                        && capture.handshake == header.handshake
+                                        && matches!(
+                                            header.kind,
+                                            catcoms_sync::voice_v2::EncryptedKind::OfferRound(_)
+                                        )
+                                })
+                            };
+                            if eligible {
+                                lower_capture = cancellation.keepalive();
+                            }
+                        }
                         let ready = match envelope.object().body() {
                             catcoms_sync::voice_v2::Body::PairReady { header } => Some(header),
                             catcoms_sync::voice_v2::Body::PairReadyRound { header, .. } => {
@@ -619,6 +651,24 @@ impl MeshTransport for Transport {
                 Ok(bytes) => format!("ok {} bytes", bytes.len()),
                 Err(error) => format!("{error:?}"),
             };
+        }
+        if let Some(owner) = lower_capture {
+            let sender = if answer.is_ok() {
+                self.rules
+                    .voice_lower
+                    .lock()
+                    .unwrap()
+                    .take()
+                    .map(|capture| capture.sent)
+            } else {
+                None
+            };
+            // No rules/index/trace guard can overlap the owner send or last Drop. This
+            // survives cancellation because the fixture retains the actual Flight Arc,
+            // not the adapter future or a fabricated Source-active boolean.
+            if let Some(sender) = sender {
+                let _ = sender.send(owner);
+            }
         }
         let held = if self.index == 2 && kind == 29 && answer.is_ok() {
             self.rules.file_reply.lock().unwrap().take()

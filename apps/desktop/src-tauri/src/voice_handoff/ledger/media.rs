@@ -22,7 +22,8 @@ pub(super) struct Claim {
     released: bool,
     admitted: bool,
     retire_allowed: bool,
-    root: Option<Arc<SdpMedia>>,
+    pub(super) root: Option<Arc<SdpMedia>>,
+    pub(super) migrated: bool,
 }
 impl Claim {
     fn new(identity: &Identity) -> Self {
@@ -35,12 +36,13 @@ impl Claim {
             admitted: false,
             retire_allowed: false,
             root: None,
+            migrated: false,
         }
     }
     pub(super) fn whole_drained(&self) -> bool {
         // Never-admitted preparation has no new browser PC debt. Its worker and the
         // original SDK/storage obligations still prevent premature final/orphan GC.
-        !self.worker && (!self.admitted() || self.released)
+        !self.worker && (self.migrated || !self.admitted() || self.released)
     }
     fn admitted(&self) -> bool {
         self.admitted || self.root.as_ref().is_some_and(|root| root.was_admitted())
@@ -850,7 +852,7 @@ impl ResolvedRow {
         claimed: [u8; 32],
         kind: ExistingKind,
     ) -> Result<Receipt, VoiceError> {
-        if kind == ExistingKind::Current {
+        if matches!(kind, ExistingKind::Current | ExistingKind::Detach) {
             return Err(VoiceError::Unauthorized);
         }
         let retired;
@@ -940,6 +942,41 @@ impl ResolvedRow {
             .media
             .as_ref()
             .and_then(|media| media.root.clone())
+    }
+    pub(crate) fn media_test_until(&self) -> u64 {
+        let state = self.row.state.lock().unwrap();
+        state
+            .plan()
+            .and_then(|plan| plan.transition.as_ref())
+            .and_then(|claim| claim.key.as_ref())
+            .and_then(|key| key.sdp.as_ref())
+            .and_then(|sdp| sdp.pc.as_ref())
+            .and_then(|pc| pc.media.as_ref())
+            .unwrap()
+            .until
+    }
+    pub(crate) fn media_test_final_progress(&self) -> (bool, bool, bool) {
+        let state = self.row.state.lock().unwrap();
+        state
+            .final_delivery()
+            .map_or((false, false, false), |delivery| {
+                (
+                    delivery.kind == FinalKind::Plan,
+                    delivery.issued.is_some(),
+                    delivery.acknowledged,
+                )
+            })
+    }
+    pub(crate) fn media_test_migrated(&self) -> bool {
+        let state = self.row.state.lock().unwrap();
+        state
+            .plan()
+            .and_then(|plan| plan.transition.as_ref())
+            .and_then(|claim| claim.key.as_ref())
+            .and_then(|key| key.sdp.as_ref())
+            .and_then(|sdp| sdp.pc.as_ref())
+            .and_then(|pc| pc.media.as_ref())
+            .is_some_and(|media| media.migrated && media.root.is_none())
     }
     pub(in crate::voice_handoff) fn media_test_transition_proof(&self) -> [u8; 32] {
         let _index = self.transition_index().unwrap();
@@ -1043,4 +1080,110 @@ mod tests {
             "a different/rolled-back sample cannot rearm it"
         );
     }
+}
+
+/// Snapshot the same original claim before allocating its independently paid index entry.
+pub(super) fn migration_parts(
+    parent: &ResolvedRow,
+    selected: &SelectedHandoffOwner,
+    session: &Arc<SessionIdentity>,
+    action: Action,
+    claimed: [u8; 32],
+    mono: u64,
+) -> Result<(Begin<'static>, Arc<SdpMedia>, u64), VoiceError> {
+    let _index = parent.transition_index()?;
+    let state = try_lock(&parent.row.state)?;
+    if !parent.row.key.matches(selected, parent.row.key.purpose) {
+        return Err(VoiceError::Unauthorized);
+    }
+    let pc = existing(parent, &state, session, action)?;
+    let media = pc.media.as_ref().ok_or(VoiceError::Unauthorized)?;
+    if media.proof != claimed
+        || media.worker
+        || media.migrated
+        || media.closed
+        || media.released
+        || !media.admitted()
+    {
+        return Err(VoiceError::Unauthorized);
+    }
+    if media.until == 0 {
+        return Err(VoiceError::Unauthorized);
+    }
+    if mono < media.until {
+        return Err(VoiceError::Capacity);
+    }
+    let root = media.root.as_ref().ok_or(VoiceError::Unauthorized)?;
+    if !root.is_current() {
+        return Err(VoiceError::Unauthorized);
+    }
+    let plan = state.plan().ok_or(VoiceError::Unauthorized)?;
+    let key = plan
+        .transition
+        .as_ref()
+        .and_then(|claim| claim.key.as_ref())
+        .ok_or(VoiceError::Unauthorized)?;
+    let storage = key.sdp.as_ref().ok_or(VoiceError::Unauthorized)?;
+    let (sdk_generation, sdk) = storage
+        .sdk
+        .as_ref()
+        .ok_or(VoiceError::Unauthorized)?
+        .identity();
+    let original = Begin {
+        parent: parent.id(),
+        pc: super::super::requests::pc::Request {
+            base: super::super::requests::sdp::Request {
+                action,
+                handshake: plan.identity.handshake(),
+                key: key.receipt,
+                sequence: storage.sequence,
+                kind: super::super::requests::sdp::Kind::Prepare,
+            },
+            storage: storage.proof,
+            sdk_generation,
+            sdk,
+            kind: super::super::requests::pc::Kind::Admit,
+        },
+        proof: pc.proof(),
+        plaintext: None,
+    };
+    Ok((original, root.clone(), media.until))
+}
+/// Borrow only through the original final UI/Index/Row tail. A failed index publication
+/// leaves this owner in place; observing actual source expiry is independently legitimate.
+pub(super) fn migration_claim<'a>(
+    parent: &ResolvedRow,
+    state: &'a mut State,
+    session: &Arc<SessionIdentity>,
+    action: Action,
+    claimed: [u8; 32],
+    root: &Arc<SdpMedia>,
+    until: u64,
+    mono: u64,
+) -> Result<&'a mut Claim, VoiceError> {
+    let pc = existing(parent, state, session, action)?;
+    let media = pc.media.as_ref().ok_or(VoiceError::Unauthorized)?;
+    if media.proof != claimed
+        || media.worker
+        || media.migrated
+        || media.closed
+        || media.released
+        || !media.admitted()
+        || !media
+            .root
+            .as_ref()
+            .is_some_and(|stored| Arc::ptr_eq(stored, root))
+        || !root.is_current()
+    {
+        return Err(VoiceError::Unauthorized);
+    }
+    if media.until != until || media.until == 0 {
+        return Err(VoiceError::Unauthorized);
+    }
+    if mono < media.until {
+        return Err(VoiceError::Capacity);
+    }
+    let media = mutable(state);
+    media.observe_expiry(mono)?;
+    Ok(media)
 }

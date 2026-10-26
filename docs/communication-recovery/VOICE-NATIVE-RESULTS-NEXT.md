@@ -1,5 +1,20 @@
 # Next voice milestone: native result recovery
 
+## Current work: finish index gates, then shared Session composition (25 October)
+
+Broker30/native mode7 now detach the SAME admitted media Root, keep the original peer current
+and retire variable negotiation only after real Source/Lower/IO/SDK return and native FinalACK.
+HANDOVER records tests, review and final pending gates. Fixed history remains paid until End.
+
+Next reclaim exact terminal history only after acknowledgement and actual owner collection,
+preserving generations/tombstones against late retries. Separate per-pair negotiation from
+ONE paid physical Session/keys/counters/executor. Do not multiply broker budgets per peer,
+reset counters, erase uncertain history or refund live owners. Test overlapping/serial peers,
+pending cleanup, reordering, End/rejoin/lock/epoch and capacity before App activation.
+Then implement operational renewal, App/RTC tracks, TURN/member relay and combined acceptance.
+App V2 remains OFF. One available desktop cannot establish independent physical audio/network
+acceptance. External download resume is separate. Older sections describe prior checkpoints.
+
 ## Current work: one-pair consumer exists; resolve acceptance before retirement (25 October)
 
 Broker29 now uses actual op28, independent browser payment, fresh-current same-peer

@@ -696,3 +696,58 @@ async fn a_physical_owner_from_an_equal_label_foreign_channel_cannot_admit_local
     f.close().await;
     other.close().await;
 }
+
+#[tokio::test]
+async fn indexed_current_rechecks_store_and_resumable_under_actual_ui_commit_without_generation_change(
+) {
+    for remove_store in [true, false] {
+        let f = Fixture::new().await;
+        let (_owner, selected, _) = selection(&f).await;
+        let route = channel_route(&f, &selected).await;
+        let generation = f
+            .state
+            .ui_session_generation
+            .load(std::sync::atomic::Ordering::Acquire);
+        let mounted = Arc::new(std::sync::Mutex::new(None));
+        let saved = mounted.clone();
+        let commit = f.state.ui_session_commit.clone();
+        let store = f.state.store.clone();
+        let resumable = f.state.session_resumable.clone();
+        let hook = super::super::sdp::before_current_commit::install(Box::new(move || {
+            let _commit = commit.try_lock_owned().unwrap();
+            if remove_store {
+                *saved.lock().unwrap() = Some(store.try_lock().unwrap().take());
+            } else {
+                *resumable.try_lock().unwrap() = false;
+            }
+        }));
+        let entered = std::sync::atomic::AtomicBool::new(false);
+        let result = super::super::sdp::current(&Context::new(&f.state), &route, |_| {
+            entered.store(true, std::sync::atomic::Ordering::Release);
+            Ok(())
+        });
+        let did_enter = entered.load(std::sync::atomic::Ordering::Acquire);
+        let generation_after = f
+            .state
+            .ui_session_generation
+            .load(std::sync::atomic::Ordering::Acquire);
+        drop(hook);
+        if remove_store {
+            *f.state.store.lock().await = mounted.lock().unwrap().take().unwrap();
+        } else {
+            *f.state.session_resumable.lock().await = true;
+        }
+        super::super::sdp::current(&Context::new(&f.state), &route, |_| {
+            assert!(f.state.ui_session_commit.clone().try_lock_owned().is_err());
+            Ok(())
+        })
+        .unwrap();
+        f.close().await;
+        assert!(
+            matches!(result, Err(Refused::Closed)),
+            "mounted-state removal must win before Current/Detach admission"
+        );
+        assert!(!did_enter);
+        assert_eq!(generation, generation_after);
+    }
+}

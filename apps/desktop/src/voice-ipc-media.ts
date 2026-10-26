@@ -6,7 +6,7 @@ import type { VoiceSdpOriginal } from "./voice-ipc-sdp-actions.ts";
 import { validateVoiceSdpIdentity } from "./voice-ipc-sdp.ts";
 
 export type VoiceMediaOriginalKind = "admit" | "resolve" | "close" | "release";
-export type VoiceMediaExistingKind = "current" | "close" | "release";
+export type VoiceMediaExistingKind = "current" | "close" | "release" | "detach";
 export type VoiceMediaReceipt = Readonly<{
   proof: string; admitted: boolean; closed: boolean; released: boolean; current: boolean;
   /** null is historical-only; a number is original Source retirement time remaining. */
@@ -51,7 +51,7 @@ export function encodeVoiceMediaOriginal(value: VoiceSdpOriginal, request: Voice
  * proof cannot create one. Release is owed only after the actual transferred PC drains. */
 export function encodeVoiceMediaExisting(parentRow: string, action: VoiceIpcActionIdentity, proof: string, request: VoiceMediaExistingKind): Encoded {
   row(parentRow); fixed(proof, 32);
-  const mode = ["current", "close", "release"].indexOf(request); if (mode < 0) return refuse();
+  const mode = ["current", "close", "release", "detach"].indexOf(request); if (mode < 0) return refuse();
   const body = new Uint8Array(82);
   try {
     body[0] = 9; body[1] = 4 + mode; identity(body, action); write(body, 50, proof);

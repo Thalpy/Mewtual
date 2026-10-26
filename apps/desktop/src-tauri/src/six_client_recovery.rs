@@ -221,6 +221,7 @@ impl Scenario {
             drop_next_call_signal: AtomicBool::new(false),
             delay_replies: AtomicBool::new(false),
             file_reply: StdMutex::new(None),
+            voice_lower: StdMutex::new(None),
             trace: StdMutex::new(Trace::default()),
         });
         let clock = SystemClock;

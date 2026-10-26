@@ -1,5 +1,21 @@
 # Mewtual; Interfaces & Hooks Schema
 
+## Broker30 and original media Detach (25 October; inactive)
+
+`retireNativeNegotiation(owner, channel, chain)` joins one exact original retirement flight.
+It needs adopted media, authenticated Current with original Source remaining zero, positive
+Detach, actual old IO/SDK/Source/Lower return and native Plan-final/ACK before 64 KiB refund.
+Lost/refused Detach retains the original claim/payment. End closes the same peer before
+joining retirement. Broker29 HMR is refused without replacing or waking its funded pool.
+
+New compact Control28/version9 mode7 uses the existing 82-byte parent/Action/proof form and
+39-byte receipt. Other modes and caps are unchanged; older natives refuse mode7. Migration
+publishes an independent index and parent tombstone, never fake Released state. Every mode
+checks that index before old-parent lookup. Fresh Current still requires actual mounted UI,
+selected owner, Session, Ledger and Root authority; negative cleanup grants no currentness.
+Fixed history/shared keys/counters stay paid. Shared Session composition and activation are
+still absent. HANDOVER states exact validation and limitations.
+
 ## Broker29 original media handoff (25 October; inactive pilot)
 
 `completeNativeMediaHandoff(owner, channel, chain)` requires the exact retained original

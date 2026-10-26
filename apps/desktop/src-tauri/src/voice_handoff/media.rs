@@ -5,6 +5,7 @@ use super::bootstrap::Route;
 use super::channel::{self, BodyKind, CompletedReply, Incoming, PhysicalHold};
 use super::context::Context;
 use super::factory::{self, Refused};
+use super::ledger;
 use super::ledger::{
     MediaIdentity, MediaPrepared, MediaReceipt, MediaRows, MediaWorker, ResolvedRow,
 };
@@ -339,6 +340,22 @@ fn start(context: &Context, route: &Route, incoming: &Incoming) -> Result<Starte
         live.channels
             .require_cleanup_route(route)
             .map_err(|_| Refused::Closed)?;
+        // Resolve indexed ownership before looking at the now-optional old parent.
+        // Keep the exact lookup owner OUTSIDE every final UI/Coordinator/Route guard.
+        if let Some(indexed) =
+            live.ledger
+                .indexed_media(route.selected(), route.session().identity(), &request)?
+        {
+            let receipt = if indexed.needs_current(&request)? {
+                let (_, mono) = observe_time(context)?;
+                super::sdp::current(context, route, |admission| {
+                    indexed.observe(&request, Some((admission, mono)))
+                })?
+            } else {
+                indexed.observe(&request, None)?
+            };
+            return Ok(Started::Immediate(Some(receipt)));
+        }
         live.ledger
             .resolve_sdp_parent(route.selected(), parent_id)?
     };
@@ -380,6 +397,28 @@ fn start(context: &Context, route: &Route, incoming: &Incoming) -> Result<Starte
             .media_original_history(route.session().identity(), &original, kind)
             .map(Started::Immediate)
             .map_err(Into::into),
+        Request::Existing {
+            action,
+            proof,
+            kind: ExistingKind::Detach,
+            ..
+        } => {
+            // One same-Session candidate exists while the actual physical position is
+            // held. Acquire before Clock/preparation and retain through candidate Drop.
+            let _physical = incoming.hold_position().map_err(|_| VoiceError::Capacity)?;
+            let (_, mono) = observe_time(context)?;
+            let prepared: ledger::MediaIndexPrepared = parent.prepare_media_index(
+                route.selected().clone(),
+                route.session().identity().clone(),
+                action,
+                proof,
+                mono,
+            )?;
+            let committed = super::sdp::current(context, route, |admission| {
+                prepared.commit(&parent, admission, mono)
+            })?;
+            Ok(Started::Immediate(Some(committed.finish())))
+        }
         Request::Existing {
             action,
             proof,

@@ -3223,25 +3223,29 @@ async function framedMedia(t: TestContext, low = true) {
     handshake: f.child.parent.binding.handshake, key: hash(99), sequence: "1",
     storage: hash(100), sdkGeneration: "1", sdkProof: hash(101), pcProof: hash(102) };
   const proof = hash(121), modes: number[] = [];
-  let admitted = false, closed = false, released = false, lost = -1, hold = -1, held = gate();
+  let admitted = false, closed = false, released = false, indexed=false, remaining=1000, busy=-1, lost = -1, hold = -1, held = gate();
   f.f.cleanup(() => held.release());
   f.custody.mediaReplies(async (header, opened) => {
     const mode = opened[1]; modes.push(mode); assert.equal(header.logical, original.parentRow);
     const expected = mode <= 3 ? encodeVoiceMediaOriginal(original, (["admit", "resolve", "close", "release"] as const)[mode])
-      : encodeVoiceMediaExisting(original.parentRow, original.identity, proof, (["current", "close", "release"] as const)[mode - 4]);
+      : encodeVoiceMediaExisting(original.parentRow, original.identity, proof, (["current", "close", "release", "detach"] as const)[mode - 4]);
     assert.deepEqual(opened, expected.body);
+    if (mode === busy) return {kind:0,body:Uint8Array.of(9,2,2,7)};
     if (mode === 0) admitted = true;
+    if (mode === 7) { assert.equal(remaining,0); indexed=true; }
     if (mode === 2 || mode === 5) closed = true;
     if (mode === 3 || mode === 6) { assert.ok(closed); assert.equal(sdk.calls.closed, 1); released = true; }
     if (mode === hold) await held.promise;
     if (mode === lost) { lost = -1; throw new Error("exact native media reply lost"); }
     if (!admitted) return { kind: 0, body: new Uint8Array([9, 1]) };
-    const current = mode === 4 && !closed && f.f.owner.isCurrent();
+    const current = (mode === 4 || mode === 7) && !closed && f.f.owner.isCurrent();
     const bytes = Buffer.alloc(39); bytes.set([9, 0, 1 | (closed ? 2 : 0) | (released ? 4 : 0) | (current ? 8 : 0)]);
-    Buffer.from(proof, "hex").copy(bytes, 3); bytes.writeUInt32BE(current ? 1000 : 0xffffffff, 35);
+    Buffer.from(proof, "hex").copy(bytes, 3); bytes.writeUInt32BE(current ? remaining : 0xffffffff, 35);
     return { kind: 0, body: bytes };
-  }, () => !admitted || released);
+  }, () => !admitted || released || indexed);
   return { ...f, sdk, modes, media: () => f.f.broker.completeNativeMediaHandoff(f.f.owner, f.child.channel, f.child.ready.chain),
+    remaining(value: number) { remaining=value; }, busy(mode: number) { busy=mode; },
+    retireNegotiation: () => f.f.broker.retireNativeNegotiation(f.f.owner,f.child.channel,f.child.ready.chain),
     lose(mode: number) { lost = mode; }, hold(mode: number) { hold = mode; held = gate(); return held; } };
 }
 for (const low of [true, false]) test(`framed media adopts original peer once and releases before old SDK/Final; LOW=${low}`, async t => {
@@ -3271,9 +3275,9 @@ test("framed lost media admission recovers original claim without a second peer 
   assert.equal(f.sdk.calls.created, 1); assert.equal(f.sdk.calls.closed, 0); assert.equal(f.f.broker.counts().bytes, paid + 8192);
   f.f.owner.retire(); await f.child.channel.close(); assert.equal(f.f.broker.counts().bytes, 0);
 });
-test("HMR refuses funded broker28 without waking its media-less cleanup shape", async t => {
+for (const version of [28,29]) test(`HMR refuses funded broker${version} without waking incompatible cleanup`, async t => {
   const f = await framedMedia(t), previous = Object.create(f.f.broker);
-  Object.defineProperty(previous, "version", { value: 28 }); let wakes = 0; previous.retrySelectedJoinKeys = () => { wakes++; };
+  Object.defineProperty(previous, "version", { value: version }); let wakes = 0; previous.retrySelectedJoinKeys = () => { wakes++; };
   const key = Symbol.for("mewtual.voice.crypto-broker.v2"), host = { [key]: previous };
   assert.throws(() => windowVoiceCryptoBroker({ async admit() { return ""; }, async settle() {}, async commitInbound() {} }, host, real), /reload required/);
   assert.equal(wakes, 0); assert.equal(host[key], previous); f.f.owner.retire(); await f.child.channel.close();
@@ -3312,4 +3316,76 @@ test("media prepayment refuses before native or SDK callbacks under full group p
   } finally { pool.refund(f.f.owner, paid); }
   assert.equal(f.f.broker.counts().bytes, before); await f.media(); assert.deepEqual(f.modes, [0, 4]);
   f.f.owner.retire(); await f.child.channel.close(); assert.equal(f.f.broker.counts().bytes, 0);
+});
+
+
+test("indexed media keeps the same peer and Session while original negotiation retires", async t => {
+  const f=await framedMedia(t); await f.media(); f.remaining(0);
+  const before=f.f.broker.counts().bytes, settlements=f.f.counts().settlements;
+  const pending=f.retireNegotiation(); assert.equal(f.retireNegotiation(),pending); await pending;
+  assert.ok(f.modes.includes(7)); assert.equal(f.sdk.calls.closed,0); assert.equal(f.sdk.calls.created,1);
+  assert.equal(f.custody.effectCounts().sdkReleases,1); assert.equal(f.child.parent.finalCounts().finalAcknowledged,true);
+  assert.equal(f.f.broker.counts().bytes,before-64*1024);
+  assert.equal(f.f.counts().settlements,settlements,"shared Session is not settled/closed");
+  assert.equal(f.child.ready.chain.isCurrent(),false); assert.equal(f.child.ready.derivation.pair(),null);
+  await f.retireNegotiation(); assert.equal(f.custody.effectCounts().sdkReleases,1);
+  f.f.owner.retire(); assert.equal(f.sdk.calls.closed,1); await f.child.channel.close(); assert.equal(f.f.broker.counts().bytes,0);
+});
+
+test("End during original detach closes peer before joining index and negotiation IO", async t => {
+  const f=await framedMedia(t); await f.media(); f.remaining(0); const held=f.hold(7), work=f.retireNegotiation();
+  await until(() => f.modes.includes(7)); const paid=f.f.broker.counts().bytes;
+  f.f.owner.retire(); assert.equal(f.sdk.calls.closed,1); let finished=false;
+  const end=f.child.channel.close().then(() => {finished=true;}); await new Promise<void>(yes => setImmediate(yes));
+  assert.equal(finished,false); assert.equal(f.f.broker.counts().bytes,paid);
+  held.release(); await work; await end; assert.equal(f.f.broker.counts().bytes,0); assert.equal(f.sdk.calls.closed,1);
+});
+
+
+test("negotiation retirement coalesces owner-predicate reentry before a second flight is published", async t => {
+  const f=await framedMedia(t); await f.media(); f.remaining(0); let nested:Promise<void>|null=null;
+  f.f.onOwnerCheck(() => { nested=f.retireNegotiation(); });
+  const work=f.retireNegotiation(); assert.equal(work,nested); await work;
+  assert.equal(f.modes.filter(mode=>mode===7).length,1); assert.equal(f.custody.effectCounts().sdkReleases,1);
+  f.f.owner.retire(); await f.child.channel.close(); assert.equal(f.f.broker.counts().bytes,0);
+});
+
+test("End reentry before retirement publication cannot submit an index request", async t => {
+  const f=await framedMedia(t); await f.media(); f.remaining(0);
+  f.f.onOwnerCheck(() => f.f.owner.retire()); assert.throws(f.retireNegotiation,/ended/);
+  assert.equal(f.modes.includes(7),false); assert.equal(f.sdk.calls.closed,1);
+  await f.child.channel.close(); assert.equal(f.f.broker.counts().bytes,0);
+});
+
+
+test("nonzero native Source remaining cannot submit detach or refund negotiation", async t => {
+  const f=await framedMedia(t); await f.media(); const paid=f.f.broker.counts().bytes;
+  const work=f.retireNegotiation(); await until(() => f.modes.filter(mode=>mode===4).length>=2 && f.f.timers().delays.includes(1000));
+  assert.equal(f.modes.includes(7),false); assert.equal(f.custody.effectCounts().sdkReleases,0);
+  assert.equal(f.f.broker.counts().bytes,paid); assert.equal(f.sdk.calls.closed,0);
+  f.remaining(0); f.f.advance(1000); await work;
+  assert.equal(f.custody.effectCounts().sdkReleases,1); assert.equal(f.f.broker.counts().bytes,paid-64*1024);
+  f.f.owner.retire(); await f.child.channel.close(); assert.equal(f.f.broker.counts().bytes,0);
+});
+
+test("a lost original detach reply retains negotiation until the same indexed claim is recovered", async t => {
+  const f=await framedMedia(t); await f.media(); f.remaining(0); f.lose(7);
+  const paid=f.f.broker.counts().bytes, work=f.retireNegotiation();
+  await until(() => f.modes.includes(7) && f.f.timers().delays.includes(1000));
+  assert.equal(f.custody.effectCounts().sdkReleases,0); assert.equal(f.f.broker.counts().bytes,paid); assert.equal(f.sdk.calls.closed,0);
+  f.f.advance(1000); await work; assert.equal(f.modes.filter(mode=>mode===7).length,2);
+  assert.equal(f.f.broker.counts().bytes,paid-64*1024); assert.equal(f.sdk.calls.created,1);
+  f.f.owner.retire(); await f.child.channel.close(); assert.equal(f.f.broker.counts().bytes,0);
+});
+
+
+test("refused detach keeps the original negotiation paid until actual index admission", async t => {
+  const f=await framedMedia(t); await f.media(); f.remaining(0); f.busy(7);
+  const paid=f.f.broker.counts().bytes, work=f.retireNegotiation();
+  await until(() => f.modes.includes(7) && f.f.timers().delays.includes(1000));
+  assert.equal(f.custody.effectCounts().sdkReleases,0); assert.equal(f.f.broker.counts().bytes,paid);
+  assert.equal(f.child.parent.finalCounts().finalAcknowledged,false); assert.equal(f.sdk.calls.closed,0);
+  f.busy(-1); f.f.advance(1000); await work;
+  assert.equal(f.custody.effectCounts().sdkReleases,1); assert.equal(f.f.broker.counts().bytes,paid-64*1024);
+  f.f.owner.retire(); await f.child.channel.close(); assert.equal(f.f.broker.counts().bytes,0);
 });

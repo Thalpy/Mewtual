@@ -64,6 +64,10 @@ pub(crate) enum Round {
     LostSdp,
     Media,
     LostMedia,
+    MediaRetire,
+    LostMediaRetire,
+    MediaHeldLower,
+    NativeIndexDrop,
 }
 
 struct Callbacks {
@@ -482,9 +486,16 @@ impl Endpoint {
     /// the RTC provider is controlled; no Input/Result/SDP/receipt crosses the control pipe.
     pub(crate) async fn sdp_round(&mut self, parent: &ledger::ResolvedRow, round: Round) {
         let lose_replies = matches!(round, Round::LostSdp);
-        let exercise_media = matches!(round, Round::Media | Round::LostMedia);
+        let exercise_media = matches!(
+            round,
+            Round::Media
+                | Round::LostMedia
+                | Round::MediaRetire
+                | Round::LostMediaRetire
+                | Round::MediaHeldLower
+        );
         assert!(parent.pc_test_intent().is_some());
-        let name = if matches!(round, Round::LostMedia) {
+        let name = if matches!(round, Round::LostMedia | Round::LostMediaRetire) {
             "rtc-round-media-loss"
         } else if exercise_media {
             "rtc-round-media"
@@ -531,13 +542,140 @@ impl Endpoint {
                 assert!(observed.admitted && !observed.closed && !observed.released);
                 assert!(!observed.current, "history is never a current permission");
                 self.media_http = true;
+                if matches!(round, Round::MediaRetire | Round::LostMediaRetire) {
+                    let original = parent.media_test_original(route.session().identity());
+                    let proof = observed.proof;
+                    drop(root); // Do not mask independent index custody with a test owner.
+                    let step = if matches!(round, Round::LostMediaRetire) {
+                        "media-retire-loss"
+                    } else {
+                        "media-retire"
+                    };
+                    assert_eq!(
+                        self.step(json!({"tag":"step","name":step})).await,
+                        json!({"kind":"negotiation-retired","peers":1,"closed":0,"releasedBytes":65536})
+                    );
+                    assert!(parent.media_test_migrated());
+                    assert_eq!(parent.sdk_test_released(), Some(true));
+                    let phase = parent.sdp_test_phase().unwrap();
+                    assert_eq!(
+                        phase.try_status().unwrap(),
+                        catcoms_sync::voice_v2::chain::sdp_handoff::Status::Drained
+                    );
+                    assert!(phase.try_is_collected().unwrap());
+                    let request = super::super::requests::media::Request::Existing {
+                        parent: parent.id(),
+                        action: original.pc.base.action,
+                        proof,
+                        kind: super::super::requests::media::ExistingKind::Current,
+                    };
+                    let indexed = self
+                        .state
+                        .voice_handoff
+                        .indexed_media(route.selected(), route.session().identity(), &request)
+                        .unwrap()
+                        .unwrap();
+                    // Same labels/bytes are not the actual Session allocation.
+                    let foreign_session = Arc::new(super::super::channel::SessionIdentity(
+                        route.session().identity().0,
+                    ));
+                    assert!(self
+                        .state
+                        .voice_handoff
+                        .indexed_media(route.selected(), &foreign_session, &request)
+                        .unwrap()
+                        .is_none());
+                    // A retained target must also refuse fresh admission from another
+                    // Ledger, even with the SAME actual selected/Session/UI allocations.
+                    let mut foreign_context = super::super::context::Context::new(&self.state)
+                        .upgrade()
+                        .unwrap();
+                    foreign_context.ledger = Arc::new(ledger::Ledger::default());
+                    let clock = crate::voice_runtime(&self.state).clock();
+                    {
+                        let foreign_mono = clock.monotonic_ms();
+                        let commit = self.state.ui_session_commit.clone().lock_owned().await;
+                        let authority = self.state.voice_authority.lock().unwrap();
+                        let admission = super::super::transition::Admission::new(
+                            &foreign_context,
+                            &authority,
+                            &route,
+                            &commit,
+                        );
+                        assert!(matches!(
+                            indexed.observe(&request, Some((&admission, foreign_mono))),
+                            Err(catcoms_sync::voice_v2::VoiceError::Unauthorized)
+                        ));
+                    }
+                    let limit = clock.monotonic_ms() + 1000;
+                    let current = loop {
+                        let mono = clock.monotonic_ms();
+                        match super::super::sdp::current(
+                            &super::super::context::Context::new(&self.state),
+                            &route,
+                            |admission| indexed.observe(&request, Some((admission, mono))),
+                        ) {
+                            Ok(current) => break current,
+                            Err(super::super::factory::Refused::Protocol(
+                                catcoms_sync::voice_v2::VoiceError::Capacity,
+                            )) if mono < limit => {
+                                clock.sleep(std::time::Duration::from_millis(5)).await;
+                            }
+                            Err(error) => panic!("indexed original current refused: {error:?}"),
+                        }
+                    };
+                    assert!(
+                        current.current && current.admitted && !current.released && !current.closed
+                    );
+                    assert_eq!(current.retire_in, Some(0));
+                    assert!(
+                        !self.state.voice_handoff.channel_may_close(route.selected()),
+                        "indexed media still owns Control"
+                    );
+                }
             } else if lose_replies {
                 super::super::media::tests::negative_before_admission(&route, parent);
             } else {
-                self.media_fixture_grant =
-                    Some(super::super::media::tests::exercise(&self.state, &route, parent).await);
+                self.media_fixture_grant = Some(if matches!(round, Round::NativeIndexDrop) {
+                    super::super::media::tests::exercise_index_drop(&self.state, &route, parent)
+                        .await
+                } else {
+                    super::super::media::tests::exercise(&self.state, &route, parent).await
+                });
             }
         }
+    }
+
+    pub(crate) fn block_media_index(&self, parent: &ledger::ResolvedRow) -> impl Send + 'static {
+        let selected = self.selected();
+        let route = (1..=64)
+            .find_map(|slot| {
+                self.state
+                    .voice_channels
+                    .route(slot)
+                    .ok()
+                    .filter(|route| Arc::ptr_eq(route.selected(), &selected))
+            })
+            .unwrap();
+        parent.media_test_block_index(route.selected().clone(), route.session().identity().clone())
+    }
+    pub(crate) async fn media_retire_start(&mut self) {
+        assert_eq!(
+            self.step(json!({"tag":"step","name":"media-retire-start"}))
+                .await,
+            json!({"kind":"retirement-started"})
+        );
+    }
+    pub(crate) async fn media_retire_progress(&mut self) -> Value {
+        self.step(json!({"tag":"step","name":"media-retire-progress"}))
+            .await
+    }
+    pub(crate) async fn media_retire_finish(&mut self) {
+        assert_eq!(
+            self.step(json!({"tag":"step","name":"media-retire-finish"}))
+                .await,
+            json!({"kind":"negotiation-retired","peers":1,"closed":0,"releasedBytes":65536})
+        );
     }
 
     pub(crate) async fn close(mut self) -> Result<(), Failure> {

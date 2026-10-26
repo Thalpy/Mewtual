@@ -1,5 +1,19 @@
 # Chat, files and voice implementation evidence
 
+## 25 October: native index and variable negotiation retirement
+
+Actual HTTP/WebCrypto and blocked-topology TCP fixtures pass normal/lost-positive Detach,
+same-peer Current after old SDK/phase cleanup, retained actual Lower ownership, full-index
+rollback, foreign Session/Ledger and Release winning final admission. A mounted-state race
+has failing-before/passing-after evidence. The 356 native handoff tests pass after the Drop-oracle correction. All 2,927 frontend
+tests, Svelte static checks and production build pass. HANDOVER records the remaining full
+backend gates, reviews and prior pilot's native results.
+
+RTC is controlled. Fixed history remains until End, and shared Session/multi-peer composition
+is absent. The 32-slot index bound and table-full rollback are not 32 admitted-owner evidence.
+No App activation, renewal, TURN/member relay, combined or physical acceptance follows.
+App V2 stays OFF. The top HANDOVER section supersedes older checkpoint TODOs below.
+
 ## 25 October: actual one-pair handoff; fractional-clock defect corrected
 
 The browser now invokes HTTP28 after the original actual HTTP/WebCrypto/TCP Offer/Answer

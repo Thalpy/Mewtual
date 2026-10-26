@@ -27,10 +27,12 @@ mod children;
 mod continuation;
 mod key_session;
 mod media;
+mod media_index;
 pub(in crate::voice_handoff) use media::{
     Identity as MediaIdentity, Prepared as MediaPrepared, Receipt as MediaReceipt,
     Rows as MediaRows, Worker as MediaWorker,
 };
+pub(in crate::voice_handoff) use media_index::Prepared as MediaIndexPrepared;
 mod ready;
 mod sdk;
 mod sdp;
@@ -319,6 +321,8 @@ enum RowPayment {
 struct Index {
     serial: u64,
     rows: [Option<Arc<Row>>; ROWS],
+    // Fixed process metadata; every occupied entry has its own detached fee anchor.
+    media: [Option<Arc<media_index::Entry>>; ROWS],
 }
 pub(crate) struct Ledger {
     index: Mutex<Index>,
@@ -329,6 +333,7 @@ impl Default for Ledger {
             index: Mutex::new(Index {
                 serial: 0,
                 rows: std::array::from_fn(|_| None),
+                media: std::array::from_fn(|_| None),
             }),
         }
     }
@@ -640,23 +645,28 @@ impl Ledger {
     /// the only Control route before the browser recovered that original final proof.
     pub(super) fn channel_may_close(&self, selected: &SelectedHandoffOwner) -> bool {
         let index = self.index.lock().unwrap_or_else(|error| error.into_inner());
-        index.rows.iter().flatten().all(|row| {
-            if !row.key.matches(selected, row.key.purpose) {
-                return true;
-            }
-            let state = row.state.lock().unwrap_or_else(|error| error.into_inner());
-            if let Some(drained) = sdp_rows::locally_drained(&state) {
-                return drained;
-            }
-            matches!(state.body, Body::Drained(..) | Body::ClosedPending)
-                && Self::final_retirement_ready(&state)
-                && ((state.final_phase.is_none()
-                    && state.final_delivery().is_none()
-                    && (row.key.parent.is_some() || state.status.action.is_none()))
-                    || state
-                        .final_delivery()
-                        .is_some_and(|delivery| delivery.issued.is_some() && delivery.acknowledged))
-        })
+        index
+            .media
+            .iter()
+            .flatten()
+            .all(|entry| entry.may_close(selected))
+            && index.rows.iter().flatten().all(|row| {
+                if !row.key.matches(selected, row.key.purpose) {
+                    return true;
+                }
+                let state = row.state.lock().unwrap_or_else(|error| error.into_inner());
+                if let Some(drained) = sdp_rows::locally_drained(&state) {
+                    return drained;
+                }
+                matches!(state.body, Body::Drained(..) | Body::ClosedPending)
+                    && Self::final_retirement_ready(&state)
+                    && ((state.final_phase.is_none()
+                        && state.final_delivery().is_none()
+                        && (row.key.parent.is_some() || state.status.action.is_none()))
+                        || state.final_delivery().is_some_and(|delivery| {
+                            delivery.issued.is_some() && delivery.acknowledged
+                        }))
+            })
     }
 
     /// Local compaction/physical session closure cannot discard a requested final proof.
@@ -694,6 +704,9 @@ impl Ledger {
     pub(super) fn channel_collected(&self, collected: super::bootstrap::CollectedChannel) {
         {
             let index = self.index.lock().unwrap_or_else(|error| error.into_inner());
+            for entry in index.media.iter().flatten() {
+                entry.collected(&collected);
+            }
             for row in index.rows.iter().flatten() {
                 if row.key.matches(collected.selected(), row.key.purpose) {
                     let mut state = row.state.lock().unwrap_or_else(|error| error.into_inner());
@@ -724,6 +737,12 @@ impl Ledger {
         drop(collected);
     }
 
+    /// Both retired-owner arrays coexist during collection and keep all destructors out
+    /// of the index guard. Inventory them in the actual synchronous service maintenance.
+    pub(super) const fn collection_layout_bytes() -> usize {
+        std::mem::size_of::<[Option<Arc<Row>>; ROWS]>()
+            + std::mem::size_of::<[Option<Arc<media_index::Entry>>; ROWS]>()
+    }
     /// Bounded history reclamation, never uncertain-history eviction. Phase/engine/receipt
     /// compaction and actual channel collection are separate prerequisites. An original live
     /// Session must retain its purpose even after FinalACK, otherwise a fresh Begin could
@@ -733,8 +752,15 @@ impl Ledger {
     pub(super) fn collect_retired(&self) {
         self.close_retired_sdp();
         let mut removed: [Option<Arc<Row>>; ROWS] = std::array::from_fn(|_| None);
+        let mut removed_media: [Option<Arc<media_index::Entry>>; ROWS] =
+            std::array::from_fn(|_| None);
         {
             let mut index = self.index.lock().unwrap_or_else(|error| error.into_inner());
+            for (slot, retired) in index.media.iter_mut().zip(&mut removed_media) {
+                if slot.as_ref().is_some_and(|entry| entry.reclaimable()) {
+                    *retired = slot.take();
+                }
+            }
             for (slot, retired) in index.rows.iter_mut().zip(&mut removed) {
                 let reclaim = slot.as_ref().is_some_and(|row| {
                     if row.key.lease.is_live() || Arc::strong_count(row) != 1 {
@@ -754,6 +780,7 @@ impl Ledger {
         // Never run original credit/lease/weak-grant destruction under native index/state
         // guards. The index serial deliberately survives collection and slot reuse.
         drop(removed);
+        drop(removed_media);
     }
 
     /// Capacity ONLY after canonical header authentication. The opaque request fixes the

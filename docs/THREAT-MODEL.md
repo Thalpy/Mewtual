@@ -1,5 +1,19 @@
 # Threat model; client integrity & enforcement boundaries
 
+## Indexed media and negotiation retirement (25 October; inactive)
+
+Mode7 Detach repeats actual Session/selected owner/Ledger and original parent generation,
+Action/proof, Root, expiry and producer gates. Candidates are borrowed through final guards
+and destroyed outside them. Full-table refusal and winning Release cannot partially migrate.
+The SAME independently paid Root survives without a strong old Row/Phase/Intent graph.
+Negative history lasts until original Session collection and lease End; GC scratch is paid.
+Current/Detach checks Store/resumable under actual UI commit, then Coordinator, preventing
+same-generation unmount races. Foreign same-byte Session/Ledger cannot refresh the claim.
+Browser refund requires positive authenticated Detach plus real old IO/SDK/Lower return and
+native FinalACK. End closes the peer before joining cleanup. No general attempt refund or
+history erasure exists. App V2 remains OFF; multi-peer, relay and physical claims remain open.
+See HANDOVER for evidence and current gates.
+
 ## Inactive media driver enforcement (25 October)
 
 The retained browser now actually consumes authenticated Control28 and moves the same

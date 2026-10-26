@@ -1,5 +1,48 @@
 # Mewtual; Handover
 
+## Native media indexing and negotiation retirement (25 October; final gates pending)
+
+Broker30 and compact Control28/version9 mode7 Detach move the SAME admitted media Root
+into a fixed 32-entry native index. Each entry binds actual selected owner and Session,
+original parent generation, Action and proof, without retaining the Row/Phase/Intent/producer
+graph. The Root's independent native allowance funds entries and candidate overlap; the
+Ledger inventory covers index slots and both GC scratch arrays. Caps did not grow. All
+Control28 forms check the index before resolving the old parent. Older natives refuse mode7.
+
+Detach needs original Source expiry and producer retirement, not presumed Lower drainage.
+The actual old IO/SDK/Source/Lower owners and exact native Plan-final/ACK must finish before
+64 KiB browser refund. An independently paid 8 KiB monitor keeps authenticated Current and
+the same peer live during cleanup. End closes that peer before joining pending retirement.
+Close/Release history stays paid until actual original Session collection and lease End.
+Full-index refusal or winning Release cannot partially migrate or revive the original claim.
+
+Review found and fixed a mounted-state race: Current/Detach now holds actual UI commit while
+checking Store/resumable, before Coordinator. A deterministic same-generation test fails
+before and passes after. Candidate/root destructors remain outside final guards. The new Drop
+oracle now records evidence without panicking, bounds UI acquisition and cleans up before
+assertion. Its absent/poisoned-checkpoint regression and actual final-admission case pass.
+Native/browser re-review has no blocker/high/medium or material low remaining.
+
+Focused real native/browser cases pass normal/lost-positive Detach, retained actual TCP
+Lower ownership, full-index rollback, foreign same-byte Session/Ledger and Release before
+final admission. The final 356-test handoff run passes after the Drop-oracle correction.
+Browser focused tests pass 250 framed plus 22 driver/5 codec; the full frontend passes
+2,927 tests, Svelte reports zero errors/warnings and the production build passes. These use actual HTTP/WebCrypto
+and blocked A-C TCP through an unjoined B, with controlled RTC. Full final index gates are
+pending in target/media-index-* logs. One heavy Rust suite runs at a time.
+
+The preceding pilot passes full native 869 and frontend 2,916 tests, Svelte/build, separate
+native check and strict native/root Clippy. Its Root full run is still running in the custody
+worktree on byte-identical Root source. The index native full suite is queued behind it.
+The inherited crypto-bigint 0.5.5/RUSTSEC-2026-0387 audit failure is not waived.
+
+Only variable negotiation storage retires here. Fixed action history remains paid until
+End. Shared Session/per-pair composition, history reuse, renewal, App tracks/activation,
+TURN/member relay and combined acceptance remain open; App V2 stays OFF. The 32-slot bound
+is not evidence for 32 admitted owners or 50-person calls. Physical independent audio/network
+needs another device; only one is available. External download resume belongs to its separate
+branch. Older entries below are checkpoint history; this section states current status.
+
 ## One-pair browser/native media driver implemented; acceptance still open (25 October)
 
 The retained Broker29 now prepays a separate 8 KiB browser record before preparing a

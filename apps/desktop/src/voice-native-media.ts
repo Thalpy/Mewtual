@@ -1,6 +1,6 @@
 /** One prepaid original-peer media handoff on the retained authenticated IPC Session.
- * The driver deliberately keeps its old session infrastructure until End. This is NOT
- * negotiation/history retirement or multiparty composition. The opaque destination and
+ * One-pair negotiation can retire into independent native custody; shared Session and
+ * fixed old history remain paid until End. This is not multiparty compaction. The opaque destination and
  * passive status contain no driver/old-chain callbacks; only this paid driver does. */
 import { encodeVoiceMediaOriginal, encodeVoiceMediaExisting, type VoiceMediaReceipt } from "./voice-ipc-media.ts";
 import type { VoiceSdpOriginal } from "./voice-ipc-sdp-actions.ts";
@@ -31,6 +31,8 @@ export class VoiceNativeMedia {
   #attempted = false;
   #admitted = false;
   #nativeReleased = false;
+  #detachRequested = false;
+  #detached = false;
   #closed = false;
   #refunded = false;
   #transferring = false;
@@ -64,6 +66,13 @@ export class VoiceNativeMedia {
   } // Inert: no Clock, provider, SDK, native or owner callback before publication.
   get adopted(): boolean { return this.#peer?.adopted === true; }
   get closed(): boolean { return this.#closed; }
+  get detached(): boolean { return this.#detached; }
+  /** Ask for the same native successor. Source expiry alone is insufficient: only
+   * positive authenticated mode7 after actual peer adoption publishes detached=true. */
+  requestDetach(): Promise<void> {
+    if (!this.adopted || this.#closed) return unavailable();
+    this.#detachRequested = true; return this.start();
+  }
   /** Used ONLY by the original RTC current closure during the synchronous transfer.
    * The flag is set after an actual same-record Current physical finally. It is never
    * renderer connected state, never Source completion, and is not retained by the peer. */
@@ -164,6 +173,17 @@ export class VoiceNativeMedia {
       finally { this.#transferring = false; }
       this.#source = null; // Actual peer and old current closure have moved/severed.
     }
+    if (this.#detachRequested && !this.#detached && receipt?.retireInMs === 0) {
+      const detachedToken = this.#status.begin(this.#now());
+      let indexed: VoiceMediaReceipt | null = null;
+      try { indexed = await this.#rpc(encodeVoiceMediaExisting(this.#original.parentRow, this.#original.identity, this.#proof!, "detach"), false); }
+      finally {
+        let at = NaN; try { at = this.#now(); } catch { /* Close already latched. */ }
+        this.#status.finish(detachedToken, indexed, at);
+      }
+      this.#observe(indexed);
+      if (!this.#closed && this.#status.currentAt(this.#now()) && indexed?.current && indexed.retireInMs === 0) this.#detached = true;
+    }
   }
   #cancel(): void {
     if (!this.#timerSet || this.#cancelling) return;
@@ -223,6 +243,11 @@ export class VoiceNativeMedia {
       const until = this.#status?.deadline ?? this.#acquireUntil;
       if (until === null || now >= until || !this.#context.live()) { this.close(); return; }
       if (!this.#flight) void this.start();
+      else {
+        // A joined Current may have refreshed the status while a later detach RPC
+        // in this SAME flight is pending. Replace the consumed old-deadline timer.
+        this.#due = until; this.#arm();
+      }
     } catch { this.close(); }
     finally { this.#callbackDepth--; }
   }

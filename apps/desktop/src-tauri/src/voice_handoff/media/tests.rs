@@ -5,6 +5,51 @@
 use super::*;
 use crate::voice_handoff::requests::media::{ExistingKind, OriginalKind};
 
+type DropCheckpoint = Arc<std::sync::Mutex<Option<tokio::sync::OwnedMutexGuard<()>>>>;
+type DropEvidence = Arc<std::sync::Mutex<Option<((usize, usize), bool)>>>;
+
+fn candidate_drop_observer(
+    checkpoint: DropCheckpoint,
+    observation: DropEvidence,
+) -> Box<dyn FnOnce((usize, usize))> {
+    Box::new(move |counts| {
+        // Drop observers must never assert: an earlier failed oracle may already be
+        // unwinding. Record evidence, return every guard, and assert after cleanup.
+        // The actual UI guard is acquired ONLY after sdp::current returns.
+        let guard = checkpoint.lock().unwrap_or_else(|e| e.into_inner()).take();
+        let after_ui_return = guard.is_some();
+        drop(guard);
+        *observation.lock().unwrap_or_else(|e| e.into_inner()) = Some((counts, after_ui_return));
+    })
+}
+
+#[test]
+fn unused_index_candidate_drop_oracle_records_missing_or_poisoned_checkpoint_without_panicking() {
+    let checkpoint: DropCheckpoint = Arc::new(std::sync::Mutex::new(None));
+    let observation: DropEvidence = Arc::new(std::sync::Mutex::new(None));
+    // An unexpected commit/refusal can unwind before installing the guard. This exact
+    // observer must report false rather than turn that test failure into process abort.
+    candidate_drop_observer(checkpoint.clone(), observation.clone())((2, 3));
+    assert_eq!(*observation.lock().unwrap(), Some(((2, 3), false)));
+    for poison_checkpoint in [true, false] {
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            if poison_checkpoint {
+                let _guard = checkpoint.lock().unwrap_or_else(|e| e.into_inner());
+                panic!("simulate an earlier fixture assertion while observing checkpoint");
+            } else {
+                let _guard = observation.lock().unwrap_or_else(|e| e.into_inner());
+                panic!("simulate an earlier fixture assertion while observing evidence");
+            }
+        }));
+        assert!(result.is_err());
+        candidate_drop_observer(checkpoint.clone(), observation.clone())((7, 11));
+        assert_eq!(
+            *observation.lock().unwrap_or_else(|e| e.into_inner()),
+            Some(((7, 11), false))
+        );
+    }
+}
+
 pub(super) struct AfterSend {
     sent: oneshot::Sender<()>,
     release: std::sync::mpsc::Receiver<()>,
@@ -31,6 +76,21 @@ pub(in crate::voice_handoff) async fn exercise(
     state: &crate::AppState,
     route: &Route,
     parent: &ResolvedRow,
+) -> Arc<catcoms_sync::voice_v2::CallGrant> {
+    exercise_impl(state, route, parent, false).await
+}
+pub(in crate::voice_handoff) async fn exercise_index_drop(
+    state: &crate::AppState,
+    route: &Route,
+    parent: &ResolvedRow,
+) -> Arc<catcoms_sync::voice_v2::CallGrant> {
+    exercise_impl(state, route, parent, true).await
+}
+async fn exercise_impl(
+    state: &crate::AppState,
+    route: &Route,
+    parent: &ResolvedRow,
+    index_drop: bool,
 ) -> Arc<catcoms_sync::voice_v2::CallGrant> {
     let context = Context::new(state);
     let (actor, grant) = factory::native::observation_actor(&context, route).unwrap();
@@ -249,6 +309,35 @@ pub(in crate::voice_handoff) async fn exercise(
     ));
     assert!(current.current && child.is_current());
 
+    let mut child = Some(child); // Preserve the previous fixture's intentional owner unless probing last Drop.
+    let mut prepared = None;
+    let checkpoint = Arc::new(std::sync::Mutex::new(None));
+    let observation = Arc::new(std::sync::Mutex::new(None));
+    let weak = Arc::downgrade(child.as_ref().unwrap());
+    let mut physical_index = None;
+    if index_drop {
+        let clock = crate::voice_runtime(state).clock();
+        while clock.monotonic_ms() < parent.media_test_until() {
+            clock.sleep(std::time::Duration::from_millis(10)).await;
+        }
+        // Real same-Session physical exclusion spans preparation and unused candidate Drop.
+        physical_index = Some(physical());
+        let mut candidate = parent
+            .prepare_media_index(
+                route.selected().clone(),
+                session.clone(),
+                original().pc.base.action,
+                recovered.proof,
+                clock.monotonic_ms(),
+            )
+            .unwrap();
+        candidate.observe_drop(candidate_drop_observer(
+            checkpoint.clone(),
+            observation.clone(),
+        ));
+        prepared = Some(candidate);
+        drop(child.take());
+    }
     // This test has NOT transferred the original browser PC. Abandon this offered media
     // ownership explicitly; its original SDK obligation still pays the actual browser PC.
     let closed = parent
@@ -270,7 +359,57 @@ pub(in crate::voice_handoff) async fn exercise(
         .unwrap();
     assert!(released.admitted && released.closed && released.released && !released.current);
     assert!(parent.media_test_root().is_none());
-    assert!(!child.is_current());
+    assert!(child.as_ref().is_none_or(|child| !child.is_current()));
+    if let Some(prepared) = prepared {
+        let clock = crate::voice_runtime(state).clock();
+        let limit = clock.monotonic_ms() + 1000;
+        let refused = loop {
+            let mono = clock.monotonic_ms();
+            match super::super::sdp::current(&context, route, |admission| {
+                prepared.commit(parent, admission, mono)
+            }) {
+                Err(Refused::Protocol(VoiceError::Capacity)) if mono < limit => {
+                    clock.sleep(std::time::Duration::from_millis(5)).await
+                }
+                value => break value,
+            }
+        };
+        let unauthorized = matches!(refused, Err(Refused::Protocol(VoiceError::Unauthorized)));
+        let not_dropped = observation
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .is_none();
+        // A retained UI guard is itself a failure. Bound its acquisition through the
+        // sanctioned Clock so that the regression reports rather than hangs forever.
+        let guard = tokio::select! {
+            guard = state.ui_session_commit.clone().lock_owned() => Some(guard),
+            _ = clock.sleep(std::time::Duration::from_secs(1)) => None,
+        };
+        *checkpoint.lock().unwrap_or_else(|e| e.into_inner()) = guard;
+        drop(prepared);
+        let actual = observation.lock().unwrap_or_else(|e| e.into_inner()).take();
+        let root_dropped = weak.upgrade().is_none();
+        // No assertion may unwind with the candidate or its physical position retained.
+        drop(physical_index.take());
+        assert!(
+            unauthorized,
+            "Release must defeat the prepared final admission"
+        );
+        assert!(
+            not_dropped,
+            "preparation must outlive its borrowed final callback"
+        );
+        assert_eq!(
+            actual,
+            Some(((1, 1), true)),
+            "actual last Entry/media owner must drop after the final UI callback returns"
+        );
+        assert!(
+            root_dropped,
+            "last candidate dropped the actual media allocation's strong owner"
+        );
+    }
+    drop(physical_index);
     assert!(
         grant.lease().is_live(),
         "negative identity test must not revoke the original call"

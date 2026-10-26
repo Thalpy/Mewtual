@@ -195,6 +195,7 @@ pub(super) fn turn_layout_bytes() -> usize {
         + std::mem::size_of::<Route>()
         + 2 * std::mem::size_of::<catcoms_sync::voice_v2::presence::PairSelector>()
         + std::mem::size_of::<Option<native::NativeWaiter>>()
+        + crate::voice_handoff::ledger::Ledger::collection_layout_bytes()
         + 256 // bounded registry/index/state guards and synchronous call wrappers
 }
 

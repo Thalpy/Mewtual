@@ -35,12 +35,16 @@ pub(super) fn current<T>(
     apply: impl FnOnce(&super::transition::Admission<'_>) -> Result<T, VoiceError>,
 ) -> Result<T, Refused> {
     let live = context.upgrade().ok_or(Refused::Closed)?;
-    factory::require_unlocked_now(&live, route.selected())?;
+    #[cfg(test)]
+    before_current_commit::run();
     let commit = live
         .commit
         .clone()
         .try_lock_owned()
         .map_err(|_| VoiceError::Capacity)?;
+    // Mounted state can change without a generation change. Observe it only AFTER
+    // taking the actual UI commit fence, in UI -> resumable -> Store -> Coordinator order.
+    factory::require_unlocked_now(&live, route.selected())?;
     let authority = match live.authority.try_lock() {
         Ok(authority) => authority,
         Err(std::sync::TryLockError::Poisoned(error)) => error.into_inner(),
@@ -150,6 +154,46 @@ mod tests {
             let mut bytes = [0; REPLY_BYTES];
             encode_into(receipt, &mut bytes);
             assert_eq!(hex::encode(bytes), vector["body"]);
+        }
+    }
+}
+
+/// Deterministic fixture at the real pre-UI boundary; production has no hook or
+/// alternative authority check. A scoped guard prevents cross-test callback retention.
+#[cfg(test)]
+pub(super) mod before_current_commit {
+    use std::{cell::RefCell, sync::Arc};
+    type Hook = (Arc<()>, Box<dyn FnOnce()>);
+    thread_local! { static HOOK: RefCell<Option<Hook>> = const { RefCell::new(None) }; }
+    pub(in crate::voice_handoff) struct Guard(Arc<()>);
+    pub(in crate::voice_handoff) fn install(callback: Box<dyn FnOnce()>) -> Guard {
+        let token = Arc::new(());
+        HOOK.with(|held| {
+            assert!(held.borrow().is_none());
+            *held.borrow_mut() = Some((token.clone(), callback));
+        });
+        Guard(token)
+    }
+    pub(super) fn run() {
+        let hook = HOOK.with(|held| held.borrow_mut().take());
+        if let Some((_, callback)) = hook {
+            callback();
+        }
+    }
+    impl Drop for Guard {
+        fn drop(&mut self) {
+            let removed = HOOK.with(|held| {
+                let mut held = held.borrow_mut();
+                if held
+                    .as_ref()
+                    .is_some_and(|(token, _)| Arc::ptr_eq(token, &self.0))
+                {
+                    held.take()
+                } else {
+                    None
+                }
+            });
+            drop(removed);
         }
     }
 }

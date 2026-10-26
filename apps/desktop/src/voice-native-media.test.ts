@@ -15,7 +15,7 @@ async function until(condition: () => boolean) { for (let n = 0; n < 200; n++) {
 async function fixture(t: TestContext) {
   const old = globalThis.RTCPeerConnection;
   let driver: VoiceNativeMedia | null = null, now = 1000, live = true, ready = true;
-  let failClose = false, loseAdmit = false, loseRelease = false;
+  let failClose = false, loseAdmit = false, loseRelease = false, loseDetach = false;
   let inCurrent = false, expireInCurrent = false;
   let heldMode: number | null = null, held: ReturnType<typeof gate> | null = null;
   let onSchedule: (() => void) | null = null, onCancel: (() => void) | null = null;
@@ -51,22 +51,23 @@ async function fixture(t: TestContext) {
     stopped: () => { counts.stops++; live = false; },
     request: async (request, cleanup) => {
       const mode = request.body[1]; requests.push(mode);
-      assert.equal(cleanup, mode !== 0 && mode !== 4);
+      assert.equal(cleanup, mode !== 0 && mode !== 4 && mode !== 7);
       if (mode === 0) admitted = true;
       if (mode === heldMode) await held!.promise; // deliberately ignores abort/Close
       if (mode === 0 && loseAdmit) { loseAdmit = false; throw new Error("lost Admit"); }
+      if (mode === 7 && loseDetach) { loseDetach = false; throw new Error("lost Detach"); }
       if (mode === 2) nativeClosed = true;
       if (mode === 3) {
         assert.ok(nativeClosed); assert.ok(counts.closed > 0, "native Release follows actual SDK drain");
         released = true;
         if (loseRelease) { loseRelease = false; throw new Error("lost Release"); }
       }
-      return mode === 1 && !admitted ? null : receipt(mode === 4);
+      return mode === 1 && !admitted ? null : receipt(mode === 4 || mode === 7);
     },
   });
   return { driver, source, counts, requests, timers,
     hold(mode: number) { heldMode = mode; held = gate(); return held; },
-    loseAdmit() { loseAdmit = true; }, loseRelease() { loseRelease = true; },
+    loseAdmit() { loseAdmit = true; }, loseRelease() { loseRelease = true; }, loseDetach() { loseDetach = true; },
     failClose(value: boolean) { failClose = value; },
     onSchedule(hook: () => void) { onSchedule = hook; }, onCancel(hook: () => void) { onCancel = hook; },
     ready(value: boolean) { ready = value; }, time(value: number) { now = value; },
@@ -205,4 +206,27 @@ test("lost Admit recovery at a fractional Current start preserves the same valid
   f.time(3192.004); f.ready(false); await f.driver.start();
   assert.deepEqual(f.requests, [0, 1, 4]); assert.equal(f.driver.adopted, true);
   await f.driver.cleanup(); assert.equal(f.counts.refund, 1);
+});
+
+
+test("same native successor is requested only after actual peer adoption", async t => {
+  const f = await fixture(t); assert.throws(() => f.driver.requestDetach(), /unavailable/);
+  await f.driver.start(); await f.driver.requestDetach(); assert.equal(f.driver.detached, true);
+  assert.deepEqual(f.requests, [0,4,4,7]); assert.equal(f.counts.created, 1); assert.equal(f.counts.closed, 0);
+  await f.driver.cleanup(); assert.equal(f.counts.refund, 1);
+});
+
+test("lost detach observation repeats the same indexed successor without another admission", async t => {
+  const f = await fixture(t); await f.driver.start(); f.loseDetach(); await f.driver.requestDetach();
+  assert.equal(f.driver.detached, false); await f.driver.start(); assert.equal(f.driver.detached, true);
+  assert.deepEqual(f.requests, [0,4,4,7,4,7]); await f.driver.cleanup();
+});
+
+test("a refreshed deadline stays monitored while the same flight waits on detach", async t => {
+  const f = await fixture(t); await f.driver.start(); f.time(2000); const held=f.hold(7), request=f.driver.requestDetach();
+  await until(() => f.requests.includes(7)); f.advance(4000);
+  assert.equal(f.driver.closed, false); assert.equal(f.timers.size, 1);
+  f.advance(1000); assert.equal(f.driver.closed, true); assert.equal(f.counts.closed, 1);
+  const cleanup=f.driver.cleanup(); await turn(); assert.equal(f.counts.refund, 0);
+  held.release(); await request; await cleanup; assert.equal(f.counts.refund, 1);
 });

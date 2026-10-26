@@ -5,6 +5,7 @@ use crate::voice_authority::SelectedHandoffOwner;
 use crate::voice_handoff::integration::webcrypto::Round;
 use catcoms_sync::voice_v2::presence::{PairSelector, VoicePairConfirmation};
 use catcoms_sync::voice_v2::{Body, CallGrant};
+use serde_json::json;
 
 /// Two actual browser brokers, not fixed AES providers or framed endpoint mocks. This
 /// proves a single-pair Node/native cycle; it does not establish WebView policy or live RTC.
@@ -195,7 +196,55 @@ async fn native_webcrypto_cycle(
                 // This still creates no RTCPeerConnection or SDP/ICE/media effect.
                 tokio::join!(a.pc_custody(&ap), c.pc_custody(&cp));
                 if let Some(round) = exercise_sdp {
+                    let lower=if matches!(round,Round::MediaHeldLower) {
+                        let low=if scenario.clients[1].identity.as_ref().unwrap().1 < scenario.clients[2].identity.as_ref().unwrap().1 {1} else {2};
+                        let (sent,received)=tokio::sync::oneshot::channel();
+                        let (selected,parent)=if low==1 {(&a_selected,&ap)} else {(&c_selected,&cp)};
+                        let mut slot=scenario.rules.voice_lower.lock().unwrap();
+                        assert!(slot.is_none());
+                        *slot=Some(super::transport::VoiceLowerCapture {endpoint:low,
+                            issuer:scenario.clients[low].identity.as_ref().unwrap().1,join:selected.join(),
+                            handshake:parent.confirmation_handshake().unwrap(),sent});
+                        Some((low,received))
+                    } else {None};
                     tokio::join!(a.sdp_round(&ap, round), c.sdp_round(&cp, round));
+                    if let Some((low,received))=lower {
+                        let owner=bounded("original successful TCP Source lower owner capture",received).await.unwrap();
+                        let blocked=if low==1 {a.block_media_index(&ap)} else {c.block_media_index(&cp)};
+                        tokio::join!(a.media_retire_start(),c.media_retire_start());
+                        let source_parent=if low==1 {&ap} else {&cp};
+                        bounded("original runtime Source expiry under full native index",async {
+                            while a_clock.monotonic_ms()<source_parent.media_test_until() {a_clock.sleep(Duration::from_millis(20)).await;}
+                        }).await;
+                        let capacity_observed=catch_fixture(async {
+                            let endpoint=if low==1 {&mut a} else {&mut c};
+                            assert_eq!(endpoint.media_retire_progress().await,json!({"done":false,"paid":true,"oldCurrent":true,"closed":0}));
+                            assert!(!source_parent.media_test_migrated());
+                        }).await;
+                        drop(blocked); // Actual free-slot refusal leaves the same nested root usable.
+                        if let Err(error)=capacity_observed {drop(owner);std::panic::resume_unwind(error);}
+                        let observed=catch_fixture(async {
+                            let (endpoint,parent,other,other_parent)=if low==1 {(&mut a,&ap,&mut c,&cp)} else {(&mut c,&cp,&mut a,&ap)};
+                            bounded("original Source expiry and Pending Plan-final with actual lower still owned",async {
+                                loop {
+                                    if parent.media_test_migrated() && parent.media_test_final_progress().0 {break;}
+                                    a_clock.sleep(Duration::from_millis(20)).await;
+                                }
+                            }).await;
+                            assert_eq!(parent.media_test_final_progress(),(true,false,false));
+                            assert_eq!(endpoint.media_retire_progress().await,json!({"done":false,"paid":true,"oldCurrent":false,"closed":0}));
+                            // The other endpoint has no captured lower and must finish independently.
+                            bounded("other endpoint retirement progresses while lower custody is held",async {
+                                while !other_parent.media_test_final_progress().2 {a_clock.sleep(Duration::from_millis(20)).await;}
+                            }).await;
+                            assert_eq!(other.media_retire_progress().await,json!({"done":true,"paid":false,"oldCurrent":false,"closed":0}));
+                        }).await;
+                        drop(owner); // Release actual Source Flight OUTSIDE every native/rules guard, including failure cleanup.
+                        if let Err(error)=observed {std::panic::resume_unwind(error);}
+                        tokio::join!(a.media_retire_finish(),c.media_retire_finish());
+                        assert_eq!(ap.media_test_final_progress(),(true,true,true));
+                        assert_eq!(cp.media_test_final_progress(),(true,true,true));
+                    }
                 }
             }
             scenario.rules.assert_graph();
@@ -909,4 +958,32 @@ async fn native_browser_media_adopts_same_original_peer_through_real_http_and_bl
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn native_browser_media_recovers_lost_authenticated_admit_current_release_and_native_end() {
     native_webcrypto_cycle(false, true, true, Some(Round::LostMedia)).await;
+}
+
+/// Native original expiry, index migration and old Plan-final/ACK happen while the same
+/// browser peer and authenticated Session stay live. No test deadline or media grant is forged.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn native_browser_media_retires_original_negotiation_and_keeps_indexed_peer_usable() {
+    native_webcrypto_cycle(false, true, true, Some(Round::MediaRetire)).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn native_browser_media_lost_detach_reply_recovers_index_before_old_plan_retirement() {
+    native_webcrypto_cycle(false, true, true, Some(Round::LostMediaRetire)).await;
+}
+
+/// Retains the exact lower Source Flight delivered to the actual TCP driver, not a
+/// fixture boolean or a delayed adapter future. Expiry cannot refund/finalize it early;
+/// indexed media and the other endpoint still progress until actual owner Drop.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn native_browser_media_keeps_same_peer_current_while_expired_original_lower_delays_final_ack(
+) {
+    native_webcrypto_cycle(false, true, true, Some(Round::MediaHeldLower)).await;
+}
+
+/// Native-scope unused candidate custody, after the real maximum HTTP/TCP SDP round.
+/// No browser media transfer is claimed: Release abandons the offered native successor.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn native_browser_sdp_index_candidate_release_wins_and_last_drop_follows_actual_ui_return() {
+    native_webcrypto_cycle(false, true, true, Some(Round::NativeIndexDrop)).await;
 }
