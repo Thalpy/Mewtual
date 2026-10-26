@@ -1,5 +1,29 @@
 # Mewtual; Handover
 
+## Welcome joins past expired KeyPackage leaves (26 October, branch `mls-leaf-lifetime`)
+
+Base `chat-update-implementation` (openmls 0.8.1). Built so that it also holds on PR #57 (openmls
+0.9.2). Design: `docs/design-mls-leaf-lifetime.md`; boundary: THREAT-MODEL, 26 October.
+
+- `ServerGroup::join` skips openmls's lifetime check on the received tree's leaves. Groups older
+  than 84 days, including alpha groups already broken, accept joiners on this build again. No wire
+  or storage change.
+- Admission now refuses a joiner KeyPackage that expires within 60 days
+  (`parse_key_package(bytes, now_ms)`), so a short-lived KeyPackage cannot strand members that
+  replay the Add later.
+- Recovery for already-broken groups: nothing to do for new joins. Each earlier failed join left a
+  leaf nobody operates; the owner removes it and sends a fresh invite.
+- Still open: a member offline past an added KeyPackage's remaining lifetime cannot replay that
+  Add, and catch-up misreports it as a chain gap (follow-up: a typed catch-up outcome). Quiet
+  members' leaves are never refreshed (follow-up: Update proposals with 6d-2). Whether to lengthen
+  new KeyPackage lifetimes is the owner's decision (design note, option C).
+- When PR #57 lands, its HANDOVER note on expired KeyPackage leaves ("not fixed here") is covered
+  by this entry.
+
+Checks: catcoms-mls and catcoms-sync tests, Clippy and fmt for both, the ambient and raw-fs
+gates and `cargo deny`; the PR lists the results. Complete root, native and frontend suites:
+CI.
+
 ## Validated proof retention and automatic cleanup retry (22 October)
 
 Frozen runtime `edf923c107f3d11bf635a3e58a04e0b673edd7c1` passed the current native/frontend/static/build gates.

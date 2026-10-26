@@ -1,5 +1,53 @@
 # Threat model; client integrity & enforcement boundaries
 
+## Expired KeyPackage leaves, Welcome joins and admission lifetimes (26 October, branch `mls-leaf-lifetime`)
+
+Design and review: `docs/design-mls-leaf-lifetime.md`.
+
+**Welcome joins no longer check leaf lifetimes in the received tree.** A leaf added from a
+KeyPackage keeps that KeyPackage's lifetime (openmls default: 84 days) until its owner replaces it.
+Only the designated committer commits and there is no MLS Update flow, so every other member's
+leaf keeps its join-time lifetime. openmls's default join compared every such leaf with the wall
+clock, so 84 days after a non-committer joined, every Welcome join to that group failed, for every
+joiner. `ServerGroup::join` now uses openmls's `skip_lifetime_validation()` (RFC 9420 §7.3; openmls
+#1810), on 0.8 and 0.9 alike.
+
+- Unchanged: GroupInfo signature, tree hash, parent hashes, leaf signatures, capabilities,
+  credentials and key uniqueness; the Welcome signature and group-id checks in `finish_join` and
+  `finish_device_join`; the lifetime check on the KeyPackage being admitted (committer, and every
+  member that processes the Add).
+- What it costs: a joiner accepts a group in which some member has not rotated its leaf key for a
+  long time. Every existing member already relies on that leaf, and refusing to join never
+  removed it. A malicious inviter that fabricates a tree for its joiner can now also include
+  KeyPackage leaves of any age. The joiner's own leaf no longer caps the Welcome's age at 84 days;
+  the join flow's deadlines and single-use KeyPackage material do.
+- Leaf refresh (member Update proposals committed by the committer) would also restore
+  post-compromise security for quiet members. It needs the deferred 6d-2 proposal path and a
+  catch-up format change; it is a follow-up.
+
+**Admitted KeyPackages must stay valid for 60 days.** A joiner chooses its own KeyPackage
+lifetime, and every member that processes the Add, including one replaying it from the commit
+log, re-checks it against its own clock. A KeyPackage valid now but expiring a minute later was
+admitted by the committer and then permanently refused by every member that was offline: they
+stayed at the old epoch until re-invited. `MlsDevice::parse_key_package(bytes, now_ms)`, the one
+parse every admission path uses, now refuses `not_after < now + 60 days`
+(`InviteError::KeyPackageExpiresTooSoon`), with `now_ms` from the `Clock`. Honest KeyPackages
+(84 days, admitted within an hour) pass with weeks of slack. Only `not_after` is checked: a late
+`not_before` delays lagging members only until their clocks pass it. An older committer does not
+enforce this.
+
+**Residuals.**
+
+- A member offline for longer than an added KeyPackage's remaining lifetime (at least 60 days;
+  about 84 for honest joiners) still cannot replay that Add: openmls has no production switch for
+  `process_message`. Commit catch-up then misreports it as `Stranded` (a `MembershipChainGap`
+  blaming log retention) or as `Verified { applied: 0 }`. Remedy: re-invite.
+- Each join that failed before this fix left a leaf nobody operates (the committer merged the Add
+  and consumed the invite; the joiner's KeyPackage key was deleted by the refused attempt). The
+  owner removes it through the ordinary removal path. A joiner still on an older build keeps
+  creating these on groups with an expired leaf.
+- A joiner on an older build still cannot join such a group.
+
 ## Switchable V2 voice transport and pinned call mode (22 October, branch only)
 
 Kind-28 dispatch and the V2 scheduler (`catcoms-sync/src/voice_schedule.rs`) exist behind a local

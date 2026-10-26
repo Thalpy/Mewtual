@@ -515,9 +515,17 @@ Which gives two distinct stranded states:
 
 | Gap behind | What happens | Evidence produced |
 |---|---|---|
-| <= 256 | Heals normally | ordinary debug logs |
+| <= 256 | Heals normally, unless a missed Add's KeyPackage has expired since (below) | ordinary debug logs |
 | 257 to 1024 | Records buffer, `drain_pending_commits` cannot chain them | one `tracing::warn!` |
 | > 1024 | Records dropped before buffering; `pending_commits` stays empty | **nothing at all** |
+
+A third way to be stuck inside 256 (26 October, `docs/design-mls-leaf-lifetime.md` section 6):
+openmls re-checks an added KeyPackage's lifetime against the wall clock when the Add is processed,
+so a member offline for longer than that KeyPackage's remaining lifetime (at least 60 days since
+admission enforces a floor; about 84 for honest joiners) cannot apply the Add however close the
+gap is. Catch-up then reports it wrongly: as `Stranded` with a `MembershipChainGap` if later records
+followed in the same answer, or as `Verified { applied: 0 }` if the Add was the newest. A typed
+outcome for "offered at my epoch, refused" is a follow-up.
 
 That warn said "a full rejoin/snapshot is needed" and was the only occurrence of the condition
 anywhere: not a typed state, not a `SyncStats` counter, not an event, not in diagnostics, not in the
