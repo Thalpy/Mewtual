@@ -1,5 +1,21 @@
 # Threat model; client integrity & enforcement boundaries
 
+## Closed-plan cache custody and Source re-admission (26 October)
+
+An early native closing fence exposed real idle cache ownership before Ready: outgoing,
+incoming credit and Source entries could retain a closed Workflow until signed expiry.
+Explicit whole-plan retirement now marks those cache owners terminal under its original
+binding. Key-only closure is deliberately distinct. Exact cache cleanup preserves the
+established pair/pin, counters, replay and unrelated SDP/media; a defensive Scope refusal
+leaves debt for expiry and never widens the lookup.
+
+The whole-plan store precedes actual Control closure. Source authorization must read that
+same latch, otherwise a retained old SourceActivity could recreate a pruned attempt record
+while its old leases remain live. A deterministic pre-Control hook pins this refusal.
+Source active-flight retention is unchanged. Real Lower keepalive and retained ACK authority
+remain paid after map removal and keep retirement Pending until actual destruction; removing
+cache ownership never certifies final delivery or drainage. No general attempt refund exists.
+
 ## Early Plan fence and uncertain native custody (26 October; inactive)
 
 An ordinary admission-shaped retry on a live lease can create work that never began. A

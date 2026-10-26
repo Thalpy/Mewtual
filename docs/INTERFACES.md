@@ -1,5 +1,15 @@
 # Mewtual; Interfaces & Hooks Schema
 
+## Root whole-plan latch (26 October; private runtime state)
+
+`retire_all` additionally makes this exact plan's old confirmation caches terminal.
+`close_successor_effects` remains key-only and does not stop old confirmation retries.
+The private monotone flag fits the existing fixed PlanBinding payment; chain metadata
+guards pass. No wire/persistence field, opcode, public capability or capacity is added.
+Maintenance preserves established pairs, replay/counters and independent SDP/media.
+Source authority checks the latch even before Control actually closes; idle-record removal
+cannot replenish a source attempt. Actual Input/Source/Lower/ACK custody still gates drainage.
+
 ## Broker40 original Plan closing intent (26 October; inactive)
 
 `close-plan` can now latch its SAME original Session intent while nested custody awaits

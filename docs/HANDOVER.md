@@ -1,5 +1,30 @@
 # Mewtual; Handover
 
+## Current cache correction and validation (26 October; App OFF)
+
+The early-fence code compiles and18 native Plan-final tests pass. The actual SDK/copy
+custody case passes9.83s. The pre-Ready Claim/key case initially failed because real idle
+Root confirmation caches retained Workflow. This was reproduced before the fix by a
+deterministic Root test (Source count1 instead of0, without clock advance).
+
+Root now uses a dedicated whole-plan terminal latch; key-only closure stays distinct.
+Maintenance removes only original confirmation cache ownership, preserving pair/pin,
+replay/counters and SDP/media. The same Source authority gate prevents re-admission before
+actual Control closure. Real Input/Lower/ACK owners still gate drainage. Root successor176
+tests pass7.14s and chain38/metadata guards pass0.02s. Read-only adversarial review finds
+no blocker/high/medium. Two new tests initially tried to capture Control after settlement;
+capturing the actual original Control before settlement fixes their fixture and both pass.
+
+This DOES change Root runtime code: older complete Root evidence is superseded for sign-off.
+Current native focused tests PASS with the fix: Plan-final18, both actual pre-Ready/SDK-copy
+cases19.65s, original rejected-result regression8.19s and active-media/index case31.26s.
+The pre-Ready case proves ordinary native maintenance progress without clock advance or
+raising its original5s observer bound. Fresh full Root validation is running; native
+full/lint/checks and dependency audit remain required. Current frontend3053/static/build
+passes (69.46s/zero diagnostics/35.25s). The original failure logs are retained locally.
+The following entries record prior checkpoints; none closes the remaining production
+App/real RTC/tracks, media isolation/relay, renewal or combined/physical acceptance work.
+
 ## Broker40 admission-reply recovery (26 October; native validation pending, App OFF)
 
 The next attached pre-media failure slice is implemented and awaiting native execution.

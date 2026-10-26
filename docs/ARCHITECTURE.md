@@ -1,5 +1,21 @@
 # Mewtual; Architecture
 
+## Whole-plan confirmation cache retirement (26 October; inactive V2)
+
+Explicit `ConfirmationControl::retire_all` now publishes a dedicated monotone whole-plan
+latch after successor closure. Key-only successor closure retains its narrower contract
+and does not set this latch. Ordinary LocalJoin maintenance removes only the exact plan's
+obsolete confirmation cache owners. Outgoing uses actual Workflow identity; incoming uses
+the existing full confirmation tuple and one-protected-plan-per-handshake invariant.
+Established pair pins/status, replay, sequence/token allocators and SDP/media remain.
+
+Source obsolescence AND final Source authority consult the same terminal latch. The latter
+prevents an old retained activity from recreating an attempt record between idle pruning
+and actual Control closure. Active Source/Lower/ACK and externally held Input keep their
+original payments and continue to delay real Workflow retirement until their actual Drop.
+No clock advance, attempt refund, final/drained assignment or protocol-format change is used.
+This fixes the actual pre-Ready cache pin found by the native early-fence regression.
+
 ## Closing before ambiguous admission recovery (26 October; inactive, native gates pending)
 
 Broker40 extends failed attached-plan cleanup with an irreversible native Plan closing

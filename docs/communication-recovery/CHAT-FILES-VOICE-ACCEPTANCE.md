@@ -1,5 +1,23 @@
 # Chat, files and voice implementation evidence
 
+## Closed-plan cache owner correction (26 October; full gates pending)
+
+The native pre-Ready fence case found idle Root caches pinning Workflow after closure.
+The new deterministic reproduction failed before correction with Source count1 rather
+than0 (0.07s). Dedicated whole-plan retirement now removes only exact obsolete caches;
+key-only closure, established pair/pin, replay/counters and independent SDP/media remain.
+Source authorization also checks the latch before actual Control closure, preventing a
+retained activity from creating a fresh attempt record after idle pruning.
+
+Focused Root successor176/chain38 pass, including actual Input/Lower/ACK retention,
+pre-Control re-admission refusal and key-only distinction. Native Plan-final18 pass and
+the independent SDK/copy case passes9.83s before this Root correction. The original
+pre-Ready and SDK/copy cases both pass19.65s with ordinary native maintenance, unchanged
+observer bounds and no clock advance. Plan-final18, rejected-result8.19s and actual active-media/
+index31.26s pass too. Fresh complete Root/native/lint validation
+is required; earlier complete Root results cover older runtime. Frontend3053/static/build
+passes in the final worktree. App stays OFF and remaining scope is unchanged.
+
 ## Broker40 early Plan closing fence (26 October; frontend passes, native pending)
 
 Full frontend 3,053 passes in68.84s, focused browser/crypto345 in8.52s, static checks

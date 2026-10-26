@@ -1,5 +1,16 @@
 # Next voice milestone: native result recovery
 
+## Pre-Ready cache pin corrected; fresh full gates required (26 October)
+
+Native SDK/copy acceptance passes, but the pre-Ready stage exposed actual Root cache
+ownership surviving whole-plan closure. A failing-before Root regression now passes.
+Dedicated whole-plan terminal state retires exact idle confirmation caches while preserving
+pair/replay/counters and key-only semantics; real Input/Source/Lower/ACK owners still delay
+retirement. Successor176 and chain38/metadata tests pass. Native Plan-final18, both real custody stages19.65s, rejected-result8.19s and media/index31.26s pass; fresh full Root validation is running.
+This changes Root runtime, so previous full Root evidence cannot close current sign-off.
+Production App/RTC/tracks, per-N media failure isolation, renewal, relay and combined/physical
+acceptance still follow. Earlier entries below are historical checkpoints.
+
 ## Broker40 fence implemented; native validation next (26 October; App OFF)
 
 The early Plan fence described in the older Broker39 section below is now implemented:
