@@ -25,7 +25,19 @@ are covered. These are controlled browser/native-adapter tests, not physical aud
 Read-only review has no remaining blocker/high/medium or material low in the scheduler slice.
 All320 focused regressions pass6.09s. Merged complete frontend2,997 tests64.54s, static0errors/0warnings
 and production build36.25s pass. Native check/strict Clippy and both actual native HTTP
-compaction cases pass40.74s/41.56s. The full Native scheduling-source rerun is running.
+compaction cases pass40.74s/41.56s. Its first full Native run failed as recorded below; the integrated rerun remains required.
+
+The first full scheduling-source run failed842passed/32failed: one primary second-collector
+case returned from retirement with peerClosed1, followed by31 intentional fixture-isolation
+cascades. The historical close cause remains unattributed. Independent deterministic coverage
+found an early poll callback crossing its cadence during cancel/rearm; it incorrectly closed
+media before the actual freshness deadline. The fix keeps the same due/observation, defers
+one <=1ms wake only before the unchanged actual deadline, and rechecks End after Clock entry.
+The old code fails and the fix passes; actual expiry still closes without another request,
+and a held new request cannot extend the original deadline or refund its fee early. Re-review
+has no blocker/high/medium. The exact previously failing native case passes45.54s/42.87s/41.43s.
+Full frontend3,000 tests62.97s, static0errors/0warnings and build35.82s pass. Final full Native
+validation will run on the integrated composition descendant; this failed run is not waived.
 
 Second-peer admission remains disabled. The next boundary is replacing the active negotiation
 only after original SDK/IO/final ACK and history disposal, retaining independent per-peer media.
