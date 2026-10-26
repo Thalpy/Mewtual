@@ -8,7 +8,7 @@ import {
 } from "./private-downloads.ts";
 const row = { id: "ab".repeat(32), cid: "cd".repeat(32), intent: "18446744073709551615", grant: "2",
   status: "incomplete", verifiedChunks: 1, savedChunks: 0, totalChunks: 2, chosenPlace: false,
-  receivedBytes: 8, savedBytes: 0, totalBytes: 16, savedTo: null };
+  receivedBytes: 8, savedBytes: 0, totalBytes: 16, savedTo: null, savedEntry: null };
 const statuses = ["receiving", "incomplete", "ready", "paused", "exhausted", "blocked", "removing",
   "saving", "save-interrupted", "save-paused", "destination-unavailable", "destination-changed", "saved"] as const;
 const as = (status: PrivateDownload["status"], extra: Partial<PrivateDownload> = {}): PrivateDownload =>
@@ -31,6 +31,18 @@ test("invalid saved owners, revisions, phases and bounds are refused", () => {
   assert.throws(() => checkedPrivateDownloads([row, row]));
   assert.throws(() => checkedPrivateDownloads(Array(33).fill(row)));
   assert.throws(() => checkedPrivateDownloads(null));
+});
+test("a saved row may name the saved-files entry it stands for, and only a saved row", () => {
+  // PR #56: an entry ID on a saved row; nothing on any other row, and nothing that is not an ID.
+  const saved = { ...row, status: "saved", savedTo: "downloads", savedEntry: "ef".repeat(16) };
+  assert.equal(checkedPrivateDownloads([saved])[0].savedEntry, "ef".repeat(16));
+  assert.equal(checkedPrivateDownloads([{ ...saved, savedEntry: undefined }])[0].savedEntry, null);
+  for (const change of [
+    { status: "incomplete", savedTo: null }, { savedEntry: "EF".repeat(16) }, { savedEntry: "ef".repeat(17) },
+    { savedEntry: 7 }, { savedEntry: "C:\\Users\\me\\report.pdf" },
+  ]) {
+    assert.throws(() => checkedPrivateDownloads([{ ...saved, ...change }]), /progress could not be read/);
+  }
 });
 test("save progress requires the exact active invocation and cannot revive a terminal row", () => {
   const row = { operation: "save-current", status: "downloading" };

@@ -1,9 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { VISUAL_FIXTURE_NOW, visualFixtureResponse } from "./visual-fixture.ts";
-import { VISUAL_TRANSFER_ROWS } from "./visual-transfers-fixture.ts";
+import { VISUAL_SAVED_FILES, VISUAL_TRANSFER_ROWS } from "./visual-transfers-fixture.ts";
 import { checkedPrivateDownloads, checkedSavedCheck, type SavedCheck } from "./private-downloads.ts";
 import { savedRowView } from "./transfer-rows.ts";
+import { checkedSavedFileChecks, checkedSavedFiles, savedListRowView } from "./saved-files.ts";
 
 test("the Transfers fixture shows every row state, closed and path free", () => {
   // Transfers UX (PR #51): `?fixture=chat&transfers=1` lists one row per state for screenshots.
@@ -34,6 +35,33 @@ test("the Transfers fixture shows every row state, closed and path free", () => 
   // Without the flag the chat fixture stays as it was.
   assert.deepEqual(visualFixtureResponse("get_private_downloads"), []);
   assert.equal(visualFixtureResponse("reveal_saved_download", { server: 1, download: "ab".repeat(32), expectedIntent: "1" }), null);
+});
+
+test("the Transfers fixture lists saved files in every list-row state, display data only", () => {
+  // PR #56: the saved-files list, its batch check and the chat card that shows the mark.
+  const list = checkedSavedFiles(visualFixtureResponse("get_saved_files", { server: 1 }, false, true));
+  assert.equal(list.state, "ok");
+  assert.equal(list.files.length, VISUAL_SAVED_FILES.length);
+  const answers = checkedSavedFileChecks(visualFixtureResponse("check_saved_files", { server: 1 }, false, true));
+  assert.deepEqual(answers.map((a) => a.check).sort(), ["missing", "present", "replaced", "unknown"]);
+  const listed = visualFixtureResponse("get_files", { server: 1 }, false, true) as { files: { cid: string }[] };
+  const views = list.files.map((file) => savedListRowView(file, answers.find((a) => a.id === file.id)?.check ?? null,
+    listed.files.some((f) => f.cid === file.cid), () => "23 Oct", { busy: false, saving: false }));
+  // Present, missing, replaced, could not check, and a folder Mewtual cannot check.
+  assert.equal(new Set(views.map((view) => `${view.word}:${view.hint}`)).size, 5);
+  assert.ok(views.some((view) => view.actions.some((action) => action.kind === "again")));
+  assert.doesNotMatch(JSON.stringify(list), /path|folder|[A-Z]:\\|\/Users\//);
+  for (const command of ["reveal_saved_file", "forget_saved_file", "reset_saved_files"]) {
+    assert.equal(visualFixtureResponse(command, { server: 1, entry: list.files[0].id }, false, true), null);
+  }
+  // A chat message shares the first saved file, so its card shows the mark.
+  const messages = visualFixtureResponse("get_messages", { server: 1, channel: "general" }, false, true) as { text: string }[];
+  assert.ok(messages.some((m) => m.text.includes(`(file:${VISUAL_SAVED_FILES[0].file.cid})`)));
+  // Without the flag the chat fixture has saved nothing and its messages are unchanged.
+  assert.deepEqual(visualFixtureResponse("get_saved_files"), { state: "ok", files: [] });
+  assert.deepEqual(visualFixtureResponse("check_saved_files"), []);
+  assert.ok(!(visualFixtureResponse("get_messages", { server: 1, channel: "general" }) as { text: string }[])
+    .some((m) => m.text.includes("(file:")));
 });
 
 test("visual fixture explicitly supports native call controller lifecycle", () => {

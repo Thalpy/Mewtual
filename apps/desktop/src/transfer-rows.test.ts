@@ -10,6 +10,7 @@ const base: PrivateDownload = {
   id: "ab".repeat(32), cid: "cd".repeat(32), intent: "3", grant: "1", status: "incomplete",
   verifiedChunks: 12, savedChunks: 4, totalChunks: 40, chosenPlace: false,
   receivedBytes: 3_100_000, savedBytes: 1_000_000, totalBytes: 12_400_000, savedTo: null,
+  savedEntry: null,
 };
 const row = (status: PrivateDownloadStatus, extra: Partial<PrivateDownload> = {}): PrivateDownload =>
   ({ ...base, status, savedTo: status === "saved" ? "downloads" : null, ...extra });

@@ -77,6 +77,20 @@ test("Save as sends only a flag, never a path, and its cancel is recognized exac
   assert.equal(isSaveAsCancelled("Save as was cancelled. Also something else"), false);
   assert.equal(isSaveAsCancelled("A Save as window is already open."), false);
 });
+test("Replace my older saved copy travels as a flag only, and only when on", async () => {
+  // PR #56: native decides what may be replaced; the renderer can only ask.
+  const saved = { path: "/Downloads/report.bin", displayed: true };
+  const mock = mockInvoker(saved);
+  await saveGroupFile(mock.invoke, 2, "c", "report.bin", { replaceOlder: true });
+  assert.deepEqual(mock.calls[0].args, { server: 2, cid: "c", name: "report.bin", replaceOlder: true });
+  await resumeGroupFile(mock.invoke, 2, "c", "r.bin", "d", "7", "op", false, false, true);
+  assert.deepEqual(mock.calls[1].args, {
+    server: 2, cid: "c", name: "r.bin", resume: "d", expectedIntent: "7", replaceOlder: true, operation: "op",
+  });
+  await saveGroupFile(mock.invoke, 2, "c", "plain.bin", { replaceOlder: false });
+  await resumeGroupFile(mock.invoke, 2, "c", "r.bin", "d", "7");
+  for (const call of mock.calls.slice(2)) assert.equal("replaceOlder" in (call.args ?? {}), false, "off sends no flag");
+});
 test("a save that may not be in Downloads names no folder", () => {
   assert.deepEqual(
     downloadSavedNotice("report.bin", { path: "/Chosen/report.bin", displayed: true }, false),

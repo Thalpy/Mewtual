@@ -60,6 +60,9 @@ export async function saveGroupFile(
     resume?: string; expectedIntent?: string; operation?: string; freshCopy?: boolean;
     /** Native opens the OS "Save as" dialog itself; no path or folder is ever sent from here. */
     saveAs?: boolean;
+    /** "Replace my older saved copy" (PR #56): a flag only. Native replaces only a copy the
+     * sealed saved-files list names and that it proves is its own and unchanged. */
+    replaceOlder?: boolean;
   },
 ): Promise<SavedFileResult> {
   return checkedResult(await invoke<unknown>("save_group_file", {
@@ -69,6 +72,7 @@ export async function saveGroupFile(
     // created, forgets that journal under the same intent CAS, then saves a separate file.
     ...(options?.resume && options.freshCopy ? { freshCopy: true } : {}),
     ...(options?.saveAs ? { saveAs: true } : {}),
+    ...(options?.replaceOlder ? { replaceOlder: true } : {}),
     ...(options?.operation ? { operation: options.operation } : {}),
   }));
 }
@@ -79,8 +83,9 @@ export async function saveGroupFile(
 export async function resumeGroupFile(
   invoke: NativeInvoker, server: number, cid: string, name: string,
   resume: string, expectedIntent: string, operation?: string, freshCopy = false, saveAs = false,
+  replaceOlder = false,
 ): Promise<SavedFileResult> {
-  return saveGroupFile(invoke, server, cid, name, { resume, expectedIntent, operation, freshCopy, saveAs });
+  return saveGroupFile(invoke, server, cid, name, { resume, expectedIntent, operation, freshCopy, saveAs, replaceOlder });
 }
 
 /** Native's exact reply when the user closes the "Save as" dialog without choosing. Nothing was

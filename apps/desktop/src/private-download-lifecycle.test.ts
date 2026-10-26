@@ -35,6 +35,8 @@ function fixture() {
     let activeServerId = 1, viewGeneration = 2, locked = false, error = "", privateDownloadBusy = {};
     let privateDownloads = [], privateDownloadSaves = {}, downloads = {}, activeSaves = {}, uuid = 0, refreshes = 0;
     let savedChecks = {}, savedChecking = {}, savedCheckVisit = 1, view = "downloads";
+    // PR #56: the "Replace my older saved copy" preference every save passes (off by default).
+    let replaceOlder = false;
     const calls = [], notices = [], views = [], replies = new Map(), filesByCid = new Map([[file.cid, file]]);
     const crypto = { randomUUID: () => "op-" + (++uuid) }, fileInventoryGate = { invalidate() {} };
     const dlKey = (server,cid) => server + ":" + cid;
@@ -267,7 +269,8 @@ test("Saved rows are checked one at a time and an overlapping refresh asks for n
 test("Transfers runs the check from its refresh and starts a new visit when shown", () => {
   // Decisions review L5: the two call sites that make the check happen at all.
   const text = (name: string) => tree.statements.find((n) => ts.isFunctionDeclaration(n) && n.name?.text === name)?.getText(tree) ?? "";
-  assert.match(text("refreshFiles"), /if \(view === "downloads"\) void checkSavedRows\(\);/);
+  // PR #56: the same refresh also checks the saved-files list's rows (one bounded batch).
+  assert.match(text("refreshFiles"), /if \(view === "downloads"\) \{\s*void checkSavedRows\(\);\s*void checkSavedListRows\(\);\s*\}/);
   assert.match(text("switchView"), /if \(v === "downloads"\) savedCheckVisit\+\+;/);
 });
 test("a saved file check answered after the row or view changed never relabels anything", async () => {
