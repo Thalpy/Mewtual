@@ -7,7 +7,8 @@ Two further failing-before regressions pin retirement in the final Clock/schedul
 against abort-resistant transport. All363 focused tests pass7.29s; complete frontend3,011
 passes67.14s, static0errors/0warnings and production build36.71s pass. Root/native formatting
 and ambient checks pass. Read-only re-review has no remaining blocker/high/medium. Native
-composition execution and Root full remain pending. The preceding879 Native pass is Broker36,
+composition execution remains pending. Fresh complete Root passes3,675/24ignored in73m52s
+on identical Root source in the warm custody checkout. The preceding879 Native pass is Broker36,
 not fresh evidence for Broker37. App V2 remains OFF and failed-plan retirement is still open.
 Current cargo deny fails the inherited crypto-bigint advisory; bans/licenses/sources pass.
 

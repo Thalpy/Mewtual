@@ -1,5 +1,29 @@
 # Mewtual; Handover
 
+## Review branches and current native blocker (26 October)
+
+The reviewed inactive checkpoints are published as [PR #58, native SDP/media custody](https://github.com/Thalpy/Mewtual/pull/58)
+and [PR #59, browser composition](https://github.com/Thalpy/Mewtual/pull/59), stacked after PR #53.
+PR #59 includes Broker37 at f8e1266f. Both new PRs are drafts: App V2 remains OFF.
+
+Fresh complete Root validation passes3,675/24ignored on the unchanged Root source. Frontend
+3,011, static checks and build pass. Current Native sign-off remains open. The new genuine
+native two-peer fixture, not yet in these PRs, completes A-B and its actual native/browser
+history collection on the original Session, then reaches A-C confirmation but stalls at
+Ready/SDP capacity reservation within the unchanged512KiB group ceiling. A reviewed native
+single-parent admission fence removes overlapping native parents but does NOT resolve the
+remaining capacity failure. Its initial two focused ledger regressions pass; broader factory
+interleaving coverage and retained-owner diagnosis are in progress. No timeout/cap was raised.
+Temporary Root allocation tracing in the isolated implementation checkout is diagnostic only,
+not part of the published checkpoint or a reason to claim that new diff has passed Root gates.
+
+The [two-computer checklist](communication-recovery/TWO-COMPUTER-ACCEPTANCE.md) records entry
+conditions, cases and required evidence. It is prepared, not executed. Production App/RTC/tracks,
+operational renewal and failed-negotiation isolation, member media relay and combined acceptance
+remain code work. Two physical endpoints alone do not establish an independently hosted B/D
+bridge replacement. Only one desktop is currently available. External-download resume and the
+dependency/toolchain upgrade are separate branches; their integration is not assumed here.
+
 ## Exact intake cancellation on shared Sessions (26 October; inactive, gates pending)
 
 Broker37 tags the physical Input controller with its actual original intake. Expiry of a
@@ -16,9 +40,10 @@ transport. All363 focused tests pass7.29s after both corrections. Complete front
 passes67.14s; final static0errors/0warnings and production build36.71s pass. Root/native fmt
 and the Git Bash ambient gate pass. Read-only re-review has no remaining blocker/high/medium.
 Current cargo deny again fails the inherited RUSTSEC-2026-0387; bans/licenses/sources pass.
-Final Root/native gates remain pending; the879-test Native pass below predates Broker37.
-This does not implement failed-negotiation retirement/replacement. App V2 stays OFF; Root full
-is still running serially and the real native two-peer fixture is queued behind it.
+Fresh complete Root passes3,675/24ignored (73m52s), on byte-identical Root source in the warm
+custody checkout. Native gates remain pending; the879-test Native pass below predates Broker37.
+This does not implement failed-negotiation retirement/replacement. App V2 stays OFF. The real
+native two-peer fixture is now compiling after the successful serial Root run.
 
 ## Sequential browser peers on one Session (26 October; inactive, native gates passed)
 
