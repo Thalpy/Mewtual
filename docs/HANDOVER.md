@@ -1,5 +1,37 @@
 # Mewtual; Handover
 
+## V2 SDK scheduling and negotiation ownership (26 October; inactive, validation in progress)
+
+Broker35 separates the retained per-pair negotiation object from shared Session keys,
+counters and lifecycle. Async work captures that exact owner; late callbacks cannot mutate
+its replacement. SDK/RTC creation rechecks owner and Clock seams, and native work callbacks
+carry the captured generation into intake publication. A bounded FIFO retains one active
+codec request and at most18 waiting requests, paid by their original callers.
+
+All retained Sessions share one codec lane. One separate SDK loan uses the existing
+MAX_ACTIVE=2 pool. Two channels can lend their second reserved position to that loan;
+one channel plus an SDK loan still consumes both positions after another channel closes.
+Ordinary admission reserves before callback-bearing owner checks. A deterministic old-code
+failure reproduces oversubscription; the fix passes. Bootstrap, protected derivation and
+confirmation, and SDP use the independent loan before admission and through actual SDK/digest
+return. Returned pre-SDK uncertainty relinquishes execution without refunding native attempts,
+bytes or authority. End cancels queued borrows; granted work drains normally. Native cleanup
+yields between complete physical requests and never holds the codec during retry cadence.
+
+Actual WebCrypto/framed fixture regressions keep indexed media current for7s of injected time
+while another Session's bootstrap/ECDH remains held, with observed provider/codec overlap2.
+Queued borrower End, other-channel collection, reentrant admission and wrapper inventories
+are covered. These are controlled browser/native-adapter tests, not physical audio evidence.
+Read-only review has no remaining blocker/high/medium or material low in the scheduler slice.
+All320 focused regressions pass6.09s. Complete frontend2,988 tests64.65s, static0errors/0warnings
+and production build36.98s pass. Native integration for this source remains pending.
+
+Second-peer admission remains disabled. The next boundary is replacing the active negotiation
+only after original SDK/IO/final ACK and history disposal, retaining independent per-peer media.
+Operational renewal, App RTC/tracks, member relay, combined/physical acceptance and the inherited
+crypto-bigint advisory remain open. App V2 stays OFF. External download resume is separately
+owned; only one desktop is available. Do not describe the communication plan as complete.
+
 ## Live browser history compaction (26 October; Native acceptance queued)
 
 Broker33 adds exact-original `compactNativeNegotiation` after variable negotiation retirement

@@ -41,6 +41,7 @@ async function fixture(purpose: "seal" | "open" = "seal", length = 8192, brokenT
   let receipt: VoiceIpcReceipt | null = null, previousOutput: Uint8Array | null = null;
   let lose: keyof typeof counts | null = null, hold: keyof typeof counts | null = null, held = gate();
   let inputBacking: Uint8Array | null = null, capacity = false, throwSdk = false, admissionHistory = false;
+  let positionAvailable = true, positions = 0, peakPositions = 0;
   const oldReceipt = (): VoiceIpcReceipt => ({ action: identity.action, inputTag: identity.inputTag, outputTag: hash(90), retired: false, digest: hash(91),
     outcome: { kind: "sealed", message: hash(92), hash: hash(93) } });
   const history = (): VoiceSdpHistory => ({ row, parentRow, purpose, pending: "not-pending", identity, settled, acknowledged,
@@ -53,6 +54,12 @@ async function fixture(purpose: "seal" | "open" = "seal", length = 8192, brokenT
   };
   const native: VoiceSdpActionNative = {
     live: () => live,
+    async reserveEngine() {
+      if (!positionAvailable || positions) return null;
+      positions++; peakPositions = Math.max(peakPositions, positions);
+      let held = true;
+      return () => { assert.equal(held, true, "one actual position return"); held = false; positions--; };
+    },
     async begin(bytes) { began = true; assert.equal(bytes === null, purpose === "open"); if (bytes) assert.deepEqual(bytes, plaintext); await step("begin"); return reply(); },
     async resolve(close) { await step("resolve"); return began ? reply() : { kind: "missing", parentRow, purpose, closeRecorded: close }; },
     async input(_row, _identity, loan) { await step("input"); inputBacking = original.slice(); loan.accept(inputBacking, expected); return null; },
@@ -85,6 +92,8 @@ async function fixture(purpose: "seal" | "open" = "seal", length = 8192, brokenT
     end() { live = false; owner.close(); }, lose(name: keyof typeof counts) { lose = name; },
     hold(name: keyof typeof counts) { hold = name; return held; }, capacity(value: boolean) { capacity = value; },
     failSdk() { throwSdk = true; },
+    positionAvailable(value: boolean) { positionAvailable = value; },
+    positions: () => ({ active: positions, peak: peakPositions }),
     historical() { receipt = oldReceipt(); },
     admissionHistory() { admissionHistory = true; },
     oldExecutorSettled() { settled = true; },
@@ -196,7 +205,8 @@ test("serial browser stage inventory fits the original64KiB without retaining Be
   // Serial composition adds only a fixed stage field and two void helper frames. The
   // first Action/history/adapter graph ends before its successor is constructed.
   const composition = 16 + 2 * 256;
-  const fixedInventory = existingSdkPc + originalBindingStrings + 2 * historyStrings + callbacksAndFrames + rowClaimsAndLoans + rtcInventory + composition;
+  const sdkPositionLoan = 128 + 3 * 128 + 2 * 128; // bounded FIFO entry, return cell, promise/continuations
+  const fixedInventory = existingSdkPc + originalBindingStrings + 2 * historyStrings + callbacksAndFrames + rowClaimsAndLoans + rtcInventory + composition + sdkPositionLoan;
   assert.ok(fixedInventory <= fixed, `complete fixed browser owner: ${fixedInventory}/${fixed}`);
   const begin = 8192 + 2 * 8419 + 2 * 8435 + 2 * 236 + 220 + wireScratch + fixed;
   const input = 2 * 66 + 2 * 82 + 2 * 9232 + 9216 + wireScratch + fixed;
@@ -230,4 +240,24 @@ test("live action finish refuses unfinished, historical-only and unapplied Open 
   assert.equal(rejected.owner.complete, false); assert.throws(() => rejected.owner.finish());
   history.oldExecutorSettled(); // Historical recovery cannot settle another executor's SDK.
   for (const f of [waiting, opened, history, rejected]) { f.end(); await f.owner.cleanup(); }
+});
+
+
+test("browser position pressure precedes Input and native engine admission", async () => {
+  const f = await fixture(); f.positionAvailable(false); await f.owner.attempt();
+  assert.equal(f.counts.begin, 1); assert.equal(f.counts.input, 0); assert.equal(f.counts.admit, 0);
+  assert.equal(f.counts.compute, 0); assert.equal(f.counts.settle, 0);
+  f.positionAvailable(true); await f.owner.attempt();
+  assert.equal(f.counts.input, 1); assert.equal(f.counts.admit, 1); assert.equal(f.counts.compute, 1);
+  assert.deepEqual(f.positions(), { active: 0, peak: 1 });
+  f.end(); await f.owner.cleanup();
+});
+
+for (const stage of ["input", "admit", "compute"] as const) test(`actual browser position remains owned through held ${stage} and End`, async () => {
+  const f = await fixture(), held = f.hold(stage), flight = f.owner.attempt();
+  await until(() => f.counts[stage] === 1); assert.equal(f.positions().active, 1);
+  f.end(); const cleanup = f.owner.cleanup().catch(() => {}); await new Promise<void>(yes => setImmediate(yes));
+  assert.equal(f.positions().active, 1); held.release(); await flight; await cleanup;
+  if (!f.owner.returned) await f.owner.cleanup();
+  assert.deepEqual(f.positions(), { active: 0, peak: 1 });
 });

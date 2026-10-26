@@ -157,8 +157,8 @@ async function idle(): Promise<void> {
   while (broker.counts().active !== 0) {
     if (performance.now() >= deadline) {
       // Fixed flags only: identify active ownership without exposing rows/keys/SDP.
-      const retained = (broker as unknown as { ipcChannels: Map<string, { activity: number; driving: boolean; retired: boolean; sdpRoundStage: string }> }).ipcChannels.get(owner.token);
-      throw new Error(`idle:${currentStep} a${broker.counts().active} c${retained?.activity} d${Number(retained?.driving)} r${Number(retained?.retired)} s${retained?.sdpRoundStage}`);
+      const retained = (broker as unknown as { ipcChannels: Map<string, { activity: number; driving: boolean; retired: boolean; negotiation: {sdpRoundStage: string} }> }).ipcChannels.get(owner.token);
+      throw new Error(`idle:${currentStep} a${broker.counts().active} c${retained?.activity} d${Number(retained?.driving)} r${Number(retained?.retired)} s${retained?.negotiation.sdpRoundStage}`);
     }
     await new Promise<void>(resolve => setImmediate(resolve));
   }
@@ -372,14 +372,14 @@ async function step(value: Step): Promise<unknown> {
           loseMediaReplies = value.name === "rtc-round-media-loss"; mediaStarted = performance.now();
           // Read-only test observation of the actual retained driver, never a new app
           // authority/connected flag. Rust independently observes original admission.
-          const retained = (broker as unknown as { ipcChannels: Map<string, { media: { adopted: boolean; closed: boolean } | null }> }).ipcChannels.get(owner.token)!;
+          const retained = (broker as unknown as { ipcChannels: Map<string, { negotiation: {media: { adopted: boolean; closed: boolean } | null} }> }).ipcChannels.get(owner.token)!;
           const deadline = performance.now() + 5000;
           do {
-            assert.ok(performance.now() < deadline, `media c${Number(retained.media?.closed)} sdk${calls.closed} lost${[...lostMediaModes].join("/")} ${mediaEvents.join(",")}`);
+            assert.ok(performance.now() < deadline, `media c${Number(retained.negotiation.media?.closed)} sdk${calls.closed} lost${[...lostMediaModes].join("/")} ${mediaEvents.join(",")}`);
             await broker.completeNativeMediaHandoff(owner, channel, chain); await idle();
-            if (!retained.media?.adopted) await new Promise<void>(yes => setTimeout(yes, 25));
-          } while (!retained.media?.adopted);
-          assert.equal(retained.media.closed, false);
+            if (!retained.negotiation.media?.adopted) await new Promise<void>(yes => setTimeout(yes, 25));
+          } while (!retained.negotiation.media?.adopted);
+          assert.equal(retained.negotiation.media.closed, false);
           assert.equal(broker.counts().bytes, before + 8192);
           assert.equal(calls.created, 1); assert.equal(calls.closed, 0);
           mediaPeerCalls = calls;
@@ -412,8 +412,8 @@ async function step(value: Step): Promise<unknown> {
       assert.ok(mediaPeerCalls); testLostDetach=value.name === "media-retire-loss";
       const before=broker.counts().bytes;
       await broker.retireNativeNegotiation(owner,channel,chain);
-      const retained=(broker as unknown as {ipcChannels:Map<string,{negotiationRetired:boolean}>}).ipcChannels.get(owner.token)!;
-      assert.equal(retained.negotiationRetired,true,"original retirement returned before completion; peerClosed="+mediaPeerCalls.closed);
+      const retained=(broker as unknown as {ipcChannels:Map<string,{negotiation:{negotiationRetired:boolean}}>}).ipcChannels.get(owner.token)!;
+      assert.equal(retained.negotiation.negotiationRetired,true,"original retirement returned before completion; peerClosed="+mediaPeerCalls.closed);
       assert.equal(mediaPeerCalls.closed,0);
       assert.equal(chain.isCurrent(),false); assert.equal(broker.counts().bytes,before-65536);
       // First join any earlier flight, then require a NEW actual authenticated Current

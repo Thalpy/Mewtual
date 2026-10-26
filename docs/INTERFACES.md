@@ -1,5 +1,19 @@
 # Mewtual; Interfaces & Hooks Schema
 
+## Broker35 local execution and captured negotiation contract (26 October; inactive)
+
+This changes retained browser internals only; incompatible HMR brokers require reload.
+Public channel handles, native wire formats and authority checks are unchanged. Private
+`reserveEngine` obtains one affine SDK position before native engine admission, and before
+SDP Input. A queued cancellation returns no loan; a granted loan ends only after actual
+SDK/digest return. Existing native attempts and byte custody are independent of this local
+execution grant. Bootstrap uses the same loan outside the shared codec. Every Session keeps
+its own keys/counters; framing and cleanup requests take individual shared FIFO turns.
+One active plus18 waiting requests is a resource bound, not a supported peer-count or
+latency promise. Two retained Sessions still progress; their provider work now serializes.
+Captured negotiation generations fence late work before intake/publication. New per-pair
+admission is still blocked. HANDOVER records current validation and unresolved acceptance.
+
 ## Broker33 explicit browser history compaction (26 October; inactive)
 
 `compactNativeNegotiation(owner, channel, plan): Promise<boolean>` requires exact original

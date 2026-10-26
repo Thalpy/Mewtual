@@ -1,5 +1,19 @@
 # Mewtual; Architecture
 
+## Shared codec and independent browser SDK execution (26 October; inactive)
+
+Broker35 retains one per-negotiation state object and fences captured callbacks by that
+owner. Session keys/counters, global End and codec infrastructure stay separate. One bounded
+FIFO serializes actual codec work across retained Sessions; one independent SDK loan shares
+the existing two-position pool. Reservations form a union: codec plus SDK occupy2 even
+when another channel closes. Ordinary admission reserves before callback-bearing checks.
+Bootstrap and protected/SDP provider work never hold the codec; their exact admission and
+actual SDK/digest return bound the loan. End cancels only unstarted borrows. Cleanup takes
+individual physical turns and releases them before native waits/retry cadence. Existing
+original metadata prepayments cover queued closures; no cap, wire or authority changes.
+Two channels' SDK computations now serialize, while their control traffic can progress.
+Multi-peer admission and App activation remain disabled; HANDOVER records current gates.
+
 ## Original-peer live browser compaction (26 October; inactive)
 
 Broker33 can retire browser negotiation history while indexed original media persists. Exact

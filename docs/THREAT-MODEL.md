@@ -1,5 +1,23 @@
 # Threat model; client integrity & enforcement boundaries
 
+## Browser SDK/codec scheduling boundary (26 October; inactive)
+
+Owner/Clock predicates can reenter admission or End. Ordinary execution reserves its
+position before the owner predicate; SDK grants atomically check the same union of fixed
+reservations and active work. Two retained channels do not create a third provider slot.
+The global codec contains no selected Session keys/custody; each queued caller retains its
+own original fee and parameters. A granted SDK loan remains owned across ignored observers,
+provider stalls and End, through actual SDK/digest return. Queued borrows may be cancelled
+before handoff, retaining metadata until their continuation returns. Native admission,
+cryptographic authority, attempts and bytes are never refunded by returning a local slot.
+
+A stalled bootstrap or protected/SDP provider cannot hold the shared codec. Controlled
+actual-WebCrypto tests observe codec/provider peak2 and media refresh beyond one5s freshness
+window. One actually stalled codec request can still expire media under the unchanged bound;
+no peer-count/latency or physical-network guarantee follows from these tests. Per-negotiation
+captured ownership fences stale async mutations; fresh multi-peer admission remains disabled.
+App V2 stays OFF, and the inherited crypto-bigint advisory remains unresolved.
+
 ## Live browser-history compaction boundary (26 October; inactive)
 
 Only exact original owner/channel/plan plus completed native mode8 history may start live

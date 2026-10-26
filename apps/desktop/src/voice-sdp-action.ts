@@ -50,6 +50,9 @@ export class VoiceSdpInputLoan {
 
 export type VoiceSdpActionNative = Readonly<{
   live(): boolean;
+  /** Existing pool position acquired before Input/admission; null is cancelled unstarted
+   * work. Native bytes, attempts and authority remain owned by the original action. */
+  reserveEngine(): Promise<(() => void) | null>;
   begin(plaintext: Uint8Array<ArrayBuffer> | null): Promise<VoiceSdpReply>;
   resolve(close: boolean): Promise<VoiceSdpReply>;
   input(row: string, identity: VoiceIpcActionIdentity, loan: VoiceSdpInputLoan): Promise<VoiceSdpReply | null>;
@@ -197,13 +200,18 @@ export class VoiceSdpActionOwner {
         if (this.live() && !this.identity) return;
       }
       if (this.live() && this.identity && !this.history?.receipt && !this.history?.settled && !this.sdkStarted) {
-        const loan = this.loan ??= new VoiceSdpInputLoan();
-        if (!this.engineAttempted) {
-          const reply = await this.native.input(this.row, this.identity, loan);
-          if (reply) { this.observe(reply); loan.clear(); this.loan = null; return; }
-        }
-        if (!this.live()) return;
-        await this.admitAndCompute(loan);
+        const release = await this.native.reserveEngine();
+        if (!release) return;
+        try {
+          if (!this.live()) return;
+          const loan = this.loan ??= new VoiceSdpInputLoan();
+          if (!this.engineAttempted) {
+            const reply = await this.native.input(this.row, this.identity, loan);
+            if (reply) { this.observe(reply); loan.clear(); this.loan = null; return; }
+          }
+          if (!this.live()) return;
+          await this.admitAndCompute(loan);
+        } finally { release(); }
         if (!this.sdkStarted && this.live() && !this.history?.receipt && !this.history?.settled) return;
       }
       if (this.live() && this.sdkDone && !this.history?.receipt) {

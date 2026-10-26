@@ -61,7 +61,7 @@ async function fixture(t: TestContext, sharedBroker?: VoiceCryptoBroker, identit
   let holdAt = -1, held: ReturnType<typeof gate> | null = null, engineEnabled = false;
   let holdWhen: ((name: string, args: unknown[]) => boolean) | null = null;
   let stalled = false, cancelEntered = false, cancelGate: ReturnType<typeof gate> | null = null;
-  let observedStep = -1, sdpSdkCalls = 0;
+  let observedStep = -1, sdpSdkCalls = 0, providerActive = 0, providerPeak = 0;
   let now = 0, timerSerial = 0, hostileHeaders = false, hangFetch = false, fetchAborted = false, fetchEntered = false;
   const timers = new Map<number, { at: number; run(): void }>();
   let timerPeak = 0, scheduleHook: (() => void) | null = null, cancelHook: (() => void) | null = null, nowHook: (() => void) | null = null;
@@ -70,6 +70,9 @@ async function fixture(t: TestContext, sharedBroker?: VoiceCryptoBroker, identit
     const value = Reflect.get(target, name);
     if (typeof value !== "function") return value;
     return async (...args: unknown[]) => {
+      const tracked = engineEnabled;
+      if (tracked) { providerActive++; providerPeak = Math.max(providerPeak, providerActive); }
+      try {
       if (engineEnabled) {
         const index = engineSteps.length; engineSteps.push(String(name));
         if ((name === "encrypt" || name === "decrypt") && (args[0] as AesGcmParams)?.additionalData?.byteLength === 579) sdpSdkCalls++;
@@ -77,7 +80,8 @@ async function fixture(t: TestContext, sharedBroker?: VoiceCryptoBroker, identit
         if (holdWhen?.(String(name), args)) { holdWhen = null; observedStep = -2; await held!.promise; }
         if (name === "encrypt" && failEncrypt) { failEncrypt = false; throw new Error("local provider failure"); }
       }
-      return value.apply(target, args);
+      return await value.apply(target, args);
+      } finally { if (tracked) providerActive--; }
     };
   } });
   let ownerHook: (() => void) | null = null;
@@ -228,6 +232,7 @@ async function fixture(t: TestContext, sharedBroker?: VoiceCryptoBroker, identit
     responseChange(value: Partial<VoiceIpcHeader> | null) { responseChange = value; },
     operations: () => [...operations], bodyReads: () => [...bodyReads],
     sdpSdkCount: () => sdpSdkCalls,
+    providers: () => ({ active: providerActive, peak: providerPeak }),
     rowBudget() {
       // Read-only unit observation of actual retained claims. Public counts intentionally
       // expose no capability/history internals to application callers.
@@ -1619,21 +1624,17 @@ test("two retained channels lend their existing two positions without a third re
   assert.deepEqual(linkedSecond.counts(), { admits: 1, commits: 1, settlements: 1 });
 });
 
-test("a lent provider and same-channel status are mutually exclusive through actual provider settlement", async t => {
+test("same-Session status progresses while an actual protected SDK provider is held", async t => {
   const f = await fixture(t), channel = f.channel(); await channel.status();
   const linked = await linkedDerivation(f, channel);
-  // Admit's four Status SDK calls precede row0's first import. Hold its real ECDH after import.
-  const provider = f.hold(f.counts().steps.length + 5), action = linked.register();
+  const provider = f.holdWhen(name => name === "deriveBits"), action = linked.register();
   const attempt = action.attempt(); await until(provider.entered);
   const before = f.counts(), status = channel.status();
-  assert.equal(channel.status(), status, "logical status observers still coalesce");
-  await new Promise<void>(yes => setImmediate(yes));
-  assert.equal(f.counts().steps.length, before.steps.length, "queued channel cannot enter SDK behind a running provider");
-  assert.deepEqual(f.counts().tx, before.tx);
-  assert.equal(f.broker.counts().active, 1, "one physical position, not two logical reservations");
-  provider.release(); assert.equal((await status).kind, "ready");
-  assert.equal((await attempt).kind, "accepted");
-  await channel.close();
+  assert.equal(channel.status(), status, "logical status observers coalesce");
+  assert.equal((await status).kind, "ready");
+  assert.ok(f.counts().tx.length > before.tx.length, "the codec advances without returning the held SDK");
+  assert.equal(f.broker.counts().active, 2, "one codec reservation and one actual SDK loan");
+  provider.release(); assert.equal((await attempt).kind, "accepted"); await channel.close();
 });
 
 test("End with a provider and queued channel retains cleanup transport until exact action settlement", async t => {
@@ -1676,22 +1677,23 @@ test("lost linked settlement after End retries only on an availability wake and 
   assert.equal(linked.counts().admits, 1); assert.equal(linked.counts().commits, 0);
 });
 
-test("End while real channel cancellation holds the lane retires an already-admitted queued provider without new SDK", async t => {
+test("End joins independent actual SDK and channel cancellation before releasing their custody", async t => {
   const f = await fixture(t), channel = f.channel(); await channel.status();
   const linked = await linkedDerivation(f, channel), admission = linked.holdAdmit();
   const attempt = linked.register().attempt(); await until(admission.entered);
   const cancellation = f.stallBody(), reads = f.counts().reads;
   const status = channel.status(); await until(() => f.counts().reads === reads + 1);
+  const provider = f.holdWhen(name => name === "deriveBits");
+  admission.release(); await until(provider.entered);
   const steps = f.counts().steps.length;
-  admission.release(); await new Promise<void>(yes => setImmediate(yes));
-  assert.equal(f.counts().steps.length, steps, "already-admitted provider queues behind actual channel intake");
   f.owner.retire(); assert.equal((await status).kind, "retired"); assert.equal((await attempt).kind, "retired");
   let closed = false; const close = channel.close().then(() => { closed = true; });
   await until(cancellation.entered);
   assert.equal(closed, false); assert.equal(linked.counts().settlements, 0);
   assert.equal(f.counts().settlements, 0); assert.equal(f.counts().collections, 0);
-  cancellation.release(); await close;
-  assert.equal(f.counts().steps.length, steps, "queued provider performs only its post-acquisition retirement check");
+  cancellation.release(); await flush(); assert.equal(closed, false, "returning IO cannot settle the held provider");
+  provider.release(); await close;
+  assert.equal(f.counts().steps.length, steps, "End forbids the next SDK operation");
   assert.equal(linked.counts().settlements, 1);
   assert.equal(f.counts().settlements, 1); assert.equal(f.counts().collections, 1);
 });
@@ -1809,7 +1811,8 @@ for (let step = 0; step < 14; step++) test(`End during actual SDK step ${step + 
   await until(hold.entered);
   const before = f.broker.counts(); f.owner.retire();
   assert.equal((await work).kind, "retired");
-  assert.equal(f.broker.counts().active, 1); assert.equal(f.broker.counts().bytes, before.bytes);
+  assert.ok(before.active >= 1 && before.active <= 2);
+  assert.equal(f.broker.counts().active, before.active); assert.equal(f.broker.counts().bytes, before.bytes);
   assert.equal(f.counts().settlements, 0);
   hold.release(); await until(() => f.broker.counts().active === 0);
   assert.equal(f.counts().steps.length, step + 1, "retirement cannot launch another SDK step");
@@ -2151,22 +2154,20 @@ test("End cannot refund history while actual BYOB cancellation still owns its bu
   await until(() => f.broker.counts().active === 0); assert.equal(f.broker.counts().bytes, 0);
 });
 
-test("history shares a lent provider's one physical lane without ordinary admission", async t => {
+test("same-Session history progresses during a held SDK without ordinary native admission", async t => {
   const f = await fixture(t), channel = f.channel(); await channel.status();
   const linked = await linkedDerivation(f, channel), action = linked.register();
-  const held = f.hold(f.counts().steps.length + 5), attempt = action.attempt(); await until(held.entered);
+  const held = f.holdWhen(name => name === "deriveBits"), attempt = action.attempt(); await until(held.entered);
   const before = f.counts(), request = f.broker.recoverChannelHistory(f.owner, channel, historyPurpose);
   assert.equal(f.broker.recoverChannelHistory(f.owner, channel, historyPurpose), request);
-  await new Promise<void>(yes => setImmediate(yes));
-  assert.deepEqual(f.counts(), before); assert.equal(f.broker.counts().active, 1);
-  held.release(); assert.equal((await request).kind, "status");
-  // The fixture's commit RPC asks for Status. It deliberately collides with the queued
-  // history flight and is uncertain; retry reuses the original cached provider output.
-  assert.equal((await attempt).kind, "uncertain");
+  assert.equal((await request).kind, "status");
+  assert.ok(f.counts().tx.length > before.tx.length);
+  assert.equal(f.broker.counts().active, 2);
+  held.release(); assert.equal((await attempt).kind, "accepted");
   const providerSteps = f.counts().steps.filter(step => step === "deriveBits").length;
   assert.equal((await action.attempt()).kind, "accepted");
   assert.equal(f.counts().steps.filter(step => step === "deriveBits").length, providerSteps);
-  assert.equal(f.counts().ordinary, 0);
+  assert.equal(f.counts().ordinary, 0); await channel.close();
 });
 
 test("a reentrant purpose getter that retires the owner cannot admit history", async t => {
@@ -2219,7 +2220,8 @@ test("Derive intake and terminal Control payload graphs fit their separate origi
   const framing = 2 * (request + 16) + 2 * (input + 16) + 144 + 288 + 4 * 40 + 2 * 32 + 2 * 12 + 1;
   const decodedAndAdopted = 3 * (transcript + 2 * 65);
   const engine = 3 * transcript + 4096 + 256;
-  const variable = framing + decodedAndAdopted + engine + 16 * 1024;
+  const sdkLoan = 128 + 3 * 128 + 2 * 128;
+  const variable = framing + decodedAndAdopted + engine + 16 * 1024 + sdkLoan;
   assert.ok(variable <= 96 * 1024, `Derive data/engine/wrapper envelope ${variable}/98304`);
   // Original purpose/row/action strings, one stored final proof, native bootstrap, decoded
   // fixed status/final metadata and wrappers. No history query is live during terminal
@@ -2323,7 +2325,8 @@ test("nine child descriptors and serial Data adoption fit unchanged chain envelo
   const transcript = 1024, retained = 2 * (130 + transcript) + 9 * (2048 - 430);
   const largestRequest = 154 + 82 + 528;
   const framing = 2 * (largestRequest + 16) + 4 * 2064 + 144 + 288 + 4 * 40 + 2 * 32 + 2 * 12 + 1;
-  const variable = retained + framing + 16 * 1024 + 16 * 1024;
+  const sdkLoan = 128 + 3 * 128 + 2 * 128;
+  const variable = retained + framing + 16 * 1024 + 16 * 1024 + sdkLoan;
   assert.ok(variable <= 96 * 1024, `child Data/engine/retained-input inventory ${variable}/98304`);
 });
 
@@ -2567,14 +2570,14 @@ test("pump observes A's exact Return after a remounted caller has adopted B", as
   await until(() => f.timers().delays.includes(250)); f.advance(250);
   // Read-only observation places the other caller exactly after pump adoption but
   // before its next attempt. The original production handles perform all actual work.
-  const internals = f.broker as unknown as { ipcChannels: Map<string, { workPump: { child: { handle: unknown } | null } }> };
-  await until(() => internals.ipcChannels.get(f.owner.token)?.workPump.child !== null &&
+  const internals = f.broker as unknown as { ipcChannels: Map<string, { negotiation: { workPump: { child: { handle: unknown } | null } } }> };
+  await until(() => internals.ipcChannels.get(f.owner.token)?.negotiation.workPump.child !== null &&
     f.timers().delays.includes(250));
   const a = child.handle(); assert.equal((await a.attempt()).kind, "accepted");
   const b = child.nextHistorical(); assert.notEqual(a, b);
   const before = reads; f.advance(250);
   await until(() => reads > before);
-  assert.equal(internals.ipcChannels.get(f.owner.token)?.workPump.child, null,
+  assert.equal(internals.ipcChannels.get(f.owner.token)?.negotiation.workPump.child, null,
     "latest B cannot hide the retained A completion");
   await observer.close();
   f.native.readWork = async (owner, executor) => ({ kind: "snapshot", owner, executor, nextSlot: 32, work: null });
@@ -3019,7 +3022,7 @@ test("PC custody never starts on copied handles, foreign chains or a closed orig
 /** Concrete retained-channel caller with a controlled RTC provider. Native MAC/AEAD and
  * original broker SDK are real; Root authority and WebRTC implementation are still mocked.
  * This does not claim WebView/native interoperability, connected media or physical audio. */
-function sdpRtcProvider(t: TestContext, localIsLow: boolean, onLocal: () => void = () => {}, onClose: () => void = () => {}) {
+function sdpRtcProvider(t: TestContext, localIsLow: boolean, onLocal: () => void = () => {}, onClose: () => void = () => {}, onDescription: () => void = () => {}) {
   const old = globalThis.RTCPeerConnection;
   const calls = { created: 0, local: 0, remote: 0, closed: 0 };
   let held: ReturnType<typeof gate> | null = null, localHeld: ReturnType<typeof gate> | null = null;
@@ -3027,7 +3030,7 @@ function sdpRtcProvider(t: TestContext, localIsLow: boolean, onLocal: () => void
   class Peer {
     constructor() { calls.created++; }
     iceGatheringState = "complete";
-    get localDescription() { return { type: localIsLow ? "offer" : "answer", sdp: "s".repeat(8192) }; }
+    get localDescription() { onDescription(); return { type: localIsLow ? "offer" : "answer", sdp: "s".repeat(8192) }; }
     addTransceiver() {}
     async setLocalDescription() { calls.local++; onLocal(); if (localHeld) await localHeld.promise; }
     async setRemoteDescription(value: RTCSessionDescriptionInit) {
@@ -3355,7 +3358,7 @@ test("framed lost media admission recovers original claim without a second peer 
   assert.equal(f.sdk.calls.created, 1); assert.equal(f.sdk.calls.closed, 0); assert.equal(f.f.broker.counts().bytes, paid + 8192);
   f.f.owner.retire(); await f.child.channel.close(); assert.equal(f.f.broker.counts().bytes, 0);
 });
-for (const version of [28,29,30,31,32]) test(`HMR refuses funded broker${version} without waking incompatible cleanup`, async t => {
+for (const version of [28,29,30,31,32,33,34]) test(`HMR refuses funded broker${version} without waking incompatible cleanup`, async t => {
   const f = await framedMedia(t), previous = Object.create(f.f.broker);
   Object.defineProperty(previous, "version", { value: version }); let wakes = 0; previous.retrySelectedJoinKeys = () => { wakes++; };
   const key = Symbol.for("mewtual.voice.crypto-broker.v2"), host = { [key]: previous };
@@ -3567,7 +3570,7 @@ test("live history compaction keeps the same peer and Session with only paid ine
   const f = await framedMedia(t); await f.media(); f.remaining(0); await f.retireNegotiation();
   const broker = f.f.broker, plan = f.child.ready.chain;
   type Chain = { fixedBytes: number; records: Map<unknown, {native: unknown; chain: unknown}>; channel: unknown; origin: unknown };
-  type Session = { keys: unknown; bootstrap: unknown; tx: bigint; linked: unknown; terminalAction: unknown; finalProof: unknown };
+  type Session = { keys: unknown; bootstrap: unknown; tx: bigint; negotiation: { linked: unknown; terminalAction: unknown; finalProof: unknown } };
   const state = broker as unknown as { chains: WeakMap<object, Chain>; ipcChannels: Map<string, Session> };
   const old = state.chains.get(plan)!, rows = [...old.records.values()], oldFixed = old.fixedBytes;
   const session = state.ipcChannels.get(f.f.owner.token)!, keys = session.keys, bootstrap = session.bootstrap, tx = session.tx;
@@ -3579,7 +3582,7 @@ test("live history compaction keeps the same peer and Session with only paid ine
   assert.equal(state.chains.has(plan), false); assert.equal(old.records.size, 0);
   assert.equal(old.channel, null); assert.equal(old.origin, null);
   for (const row of rows) { assert.equal(row.native, null); assert.equal(row.chain, null); }
-  assert.equal(session.linked, null); assert.equal(session.terminalAction, null); assert.equal(session.finalProof, null);
+  assert.equal(session.negotiation.linked, null); assert.equal(session.negotiation.terminalAction, null); assert.equal(session.negotiation.finalProof, null);
   assert.equal(session.keys, keys); assert.equal(session.bootstrap, bootstrap); assert.ok(session.tx > tx);
   assert.equal(f.sdk.calls.created, 1); assert.equal(f.sdk.calls.closed, 0);
   assert.equal(plan.isCurrent(), false); assert.equal(f.child.ready.derivation.pair(), null);
@@ -3677,4 +3680,217 @@ test("live compaction retains the full fixed fee until its heavy commit frame re
   assert.equal(refunds, 1); assert.ok(broker.counts().bytes < paid);
   assert.equal(await broker.compactNativeNegotiation(f.f.owner, f.child.channel, plan), true); assert.equal(refunds, 1);
   f.f.owner.retire(); await f.child.channel.close(); assert.equal(broker.counts().bytes, 0);
+});
+
+
+test("a delayed old RTC callback cannot read SDK text or clear a replacement negotiation", async t => {
+  const f = await framedSdpOffer(t); let reads = 0;
+  const sdk = sdpRtcProvider(t,true,()=>{},()=>{},()=>{reads++;}), held = sdk.holdLocal();
+  const pending = f.rtc(); await until(()=>sdk.calls.local===1);
+  type Pair = {constructor: new () => Pair; rtcFlight: Promise<void>|null; sdpFlight: Promise<void>|null; actionBusy:boolean};
+  const state = f.f.broker as unknown as {ipcChannels:Map<string,{negotiation:Pair}>};
+  const channel = state.ipcChannels.get(f.f.owner.token)!, original = channel.negotiation;
+  // Deliberately force a replacement earlier than production may publish it. This
+  // negative regression pins callback ownership independently of the admission barrier.
+  const replacement = new original.constructor(), sentinel = gate();
+  replacement.sdpFlight = sentinel.promise; replacement.actionBusy = true;
+  channel.negotiation = replacement;
+  try {
+    held.release(); await pending;
+    assert.equal(reads,0,"an old SDK completion must recheck the actual negotiation before reading text");
+    assert.equal(f.counts.begin,0); assert.equal(original.rtcFlight,null);
+    assert.equal(replacement.sdpFlight,sentinel.promise); assert.equal(replacement.actionBusy,true);
+  } finally { channel.negotiation = original; sentinel.release(); }
+  f.f.owner.retire(); await f.child.channel.close(); assert.equal(f.f.broker.counts().bytes,0);
+});
+
+
+for (const seam of ["owner", "clock"] as const) test(`fresh RTC rechecks negotiation identity after the ${seam} callback`, async t => {
+  const f = await framedSdpOffer(t), sdk = sdpRtcProvider(t,true);
+  type Pair = {constructor:new()=>Pair; actionBusy:boolean; rtcFlight:Promise<void>|null};
+  const state = f.f.broker as unknown as {ipcChannels:Map<string,{negotiation:Pair}>};
+  const channel=state.ipcChannels.get(f.f.owner.token)!, original=channel.negotiation, replacement=new original.constructor();
+  replacement.actionBusy=true; let changed=false;
+  const replace=()=>{changed=true;channel.negotiation=replacement;};
+  if(seam==="owner")f.f.onOwnerCheck(replace);else f.f.onNow(replace);
+  const pcAdmits=f.custody.pcCounts().pcAdmits;
+  try {
+    await f.rtc();assert.equal(changed,true);assert.equal(sdk.calls.created,0);
+    assert.equal(f.custody.pcCounts().pcAdmits,pcAdmits);assert.equal(f.counts.begin,0);
+    assert.equal(original.rtcFlight,null);assert.equal(replacement.actionBusy,true);
+  }finally{channel.negotiation=original;}
+  f.f.owner.retire();await f.child.channel.close();assert.equal(f.f.broker.counts().bytes,0);
+});
+
+
+test("PC Admit rechecks its captured negotiation after its own request clock", async t => {
+  const {f,child,custody,admitPc}=await establishedPcFixture(t);
+  type Pair={constructor:new()=>Pair;actionBusy:boolean;sdpFlight:Promise<void>|null};
+  const state=f.broker as unknown as {ipcChannels:Map<string,{negotiation:Pair}>};
+  const channel=state.ipcChannels.get(f.owner.token)!, original=channel.negotiation, replacement=new original.constructor();
+  replacement.actionBusy=true;const baseline=custody.pcCounts().pcAdmits;
+  f.onNow(()=>{channel.negotiation=replacement;});
+  try {await admitPc();assert.equal(custody.pcCounts().pcAdmits,baseline);assert.equal(replacement.actionBusy,true);assert.equal(original.sdpFlight,null);}
+  finally {channel.negotiation=original;}
+  f.owner.retire();await child.channel.close();assert.equal(f.broker.counts().bytes,0);
+});
+
+test("a channel-only close inside its current owner predicate cannot report fresh negotiation permission", async t => {
+  const f=await fixture(t), handle=f.channel();await handle.status();
+  const state=f.broker as unknown as {ipcChannels:Map<string,{negotiation:object;negotiationCurrent(owner:object):boolean}>};
+  const channel=state.ipcChannels.get(f.owner.token)!;let closing:Promise<void>|null=null;
+  f.onOwnerCheck(()=>{closing=handle.close();});
+  assert.equal(channel.negotiationCurrent(channel.negotiation),false);
+  assert.equal(f.owner.isCurrent(),true,"closing this channel did not retire the external owner");
+  await closing;f.owner.retire();await flush();assert.equal(f.broker.counts().bytes,0);
+});
+
+test("an old pump cannot reserve an intake when the broker owner predicate replaces its negotiation", async t => {
+  const f=await fixture(t), handle=f.channel();await handle.status();const parent=await framedDerivation(f);
+  const observer=f.broker.observeNativeWork(f.owner,handle,f.key);
+  type Pair={constructor:new()=>Pair;workPump:{actions:{derive(work:unknown):unknown}}};
+  const state=f.broker as unknown as {ipcChannels:Map<string,{negotiation:Pair}>};
+  const channel=state.ipcChannels.get(f.owner.token)!, original=channel.negotiation, replacement=new original.constructor();
+  const before=f.broker.counts(), rows=f.rowBudget();let checks=0;
+  const replaceInBroker=()=>{if(++checks===2)channel.negotiation=replacement;else f.onOwnerCheck(replaceInBroker);};
+  f.onOwnerCheck(replaceInBroker);
+  try {
+    assert.throws(()=>original.workPump.actions.derive({kind:"attached",row:parent.row,identity:parent.identity,
+      purpose:{kind:"derive",...historyPurpose}}),/old voice intake generation/);
+    assert.equal(checks,2);assert.deepEqual(f.broker.counts(),before);assert.deepEqual(f.rowBudget(),rows);
+  }finally{channel.negotiation=original;}
+  await observer.close();
+  // Complete the same real fixture parent normally so the rejection oracle cannot hide
+  // unfinished native work or skip the actual post-End zero-payment gate.
+  const ready=await f.broker.nativeDerivationFromChannel(f.owner,handle,f.key,historyPurpose,parent.row,parent.identity).attempt();
+  assert.equal(ready.kind,"ready");if(ready.kind!=="ready")throw new Error("original input required");
+  assert.equal((await ready.derivation.attempt()).kind,"accepted");
+  f.owner.retire();await handle.close();await flush();assert.equal(f.broker.counts().bytes,0);
+});
+
+
+test("indexed media keeps refreshing while another Session's actual bootstrap provider is held", async t => {
+  const f = await framedMedia(t); await f.media(); f.remaining(0); await f.retireNegotiation();
+  const first = f.f, second = await fixture(t, first.broker, 2), channel = second.channel();
+  const retained = first.broker as unknown as { ipcChannels: Map<string, { keys: unknown; bootstrap: unknown; tx: bigint }> };
+  const original = retained.ipcChannels.get(first.owner.token)!, keys = original.keys, bootstrap = original.bootstrap;
+  const before = original.tx, held = first.holdWhen(name => name === "deriveBits");
+  const setup = channel.status(); await until(held.entered);
+  for (let n = 0; n < 7; n++) {
+    first.advance(1000); await f.media();
+    assert.equal(f.sdk.calls.closed, 0, "hung bootstrap cannot monopolize original media Current");
+  }
+  assert.equal(original.keys, keys); assert.equal(original.bootstrap, bootstrap); assert.ok(original.tx > before);
+  assert.equal(first.providers().peak, 2, "actual held SDK and serialized codec overlap within two providers");
+  let ordinary = 0;
+  const waiting = first.broker.run(second.owner, "generate", 128, async () => { ordinary++; });
+  assert.equal(ordinary, 0, "two reserved channels plus SDK never admit a third provider");
+  first.owner.retire(); assert.equal(f.sdk.calls.closed, 1); await f.child.channel.close();
+  await flush(); assert.equal(ordinary, 0, "remaining channel plus granted SDK still consume both positions");
+  held.release(); assert.equal((await setup).kind, "ready"); await waiting; assert.equal(ordinary, 1);
+  assert.equal((await channel.status()).kind, "ready", "shared codec survives original channel collection");
+  second.owner.retire(); await channel.close(); assert.equal(first.broker.counts().bytes, 0);
+});
+
+test("indexed media survives more than one freshness window during another actual protected derivation", async t => {
+  const f = await framedMedia(t); await f.media(); f.remaining(0); await f.retireNegotiation();
+  const first = f.f, second = await fixture(t, first.broker, 2), channel = second.channel(); await channel.status();
+  const linked = await linkedDerivation(second, channel);
+  const held = first.holdWhen(name => name === "deriveBits"), action = linked.register(), attempt = action.attempt();
+  await until(held.entered); assert.equal(linked.counts().admits, 1);
+  for (let n = 0; n < 7; n++) {
+    first.advance(1000); await f.media(); assert.equal(f.sdk.calls.closed, 0);
+    assert.equal(linked.counts().commits, 0, "only actual held SDK return permits result publication");
+  }
+  assert.equal(first.providers().peak, 2);
+  held.release(); assert.equal((await attempt).kind, "accepted");
+  assert.deepEqual(linked.counts(), { admits: 1, commits: 1, settlements: 1 });
+  first.owner.retire(); await f.child.channel.close(); second.owner.retire(); await channel.close();
+  assert.equal(first.broker.counts().bytes, 0);
+});
+
+
+test("ordinary admission reserves its position before a reentrant owner predicate requests SDK", async t => {
+  const f = await fixture(t), channel = f.channel(); await channel.status();
+  const state = f.broker as unknown as { ipcChannels: Map<string, { reserveEngine(): Promise<(() => void) | null> }>; executionPositions(): number };
+  const session = state.ipcChannels.get(f.owner.token)!, firstHeld = gate(), secondHeld = gate();
+  let firstEntered = false, secondEntered = false, sdkGranted = false, used = 0;
+  let sdk: Promise<(() => void) | null> | null = null;
+  f.cleanup(() => { firstHeld.release(); secondHeld.release(); void sdk?.then(release => release?.()); });
+  const first = f.broker.run(f.owner, "generate", 128, async () => { firstEntered = true; await firstHeld.promise; });
+  await until(() => firstEntered);
+  const second = f.broker.run(f.owner, "generate", 128, async () => {
+    secondEntered = true;
+    used = state.executionPositions();
+    await secondHeld.promise;
+  });
+  const settle = f.admission.settle;
+  f.admission.settle = async () => {
+    f.admission.settle = settle;
+    f.onOwnerCheck(() => { sdk = session.reserveEngine().then(release => { sdkGranted = release !== null; return release; }); });
+  };
+  firstHeld.release(); await first; await until(() => secondEntered);
+  assert.ok(used <= 2, "owner callback cannot oversubscribe the spare position");
+  assert.ok(sdk); assert.equal(sdkGranted, false, "queued SDK cannot preempt an already-reserved ordinary position");
+  secondHeld.release(); await second; const release = await sdk; assert.ok(release); release();
+  f.owner.retire(); await channel.close(); assert.equal(f.broker.counts().bytes, 0);
+});
+
+
+test("End cancels another channel's unstarted SDK borrow while the first actual provider stays held", async t => {
+  const first = await fixture(t), a = first.channel(); await a.status();
+  const second = await fixture(t, first.broker, 2), b = second.channel(); await b.status();
+  const linked = await linkedDerivation(first, a), other = await linkedDerivation(second, b);
+  const held = first.holdWhen(name => name === "deriveBits"), action = linked.register().attempt();
+  await until(held.entered);
+  const queued = other.register().attempt();
+  const state = first.broker as unknown as { sdkPositions: { waiting: unknown[] }; executionPositions(): number };
+  await until(() => state.sdkPositions.waiting.length === 1);
+  assert.equal(other.counts().admits, 0, "queued borrower has no native engine admission");
+  second.owner.retire(); assert.equal((await queued).kind, "retired"); await b.close();
+  assert.equal(state.sdkPositions.waiting.length, 0);
+  assert.equal(first.providers().active, 1, "other channel's End cannot cancel this actual SDK");
+  assert.equal(state.executionPositions(), 2, "one channel plus its granted SDK still consume both positions");
+  assert.equal(linked.counts().commits, 0); assert.equal(other.counts().admits, 0);
+  let ordinary = false;
+  const pending = first.broker.run(first.owner, "generate", 128, async () => { ordinary = true; });
+  await flush(); assert.equal(ordinary, false);
+  held.release(); assert.equal((await action).kind, "accepted"); await pending;
+  assert.equal(first.providers().peak, 1, "unstarted queued borrower never invokes a second provider"); first.owner.retire(); await a.close();
+  assert.equal(first.broker.counts().bytes, 0);
+});
+
+
+test("bootstrap transient provider and position metadata fit their existing prepayments", () => {
+  // Parsed Session strings/keys belong to the independently retained8KiB Control payment.
+  // Setup owns bounded IPC UTF16, parsed backing, provider transient inputs and continuation
+  // wrappers. Its queued position uses the otherwise-idle original16KiB metadata workspace.
+  const nativeReplyText = 2 * 2048, transcriptBacking = 1024, nativePoint = 65;
+  const hashAndSecrets = 32 + 2 * 32, providerParameters = 256;
+  const keyWrappers = 8 * 128, setupFrames = 2 * 256;
+  const sdkLoan = 128 + 3 * 128 + 2 * 128;
+  assert.ok(nativeReplyText + transcriptBacking + nativePoint + hashAndSecrets + providerParameters + keyWrappers + setupFrames <= 8192);
+  const codecCoordinator = 256 + 2 * 128, sdkCoordinator = 256 + 2 * 128;
+  assert.ok(sdkLoan + codecCoordinator + sdkCoordinator <= 16 * 1024);
+});
+
+
+test("a queued SDK grant cannot publish a loan into a replacement negotiation", async t => {
+  const f = await fixture(t), handle = f.channel(); await handle.status();
+  type Pair = { constructor: new () => Pair; sdkPosition: unknown };
+  const state = f.broker as unknown as { ipcChannels: Map<string, { negotiation: Pair; reserveEngine(): Promise<(() => void) | null> }> };
+  const channel = state.ipcChannels.get(f.owner.token)!, original = channel.negotiation;
+  const held = gate(); f.cleanup(held.release);
+  let entered = false;
+  const ordinary = f.broker.run(f.owner, "generate", 128, async () => { entered = true; await held.promise; });
+  await until(() => entered);
+  const pending = channel.reserveEngine();
+  const replacement = new original.constructor(); channel.negotiation = replacement;
+  let release: (() => void) | null = null;
+  try {
+    held.release(); await ordinary; release = await pending;
+    assert.equal(release, null, "old owner's granted position must return before publication");
+    assert.equal(original.sdkPosition, null); assert.equal(replacement.sdkPosition, null);
+  } finally { release?.(); channel.negotiation = original; }
+  f.owner.retire(); await handle.close(); assert.equal(f.broker.counts().bytes, 0);
 });
