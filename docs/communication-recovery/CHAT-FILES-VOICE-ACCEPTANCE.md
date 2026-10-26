@@ -21,7 +21,7 @@ its Root full suite is still running. New native acceptance/full checks are queu
 App V2 remains OFF; this is not real ICE/audio, failed-peer isolation, relay or completion
 of combined/physical acceptance. External download resume remains separately owned.
 
-## Genuine native second peer and shared variable funding (26 October; full gates pending)
+## Genuine native second peer and shared variable funding (26 October; full suites pass)
 
 The actual native/TCP + Node/WebCrypto two-peer case passes77.90s after shared variable
 prepayment. A completes A-B, actual native mode8 and browser history collection, then A-C
@@ -35,8 +35,11 @@ Root's192KiB core +32KiB Ready are funded before Derive with a direct96KiB escro
 the original confirmation ceiling. Explicit affine closing rights cover abandonment and
 old-close races; actual escrow destruction pins metadata lifetime. All695 focused voice
 regressions pass19.65s. Graphs1968/2048 and1968/4096 pass original bounds. Eight native
-admission-focused tests pass29.10s. Full frontend3011/static/build pass. Fresh Root/native
-full/lint gates remain pending; preceding full results are historical for this new source.
+admission-focused tests pass29.10s. Full frontend3011/static/build pass. Fresh complete Root
+3,679/24 existing ignores and native879 unit+5 ACL tests (884 total) pass, as do strict
+Root/native lint, formatting and ambient-dependency checks. Root source equivalence is
+LF-normalized across all728 files; five differ only in line endings. Dependency audit still
+fails on inherited RUSTSEC-2026-0387; no ignore was added. Earlier results are historical.
 App V2 stays OFF; production composition, operational/failure recovery, relay and combined/
 physical acceptance remain open. See HANDOVER and TWO-COMPUTER-ACCEPTANCE.md.
 

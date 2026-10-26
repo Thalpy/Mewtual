@@ -33,7 +33,7 @@ Real WebView/SDP/ICE/audio and media relay are not established by controlled RTC
 Pre-compaction terminal failure still retires the Session; failed-peer isolation/renewal,
 production App integration, relay, combined and physical acceptance remain open.
 
-## Variable voice progression funded before Derive (26 October; Root full run pending)
+## Variable voice progression funded before Derive (26 October; complete suites pass)
 
 The implementation checkout now uses one prepaid192KiB core plus independent32KiB Ready
 capacity before exposing protected Derive. A direct96KiB escrow preserves the original96KiB
@@ -55,16 +55,17 @@ paths, synchronous two-peer End and all-three-endpoint cleanup. C's direct edge 
 forbidden. RTC objects are controlled, not audible WebView/physical media evidence.
 Fresh native check, strict native lint and complete native tests pass:879 unit tests plus
 5 ACL integration tests,884 total; the unit body took1935.39s. Strict Root lint also passes.
-The complete Root suite is still running serially on this NEW Root source. Root validation
-uses the warm custody checkout at dbb0a2ae: all728 Root
+The complete Root suite passes 3,679 tests with 24 existing ignores (0 failures), completed
+15:30:28 UTC. Root validation uses the warm custody checkout at dbb0a2ae: all728 Root
 files match after LF normalization; five differ only in line endings. The3675/24ignored and
 879 results below predate variable-reservation changes and cannot sign off the new code.
 Later ordinary member/origin records, fixed history, native storage and operational replacement
 remain separate constraints; this is not universal Ready admission or App activation.
 
-PR #59 is being advanced from21522d46 with69b2ce65 (Root variable prepayment) and833dfc9d
-(native admission/actual two-peer acceptance). Its Root full-suite result remains pending;
-the draft must not be treated as complete validation. Fresh `cargo deny check` still fails
+PR #59 includes69b2ce65 (Root variable prepayment) and833dfc9d (native admission/actual
+two-peer acceptance). All three complete runtime suites, formatting, strict Root/native
+lint, static/build checks and ambient-dependency check pass for that checkpoint. It remains
+inactive and does not close the plan. Fresh `cargo deny check` still fails
 only on inherited RUSTSEC-2026-0387 (`crypto-bigint`0.5.5); no ignore/dependency change was
 added here. The dependency upgrade remains separately owned.
 App V2 remains OFF. Production App/RTC/tracks, failure isolation/renewal, relay, combined and
