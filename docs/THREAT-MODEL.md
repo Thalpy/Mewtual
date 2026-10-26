@@ -13,7 +13,7 @@ and native/chain adapters leave. The full original fee covers transaction snapsh
 actual heavy worker return; an independently scoped finalizer refunds once afterward. End
 closes the real peer before joining this flight and native cleanup. Actual channel collection
 releases the marker fee. Shared Session keys/nonces survive unchanged; second-pair admission
-stays closed. Native HTTP execution of this new consumer remains pending; App V2 remains OFF.
+stays closed. Extended native HTTP execution passes; the full Native rerun remains pending. App V2 stays OFF.
 
 ## End-only browser handle detachment (26 October; inactive)
 
