@@ -1,5 +1,25 @@
 # Chat, files and voice implementation evidence
 
+## Broker41 browser media failure isolation (26 October; native acceptance pending)
+
+Exact current un-compacted media can now close without ending independent indexed peers.
+Original Session keys/counters/history remain; actual media/SDK/IO joins, native releases,
+Plan-final/ACK and complete advancement barriers are unchanged. Lost Phase intent remains
+Phase until an exact authenticated refusal permits fallback. End joins held Current/cleanup;
+compaction winners retain paid markers and failed pre-compaction records leave before refund.
+
+Focused browser393 tests pass13.25s; complete frontend3068 pass74.63s; static checks report
+zero diagnostics; build passes38.65s. Strict Node-helper/media TypeScript and native fmt pass.
+Read-only adversarial review found and resolved a test accounting mismatch: the actual native
+fixture now retains explicit terminal evidence and checks exactly one surviving Current.
+No remaining actionable finding in this slice. The new actual native/HTTP/Root/TCP case is
+UNCOMPILED/UNRUN while one complete Root validation occupies the shared target. Controlled
+RTC is used; this provides no microphone, audible or physical-network evidence.
+
+The previous complete native failure865/20 remains historical failed evidence. Matching full
+Root/native/check/lint gates remain required. Production App/real RTC/tracks, renewal/lifetime
+capacity, member relay and combined/physical acceptance remain open. App V2 stays OFF.
+
 ## Closed-plan cache owner correction (26 October; full gates pending)
 
 The native pre-Ready fence case found idle Root caches pinning Workflow after closure.

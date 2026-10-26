@@ -1,5 +1,23 @@
 # Threat model; client integrity & enforcement boundaries
 
+## Own-media failure and reentrant cleanup (26 October; inactive)
+
+An exact attached un-compacted media failure must not revoke an independent indexed peer.
+Browser selection requires the original Plan, negotiation generation and driver allocation.
+Its negative fence precedes SDK/cancel callbacks, which can reenter and request cleanup.
+Worker publication coalesces after callbacks; real media/SDK/Current work and existing
+compaction frames join outside the codec before releases and finalization. Losing a Phase
+reply never authorizes relabelling it as Plan. Existing native Close/Release/history and
+Plan certificate gates remain authoritative, including for lost media admission replies.
+
+Cleanup clears only exact current references and removes an un-compacted registry owner
+before actual driver refund. Successful compacted markers remain separately funded. End
+joins this same failed worker before key destruction even when an original Current is held.
+Throwing observers do not skip SDK close attempts; SDK refusal retains payment and retries
+on the original cadence. Tests cover lost replies, compaction/End races and callback reentry.
+Native execution remains pending; App/real RTC/tracks, renewal, relay and physical acceptance
+are not claimed by this slice. Earlier blanket media fallback descriptions are historical.
+
 ## Closed-plan cache custody and Source re-admission (26 October)
 
 An early native closing fence exposed real idle cache ownership before Ready: outgoing,

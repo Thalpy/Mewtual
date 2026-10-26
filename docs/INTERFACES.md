@@ -1,5 +1,20 @@
 # Mewtual; Interfaces & Hooks Schema
 
+## Broker41 failed media cleanup (26 October; inactive)
+
+`retireFailedNativeNegotiation` also accepts its exact attached un-compacted media allocation.
+Plan/generation/driver identity must match the registry; stale or foreign records cannot
+select another peer. Calls coalesce across owner and SDK callbacks. Completion joins actual
+media/SDK/framed work and original native releases and Plan-final/ACK; a void return after
+End or a compaction winner grants no fresh negotiation. Advancement still checks its full
+original quiescence/history barrier. Session counters, fixed history and native budgets stay.
+
+`VoiceNativeMedia.close` publishes its private closed/status state and owning negotiation's
+negative state before source/SDK/cancel callbacks. A throwing observer still runs actual
+close attempts; refusal retains debt for joined cleanup. Broker40 HMR requires reload.
+The native wire/API is unchanged. Native execution of this browser extension is pending;
+controlled RTC evidence cannot establish actual WebView audio or production App activation.
+
 ## Root whole-plan latch (26 October; private runtime state)
 
 `retire_all` additionally makes this exact plan's old confirmation caches terminal.

@@ -1,5 +1,20 @@
 # Next voice milestone: native result recovery
 
+## Broker41 media failure isolation implemented; native execution next (26 October)
+
+The exact attached un-compacted media allocation can now retire peer-locally. Actual
+Current/SDK/IO and compaction workers join before original native releases/Plan-final/ACK;
+Session keys/counters and indexed sibling Current survive. End and callbacks coalesce with
+the same worker; failed registry ownership disappears before real driver refund. Immutable
+Phase intent is recovered, not relabelled. No finite native/browser budget is replenished.
+
+Focused393/full frontend3068/static/build and strict helper checks pass. Read-only review
+has no remaining actionable finding. The new real native/HTTP/Root/TCP preservation case
+still needs compilation/execution and matching complete gates; RTC remains controlled.
+Production App/RTC/microphone, operational renewal/lifetime capacity, member relay and
+combined/physical acceptance still follow. App V2 remains OFF. Earlier entries record the
+checkpoint history and do not supersede this implementation or its pending validation.
+
 ## Pre-Ready cache pin corrected; fresh full gates required (26 October)
 
 Native SDK/copy acceptance passes, but the pre-Ready stage exposed actual Root cache

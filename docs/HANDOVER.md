@@ -1,5 +1,35 @@
 # Mewtual; Handover
 
+## Broker41 peer-local media failure (26 October; native execution pending, App OFF)
+
+The browser can retire the exact current un-compacted negotiation after its own media
+record exists. It closes that generation before SDK/cancel callbacks, joins its actual
+media Current/SDK/IO, negotiation and compaction workers, then follows original native
+Close/Release and immutable Plan-final/ACK. Independent indexed peers retain their original
+Session keys, increasing counters and Current owner. A compaction winner keeps its paid
+marker; an un-compacted failed record is removed before the actual driver refund.
+
+Lost Admit/Close/Release and history replies retain the same original intent. A lost Phase
+refusal is recovered as Phase; only the existing authenticated refusal permits Plan
+fallback. End joins the failed worker even while Current is held. SDK-close refusal keeps
+actual debt and retries on the existing paid cadence; callbacks cannot publish duplicate
+cleanup workers. No attempt/deadline/history/capacity allowance is reset or increased.
+
+Focused browser tests393 pass (13.25s), full frontend3068 pass (74.63s), static checks have
+zero diagnostics and production build passes (38.65s). Strict TypeScript for the Node
+interop helper/media owner and native formatting pass. Read-only adversarial review has
+no remaining actionable finding in this slice. Its new real native/HTTP/Root/TCP case is
+NOT compiled or executed yet; it uses controlled RTC, not microphone/audio acceptance.
+The test explicitly retains terminal evidence while checking the exact surviving peer.
+
+Fresh complete Root validation of the matching cache correction is still running. Current
+native full/check/lint and the new media case remain required. The historical865/20 native
+failure below is not a green result. Production App/native/real RTC/microphone wiring,
+operational renewal/lifetime capacity, member relay, combined acceptance and independent
+physical audio/network tests remain open. External download resume is separately owned.
+The dated entries below describe earlier checkpoints; Broker41 supersedes their blanket
+per-negotiation media fallback only for the exact attached un-compacted allocation.
+
 ## Current cache correction and validation (26 October; App OFF)
 
 The early-fence code compiles and18 native Plan-final tests pass. The actual SDK/copy

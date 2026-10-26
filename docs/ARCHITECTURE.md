@@ -1,5 +1,21 @@
 # Mewtual; Architecture
 
+## Isolating an attached media failure (26 October; inactive V2)
+
+Broker41 permits failure retirement of the exact current un-compacted media allocation,
+bound to its Plan, negotiation generation and actual driver. Negative state is published
+before SDK/cancel callbacks. Cleanup joins that driver's real Current/history/SDK work and
+existing negotiation/compaction frames outside the shared codec. A compaction winner keeps
+its separately paid retained marker; otherwise the failed registry owner and current media
+references disappear before the driver's post-worker refund. Old chain/action history stays
+paid independently. End joins the same coalesced worker before clearing Session keys.
+
+The original native media Close/Release gates and original Plan-final/ACK still decide
+retirement. Ambiguous Phase intent is never relabelled; exact recovery and its authenticated
+refusal alone permit the existing Plan fallback. Independent indexed peers retain their
+Session and authenticated Current. This adds no wire field, native effect grant, attempt,
+capacity or deadline. Production App/RTC/tracks, renewal and member relay remain unfinished.
+
 ## Whole-plan confirmation cache retirement (26 October; inactive V2)
 
 Explicit `ConfirmationControl::retire_all` now publishes a dedicated monotone whole-plan
