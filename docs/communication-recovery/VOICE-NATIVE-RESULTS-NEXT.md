@@ -8,7 +8,11 @@ End fences and joins exact original native/broker work, including lost activatio
 and internally published channels without returned handles. Actual selected-key job return
 retains both fees and lookup; early retired outcomes are not cleanup. Focused408 plus actual
 broker/adapter regressions and strict checks pass; complete frontend3099/static/build pass
-(84.23s/zero diagnostics/39.89s).
+(84.23s/zero diagnostics/39.89s). Actual native command logic + WebCrypto/private HTTP
+bootstrap passes0.94s, including lost accepted activation and normal Work/Collect before
+forced teardown. Actual TCP failed-media/sibling preservation passes74.13s. Root3683/24,
+Clippy/fmt/no-ambient pass; native full/check/lint/current-source scan remain pending.
+Fresh dependency audit remains red on inherited crypto-bigint0.5.5/RUSTSEC-2026-0387.
 
 This is still disconnected from App. Next add App lock/room/unmount ownership and private
 configured RTC/microphone/remote-audio/data-channel adoption without exposing SDK/SDP grants.

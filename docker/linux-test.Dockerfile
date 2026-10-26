@@ -6,6 +6,21 @@ COPY . .
 RUN test -f Cargo.toml \
     && test -f crates/catcoms-app/src/store.rs \
     && test -f apps/desktop/src/App.svelte \
+    && test -f apps/desktop/scripts/test-svelte.mjs \
+    && test -f apps/desktop/scripts/svelte-loader.mjs \
+    && test -f apps/desktop/scripts/flow-processes.mjs \
+    && test -f apps/desktop/scripts/flow-processes.test.mjs \
+    && test -f apps/desktop/scripts/startup-env.mjs \
+    && test -f apps/desktop/scripts/startup-env.test.mjs \
+    && test -f apps/desktop/scripts/vite-watch.test.mjs \
+    && test -f apps/desktop/scripts/voice-app-interop.ts \
+    && test -f apps/desktop/scripts/voice-native-interop.ts \
+    && test -f apps/desktop/scripts/voice-native-control.ts \
+    && test -f apps/desktop/scripts/voice-native-reply-loss.ts \
+    && test -f apps/desktop/scripts/fixtures/LightboxPictureHarness.svelte \
+    && test -f apps/desktop/scripts/fixtures/PixaViewerHarness.svelte \
+    && test -f apps/desktop/scripts/fixtures/StudioSoundHarness.svelte \
+    && test -f apps/desktop/scripts/fixtures/StudioPlaybackHarness.svelte \
     && test -f apps/desktop/src-tauri/src/voice_handoff/channel/vectors.json \
     && test -f apps/desktop/src-tauri/src/voice_handoff/requests/vectors.json \
     && test -f apps/desktop/src-tauri/src/voice_handoff/requests/confirmation/vectors.json \

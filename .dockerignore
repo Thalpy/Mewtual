@@ -50,6 +50,23 @@
 !apps/desktop/public/boot-failure.js
 !apps/desktop/public/THIRD-PARTY-NOTICES.txt
 !apps/desktop/scripts/test-dom.mjs
+# Exact checked-in dependencies of the complete frontend/native Node test suites.
+!apps/desktop/scripts/fixtures/
+!apps/desktop/scripts/test-svelte.mjs
+!apps/desktop/scripts/svelte-loader.mjs
+!apps/desktop/scripts/flow-processes.mjs
+!apps/desktop/scripts/flow-processes.test.mjs
+!apps/desktop/scripts/startup-env.mjs
+!apps/desktop/scripts/startup-env.test.mjs
+!apps/desktop/scripts/vite-watch.test.mjs
+!apps/desktop/scripts/voice-app-interop.ts
+!apps/desktop/scripts/voice-native-interop.ts
+!apps/desktop/scripts/voice-native-control.ts
+!apps/desktop/scripts/voice-native-reply-loss.ts
+!apps/desktop/scripts/fixtures/LightboxPictureHarness.svelte
+!apps/desktop/scripts/fixtures/PixaViewerHarness.svelte
+!apps/desktop/scripts/fixtures/StudioSoundHarness.svelte
+!apps/desktop/scripts/fixtures/StudioPlaybackHarness.svelte
 !apps/desktop/src/**/*.css
 !apps/desktop/src/**/*.svelte
 !apps/desktop/src/**/*.ts

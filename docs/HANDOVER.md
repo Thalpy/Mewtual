@@ -24,9 +24,21 @@ Cross-layer frontend408 tests pass10.34s; the additional real hidden-channel reg
 six native-adapter tests pass, and strict TypeScript passes. Complete frontend3099 passes
 (84.23s), static checks report zero diagnostics and production build passes39.89s. Real broker tests cover held setup, publication/settlement, constructor failure,
 remounts and process/full-group refusal; native command outcomes are simulated there.
-Matching full Root validation and parent native acceptance remain pending. `ready` is only
-historical authenticated bootstrap/lifecycle installation, never current media or connected
-UI evidence. Production App lock/room wiring, configured RTC/microphone/tracks/data channels,
+Complete Root3683/24 existing ignores, strict Clippy, fmt and no-ambient pass on identical
+Root sources/locks in the warm custody checkout. Current-native construction scan and full
+native/check/lint remain pending. Fresh cargo-deny FAILS on inherited RUSTSEC-2026-0387
+(crypto-bigint0.5.5); bans/licenses/sources pass. No waiver is added; the dependency upgrade
+is separately owned.
+
+The actual facade now passes real native command logic + WebCrypto/private HTTP bootstrap
+in0.94s, recovering a lost accepted activation as the SAME native join/lease with one key
+publication. Successful normal Work/Collect precedes forced fixture shutdown. This is not
+Tauri WebView/CSP/audio evidence. The real TCP failed-media/sibling preservation case also
+passes74.13s on the combined source. Complete native execution is now running. Exact Docker
+allow rules/context assertions include the Node/Svelte test dependencies; static input
+audit passes, but the actual Docker context build is unrun (Linux engine unavailable).
+`ready` is only historical authenticated bootstrap/lifecycle installation, never current
+media or connected UI evidence. Production App lock/room wiring, configured RTC/microphone/tracks/data channels,
 packaged CSP/WebView access, operational renewal/lifetime capacity, member relay and
 combined/physical acceptance remain open. V2 stays OFF; external resume is separate.
 

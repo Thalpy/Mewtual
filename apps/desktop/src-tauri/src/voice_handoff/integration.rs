@@ -6,6 +6,7 @@ use catcoms_sync::voice_v2::presence::PairSelector;
 use service::tests::{opened_frame, opened_reply, opened_reply_kind};
 use sha2::{Digest, Sha256};
 use std::sync::Arc;
+mod app_session;
 mod confirmation;
 mod key_session;
 pub(super) mod pc;

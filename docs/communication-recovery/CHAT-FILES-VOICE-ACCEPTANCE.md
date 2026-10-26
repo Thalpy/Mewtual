@@ -13,10 +13,21 @@ Cross-layer focused408 tests pass10.34s; six adapter tests including actual brok
 and hidden-channel constructor failure pass; strict TypeScript passes. Two mutation checks
 catch early key release and late native End. Final read-only review has no actionable finding.
 Complete frontend3099 passes84.23s, static checks have zero diagnostics and build passes39.89s.
-Matching full Root/parent-native checks remain in progress.
-Native command replies are simulated in these new composition tests; actual native command
-execution through this facade, packaged CSP/WebView, App/RTC/mic/tracks/data channels,
-renewal/lifetime capacity, relay and combined/physical acceptance remain open. V2 stays OFF.
+Root3683/24 existing ignores, Clippy, fmt and no-ambient pass on identical Root sources/locks
+in the warm custody checkout; current-native construction scan and full native/check/lint
+remain pending. Fresh cargo-deny FAILS RUSTSEC-2026-0387/crypto-bigint0.5.5 (inherited;
+no waiver); bans/licenses/sources pass.
+
+A new actual native-command-logic/WebCrypto/private-HTTP facade case passes0.94s. It loses
+an accepted activation reply, verifies original join/lease continuity and one key publication,
+and observes normal Work/Collect before forced teardown. Public projection custody survives
+bounded pipe writes; all failure paths attempt bounded child/native/service/Actor cleanup.
+The exact Docker context dependency audit is updated; static inputs pass, actual Docker
+build is unrun because its Linux engine is unavailable. Native command logic is exercised,
+not Tauri/WebView serialization/CSP or audio. The real TCP failed-media preservation case
+passes74.13s; complete native suite is running. Packaged CSP/WebView, App/RTC/mic/tracks/data
+channels, renewal/lifetime capacity, relay and combined/physical acceptance remain open.
+V2 stays OFF.
 
 ## Broker41 browser media failure isolation (26 October; native acceptance pending)
 
