@@ -113,6 +113,52 @@ fn decode<'a>(
     };
     request
 }
+/// Maintenance shares the production nonblocking admission/Index fences. Only an exact
+/// local Capacity means this synchronous call did not admit a producer. Retry the SAME
+/// candidate, with fresh sanctioned clock samples, within the existing fixture bound;
+/// never retry another refusal or discard an already successful Factory/Existing row.
+async fn current<T>(
+    state: &AppState,
+    context: &context::Context,
+    route: &bootstrap::Route,
+    intent: &InitialSdpIntent,
+    mut apply: impl FnMut(
+        &crate::voice_handoff::transition::Admission<'_>,
+        u64,
+        u64,
+    ) -> Result<T, VoiceError>,
+) -> Result<T, factory::Refused> {
+    let clock = crate::voice_runtime(state).clock();
+    let wall = clock.now_ms();
+    let mono = clock.monotonic_ms();
+    // Historical refusals still get one observation after Close. Only retries consume
+    // this original remaining Ready interval; no new deadline is granted by the helper.
+    let deadline = mono.saturating_add(intent.remaining_at(wall, mono).unwrap_or(0));
+    for attempt in 0..32 {
+        let wall = clock.now_ms();
+        let mono = clock.monotonic_ms();
+        let result = crate::voice_handoff::sdp::current(context, route, |admission| {
+            apply(admission, wall, mono)
+        });
+        if !matches!(
+            result,
+            Err(factory::Refused::Protocol(VoiceError::Capacity))
+        ) || attempt == 31
+            || clock.monotonic_ms() >= deadline
+        {
+            return result;
+        }
+        // No native guard survives this wait. Original Ready/intent deadlines and all
+        // protocol/security refusals remain enforced by the actual admission path.
+        clock
+            .sleep(std::time::Duration::from_millis(
+                10.min(deadline - clock.monotonic_ms().min(deadline)),
+            ))
+            .await;
+    }
+    unreachable!("last bounded attempt returns its exact result")
+}
+
 // These are independently admitted original native objects, not reconstructed identifiers.
 #[allow(clippy::too_many_arguments)]
 pub(super) async fn exercise(
@@ -142,11 +188,11 @@ pub(super) async fn exercise(
         .unwrap();
     let funding = candidate.funding();
     let before = state.voice_handoff.sdp_test_rows(parent.id());
-    let wall = clock.now_ms();
-    let mono = clock.monotonic_ms();
-    let begins = crate::voice_handoff::sdp::current(&context, route, |admission| {
+    // An outer Capacity occurs BEFORE this closure. Keep the complete successful batch,
+    // including its affine Factory, then retry only individual LOCAL refusals below.
+    let begins = current(state, &context, route, intent, |admission, wall, mono| {
         let barrier = std::sync::Barrier::new(8);
-        std::thread::scope(|scope| {
+        Ok(std::thread::scope(|scope| {
             let tasks: Vec<_> = (0..8)
                 .map(|_| {
                     scope.spawn(|| {
@@ -162,31 +208,38 @@ pub(super) async fn exercise(
                     })
                 })
                 .collect();
-            // Try-lock contention is a proven LOCAL refusal. Once the concurrent
-            // callers have returned, retry only Capacity with the SAME original paid
-            // candidate. Never reinterpret an unknown publication as unstarted work.
-            let results: Vec<_> = tasks.into_iter().map(|task| task.join().unwrap()).collect();
-            results
+            tasks
                 .into_iter()
-                .map(|result| match result {
-                    Err(VoiceError::Capacity) => state.voice_handoff.begin_sdp_action(
+                .map(|task| task.join().unwrap())
+                .collect::<Vec<_>>()
+        }))
+    })
+    .await
+    .unwrap();
+    let mut admitted = Vec::with_capacity(begins.len());
+    for result in begins {
+        admitted.push(match result {
+            Err(VoiceError::Capacity) => {
+                current(state, &context, route, intent, |admission, wall, mono| {
+                    state.voice_handoff.begin_sdp_action(
                         parent,
                         route.selected(),
                         admission,
                         &candidate,
                         wall,
                         mono,
-                    ),
-                    result => result,
+                    )
                 })
-                .collect::<Result<Vec<_>, _>>()
-        })
-    })
-    .unwrap();
+                .await
+                .unwrap()
+            }
+            result => result.unwrap(),
+        });
+    }
     let mut factory = None;
     let mut ids = Vec::new();
     let mut outcomes = Vec::new();
-    for begin in begins {
+    for begin in admitted {
         match begin {
             ledger::SdpBegin::Factory(ticket) => {
                 outcomes.push(ticket.resolved().sdp_test_outcome());
@@ -230,21 +283,45 @@ pub(super) async fn exercise(
     let changed_candidate = parent
         .sdp_action_candidate(route.session().identity(), &changed)
         .unwrap();
-    let wall = clock.now_ms();
-    let mono = clock.monotonic_ms();
-    assert!(matches!(
-        crate::voice_handoff::sdp::current(&context, route, |admission| state
-            .voice_handoff
-            .begin_sdp_action(
+    // Deterministically reproduce supported admission contention, rather than relying on
+    // the periodic collector happening to win this turn. Capacity is BEFORE the callback;
+    // it must leave the one original row/outcome and its unstarted publication untouched.
+    let canonical = row.sdp_test_outcome();
+    let commit = state.ui_session_commit.clone().lock_owned().await;
+    let mut entered = false;
+    let blocked = crate::voice_handoff::sdp::current(&context, route, |_| {
+        entered = true;
+        Ok(())
+    });
+    assert_eq!(
+        blocked,
+        Err(factory::Refused::Protocol(VoiceError::Capacity))
+    );
+    assert!(
+        !entered,
+        "local admission refusal must not enter the operation"
+    );
+    drop(commit);
+    assert_eq!(state.voice_handoff.sdp_test_rows(parent.id()), before + 1);
+    assert!(Arc::ptr_eq(&canonical, &row.sdp_test_outcome()));
+    assert!(row.status().unwrap().action.is_none());
+    drop(canonical);
+    assert_eq!(
+        current(state, &context, route, intent, |admission, wall, mono| {
+            state.voice_handoff.begin_sdp_action(
                 parent,
                 route.selected(),
                 admission,
                 &changed_candidate,
                 wall,
-                mono
-            )),
-        Err(factory::Refused::Protocol(VoiceError::RetryMismatch))
-    ));
+                mono,
+            )
+        })
+        .await
+        .map(|_| ()),
+        Err(factory::Refused::Protocol(VoiceError::RetryMismatch)),
+        "changed original SDP input must be rejected before publication"
+    );
     assert!(!row.try_compact_sdp().unwrap());
 
     if intent.local_is_low() {
@@ -299,26 +376,61 @@ pub(super) async fn exercise(
         buffer.bind_native_history(funding.clone()).unwrap();
         // The exact admitted UI guard moves into publication; no second lock/generation
         // snapshot or literal unlocked boolean substitutes after the native fence.
-        let wall = clock.now_ms();
-        let mono = clock.monotonic_ms();
-        let live = context.upgrade().unwrap();
-        let commit = live.commit.clone().try_lock_owned().unwrap();
-        {
-            let authority = live.authority.try_lock().unwrap();
-            let admission =
-                crate::voice_handoff::transition::Admission::new(&live, &authority, route, &commit);
-            if let Some(foreign) = &foreign_writer {
-                assert_eq!(
-                    route.try_with_open(|| ticket.mark_handoff(&admission, foreign, wall, mono)),
-                    Err(VoiceError::Unauthorized),
-                    "same-intent foreign slot is not admission"
-                );
+        let mut admitted_commit = None;
+        for attempt in 0..32 {
+            // Clock callbacks run before every native guard. A parked Actor command
+            // must never turn contention on its UI fence into an unbounded await.
+            let wall = clock.now_ms();
+            let mono = clock.monotonic_ms();
+            let result = (|| {
+                let live = context.upgrade().ok_or(VoiceError::Unauthorized)?;
+                let commit = live
+                    .commit
+                    .clone()
+                    .try_lock_owned()
+                    .map_err(|_| VoiceError::Capacity)?;
+                {
+                    let authority = live
+                        .authority
+                        .try_lock()
+                        .map_err(|_| VoiceError::Capacity)?;
+                    let admission = crate::voice_handoff::transition::Admission::new(
+                        &live, &authority, route, &commit,
+                    );
+                    if let Some(foreign) = &foreign_writer {
+                        match route
+                            .try_with_open(|| ticket.mark_handoff(&admission, foreign, wall, mono))
+                        {
+                            Err(VoiceError::Unauthorized) => {}
+                            Err(VoiceError::Capacity) => return Err(VoiceError::Capacity),
+                            result => {
+                                panic!("same-intent foreign slot must refuse admission: {result:?}")
+                            }
+                        }
+                    }
+                    route.try_with_open(|| ticket.mark_handoff(&admission, &writer, wall, mono))?;
+                }
+                Ok(commit)
+            })();
+            match result {
+                Ok(commit) => {
+                    admitted_commit = Some(commit);
+                    break;
+                }
+                Err(VoiceError::Capacity) if attempt < 31 => {
+                    // Every guard has left the failed synchronous attempt. This SAME
+                    // original Writer may retry only within its original Ready interval.
+                    let remaining = intent
+                        .remaining_at(clock.now_ms(), clock.monotonic_ms())
+                        .unwrap();
+                    clock
+                        .sleep(std::time::Duration::from_millis(10.min(remaining)))
+                        .await;
+                }
+                Err(error) => panic!("exact original handoff refused: {error:?}"),
             }
-            route
-                .try_with_open(|| ticket.mark_handoff(&admission, &writer, wall, mono))
-                .unwrap();
         }
-        drop(live);
+        let commit = admitted_commit.expect("one exact original publication admission");
         drop(foreign_writer);
         drop(foreign_outcome);
         publication.admit(commit);
@@ -372,6 +484,13 @@ pub(super) async fn exercise(
             drop(body);
             assert!(!row.try_compact_sdp().unwrap());
             drop(completion);
+            // Receiving completion can overtake the sender's Work destructor. A real
+            // same-Actor FIFO command proves that sender has returned; it never releases
+            // any still-held body/completion/native owner on the fixture's behalf.
+            actor
+                .delivery_snapshot(catcoms_app::channel_id("general"))
+                .await
+                .unwrap();
             assert!(funding.is_collected());
             assert!(row.try_compact_sdp().unwrap());
             let status = row.status().unwrap();
@@ -393,6 +512,10 @@ pub(super) async fn exercise(
                 drop(ticket);
                 drop(body);
                 drop(completion);
+                actor
+                    .delivery_snapshot(catcoms_app::channel_id("general"))
+                    .await
+                    .unwrap();
                 assert!(!funding.is_closed());
                 assert_eq!(
                     row.capture_closed_sdp_publication(route.session().identity(), &action),
@@ -442,6 +565,10 @@ pub(super) async fn exercise(
                 drop(body);
                 assert!(!row.try_compact_sdp().unwrap());
                 drop(completion);
+                actor
+                    .delivery_snapshot(catcoms_app::channel_id("general"))
+                    .await
+                    .unwrap();
                 assert!(funding.is_collected());
                 if mismatch_mode == 2 {
                     assert!(
@@ -508,10 +635,8 @@ pub(super) async fn exercise(
     if matches!(mismatch_mode, 1 | 2) {
         // Retain a genuinely unstarted Open row through the parent PC/SDK close. Its
         // worker is gone, but open/zero IO is not terminal and cannot compact yet.
-        let wall = clock.now_ms();
-        let mono = clock.monotonic_ms();
         let ledger::SdpBegin::Factory(open_ticket) =
-            crate::voice_handoff::sdp::current(&context, route, |admission| {
+            current(state, &context, route, intent, |admission, wall, mono| {
                 state.voice_handoff.begin_sdp_action(
                     parent,
                     route.selected(),
@@ -521,6 +646,7 @@ pub(super) async fn exercise(
                     mono,
                 )
             })
+            .await
             .unwrap()
         else {
             panic!("one original Open row");
@@ -558,21 +684,22 @@ pub(super) async fn exercise(
         )
         .unwrap()
         .is_none());
-    let wall = clock.now_ms();
-    let mono = clock.monotonic_ms();
-    assert!(matches!(
-        crate::voice_handoff::sdp::current(&context, route, |admission| state
-            .voice_handoff
-            .begin_sdp_action(
+    assert_eq!(
+        current(state, &context, route, intent, |admission, wall, mono| {
+            state.voice_handoff.begin_sdp_action(
                 parent,
                 route.selected(),
                 admission,
                 &open_candidate,
                 wall,
-                mono
-            )),
-        Err(factory::Refused::Protocol(VoiceError::Unauthorized))
-    ));
+                mono,
+            )
+        })
+        .await
+        .map(|_| ()),
+        Err(factory::Refused::Protocol(VoiceError::Unauthorized)),
+        "a closed original purpose never revives after local contention"
+    );
     assert!(
         phase.effect().is_live(),
         "neither purpose Return retires the shared storage/PC"

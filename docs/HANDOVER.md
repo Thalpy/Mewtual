@@ -28,6 +28,35 @@ current Root/native source is unchanged here; the Native consumer's867/7 failure
 correction/full rerun are separate evidence, not a green current Native gate. Cargo deny still
 reports inherited RUSTSEC-2026-0387 in crypto-bigint0.5.5; no ignore or dependency change.
 
+## Native SDP acceptance contention and sender-return corrections (26 October; full rerun pending)
+
+The consumer full Native run failed867passed/7failed: the first changed-SDP RetryMismatch
+assertion failed, followed by six intentional unfinished-fixture isolation refusals. Its exact
+original result was not printed and remains unattributed. A diagnostic rerun plus12 unchanged
+repetitions passed; they do not establish the original cause or waive the full-run failure.
+
+Read-only review confirmed fixture assumptions that were independently invalid. Actual
+nonblocking UI/Store/Coordinator/Route/Index/Row contention can return local Capacity before
+the mandatory mismatch/Unauthorized comparison. The fixture now retries ONLY that proven
+unstarted refusal with the SAME paid candidate/Writer, fresh sanctioned Clock samples and
+original remaining Ready interval. Successful Factory/Existing owners survive individual
+retries. No retry occurs after canonical publication admission, and its actual UI commit
+moves into Publication. Every failed guard leaves before Clock/sleep; no blocking UI wait.
+
+A deterministic actual-UI-guard regression proves Capacity before callback entry, unchanged
+original row/outcome allocation and no action, followed by required RetryMismatch. The exact
+closed-purpose/foreign-writer Unauthorized assertions remain. Receiving Actor completion can
+also precede its sender's Work destruction; after caller-owner Drop, an actual same-Actor FIFO
+delivery read now precedes funding collection assertions. Held-owner negative assertions stay.
+No production behavior, authority check, resource cap or timeout was relaxed.
+
+All9 focused PC-intent scenarios pass96.65s after the final corrections. Read-only re-review
+has no blocker/high/medium. Strict Native Clippy and a fresh complete Native rerun are now
+sequentially queued/running in target/sdp-retry-validation-*. Earlier full-run failures remain
+recorded; current full Native is not yet green. Root source remains byte-identical to the
+3,675pass/24ignored run. Frontend consumer2,943/check/build results are unchanged here. This
+fixture checkpoint does not complete V2 integration, media relay or combined/physical acceptance.
+
 ## Authenticated browser history consumer (26 October; final checks pending)
 
 Broker31 adds `collectNativeNegotiationHistory` for the exact original owner/channel/chain
@@ -52,7 +81,7 @@ Final current-source native/browser HTTP cases pass42.00s/43.34s through End/byt
 including the collector barrier and final early negative fence. Real parent/child rows are held BEFORE browser mode8; native reports
 pending, then collects only after their return. The first positively authenticated completed
 reply is lost and the SAME claim recovers. A newly started Current after joining old flights
-keeps the original peer usable. The complete Native consumer suite is now running serially after its parent's successful full run. Earlier fixture loss-set
+keeps the original peer usable. The complete Native consumer run failed:867passed/7failed. The first failure is the changed-input RetryMismatch assertion in integration/sdp_rows.rs; six later fixtures fail closed behind its unfinished-shutdown isolation gate. The exact returned refusal is being diagnosed before advancing compaction. Earlier fixture loss-set
 failures remain recorded, and the strict expected order is preserved.
 
 One HTTP repetition returned from retirement before its completion marker. Its diagnostic
@@ -71,8 +100,7 @@ Current keeps the indexed peer open and original64KiB remains paid. Read-only re
 the fence and per-RPC fairness boundary. Final frontend/static/build checks pass. Separate native check passes55.96s and strict Native
 Clippy95.85s after fixing narrow test/style findings: synchronous Store-observer guard release
 before awaiting Store, production item ordering, and a Drop-observer type alias. Native runtime
-behavior is unchanged by those lint fixes. The full current Native suite is still running;
-there is only one heavy Rust suite running.
+behavior is unchanged by those lint fixes. The full current Native run failed as recorded above; no full-suite sign-off is claimed.
 
 The complete Root source remains byte-identical to the3,675pass/24ignored run. The Native production algorithm is unchanged from f95257c0; that checkpoint's full Native
 suite passes874 unit+5ACL tests (879total),0failed/ignored, in38m27s including compile.
