@@ -127,8 +127,14 @@ pub fn plan(input: PlanInput<'_>) -> CachePlan {
         }
     }
 
-    let eligible =
-        |cid: &Cid| sizes.contains_key(cid) && !input.pins.contains(cid) && !dropped.contains(cid);
+    // Profile images are protected in every class, not only the unclaimed one: a hostile old row
+    // naming someone's avatar as a chunk must not drag it out first.
+    let eligible = |cid: &Cid| {
+        sizes.contains_key(cid)
+            && !input.pins.contains(cid)
+            && !dropped.contains(cid)
+            && !input.profile_refs.contains(cid)
+    };
     let mut ordered: Vec<Vec<Candidate>> = Vec::new();
     // Class 1, one candidate per group so the stop rule can end mid-class.
     for cid in input

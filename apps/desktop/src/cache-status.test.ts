@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
-  CACHE_LIMIT_CHOICES, cacheBytes, cacheFooter, cachePauseText, cachePercent, cacheTone,
+  CACHE_LIMIT_CHOICES, cacheBytes, cacheFooter, cachePauseText, cachePercent, cacheShown, cacheTone,
   checkedCacheStatus, leaveLoss, leaveReportText, limitLabel, lowerLimitWarning, pinnedSummary,
   type CacheStatus,
 } from "./cache-status.ts";
@@ -73,7 +73,8 @@ test("tone and percentage follow the native flags, not a local recomputation", (
   assert.equal(cachePercent(status({ limit_bytes: null })), null);
   assert.equal(cacheTone(status({ nearly_full: true })), "warn");
   assert.equal(cacheTone(status({ paused: "not-ready" })), "ok");
-  for (const pause of ["scan-incomplete", "setting-unreadable", "index-unreadable", "pins-unknown", "studio-unknown", "not-ready"] as const) {
+  assert.equal(cacheTone(status({ paused: "no-cache" })), "ok");
+  for (const pause of ["scan-incomplete", "setting-unreadable", "index-unreadable", "pins-unknown", "studio-unknown", "not-ready", "no-cache"] as const) {
     assert.ok(cachePauseText(pause).length > 10);
   }
 });
@@ -108,16 +109,35 @@ test("the leave confirmation names Keep copies and unfinished downloads", () => 
   );
   assert.deepEqual(loss.keep, ["file cc112233", "song.mp3"]);
   assert.deepEqual(loss.downloads, ["clip.mp4"], "finished saves are not lost; removals are already going");
-  assert.deepEqual(leaveLoss(null, [], files), { keep: [], downloads: [] });
+  assert.equal(loss.unknown, false);
+});
+
+test("an unreadable inventory is reported as unknown, never as nothing to lose", () => {
+  assert.equal(leaveLoss(null, [], []).unknown, true);
+  assert.equal(leaveLoss({ files: [], transfers: [] }, null, []).unknown, true);
+  assert.equal(leaveLoss({ files: [], transfers: [], error: "Kept storage needs attention" }, [], []).unknown, true);
+  assert.deepEqual(leaveLoss({ files: [], transfers: [], error: null }, [], []), { keep: [], downloads: [], unknown: false });
+});
+
+test("the footer hides for a server with no size-limited cache", () => {
+  assert.equal(cacheShown(null), false);
+  assert.equal(cacheShown(status({ paused: "no-cache" })), false);
+  assert.equal(cacheShown(status({ paused: "not-ready" })), true);
+  assert.equal(checkedCacheStatus(status({ paused: "no-cache" }))?.paused, "no-cache");
 });
 
 test("the leave toast claims only bytes actually removed", () => {
   assert.equal(leaveReportText("Lantern Room", null), "Left Lantern Room.");
   assert.equal(
-    leaveReportText("Lantern Room", { freed_bytes: 1.2 * GIB, kept_bytes: 0, failed: 0 }),
+    leaveReportText("Lantern Room", { freed_bytes: 1.2 * GIB, kept_bytes: 0, failed: 0, cleaned: true }),
     "Left Lantern Room. Freed 1.2 GiB on this device.",
   );
-  const partial = leaveReportText("Lantern Room", { freed_bytes: 0, kept_bytes: 2048, failed: 3 });
+  assert.equal(
+    leaveReportText("Lantern Room", { freed_bytes: 0, kept_bytes: 0, failed: 0, cleaned: false }),
+    "Left Lantern Room. Its cached files stay on this device for now.",
+    "a skipped cleanup never reads as a clean one",
+  );
+  const partial = leaveReportText("Lantern Room", { freed_bytes: 0, kept_bytes: 2048, failed: 3, cleaned: true });
   assert.match(partial, /Kept 2 KiB that Studio still uses\./);
   assert.match(partial, /tries again after the next unlock/);
   assert.doesNotMatch(partial, /Freed/);
@@ -127,7 +147,8 @@ test("no separators or em dashes in any of this text", () => {
   const texts = [
     cacheFooter(status()).title, cacheFooter(status({ held_by_pins: true })).chip ?? "",
     lowerLimitWarning(status(), GIB) ?? "", pinnedSummary(status()),
-    leaveReportText("x", { freed_bytes: 1, kept_bytes: 1, failed: 1 }),
+    leaveReportText("x", { freed_bytes: 1, kept_bytes: 1, failed: 1, cleaned: true }),
+    leaveReportText("x", { freed_bytes: 0, kept_bytes: 0, failed: 0, cleaned: false }),
     ...(["scan-incomplete", "studio-unknown"] as const).map(cachePauseText),
   ];
   for (const text of texts) assert.doesNotMatch(text, /[·—]/);

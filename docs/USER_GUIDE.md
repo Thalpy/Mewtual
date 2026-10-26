@@ -535,8 +535,8 @@ without fetching, and this device can send them to other members who ask. Each s
 - When the cache is over its limit, the files **shared longest ago leave first**; when you last
   opened a file does not matter. Anyone who still has a file that left can send it again.
 - These always stay: files you **Keep**, files **you shared from this device** (signed uploads;
-  very old unsigned ones are not covered), files **Studio** work still uses, files on screen or
-  transferring right now, and unfinished downloads.
+  very old unsigned ones are not covered), files **Studio** work still uses, files opened, played
+  or transferring in the last ten minutes, and unfinished downloads.
 - **Never expires** and wiki embeds keep a file in circulation, but they do not stop your cache
   from dropping it. Use **Keep** to hold a copy here. A checked Keep copy replaces the cache's
   duplicate, so releasing that Keep copy removes the file from this device.
@@ -547,9 +547,10 @@ without fetching, and this device can send them to other members who ask. Each s
 - Without a check that someone else still has a file, a small limit can drop the last copy any
   member has. Your own uploads are never dropped, which covers the usual case.
 - **Leaving a server** removes its cached files, Keep copies and unfinished downloads from this
-  device after a confirmation that names them, and reports the space freed. Files saved to your
-  folders are untouched, and anything Studio still uses stays. If some files cannot be removed,
-  Mewtual tries again after the next unlock.
+  device after a confirmation that names them (or says it could not check), and reports the
+  space freed. Files saved to your folders are untouched, and anything Studio still uses stays.
+  If some files cannot be removed, Mewtual tries again after the next unlock; if the server's
+  files are in use again (you rejoined), they stay.
 
 **Custom emoji** live in the `emoji/` folder. Add one in **Server settings → Emoji & Stickers**:
 type a `code`, choose its display size and upload an image. Then anyone types `:code:` to use it.

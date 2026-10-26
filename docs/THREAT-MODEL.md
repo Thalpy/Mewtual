@@ -32,10 +32,13 @@ crash-safe writes and leave cleanup ([design](design-cache-housekeeping.md)).
   and sealed records shorter than 40 bytes. Keep's own stores keep their earlier write path.
 - **Saved files serve.** A verified Download chunk is also put in the shared cache, so a member
   asking for it can learn this device holds the file, as for any file it has displayed.
-- **Leave cleanup** runs under an in-process claim per group (attach waits on it), deletes only
-  CIDs enumerated after a complete Studio scan, removes `kept/` wholesale under its lease, keeps
-  its marker while anything failed, and resumes after an unlock in which every server restored.
-  Leaving is confirmed in the UI with the Keep copies and unfinished Downloads it deletes.
+- **Leave cleanup** runs under an in-process claim per group (attach waits on it). It starts only
+  if the marker is still present and the namespace's Keep lease is free (every attached server
+  holds it), and holds that lease to the end, so a rejoin or an unregistered join that attached
+  first is never emptied. It deletes only CIDs enumerated after a complete Studio scan, removes
+  `kept/` wholesale, keeps its marker while anything failed, and resumes after an unlock in which
+  every server restored. Leaving is confirmed in the UI with the Keep copies and unfinished
+  Downloads it deletes, or a warning when those could not be checked.
 - **Not claimed:** physical power-loss evidence, filesystem allocation (usage counts sealed file
   lengths), cleanup of caches left before this change, or expiry enforcement.
 

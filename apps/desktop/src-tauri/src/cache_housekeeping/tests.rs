@@ -108,12 +108,71 @@ async fn leave_cleanup_empties_the_namespace_under_a_claim_and_reports_freed_byt
 
     let claim = state.cache.claim(&GROUP).unwrap();
     assert!(state.cache.claim(&GROUP).is_none(), "one cleanup per group");
-    let report = clean_namespace(&state, &claim, None).await;
+    let report = clean_namespace(&state, &claim, None, false).await;
     assert_eq!(report.failed, 0);
+    assert!(report.cleaned);
     assert!(report.freed_bytes >= 4000);
     assert!(!namespace.exists(), "nothing pinned, so the namespace went");
     drop(claim);
     assert!(!state.cache.claimed(&GROUP));
+}
+
+/// Review H1: a server that attached the namespace before the claim existed (a rejoin, or a join
+/// still being registered) holds its Keep lease. Neither the sweep nor a leave may then empty
+/// the namespace, and the marker goes so no later attach treats it as an interrupted leave.
+#[tokio::test]
+async fn cleanup_never_empties_a_namespace_a_live_server_attached_first() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = store_in(dir.path());
+    let key = hex::encode(GROUP);
+    let cached = store.blob_store(&key).unwrap().put(&[2; 4000]).unwrap();
+    assert!(mark_leaving(&store, &GROUP).unwrap());
+    let namespace = store.cache_namespace_dir(&key).unwrap();
+    // The attach of a joining server completed: it holds the store (and its Keep lease).
+    let (attached, _) = prepare_blob_store(&store, None, &GROUP).unwrap();
+    assert!(
+        !storage_cache::has_leaving_marker(&namespace),
+        "a rejoin takes the namespace back"
+    );
+    // Put the marker back as if the leave of an alias wrote it after that attach.
+    assert!(mark_leaving(&store, &GROUP).unwrap());
+    let state = AppState::default();
+    *state.store.lock().await = Some(store);
+    sweep_leaving(&state, None).await;
+    assert!(
+        attached.has(&cached),
+        "the live server's cache survives the sweep"
+    );
+    assert!(
+        !storage_cache::has_leaving_marker(&namespace),
+        "an attached namespace is not an interrupted leave"
+    );
+    let claim = state.cache.claim(&GROUP).unwrap();
+    assert!(mark_leaving(state.store.lock().await.as_ref().unwrap(), &GROUP).unwrap());
+    let report = clean_namespace(&state, &claim, None, false).await;
+    assert!(!report.cleaned && report.freed_bytes == 0);
+    assert!(
+        attached.has(&cached),
+        "and survives a leave of an alias too"
+    );
+}
+
+#[test]
+fn adoption_never_migrates_without_a_size_limited_cache() {
+    use catcoms_app::cache_housekeeping::CachePause;
+    let status = |paused| CacheStatus {
+        paused,
+        ..CacheStatus::default()
+    };
+    assert_eq!(adoption_scan(&status(Some(CachePause::NoCache))), None);
+    assert_eq!(
+        adoption_scan(&status(Some(CachePause::ScanIncomplete))),
+        Some(false)
+    );
+    assert_eq!(
+        adoption_scan(&status(Some(CachePause::NotReady))),
+        Some(true)
+    );
 }
 
 #[tokio::test]

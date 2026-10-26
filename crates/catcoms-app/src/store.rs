@@ -124,7 +124,7 @@ pub(crate) use epoch_studio::{
     StudioOverlayCapture, StudioOverlayPlan, StudioOverlayStamp, StudioOverlayStart,
     StudioSourceCapture, MAX_SIGNING_TURNS_PER_VISIT, SIGNING_SLICE_BUDGET_MS,
 };
-pub use leave_cleanup::{LeaveCleanup, LeaveReport};
+pub use leave_cleanup::{LeaveBegin, LeaveCleanup, LeaveReport};
 // Flow R, the scheduled resolution of an interrupted Prepared handoff (Agent 1, design 6.4.2).
 pub(crate) use epoch_studio::{
     StudioResolveCapture, StudioResolvePlan, StudioResolveStart, StudioResolved,

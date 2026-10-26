@@ -20,6 +20,7 @@ export type CacheStatus = {
 };
 
 export type CachePause =
+  | "no-cache"
   | "not-ready"
   | "scan-incomplete"
   | "setting-unreadable"
@@ -28,9 +29,15 @@ export type CachePause =
   | "studio-unknown";
 
 const PAUSES: readonly CachePause[] = [
-  "not-ready", "scan-incomplete", "setting-unreadable", "index-unreadable", "pins-unknown",
-  "studio-unknown",
+  "no-cache", "not-ready", "scan-incomplete", "setting-unreadable", "index-unreadable",
+  "pins-unknown", "studio-unknown",
 ];
+
+/** Whether the footer should show a cache segment at all: not for a server with no size-limited
+ * cache (the in-memory fallback before the vault store attaches), whose usage is unknown. */
+export function cacheShown(status: CacheStatus | null): status is CacheStatus {
+  return !!status && status.paused !== "no-cache";
+}
 
 const count = (v: unknown): v is number => typeof v === "number" && Number.isSafeInteger(v) && v >= 0;
 
@@ -80,7 +87,7 @@ export function cachePercent(status: CacheStatus): number | null {
 export type CacheTone = "ok" | "warn" | "over" | "paused";
 
 export function cacheTone(status: CacheStatus): CacheTone {
-  if (status.paused && status.paused !== "not-ready") return "paused";
+  if (status.paused && status.paused !== "not-ready" && status.paused !== "no-cache") return "paused";
   if (status.over_limit) return "over";
   if (status.nearly_full) return "warn";
   return "ok";
@@ -89,6 +96,7 @@ export function cacheTone(status: CacheStatus): CacheTone {
 /** Short reasons for a paused cleanup, for the settings page. */
 export function cachePauseText(pause: CachePause): string {
   switch (pause) {
+    case "no-cache": return "This server's files are not cached on disk yet.";
     case "not-ready": return "Measuring this device's cache.";
     case "scan-incomplete": return "Some cached files could not be measured, so nothing is removed for now.";
     case "setting-unreadable": return "The saved limit could not be read. Choose a limit again to resume cleanup.";
@@ -167,31 +175,37 @@ export function pinnedSummary(status: CacheStatus): string {
     : `Nothing is pinned right now. ${KEEPS}`;
 }
 
-/** What leaving deletes, for the confirmation: names of Keep copies and unfinished Downloads. */
-export type LeaveLoss = { keep: string[]; downloads: string[] };
+/** What leaving deletes, for the confirmation: names of Keep copies and unfinished Downloads.
+ * `unknown` is set when either inventory could not be read: the dialog must then say it could not
+ * check, never that there is nothing to lose. */
+export type LeaveLoss = { keep: string[]; downloads: string[]; unknown: boolean };
 
 /** Build the confirmation lists. Names come from the server's file list where it still has the
  * file; otherwise a short address stands in, so nothing is silently left out. */
 export function leaveLoss(
-  kept: { files: { cid: string }[]; transfers: { cid: string; phase?: string }[] } | null,
-  downloads: { cid: string; status: string }[],
+  kept: { files: { cid: string }[]; transfers: { cid: string; phase?: string }[]; error?: string | null } | null,
+  downloads: { cid: string; status: string }[] | null,
   files: { cid: string; name: string }[],
 ): LeaveLoss {
+  const unknown = !kept || !!kept.error || downloads === null;
   const nameOf = (cid: string) => files.find((f) => f.cid === cid)?.name ?? `file ${cid.slice(0, 8)}`;
   const keep = new Set<string>();
   for (const f of kept?.files ?? []) keep.add(nameOf(f.cid));
   for (const t of kept?.transfers ?? []) if (t.phase !== "deleting") keep.add(nameOf(t.cid));
   const pending = new Set<string>();
-  for (const d of downloads) if (d.status !== "saved" && d.status !== "removing") pending.add(nameOf(d.cid));
-  return { keep: [...keep].sort(), downloads: [...pending].sort() };
+  for (const d of downloads ?? []) if (d.status !== "saved" && d.status !== "removing") pending.add(nameOf(d.cid));
+  return { keep: [...keep].sort(), downloads: [...pending].sort(), unknown };
 }
 
 /** The toast after leaving. Only bytes actually removed are claimed. */
 export function leaveReportText(
   name: string,
-  report: { freed_bytes: number; kept_bytes: number; failed: number } | null,
+  report: { freed_bytes: number; kept_bytes: number; failed: number; cleaned: boolean } | null,
 ): string {
   if (!report) return `Left ${name}.`;
+  if (!report.cleaned && report.failed === 0) {
+    return `Left ${name}. Its cached files stay on this device for now.`;
+  }
   const parts = [`Left ${name}.`];
   if (report.freed_bytes > 0) parts.push(`Freed ${cacheBytes(report.freed_bytes)} on this device.`);
   if (report.kept_bytes > 0) parts.push(`Kept ${cacheBytes(report.kept_bytes)} that Studio still uses.`);

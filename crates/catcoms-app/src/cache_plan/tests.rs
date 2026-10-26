@@ -137,6 +137,20 @@ fn unclaimed_blobs_go_first_but_only_from_the_mount_set_and_never_profile_images
 }
 
 #[test]
+fn a_hostile_old_row_naming_a_profile_image_cannot_drag_it_out() {
+    // Row 0 is a fake listing whose manifest names this device's avatar (8) as a chunk.
+    let mut case = Case::new(
+        &[(8, 10), (1, 10), (2, 10)],
+        vec![row(0, 66, &[8]), row(1, 101, &[1]), row(2, 102, &[2])],
+        Some(10),
+    );
+    case.profile = set(&[8]);
+    let plan = case.plan();
+    assert!(!plan.evict.contains(&cid(8)), "the avatar stays");
+    assert_eq!(plan.evict, vec![cid(1), cid(2)]);
+}
+
+#[test]
 fn hidden_rows_skip_only_the_unclaimed_class() {
     // Rows past the 256 cap (or an unreadable profile) make "unclaimed" unknowable, but visible
     // listed files can still leave safely: a hidden row's chunks are never offered in class 2.

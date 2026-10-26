@@ -166,7 +166,10 @@ impl CacheSetting {
 /// Why housekeeping is not deleting anything right now. Each maps to a short footer phrase.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CachePause {
-    /// No size-limited cache, no complete mount scan yet, or no limit handed over yet.
+    /// No size-limited cache at all (the in-memory fallback store, or no mount scan yet). Usage is
+    /// then unknown, so nothing may be migrated from it.
+    NoCache,
+    /// The cache is measured but no limit has been handed over yet.
     NotReady,
     /// The last scan could not read every entry.
     ScanIncomplete,
@@ -184,6 +187,7 @@ impl CachePause {
     /// Stable lowercase name for the desktop bridge and frontend.
     pub fn as_str(self) -> &'static str {
         match self {
+            Self::NoCache => "no-cache",
             Self::NotReady => "not-ready",
             Self::ScanIncomplete => "scan-incomplete",
             Self::SettingUnreadable => "setting-unreadable",
@@ -241,6 +245,9 @@ pub struct CacheRuntime {
     last_status_event: Option<u64>,
     /// A changed status arrived inside the coalescing window and still has to be emitted.
     status_held: bool,
+    /// The last status computed for a query, with its monotonic time: `get_cache_status` reuses
+    /// it for up to a second instead of rebuilding the plan on every call.
+    status_cache: Option<(u64, CacheStatus)>,
     last_studio_request: Option<u64>,
 }
 
@@ -289,6 +296,7 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
     pub fn set_cache_limit(&mut self, limit: CacheLimit) {
         self.cache.limit = limit;
         self.cache.forced = true;
+        self.cache.status_cache = None;
     }
 
     pub fn cache_limit(&self) -> CacheLimit {
@@ -406,7 +414,7 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
     }
 
     fn cache_inputs(&self, now: u64) -> Result<Inputs, CachePause> {
-        let index = self.sync.blob_cache_index().ok_or(CachePause::NotReady)?;
+        let index = self.sync.blob_cache_index().ok_or(CachePause::NoCache)?;
         if !index.complete() {
             return Err(CachePause::ScanIncomplete);
         }
@@ -497,6 +505,20 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
         let now = self.runtime_clock().monotonic_ms();
         let result = self.cache_inputs(now).map(|inputs| inputs.plan());
         self.status_from(&result)
+    }
+
+    /// The status for a query: reused for up to [`STATUS_INTERVAL_MS`], so a UI polling or
+    /// switching servers quickly cannot make the actor rebuild the plan on every call.
+    pub fn cache_status_cached(&mut self) -> CacheStatus {
+        let now = self.runtime_clock().monotonic_ms();
+        if let Some((at, status)) = &self.cache.status_cache {
+            if now < at.saturating_add(STATUS_INTERVAL_MS) {
+                return status.clone();
+            }
+        }
+        let status = self.cache_status();
+        self.cache.status_cache = Some((now, status.clone()));
+        status
     }
 
     /// One housekeeping turn. Cheap when nothing is due: a usage comparison and two clock reads.
@@ -626,6 +648,8 @@ impl<T: MeshTransport, R: CryptoRngCore> Server<T, R> {
     /// window is held and re-offered by [`cache_pump`](Self::cache_pump) once the window passes,
     /// so the footer is never left showing an older state.
     fn offer_status(&mut self, now: u64, status: CacheStatus, pump: &mut CachePump) {
+        // A freshly computed status is the best answer for queries too.
+        self.cache.status_cache = Some((now, status.clone()));
         if self.cache.last_status.as_ref() == Some(&status) {
             self.cache.status_held = false;
             return;

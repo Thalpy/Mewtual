@@ -121,7 +121,8 @@ stays off for that mount.
    in CID order, and are never counted as files. Livery images are inline in the livery document
    and event images are listed files, so neither is a separate blob reference.
 2. **Listed files, oldest position first.** A file is dropped as a whole: every held chunk except
-   those a pin set holds. Partly cached files count only their held chunks.
+   those a pin set holds. Partly cached files count only their held chunks. Profile images are
+   excluded here too, so a hostile old row naming an avatar cannot drag it out first.
 
 The planner is a pure function of (size index, mount set, index snapshot, profile references, pin
 sets, limit), unit-tested without a disk.
@@ -351,12 +352,23 @@ failed to restore, the sweep waits and logs which one.
 
 **Rejoin over a marker.** Attaching a group whose namespace still carries a marker first finishes
 the non-cache steps (removes `staging/`, `incoming/` and `kept/`), keeps the cache (it is the same
-group's content-addressed data), removes the marker, and only then opens the Keep store. A
-half-deleted `kept/` can therefore never fault the rejoined server's Keep, and Keep copies the user
-confirmed deleting are not resurrected.
+group's content-addressed data), removes the marker, and only then opens the Keep store. If that
+removal fails, the marker stays and Keep is disabled for that mount (eviction pauses with it), so
+a half-deleted `kept/` is never loaded as whole and confirmed deletions are not resurrected.
+
+**An attach that came first** (review H1). A claim only stops attaches that start after it; a
+rejoin or a join still being registered may already hold the namespace. So phase 1 also requires
+the marker to still be present (a rejoin removes it) and takes the namespace's Keep lease, which
+every attached server holds for its lifetime, and holds it to the end. A held lease means the
+namespace is in use: nothing is deleted, and the marker is cleared so no later attach treats it as
+an interrupted leave. A leave first waits up to three seconds for the just-stopped actor's handle
+to release the lease. A cleanup stopped by a session change skips scratch and `kept/` too, and
+keeps the marker. The leave report says `cleaned: false` whenever cleanup did not run, and the
+toast then says the files stay on this device.
 
 **Confirmation** (owner decision 4): every Leave entry point (the rail menu and the settings page)
-asks first, naming the Keep copies and unfinished Downloads it will permanently delete. Caches of
+asks first, naming the Keep copies and unfinished Downloads it will permanently delete. If either
+inventory cannot be read, it says it could not check rather than that nothing will be lost. Caches of
 servers left before this change carry no marker and are not touched.
 
 ### 13. Docs to correct

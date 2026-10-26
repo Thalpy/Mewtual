@@ -70,7 +70,7 @@ test("leaving asks first and names the Keep copies and unfinished downloads it d
   const pending = app.requestLeave(1);
   assert.deepEqual(state.leaveConfirm, { id: 1, name: "Lantern Room", loss: null }, "the dialog opens at once, still loading");
   await pending;
-  assert.deepEqual(state.leaveConfirm?.loss, { keep: ["song.mp3"], downloads: ["clip.mp4"] });
+  assert.deepEqual(state.leaveConfirm?.loss, { keep: ["song.mp3"], downloads: ["clip.mp4"], unknown: false });
   assert.deepEqual(state.left, [], "nothing leaves until confirmed");
   app.confirmLeave();
   assert.deepEqual(state.left, [1]);
@@ -89,17 +89,30 @@ test("a dismissed confirmation is never resurrected by a late load", async () =>
   assert.deepEqual(state.left, []);
 });
 
-test("unreadable lists still ask, with nothing invented", async () => {
+test("unreadable lists still ask, and say they could not check", async () => {
   const state = stateWith({});
   const app = load(state);
   await app.requestLeave(1);
-  assert.deepEqual(state.leaveConfirm?.loss, { keep: [], downloads: [] });
+  assert.deepEqual(state.leaveConfirm?.loss, { keep: [], downloads: [], unknown: true });
+  // A Keep store that reports an error is just as unknown, even with empty lists.
+  const faulted = stateWith({
+    get_kept_files: { files: [], transfers: [], error: "Kept storage needs attention" },
+    get_private_downloads: [],
+    get_files: [],
+  });
+  await load(faulted).requestLeave(1);
+  assert.equal((faulted.leaveConfirm?.loss as { unknown: boolean }).unknown, true);
+  assert.match(source, /leaving\.loss\.unknown[\s\S]{0,200}could not be checked\. Leaving deletes any/);
 });
 
 test("the leave report is validated before the toast claims anything", () => {
   const app = load(stateWith({}));
-  assert.deepEqual(app.checkedLeaveReport({ freed_bytes: 5, kept_bytes: 0, failed: 0 }), { freed_bytes: 5, kept_bytes: 0, failed: 0 });
-  assert.equal(app.checkedLeaveReport({ freed_bytes: -1, kept_bytes: 0, failed: 0 }), null);
+  assert.deepEqual(
+    app.checkedLeaveReport({ freed_bytes: 5, kept_bytes: 0, failed: 0, cleaned: true }),
+    { freed_bytes: 5, kept_bytes: 0, failed: 0, cleaned: true },
+  );
+  assert.equal(app.checkedLeaveReport({ freed_bytes: 5, kept_bytes: 0, failed: 0 }), null, "cleaned is required");
+  assert.equal(app.checkedLeaveReport({ freed_bytes: -1, kept_bytes: 0, failed: 0, cleaned: true }), null);
   assert.equal(app.checkedLeaveReport(null), null);
 });
 

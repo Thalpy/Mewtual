@@ -379,6 +379,16 @@ pub fn finish_leaving(namespace: &Path) -> Result<bool, StorageError> {
     Ok(fs::remove_dir(namespace).is_ok())
 }
 
+/// Remove only the marker: the namespace turned out to be attached again (in use), so it must not
+/// be cleaned, and a later attach must not mistake it for an interrupted leave.
+pub fn clear_leaving_marker(namespace: &Path) -> Result<(), StorageError> {
+    match fs::remove_file(namespace.join(LEAVING_MARKER)) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(StorageError::Io(e.to_string())),
+    }
+}
+
 /// Namespaces under `blobs_root` that carry a leave marker, as `(directory name, path)`.
 /// Bounded; names are returned only if they are a plausible namespace (lowercase hex).
 pub fn leaving_namespaces(blobs_root: &Path) -> Vec<(String, PathBuf)> {
@@ -417,11 +427,59 @@ pub fn remove_scratch(namespace: &Path) -> Removal {
     removal
 }
 
+/// The namespace's Keep lease (`kept/lease.lock`), held by whoever owns the namespace's Keep store.
+/// Every attached server holds it for its whole lifetime, so taking it proves that no server in
+/// this process (and no other process) has the namespace attached. Leave cleanup takes it before
+/// deleting anything and holds it to the end.
+#[derive(Debug)]
+pub struct KeptLease {
+    /// Held only for its lock; dropping it releases the lease.
+    _held: fs::File,
+}
+
+/// Outcome of trying to take the Keep lease.
+#[derive(Debug)]
+pub enum LeaseAttempt {
+    /// Taken (or there is no `kept/` at all, so no Keep store can be attached here).
+    Held(Option<KeptLease>),
+    /// Another handle holds it: the namespace is attached, so it must not be emptied.
+    Busy,
+    /// `kept/` is not a plain directory or the lease could not be opened.
+    Failed,
+}
+
+/// Try to take the namespace's Keep lease without creating `kept/` if it is absent.
+pub fn lock_kept(namespace: &Path) -> LeaseAttempt {
+    let kept = namespace.join(KEPT_DIR);
+    match fs::symlink_metadata(&kept) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return LeaseAttempt::Held(None),
+        Err(_) => return LeaseAttempt::Failed,
+        Ok(m) if m.file_type().is_symlink() || !m.is_dir() => return LeaseAttempt::Held(None),
+        Ok(_) => {}
+    }
+    match crate::vault::try_lock_file(&kept.join(KEPT_LEASE)) {
+        Ok(lease) => LeaseAttempt::Held(Some(KeptLease { _held: lease })),
+        Err(StorageError::VaultBusy) => LeaseAttempt::Busy,
+        Err(_) => LeaseAttempt::Failed,
+    }
+}
+
 /// Delete `kept/` wholesale under its own lease: every entry except the lease file, then the lease
 /// file and the directory. Used only after the server has left, so no Keep record is needed and no
 /// device binding is required, which is what makes this step resumable. If another handle holds
 /// the lease, nothing is removed and one failure is reported.
 pub fn remove_kept_tree(namespace: &Path) -> Removal {
+    match lock_kept(namespace) {
+        LeaseAttempt::Held(lease) => remove_kept_tree_held(namespace, lease),
+        LeaseAttempt::Busy | LeaseAttempt::Failed => Removal {
+            freed_bytes: 0,
+            failed: 1,
+        },
+    }
+}
+
+/// As [`remove_kept_tree`], with the lease already taken by [`lock_kept`] (it is released here).
+pub fn remove_kept_tree_held(namespace: &Path, lease: Option<KeptLease>) -> Removal {
     let kept = namespace.join(KEPT_DIR);
     let mut removal = Removal::default();
     match fs::symlink_metadata(&kept) {
@@ -440,12 +498,10 @@ pub fn remove_kept_tree(namespace: &Path) -> Removal {
         Ok(_) => {}
     }
     let lease_path = kept.join(KEPT_LEASE);
-    let lease = match crate::vault::try_lock_file(&lease_path) {
-        Ok(lease) => lease,
-        Err(_) => {
-            removal.failed = 1;
-            return removal;
-        }
+    let Some(lease) = lease else {
+        // `kept/` appeared after `lock_kept` saw none: someone attached meanwhile. Keep it.
+        removal.failed = 1;
+        return removal;
     };
     let mut budget = MAX_REMOVAL_ENTRIES;
     match fs::read_dir(&kept) {

@@ -99,7 +99,7 @@
   import { acceptSaveProgress, checkedPrivateDownloads, checkedSavedCheck, privateDownloadChatLabel, privateDownloadChatSave, privateDownloadOffers, privateDownloadSaveAsIsNewCopy, type PrivateDownload, type PrivateDownloadActionKind, type SavedCheck } from "./private-downloads";
   import { SAVED_ROW_GROUPS, TRANSFER_ICONS, confirmWords, groupSavedRows, savedRowTransitions, savedRowView, type SavedRowAction, type SavedRowGroup, type SavedRowLive, type TransferIcon } from "./transfer-rows";
   import {
-    CACHE_LIMIT_CHOICES, cacheBytes, cacheFooter, cachePauseText, checkedCacheStatus, leaveLoss,
+    CACHE_LIMIT_CHOICES, cacheBytes, cacheFooter, cachePauseText, cacheShown, checkedCacheStatus, leaveLoss,
     leaveReportText, limitLabel, lowerLimitWarning, pinnedSummary, type CacheStatus, type LeaveLoss,
   } from "./cache-status";
   import {
@@ -7434,12 +7434,12 @@
   }
 
   /** Native's leave report, or `null` when it is missing or malformed (the toast then claims nothing). */
-  function checkedLeaveReport(raw: unknown): { freed_bytes: number; kept_bytes: number; failed: number } | null {
+  function checkedLeaveReport(raw: unknown): { freed_bytes: number; kept_bytes: number; failed: number; cleaned: boolean } | null {
     if (!raw || typeof raw !== "object") return null;
     const r = raw as Record<string, unknown>;
     const n = (v: unknown) => typeof v === "number" && Number.isSafeInteger(v) && v >= 0;
-    return n(r.freed_bytes) && n(r.kept_bytes) && n(r.failed)
-      ? { freed_bytes: r.freed_bytes as number, kept_bytes: r.kept_bytes as number, failed: r.failed as number }
+    return n(r.freed_bytes) && n(r.kept_bytes) && n(r.failed) && typeof r.cleaned === "boolean"
+      ? { freed_bytes: r.freed_bytes as number, kept_bytes: r.kept_bytes as number, failed: r.failed as number, cleaned: r.cleaned }
       : null;
   }
 
@@ -7457,9 +7457,11 @@
     leaveConfirm = {
       id,
       name,
+      // An inventory that could not be read is passed as null, so the dialog says it could not
+      // check instead of claiming there is nothing to lose.
       loss: leaveLoss(
         kept.status === "fulfilled" ? kept.value : null,
-        downloads.status === "fulfilled" ? downloads.value : [],
+        downloads.status === "fulfilled" ? downloads.value : null,
         listed.status === "fulfilled" ? listed.value : [],
       ),
     };
@@ -28932,7 +28934,7 @@
         </button>
       {/if}
       <span class="sb-spacer"></span>
-      {#if cur && !dmHome && !inboxView && cacheStatus}
+      {#if cur && !dmHome && !inboxView && cacheShown(cacheStatus)}
         {@const foot = cacheFooter(cacheStatus)}
         <button
           class="seg sb-cache"
@@ -29619,7 +29621,9 @@
               <h3>These unfinished downloads will be permanently deleted</h3>
               <ul class="leave-loss">{#each leaving.loss.downloads as name (name)}<li>{name}</li>{/each}</ul>
             {/if}
-            {#if !leaving.loss.keep.length && !leaving.loss.downloads.length}
+            {#if leaving.loss.unknown}
+              <p class="warn-t small">Kept copies or downloads could not be checked. Leaving deletes any this device has for this server.</p>
+            {:else if !leaving.loss.keep.length && !leaving.loss.downloads.length}
               <p class="muted small">No Keep copies or unfinished downloads on this device.</p>
             {/if}
           {/if}

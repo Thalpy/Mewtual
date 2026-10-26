@@ -7458,7 +7458,7 @@ async fn leave_server(
     // deleted either.
     let report = match (&claim, marked, registry) {
         (Some(claim), true, PersistOutcome::Durable) => {
-            cache_housekeeping::clean_namespace(&state, claim, Some(generation)).await
+            cache_housekeeping::clean_namespace(&state, claim, Some(generation), true).await
         }
         _ => Default::default(),
     };

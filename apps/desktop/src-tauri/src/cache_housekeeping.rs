@@ -37,6 +37,9 @@ pub(super) struct CacheBridge {
     /// Woken whenever a claim is released, so a waiting attach can proceed.
     released: tokio::sync::Notify,
     studio: tokio::sync::Mutex<StudioScans>,
+    /// Serialises `set_cache_limit`'s save-then-apply, so two quick choices cannot leave the actor
+    /// on a different limit from the sealed record.
+    limit_writes: tokio::sync::Mutex<()>,
 }
 
 #[derive(Default)]
@@ -94,6 +97,9 @@ pub(super) struct LeaveReport {
     kept_bytes: u64,
     /// Entries that could not be removed; cleanup resumes after the next unlock.
     failed: usize,
+    /// Whether cleanup ran. False: the files stay on this device (in use, shared by another
+    /// server entry, or never marked), and the toast must not claim otherwise.
+    cleaned: bool,
 }
 
 impl From<catcoms_app::store::LeaveReport> for LeaveReport {
@@ -102,6 +108,16 @@ impl From<catcoms_app::store::LeaveReport> for LeaveReport {
             freed_bytes: report.freed_bytes,
             kept_bytes: report.kept_bytes,
             failed: report.failed,
+            cleaned: report.cleaned,
+        }
+    }
+}
+
+impl LeaveReport {
+    fn failed() -> Self {
+        Self {
+            failed: 1,
+            ..Self::default()
         }
     }
 }
@@ -169,6 +185,7 @@ pub(super) fn prepare_blob_store(
     // A rejoin over a marker: the group is live again, so the cache (its own content-addressed
     // data) stays, but the Keep copies and Downloads the user confirmed deleting must go before
     // Keep opens, or a half-deleted `kept/` would fault it. The marker goes only if that worked.
+    let mut keep_unsafe = false;
     if let Ok(dir) = store.cache_namespace_dir(&key) {
         if storage_cache::has_leaving_marker(&dir) {
             let mut removal = storage_cache::remove_scratch(&dir);
@@ -176,11 +193,18 @@ pub(super) fn prepare_blob_store(
             if removal.failed == 0 {
                 let _ = storage_cache::finish_leaving(&dir);
             } else {
+                // A half-deleted `kept/` must not be loaded as if it were whole, and copies the
+                // user confirmed deleting must not come back: Keep stays off for this mount (the
+                // marker stays, so the next attach tries again). Eviction then pauses too.
+                keep_unsafe = true;
                 tracing::warn!(target: "catcoms_app", server, failed = removal.failed, "STORAGE.CACHE.REJOIN_CLEANUP_INCOMPLETE");
             }
         }
     }
     let mut blobs = store.blob_store(&key).map_err(|e| e.to_string())?;
+    if keep_unsafe {
+        blobs.disable_retention();
+    }
     let report = match blobs.cache_scan(true) {
         Ok(report) => report,
         Err(_) => return Ok((blobs, CacheLimit::Pending)),
@@ -236,10 +260,9 @@ pub(super) async fn adopt_cache_setting(
     let Ok(status) = actor.cache_status().await else {
         return;
     };
-    let complete = !matches!(
-        status.paused,
-        Some(catcoms_app::cache_housekeeping::CachePause::ScanIncomplete)
-    );
+    let Some(complete) = adoption_scan(&status) else {
+        return; // no size-limited cache: usage is unknown, so nothing may be migrated from it
+    };
     let limit = {
         let guard = state.store.lock().await;
         let Some(store) = guard.as_ref() else {
@@ -248,6 +271,17 @@ pub(super) async fn adopt_cache_setting(
         resolve_setting(store, server, group, complete, status.usage_bytes)
     };
     let _ = actor.set_cache_limit(limit).await;
+}
+
+/// Whether a registered server's status can seed a migration: `None` with no size-limited cache
+/// (usage then reads 0 and would save a too-small limit), otherwise whether its scan was complete.
+fn adoption_scan(status: &CacheStatus) -> Option<bool> {
+    use catcoms_app::cache_housekeeping::CachePause;
+    match status.paused {
+        Some(CachePause::NoCache) => None,
+        Some(CachePause::ScanIncomplete) => Some(false),
+        _ => Some(true),
+    }
 }
 
 /// Ask for a Studio reference scan. Never awaits an actor or the store from the caller's task:
@@ -341,34 +375,71 @@ async fn studio_scan_once(app: AppHandle) {
     }
 }
 
+/// How long a leave waits for the stopped actor's blob handle to release the Keep lease.
+const LEASE_RELEASE_ATTEMPTS: u32 = 15;
+const LEASE_RELEASE_WAIT: Duration = Duration::from_millis(200);
+
 /// Empty the namespace of a group no server uses any more. Studio-referenced blobs stay; the
 /// marker stays while anything failed, so the next unlock resumes. Holds the group's claim from
 /// start to finish and the store lock only for the reference scan and enumeration. `generation`
 /// is the unlocked session that asked; between batches the cleanup stops if it changed (tests
-/// with no session pass `None`).
+/// with no session pass `None`). `await_release` gives a just-stopped actor's blob handle a few
+/// seconds to drop its Keep lease (leave); the sweep has no such actor and does not wait.
+///
+/// A namespace whose Keep lease stays held is attached by a live server (a rejoin, or a join
+/// not yet registered): its marker is cleared so no later attach mistakes it for an
+/// interrupted leave, and nothing is deleted.
 pub(super) async fn clean_namespace(
     state: &AppState,
     claim: &CleanupClaim<'_>,
     generation: Option<u64>,
+    await_release: bool,
 ) -> LeaveReport {
-    let failed = LeaveReport {
-        failed: 1,
-        ..LeaveReport::default()
-    };
+    use catcoms_app::store::LeaveBegin;
     let key = hex::encode(&claim.group);
-    // Phase 1, store lock held: the reference scan, a cache-only handle and the exact list of
-    // CIDs to delete. The handle keeps the Keep lease free for the wholesale `kept/` removal.
-    let guard = state.store.clone().lock_owned().await;
-    let begun = tokio::task::spawn_blocking(move || {
-        let mut guard = guard;
-        guard.as_mut()?.begin_leave_cleanup(&key).ok()
-    })
-    .await
-    .ok()
-    .flatten();
-    let Some(mut cleanup) = begun else {
-        return failed;
+    let attempts = if await_release {
+        LEASE_RELEASE_ATTEMPTS
+    } else {
+        1
     };
+    let mut begun = None;
+    for attempt in 0..attempts {
+        // Phase 1, store lock held: marker and lease checks, the reference scan, a cache-only
+        // handle and the exact list of CIDs to delete.
+        let guard = state.store.clone().lock_owned().await;
+        let key = key.clone();
+        let outcome = tokio::task::spawn_blocking(move || {
+            let mut guard = guard;
+            let store = guard.as_mut()?;
+            let outcome = store.begin_leave_cleanup(&key).ok()?;
+            if matches!(outcome, LeaveBegin::Busy) && attempt + 1 == attempts {
+                // Still attached after the wait: the namespace is in use again.
+                if let Ok(dir) = store.cache_namespace_dir(&key) {
+                    let _ = storage_cache::clear_leaving_marker(&dir);
+                }
+            }
+            Some(outcome)
+        })
+        .await
+        .ok()
+        .flatten();
+        match outcome {
+            Some(LeaveBegin::Busy) if attempt + 1 < attempts => {
+                SystemClock.sleep(LEASE_RELEASE_WAIT).await;
+            }
+            other => {
+                begun = other;
+                break;
+            }
+        }
+    }
+    let mut cleanup = match begun {
+        Some(LeaveBegin::Ready(cleanup)) => cleanup,
+        // Taken back by a rejoin, or attached by a live server: its files stay, truthfully.
+        Some(LeaveBegin::NoMarker) | Some(LeaveBegin::Busy) => return LeaveReport::default(),
+        Some(LeaveBegin::Unavailable) | None => return LeaveReport::failed(),
+    };
+    let failed = LeaveReport::failed();
     // Phase 2, no store lock: bounded batches, checking between them that the unlocked session
     // is still the one that asked. A changed session abandons the rest (kept, marker stays).
     loop {
@@ -432,7 +503,7 @@ pub(super) async fn sweep_leaving(state: &AppState, generation: Option<u64>) {
         let Some(claim) = claim else {
             continue;
         };
-        let report = clean_namespace(state, &claim, generation).await;
+        let report = clean_namespace(state, &claim, generation, false).await;
         drop(claim);
         tracing::info!(target: "catcoms_app", namespace = %name, freed = report.freed_bytes, failed = report.failed, "STORAGE.CACHE.LEAVE_RESUMED");
     }
@@ -473,8 +544,10 @@ pub(super) async fn set_cache_limit(
 ) -> Result<UiCacheStatus, String> {
     require_unlocked_session(&state).await?;
     if !cache_plan::valid_limit(bytes) {
-        return Err("Choose a limit between 1 GB and 1 TB, or no limit.".into());
+        return Err("Choose a limit between 1 GiB and 1 TiB, or no limit.".into());
     }
+    // Save and apply as one step per process, so the actor always ends on the sealed value.
+    let _serial = state.cache.limit_writes.lock().await;
     let (actor, group) = {
         let servers = state.servers.lock().await;
         let entry = servers

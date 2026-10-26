@@ -608,10 +608,11 @@ fn leave_cleanup_keeps_studio_references_and_empties_the_rest() {
     .unwrap();
     catcoms_storage::cache::write_leaving_marker(&dir).unwrap();
 
-    let mut cleanup = store.begin_leave_cleanup(&key).unwrap();
+    let mut cleanup = ready(store.begin_leave_cleanup(&key).unwrap());
     while cleanup.delete_batch(1) {}
     let report = cleanup.finish();
     assert_eq!(report.failed, 0);
+    assert!(report.cleaned);
     assert!(
         report.kept_bytes > 0,
         "the Studio frame is reported as kept"
@@ -647,10 +648,72 @@ fn leave_cleanup_with_unknown_references_keeps_the_cache_and_the_marker() {
     .unwrap();
     let dir = store.cache_namespace_dir(&key).unwrap();
     catcoms_storage::cache::write_leaving_marker(&dir).unwrap();
-    let mut cleanup = store.begin_leave_cleanup(&key).unwrap();
+    let mut cleanup = ready(store.begin_leave_cleanup(&key).unwrap());
     while cleanup.delete_batch(16) {}
     let report = cleanup.finish();
     assert!(report.failed > 0);
     assert!(store.cache_only_blob_store(&key).unwrap().has(&cached));
+    assert!(catcoms_storage::cache::has_leaving_marker(&dir));
+}
+
+fn ready(begun: crate::store::LeaveBegin) -> crate::store::LeaveCleanup {
+    match begun {
+        crate::store::LeaveBegin::Ready(cleanup) => cleanup,
+        other => panic!("cleanup did not start: {other:?}"),
+    }
+}
+
+/// A server that attached the namespace before any claim existed (a rejoin, or a join still
+/// being registered) holds its Keep lease, and a rejoin removes the marker. Either one stops the
+/// cleanup before it deletes anything.
+#[test]
+fn leave_cleanup_never_touches_a_namespace_that_is_attached_or_taken_back() {
+    let root = tempfile::tempdir().unwrap();
+    let mut store = open(root.path());
+    let key = hex::encode([6u8; 32]);
+    let live = store.blob_store(&key).unwrap(); // holds kept/lease.lock, like a live server
+    let cid = {
+        let mut writer = store.cache_only_blob_store(&key).unwrap();
+        writer.put(b"a live server's cache").unwrap()
+    };
+    let dir = store.cache_namespace_dir(&key).unwrap();
+    catcoms_storage::cache::write_leaving_marker(&dir).unwrap();
+    assert!(matches!(
+        store.begin_leave_cleanup(&key).unwrap(),
+        crate::store::LeaveBegin::Busy
+    ));
+    assert!(live.has(&cid), "nothing was deleted");
+    drop(live);
+    std::fs::remove_file(dir.join("leaving")).unwrap(); // a rejoin took it back
+    assert!(matches!(
+        store.begin_leave_cleanup(&key).unwrap(),
+        crate::store::LeaveBegin::NoMarker
+    ));
+    assert!(store.cache_only_blob_store(&key).unwrap().has(&cid));
+}
+
+/// A session change mid-cleanup abandons it: the rest of the cache, scratch and `kept/` stay, and
+/// so does the marker, for the next unlock.
+#[test]
+fn an_abandoned_cleanup_leaves_keep_scratch_and_the_marker() {
+    let root = tempfile::tempdir().unwrap();
+    let mut store = open(root.path());
+    let key = hex::encode([7u8; 32]);
+    {
+        let mut blobs = store.blob_store(&key).unwrap();
+        blobs.put(b"one").unwrap();
+        blobs.put(b"two").unwrap();
+    }
+    let dir = store.cache_namespace_dir(&key).unwrap();
+    catcoms_storage::cache::write_leaving_marker(&dir).unwrap();
+    let mut cleanup = ready(store.begin_leave_cleanup(&key).unwrap());
+    cleanup.delete_batch(1);
+    cleanup.abandon();
+    let report = cleanup.finish();
+    assert!(report.failed > 0);
+    assert!(
+        dir.join("kept").exists(),
+        "kept/ is not emptied under a changed session"
+    );
     assert!(catcoms_storage::cache::has_leaving_marker(&dir));
 }

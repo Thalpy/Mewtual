@@ -5693,7 +5693,7 @@ where
                         server.set_cache_limit(limit);
                         let _ = reply.send(server.cache_status());
                     }
-                    Some(AppCommand::CacheStatus { reply }) => { let _ = reply.send(server.cache_status()); }
+                    Some(AppCommand::CacheStatus { reply }) => { let _ = reply.send(server.cache_status_cached()); }
                     Some(AppCommand::CacheProtectionChanged) => server.cache_protection_changed(),
                     Some(AppCommand::RetryKeptFile { cid, request, reply }) => {
                         let result = <[u8; 32]>::try_from(cid.as_slice()).map_err(|_| "bad content address".to_string())
