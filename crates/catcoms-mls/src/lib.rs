@@ -26,7 +26,10 @@ use thiserror::Error;
 
 pub use config::CIPHERSUITE;
 pub use device::{key_package_signature_key, serialize_key_package, MlsDevice};
-pub use group::{AddOutcome, Incoming, ServerGroup, StagedOutcome};
+pub use group::{
+    commit_header, AddOutcome, AppliedCommit, CommitHeader, CommitRefusal, Incoming, ServerGroup,
+    StagedOutcome,
+};
 pub use invite::{InviteError, InviteLedger, InviteToken, MembershipCredential};
 pub use persist::{restore_server, snapshot_server};
 pub use policy::{GroupMode, GroupPolicy, PolicyError};
@@ -46,6 +49,10 @@ pub enum MlsError {
     /// An invite admission was rejected.
     #[error(transparent)]
     Invite(#[from] InviteError),
+    /// [`ServerGroup::apply_commit`] refused a message that is not this group's next commit.
+    /// Nothing was processed or changed.
+    #[error("not this group's next commit: {0}")]
+    NotACommit(#[from] CommitRefusal),
     /// An internal invariant was violated.
     #[error("internal invariant violated: {0}")]
     Internal(&'static str),

@@ -26,6 +26,13 @@ openmls_traits = "0.6"
 tls_codec = { version = "0.5", features = ["derive", "std"] }
 zeroize = "1"
 
+[features]
+# Test fixtures only: builders for MLS messages this product never sends (a self-update proposal,
+# an external commit), so a dependent crate can prove its commit path refuses them
+# (`group/commit_gate.rs`). Turned on only by catcoms-sync's dev-dependency; with resolver 2 a
+# dev-dependency's features never reach a non-test build.
+test-support = []
+
 [dev-dependencies]
 # Real restored-group catalog regressions alter one existing MemoryStorage JSON field. This
 # uses the already-resolved dependency; no snapshot or secret storage content is printed.

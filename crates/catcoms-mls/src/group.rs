@@ -15,6 +15,9 @@ use crate::device::MlsDevice;
 use crate::invite::{membership_from_key_package, InviteError, InviteLedger, InviteToken};
 use crate::{proto, MlsError};
 
+mod commit_gate;
+pub use commit_gate::{commit_header, AppliedCommit, CommitHeader, CommitRefusal};
+
 mod catalog;
 pub use catalog::{
     MemberCatalogCursor, MemberCatalogEntry, MemberCatalogError, MemberCatalogPage,
@@ -524,6 +527,10 @@ impl ServerGroup {
     }
 
     /// Process a serialized inbound MLS message (application message or commit).
+    ///
+    /// `Ok` means "processed", not "a commit was merged": application messages and proposals
+    /// succeed too. Anything that will be recorded or counted as a membership commit must go
+    /// through [`ServerGroup::apply_commit`] instead, which refuses every non-commit.
     pub fn process_incoming(
         &mut self,
         device: &MlsDevice,
@@ -723,6 +730,9 @@ mod own_echo_tests;
 
 #[cfg(test)]
 mod suite_refusal_tests;
+
+#[cfg(test)]
+mod commit_gate_tests;
 
 #[cfg(test)]
 mod m1_tests {
