@@ -12,24 +12,29 @@ member's 256-record commit log. That log is what catch-up serves, so it could pu
 out and strand lagging members. A wrapped application message was also decrypted on the commit
 path.
 
-**Now.** Everything that records, counts or acts on a commit record goes through
-`ServerGroup::apply_commit`. Before any decryption it refuses whatever is not exactly one
-`PrivateMessage` with content type `Commit`, for this group, built at the record's epoch, which
-must be the current one. The cleartext header is bound into the AEAD, so it cannot lie. It then
-runs the existing own-leaf, external-sender, credential-binding and M-1 checks and merges. A
-refusal leaves the epoch, the log, the past-key window and the counters as they were; it is
-counted in `SyncStats::commit_records_refused`. The fork contest (rank >= 1) refuses a record
-that is not a commit for its own label, so a wrapped non-commit cannot win the tie-break. A
-restore drops such records from a persisted log. A real commit with bytes appended is refused
-too: openmls's own parse ignores trailing bytes.
+**Now.** Every *received* commit record (live, buffered, from catch-up, or a fork-contest winner)
+is applied, recorded and counted only through `ServerGroup::apply_commit`; a node's own commits
+are recorded after its own stage-and-merge, as before. Before any decryption `apply_commit`
+refuses whatever is not exactly one `PrivateMessage` with content type `Commit`, for this group,
+built at the record's epoch, which must be the current one. The cleartext header is bound into the
+AEAD, so it cannot lie. It then runs the existing own-leaf, external-sender, credential-binding and
+M-1 checks and merges. A refusal leaves the epoch, the log and `commits_applied` as they were and
+increments `SyncStats::commit_records_refused`; on the in-order path the header check runs before
+the past-key snapshot, so the key window is untouched too. The fork contest (rank >= 1) refuses a
+record that is not a commit for its own label, so a wrapped non-commit cannot win the tie-break. A
+restore drops such records from a persisted log. A real commit with bytes appended is refused too:
+openmls's own parse ignores trailing bytes.
 
 **Residuals.** Records are still buffered before authorization, so anyone who can publish on the
-control topic can squat a future slot and stall commit recovery (pre-existing). At rank >= 1, an
-in-window committer can still win a contest with a header-valid commit that does not apply;
-nobody advances, nothing is recorded. `committer_device` is not bound to the commit's MLS sender,
-so the authorized committer can relay another member's (real) commit. Older peers still log and
-serve non-commits. That costs this build only refused records, but those records still take room
-in an older peer's log. No wire or storage format change.
+control topic can squat a future slot and stall commit recovery (pre-existing). At rank >= 1 (off
+by default; R3 says not to raise it): an in-window committer can still win a contest with a
+header-valid commit that does not apply; one that re-wraps the real candidate's bytes under its
+own device can win, after which the real committer refuses its own commit (own-leaf rule) and is
+stranded (pre-existing); and a contest mixing this build with older ones can split, because only
+this build refuses a non-commit candidate. `committer_device` is not bound to the commit's MLS
+sender, so the authorized committer can relay another member's (real) commit. Older peers still
+log and serve non-commits; that costs this build only refused records, but those records still
+take room in an older peer's log. No wire or storage format change.
 
 ## Crypto dependency boundary (24 October, update PR)
 

@@ -68,7 +68,9 @@ Refusals are `MlsError::NotACommit(CommitRefusal)`, where `CommitRefusal` names 
 (`NotProtocolMessage`, `NotCiphertext`, `NotCommitContent`, `WrongGroup`, `WrongEpoch {..}`,
 `NotStagedCommit`). openmls failures stay `Protocol`.
 
-`catcoms_mls::commit_header(bytes)` runs the header-only part of step 1 (no group state).
+`catcoms_mls::commit_header(bytes)` parses the header alone (no group state);
+`check_commit_header(bytes, group_id, expected_epoch, current_epoch)` is step 1 in full, and both
+`apply_commit` and the sync layer's pre-check call it, so the two cannot drift apart.
 
 `process_incoming` keeps its contract for other callers and tests. Its doc says commit-log callers
 must use `apply_commit`.
@@ -120,13 +122,18 @@ decrypts it afterwards, so its ratchet generation was not used); proposal; exter
 commit for another epoch, either way round; replay of an already-merged commit, under its own label
 and relabelled; our own pending commit (refused by #57's own-leaf rule, stays pending); a Welcome,
 garbage bytes, another group's commit, and a real commit with bytes appended; the happy path with
-and without a removal.
+and without a removal; and the frozen openmls 0.8.1 fixtures (#57): a 0.8.1 member snapshot
+refuses the 0.8.1 application message on the commit path (and can still read it) and applies the
+0.8.1 commit through `apply_commit`.
 
 catcoms-sync (`commit_log_tests.rs`), through the real `on_control`, catch-up, restore and
 fork-contest code, with records signed by an authorized committer:
 
-- an application message, a proposal and an external commit are refused, not logged, not counted,
-  and the real commit for that epoch then applies;
+- an application message, **another member's** proposal (Bob's own would already be refused by
+  #57's own-leaf rule) and an external commit are refused, not logged, not counted, the past-key
+  window is untouched, and the real commit for that epoch then applies;
+- the buffered-drain path: an application message from the next epoch, labelled with it, is
+  buffered, then refused when the drain reaches it (before this change it was logged there);
 - a commit relabelled one epoch ahead is buffered, then refused when its slot comes up; a replay
   relabelled to the current epoch is refused; neither is logged and the chain carries on;
 - catch-up from a peer whose log holds a non-commit ahead of the real commit: the requester refuses
@@ -155,7 +162,9 @@ a dev-dependency's feature never reaches a non-test build.
 - **Mixed versions:** older builds still log non-commits and serve them. This build refuses them
   when it applies, so they cannot reach its log or move its epoch. But they still take room in an
   older peer's 256-record log and in the prefix it serves, and real commits already pushed out of
-  an older peer's log stay unrecoverable from that peer even after it upgrades.
+  an older peer's log stay unrecoverable from that peer even after it upgrades. At
+  `max_committer_rank >= 1` only, a fork contest that mixes builds can split: this build refuses
+  a non-commit candidate that an older build accepts as the winner.
 - **Persistence:** format unchanged. Load filters header-mismatched records. A record that passes
   the header check but would fail to apply cannot be detected without processing it; if one
   survives from alpha data it is served, and requesters on this build refuse it.
@@ -179,6 +188,11 @@ a dev-dependency's feature never reaches a non-test build.
 - **Committer not bound to the MLS sender.** `committer_device` is not compared with the commit's
   MLS sender leaf, so an authorized committer can relay another member's commit. That is a
   real, merged commit, so it is in the log by this design's rule. Binding the two is a follow-up.
+  At rank >= 1 it has a sharper edge (pre-existing, from #57's own-leaf rule): an in-window
+  committer re-wraps the real candidate's exact bytes under its own device, `commit_id` differs,
+  and it wins about half the time. The real committer then aborts its staged commit and refuses
+  the winner, which is its own commit, so it is stranded while everyone else advances. Smallest
+  fix: in the loser branch, merge the staged commit when the winner's bytes are our own.
 - **Restoring an older snapshot (pre-existing).** A committer that restores a snapshot taken before
   its own last commit has that commit refused when catch-up serves it back, as under 0.8.
 - The authorized committer can still withhold commits or flood the control topic. That is the
@@ -206,3 +220,27 @@ No blocker, no high. Findings and what was done:
 | LOW | `Internal` after a merge strands bookkeeping | `debug_assert` |
 | LOW | Counter semantics; `NotStagedCommit` doc | Documented (section 3); doc fixed |
 | LOW | Mixed-version cost understated | Section 5 corrected |
+
+## 8. Review of the implemented diff (AGENTS.md skeleton, read-only)
+
+No blocker, no high. Confirmed: the header cannot lie (AEAD-bound), honest commits from every
+build pass (PURE_CIPHERTEXT from the start, records labelled with the pre-commit epoch), the
+restore filter cannot drop a real commit, the `debug_assert` holds (self-removal also advances),
+`test-support` cannot reach a production build, nothing matches exhaustively on `MlsError` or
+builds `SyncStats` literally.
+
+| Severity | Finding | Outcome |
+|---|---|---|
+| MEDIUM | catcoms-app rank-1 tests, sync integration tests and `cargo deny` not run; HANDOVER claimed checks | Run (results in the PR); HANDOVER states only that |
+| LOW | ARCHITECTURE §4b/§4c still said `process_incoming` and understated forged future records | Updated |
+| LOW | THREAT-MODEL overstated ("everything" goes through `apply_commit`; key window) | Reworded: received records; key window on the in-order path |
+| LOW | HANDOVER said the leaf-lifetime fix was done | Reworded: in review |
+| LOW | Mixed-version contest split at rank >= 1 | Section 5 |
+| LOW | Re-wrapped commit can strand the real committer at rank >= 1 (pre-existing) | Section 6, follow-up with the smallest fix |
+| LOW | Sync proposal case used Bob's own proposal | Now Carol's, wrapped by Alice |
+| LOW | Drain path not pinned for a record only the new guard refuses | New drain test |
+| LOW | Pre-check-before-snapshot not tested | Past-key window asserted unchanged, and shown to grow on a real commit |
+| LOW | No older-build fixture | 0.8.1 fixture test through `apply_commit` |
+| LOW | Pure-applier contest with junk; unauthorized records not counted | Not added: the contest check is one line on a path the contest test already drives; unauthorized records are rejected before the counter by design (`authorize_committer` logs them) |
+| LOW | Header checks duplicated in two crates | One `check_commit_header` used by both |
+| LOW | `catcomsctl` stats line lacks the counter | Added |

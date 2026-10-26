@@ -1676,6 +1676,7 @@ pub struct AppliedCommit { pub removed: bool }
 pub enum CommitRefusal { NotProtocolMessage, NotCiphertext, NotCommitContent(&str), WrongGroup,
                          WrongEpoch { expected, found, current }, NotStagedCommit }
 pub fn commit_header(&[u8]) -> Result<CommitHeader { group_id, epoch }, CommitRefusal>;   // header only, exact parse, no state
+pub fn check_commit_header(&[u8], group_id, expected_epoch, current_epoch) -> Result<(), CommitRefusal>;   // apply_commit's own pre-check
 // feature "test-support" (dev-dependency only): ServerGroup::test_self_update_proposal / test_external_commit fixtures.
 
 pub struct InviteToken {           // pasteable, single-use, device-bound capability (INVITE_DOMAIN v2)

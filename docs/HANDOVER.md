@@ -8,19 +8,19 @@ boundary: THREAT-MODEL, 26 October.
 - `ServerGroup::apply_commit(device, bytes, expected_epoch)` is the commit-only entry point. It
   refuses, before decrypting anything, whatever is not exactly one `PrivateMessage` commit for this
   group built at `expected_epoch` (the current epoch), then runs every existing commit check.
-- `catcoms-sync` records, counts and acts on a commit record only through it (in-order apply and
-  both fork-contest apply branches). The fork contest refuses a record that is not a commit for
-  its own label. A restore drops such records from a persisted log. `SyncStats` gains
-  `commit_records_refused`.
+- `catcoms-sync` applies, records and counts a received commit record only through it (in-order
+  apply and both fork-contest apply branches); its own commits are recorded after its own merge, as
+  before. The fork contest refuses a record that is not a commit for its own label. A restore drops
+  such records from a persisted log. `SyncStats` gains `commit_records_refused`.
 - No wire or storage format change. Older peers still log and serve non-commits; this build
   refuses them when it applies.
 - Follow-ups: unauthenticated records can still squat future buffer slots and stall commit
-  recovery (pre-existing); at `max_committer_rank >= 1` an unappliable commit can still win a fork
-  contest; `committer_device` is not bound to the commit's MLS sender; catch-up has no typed
-  outcome for "offered at my epoch, refused".
+  recovery (pre-existing); at `max_committer_rank >= 1` (off by default) an unappliable or re-wrapped
+  commit can still win a fork contest and a mixed-version contest can split; `committer_device`
+  is not bound to the commit's MLS sender; catch-up has no typed outcome for "offered at my epoch,
+  refused".
 
-Checks: catcoms-mls and catcoms-sync tests, Clippy and fmt for both, the ambient and raw-fs
-gates and `cargo deny`; the PR lists the results. Complete suites: CI.
+Checks run locally are listed in the PR; complete suites run in CI.
 
 ## Toolchain and crypto dependency update (24 October, branch `crypto-bigint-upgrade`)
 
@@ -49,9 +49,10 @@ Pre-existing, found in review, not fixed in this PR: any member's KeyPackage lea
 openmls's default 84 days. The designated committer's own leaf is replaced by its commits, but
 non-committing members never refresh their KeyPackage leaves. Once any such leaf in a group is
 that old, every new Welcome join to that group fails with `Lifetime(Expired)`. openmls
-0.8 behaves the same, so alpha groups may already be affected. Fixed separately on branch
-`mls-leaf-lifetime` (its own PR, based on `chat-update-implementation`). The second issue found
-here, non-commits recorded in the commit log, is fixed by the `mls-commit-log` entry above.
+0.8 behaves the same, so alpha groups may already be affected. A fix is in review separately
+(branch `mls-leaf-lifetime`, its own draft PR on `chat-update-implementation`, not merged at the
+time of writing). The second issue found here, non-commits recorded in the commit log, is fixed by
+the `mls-commit-log` entry above.
 
 Focused checks for each step are listed in the commit messages. The complete root, native and
 frontend suites have not yet been run on the final commit.

@@ -1564,7 +1564,8 @@ review (run before commit) hardened it:
 ## 4b. Membership commit propagation (6d-1a)
 
 The Add commit (previously discarded) is now captured and fanned out on a per-group
-**control topic**; every member applies it via `process_incoming` and advances to
+**control topic**; every member applies it via `ServerGroup::apply_commit` (which accepts only
+a commit for exactly the record's epoch; see `docs/design-mls-commit-log.md`) and advances to
 the same epoch; so a multi-member join converges and a non-admitting member can
 decrypt the new joiner's ops. A design+adversarial-review pass (verified against
 the openmls 0.8.1 source) showed the "safe by construction" claim was only *assumed*,
@@ -1579,10 +1580,12 @@ staged fork-resolution path that a non-zero rank enables.
 A member that misses a control-topic commit (unreliable delivery / brief offline)
 self-heals: an out-of-order commit is buffered (`pending_commits`), a new
 `KIND_COMMIT_CATCHUP` request fetches the gap from any member's bounded `commit_log`,
-and the missed MLS commits are **replayed in epoch order** through `process_incoming`.
-Every retained buffer/queue is hard-bounded so an untrusted peer cannot force
-unbounded allocation; a forged future commit is gap- and size-capped and fails MLS
-verification at apply time (its only residual cost is one deduped catch-up request).
+and the missed MLS commits are **replayed in epoch order** through `apply_commit`, so only real
+commits are applied and logged. Every retained buffer/queue is hard-bounded so an untrusted peer
+cannot force unbounded allocation; a forged future commit is gap- and size-capped and fails at
+apply time. It is buffered before any authorization, though, and takes its epoch's slot, so a
+forged record labelled past the group's real head can keep a member's commit recovery
+re-queueing (THREAT-MODEL, 26 October; a follow-up).
 Separately, a bounded **past-epoch channel-key window** (`snapshot_epoch_keys` before
 each advance → `Zeroizing` keys, evicted past `max_past_epochs`) lets an op sealed
 just before an epoch boundary still decrypt (`ingest_with_key`, inner signature still
