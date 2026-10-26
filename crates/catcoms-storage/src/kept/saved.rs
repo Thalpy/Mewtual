@@ -524,10 +524,11 @@ fn locate_saved(entry: &SavedFile) -> Result<PathBuf, SavedPresence> {
 
 /// What "Replace my older saved copy" is asked to do: the older copy (an entry read from the list
 /// when the new save was recorded), the new copy's location (it must have identities), and the
-/// name a one-click save asked for (native's sanitized Downloads name), which decides whether the
-/// new copy takes the old name. `None` for a name the user chose in Save as: that name is never
-/// renamed (design review M2). The export's own journal cannot tell these apart, because creation
-/// numbers the name before the staging file exists.
+/// name a fresh one-click save into Downloads asked for (native's sanitized Downloads name), which
+/// decides whether the new copy takes the old name. `None` for a name the user chose in Save as
+/// and for any reopened or recovered journal (whose name may be one the user typed): such a name
+/// is never renamed (design review M2, adversarial review M2). The export's own journal cannot
+/// tell these apart, because creation numbers the name before the staging file exists.
 #[derive(Debug, Clone)]
 pub struct ReplaceRequest {
     pub old: SavedFile,
@@ -584,8 +585,9 @@ pub enum ReplaceOutcome {
     Linked { old_leaf: String },
     /// The old copy was deleted, but the new copy could not take its name (taken meanwhile, or
     /// the link failed). The caller forgets the old entry and tells the user, naming the new
-    /// copy's own name only when `still_named` (it still has it).
-    RemovedNotMoved { still_named: bool },
+    /// copy's own name only when `still_named` is `Some(true)` (seen to still have it); `Some
+    /// (false)` means it was seen gone, `None` that it could not be read (re-review LOW 1).
+    RemovedNotMoved { still_named: Option<bool> },
     /// Nothing was deleted.
     Refused(ReplaceRefusal),
     /// Unix: the old copy was moved aside for its last check and could not be put back. It may be
@@ -680,7 +682,10 @@ pub fn replace_older_copy(
         return ReplaceOutcome::Removed;
     }
     if !keep_going() {
-        return ReplaceOutcome::RemovedNotMoved { still_named: true };
+        // Checked, not assumed (re-review LOW 3): only Windows' pin guarantees it.
+        return ReplaceOutcome::RemovedNotMoved {
+            still_named: pin.still_named(&folder, &request.new.leaf).ok(),
+        };
     }
     match external::link_name(&folder, new_folder, &pin, &request.new.leaf, old_leaf) {
         external::LinkName::Linked => ReplaceOutcome::Linked {
@@ -692,24 +697,54 @@ pub fn replace_older_copy(
     }
 }
 
+/// What [`drop_first_name`] left, so the save result names only a name seen to hold the copy
+/// (adversarial re-review MEDIUM: a note saying "both names" after the old name went could lead
+/// the user to delete the only copy).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FirstNameDrop {
+    /// The first name was removed while the old name held the copy: the copy has the old name.
+    Removed,
+    /// Nothing was removed, and both names were seen to hold the copy (the same file).
+    BothNames,
+    /// Nothing was removed; only the old name was seen to hold the copy (the first name went, or
+    /// holds something else now).
+    OnlyOld,
+    /// Nothing was removed; only the first name was seen to hold the copy (the old name went, or
+    /// holds something else now). The caller moves the list entry back to the first name.
+    OnlyFirst,
+    /// Nothing was removed, and which names hold the copy could not be shown (both went, or a
+    /// name could not be read).
+    Unknown,
+}
+
 /// Step 6: remove the new copy's first name `first_leaf` after [`ReplaceOutcome::Linked`] and the
 /// list rename, only while it holds the new copy **and `old_leaf` still does too** (review H1):
 /// the old name may have been deleted or replaced since the link, and then the first name is the
-/// only copy. Returns whether the name was removed; `false` leaves both names (the same file) or
-/// the only one.
+/// only copy, which stays. When nothing was removed, both names are looked at again, read-only, so
+/// the answer says which of them hold the copy now.
 pub fn drop_first_name(
     new: &SavedLocation,
     first_leaf: &str,
     old_leaf: &str,
     rng: &mut dyn CryptoRngCore,
-) -> bool {
+) -> FirstNameDrop {
     let (Some((folder_id, file_id)), Some(folder)) = (new.identity, new.folder_path()) else {
-        return false;
+        return FirstNameDrop::Unknown;
     };
-    matches!(
-        external::remove_second_name(&folder, folder_id, first_leaf, old_leaf, file_id, rng),
-        Ok(Verified::Removed { .. })
-    )
+    if let Ok(Verified::Removed { .. }) =
+        external::remove_second_name(&folder, folder_id, first_leaf, old_leaf, file_id, rng)
+    {
+        return FirstNameDrop::Removed;
+    }
+    // By file identity: a name holds the copy only if it opens that very file. An unreadable name
+    // proves nothing either way.
+    let holds = |leaf: &str| external::names_copy(&folder, leaf, file_id).ok();
+    match (holds(old_leaf), holds(first_leaf)) {
+        (Some(true), Some(true)) => FirstNameDrop::BothNames,
+        (Some(true), Some(false)) => FirstNameDrop::OnlyOld,
+        (Some(false), Some(true)) => FirstNameDrop::OnlyFirst,
+        _ => FirstNameDrop::Unknown,
+    }
 }
 
 #[cfg(test)]

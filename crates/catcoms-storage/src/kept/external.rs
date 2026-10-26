@@ -1317,13 +1317,20 @@ pub(super) fn pin_copy(
 }
 
 impl CopyPin {
-    /// Read-only: whether `folder/leaf` still names the pinned copy.
-    fn still_named(&self, folder: &Path, leaf: &str) -> bool {
-        matches!(
-            open_nofollow(&folder.join(leaf), false),
-            Ok(AtName::Object(found))
-                if matches!(verify(&found, Expected::Journal(self.identity)), Ok(Some(_)))
-        )
+    /// Read-only: whether `folder/leaf` still names the pinned copy. An error means it could not
+    /// be read, which callers must never report as "gone" (re-review LOW 1).
+    pub(super) fn still_named(&self, folder: &Path, leaf: &str) -> io::Result<bool> {
+        names_copy(folder, leaf, self.identity)
+    }
+}
+
+/// Read-only: whether `folder/leaf` names the file with `identity` (PR #56). `Ok(false)` when
+/// nothing, or another object, is at the name; an error when the name could not be read right now
+/// (a sharing violation, a permission error), which says nothing about whether the copy is there.
+pub(super) fn names_copy(folder: &Path, leaf: &str, identity: FileIdentity) -> io::Result<bool> {
+    match open_nofollow(&folder.join(leaf), false)? {
+        AtName::Object(found) => Ok(verify(&found, Expected::Journal(identity))?.is_some()),
+        AtName::Missing | AtName::Foreign => Ok(false),
     }
 }
 
@@ -1463,7 +1470,8 @@ pub(super) fn remove_unchanged(
         }
         before_replace_delete(&path);
         // The caller's pin keeps the new copy's name in place, so this holds through the delete.
-        if !pin.still_named(folder, new_leaf) {
+        // A name that cannot be read is an error ("could not be checked"), never "gone".
+        if !pin.still_named(folder, new_leaf)? {
             return Ok(Unchanged::NewGone);
         }
         inject(Effect::Remove)?;
@@ -1547,7 +1555,7 @@ pub(super) fn remove_unchanged(
             return Ok(Unchanged::Stopped);
         }
         before_replace_delete(&folder.join(leaf));
-        if !pin.still_named(folder, new_leaf) {
+        if !pin.still_named(folder, new_leaf)? {
             return Ok(Unchanged::NewGone);
         }
         let aside = aside_name(rng);
@@ -1578,12 +1586,15 @@ pub(super) fn remove_unchanged(
                 Err(_) => Unchanged::Stranded,
             });
         }
-        // Once more right before the unlink: the new copy must still have its name.
-        if !pin.still_named(folder, new_leaf) {
-            return Ok(match rename_back(&pinned.dir, &aside, leaf) {
-                Ok(()) => Unchanged::NewGone,
-                Err(_) => Unchanged::Stranded,
-            });
+        // Once more right before the unlink: the new copy must still have its name. Gone puts the
+        // old copy back and refuses; unreadable puts it back and reports the error (could not be
+        // checked).
+        let named = pin.still_named(folder, new_leaf);
+        if !matches!(named, Ok(true)) {
+            return match rename_back(&pinned.dir, &aside, leaf) {
+                Ok(()) => named.map(|_| Unchanged::NewGone),
+                Err(_) => Ok(Unchanged::Stranded),
+            };
         }
         let removed = inject(Effect::Remove).and_then(|()| {
             rustix::fs::unlinkat(&pinned.dir, aside.as_str(), rustix::fs::AtFlags::empty())
@@ -1616,8 +1627,9 @@ pub(super) enum LinkName {
     /// `to` now names the new copy too.
     Linked,
     /// Nothing was linked (the name was taken, or the link failed); `still_named` says whether
-    /// the new copy still has its own name, so the note never names a name that is gone.
-    NotLinked { still_named: bool },
+    /// the new copy still has its own name (`None`: it could not be read), so the note never
+    /// names a name that is gone or unconfirmed.
+    NotLinked { still_named: Option<bool> },
 }
 
 /// PR #56, "Replace my older saved copy" step 4: give the pinned new copy (named `from`) the
@@ -1633,7 +1645,7 @@ pub(super) fn link_name(
     to: &str,
 ) -> LinkName {
     let not_linked = || LinkName::NotLinked {
-        still_named: pin.still_named(folder, from),
+        still_named: pin.still_named(folder, from).ok(),
     };
     let linked = match link_open(&pin.file, folder, Some(folder_id), from, to) {
         Ok(linked) => linked,

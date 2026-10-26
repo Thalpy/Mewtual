@@ -25,8 +25,8 @@ use super::*;
 use catcoms_app::{DownloadReady, SavedFilesLoad};
 use catcoms_storage::kept::{
     drop_first_name, replace_older_copy, saved_file_location, saved_file_presence, ExportJournal,
-    NoCandidate, ReplaceOutcome, ReplaceRefusal, ReplaceRequest, SavedFile, SavedFileId,
-    SavedFiles, SavedLocation, SavedPresence,
+    FirstNameDrop, NoCandidate, ReplaceOutcome, ReplaceRefusal, ReplaceRequest, SavedFile,
+    SavedFileId, SavedFiles, SavedLocation, SavedPresence,
 };
 use private_downloads::{SavedCheck, SAVED_CHECK_WAIT};
 
@@ -69,9 +69,20 @@ pub(super) const NOT_REPLACED_CANNOT_CHECK: &str = "Mewtual did not replace the 
 /// L3).
 pub(super) const NOT_REPLACED_THIS_TIME: &str =
     "Mewtual did not replace any earlier copy this time.";
-pub(super) const NOT_REPLACED_NEW_GONE: &str = "Mewtual did not replace the copy it saved before, because the new copy was moved or deleted meanwhile.";
+/// The new copy was not there (or not the same size) when the replace started, or had gone right
+/// before the delete (adversarial review H1).
+pub(super) const NOT_REPLACED_NEW_GONE: &str = "Mewtual did not replace the copy it saved before, because the new copy was moved, changed or deleted meanwhile.";
+/// The old copy went, and the new copy was then seen gone from its own name too.
 pub(super) const REMOVED_NEW_GONE: &str =
     "Mewtual removed the copy it saved before, but the new copy was moved or deleted meanwhile.";
+/// The old copy went, the new copy could not take its name, and its own name could not be read
+/// (re-review LOW 1): no name is claimed.
+pub(super) const REMOVED_NOT_MOVED: &str =
+    "Mewtual removed the copy it saved before, but could not give this copy its name.";
+/// After the link, neither name could be shown to hold the copy (re-review MEDIUM): no name is
+/// claimed.
+pub(super) const NAME_UNCONFIRMED: &str =
+    "Mewtual could not confirm which name this saved file has now.";
 pub(super) const REPLACE_STRANDED: &str = "Mewtual could not finish replacing the copy it saved before. It may be in that folder under a name starting with mewtual-removing-.";
 
 /// "Mewtual removed the copy it saved before, but could not give this copy its name, so it keeps
@@ -234,7 +245,8 @@ pub(super) struct PublishedSave {
 
 /// A save that asked for "Replace my older saved copy". `claim` is `None` when another save of the
 /// same file is replacing right now (this one then makes a normal copy). `started_from` is native's
-/// sanitized Downloads name for a one-click save, `None` for a name chosen in Save as.
+/// sanitized Downloads name for a fresh one-click save (`Exported::started_from`), `None` for a
+/// name chosen in Save as and for a reopened or recovered journal.
 pub(super) struct ReplaceAsk {
     pub(super) claim: Option<ReplaceClaim>,
     pub(super) started_from: Option<String>,
@@ -466,8 +478,8 @@ pub(super) trait ReplacePorts: Send + Sync {
     async fn replace(&self, request: ReplaceRequest) -> ReplaceOutcome;
     async fn forget(&self, id: SavedFileId) -> bool;
     async fn rename(&self, id: SavedFileId, from: String, to: String) -> bool;
-    /// Step 6 on the blocking pool.
-    async fn drop_first(&self, new: SavedLocation, first: String, old: String) -> bool;
+    /// Step 6 on the blocking pool: what the first and old names hold afterwards.
+    async fn drop_first(&self, new: SavedLocation, first: String, old: String) -> FirstNameDrop;
     /// The invocation and the server incarnation are still current.
     fn live(&self) -> bool;
 }
@@ -500,10 +512,10 @@ pub(super) async fn replace_sequence(ports: &impl ReplacePorts, plan: ReplacePla
         }
         ReplaceOutcome::RemovedNotMoved { still_named } => {
             ports.forget(old).await;
-            replaced.notes.push(if still_named {
-                kept_own_name(&first)
-            } else {
-                REMOVED_NEW_GONE.into()
+            replaced.notes.push(match still_named {
+                Some(true) => kept_own_name(&first),
+                Some(false) => REMOVED_NEW_GONE.into(),
+                None => REMOVED_NOT_MOVED.into(),
             });
         }
         ReplaceOutcome::Linked { old_leaf } => {
@@ -514,12 +526,36 @@ pub(super) async fn replace_sequence(ports: &impl ReplacePorts, plan: ReplacePla
                     .rename(plan.entry, first.clone(), old_leaf.clone())
                     .await;
             if !renamed {
+                // Step 4 just saw both names hold the copy, and nothing has been removed.
+                replaced.notes.push(second_name_left(&first));
+            } else if !ports.live() {
+                // Step 6 never ran: both names are left as step 4 saw them.
+                replaced.renamed_to = Some(old_leaf.clone());
                 replaced.notes.push(second_name_left(&first));
             } else {
-                replaced.renamed_to = Some(old_leaf.clone());
-                let dropped = ports.live() && ports.drop_first(new, first.clone(), old_leaf).await;
-                if !dropped {
-                    replaced.notes.push(second_name_left(&first));
+                // Re-review MEDIUM: say only what step 6 saw afterwards, so the result never sends
+                // the user to a name that went (deleting the other one would lose the only copy).
+                match ports.drop_first(new, first.clone(), old_leaf.clone()).await {
+                    FirstNameDrop::Removed | FirstNameDrop::OnlyOld => {
+                        replaced.renamed_to = Some(old_leaf);
+                    }
+                    FirstNameDrop::BothNames => {
+                        replaced.renamed_to = Some(old_leaf);
+                        replaced.notes.push(second_name_left(&first));
+                    }
+                    FirstNameDrop::OnlyFirst => {
+                        // The copy is only at its first name: the list follows it back (a failed
+                        // move back leaves an entry that reads "missing" or "replaced", never a
+                        // wrong claim), and the result points at the first name.
+                        if ports.live() {
+                            ports.rename(plan.entry, old_leaf, first.clone()).await;
+                        }
+                        replaced.notes.push(kept_own_name(&first));
+                    }
+                    FirstNameDrop::Unknown => {
+                        replaced.renamed_to = Some(old_leaf);
+                        replaced.notes.push(NAME_UNCONFIRMED.into());
+                    }
                 }
             }
         }
@@ -575,14 +611,14 @@ impl ReplacePorts for ActorReplace<'_> {
     async fn rename(&self, id: SavedFileId, from: String, to: String) -> bool {
         rename_entry(self.state, self.server, self.instance, id, &from, &to).await
     }
-    async fn drop_first(&self, new: SavedLocation, first: String, old: String) -> bool {
+    async fn drop_first(&self, new: SavedLocation, first: String, old: String) -> FirstNameDrop {
         let slot = self.slot.clone();
         private_downloads::blocking(move || {
             let _held = slot;
             drop_first_name(&new, &first, &old, &mut OsCryptoRng)
         })
         .await
-        .unwrap_or(false)
+        .unwrap_or(FirstNameDrop::Unknown)
     }
     fn live(&self) -> bool {
         Self::keep_going(&self.origin, &self.ready, self.deadline)()

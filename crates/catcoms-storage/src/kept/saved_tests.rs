@@ -1,6 +1,8 @@
 //! The saved-files list: codec, bounds, version handling, the read-only checks of a recorded file,
 //! and the "Replace my older saved copy" sequence at every interleaving, against real files
 //! (PR #56, `docs/design-saved-files-list.md`).
+#[cfg(unix)]
+use super::super::external::AFTER_ASIDE;
 #[cfg(windows)]
 use super::super::external::BEFORE_REMOVE;
 use super::super::external::{BEFORE_LINK, BEFORE_REPLACE_DELETE};
@@ -545,12 +547,10 @@ fn a_second_save_takes_the_old_name_and_drops_its_first_name() {
     // The old name now holds the new copy, and the new copy still has its first name.
     assert_eq!(identity_at(&fx.old_path), new_id);
     assert_eq!(identity_at(&fx.new_path), new_id);
-    assert!(drop_first_name(
-        &fx.request.new,
-        "report (1).pdf",
-        "report.pdf",
-        &mut rng()
-    ));
+    assert_eq!(
+        drop_first_name(&fx.request.new, "report (1).pdf", "report.pdf", &mut rng()),
+        FirstNameDrop::Removed
+    );
     assert_eq!(listing(&fx.dir), ["report.pdf"]);
     assert_eq!(fs::read(&fx.old_path).unwrap(), CONTENT.concat());
 }
@@ -836,7 +836,9 @@ fn a_name_taken_before_the_link_keeps_the_new_copy_under_its_own_name() {
     BEFORE_LINK.with(|hook| hook.borrow_mut().take());
     assert_eq!(
         outcome,
-        ReplaceOutcome::RemovedNotMoved { still_named: true }
+        ReplaceOutcome::RemovedNotMoved {
+            still_named: Some(true)
+        }
     );
     assert_eq!(
         fs::read(&fx.old_path).unwrap(),
@@ -929,14 +931,77 @@ fn the_first_name_stays_when_the_old_name_went_after_the_link() {
         if replaced {
             fs::write(&fx.old_path, b"another file took the name").unwrap();
         }
-        assert!(!drop_first_name(
-            &fx.request.new,
-            "report (1).pdf",
-            "report.pdf",
-            &mut rng()
-        ));
+        // Re-review MEDIUM: the answer says the copy is only at its first name, so native never
+        // tells the user both names are the same file.
+        assert_eq!(
+            drop_first_name(&fx.request.new, "report (1).pdf", "report.pdf", &mut rng()),
+            FirstNameDrop::OnlyFirst
+        );
         assert_eq!(fs::read(&fx.new_path).unwrap(), CONTENT.concat());
     }
+    // Neither name holds it any more: nothing is claimed.
+    let fx = second_save("report.pdf");
+    assert!(matches!(
+        replace_older_copy(&fx.request, &go, &mut rng()),
+        ReplaceOutcome::Linked { .. }
+    ));
+    fs::remove_file(&fx.old_path).unwrap();
+    fs::remove_file(&fx.new_path).unwrap();
+    assert_eq!(
+        drop_first_name(&fx.request.new, "report (1).pdf", "report.pdf", &mut rng()),
+        FirstNameDrop::Unknown
+    );
+}
+
+#[test]
+fn the_new_copys_own_name_is_never_claimed_once_it_went_before_the_link() {
+    // Re-review LOW 4: the new copy is deleted right before it would take the old name.
+    let fx = second_save("report.pdf");
+    let removed = Rc::new(Cell::new(false));
+    let seen = removed.clone();
+    BEFORE_LINK.with(|hook| {
+        *hook.borrow_mut() = Some(Box::new(move |new_copy: &Path| {
+            seen.set(fs::remove_file(new_copy).is_ok());
+        }));
+    });
+    let outcome = replace_older_copy(&fx.request, &go, &mut rng());
+    BEFORE_LINK.with(|hook| hook.borrow_mut().take());
+    if cfg!(windows) {
+        // The pin keeps the new copy's name, so the link goes ahead.
+        assert!(!removed.get(), "the pinned new copy could not be deleted");
+        assert!(
+            matches!(outcome, ReplaceOutcome::Linked { .. }),
+            "{outcome:?}"
+        );
+    } else {
+        // The old copy was already removed, and the new copy went: the note must not name it.
+        assert!(removed.get());
+        assert_eq!(
+            outcome,
+            ReplaceOutcome::RemovedNotMoved {
+                still_named: Some(false)
+            }
+        );
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn unix_the_new_copy_gone_after_the_rename_aside_puts_the_old_copy_back() {
+    // Re-review LOW 4: the second check, right before the unlink. The new copy goes after the old
+    // one was moved aside and verified there: the old copy is put back at its name, unchanged.
+    let fx = second_save("report.pdf");
+    let new_path = fx.new_path.clone();
+    AFTER_ASIDE.with(|hook| {
+        *hook.borrow_mut() = Some(Box::new(move |_: &Path, _: &Path| {
+            fs::remove_file(&new_path).unwrap();
+        }));
+    });
+    let outcome = replace_older_copy(&fx.request, &go, &mut rng());
+    AFTER_ASIDE.with(|hook| hook.borrow_mut().take());
+    assert_eq!(outcome, ReplaceOutcome::Refused(ReplaceRefusal::NewGone));
+    assert_eq!(fs::read(&fx.old_path).unwrap(), CONTENT.concat());
+    assert_eq!(listing(&fx.dir), ["report.pdf"]);
 }
 
 #[cfg(windows)]
@@ -970,7 +1035,7 @@ fn windows_the_other_name_cannot_go_while_the_first_one_is_removed() {
         2,
         "the old name could be neither deleted nor replaced"
     );
-    assert!(dropped);
+    assert_eq!(dropped, FirstNameDrop::Removed);
     assert_eq!(listing(&fx.dir), ["intruder", "report.pdf"]);
     assert_eq!(fs::read(&fx.old_path).unwrap(), CONTENT.concat());
 }
@@ -984,11 +1049,10 @@ fn dropping_a_first_name_that_is_not_the_new_copy_does_nothing() {
     ));
     fs::remove_file(&fx.new_path).unwrap();
     fs::write(&fx.new_path, b"someone else's file").unwrap();
-    assert!(!drop_first_name(
-        &fx.request.new,
-        "report (1).pdf",
-        "report.pdf",
-        &mut rng()
-    ));
+    // The copy is at the old name only.
+    assert_eq!(
+        drop_first_name(&fx.request.new, "report (1).pdf", "report.pdf", &mut rng()),
+        FirstNameDrop::OnlyOld
+    );
     assert_eq!(fs::read(&fx.new_path).unwrap(), b"someone else's file");
 }

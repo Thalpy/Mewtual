@@ -396,7 +396,7 @@ struct FakeReplace {
     renamed: Mutex<Vec<(String, String)>>,
     rename_ok: bool,
     dropped: Mutex<Vec<(String, String)>>,
-    drop_ok: bool,
+    drop: FirstNameDrop,
     live: AtomicBool,
 }
 impl FakeReplace {
@@ -407,7 +407,7 @@ impl FakeReplace {
             renamed: Mutex::new(Vec::new()),
             rename_ok: true,
             dropped: Mutex::new(Vec::new()),
-            drop_ok: true,
+            drop: FirstNameDrop::Removed,
             live: AtomicBool::new(true),
         }
     }
@@ -425,9 +425,9 @@ impl ReplacePorts for FakeReplace {
         self.renamed.lock().unwrap().push((from, to));
         self.rename_ok
     }
-    async fn drop_first(&self, _new: SavedLocation, first: String, old: String) -> bool {
+    async fn drop_first(&self, _new: SavedLocation, first: String, old: String) -> FirstNameDrop {
         self.dropped.lock().unwrap().push((first, old));
-        self.drop_ok
+        self.drop
     }
     fn live(&self) -> bool {
         self.live.load(Ordering::SeqCst)
@@ -506,14 +506,55 @@ async fn the_replace_sequence_changes_the_list_only_after_each_effect() {
         .notes
         .iter()
         .any(|note| note.contains("also kept the name")));
-    // A first name that could not be dropped (the old name went meanwhile, review H1).
-    let mut ports = FakeReplace::new(ReplaceOutcome::Linked {
-        old_leaf: "report.pdf".into(),
-    });
-    ports.drop_ok = false;
-    let done = replace_sequence(&ports, plan_for_test(&folder)).await;
-    assert_eq!(done.renamed_to.as_deref(), Some("report.pdf"));
-    assert!(done.notes[1].contains("also kept the name report (1).pdf"));
+    // Re-review MEDIUM: a first name that was not dropped is reported by what step 6 saw
+    // afterwards, so the result never sends the user to a name that went.
+    for (drop, renamed_to, note, moved_back) in [
+        // Both names hold the copy: the second name is named, deleting either keeps the other.
+        (
+            FirstNameDrop::BothNames,
+            Some("report.pdf"),
+            Some(second_name_left("report (1).pdf")),
+            false,
+        ),
+        // The old name went (or holds another file): the copy is only at its first name, the
+        // entry moves back and nothing says "both names".
+        (
+            FirstNameDrop::OnlyFirst,
+            None,
+            Some(kept_own_name("report (1).pdf")),
+            true,
+        ),
+        // The first name went: the copy has the old name only, nothing more to say.
+        (FirstNameDrop::OnlyOld, Some("report.pdf"), None, false),
+        // Neither could be shown: no name is claimed.
+        (
+            FirstNameDrop::Unknown,
+            Some("report.pdf"),
+            Some(NAME_UNCONFIRMED.to_owned()),
+            false,
+        ),
+    ] {
+        let mut ports = FakeReplace::new(ReplaceOutcome::Linked {
+            old_leaf: "report.pdf".into(),
+        });
+        ports.drop = drop;
+        let done = replace_sequence(&ports, plan_for_test(&folder)).await;
+        assert_eq!(done.renamed_to.as_deref(), renamed_to, "{drop:?}");
+        assert_eq!(done.notes[0], REPLACED, "{drop:?}");
+        assert_eq!(done.notes.get(1).cloned(), note, "{drop:?}");
+        let mut expected = vec![("report (1).pdf".to_owned(), "report.pdf".to_owned())];
+        if moved_back {
+            expected.push(("report.pdf".into(), "report (1).pdf".into()));
+        }
+        assert_eq!(*ports.renamed.lock().unwrap(), expected, "{drop:?}");
+        if drop != FirstNameDrop::BothNames {
+            assert!(
+                done.notes.iter().all(|n| !n.contains("Both names")),
+                "{drop:?}: {:?}",
+                done.notes
+            );
+        }
+    }
 }
 
 #[tokio::test]
@@ -527,15 +568,25 @@ async fn every_replace_outcome_has_a_truthful_note() {
         (ReplaceOutcome::AlreadyNew, true, None),
         (ReplaceOutcome::Removed, true, Some(REPLACED.to_owned())),
         (
-            ReplaceOutcome::RemovedNotMoved { still_named: true },
+            ReplaceOutcome::RemovedNotMoved {
+                still_named: Some(true),
+            },
             true,
             Some(kept_own_name("report (1).pdf")),
         ),
-        // A name that is gone is never named (adversarial review H1).
+        // A name that is gone is never named (adversarial review H1), nor one that could not be
+        // read (re-review LOW 1).
         (
-            ReplaceOutcome::RemovedNotMoved { still_named: false },
+            ReplaceOutcome::RemovedNotMoved {
+                still_named: Some(false),
+            },
             true,
             Some(REMOVED_NEW_GONE.into()),
+        ),
+        (
+            ReplaceOutcome::RemovedNotMoved { still_named: None },
+            true,
+            Some(REMOVED_NOT_MOVED.into()),
         ),
         (
             ReplaceOutcome::Refused(ReplaceRefusal::NewGone),
