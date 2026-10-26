@@ -542,13 +542,13 @@ async fn two_browser_peer_cycle(fail_second: bool) {
                 Box::pin(a.automatic_pair(ac[0])),
                 Box::pin(c.automatic_pair(ac[1]))
             );
-            tokio::join!(
+            let (failed_id, _) = tokio::join!(
                 Box::pin(a.fail_attached_pair(1, &ap)),
                 Box::pin(c.fail_attached_pair(0, &cp))
             );
             // Retained failed rows still carry the exact original parent identities.
-            assert_eq!(ap.id().logical()[..8], old.0[..8]);
-            assert_ne!(ap.id().logical(), old.0);
+            assert_eq!(failed_id[..8], old.0[..8]);
+            assert_ne!(failed_id, old.0);
             a.assert_collected_pair_known(ab[0]);
             a.current_peers(1).await;
             b.current_peers(1).await;
