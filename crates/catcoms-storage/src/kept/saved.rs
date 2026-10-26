@@ -396,22 +396,29 @@ impl SavedFiles {
     }
 
     /// Compare-and-swap of an entry's file name, after "Replace my older saved copy" gave the new
-    /// copy its old name: only while entry `id` still names `from`. Returns whether it changed.
+    /// copy its old name: only while entry `id` still names `from`. Any other entry at the new
+    /// place goes, exactly as [`Self::record`] keeps one entry per place (adversarial review M1:
+    /// an old entry whose forgetting failed would otherwise sit at the same place, and the whole
+    /// list would then decode as damaged). Returns whether it changed.
     pub fn rename(&mut self, id: SavedFileId, from: &str, to: &str) -> bool {
         if !external::valid_leaf(to) {
             return false;
         }
-        match self
+        let Some(at) = self
             .entries
-            .iter_mut()
-            .find(|entry| entry.id == id && entry.location.leaf == from)
-        {
-            Some(entry) => {
-                entry.location.leaf = to.to_owned();
-                true
-            }
-            None => false,
+            .iter()
+            .position(|entry| entry.id == id && entry.location.leaf == from)
+        else {
+            return false;
+        };
+        let mut renamed = self.entries[at].location.clone();
+        renamed.leaf = to.to_owned();
+        self.entries
+            .retain(|entry| entry.id == id || !entry.location.same_place(&renamed));
+        if let Some(entry) = self.entries.iter_mut().find(|entry| entry.id == id) {
+            entry.location = renamed;
         }
+        true
     }
 
     fn encoded_len(&self) -> usize {
@@ -555,6 +562,9 @@ pub enum ReplaceRefusal {
     Unchecked,
     /// The invocation ended or the deadline passed (`keep_going` answered false).
     Stopped,
+    /// The new copy was deleted, moved or changed before the old one could be removed beside it
+    /// (adversarial review H1): the old copy is kept, so a copy always remains.
+    NewGone,
 }
 
 /// What [`replace_older_copy`] found and did.
@@ -573,8 +583,9 @@ pub enum ReplaceOutcome {
     /// succeeded calls [`drop_first_name`].
     Linked { old_leaf: String },
     /// The old copy was deleted, but the new copy could not take its name (taken meanwhile, or
-    /// the link failed). The caller forgets the old entry and tells the user the new copy's name.
-    RemovedNotMoved,
+    /// the link failed). The caller forgets the old entry and tells the user, naming the new
+    /// copy's own name only when `still_named` (it still has it).
+    RemovedNotMoved { still_named: bool },
     /// Nothing was deleted.
     Refused(ReplaceRefusal),
     /// Unix: the old copy was moved aside for its last check and could not be put back. It may be
@@ -615,6 +626,20 @@ pub fn replace_older_copy(
         return Refused(ReplaceRefusal::Stopped);
     }
     let old_leaf = &request.old.location.leaf;
+    // The old name is the new copy's own name (in any letter case on Windows): the new save took
+    // it because the old copy was gone. Nothing to delete, and nothing to open: the pin below
+    // would exclude the delete access a check of that same file asks for.
+    if same_leaf(request.new.platform, &request.new.leaf, old_leaf) {
+        return ReplaceOutcome::AlreadyNew;
+    }
+    // Adversarial review H1: hold the new copy (same file, so the same size as the old copy) from
+    // before the old copy is checked until it has the old name, so the old copy is only ever
+    // deleted beside a copy that is still there.
+    let pin = match external::pin_copy(&folder, &request.new.leaf, new_id, request.old.size) {
+        Ok(Some(pin)) => pin,
+        Ok(None) => return Refused(ReplaceRefusal::NewGone),
+        Err(_) => return Refused(ReplaceRefusal::Unchecked),
+    };
     let removed = external::remove_unchanged(
         &folder,
         new_folder,
@@ -625,6 +650,7 @@ pub fn replace_older_copy(
             cid: request.old.cid,
             newer: new_id,
         },
+        (&pin, &request.new.leaf),
         keep_going,
         rng,
     );
@@ -639,6 +665,7 @@ pub fn replace_older_copy(
         Ok(Unchanged::Shared) => return Refused(ReplaceRefusal::Shared),
         Ok(Unchanged::FolderChanged) => return Refused(ReplaceRefusal::FolderChanged),
         Ok(Unchanged::Stopped) => return Refused(ReplaceRefusal::Stopped),
+        Ok(Unchanged::NewGone) => return Refused(ReplaceRefusal::NewGone),
         Ok(Unchanged::Stranded) => return ReplaceOutcome::Stranded,
         Err(_) => return Refused(ReplaceRefusal::Unchecked),
     }
@@ -653,13 +680,15 @@ pub fn replace_older_copy(
         return ReplaceOutcome::Removed;
     }
     if !keep_going() {
-        return ReplaceOutcome::RemovedNotMoved;
+        return ReplaceOutcome::RemovedNotMoved { still_named: true };
     }
-    match external::link_name(&folder, new_folder, &request.new.leaf, old_leaf, new_id) {
-        Ok(true) => ReplaceOutcome::Linked {
+    match external::link_name(&folder, new_folder, &pin, &request.new.leaf, old_leaf) {
+        external::LinkName::Linked => ReplaceOutcome::Linked {
             old_leaf: old_leaf.clone(),
         },
-        Ok(false) | Err(_) => ReplaceOutcome::RemovedNotMoved,
+        external::LinkName::NotLinked { still_named } => {
+            ReplaceOutcome::RemovedNotMoved { still_named }
+        }
     }
 }
 

@@ -64,8 +64,14 @@ pub(super) const NOT_REPLACED_SHARED: &str =
 pub(super) const NOT_REPLACED_UNCHECKED: &str =
     "Mewtual did not replace the copy it saved before, because it could not be checked right now.";
 pub(super) const NOT_REPLACED_CANNOT_CHECK: &str = "Mewtual did not replace the copy it saved before, because it cannot check files in that folder.";
+/// Said when a replace was asked for but none could be considered (a save that could not be
+/// listed, a kept record, a recovered save). It claims no earlier copy exists (adversarial review
+/// L3).
 pub(super) const NOT_REPLACED_THIS_TIME: &str =
-    "Mewtual did not replace the copy it saved before this time.";
+    "Mewtual did not replace any earlier copy this time.";
+pub(super) const NOT_REPLACED_NEW_GONE: &str = "Mewtual did not replace the copy it saved before, because the new copy was moved or deleted meanwhile.";
+pub(super) const REMOVED_NEW_GONE: &str =
+    "Mewtual removed the copy it saved before, but the new copy was moved or deleted meanwhile.";
 pub(super) const REPLACE_STRANDED: &str = "Mewtual could not finish replacing the copy it saved before. It may be in that folder under a name starting with mewtual-removing-.";
 
 /// "Mewtual removed the copy it saved before, but could not give this copy its name, so it keeps
@@ -85,7 +91,10 @@ fn second_name_left(name: &str) -> String {
 fn refusal_note(refusal: ReplaceRefusal) -> &'static str {
     match refusal {
         ReplaceRefusal::OtherFolder => NOT_REPLACED_ELSEWHERE,
-        ReplaceRefusal::Changed | ReplaceRefusal::FolderChanged => NOT_REPLACED_CHANGED,
+        ReplaceRefusal::Changed => NOT_REPLACED_CHANGED,
+        // Adversarial review L2: a folder that moved says nothing about the copy itself.
+        ReplaceRefusal::FolderChanged => NOT_REPLACED_UNCHECKED,
+        ReplaceRefusal::NewGone => NOT_REPLACED_NEW_GONE,
         ReplaceRefusal::MoreNames => NOT_REPLACED_NAMES,
         ReplaceRefusal::ReadOnly => NOT_REPLACED_READ_ONLY,
         ReplaceRefusal::Shared => NOT_REPLACED_SHARED,
@@ -489,9 +498,13 @@ pub(super) async fn replace_sequence(ports: &impl ReplacePorts, plan: ReplacePla
             ports.forget(old).await;
             replaced.notes.push(REPLACED.into());
         }
-        ReplaceOutcome::RemovedNotMoved => {
+        ReplaceOutcome::RemovedNotMoved { still_named } => {
             ports.forget(old).await;
-            replaced.notes.push(kept_own_name(&first));
+            replaced.notes.push(if still_named {
+                kept_own_name(&first)
+            } else {
+                REMOVED_NEW_GONE.into()
+            });
         }
         ReplaceOutcome::Linked { old_leaf } => {
             ports.forget(old).await;

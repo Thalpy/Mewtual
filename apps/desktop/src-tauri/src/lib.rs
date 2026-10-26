@@ -15553,11 +15553,13 @@ async fn save_group_file(
         // journal), and whether this save found an interrupted session's publication instead.
         let mut journaled_location = None;
         let mut recovered = false;
+        let mut started_from = None;
         let path = match journaled {
             Some(exported) => {
                 staging_note = exported.staging_note.map(str::to_owned);
                 journaled_location = Some(exported.location);
                 recovered = exported.recovered;
+                started_from = exported.started_from;
                 exported.path
             }
             None => {
@@ -15599,12 +15601,11 @@ async fn save_group_file(
         let asked = replace_older.unwrap_or(false);
         let ask = (asked && !recovered).then(|| saved_files::ReplaceAsk {
             claim: saved_files::ReplaceClaim::try_acquire(server, target),
-            // A one-click save asked for the sanitized listed name; a Save as name is the
-            // user's own and is never renamed (design review M2).
-            started_from: match &destination {
-                private_downloads::Destination::Downloads(_) => Some(safe_download_name(&name)),
-                private_downloads::Destination::Chosen(_) => None,
-            },
+            // Only a fresh one-click save into Downloads names what it asked for; a Save as name,
+            // or a reopened journal's (which may be a Save as name), is never renamed (design
+            // review M2, adversarial review M2). The non-resumable writer has no identity, so it
+            // never replaces anyway.
+            started_from,
         });
         let location = journaled_location
             .or_else(|| catcoms_storage::kept::SavedLocation::unidentified(&path));

@@ -1954,6 +1954,11 @@ pub(super) struct Exported {
     /// The reopen found an interrupted session's publication instead of publishing now. Listed,
     /// but never a replace (design section 5).
     pub(super) recovered: bool,
+    /// The name a fresh one-click save into Downloads asked for (before numbering), which lets
+    /// "Replace my older saved copy" give the new copy the old copy's name. `None` for a name
+    /// chosen in Save as and for any reopened journal, whose name may be one the user typed
+    /// (adversarial review M2: a Save as journal resumed by a plain Resume is never renamed).
+    pub(super) started_from: Option<String>,
 }
 
 /// Review M-5: map what happened to our staging name after publication to (may the record be
@@ -1998,11 +2003,13 @@ pub(super) async fn export_sequence(
     name: &str,
 ) -> Result<Option<Exported>, String> {
     let base = safe_download_name(name);
+    let mut started_from = None;
     let mut file = match ports.export_state().await? {
         None => {
             let plan = plan.clone();
             let created = match destination {
                 Destination::Downloads(folder) => {
+                    started_from = Some(base.clone());
                     let (folder, name) = (folder.clone(), base.clone());
                     blocking(move || ExportFile::create(&folder, &name, plan, &mut OsCryptoRng))
                         .await?
@@ -2075,6 +2082,7 @@ pub(super) async fn export_sequence(
                         staging_note,
                         location,
                         recovered: true,
+                        started_from: None,
                     }));
                 }
                 ExportReopen::Halt(halt) => return Err(record_halt(ports, journal, halt).await),
@@ -2226,6 +2234,7 @@ pub(super) async fn export_sequence(
         staging_note,
         location,
         recovered: false,
+        started_from,
     }))
 }
 

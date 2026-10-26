@@ -1277,6 +1277,54 @@ pub(super) enum Unchanged {
     /// Unix: moved aside for its last check and could not be put back.
     #[cfg_attr(not(unix), allow(dead_code))]
     Stranded,
+    /// The new copy no longer holds its name right before the delete (deleted, quarantined or
+    /// moved meanwhile): nothing was deleted, so a copy always remains (adversarial review H1).
+    NewGone,
+}
+
+/// The new copy of a replace, held open from before the old copy is checked until its name is
+/// given the old name (adversarial review H1). On Windows the handle is the delete-denying pin of
+/// publication: while it is held nobody can delete, rename or replace the new copy's name, so the
+/// old copy is only ever deleted beside a copy that is still there. Elsewhere it is an open
+/// descriptor (Linux and Android link from it), and the name is checked again right before the
+/// delete; a process of the same account could still remove it in between (the documented Unix
+/// residual).
+pub(super) struct CopyPin {
+    file: File,
+    identity: FileIdentity,
+}
+
+/// Pin `folder/leaf` as the new copy: a regular file with `identity` and exactly `size` bytes.
+/// `Ok(None)` when it is not there, or not that file.
+pub(super) fn pin_copy(
+    folder: &Path,
+    leaf: &str,
+    identity: FileIdentity,
+    size: u64,
+) -> io::Result<Option<CopyPin>> {
+    #[cfg(windows)]
+    let opened = open_leaf_pinned(&folder.join(leaf))?;
+    #[cfg(not(windows))]
+    let opened = open_leaf(&folder.join(leaf), false)?;
+    match opened {
+        Leaf::Opened(file, observed)
+            if observed.identity == identity && file.metadata()?.len() == size =>
+        {
+            Ok(Some(CopyPin { file, identity }))
+        }
+        _ => Ok(None),
+    }
+}
+
+impl CopyPin {
+    /// Read-only: whether `folder/leaf` still names the pinned copy.
+    fn still_named(&self, folder: &Path, leaf: &str) -> bool {
+        matches!(
+            open_nofollow(&folder.join(leaf), false),
+            Ok(AtName::Object(found))
+                if matches!(verify(&found, Expected::Journal(self.identity)), Ok(Some(_)))
+        )
+    }
 }
 
 /// Read `file` from the start: exactly `size` bytes hashing to `cid`. `None` when `keep_going`
@@ -1333,14 +1381,20 @@ fn content_is(
 ///   renamed aside (PR #51 review H3: the user's file is never hidden while it is read). At the
 ///   aside name the identity, one name, size and modification time must still match, else it is
 ///   put back without replacing; then `unlinkat`.
+///
+/// Both: `new_copy` (the new copy, pinned by the caller, named `new_leaf`) must still hold its name
+/// right before the delete, else nothing is deleted (`NewGone`, adversarial review H1).
+#[allow(clippy::too_many_arguments)]
 pub(super) fn remove_unchanged(
     folder: &Path,
     folder_id: FileIdentity,
     leaf: &str,
     copy: UnchangedCopy,
+    new_copy: (&CopyPin, &str),
     keep_going: &dyn Fn() -> bool,
     rng: &mut dyn catcoms_rt::CryptoRngCore,
 ) -> io::Result<Unchanged> {
+    let (pin, new_leaf) = new_copy;
     #[cfg(windows)]
     {
         use std::os::windows::fs::OpenOptionsExt;
@@ -1351,6 +1405,15 @@ pub(super) fn remove_unchanged(
         const FILE_SHARE_READ: u32 = 0x1;
         const FILE_ATTRIBUTE_READONLY: u64 = 0x1;
         let _ = &rng;
+        // Adversarial review L4: the folder first, so a folder that went (or moved) reads as
+        // changed, never as "the old copy is missing" (which would forget an entry whose file
+        // still exists elsewhere).
+        match folder_identity(folder) {
+            Ok(id) if id == folder_id => {}
+            Ok(_) => return Ok(Unchanged::FolderChanged),
+            Err(error) if unreachable(&error) => return Ok(Unchanged::FolderChanged),
+            Err(error) => return Err(error),
+        }
         let path = folder.join(leaf);
         let mut file = match OpenOptions::new()
             .access_mode(DELETE | FILE_READ_DATA | FILE_READ_ATTRIBUTES | SYNCHRONIZE)
@@ -1399,6 +1462,10 @@ pub(super) fn remove_unchanged(
             return Ok(Unchanged::Stopped);
         }
         before_replace_delete(&path);
+        // The caller's pin keeps the new copy's name in place, so this holds through the delete.
+        if !pin.still_named(folder, new_leaf) {
+            return Ok(Unchanged::NewGone);
+        }
         inject(Effect::Remove)?;
         use fs_at::os::windows::FileExt;
         file.delete_by_handle().map_err(|(_, error)| error)?;
@@ -1440,7 +1507,22 @@ pub(super) fn remove_unchanged(
         if metadata.mode() & 0o200 == 0 {
             return Ok(Unchanged::ReadOnly);
         }
-        if pinned.shared || metadata.mode() & 0o022 != 0 {
+        // Adversarial review L1: the file gets the folder's rule (owner, mode bits, a proven
+        // user-private group without an extended ACL), so a umask-002 export in the user's own
+        // folder is not refused, while a file other accounts may write is.
+        let me = rustix::process::geteuid().as_raw();
+        let file_shared = shared_folder(
+            FolderOwnership {
+                owner: metadata.uid(),
+                group: metadata.gid(),
+                // A file's sticky bit means nothing for who may write it.
+                mode: metadata.mode() & !0o1000,
+            },
+            me,
+            rustix::process::getegid().as_raw(),
+            |gid| !extended_acl_present(&file) && system_group_is_private(gid, me),
+        );
+        if pinned.shared || file_shared {
             return Ok(Unchanged::Shared);
         }
         let stamp = |metadata: &fs::Metadata| {
@@ -1465,6 +1547,9 @@ pub(super) fn remove_unchanged(
             return Ok(Unchanged::Stopped);
         }
         before_replace_delete(&folder.join(leaf));
+        if !pin.still_named(folder, new_leaf) {
+            return Ok(Unchanged::NewGone);
+        }
         let aside = aside_name(rng);
         match rename_no_replace(&pinned.dir, leaf, &aside) {
             Ok(()) => {}
@@ -1493,6 +1578,13 @@ pub(super) fn remove_unchanged(
                 Err(_) => Unchanged::Stranded,
             });
         }
+        // Once more right before the unlink: the new copy must still have its name.
+        if !pin.still_named(folder, new_leaf) {
+            return Ok(match rename_back(&pinned.dir, &aside, leaf) {
+                Ok(()) => Unchanged::NewGone,
+                Err(_) => Unchanged::Stranded,
+            });
+        }
         let removed = inject(Effect::Remove).and_then(|()| {
             rustix::fs::unlinkat(&pinned.dir, aside.as_str(), rustix::fs::AtFlags::empty())
                 .map_err(io::Error::from)
@@ -1508,7 +1600,9 @@ pub(super) fn remove_unchanged(
     }
     #[cfg(not(any(windows, unix)))]
     {
-        let _ = (folder, folder_id, leaf, copy, keep_going, rng);
+        let _ = (
+            folder, folder_id, leaf, copy, pin, new_leaf, keep_going, rng,
+        );
         Err(io::Error::new(
             io::ErrorKind::Unsupported,
             "verified removal is unavailable on this platform",
@@ -1516,35 +1610,38 @@ pub(super) fn remove_unchanged(
     }
 }
 
-/// PR #56, "Replace my older saved copy" step 4: give the new copy (`from`, with `identity`) the
+/// What [`link_name`] did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum LinkName {
+    /// `to` now names the new copy too.
+    Linked,
+    /// Nothing was linked (the name was taken, or the link failed); `still_named` says whether
+    /// the new copy still has its own name, so the note never names a name that is gone.
+    NotLinked { still_named: bool },
+}
+
+/// PR #56, "Replace my older saved copy" step 4: give the pinned new copy (named `from`) the
 /// absent name `to` in the same folder, never replacing anything, and confirm that `to` holds it.
-/// The new copy is pinned first (Windows: the delete-denying pin of publication; elsewhere an open
-/// descriptor that Linux and Android link from) and must have `identity`, then [`link_open`] makes
-/// the name. `Ok(false)` when `from` no longer holds the new copy, `to` is taken, or `to` holds
-/// something else right after the link (nothing of ours is claimed then).
+/// [`link_open`] links from the pin's own handle (Windows: under its delete-denying share; Linux
+/// and Android: from its descriptor). A taken name, a failed link, or another object at `to` right
+/// after the link is `NotLinked` (nothing of ours is claimed then).
 pub(super) fn link_name(
     folder: &Path,
     folder_id: FileIdentity,
+    pin: &CopyPin,
     from: &str,
     to: &str,
-    identity: FileIdentity,
-) -> io::Result<bool> {
-    #[cfg(windows)]
-    let opened = open_leaf_pinned(&folder.join(from))?;
-    #[cfg(not(windows))]
-    let opened = open_leaf(&folder.join(from), false)?;
-    let file = match opened {
-        Leaf::Opened(file, observed) if observed.identity == identity => file,
-        _ => return Ok(false),
+) -> LinkName {
+    let not_linked = || LinkName::NotLinked {
+        still_named: pin.still_named(folder, from),
     };
-    let linked = match link_open(&file, folder, Some(folder_id), from, to) {
+    let linked = match link_open(&pin.file, folder, Some(folder_id), from, to) {
         Ok(linked) => linked,
-        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => return Ok(false),
-        Err(error) => return Err(error),
+        Err(_) => return not_linked(),
     };
-    match linked.open_leaf(to)? {
-        Leaf::Opened(_, observed) => Ok(observed.identity == identity),
-        _ => Ok(false),
+    match linked.open_leaf(to) {
+        Ok(Leaf::Opened(_, observed)) if observed.identity == pin.identity => LinkName::Linked,
+        _ => not_linked(),
     }
 }
 

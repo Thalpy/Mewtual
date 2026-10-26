@@ -489,9 +489,26 @@ async fn every_replace_outcome_has_a_truthful_note() {
         (ReplaceOutcome::AlreadyNew, true, None),
         (ReplaceOutcome::Removed, true, Some(REPLACED.to_owned())),
         (
-            ReplaceOutcome::RemovedNotMoved,
+            ReplaceOutcome::RemovedNotMoved { still_named: true },
             true,
             Some(kept_own_name("report (1).pdf")),
+        ),
+        // A name that is gone is never named (adversarial review H1).
+        (
+            ReplaceOutcome::RemovedNotMoved { still_named: false },
+            true,
+            Some(REMOVED_NEW_GONE.into()),
+        ),
+        (
+            ReplaceOutcome::Refused(ReplaceRefusal::NewGone),
+            false,
+            Some(NOT_REPLACED_NEW_GONE.into()),
+        ),
+        // A folder that moved says nothing about the copy (adversarial review L2).
+        (
+            ReplaceOutcome::Refused(ReplaceRefusal::FolderChanged),
+            false,
+            Some(NOT_REPLACED_UNCHECKED.into()),
         ),
         (
             ReplaceOutcome::Stranded,

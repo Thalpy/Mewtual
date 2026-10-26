@@ -1885,6 +1885,13 @@ impl ServerStore {
             ));
         }
         let plain = Zeroizing::new(list.encode());
+        // Adversarial review M1, backstop: never write a list this build would read back as
+        // damaged (it would stop recording and offer to start anew over every entry).
+        if catcoms_storage::kept::SavedFiles::decode(&plain).as_ref() != Ok(list) {
+            return Err(AppError::Invalid(
+                "the saved-files list would not read back".into(),
+            ));
+        }
         let sealed = seal(&self.keys.db_key()?, &plain, rng)?;
         self.write_saved_files_record(id, &frame(&sealed))
     }

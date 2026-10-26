@@ -9,7 +9,6 @@ use rand_chacha::ChaCha20Rng;
 use rand_core::SeedableRng;
 use std::cell::Cell;
 use std::fs;
-#[cfg(windows)]
 use std::rc::Rc;
 
 const OWNER: [u8; 64] = [3; 64];
@@ -835,13 +834,84 @@ fn a_name_taken_before_the_link_keeps_the_new_copy_under_its_own_name() {
     });
     let outcome = replace_older_copy(&fx.request, &go, &mut rng());
     BEFORE_LINK.with(|hook| hook.borrow_mut().take());
-    assert_eq!(outcome, ReplaceOutcome::RemovedNotMoved);
+    assert_eq!(
+        outcome,
+        ReplaceOutcome::RemovedNotMoved { still_named: true }
+    );
     assert_eq!(
         fs::read(&fx.old_path).unwrap(),
         b"saved by another program meanwhile",
         "never replaced"
     );
     assert_eq!(fs::read(&fx.new_path).unwrap(), CONTENT.concat());
+}
+
+#[test]
+fn the_old_copy_is_kept_when_the_new_copy_is_gone_before_the_delete() {
+    // Adversarial review H1: the user deletes the apparent duplicate (or antivirus quarantines
+    // it) while the old copy is being checked. The old copy must then stay: never no copy at all.
+    let fx = second_save("report.pdf");
+    fs::remove_file(&fx.new_path).unwrap();
+    assert_eq!(
+        replace_older_copy(&fx.request, &go, &mut rng()),
+        ReplaceOutcome::Refused(ReplaceRefusal::NewGone),
+        "gone before the replace starts"
+    );
+    assert_eq!(fs::read(&fx.old_path).unwrap(), CONTENT.concat());
+
+    // Gone (or attempted) right before the delete.
+    let fx = second_save("report.pdf");
+    let new_path = fx.new_path.clone();
+    let removed = Rc::new(Cell::new(false));
+    let seen = removed.clone();
+    BEFORE_REPLACE_DELETE.with(|hook| {
+        *hook.borrow_mut() = Some(Box::new(move |_: &Path| {
+            seen.set(fs::remove_file(&new_path).is_ok());
+        }));
+    });
+    let outcome = replace_older_copy(&fx.request, &go, &mut rng());
+    BEFORE_REPLACE_DELETE.with(|hook| hook.borrow_mut().take());
+    if cfg!(windows) {
+        // Windows holds the new copy under a delete-denying pin, so the delete attempt fails and
+        // the replace goes ahead beside a copy that is still there.
+        assert!(!removed.get(), "the pinned new copy could not be deleted");
+        assert!(
+            matches!(outcome, ReplaceOutcome::Linked { .. }),
+            "{outcome:?}"
+        );
+        assert_eq!(fs::read(&fx.old_path).unwrap(), CONTENT.concat());
+    } else {
+        // Unix has no share modes: the new copy went, so the old one is kept.
+        assert!(removed.get());
+        assert_eq!(outcome, ReplaceOutcome::Refused(ReplaceRefusal::NewGone));
+        assert_eq!(fs::read(&fx.old_path).unwrap(), CONTENT.concat());
+    }
+}
+
+#[test]
+fn renaming_onto_an_old_entrys_place_keeps_the_list_readable() {
+    // Adversarial review M1: forgetting the old entry failed, then the rename succeeded. The list
+    // must keep one entry per place, or it would decode as damaged afterwards.
+    let fx = second_save("report.pdf");
+    let mut list = SavedFiles::new(&OWNER);
+    list.record(fx.request.old.clone());
+    let new = SavedFile {
+        id: SavedFileId::from_bytes([2; 16]),
+        cid: fx.request.old.cid,
+        size: fx.request.old.size,
+        saved_at_ms: 2,
+        location: fx.request.new.clone(),
+    };
+    list.record(new);
+    assert_eq!(list.entries().len(), 2);
+    assert!(list.rename(
+        SavedFileId::from_bytes([2; 16]),
+        "report (1).pdf",
+        "report.pdf"
+    ));
+    assert_eq!(list.entries().len(), 1);
+    assert_eq!(list.entries()[0].location.leaf(), "report.pdf");
+    assert_eq!(SavedFiles::decode(&list.encode()), Ok(list));
 }
 
 #[test]
