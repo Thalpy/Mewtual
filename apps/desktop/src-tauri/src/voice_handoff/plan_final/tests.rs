@@ -595,6 +595,189 @@ async fn phase_and_plan_final_meanings_cannot_replace_each_other() {
 }
 
 #[tokio::test]
+async fn automatic_work_hides_only_issued_acked_and_actually_retired_original_plan() {
+    let case = Case::new();
+    let ledger = &case.state.voice_handoff;
+    let visible = || {
+        ledger
+            .project_work(&case.selected, 0)
+            .unwrap()
+            .metadata
+            .is_some()
+    };
+    assert!(!ledger.automatic_parent_available(&case.selected).unwrap());
+    assert!(visible());
+    let late = case.action.input().unwrap();
+    case.returned();
+    let context = Context::new(&case.state);
+    let admission = admit(&context, &case.route).await.unwrap();
+    case.row.request_plan_final(&admission).unwrap();
+    assert!(case
+        .row
+        .issue_final(admission.session())
+        .unwrap()
+        .proof
+        .is_none());
+    assert!(!ledger.automatic_parent_available(&case.selected).unwrap());
+    assert!(
+        visible(),
+        "an actual held Root input must keep this plan outstanding"
+    );
+    drop(late);
+    assert!(!ledger.automatic_parent_available(&case.selected).unwrap());
+    assert!(
+        visible(),
+        "retirement without issuance/ACK is not a certificate"
+    );
+    let issued = case.row.issue_final(admission.session()).unwrap();
+    let proof = issued.proof.expect("actual original Plan retirement");
+    assert!(!ledger.automatic_parent_available(&case.selected).unwrap());
+    assert!(
+        visible(),
+        "lost issuance is still outstanding until original ACK"
+    );
+    let acked = case
+        .row
+        .acknowledge_final(admission.session(), proof)
+        .unwrap();
+    assert!(ledger.automatic_parent_available(&case.selected).unwrap());
+    assert!(!visible());
+    // Omission is never forgetting or authority renewal. Native keeps this same row,
+    // Plan-final meaning/proof, and all paid history for exact direct recovery.
+    assert_eq!(case.row.issue_final(admission.session()).unwrap(), acked);
+    assert_eq!(
+        case.row
+            .acknowledge_final(admission.session(), proof)
+            .unwrap(),
+        acked
+    );
+    assert_eq!(
+        ledger
+            .lookup_original(&case.selected, Purpose::Derive(case.selector))
+            .unwrap()
+            .id(),
+        case.row.id()
+    );
+    assert!(
+        case.route.require_open().is_ok(),
+        "the original live Session was not ended"
+    );
+}
+
+#[tokio::test]
+async fn phase_final_ack_never_hides_a_parent_or_admits_the_next_automatic_plan() {
+    let case = Case::new();
+    case.action.settle_engine();
+    case.row
+        .close_phase(case.route.session().identity(), CloseMode::Retire)
+        .unwrap();
+    assert!(case.row.try_compact().unwrap());
+    drop(case.action);
+    let issued = case
+        .row
+        .issue_final(case.route.session().identity())
+        .unwrap();
+    assert_eq!(issued.kind, FinalKind::Phase);
+    case.row
+        .acknowledge_final(case.route.session().identity(), issued.proof.unwrap())
+        .unwrap();
+    assert!(!case
+        .state
+        .voice_handoff
+        .automatic_parent_available(&case.selected)
+        .unwrap());
+    assert!(case
+        .state
+        .voice_handoff
+        .project_work(&case.selected, 0)
+        .unwrap()
+        .metadata
+        .is_some());
+}
+
+#[tokio::test]
+async fn certified_projection_hides_exact_children_but_not_an_equal_label_foreign_parent() {
+    let case = Case::new();
+    case.returned();
+    let ledger = &case.state.voice_handoff;
+    let request = ConfirmationPurpose::Start(None);
+    let (Begin::Factory(registration), _) = ledger
+        .begin_child(case.selected.clone(), &case.row, request)
+        .unwrap()
+    else {
+        panic!("actual original child reservation")
+    };
+    let child_id = registration.id();
+    registration.mark_handoff().unwrap();
+    drop(registration);
+    let context = Context::new(&case.state);
+    let admission = admit(&context, &case.route).await.unwrap();
+    assert_eq!(
+        case.row.request_plan_final(&admission),
+        Err(VoiceError::Capacity)
+    );
+    let parent_snapshot = ledger.project_work(&case.selected, 0).unwrap();
+    let child_snapshot = ledger
+        .project_work(&case.selected, parent_snapshot.next_slot)
+        .unwrap();
+    assert_eq!(child_snapshot.metadata.as_ref().unwrap().row, child_id);
+    let child_purpose = Purpose::Confirmation {
+        parent: case.row.id(),
+        request,
+    };
+    let child = ledger
+        .resolve(&case.selected, child_purpose, child_id)
+        .unwrap();
+    child.close_pending().unwrap();
+    assert!(!ledger.automatic_parent_available(&case.selected).unwrap());
+    case.row.request_plan_final(&admission).unwrap();
+    let issued = case.row.issue_final(admission.session()).unwrap();
+    case.row
+        .acknowledge_final(admission.session(), issued.proof.unwrap())
+        .unwrap();
+    assert!(ledger.automatic_parent_available(&case.selected).unwrap());
+    assert!(ledger
+        .project_work(&case.selected, 0)
+        .unwrap()
+        .metadata
+        .is_none());
+    assert!(ledger
+        .project_work(&case.selected, parent_snapshot.next_slot)
+        .unwrap()
+        .metadata
+        .is_none());
+    // Previously returned metadata and direct authenticated child recovery remain valid
+    // history. Neither the parent nor child slot was forgotten or reused by omission.
+    assert_eq!(child_snapshot.metadata.unwrap().row, child.id());
+    assert_eq!(
+        ledger
+            .resolve(&case.selected, child_purpose, child_id)
+            .unwrap()
+            .id(),
+        child_id
+    );
+    let (_coordinator, foreign, foreign_selector) = ledger::tests::selection();
+    let Begin::Factory(foreign_row) = ledger
+        .begin(foreign.clone(), Purpose::Derive(foreign_selector))
+        .unwrap()
+    else {
+        panic!("foreign actual allocation remains independent")
+    };
+    let foreign_id = foreign_row.id();
+    assert!(!ledger.automatic_parent_available(&foreign).unwrap());
+    assert_eq!(
+        ledger
+            .project_work(&foreign, 0)
+            .unwrap()
+            .metadata
+            .unwrap()
+            .row,
+        foreign_id
+    );
+    assert!(ledger.automatic_parent_available(&case.selected).unwrap());
+}
+
+#[tokio::test]
 async fn foreign_equal_hash_session_or_context_cannot_install_plan_final_intent() {
     let case = Case::new();
     case.returned();

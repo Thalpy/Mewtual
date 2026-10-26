@@ -5,7 +5,7 @@
 import type { VoiceCryptoChain, VoiceIpcClock } from "./voice-crypto.ts";
 
 export const VOICE_SESSION_LIFECYCLE_BYTES = 2 * 1024;
-export type VoiceLifecycleStage = "waiting" | "confirmation" | "handoff" | "pc" | "rtc" | "media" | "retire" | "compact" | "advance" | "stopped";
+export type VoiceLifecycleStage = "waiting" | "confirmation" | "handoff" | "pc" | "rtc" | "media" | "retire" | "compact" | "failed" | "advance" | "stopped";
 export type VoiceLifecycleObservation = Readonly<{
   generation: object; plan: VoiceCryptoChain | null; stage: VoiceLifecycleStage;
 }>;

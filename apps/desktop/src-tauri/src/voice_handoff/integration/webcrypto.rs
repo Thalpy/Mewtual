@@ -345,6 +345,21 @@ impl Endpoint {
         self.callbacks.expected_parent = None;
     }
 
+    /// Close only the browser's OWN currently attached plan after known confirmation/
+    /// key admission. Original native Plan-final/ACK is checked independently afterward.
+    pub(crate) async fn fail_attached_pair(&mut self, peers: usize, parent: &ledger::ResolvedRow) {
+        assert!(peers <= 1);
+        assert_eq!(
+            self.step(json!({"tag":"step","name":"fail-attached","peers":peers}))
+                .await,
+            json!({"kind":"failed-plan-retired","peers":peers,"closed":0})
+        );
+        assert!(parent
+            .retired_plan_test_observation(&self.selected())
+            .unwrap());
+        self.callbacks.expected_parent = None;
+    }
+
     pub(crate) async fn end_browser_peers(&mut self, count: usize) {
         assert_eq!(
             self.step(json!({"tag":"step","name":"end-peers"})).await,

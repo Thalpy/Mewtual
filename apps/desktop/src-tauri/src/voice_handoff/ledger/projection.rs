@@ -1,5 +1,6 @@
-//! Non-creating historical work discovery. A slot is a scan hint, never an event cursor:
-//! Pending -> attached changes the same RowId and must be observed by scanning again.
+//! Non-creating outstanding-work discovery. Certified Plan-final subtrees stay available
+//! through direct authenticated history, but do not pin a new automatic consumer. A slot
+//! is a scan hint, never an event cursor: Pending -> attached changes the same RowId.
 use super::*;
 
 /// Fixed public metadata copied under the original Row guard. The actual Row remains paid
@@ -33,18 +34,28 @@ impl Ledger {
             return Err(VoiceError::Bounds);
         }
         let index = self.index.lock().unwrap_or_else(|error| error.into_inner());
-        let row = index
-            .rows
-            .iter()
-            .skip(usize::from(from))
-            .flatten()
+        let mut candidate = None;
+        for row in index.rows.iter().skip(usize::from(from)).flatten() {
             // SDP is consumed explicitly by the original-key v8 round composer. Never
             // feed that distinct action family into the confirmation/v1 public pump.
-            .find(|row| {
-                !matches!(row.key.purpose, Purpose::Sdp { .. })
-                    && row.key.matches(selected, row.key.purpose)
-            });
-        let Some(row) = row else {
+            if matches!(row.key.purpose, Purpose::Sdp { .. })
+                || !row.key.matches(selected, row.key.purpose)
+            {
+                continue;
+            }
+            // Exact native Plan-final issuance/ACK and full retirement certify that
+            // this subtree has no outstanding automatic work. Match the ACTUAL parent
+            // allocation, never a slot/selector. Direct original Control lookup/history
+            // is retained, including recovery of a lost ACK observation. Empty metadata
+            // remains insufficient evidence for any browser cleanup or advancement.
+            let parent = row.key.parent.as_ref().unwrap_or(row);
+            if Self::certified_retired_plan(&index, selected, parent)? {
+                continue;
+            }
+            candidate = Some(row);
+            break;
+        }
+        let Some(row) = candidate else {
             return Ok(WorkProjection {
                 next_slot: ROWS as u8,
                 metadata: None,

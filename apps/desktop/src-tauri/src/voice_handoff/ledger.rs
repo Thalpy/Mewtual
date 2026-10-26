@@ -493,6 +493,11 @@ impl ResolvedRow {
                 acknowledged: false,
             });
         }
+        // Plan issuance is an irreversible full-retirement witness, also used by native
+        // outstanding-work selection. Every future obligation must join the gates above
+        // BEFORE issuance; no Begin/attach/Claim/key/SDK/child path may reopen it afterward.
+        // This historical witness avoids reclassifying a retired parent on Root try-lock
+        // contention; it still grants no fresh effect or permission to forget history.
         let proof = if let Some(proof) = delivery.issued {
             proof
         } else {

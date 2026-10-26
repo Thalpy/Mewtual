@@ -13,10 +13,87 @@ pub(in crate::voice_handoff) struct Continuation {
     pub incoming: Option<Arc<CryptoAction>>,
 }
 
+#[cfg(test)]
+impl ResolvedRow {
+    /// Passive native oracle: no issuance, ACK, grant, side effect or renewed authority.
+    pub(in crate::voice_handoff) fn retired_plan_test_observation(
+        &self,
+        selected: &SelectedHandoffOwner,
+    ) -> Result<bool, VoiceError> {
+        let index = self.indexed()?;
+        Ledger::certified_retired_plan(&index, selected, &self.row)
+    }
+}
+
 impl Ledger {
+    /// A complete original Plan certificate closes this subtree permanently. This is
+    /// only an outstanding-work/admission filter, never browser advancement authority or
+    /// permission to remove history. Call under Index; direct Control recovery remains
+    /// available. A local Pending close, ordinary Return or Phase final cannot qualify.
+    pub(super) fn certified_retired_plan(
+        index: &Index,
+        selected: &SelectedHandoffOwner,
+        row: &Arc<Row>,
+    ) -> Result<bool, VoiceError> {
+        if row.key.parent.is_some()
+            || !matches!(row.key.purpose, Purpose::Derive(_))
+            || !row.key.matches(selected, row.key.purpose)
+            || !index
+                .rows
+                .iter()
+                .flatten()
+                .any(|actual| Arc::ptr_eq(actual, row))
+        {
+            return Ok(false);
+        }
+        let state = super::transition::try_lock(&row.state)?;
+        let retired = matches!(state.body, Body::Drained(..))
+            && state.status.action.is_some()
+            && state.status.drained
+            && state.status.engine.settled
+            && state.final_phase.is_none()
+            && state.final_delivery().is_some_and(|delivery| {
+                delivery.kind == FinalKind::Plan
+                    && delivery.issued.is_some()
+                    && delivery.acknowledged
+            })
+            && state
+                .plan()
+                .is_some_and(|plan| plan.control.is_none() && !plan.can_adopt_child());
+        // Issued Plan proof is the irreversible full-retirement witness established by
+        // issue_final, not a renderer claim. No later native admission may reopen it.
+        // Do NOT re-sample boolean Root Phase observers here: transient try-lock pressure
+        // maps to false there and would expose an old terminal descriptor to a fresh pump,
+        // permanently pinning it. Historical proof/ACK stays valid under that pressure.
+        if !retired {
+            return Ok(false);
+        }
+        // Same Index -> parent -> child order and closure contract as Plan final. This
+        // automatic scheduling query must refuse Capacity rather than wait on a child.
+        // At most32 children are visited; no allocation, descriptor queue or destruction.
+        for child in index.rows.iter().flatten().filter(|child| {
+            child
+                .key
+                .parent
+                .as_ref()
+                .is_some_and(|parent| Arc::ptr_eq(parent, row))
+        }) {
+            let child_state = super::transition::try_lock(&child.state)?;
+            if !sdp_rows::locally_drained(&child_state).unwrap_or_else(|| {
+                matches!(child_state.body, Body::ClosedPending)
+                    || (matches!(child_state.body, Body::Drained(..)) && child_state.status.drained)
+            }) {
+                return Ok(false);
+            }
+        }
+        Ok(true)
+    }
+
     /// The current browser coordinator can advance only one original negotiation at a
-    /// time. Do not automatically prepay another parent/Root pair while that subtree is
-    /// registered: its otherwise unused preparation can consume the current Ready budget.
+    /// time. Do not automatically prepay another parent/Root pair while an uncertified
+    /// subtree is registered: its unused preparation can consume the current Ready budget.
+    /// Exact Plan-certified retired rows may remain paid until End without blocking a
+    /// different selector. This neither forgets them nor renews their old authority.
     /// This is only a scheduling observation. Final new-parent admission repeats it under
     /// the same UI commit as begin; exact known Pending/history recovery bypasses this gate.
     pub(in crate::voice_handoff) fn automatic_parent_available(
@@ -29,10 +106,15 @@ impl Ledger {
         if self.collecting.load(Ordering::Acquire) {
             return Err(VoiceError::Capacity);
         }
-        Ok(!index.rows.iter().flatten().any(|row| {
-            matches!(row.key.purpose, Purpose::Derive(_))
+        for row in index.rows.iter().flatten() {
+            if matches!(row.key.purpose, Purpose::Derive(_))
                 && row.key.matches(selected, row.key.purpose)
-        }))
+                && !Self::certified_retired_plan(&index, selected, row)?
+            {
+                return Ok(false);
+            }
+        }
+        Ok(true)
     }
 
     /// Rotate through the finite original table. Pending work wins at its own slot,

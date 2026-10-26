@@ -232,6 +232,35 @@ fn automatic_discovery_waits_for_registered_parent_but_preserves_original_pendin
 }
 
 #[test]
+fn automatic_parent_certificate_and_projection_refuse_contended_original_state() {
+    let (_coordinator, selected, selector) = selection();
+    let ledger = Arc::new(Ledger::default());
+    let registration = ticket(&ledger, selected.clone(), selector);
+    let id = registration.id();
+    registration.mark_handoff().unwrap();
+    drop(registration);
+    let row = ledger
+        .resolve(&selected, Purpose::Derive(selector), id)
+        .unwrap();
+    let held = row.row.state.lock().unwrap();
+    assert!(matches!(
+        ledger.automatic_parent_available(&selected),
+        Err(VoiceError::Capacity)
+    ));
+    assert!(matches!(
+        ledger.project_work(&selected, 0),
+        Err(VoiceError::Capacity)
+    ));
+    drop(held);
+    assert!(!ledger.automatic_parent_available(&selected).unwrap());
+    assert!(ledger
+        .project_work(&selected, 0)
+        .unwrap()
+        .metadata
+        .is_some());
+}
+
+#[test]
 fn automatic_discovery_refuses_collection_ticket_even_when_index_has_no_parent() {
     let (_coordinator, selected, selector) = selection();
     let ledger = Arc::new(Ledger::default());

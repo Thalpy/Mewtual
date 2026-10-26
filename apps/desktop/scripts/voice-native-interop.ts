@@ -15,6 +15,8 @@ import {
 import type { VoiceIpcPurpose, VoiceIpcActionIdentity, VoiceIpcConfirmationPurpose } from "../src/voice-ipc-actions.ts";
 import { decodeVoiceWorkSnapshot } from "../src/voice-ipc-work.ts";
 import { decodeVoiceMedia } from "../src/voice-ipc-media.ts";
+import { encodeVoiceSdpPhase } from "../src/voice-ipc-sdp.ts";
+import { decodeVoiceIpcActionReply } from "../src/voice-ipc-replies.ts";
 
 const MAX_FRAME = 4096;
 const control = new NativeControlFrames(MAX_FRAME);
@@ -223,6 +225,7 @@ async function idle(): Promise<void> {
   }
 }
 type Step =
+  | { tag: "step"; name: "fail-attached"; peers: 0 | 1 }
   | { tag: "step"; name: "coordinator" | "coordinator-end"; peers: 1 | 2 }
   | { tag: "step"; name: "prepare"; owner: string; group: string }
   | { tag: "step"; name: "derive"; purpose: VoiceIpcPurpose }
@@ -231,6 +234,57 @@ type Step =
   | { tag: "step"; name: "pump" | "close" | "wedge" | "pc-custody" | "rtc-round" | "rtc-round-loss" | "rtc-round-media" | "rtc-round-media-loss" | "media-revoked" | "media-retire" | "media-retire-loss" | "media-retire-start" | "media-retire-progress" | "media-retire-finish" | "media-current-after-history" | "media-history-pending" | "advance-pair" | "media-current-all" | "end-peers" };
 async function step(value: Step): Promise<unknown> {
   switch (value.name) {
+    case "fail-attached": {
+      const session = (broker as unknown as { ipcChannels: Map<string, {
+        keys: unknown; bootstrap: unknown; tx: bigint;
+        negotiation: { terminalAction: { row: string; identity: VoiceIpcActionIdentity } | null;
+          linked: { handle: VoiceCryptoChain; sdp: unknown; binding: { handshake: string }; custody: {
+          needsClaim: boolean; needsKeyRecovery: boolean; keyReceipt: { state: string; receipt: string } | null;
+        } | null } | null; media: unknown };
+        framed<T>(operation: number, kind: number, logical: string, plaintext: Uint8Array<ArrayBuffer>, ended: boolean,
+          allowed: (kind: number, length: number) => boolean, decode: (opened: Uint8Array<ArrayBuffer>) => T): Promise<T>;
+      }> }).ipcChannels.get(owner.token)!;
+      const plan = session.negotiation.linked?.handle;
+      assert.ok(plan, "actual attached original browser plan required");
+      // The native pump oracle can precede browser observation of its final reply.
+      // Wait passively for the ORIGINAL already-running transition; do not recover an
+      // ambiguous admission or drive another positive leaf from this negative test step.
+      const readyUntil = performance.now() + 5000;
+      while (session.negotiation.linked?.custody?.keyReceipt?.state !== "current") {
+        assert.ok(performance.now() < readyUntil, "original browser key observation did not return");
+        await new Promise<void>(yes => setTimeout(yes, 10));
+      }
+      const linked = session.negotiation.linked!;
+      assert.equal(linked.handle, plan); assert.equal(linked.sdp, null);
+      assert.equal(session.negotiation.media, null);
+      assert.equal(linked.custody!.needsClaim, false); assert.equal(linked.custody!.needsKeyRecovery, false);
+      const original = session.negotiation.terminalAction!;
+      const binding = { parentRow: original.row, identity: original.identity, handshake: linked.binding.handshake,
+        key: linked.custody!.keyReceipt!.receipt, sequence: "1" };
+      plan.close();
+      // Negative-only plan selection from the OWN retained Session. No renderer row,
+      // role, result or readiness hint is supplied. Native independently certifies it.
+      await broker.retireFailedNativeNegotiation(owner, channel, plan);
+      // Deliberately bypass ONLY browser scheduling for this test. The SAME private
+      // authenticated codec sends a late first storage request with its genuine old key
+      // binding. Native must refuse it; browser closure alone cannot prove that boundary.
+      const late = encodeVoiceSdpPhase({ ...binding, request: { kind: "prepare" } });
+      try {
+        const refusal = await session.framed(late.operation, late.kind, original.row, late.body, true,
+          (kind, length) => kind === 0 && length === 19, opened => decodeVoiceIpcActionReply(opened, original.row));
+        assert.deepEqual(refusal, { kind: "refused", code: "unauthorized" });
+      } finally { late.body.fill(0); }
+      assert.equal(mediaRecords.length, value.peers);
+      for (const record of mediaRecords) assert.equal(record.calls.closed, 0);
+      if (originalSession) {
+        assert.equal(session.keys, originalSession.keys);
+        assert.equal(session.bootstrap, originalSession.bootstrap);
+        assert.ok(session.tx > originalSession.tx);
+        originalSession = null;
+      }
+      assert.equal(broker.advanceNativeNegotiation(owner, channel, plan), true);
+      return { kind: "failed-plan-retired", peers: value.peers, closed: 0 };
+    }
     case "coordinator": {
       assert.ok(value.peers === 1 || value.peers === 2);
       installCoordinatedRtc();

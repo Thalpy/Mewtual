@@ -4211,3 +4211,270 @@ test("one genuinely held admission RPC still expires old media and retains its a
     assert.equal(f.broker.counts().bytes, 0);
   } finally { held.release(); f.owner.retire(); await child.channel.close(); }
 });
+
+for (const lost of [false, true]) test(`closing a failed new peer after Finish preserves independently indexed media; lost final=${lost}`, async t => {
+  const originalRtc = globalThis.RTCPeerConnection;
+  const first = await framedMedia(t), f = first.f;
+  t.after(() => { globalThis.RTCPeerConnection = originalRtc; });
+  await first.media(); first.remaining(0); await first.retireNegotiation();
+  const firstPlan = first.child.ready.chain;
+  assert.equal(await f.broker.compactNativeNegotiation(f.owner, first.child.channel, firstPlan), true);
+  const oldResponder = f.actionHandler()!;
+  assert.equal(f.broker.advanceNativeNegotiation(f.owner, first.child.channel, firstPlan), true);
+  const child = await framedConfirmation(f, true, true, 2), custody = custodyReplies(f, child);
+  const nextResponder = f.actionHandler()!;
+  f.actions((header, body) => header.logical === first.child.parent.row
+    ? oldResponder(header, body) : nextResponder(header, body));
+  const observer = f.broker.observeNativeLifecycle(f.owner, child.channel, f.key);
+  const session = (f.broker as unknown as { ipcChannels: Map<string, { negotiation: object }> }).ipcChannels.get(f.owner.token)!;
+  const originalNegotiation = session.negotiation;
+  try {
+    await child.derive(); await child.handle().attempt();
+    await until(() => custody.keyCounts().adopted);
+    if (lost) child.parent.loseFinalReplies();
+    // The original selected Session and A-B authority remain valid. Only C's negative
+    // plan fence is requested; it must not synchronously close A-B's actual SDK peer.
+    child.ready.chain.close();
+    assert.equal(first.sdk.calls.closed, 0, "a failed new plan must not tear down established peers");
+    const deadline = performance.now() + 5000;
+    while (session.negotiation === originalNegotiation) {
+      if (performance.now() >= deadline) throw new Error(`failed peer cleanup stalled: ${JSON.stringify(child.parent.finalCounts())}`);
+      // WebCrypto runs on real worker threads in this seam. Join its actual operation
+      // before moving the fake clock; repeated clock jumps must not invent multi-second
+      // crypto delays merely because another test process is using the CPU.
+      await settledVoiceRpc(f);
+      const cadence = f.timers().delays.find(delay => delay > 0 && delay <= 1000);
+      if (cadence !== undefined) f.advance(Math.min(250, cadence));
+      await flush();
+      const state = originalNegotiation as { failedReturned: boolean; failedFlight: unknown; linked: {
+        records: Map<unknown, { drained: boolean; running: boolean; job: unknown }>;
+        confirmations: Map<unknown, { returned: boolean; running: boolean }>;
+      } | null };
+      assert.equal(first.sdk.calls.closed, 0, `indexed Current survives cleanup: returned=${state.failedReturned} flight=${!!state.failedFlight} rows=${JSON.stringify([...state.linked?.records.values() ?? []].map(r => [r.drained,r.running,!!r.job]))} children=${JSON.stringify([...state.linked?.confirmations.values() ?? []].map(c => [c.returned,c.running]))}`);
+    }
+    assert.equal(child.parent.finalCounts().finalAcknowledged, true);
+    assert.equal(child.parent.finalCounts().retireCalls, 0, "failure chooses Plan before any terminal intent");
+    assert.ok(child.parent.planCalls() >= (lost ? 2 : 1));
+    assert.ok(child.parent.finalCounts().finalCalls >= (lost ? 2 : 1));
+    assert.equal(custody.keyCounts().releases, 1);
+  } finally {
+    f.owner.retire(); await observer.close(); await child.channel.close();
+  }
+  assert.equal(f.broker.counts().bytes, 0);
+});
+
+/** A second attached Derive with no child/Claim ever admitted. Its engine is settled,
+ * but ordinary parent Return has deliberately NOT run. A-B remains indexed/current. */
+async function indexedMediaFixture(t: TestContext) {
+  const originalRtc = globalThis.RTCPeerConnection, first = await framedMedia(t), f = first.f;
+  t.after(() => { globalThis.RTCPeerConnection = originalRtc; });
+  await first.media(); first.remaining(0); await first.retireNegotiation();
+  const firstPlan = first.child.ready.chain;
+  assert.equal(await f.broker.compactNativeNegotiation(f.owner, first.child.channel, firstPlan), true);
+  const oldResponder = f.actionHandler()!;
+  assert.equal(f.broker.advanceNativeNegotiation(f.owner, first.child.channel, firstPlan), true);
+  return { first, f, oldResponder };
+}
+/** Observe actual preceding codec finally owners before advancing a simulated clock.
+ * This is a test-only empty FIFO turn, never an RPC, grant or production scheduling hint. */
+async function settledVoiceRpc(f: Awaited<ReturnType<typeof fixture>>): Promise<void> {
+  const queue = (f.broker as unknown as { ipcExecution: { run<T>(work: () => Promise<T>): Promise<T> } }).ipcExecution;
+  await queue.run(async () => undefined);
+  await flush();
+}
+async function failedParentFixture(t: TestContext) {
+  const { first, f, oldResponder } = await indexedMediaFixture(t);
+  const purpose = { ...historyPurpose, peer: hash(107), join: hash(108), keyRef: hash(109) };
+  const parent = await framedDerivation(f, true, 2, purpose), channel = f.channel();
+  const ready = await f.broker.nativeDerivationFromChannel(f.owner, channel, f.key, purpose, parent.row, parent.identity).attempt();
+  assert.equal(ready.kind, "ready"); if (ready.kind !== "ready") throw new Error("actual attached parent required");
+  const nextResponder = f.actionHandler()!;
+  f.actions((header, body) => header.logical === first.child.parent.row ? oldResponder(header, body) : nextResponder(header, body));
+  assert.equal((await ready.derivation.attempt()).kind, "accepted");
+  await until(() => parent.counts().settlements !== 0);
+  return { first, f, parent, channel, ready, purpose };
+}
+
+test("attached failure before ordinary parent Return obtains exact Plan final and preserves indexed media", async t => {
+  const { first, f, parent, channel, ready } = await failedParentFixture(t);
+  assert.equal(parent.wasReturned(), false);
+  ready.chain.close();
+  await f.broker.retireFailedNativeNegotiation(f.owner, channel, ready.chain);
+  assert.equal(parent.wasReturned(), true);
+  assert.equal(parent.finalCounts().finalAcknowledged, true);
+  assert.equal(parent.finalCounts().retireCalls, 0);
+  assert.equal(first.sdk.calls.closed, 0);
+  assert.equal(f.broker.advanceNativeNegotiation(f.owner, channel, ready.chain), true);
+  f.owner.retire(); await channel.close(); assert.equal(f.broker.counts().bytes, 0);
+});
+
+test("End joins a public failed worker without a lifecycle observer through its actual held ACK", async t => {
+  // No indexed sibling may accidentally serialize End through its own Current/Close.
+  // The funded SDK phase must remain paid solely because this exact worker is held.
+  const { f, child } = await establishedPcFixture(t);
+  const { parent, channel, ready } = child;
+  const responder = f.actionHandler()!, held = gate(); let entered = false;
+  f.cleanup(() => held.release());
+  f.actions(async (header, body) => {
+    const reply = await responder(header, body);
+    if (header.logical === parent.row && header.operation === 7) { entered = true; await held.promise; }
+    return reply;
+  });
+  ready.chain.close();
+  const cleanup = f.broker.retireFailedNativeNegotiation(f.owner, channel, ready.chain);
+  await until(() => entered);
+  assert.equal(parent.finalCounts().finalAcknowledged, true, "native committed before the reply returns");
+  f.owner.retire(); const closing = channel.close(); let finished = false;
+  void closing.then(() => { finished = true; }); await flush();
+  assert.equal(finished, false); assert.equal(f.counts().collections, 0);
+  const charged = f.broker.counts().bytes; assert.ok(charged > 0);
+  await flush(); assert.equal(f.broker.counts().bytes, charged);
+  held.release(); await cleanup; await closing;
+  assert.equal(f.broker.counts().bytes, 0);
+});
+
+test("failed advance waits for the original history driver's actual finally", async t => {
+  const { first, f, parent, channel, ready, purpose } = await failedParentFixture(t);
+  ready.chain.close(); await f.broker.retireFailedNativeNegotiation(f.owner, channel, ready.chain);
+  const held = f.hold(f.counts().steps.length);
+  const history = f.broker.recoverChannelHistory(f.owner, channel, purpose, parent.row);
+  await until(held.entered);
+  assert.equal(f.broker.advanceNativeNegotiation(f.owner, channel, ready.chain), false);
+  assert.equal(first.sdk.calls.closed, 0);
+  held.release(); await history; await until(() => f.providers().active === 0); await flush();
+  assert.equal(f.broker.advanceNativeNegotiation(f.owner, channel, ready.chain), true);
+  f.owner.retire(); await channel.close(); assert.equal(f.broker.counts().bytes, 0);
+});
+
+test("End during failed SDK unlink preserves the actual link until fixed history disposal", async t => {
+  const { f, child } = await establishedPcFixture(t);
+  const session = (f.broker as unknown as { ipcChannels: Map<string, {
+    custody: { sdpUnlinked(chain: unknown, phase: unknown): void };
+  }> }).ipcChannels.get(f.owner.token)!;
+  const unlink = session.custody.sdpUnlinked;
+  session.custody.sdpUnlinked = (chain, phase) => {
+    f.onOwnerCheck(() => f.owner.retire());
+    unlink(chain, phase);
+  };
+  child.ready.chain.close();
+  await f.broker.retireFailedNativeNegotiation(f.owner, child.channel, child.ready.chain);
+  await child.channel.close();
+  assert.equal(f.broker.counts().bytes, 0);
+});
+
+test("exact Plan certificate retires an untouched unknown child without admitting it", async t => {
+  const { first, f, parent, channel, ready, purpose } = await failedParentFixture(t);
+  const unknown = f.broker.nativeConfirmationFromChannel(f.owner, channel, ready.chain,
+    { parent: purpose, parentRow: parent.row, request: { kind: "start", predecessor: null } });
+  const before = parent.counts().admissions;
+  ready.chain.close();
+  await f.broker.retireFailedNativeNegotiation(f.owner, channel, ready.chain);
+  assert.equal(parent.finalCounts().finalAcknowledged, true);
+  assert.equal(parent.counts().admissions, before, "negative history/finalization cannot admit an action");
+  assert.equal((await unknown.attempt()).kind, "retired");
+  assert.equal(first.sdk.calls.closed, 0);
+  assert.equal(f.broker.advanceNativeNegotiation(f.owner, channel, ready.chain), true);
+  f.owner.retire(); await channel.close(); assert.equal(f.broker.counts().bytes, 0);
+});
+
+test("exact Plan certificate supersedes a quiet child's lost local Return observation", async t => {
+  const { f, child } = await establishedPcFixture(t);
+  const oldHandle = child.handle();
+  type QuietChild = { returned: boolean; running: boolean };
+  type State = { linked: { confirmations: Map<unknown, QuietChild> } };
+  const session = (f.broker as unknown as { ipcChannels: Map<string, {
+    negotiation: State;
+    cleanupConfirmationIntents(separate: boolean, state: State): Promise<void>;
+    custody: { failedHistoryRetained(chain: unknown): void };
+  }> }).ipcChannels.get(f.owner.token)!;
+  const cleanup = session.cleanupConfirmationIntents.bind(session);
+  let dropped = false, superseded = false;
+  session.cleanupConfirmationIntents = async (separate, state) => {
+    await cleanup(separate, state);
+    if (!dropped) {
+      // Lose only the browser's observation AFTER the actual framed native Return.
+      // Native closure, settlement and parent certificate remain independent truth.
+      for (const item of state.linked.confirmations.values()) {
+        assert.equal(item.running, false); item.returned = false;
+      }
+      dropped = true;
+    }
+  };
+  const retain = session.custody.failedHistoryRetained;
+  session.custody.failedHistoryRetained = chain => {
+    superseded = [...session.negotiation.linked.confirmations.values()].some(item => !item.returned);
+    retain(chain);
+  };
+  child.ready.chain.close();
+  await f.broker.retireFailedNativeNegotiation(f.owner, child.channel, child.ready.chain);
+  assert.equal(dropped && superseded, true);
+  assert.equal(child.parent.finalCounts().finalAcknowledged, true);
+  assert.equal((await oldHandle.attempt()).kind, "retired");
+  assert.equal(f.broker.advanceNativeNegotiation(f.owner, child.channel, child.ready.chain), true);
+  f.owner.retire(); await child.channel.close(); assert.equal(f.broker.counts().bytes, 0);
+});
+
+for (const operation of [10, 11, 12, 13]) test(`uncertain live admission ${operation} stays quarantined without replaying an Admit`, async t => {
+  const { first, f, oldResponder } = await indexedMediaFixture(t);
+  const child = await framedConfirmation(f, true, true, 2), custody = custodyReplies(f, child);
+  const nextResponder = f.actionHandler()!;
+  f.actions((header, body) => header.logical === first.child.parent.row ? oldResponder(header, body) : nextResponder(header, body));
+  let lost = false;
+  f.onResponse(async header => {
+    if (!lost && header.logical === child.parent.row && header.operation === operation) {
+      lost = true;
+      child.ready.chain.close(); // Actual native effect committed; browser has no receipt.
+      throw new Error("test-only positive admission reply lost after native effect");
+    }
+  });
+  const observer = f.broker.observeNativeLifecycle(f.owner, child.channel, f.key);
+  const counts = () => [custody.counts().claims, custody.keyCounts().adoptions,
+    custody.effectCounts().storagePrepares, custody.effectCounts().sdkAdmissions];
+  try {
+    await child.derive(); await child.handle().attempt();
+    const deadline = performance.now() + 5000;
+    while (!lost) {
+      if (performance.now() >= deadline) throw new Error("actual admission loss seam was not reached");
+      await settledVoiceRpc(f);
+      f.advance(250); await flush();
+    }
+    const admitted = counts();
+    for (let turn = 0; turn < 8; turn++) {
+      await settledVoiceRpc(f);
+      f.advance(250); await flush();
+    }
+    assert.equal(f.owner.isCurrent(), true);
+    assert.deepEqual(counts(), admitted, "cleanup must not create or replay a positive admission on a live lease");
+    assert.equal(child.parent.finalCounts().finalAcknowledged, false);
+    assert.equal(f.broker.advanceNativeNegotiation(f.owner, child.channel, child.ready.chain), false);
+    assert.equal(first.sdk.calls.closed, 0, "quarantined peer does not close indexed media");
+  } finally {
+    f.owner.retire(); await observer.close(); await child.channel.close();
+  }
+  assert.equal(f.broker.counts().bytes, 0);
+});
+
+test("provisional Finish custody cannot create its first Claim during peer cleanup", async t => {
+  const { first, f, oldResponder } = await indexedMediaFixture(t);
+  const child = await framedConfirmation(f, true, true, 2), custody = custodyReplies(f, child);
+  const nextResponder = f.actionHandler()!;
+  f.actions((header, body) => header.logical === first.child.parent.row ? oldResponder(header, body) : nextResponder(header, body));
+  await child.derive();
+  const held = child.holdResult(), finishing = child.handle().attempt();
+  await until(() => child.counts().results === 1);
+  assert.equal(custody.counts().claims, 0);
+  child.ready.chain.close();
+  const cleanup = f.broker.retireFailedNativeNegotiation(f.owner, child.channel, child.ready.chain);
+  held.release(); await finishing;
+  try {
+    for (let turn = 0; turn < 8; turn++) {
+      await settledVoiceRpc(f);
+      f.advance(250); await flush();
+    }
+    assert.equal(custody.counts().claims, 0);
+    assert.equal(custody.keyCounts().adoptions, 0);
+    assert.equal(first.sdk.calls.closed, 0);
+    assert.equal(f.broker.advanceNativeNegotiation(f.owner, child.channel, child.ready.chain), false);
+  } finally { f.owner.retire(); await cleanup; await child.channel.close(); }
+  assert.equal(f.broker.counts().bytes, 0);
+});

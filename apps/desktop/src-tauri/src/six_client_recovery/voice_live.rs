@@ -428,10 +428,17 @@ async fn native_browser_two_peers_share_original_session_after_actual_history_co
     // Three full endpoint lifecycle futures are substantially larger than their metadata.
     // Keep this test coordinator small on the standard harness stack; runtime budgets and
     // actual application/actor futures remain unchanged.
-    Box::pin(two_browser_peer_cycle()).await;
+    Box::pin(two_browser_peer_cycle(false)).await;
 }
 
-async fn two_browser_peer_cycle() {
+/// Actual native failure of C before storage/SDK/media admission must leave A-B's
+/// original indexed media, keys/counters and Current usable. RTC remains controlled.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn native_browser_failed_attached_peer_preserves_original_session_and_indexed_peer() {
+    Box::pin(two_browser_peer_cycle(true)).await;
+}
+
+async fn two_browser_peer_cycle(fail_second: bool) {
     eprintln!("two-peer fixture: initial admission");
     let mut scenario = Scenario::new(false, isolate().await);
     scenario.admit().await;
@@ -527,23 +534,43 @@ async fn two_browser_peer_cycle() {
             ab[0].epoch, ac[0].epoch,
             "reopening an existing member must not create a new MLS epoch"
         );
-        eprintln!("two-peer fixture: second complete pair");
-        let next = Box::pin(complete_browser_media_pair(&mut a, c, ac)).await;
-        assert_ne!(
-            old.0, next.0,
-            "genuine second native parent has a different full serial"
-        );
-        assert_eq!(
-            &old.0[..8],
-            &next.0[..8],
-            "genuine next peer reuses a collected native slot"
-        );
-        a.assert_collected_pair_known(ab[0]);
-        eprintln!("two-peer fixture: both histories collected; verify peers");
-        a.current_peers(2).await;
-        b.current_peers(1).await;
-        c.current_peers(1).await;
-        a.end_browser_peers(2).await;
+        if fail_second {
+            eprintln!(
+                "two-peer fixture: fail confirmed attached pair without touching indexed peer"
+            );
+            let (ap, cp) = tokio::join!(
+                Box::pin(a.automatic_pair(ac[0])),
+                Box::pin(c.automatic_pair(ac[1]))
+            );
+            tokio::join!(
+                Box::pin(a.fail_attached_pair(1, &ap)),
+                Box::pin(c.fail_attached_pair(0, &cp))
+            );
+            // Retained failed rows still carry the exact original parent identities.
+            assert_eq!(ap.id().logical()[..8], old.0[..8]);
+            assert_ne!(ap.id().logical(), old.0);
+            a.assert_collected_pair_known(ab[0]);
+            a.current_peers(1).await;
+            b.current_peers(1).await;
+            a.end_browser_peers(1).await;
+        } else {
+            eprintln!("two-peer fixture: second complete pair");
+            let next = Box::pin(complete_browser_media_pair(&mut a, c, ac)).await;
+            assert_ne!(
+                old.0, next.0,
+                "genuine second native parent has a different full serial"
+            );
+            assert_eq!(
+                &old.0[..8],
+                &next.0[..8],
+                "genuine next peer reuses a collected native slot"
+            );
+            a.assert_collected_pair_known(ab[0]);
+            a.current_peers(2).await;
+            b.current_peers(1).await;
+            c.current_peers(1).await;
+            a.end_browser_peers(2).await;
+        }
         scenario.rules.assert_graph();
         let trace = scenario.rules.trace.lock().unwrap();
         for edge in [(0, 1, 28), (1, 0, 28), (0, 2, 28), (2, 0, 28)] {

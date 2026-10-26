@@ -1,9 +1,9 @@
 import { VoiceHandleCell } from "./voice-handle-cell.ts";
 import { VoiceSharedExecution } from "./voice-shared-execution.ts";
 import { VoiceSdkPositions, type VoiceSdkPositionRequest } from "./voice-sdk-positions.ts";
-/** V2 endpoint crypto foundation. Not wired to calls until native signed delegation, packet
- * reservation, replay/confirmation and final-delivery commands exist. Native tickets are
- * authority; these WebCrypto helpers neither authenticate a member nor authorize a helper. */
+/** Retained V2 endpoint crypto/native custody. App activation still requires production
+ * adapter/RTC-track composition and acceptance. Native tickets and original scoped grants
+ * are authority; WebCrypto alone neither authenticates a member nor authorizes a helper. */
 import { parseVoiceIpcBootstrap, type VoiceIpcBootstrap } from "./voice-ipc-bootstrap.ts";
 import {
   decodeVoiceIpcAdmission, encodeVoiceIpcAdmission, encodeVoiceIpcHeader,
@@ -486,7 +486,7 @@ function context(label: string, transcript: Uint8Array): Uint8Array<ArrayBuffer>
  * unsettled work. Revoking an owner never frees a running promise; only its real settlement does.
  * A derive pipeline uses one permit for sequential import/ECDH/HKDF work, never parallel calls. */
 export class VoiceCryptoBroker {
-  readonly version = 38;
+  readonly version = 39;
   readonly subtle: SubtleCrypto;
   private readonly native: VoiceCryptoAdmission;
   private active = 0;
@@ -695,6 +695,28 @@ export class VoiceCryptoBroker {
         } };
       },
       compactionReturned: bytes => this.refund(owner, bytes),
+      failedHistoryRetained: chain => {
+        // Native Plan-final/ACK and the peer worker have really returned. Keep every
+        // fixed history fee, but sever adapters that capture the old complete N. Old
+        // retired public handles cannot start effects, and End disposal needs no adapter.
+        for (const record of chain.records.values()) {
+          if (!record.drained || record.running || record.bytes !== 0) throw new Error("failed action still running");
+        }
+        for (const child of chain.confirmations.values()) {
+          if (child.running || (child.record && !child.record.drained)) throw new Error("failed child still running");
+        }
+        for (const record of chain.records.values()) {
+          // A completed Job template also retains its native adapter closures. Actual
+          // physicalDrained/worker return is proved above; this is inert history only.
+          record.native = null!; record.job = null;
+        }
+        for (const child of chain.confirmations.values()) {
+          // Exact parent Plan-final/ACK supersedes an absent child or a lost ordinary
+          // Return observation, AFTER its actual local work returned. This is fixed
+          // negative history, never a new child Begin/admission or effect permission.
+          child.returned = true; child.outcome = Object.freeze({ kind: "retired" }); child.native = null;
+        }
+      },
       unlinked: chain => {
         // Actual native final ACK and channel collection have removed the last channel
         // reference. Owner End alone cannot release these still-retained fixed objects.
@@ -827,6 +849,16 @@ export class VoiceCryptoBroker {
     if (channel.compacted(plan)) return Promise.resolve();
     if (!chain || chain.owner!==owner || chain.channel!==channel) throw new Error("original native negotiation required");
     return channel.retireNegotiation(chain);
+  }
+
+  /** Negative cleanup of one attached original plan, before any per-N media record. No history
+   * refund or new admission follows a void result; exact final/ACK and actual worker return
+   * are separately required. Unknown native publication is deliberately not covered. */
+  retireFailedNativeNegotiation(owner: VoiceCryptoOwner, handle: VoiceIpcChannel, plan: VoiceCryptoChain): Promise<void> {
+    const channel = this.ipcChannels.get(owner.token), chain = this.chains.get(plan);
+    if (!channel || channel.handle !== handle || !channel.owns(owner) || !chain || chain.owner !== owner || chain.channel !== channel)
+      throw new Error("original attached native plan required");
+    return channel.retireFailedNegotiation(chain);
   }
 
   /** Recover exact native terminal-history collection. True is historical evidence
@@ -1256,7 +1288,7 @@ export class VoiceCryptoBroker {
     if (chain.continuation && !chain.continuation.returned) this.startConfirmation(chain.continuation);
     // Local expiry must still release any possibly accepted native Claim through the
     // original channel. Its actual SDK/RPC owners keep their existing payments meanwhile.
-    if (chain.custody) chain.channel?.closeLinked(chain);
+    chain.channel?.closeLinked(chain);
     if (!chain.running) this.drainChain(chain);
   }
   private drainChain(chain: BrowserChain): void {
@@ -2147,6 +2179,7 @@ type IpcCustody = Readonly<{
   begin(): void; end(): void; setupDrained(): void; closed(): void; collected(): void;
   prepareCompaction(chain: BrowserChain): Promise<PreparedBrowserHistory>;
   compactionReturned(bytes: number): void;
+  failedHistoryRetained(chain: BrowserChain): void;
   unlinked(chain: BrowserChain): void;
   finishInput(chain: BrowserChain): void;
   transitionUpdated(chain: BrowserChain): void;
@@ -2188,6 +2221,10 @@ class RetainedNativeNegotiation {
   media: VoiceNativeMedia | null = null;
   negotiationFlight: Promise<void> | null = null;
   negotiationRetired = false;
+  failed = false;
+  failedFlight: Promise<void> | null = null;
+  failedReturned = false;
+  failedPlan: VoiceCryptoChain | null = null;
   compactFlight: Promise<boolean> | null = null;
   sdpRoundStage: "offer" | "answer" | "done" = "offer";
   sdpAction: VoiceSdpActionOwner | null = null;
@@ -2202,6 +2239,7 @@ class RetainedNativeNegotiation {
   // Immutable after the one definite Phase-refusal transition. Unknown replies never
   // select a different intent, and an issued proof can only be ACKed in its original mode.
   finalMode: "retire" | "retire-plan" = "retire";
+  finalIntentStarted = false;
   finalProof: string | null = null;
   finalAcknowledged = false;
   actionBusy = false;
@@ -2307,15 +2345,16 @@ class RetainedIpcChannel {
     if (next && next.generation !== state.generation) this.lifecycleAdvance = null;
     if (this.retired || this.drained) stage = "stopped";
     else if (next?.generation === state.generation) { stage = "advance"; plan = next.plan; }
+    else if (state.failedReturned) { stage = "advance"; plan = state.failedPlan; }
+    else if (state.failed || chain?.closed || chain?.sdp?.closed) stage = chain ? "failed" : "waiting";
     else if (!chain) stage = state.workPump ? "waiting" : "confirmation";
     else if (state.negotiationRetired) stage = "compact";
     else if (state.media?.adopted) stage = state.media.closed ? "stopped" : "retire";
-    else if (chain.closed || chain.sdp?.closed) stage = "stopped";
     else if (chain.custody?.keyReceipt?.state !== "current" || chain.variable || chain.running || chain.continuation?.running)
       stage = state.workPump ? "waiting" : "confirmation";
     else if (!chain.sdp || chain.sdp.storage?.state !== "funded" || chain.sdp.sdk?.state !== "held") stage = "handoff";
     else if (state.sdpRoundStage === "done") stage = "media";
-    else if (chain.sdp.pc.schedulingState === "closed") stage = "stopped";
+    else if (chain.sdp.pc.schedulingState === "closed") stage = "failed";
     else stage = chain.sdp.pc.schedulingState === "admitted" ? "rtc" : "pc";
     return Object.freeze({ generation: state.generation, plan, stage });
   }
@@ -2327,6 +2366,7 @@ class RetainedIpcChannel {
     if (this.negotiation !== state || this.retired || this.drained || state.generation !== observation.generation) return false;
     if (observation.plan === null) return state.linked === null;
     if (compacted) {
+      if (state.failedReturned && state.failedPlan === observation.plan) return true;
       const peer = this.peers.get(observation.plan);
       return peer?.generation === observation.generation && peer.compacted && peer.compactionReturned;
     }
@@ -2356,6 +2396,7 @@ class RetainedIpcChannel {
       case "rtc": return broker.completeNativeSdpRtcRound(owner, this.handle, plan!);
       case "media": return broker.completeNativeMediaHandoff(owner, this.handle, plan!);
       case "retire": return broker.retireNativeNegotiation(owner, this.handle, plan!);
+      case "failed": return broker.retireFailedNativeNegotiation(owner, this.handle, plan!);
       case "compact": return broker.compactNativeNegotiation(owner, this.handle, plan!).then(collected => {
         if (collected && this.lifecycleMatches(observation, true))
           this.lifecycleAdvance = { generation: observation.generation, plan: plan! };
@@ -2766,7 +2807,106 @@ class RetainedIpcChannel {
     release(); this.endActivity(); this.collect();
   }
   closeLinked(chain: BrowserChain): void {
-    const pairState = this.negotiation; if (pairState.linked === chain) this.retire(); }
+    const pairState = this.negotiation;
+    if (pairState.linked !== chain) return;
+    if (pairState.media || !this.live() || this.negotiation !== pairState || this.retired || this.drained) {
+      this.retire(); return;
+    }
+    // Fence ONLY this negotiation before SDK/owner callbacks. Independent indexed media
+    // keeps its original Current owner and shared Session. Never abort its controller.
+    pairState.failed = true;
+    pairState.sdkPosition?.cancel();
+    try { pairState.sdpRtc?.close(); } catch { /* Actual close must join during cleanup. */ }
+    pairState.sdpAction?.close();
+    void pairState.workPump?.close();
+    this.wake();
+  }
+
+  /** One attached failed plan with no per-negotiation media record. This slice quarantines
+   * ambiguous positive admissions: a live Session's ordinary Admit/Claim must never be
+   * used as a negative lookup, since it could create an effect which never began. */
+  retireFailedNegotiation(chain: BrowserChain): Promise<void> {
+    const state = this.negotiation;
+    if (state.failedFlight) return state.failedFlight;
+    if (state.failedReturned && state.failedPlan === chain.handle) return Promise.resolve();
+    if (state.linked !== chain || state.media || !state.terminalAction || !this.live() ||
+        this.negotiation !== state || this.retired || this.drained)
+      throw new Error("original failed attached plan required");
+    if (state.finalIntentStarted && state.finalMode !== "retire-plan")
+      throw new Error("original terminal intent requires exact recovery");
+    // Select immutable Plan meaning BEFORE the first terminal transport opportunity.
+    // No lost/Pending Phase intent may be relabelled, even during negative cleanup.
+    state.finalMode = "retire-plan";
+    if (!chain.closed) chain.handle.close();
+    if (this.negotiation !== state || this.retired || this.drained) return Promise.resolve();
+    state.failed = true; this.beginActivity();
+    const work = Promise.resolve().then(() => this.cleanupFailedPlan(state));
+    // Separate scope: publication observes actual heavy worker return, not its last
+    // successful native call. The same fixed work envelope remains until replacement.
+    const flight = this.failedPlanCompletion(work, state, chain.handle);
+    state.failedFlight = flight; return flight;
+  }
+  private async cleanupFailedPlan(state: RetainedNativeNegotiation): Promise<boolean> {
+    const chain = state.linked!;
+    state.sdkPosition?.cancel();
+    if (state.workPump) { await state.workPump.close(); state.workPump = null; }
+    state.intake?.retire();
+    if (state.intake) await state.intake.drained.promise;
+    await chain.drained.promise;
+    if (state.derivationReturn) { try { await state.derivationReturn; } catch { /* exact cleanup below */ } }
+    if (state.transitionFlight) await state.transitionFlight;
+    if (state.rtcFlight) await state.rtcFlight;
+    if (state.sdpFlight) await state.sdpFlight;
+    while (this.live() && this.negotiation === state && !this.drained) {
+      const observed = this.wakeIdentity;
+      try {
+        if (state.sdpRtc) await state.sdpRtc.drain();
+        if (state.sdpAction && !state.sdpAction.returned) await state.sdpAction.cleanup();
+        if (!this.live() || this.negotiation !== state || this.drained) return false;
+        const custody = chain.custody, phase = chain.sdp;
+        // Missing observations are not absence. Existing global-End cleanup can safely
+        // recover these through revoked native admission. A live peer-local path needs
+        // a new native negative fence/lookup first; do not manufacture fresh authority.
+        if (custody?.needsClaim || custody?.needsKeyRecovery || phase?.needsStorageRecovery || phase?.needsSdkRecovery)
+          throw new Error("failed native admission remains uncertain");
+        await this.cleanupConfirmationIntents(true, state);
+        if (!state.derivationReturned) await this.returnDerivation(chain, state);
+        await this.cleanupSdp(chain, true, state);
+        if (custody?.needsKeyRelease)
+          await this.keySessionRpc(chain, { kind: "release", receipt: custody.keyReceipt!.receipt }, true, state);
+        if (custody?.needsRelease)
+          await this.transitionRpc(chain, { kind: "release", receipt: custody.receipt!.receipt }, true, state);
+        if (!state.finalAcknowledged) await this.retireOriginalAction(true, state);
+        if (!this.live() || this.negotiation !== state || this.drained) return false;
+        state.sdpAction = null; state.sdpRtc = null;
+        chain.record?.pair?.retire();
+        for (const record of chain.records.values()) record.pair = null;
+        return true;
+      } catch {
+        if (this.live() && this.negotiation === state) await this.waitCleanupWake(observed);
+      }
+    }
+    return false;
+  }
+  private failedPlanCompletion(work: Promise<boolean>, state: RetainedNativeNegotiation, plan: VoiceCryptoChain): Promise<void> {
+    return work.then(done => {
+      if (!done || this.negotiation !== state || this.retired || this.drained) return;
+      const chain = state.linked;
+      if (!chain || chain.handle !== plan || !state.finalAcknowledged) return;
+      if (chain.sdp) this.custody.sdpUnlinked(chain, chain.sdp);
+      // That refund's final owner check is callback-bearing. If End wins, leave its
+      // original link intact so global cleanup issues unlinked AFTER actual joins.
+      if (!this.live() || this.retired || this.drained || this.negotiation !== state) {
+        this.retire(); return;
+      }
+      this.custody.failedHistoryRetained(chain); // No callback or refund in this leaf.
+      state.linked = null; state.intake = null;
+      state.terminalAction = null; state.finalProof = null;
+      state.failedPlan = plan; state.negotiationRetired = true; state.failedReturned = true;
+      // Do not call unlinked/compaction or refund chain/action history. Native retains
+      // the exact certified rows; broker fixed history stays paid until actual owner End.
+    }).finally(() => { state.failedFlight = null; this.endActivity(); this.collect(); });
+  }
   /** One bounded observer flight. End joins actual IO and transfers any ambiguous
    * receipt to the existing cleanup driver; no task waits here on parent finalization. */
   startTransition(chain: BrowserChain): Promise<void> {
@@ -3053,18 +3193,33 @@ class RetainedIpcChannel {
     if (!peer?.compacted || !peer.media) throw new Error("original compacted media required");
     return peer.media.start();
   }
-  /** Publication is explicit after the public compaction observer returns, never inside
-   * old accounting/finally callbacks. Repeating an old marker cannot advance a newer owner. */
+  /** Pure final publication barrier, shared by both kinds of retired negotiation. */
+  private negotiationQuiet(state: RetainedNativeNegotiation): boolean {
+    // Both successful compaction and failed-plan retirement share this whole barrier.
+    // A queued history driver still captures the old N for its End joins even when its
+    // current request appears harmless. Never replace N before that driver's finally.
+    return !this.driving && !this.request && !this.historyRequest && !this.retry &&
+      !state.compactFlight && !state.failedFlight && !state.sdkPosition && !state.workPump && !state.linked && !state.intake && !state.media &&
+      !state.transitionFlight && !state.derivationReturn && !state.sdpFlight && !state.rtcFlight && !state.negotiationFlight &&
+      !state.actionBusy && !state.rtcCreating && !state.sdpCreating && !state.sdpRtc && !state.sdpAction && state.negotiationRetired;
+  }
+  /** Publication is explicit after the public retirement/compaction observer returns,
+   * never inside old accounting callbacks. An old marker cannot replace a newer owner. */
   advanceNegotiation(plan: VoiceCryptoChain): boolean {
     const peer = this.peers.get(plan), pairState = this.negotiation;
+    if (pairState.failedReturned && pairState.failedPlan === plan) {
+      if (!this.live() || this.retired || this.drained || this.negotiation !== pairState || !this.keys || !this.negotiationQuiet(pairState))
+        return false;
+      // The same fixed Session work envelope pays the replacement only AFTER the actual
+      // failed worker returned. Old chain/action history stays paid in the broker/native
+      // ledgers until End. This does not remove history or reset any Root action budget.
+      this.negotiation = new RetainedNativeNegotiation(); return true;
+    }
     if (this.retired || this.drained || !peer?.compacted || !peer.compactionReturned) return false;
     if (peer.advanced) return true;
     if (!this.negotiationCurrent(pairState)) return false;
     if (this.negotiation !== pairState || this.retired || this.drained || !this.keys || peer.generation !== pairState.generation ||
-        this.driving || this.request || this.historyRequest || this.retry ||
-        pairState.compactFlight || pairState.sdkPosition || pairState.workPump || pairState.linked || pairState.intake || pairState.media ||
-        pairState.transitionFlight || pairState.derivationReturn || pairState.sdpFlight || pairState.rtcFlight || pairState.negotiationFlight ||
-        pairState.actionBusy || pairState.rtcCreating || pairState.sdpCreating || pairState.sdpRtc || pairState.sdpAction || !pairState.negotiationRetired) return false;
+        !this.negotiationQuiet(pairState)) return false;
     const next = new RetainedNativeNegotiation(); // Inert, no callback between checks/publication.
     peer.advanced = true; this.negotiation = next; return true;
   }
@@ -3479,8 +3634,8 @@ class RetainedIpcChannel {
   /** Fresh per-pair effects must survive both sides of the owner callback. Exact old
    * cleanup and independently indexed media use their separate original bindings. */
   private negotiationCurrent(state: RetainedNativeNegotiation): boolean {
-    return this.negotiation === state && !this.retired && !this.drained && this.live() &&
-      this.negotiation === state && !this.retired && !this.drained;
+    return this.negotiation === state && !state.failed && !this.retired && !this.drained && this.live() &&
+      this.negotiation === state && !state.failed && !this.retired && !this.drained;
   }
   private check(): void { if (!this.live()) throw new Error("voice channel closed"); }
   private retire(): void {
@@ -3576,6 +3731,7 @@ class RetainedIpcChannel {
         if (pairState.rtcFlight) await pairState.rtcFlight;
         if (pairState.sdpFlight) await pairState.sdpFlight;
         if (pairState.negotiationFlight) await pairState.negotiationFlight;
+        if (pairState.failedFlight) await pairState.failedFlight;
         // Media debt blocks native parent Final. Finish it BEFORE unseen-parent/old SDK
         // cleanup, and never own SharedIpcExecution while joining SDK or current work.
         if (pairState.compactFlight) await pairState.compactFlight;
@@ -4018,6 +4174,7 @@ class RetainedIpcChannel {
       ordinaryDrained = settled.localDrained;
     }
     if (pairState.finalProof === null) {
+      pairState.finalIntentStarted = true; // BEFORE transport; an ambiguous intent is immutable.
       let reply = await exchange(pairState.finalMode === "retire" ? { kind: "close", mode: "retire" } : { kind: "close-plan" }, 100,
         opened => decodeVoiceIpcFinalReply(opened, original.row, original.identity, null, pairState.finalMode));
       if (reply.kind === "refused" && reply.code === "unauthorized" && ordinaryDrained && pairState.finalMode === "retire") {
@@ -4058,7 +4215,7 @@ export function windowVoiceCryptoBroker(
   const host = window as Record<symbol, unknown>;
   const previous = host[BROKER] as VoiceCryptoBroker | undefined;
   if (previous) {
-    if (previous.version !== 38 || typeof previous.observeNativeLifecycle !== "function" || typeof previous.advanceNativeNegotiation !== "function" || typeof previous.compactNativeNegotiation !== "function" || typeof previous.collectNativeNegotiationHistory !== "function" || typeof previous.retireNativeNegotiation !== "function" || typeof previous.completeNativeMediaHandoff !== "function" || typeof previous.completeNativeSdpRtcRound !== "function" || typeof previous.prepareNativeSdpRtc !== "function" || typeof previous.prepareNativeSdpCrypto !== "function" || typeof previous.prepareNativePcIntent !== "function" || typeof previous.prepareNativeSdpHandoff !== "function" || typeof previous.observeNativeWork !== "function" || typeof previous.returnNativeDerivation !== "function" || typeof previous.nativeConfirmationFromChannel !== "function" || typeof previous.nativeDerivationFromChannel !== "function" || typeof previous.recoverChannelHistory !== "function" || typeof previous.prepareChainFromChannel !== "function" || typeof previous.nativeChannel !== "function" || typeof previous.run !== "function" || typeof previous.selectJoinKey !== "function" || typeof previous.retrySelectedJoinKeys !== "function" ||
+    if (previous.version !== 39 || typeof previous.retireFailedNativeNegotiation !== "function" || typeof previous.observeNativeLifecycle !== "function" || typeof previous.advanceNativeNegotiation !== "function" || typeof previous.compactNativeNegotiation !== "function" || typeof previous.collectNativeNegotiationHistory !== "function" || typeof previous.retireNativeNegotiation !== "function" || typeof previous.completeNativeMediaHandoff !== "function" || typeof previous.completeNativeSdpRtcRound !== "function" || typeof previous.prepareNativeSdpRtc !== "function" || typeof previous.prepareNativeSdpCrypto !== "function" || typeof previous.prepareNativePcIntent !== "function" || typeof previous.prepareNativeSdpHandoff !== "function" || typeof previous.observeNativeWork !== "function" || typeof previous.returnNativeDerivation !== "function" || typeof previous.nativeConfirmationFromChannel !== "function" || typeof previous.nativeDerivationFromChannel !== "function" || typeof previous.recoverChannelHistory !== "function" || typeof previous.prepareChainFromChannel !== "function" || typeof previous.nativeChannel !== "function" || typeof previous.run !== "function" || typeof previous.selectJoinKey !== "function" || typeof previous.retrySelectedJoinKeys !== "function" ||
         typeof previous.registerProtectedConfirmation !== "function" ||
         typeof previous.registerProtectedDerivation !== "function" || typeof previous.registerConfirmation !== "function" || typeof previous.createPair !== "function") {
       throw new Error("voice crypto broker version changed; reload required");
