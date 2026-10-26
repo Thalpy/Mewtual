@@ -26,7 +26,7 @@ null, undefined and copied handles fail. Action handles remain terminal. HMR32 i
 Compaction transfers1KiB from existing fixed custody without recharge. Heavy worker return
 precedes the separate refund finalizer. End joins compaction after closing the peer; actual
 channel collection releases the retained marker fee. Session keys/counters never reset, and
-canLink remains blocked. HANDOVER separates passing browser gates from queued native HTTP proof.
+canLink remains blocked. HANDOVER records passing extended native HTTP proof and the current full Native rerun.
 
 ## Broker32 terminal handle contract after End (26 October; inactive)
 

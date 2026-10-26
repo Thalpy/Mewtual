@@ -3,6 +3,7 @@
  * sends crypto Input, Result, private keys or plaintext over this control pipe. The Rust
  * parent accepts a closed set of public-metadata callbacks. No app command invokes this. */
 import assert from "node:assert/strict";
+import { NativeControlFrames } from "./voice-native-control.ts";
 import { NativeSdpReplyLoss, type NativeSdpObservation } from "./voice-native-reply-loss.ts";
 import { webcrypto } from "node:crypto";
 import {
@@ -15,8 +16,8 @@ import type { VoiceIpcPurpose, VoiceIpcActionIdentity, VoiceIpcConfirmationPurpo
 import { decodeVoiceWorkSnapshot } from "../src/voice-ipc-work.ts";
 
 const MAX_FRAME = 4096;
-const scratch = Buffer.alloc(MAX_FRAME + 4);
-let used = 0, stepRunning = false, currentStep = "none";
+const control = new NativeControlFrames(MAX_FRAME);
+let stepRunning = false, currentStep = "none";
 let callback: { resolve(value: unknown): void; reject(reason: Error): void } | null = null;
 let broker: VoiceCryptoBroker, owner: VoiceCryptoOwner, key: VoiceJoinKeyHandle;
 let channel: VoiceIpcChannel, chain: VoiceCryptoChain;
@@ -524,24 +525,31 @@ function accept(value: unknown): void {
       // Fixed-size diagnostics only: no Input/Result/body bytes are ever serialized here.
       send({ tag: "failed", reason: ("step="+currentStep+" "+String(error instanceof Error ? error.message : "endpoint failed").slice(0,160)+
         " stages="+stages.join(",")+" media="+mediaEvents.join(",")).slice(0,512) });
+    }).catch(() => {
+      // send()/response-handler failures belong to this same control step. Never leave
+      // its returned Promise unobserved or print arbitrary assertion/frame payloads.
+      const step = currentStep.replace(/[^a-z-]/g,"?").slice(0,40);
+      process.stderr.write(`control-egress-failed step=${step}\n`);
+      process.exitCode = 1; stopAvailability(); process.stdin.destroy();
     });
   }
 }
 process.stdin.on("data", (bytes: Buffer) => {
   try {
-    // One control step/callback response at a time. Refuse excess before constructing an
-    // accumulator; arbitrary parent input cannot grow a queued JSON/message buffer.
-    assert.ok(used + bytes.length <= scratch.length, "oversized control pipe input");
-    bytes.copy(scratch, used); used += bytes.length;
-    if (used < 4) return;
-    const length = scratch.readUInt32BE();
-    assert.ok(length > 0 && length <= MAX_FRAME);
-    if (used < length + 4) return;
-    assert.equal(used, length + 4, "only one frame may be outstanding");
-    const frame = JSON.parse(scratch.subarray(4, used).toString("utf8"));
-    scratch.fill(0, 0, used); used = 0; accept(frame);
-  } catch {
-    process.exitCode = 1; process.stdin.destroy();
+    // OS chunks may contain a reply followed by the next step. The fixed reader clears
+    // each frame BEFORE accept(), whose original one-step/one-callback checks still apply.
+    control.feed(bytes, accept);
+  } catch (error) {
+    // Diagnostic metadata only. Never stringify the input frame or arbitrary assertion
+    // payload (which could contain values); classify only our known fixed messages.
+    const message = error instanceof Error ? error.message : "";
+    const reason = message.startsWith("invalid control frame length") ? "frame-size"
+      : message.startsWith("control reader unavailable") ? "reader-state"
+      : message.startsWith("unsolicited native control response") ? "no-callback"
+      : message.startsWith("control steps are serialized") ? "overlapped-step" : "invalid-metadata";
+    const step = currentStep.replace(/[^a-z-]/g,"?").slice(0,40);
+    process.stderr.write(`control-ingress:${reason} step=${step} used=${control.pendingBytes} declared=${control.declaredBytes} chunk=${bytes.length} callback=${Number(callback!==null)} running=${Number(stepRunning)}\n`);
+    process.exitCode = 1; stopAvailability(); process.stdin.destroy();
   }
 });
 process.stdin.on("end", () => {
@@ -549,6 +557,7 @@ process.stdin.on("end", () => {
   if (retirementWork && !retirementDone) {
     process.stderr.write("native media retirement incomplete at control EOF\n"); process.exitCode=1;
   }
-  if (used !== 0 || callback || stepRunning) process.exitCode = 1;
+  try { control.finish(); } catch { process.exitCode = 1; }
+  if (callback || stepRunning) process.exitCode = 1;
   process.exit(process.exitCode ?? 0);
 });

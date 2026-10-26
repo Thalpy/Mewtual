@@ -1,18 +1,23 @@
 # Chat, files and voice implementation evidence
 
-## Inactive live browser compaction checkpoint (26 October; native extension queued)
+## Inactive live browser compaction checkpoint (26 October; full native rerun pending)
 
-Broker33's exact mode8-to-browser disposal transaction has passing browser focused coverage,
-2,958 complete frontend tests, zero static errors/warnings and a passing production build.
-Read-only review has no remaining blocker/high/medium or material low. Tests cover original
-Session/peer preservation, monotonic counters, pending/lost history, End during held IO and
-final owner checks, copied/unset plan rejection, coalescing and post-heavy-return accounting.
+The extended real HTTP/native mode8 cases pass41.13s/41.41s through browser history
+compaction, exact refund, same Session keys/counters and fresh Current. Full frontend2,967,
+static0errors/0warnings and production build pass. A bounded incremental Node control parser
+now accepts fragmented/coalesced frames without weakening logical sequencing; nine focused
+regressions pass. Bounded sanitized diagnostics are forwarded immediately. The earlier EOF
+remains unattributed; these changes and later passes do not prove its original cause.
 
-The real HTTP/TCP history scenario now additionally performs browser compaction and fresh
-Current after removal, but that extension is queued behind a frozen Native full run and has
-not passed yet. Existing mode8 native-history evidence does not close this new acceptance.
-No multi-peer, renewed generation, App tracks, media relay or physical network/audio completion
-is claimed. App V2 stays OFF. HANDOVER records exact gates and inherited dependency-audit failure.
+The preceding3f2e6941 full Native run passes879. The first current full run passed863/failed11:
+one primary local Capacity unwrapped in a test-only SDP metadata lookup and ten isolation
+cascades. A held-row regression and bounded exact-original Capacity retries now pass9.55s;
+strict Native Clippy passes1m11s. A fresh full Native rerun is running. Read-only review has
+no remaining blocker/high/medium. Root runtime remains the matching3,675pass/24ignored source.
+
+No multi-peer admission, operational renewal, App activation/tracks, relay or physical
+acceptance is claimed. App V2 stays OFF. The inherited crypto-bigint advisory remains open.
+HANDOVER records the exact evidence, custody limits and outstanding work.
 
 ## 26 October: browser mode8 HTTP consumer and lost completion
 

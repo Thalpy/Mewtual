@@ -183,6 +183,13 @@ impl Endpoint {
                     retained.len() + count <= 16 * 1024,
                     "endpoint stderr exceeded fixture bound"
                 );
+                // Surface bounded child diagnostics while its stdout reader still owns
+                // the step. A fatal Node exit otherwise reports only pipe EOF, and a
+                // panic can prevent the later collection report from being reached.
+                eprintln!(
+                    "bounded Node stderr: {}",
+                    String::from_utf8_lossy(&scratch[..count])
+                );
                 retained.extend_from_slice(&scratch[..count]);
             }
         });
