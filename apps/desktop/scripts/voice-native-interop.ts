@@ -243,6 +243,7 @@ async function step(value: Step): Promise<unknown> {
         } | null } | null; media: unknown };
         framed<T>(operation: number, kind: number, logical: string, plaintext: Uint8Array<ArrayBuffer>, ended: boolean,
           allowed: (kind: number, length: number) => boolean, decode: (opened: Uint8Array<ArrayBuffer>) => T): Promise<T>;
+        execution: { run<T>(work: () => Promise<T>): Promise<T> };
       }> }).ipcChannels.get(owner.token)!;
       const plan = session.negotiation.linked?.handle;
       assert.ok(plan, "actual attached original browser plan required");
@@ -268,12 +269,44 @@ async function step(value: Step): Promise<unknown> {
       // Deliberately bypass ONLY browser scheduling for this test. The SAME private
       // authenticated codec sends a late first storage request with its genuine old key
       // binding. Native must refuse it; browser closure alone cannot prove that boundary.
-      const late = encodeVoiceSdpPhase({ ...binding, request: { kind: "prepare" } });
+      if (value.peers) await broker.completeNativeMediaHandoff(owner, channel, mediaRecords[0].plan);
+      const actualFrame = session.framed;
+      let physical = 0, peak = 0;
+      // Measure the full encode/IO/decode/finally lifetime. Counting fetch() alone would
+      // miss overlapping body reads and WebCrypto after the Response already returned.
+      session.framed = (async (...args: Parameters<typeof actualFrame>) => {
+        physical++; peak = Math.max(peak, physical);
+        try { return await Reflect.apply(actualFrame, session, args); }
+        finally { physical--; }
+      }) as typeof actualFrame;
+      const probeUntil = performance.now() + 5000;
       try {
-        const refusal = await session.framed(late.operation, late.kind, original.row, late.body, true,
-          (kind, length) => kind === 0 && length === 19, opened => decodeVoiceIpcActionReply(opened, original.row));
-        assert.deepEqual(refusal, { kind: "refused", code: "unauthorized" });
-      } finally { late.body.fill(0); }
+        for (;;) {
+          let queuedCurrent: Promise<void> | null = null;
+          const currents: number = value.peers ? mediaRecords[0].currents : 0;
+          let refusal: ReturnType<typeof decodeVoiceIpcActionReply>;
+          try { refusal = await session.execution.run(async () => {
+            // Queue a REAL old-peer Current while this turn owns the codec. Never await
+            // it here: it must enter only after the late probe's actual finally returns.
+            if (value.peers) queuedCurrent = broker.completeNativeMediaHandoff(owner, channel, mediaRecords[0].plan);
+            await Promise.resolve();
+            const late = encodeVoiceSdpPhase({ ...binding, request: { kind: "prepare" } });
+            try {
+              return await session.framed(late.operation, late.kind, original.row, late.body, true,
+                (kind, length) => kind === 0 && length === 19, opened => decodeVoiceIpcActionReply(opened, original.row));
+            } finally { late.body.fill(0); }
+          }); } finally { if (queuedCurrent) await queuedCurrent; }
+          assert.equal(physical, 0); assert.equal(peak, 1, "late negative probe and Current must share one physical codec");
+          if (value.peers) assert.ok(mediaRecords[0].currents > currents, "queued authenticated Current must actually return");
+          assert.ok(performance.now() < probeUntil, "late native probe exceeded its fixed bound");
+          if (refusal.kind === "refused" && refusal.code === "unauthorized") break;
+          // Actor/map pressure can precede the permanent row check. Only authenticated
+          // Capacity retries; no timeout/absence/uncertain response proves refusal.
+          assert.deepEqual(refusal, { kind: "refused", code: "capacity" });
+          assert.ok(performance.now() < probeUntil, "late native refusal stayed under pressure");
+          await new Promise<void>(yes => setTimeout(yes, 10));
+        }
+      } finally { session.framed = actualFrame; }
       assert.equal(mediaRecords.length, value.peers);
       for (const record of mediaRecords) assert.equal(record.calls.closed, 0);
       if (originalSession) {

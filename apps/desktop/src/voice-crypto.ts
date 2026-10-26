@@ -2827,10 +2827,16 @@ class RetainedIpcChannel {
    * used as a negative lookup, since it could create an effect which never began. */
   retireFailedNegotiation(chain: BrowserChain): Promise<void> {
     const state = this.negotiation;
+    if (state.linked !== chain && !(state.failedReturned && state.failedPlan === chain.handle))
+      throw new Error("original failed attached plan required");
     if (state.failedFlight) return state.failedFlight;
     if (state.failedReturned && state.failedPlan === chain.handle) return Promise.resolve();
     if (state.linked !== chain || state.media || !state.terminalAction || !this.live() ||
         this.negotiation !== state || this.retired || this.drained)
+      throw new Error("original failed attached plan required");
+    // live() calls the owner predicate. It can reenter and publish this exact worker.
+    if (state.failedFlight) return state.failedFlight;
+    if (state.linked !== chain || state.media || !state.terminalAction)
       throw new Error("original failed attached plan required");
     if (state.finalIntentStarted && state.finalMode !== "retire-plan")
       throw new Error("original terminal intent requires exact recovery");
@@ -2838,7 +2844,12 @@ class RetainedIpcChannel {
     // No lost/Pending Phase intent may be relabelled, even during negative cleanup.
     state.finalMode = "retire-plan";
     if (!chain.closed) chain.handle.close();
+    // Closing the actual RTC/dispatch cell can also reenter. Re-coalesce after the
+    // LAST callback, then repeat callback-free publication fences before paying work.
+    if (state.failedFlight) return state.failedFlight;
     if (this.negotiation !== state || this.retired || this.drained) return Promise.resolve();
+    if (state.linked !== chain || state.media || !state.terminalAction)
+      throw new Error("original failed attached plan required");
     state.failed = true; this.beginActivity();
     const work = Promise.resolve().then(() => this.cleanupFailedPlan(state));
     // Separate scope: publication observes actual heavy worker return, not its last

@@ -4308,6 +4308,49 @@ test("attached failure before ordinary parent Return obtains exact Plan final an
   f.owner.retire(); await channel.close(); assert.equal(f.broker.counts().bytes, 0);
 });
 
+test("a reentrant owner callback coalesces the same failed worker before publication", async t => {
+  const { first, f, parent, channel, ready } = await failedParentFixture(t);
+  const session = (f.broker as unknown as { ipcChannels: Map<string, {
+    cleanupFailedPlan(state: unknown): Promise<boolean>;
+  }> }).ipcChannels.get(f.owner.token)!;
+  const cleanup = session.cleanupFailedPlan.bind(session); let workers = 0;
+  session.cleanupFailedPlan = state => { workers++; return cleanup(state); };
+  let reentrant: Promise<void> | null = null;
+  f.onOwnerCheck(() => {
+    reentrant = f.broker.retireFailedNativeNegotiation(f.owner, channel, ready.chain);
+  });
+  const original = f.broker.retireFailedNativeNegotiation(f.owner, channel, ready.chain);
+  assert.equal(original, reentrant, "the final callback must not publish a second paid flight");
+  await original;
+  assert.equal(workers, 1); assert.equal(parent.finalCounts().finalAcknowledged, true);
+  assert.equal(first.sdk.calls.closed, 0);
+  f.owner.retire(); await channel.close(); assert.equal(f.broker.counts().bytes, 0);
+});
+
+test("a reentrant SDK close coalesces the original failed worker after the last callback", async t => {
+  const prepared = await framedMedia(t);
+  const { f, child, sdk } = prepared;
+  const session = (f.broker as unknown as { ipcChannels: Map<string, {
+    cleanupFailedPlan(state: unknown): Promise<boolean>;
+  }> }).ipcChannels.get(f.owner.token)!;
+  const cleanup = session.cleanupFailedPlan.bind(session); let workers = 0;
+  session.cleanupFailedPlan = state => { workers++; return cleanup(state); };
+  const prototype = globalThis.RTCPeerConnection.prototype, close = prototype.close;
+  let reentrant: Promise<void> | null = null, entered = false;
+  prototype.close = function () {
+    if (!entered) {
+      entered = true;
+      reentrant = f.broker.retireFailedNativeNegotiation(f.owner, child.channel, child.ready.chain);
+    }
+    close.call(this);
+  };
+  t.after(() => { prototype.close = close; });
+  const original = f.broker.retireFailedNativeNegotiation(f.owner, child.channel, child.ready.chain);
+  assert.equal(entered, true); assert.equal(original, reentrant);
+  await original; assert.equal(workers, 1); assert.equal(sdk.calls.closed, 1);
+  f.owner.retire(); await child.channel.close(); assert.equal(f.broker.counts().bytes, 0);
+});
+
 test("End joins a public failed worker without a lifecycle observer through its actual held ACK", async t => {
   // No indexed sibling may accidentally serialize End through its own Current/Close.
   // The funded SDK phase must remain paid solely because this exact worker is held.

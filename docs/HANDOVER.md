@@ -13,8 +13,8 @@ Root action budget or fixed history limit is reset.
 Native automatic discovery omits only exact indexed/selected Plan-certified retired parents
 and descendants. Issuance already required full Root/SDK/IO retirement; its immutable issued
 and ACKed certificate is the historical witness. Discovery does not resample boolean Root
-try-lock observers, which could temporarily expose an old terminal descriptor. Native row
-contention returns Capacity. Direct authenticated history and the retained rows remain.
+try-lock observers, which could temporarily expose an old terminal descriptor. Certificate
+row contention returns Capacity. Direct authenticated history and the retained rows remain.
 Omission never authorizes browser advancement; its own exact ACK/framed finally and actual
 cleanup return do. Quiet unknown children or lost local Return observations are covered by
 the parent's exact final certificate after actual local work joins.
@@ -23,8 +23,9 @@ Old fixed chain/action history stays paid until End. Before replacing N, complet
 old native adapters, completed Job templates and child adapters that capture it; no complete
 old N is charged to a reused Session work envelope. A reentrant End keeps the old link until
 global cleanup can dispose it. End explicitly joins public failed workers even without the
-lifecycle observer. Four review findings were fixed and their regression tests catch removal
-of each fix. Final read-only re-review has no remaining blocker/high/medium in this narrow
+lifecycle observer. Publication re-coalesces after both owner and SDK-close callbacks.
+Reviewed lifecycle/probe fixes have seven successful mutation checks across their seams.
+Final read-only re-review has no remaining blocker/high/medium in this narrow
 boundary; the native historical-witness design was separately reviewed.
 
 Restrictions are deliberate: uncertain Claim/key/storage/SDK admission remains quarantined
@@ -34,14 +35,20 @@ Unknown parent publication remains quarantined. ANY per-N media record currently
 to whole-Session retirement, including an offered record with no observed admission; this
 slice does not solve that case, operational renewal or real RTC/media relay. App V2 stays OFF.
 
-Focused 334 tests pass (7.22 s); complete frontend 3,045 (74.43 s), static checks and build
-(42.04 s) pass. Strict TypeScript covers the Node endpoint and lifecycle. Native finalization
+Focused 335 tests (7.18 s) plus the new SDK-close reentry regression pass; final complete
+frontend 3,047 (95.22 s), static checks and build (37.02 s) pass. Strict TypeScript covers
+the Node endpoint and lifecycle. Native finalization
 (17), contention (1) and projection (3) focused tests pass. The real TCP preservation case
-passes in 71.24 s; the unchanged successful two-peer baseline passes in 78.87 s. That case
+passes in 76.98 s with the corrected serialized probe; the unchanged successful two-peer
+baseline passes in 78.87 s. That case
 uses A-B's blocked edge/unjoined helper, then a permitted A-C edge with confirmed observed
 Claim/key and no SDP admission. It checks the exact retained native certificate, same Session
 keys/increasing counters, a refused late first storage request and fresh A-B Current; RTC
-objects remain controlled. Full new native validation is running, not yet claimed passed.
+objects remain controlled. The probe explicitly queues real Current behind its late request,
+requires peak full-framing ownership1 and authenticated Current progress, and retries only
+authenticated Capacity under one fixed5s bound before mandatory Unauthorized. Its deliberate
+serialization-removal mutation fails. The first full native run was intentionally interrupted
+for these review corrections; final frozen-source native validation is restarting.
 Root code/lockfiles remain unchanged from the passing 3,679/24-ignore source; its construction
 gate scans native source and passes again (0.51 s). Fresh native check passes (43.15 s).
 The older 885 native result below predates this slice. Native full is running; strict lint

@@ -8,7 +8,7 @@ is irreversible. Every future obligation must join issuance before proof creatio
 Begin/attach/Claim/key/storage/SDK/PC/child path may reopen it afterward. Native discovery uses
 that historical witness with exact indexed/selected parent identity and actual parent Arcs
 for descendants. It does not resample boolean Root Phase status: contention there can mean
-false without reversing retirement. Native row/child contention instead returns Capacity.
+false without reversing retirement. Certificate parent/child try-lock contention returns Capacity.
 This is selection only, never authority to forget rows or admit an SDK/RTC effect.
 
 Peer-local cleanup must not reuse ordinary Admit as a negative lookup while the lease is

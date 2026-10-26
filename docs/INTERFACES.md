@@ -14,8 +14,9 @@ Native `readWork` now selects outstanding work. It omits exact parent/descendant
 after original Plan-kind final issuance and ACK certified full retirement. Pending, unissued,
 unACKed and Phase-kind histories remain visible/blocking. Direct original history lookup is
 unchanged; absence from `readWork` never proves browser cleanup. Wire fields/opcodes are
-unchanged. Both native automatic-admission and projection queries refuse Capacity on native
-row contention. Immutable issued proof avoids reinterpreting Root try-lock contention as an
+unchanged. Both queries refuse Capacity on certification parent/child try-lock contention;
+the projection's chosen-descriptor/index locks retain their existing blocking behavior.
+Immutable issued proof avoids reinterpreting Root try-lock contention as an
 unretired historical parent.
 
 ## Broker38 lifecycle observer (26 October; inactive)
