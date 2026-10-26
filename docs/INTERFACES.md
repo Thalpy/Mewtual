@@ -1663,12 +1663,20 @@ pub struct ServerGroup;   // one MLS group == one server
   designated_committer() -> Option<DeviceId>;   // lowest leaf index
   is_designated_committer(&MlsDevice) -> bool;
   create_application_message(&mut, &MlsDevice, &[u8]) -> Result<Vec<u8>>;
-  process_incoming(&mut, &MlsDevice, &[u8]) -> Result<Incoming>;   // applies commits / app msgs
+  process_incoming(&mut, &MlsDevice, &[u8]) -> Result<Incoming>;   // applies commits / app msgs; Ok is "processed", not "a commit merged"
+  apply_commit(&mut, &MlsDevice, &[u8], expected_epoch) -> Result<AppliedCommit>;   // the ONLY entry for commit records:
+    // Ok iff exactly one PrivateMessage commit for this group built at expected_epoch (== current) merged.
+    // Header checks run before decryption; refusals are MlsError::NotACommit(CommitRefusal). docs/design-mls-commit-log.md.
   channel_secret(&MlsDevice, DocType, doc_id:u128) -> Result<[u8;32]>;   // per-doc content key (epoch exporter)
   metadata_secret(&MlsDevice, DocType, doc_id:u128) -> Result<[u8;32]>;  // network identifiers (separate label)
   epoch()->u64; group_id()->Vec<u8>; member_count(); member_device_ids(); contains_device(&DeviceId);
 pub struct AddOutcome { pub welcome:Vec<u8>, pub commit:Vec<u8>, pub commit_epoch:u64 }
 pub enum Incoming { Application(Vec<u8>), CommitApplied, Other }
+pub struct AppliedCommit { pub removed: bool }
+pub enum CommitRefusal { NotProtocolMessage, NotCiphertext, NotCommitContent(&str), WrongGroup,
+                         WrongEpoch { expected, found, current }, NotStagedCommit }
+pub fn commit_header(&[u8]) -> Result<CommitHeader { group_id, epoch }, CommitRefusal>;   // header only, exact parse, no state
+// feature "test-support" (dev-dependency only): ServerGroup::test_self_update_proposal / test_external_commit fixtures.
 
 pub struct InviteToken {           // pasteable, single-use, device-bound capability (INVITE_DOMAIN v2)
     pub group_id:Vec<u8>, pub inviter_device_id:DeviceId, pub inviter_public_key:Vec<u8>,
@@ -2688,6 +2696,7 @@ pub struct SyncConfig { max_past_epochs:u64, max_commit_log:usize, max_pending_c
                         // same-epoch commit. Only read when max_committer_rank >= 1.
                         stage_decision_window_ms:u64 }
 pub struct SyncStats { commits_applied, commits_buffered, commits_served, commit_catchups_requested,
+                       commit_records_refused /* signed records whose bytes were not this epoch's commit */,
                        commit_chain_gaps_observed /* once per epoch stuck at, not per exchange */,
                        ops_ingested, ops_recovered_past_epoch, ops_dropped_future_epoch, ops_dropped_old_epoch,
                        doc_catchups_requested, requests_rejected,

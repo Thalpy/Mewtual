@@ -1,5 +1,36 @@
 # Threat model; client integrity & enforcement boundaries
 
+## Commit log integrity (26 October, branch `mls-commit-log`)
+
+Design and review: `docs/design-mls-commit-log.md`.
+
+**What was open.** A commit record's committer signature covers whatever bytes the committer put in
+`mls_commit`. `apply_commit_in_order` and both fork-contest apply branches treated any `Ok` from
+`process_incoming` as an applied commit, and that includes application messages and proposals. So
+an authorized committer (at the default rank 0, the owner) could put non-commits into every
+member's 256-record commit log. That log is what catch-up serves, so it could push real commits
+out and strand lagging members. A wrapped application message was also decrypted on the commit
+path.
+
+**Now.** Everything that records, counts or acts on a commit record goes through
+`ServerGroup::apply_commit`. Before any decryption it refuses whatever is not exactly one
+`PrivateMessage` with content type `Commit`, for this group, built at the record's epoch, which
+must be the current one. The cleartext header is bound into the AEAD, so it cannot lie. It then
+runs the existing own-leaf, external-sender, credential-binding and M-1 checks and merges. A
+refusal leaves the epoch, the log, the past-key window and the counters as they were; it is
+counted in `SyncStats::commit_records_refused`. The fork contest (rank >= 1) refuses a record
+that is not a commit for its own label, so a wrapped non-commit cannot win the tie-break. A
+restore drops such records from a persisted log. A real commit with bytes appended is refused
+too: openmls's own parse ignores trailing bytes.
+
+**Residuals.** Records are still buffered before authorization, so anyone who can publish on the
+control topic can squat a future slot and stall commit recovery (pre-existing). At rank >= 1, an
+in-window committer can still win a contest with a header-valid commit that does not apply;
+nobody advances, nothing is recorded. `committer_device` is not bound to the commit's MLS sender,
+so the authorized committer can relay another member's (real) commit. Older peers still log and
+serve non-commits. That costs this build only refused records, but those records still take room
+in an older peer's log. No wire or storage format change.
+
 ## Crypto dependency boundary (24 October, update PR)
 
 Plan of record and evidence: `docs/design-crypto-bigint-upgrade.md`.
