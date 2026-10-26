@@ -308,64 +308,113 @@ async fn derivation_cycle(
     action.extend_from_slice(&tag);
     let mut admit = action.clone();
     admit.extend_from_slice(&engine.to_be_bytes());
-    let header = (4, 2, 0, id.logical());
-    let reply = admission::admit(
-        &context,
-        &route,
-        opened_frame(&public, &route, header, &admit, None),
-    )
-    .await
-    .unwrap();
-    let plain = opened_reply(&public, header, &admit, &reply);
-    assert_eq!(&plain[..2], &[1, 6]);
-    assert_eq!(
-        u64::from_be_bytes(plain[66..74].try_into().unwrap()),
-        serial
-    );
-    drop(reply);
     let work = row.work().unwrap();
     let original_deadline = work.action().protected_binding().unwrap().deadline;
     let phase = work.phase().clone();
     drop(work);
+    let clock = crate::voice_runtime(state).clock();
+    let capacity = replies::refused(factory::Refused::Protocol(
+        catcoms_sync::voice_v2::VoiceError::Capacity,
+    ));
+    // This fixture used to assume the first Admit always succeeded. Real native UI/
+    // Coordinator contention is an authenticated local refusal, not a lost result or
+    // a new action. Pin that case deterministically with the ACTUAL commit guard.
+    let before_admit = row.status().unwrap();
+    // One watchdog covers guard acquisition, every Actor/native await and retry sleep.
+    // It uses remaining ORIGINAL time once, never a renewed per-attempt timeout.
+    tokio::time::timeout(std::time::Duration::from_millis(
+        original_deadline.saturating_sub(clock.monotonic_ms()),
+    ), async {
+        let mut pressure = Some(state.ui_session_commit.clone().lock_owned().await);
+        let mut admission_refusals = 0u32;
+        loop {
+            assert!(clock.monotonic_ms() < original_deadline,
+                "original Derive admission deadline exhausted after {admission_refusals} local refusals");
+            let header = (route.session().fixture_counts().1 + 1, 2, 0, id.logical());
+            let reply = admission::admit(
+                &context,
+                &route,
+                opened_frame(&public, &route, header, &admit, None),
+            )
+            .await
+            .unwrap();
+            let plain = opened_reply(&public, header, &admit, &reply);
+            drop(reply); // Original physical reply returns BEFORE the same request retries.
+            if let Some(guard) = pressure.take() {
+                drop(guard);
+                assert_eq!(
+                    plain, capacity,
+                    "holding the real UI fence must prevent engine admission"
+                );
+                assert!(
+                    row.status().unwrap() == before_admit,
+                    "a proven local refusal cannot change the original native action"
+                );
+            }
+            if plain == capacity {
+                admission_refusals += 1;
+                clock.sleep(std::time::Duration::from_millis(25)).await;
+                continue;
+            }
+            // Keep the FULL fixed refusal in diagnostics. The old two-byte prefix hid
+            // Capacity versus authorization/deadline failure in the complete-suite run.
+            assert!(
+                plain.starts_with(&[1, 6]),
+                "original engine Admit refused: {plain:?}"
+            );
+            assert_eq!(
+                u64::from_be_bytes(plain[66..74].try_into().unwrap()),
+                serial
+            );
+            assert!(clock.monotonic_ms() < original_deadline, "late Admit cannot become fixture success");
+            break;
+        }
+    }).await.expect("original Derive admission stage exceeded its unchanged deadline");
     let mut result = action.clone();
     result.extend_from_slice(&Sha256::digest([]));
     result.extend_from_slice(&0u16.to_be_bytes());
-    let clock = crate::voice_runtime(state).clock();
     let mut capacity_refusals = 0u32;
-    let status = loop {
-        // Native local contention and Root capacity are retryable on the SAME output,
-        // action/permit and original deadline. A fresh physical nonce is not new work.
-        // Capacity may reflect local registry contention or Root pressure; the refusal
-        // alone does not identify its cause. The old one-shot fixture treated it as
-        // terminal even though the browser preserves this exact request for retry.
-        assert!(
-            clock.monotonic_ms() < original_deadline,
-            "original Derive deadline exhausted after {capacity_refusals} capacity refusals"
-        );
-        let header = (route.session().fixture_counts().1 + 1, 3, 1, id.logical());
-        let response = derivation_result::commit(
-            &context,
-            &route,
-            opened_frame(&public, &route, header, &result, Some(&phase)),
-        )
-        .await
-        .expect("actual original result worker must fit its unchanged payment");
-        let (status, incoming) = response.into_parts();
-        drop(incoming); // collect actual physical owner before an exact new transmission
-        match status {
-            Ok(status) => break status,
-            Err(factory::Refused::Protocol(catcoms_sync::voice_v2::VoiceError::Capacity))
-                if clock.monotonic_ms() < original_deadline =>
-            {
-                capacity_refusals += 1;
-                eprintln!("native Derive exact result retry {capacity_refusals}; row {:?}; action {serial}; remaining original ms {}", id.logical(), original_deadline.saturating_sub(clock.monotonic_ms()));
-                // The same one-second retry cadence as retained browser cleanup. Do not
-                // spin on a busy native fence or grant another action/engine budget.
-                clock.sleep(std::time::Duration::from_secs(1)).await;
+    let status = tokio::time::timeout(std::time::Duration::from_millis(
+        original_deadline.saturating_sub(clock.monotonic_ms()),
+    ), async {
+        loop {
+            // Native local contention and Root capacity are retryable on the SAME output,
+            // action/permit and original deadline. A fresh physical nonce is not new work.
+            // Capacity may reflect local registry contention or Root pressure; the refusal
+            // alone does not identify its cause. The old one-shot fixture treated it as
+            // terminal even though the browser preserves this exact request for retry.
+            assert!(
+                clock.monotonic_ms() < original_deadline,
+                "original Derive deadline exhausted after {capacity_refusals} capacity refusals"
+            );
+            let header = (route.session().fixture_counts().1 + 1, 3, 1, id.logical());
+            let response = derivation_result::commit(
+                &context,
+                &route,
+                opened_frame(&public, &route, header, &result, Some(&phase)),
+            )
+            .await
+            .expect("actual original result worker must fit its unchanged payment");
+            let (status, incoming) = response.into_parts();
+            drop(incoming); // collect actual physical owner before an exact new transmission
+            match status {
+                Ok(status) => {
+                    assert!(clock.monotonic_ms() < original_deadline, "late Result cannot become fixture success");
+                    break status;
+                },
+                Err(factory::Refused::Protocol(catcoms_sync::voice_v2::VoiceError::Capacity))
+                    if clock.monotonic_ms() < original_deadline =>
+                {
+                    capacity_refusals += 1;
+                    eprintln!("native Derive exact result retry {capacity_refusals}; row {:?}; action {serial}; remaining original ms {}", id.logical(), original_deadline.saturating_sub(clock.monotonic_ms()));
+                    // The same one-second retry cadence as retained browser cleanup. Do not
+                    // spin on a busy native fence or grant another action/engine budget.
+                    clock.sleep(std::time::Duration::from_secs(1)).await;
+                }
+                Err(error) => panic!("actual original Derive result failed after {capacity_refusals} capacity refusals: {error:?}"),
             }
-            Err(error) => panic!("actual original Derive result failed after {capacity_refusals} capacity refusals: {error:?}"),
         }
-    };
+    }).await.expect("original Derive Result stage exceeded its unchanged deadline");
     let receipt = status.engine.receipt.expect("exact native receipt");
     assert!(matches!(
         receipt.outcome,
