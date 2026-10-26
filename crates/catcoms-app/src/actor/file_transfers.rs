@@ -1429,6 +1429,14 @@ impl FileTransfers {
                     job.fail(server, "chunk is out of range".into());
                     return;
                 }
+                // Displayed or transferring right now: pin every chunk of every variant this read
+                // may use, refreshed on each chunk, so cache eviction never removes it mid-read.
+                server.note_cache_use(
+                    job.cid,
+                    manifests
+                        .iter()
+                        .flat_map(|manifest| manifest.chunks.iter().map(|c| c.ciphertext_cid)),
+                );
                 let mut missing = Vec::new();
                 let mut held = None;
                 for manifest in manifests {
@@ -1446,6 +1454,9 @@ impl FileTransfers {
                             .ok()
                             .flatten()
                     });
+                    // A chunk found in the private store (a resumed Download) is copied into the
+                    // shared cache below; one found in the cache is already there.
+                    let from_private = retained.is_some();
                     if let Some(ciphertext) =
                         retained.or_else(|| server.sync.get_blob(&reference.ciphertext_cid))
                     {
@@ -1470,6 +1481,9 @@ impl FileTransfers {
                                 if let Err(error) = keep.token.put(server, &ciphertext) {
                                     job.fail(server, error.to_string());
                                     return;
+                                }
+                                if from_private {
+                                    keep.token.fill_cache(server, &ciphertext);
                                 }
                             }
                             held = Some(bytes);
@@ -2212,6 +2226,9 @@ impl FileTransfers {
                         if let Err(error) = stored {
                             job.fail(server, error.to_string());
                             return;
+                        }
+                        if let Some(keep) = &job.keep {
+                            keep.token.fill_cache(server, &ciphertext);
                         }
                         drop(_accounting);
                         if let Some(next) = job.accept(server, bytes, Some(provider)) {

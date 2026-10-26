@@ -15,8 +15,10 @@ async fn file_keep_uses_member_bridge_without_a_direct_edge_and_survives_solo_na
     bridged_saved_copy(false).await;
 }
 
+/// Renamed from `..._without_becoming_a_source_...` when saved files began to propagate: the
+/// private record still never serves, but its verified chunks now also fill the ordinary cache.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn private_download_bridges_without_becoming_a_source_and_exports_after_solo_native_reopen() {
+async fn private_download_bridges_fills_the_cache_and_exports_after_solo_native_reopen() {
     bridged_saved_copy(true).await;
 }
 
@@ -101,7 +103,10 @@ async fn bridged_saved_copy(private: bool) {
     let kept = scenario.online(2).actor.kept_files().await;
     let expected_plan = if let Some(id) = download_id {
         assert!(kept.files.is_empty() && kept.transfers.is_empty());
-        assert!(!scenario.online(2).actor.file_available(raw.clone()).await);
+        // Saved files propagate (cache housekeeping): the verified chunks were also copied into
+        // the ordinary cache, so the file is available here. The private record itself is still
+        // not a Keep and never a public source.
+        assert!(scenario.online(2).actor.file_available(raw.clone()).await);
         let saved = scenario.online(2).actor.downloads().await.unwrap();
         assert_eq!(saved.len(), 1);
         assert!(saved[0].checked && saved[0].id == id);
