@@ -1,5 +1,33 @@
 # Mewtual; Handover
 
+## Browser terminal-handle disposal after End (26 October; Native full pending)
+
+Broker32 gives plan/action/derivation and confirmation intake handles detachable dispatch
+cells. Public handle, owner-retirement and queued plan/intake timer factories capture only
+those cells. End disposes them after actual channel/native final/ACK, SDK/IO and entered
+synchronous dispatch return. Fixed fees remain while entered callbacks finish. Native SDK
+unlink remains a separate prerequisite; disposal cannot clear its Phase ahead of the driver.
+Released records lose native/chain/job/input backedges and broker indexes/maps are removed.
+
+An actual origin-intake link is installed BEFORE transfer/Ready callbacks. End between payment
+transfer and Ready publication therefore cannot lose the intake cell through map/outcome
+removal. A failed retirement subscription explicitly abandons only proven-unstarted work.
+The real64-listener regression fails before the correction (3,816 bytes stranded) and passes
+afterward. Retained original handles/receipts, pending native final, transfer-before-ready,
+2,000 old calls, entered-cell reentry and HMR31 refusal are covered. All304 focused tests pass
+6.66s. Read-only re-review has no remaining blocker/high/medium or material low. Complete frontend validation passes2,950 tests72.89s, Svelte0errors/0warnings and production
+build39.43s. Its first full run caught the local cell method name colliding with the static
+Tauri command scanner; it was renamed dispatch and the security gate remains unchanged. The
+fresh complete frontend run passes. Strict Native Clippy passes1m39s; its full rerun is running.
+
+This checkpoint implements End disposal ONLY. Live browser-history compaction, replacing the
+active negotiation on the same Session, operational renewal, App RTC/tracks, TURN/member relay,
+combined acceptance and physical independent audio/network testing remain open. App V2 stays
+OFF; only one desktop is available and external download resume is separately owned. The
+current Root/native source is unchanged here; the Native consumer's867/7 failure and fixture
+correction/full rerun are separate evidence, not a green current Native gate. Cargo deny still
+reports inherited RUSTSEC-2026-0387 in crypto-bigint0.5.5; no ignore or dependency change.
+
 ## Authenticated browser history consumer (26 October; final checks pending)
 
 Broker31 adds `collectNativeNegotiationHistory` for the exact original owner/channel/chain

@@ -437,3 +437,15 @@ test("two occupied broker slots finish native acknowledgements before follow-up 
   assert.deepEqual([...followups].sort(), ["1", "2", "3"]);
   f.owner.retire(); assert.equal(f.broker.counts().bytes, 0);
 });
+
+
+test("full real owner listener capacity abandons only the proven-unstarted confirmation", async () => {
+  const f = await fixture(), input = await f.input();
+  for (let n = 0; n < 64; n++) {
+    try { f.owner.onRetired(() => {}); } catch { break; }
+  }
+  const before = f.broker.counts();
+  assert.throws(() => f.register(input), /observer capacity/);
+  assert.deepEqual(f.broker.counts(), before, "failed subscription cannot strand an action, fee or live dispatch target");
+  f.owner.retire(); await flush(); assert.equal(f.broker.counts().bytes, 0);
+});

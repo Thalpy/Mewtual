@@ -1,5 +1,14 @@
 # Mewtual; Architecture
 
+## End-only browser terminal disposal (26 October; inactive)
+
+Broker32 wraps public negotiation handles and queued plan/intake callbacks in detachable cells.
+End waits for actual native/channel/SDK return before disposal; an entered synchronous dispatch
+keeps fixed history charged until its return. Actual transferred-intake ownership is published
+before Ready, independently of outcome/index retention. Final disposal erases adapters and old
+heavy graph edges. This is End cleanup, not live history compaction or shared-Session multiparty
+composition. HANDOVER records focused/review evidence and pending complete gates. App V2 is OFF.
+
 ## Browser consumer for native history collection (26 October; inactive)
 
 Broker31 drives mode8 through the existing independent media driver and physical Session.

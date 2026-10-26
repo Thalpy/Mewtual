@@ -1,5 +1,15 @@
 # Mewtual; Interfaces & Hooks Schema
 
+## Broker32 terminal handle contract after End (26 October; inactive)
+
+After actual disposal, retained plan handles report noncurrent and close idempotently. Action
+and intake attempts return shared retired observations, inspect is retired, derivation pair is
+null and confirmation row is null. Previously returned receipts remain historical observations.
+No old handle starts native work or targets another negotiation. Detached targets retain no
+native/chain/SDK graph. Fixed fees remain until entered dispatch and actual cleanup return;
+IPC activity reaching zero alone is not a terminal-disposal join. Broker31 HMR is refused while
+funded. This adds no live compaction or second negotiation admission; HANDOVER records limits.
+
 ## Broker31 native-history observation (26 October; inactive)
 
 `collectNativeNegotiationHistory(owner, channel, chain): Promise<boolean>` requires exact

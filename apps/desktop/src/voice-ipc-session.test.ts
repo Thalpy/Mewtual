@@ -30,6 +30,7 @@ async function until(check: () => boolean) {
   const deadline = performance.now() + 15_000;
   while (!check()) { if (performance.now() >= deadline) throw new Error("condition did not settle"); await new Promise<void>(yes => setImmediate(yes)); }
 }
+const flush = () => new Promise<void>(resolve => setImmediate(resolve));
 const integer = (n: bigint, size: number) => Buffer.from(n.toString(16).padStart(size * 2, "0"), "hex");
 const historyPurpose: VoiceIpcPurpose = Object.freeze({ peer: hash(7), join: hash(8), keyRef: hash(9), epoch: "9007199254740993" });
 const historyVectors = JSON.parse(readFileSync(new URL("../src-tauri/src/voice_handoff/replies/vectors.json", import.meta.url), "utf8")) as {
@@ -209,6 +210,9 @@ async function fixture(t: TestContext, sharedBroker?: VoiceCryptoBroker, identit
     for (const cleanup of cleanups) cleanup();
     held?.release(); cancelGate?.release(); fetchCancel?.release(); owner.retire(); broker.retrySelectedJoinKeys();
     await until(() => broker.counts().active === 0);
+    // Entered terminal-handle dispatch can finish after the last IPC activity. Join
+    // its queued disposal tail too; End alone is never proof of that stack's return.
+    await flush();
     assert.equal(broker.counts().bytes, 0);
   });
   return {
@@ -1173,8 +1177,79 @@ for (const withChild of [false, true]) test(`${withChild ? "accepted child" : "D
   assert.ok(f.owner.isCurrent());
   assert.deepEqual(f.rowBudget(), { reserved: 0, actions: withChild ? 2 : 1 }, "live owner retains completed identities");
   f.owner.retire();
+  await flush(); // Retained cells join the retirement callback before fixed-history refund.
   assert.deepEqual(f.rowBudget(), { reserved: 0, actions: 0 }, "owner retirement after unlink collects every occupied record");
   assert.equal(f.broker.counts().bytes, 0);
+});
+
+test("End between actual intake transfer and ready publication still detaches the original cell", async t => {
+  const f = await fixture(t), channel = f.channel(); await channel.status();
+  const parent = await framedDerivation(f); parent.pendingFinal();
+  const handle = f.broker.nativeDerivationFromChannel(f.owner, channel, f.key, historyPurpose, parent.row, parent.identity);
+  type Intake = { transferred: boolean; outcome: { kind: string } | null; cell: { detached: boolean } };
+  const state = f.broker as unknown as { intakes: Map<object, Map<string, Intake>> };
+  const original = state.intakes.get(f.owner)!.get(parent.row)!;
+  let ended = false;
+  const beforeReady = () => {
+    if (!ended && original.transferred && original.outcome?.kind !== "ready") {
+      ended = true; f.owner.retire();
+    } else if (!ended) f.onOwnerCheck(beforeReady);
+  };
+  f.onOwnerCheck(beforeReady);
+  const outcome = await handle.attempt();
+  assert.equal(ended, true, "actual transfer must precede the injected End");
+  assert.equal(outcome.kind, "retired");
+  await until(() => parent.finalCounts().retireCalls > 0);
+  assert.ok(f.broker.counts().bytes > 0, "pending native final retains the original terminal cells");
+  assert.equal(original.cell.detached, false);
+  parent.pendingFinal(false); f.broker.retrySelectedJoinKeys(); await channel.close(); await flush();
+  assert.equal(original.cell.detached, true); assert.equal(f.broker.counts().bytes, 0);
+  const calls = f.operations(), first = handle.attempt();
+  for (let n = 0; n < 2000; n++) assert.equal(handle.attempt(), first);
+  assert.equal((await first).kind, "retired"); assert.deepEqual(f.operations(), calls);
+});
+
+test("End detaches retained public handles and erases the actual old adapter graph", async t => {
+  const f = await fixture(t), child = await framedConfirmation(f);
+  const derived = await child.derive(), intake = child.handle();
+  const confirmed = await intake.attempt();
+  assert.equal(derived.kind, "accepted"); assert.equal(confirmed.kind, "accepted");
+  type Cell = { detached: boolean };
+  type Row = { cell: Cell; native: unknown; chain: unknown; job: unknown; protectedInput: unknown };
+  type Chain = { cell: Cell; records: Map<unknown, Row>; confirmations: Map<unknown, { cell: Cell; native: unknown; record: unknown }>;
+    channel: unknown; custody: unknown; sdp: unknown; record: unknown };
+  const state = f.broker as unknown as { chains: WeakMap<object, Chain> };
+  const original = state.chains.get(child.ready.chain)!;
+  const rows = [...original.records.values()], children = [...original.confirmations.values()];
+  assert.ok(rows.length >= 2); assert.ok(children.length >= 1);
+  await child.channel.close(); // Real native final/ACK and SDK cleanup; owner still retains fixed history.
+  assert.ok(f.broker.counts().bytes > 0); assert.equal(original.cell.detached, false);
+  f.owner.retire();
+  // The retirement callback itself entered the cell. Its fee cannot leave while that
+  // entered stack still needs the old record; the joined tail runs only after return.
+  assert.ok(f.broker.counts().bytes > 0);
+  assert.equal(child.ready.chain.isCurrent(), false);
+  await flush();
+  assert.equal(f.broker.counts().bytes, 0); assert.equal(state.chains.has(child.ready.chain), false);
+  assert.equal(original.cell.detached, true); assert.equal(original.records.size, 0);
+  assert.equal(original.confirmations.size, 0); assert.equal(original.channel, null);
+  assert.equal(original.custody, null); assert.equal(original.sdp, null); assert.equal(original.record, null);
+  for (const row of rows) {
+    assert.equal(row.cell.detached, true); assert.equal(row.native, null); assert.equal(row.chain, null);
+    assert.equal(row.job, null); assert.equal(row.protectedInput, null);
+  }
+  for (const item of children) {
+    assert.equal(item.cell.detached, true); assert.equal(item.native, null); assert.equal(item.record, null);
+  }
+  const calls = f.operations();
+  const first = intake.attempt();
+  for (let n = 0; n < 2000; n++) {
+    assert.equal(intake.attempt(), first); child.ready.chain.close(); child.ready.derivation.retire();
+    assert.equal(child.ready.derivation.inspect(), "retired"); assert.equal(child.ready.derivation.pair(), null);
+  }
+  assert.equal((await first).kind, "retired"); assert.equal(intake.row(), null);
+  assert.deepEqual(f.operations(), calls, "old handles start no native request after disposal");
+  assert.equal(derived.kind, "accepted"); assert.equal(confirmed.kind, "accepted", "held receipts remain historical observations");
 });
 
 test("known child completion cannot renew the original browser deadline or encryption allocator", async t => {
@@ -3280,7 +3355,7 @@ test("framed lost media admission recovers original claim without a second peer 
   assert.equal(f.sdk.calls.created, 1); assert.equal(f.sdk.calls.closed, 0); assert.equal(f.f.broker.counts().bytes, paid + 8192);
   f.f.owner.retire(); await f.child.channel.close(); assert.equal(f.f.broker.counts().bytes, 0);
 });
-for (const version of [28,29,30]) test(`HMR refuses funded broker${version} without waking incompatible cleanup`, async t => {
+for (const version of [28,29,30,31]) test(`HMR refuses funded broker${version} without waking incompatible cleanup`, async t => {
   const f = await framedMedia(t), previous = Object.create(f.f.broker);
   Object.defineProperty(previous, "version", { value: version }); let wakes = 0; previous.retrySelectedJoinKeys = () => { wakes++; };
   const key = Symbol.for("mewtual.voice.crypto-broker.v2"), host = { [key]: previous };

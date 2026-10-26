@@ -1,3 +1,4 @@
+import { VoiceHandleCell } from "./voice-handle-cell.ts";
 /** V2 endpoint crypto foundation. Not wired to calls until native signed delegation, packet
  * reservation, replay/confirmation and final-delivery commands exist. Native tickets are
  * authority; these WebCrypto helpers neither authenticate a member nor authorize a helper. */
@@ -259,9 +260,55 @@ export type VoiceIpcChannel = Readonly<{
 export type VoiceIpcClock = Readonly<{
   now(): number; schedule(work: () => void, milliseconds: number): unknown; cancel(handle: unknown): void;
 }>;
+type ChainHandleOps = { close(): void; current(): boolean; retired(): void; timer(): void };
+type ActionHandleOps = { attempt(): Promise<ActionOutcome>; inspect(): VoiceConfirmationStatus;
+  retire(): void; pair(): VoiceCryptoPair | null };
+type DerivationIntakeOps = { attempt(): Promise<VoiceChannelDerivationOutcome>; retire(): void; timer(): void };
+type ConfirmationIntakeOps = { attempt(): Promise<VoiceChannelConfirmationOutcome>; row(): string | null };
+const retiredAction = Promise.resolve(Object.freeze({ kind: "retired" } as const));
+const retiredDerivationIntake = Promise.resolve(Object.freeze({ kind: "retired" } as const));
+const retiredConfirmationIntake = Promise.resolve(Object.freeze({ kind: "retired" } as const));
+
+// These factories MUST stay outside constructors/registration scopes. Merely reading
+// cell.target in a closure created beside old input/record locals can retain that scope.
+function chainHandle(cell: VoiceHandleCell<ChainHandleOps>): VoiceCryptoChain {
+  return Object.freeze({ close: () => cell.dispatch(ops => ops.close(), undefined),
+    isCurrent: () => cell.dispatch(ops => ops.current(), false) });
+}
+function chainRetirement(cell: VoiceHandleCell<ChainHandleOps>): () => void {
+  return () => cell.dispatch(ops => ops.retired(), undefined);
+}
+function chainTimer(cell: VoiceHandleCell<ChainHandleOps>): () => void {
+  return () => cell.dispatch(ops => ops.timer(), undefined);
+}
+function confirmationHandle(cell: VoiceHandleCell<ActionHandleOps>): VoiceConfirmationHandle {
+  return Object.freeze({ attempt: () => cell.dispatch(ops => ops.attempt() as Promise<VoiceConfirmationOutcome>, retiredAction),
+    inspect: () => cell.dispatch(ops => ops.inspect(), "retired" as const),
+    retire: () => cell.dispatch(ops => ops.retire(), undefined) });
+}
+function derivationHandle(cell: VoiceHandleCell<ActionHandleOps>): VoiceDerivationHandle {
+  return Object.freeze({ attempt: () => cell.dispatch(ops => ops.attempt() as Promise<VoiceDerivationOutcome>, retiredAction),
+    inspect: () => cell.dispatch(ops => ops.inspect(), "retired" as const),
+    retire: () => cell.dispatch(ops => ops.retire(), undefined), pair: () => cell.dispatch(ops => ops.pair(), null) });
+}
+function derivationIntakeHandle(cell: VoiceHandleCell<DerivationIntakeOps>): VoiceChannelDerivationHandle {
+  return Object.freeze({ attempt: () => cell.dispatch(ops => ops.attempt(), retiredDerivationIntake) });
+}
+function derivationIntakeRetirement(cell: VoiceHandleCell<DerivationIntakeOps>): () => void {
+  return () => cell.dispatch(ops => ops.retire(), undefined);
+}
+function derivationIntakeTimer(cell: VoiceHandleCell<DerivationIntakeOps>): () => void {
+  return () => cell.dispatch(ops => ops.timer(), undefined);
+}
+function confirmationIntakeHandle(cell: VoiceHandleCell<ConfirmationIntakeOps>): VoiceChannelConfirmationHandle {
+  return Object.freeze({ attempt: () => cell.dispatch(ops => ops.attempt(), retiredConfirmationIntake),
+    row: () => cell.dispatch(ops => ops.row(), cell.row) });
+}
+
 type BrowserChain = {
   owner: VoiceCryptoOwner; key: JoinKeyRecord; binding: VoiceCryptoChainBinding;
-  expires: number; closed: boolean; rowIssued: boolean; reservedRows: number;
+  cell: VoiceHandleCell<ChainHandleOps>;
+  expires: number; closed: boolean; historyDisposing: boolean; rowIssued: boolean; reservedRows: number;
   setup: VoiceDerivationSetup | null;
   running: boolean; execution: boolean; variable: boolean; fixedBytes: number;
   record: ActionRecord | null; unsubscribe: () => void; handle: VoiceCryptoChain;
@@ -273,7 +320,7 @@ type BrowserChain = {
   continuation: ConfirmationIntake | null; confirmations: Map<string, ConfirmationIntake>;
   // A channel-linked chain lends its original physical position; logical row serialization
   // remains separate so admission/result/settlement RPCs can use that SAME channel.
-  channel: RetainedIpcChannel | null; drained: Signal<void>;
+  channel: RetainedIpcChannel | null; origin: ChainIntake | null; drained: Signal<void>;
   // Same keys/payment; no effect, admission, SDP or RTC authority lives in this metadata.
   custody: VoiceKeyCustody | null;
   sdp: VoiceSdpSdkCustody | null;
@@ -281,6 +328,7 @@ type BrowserChain = {
   mediaIndexed: boolean;
 };
 type ConfirmationIntake = {
+  cell: VoiceHandleCell<ConfirmationIntakeOps>;
   chain: BrowserChain; purpose: VoiceIpcConfirmationPurpose; row: string | null; identity: VoiceIpcActionIdentity | null;
   native: VoiceProtectedConfirmationNative | null; record: ActionRecord | null;
   handle: VoiceChannelConfirmationHandle; pending: Signal<VoiceChannelConfirmationOutcome> | null;
@@ -292,9 +340,10 @@ type ConfirmationIntake = {
 /** The SAME prepaid claim becomes BrowserChain. No refund/recharge, new deadline, or second
  * group/execution position exists between admitting the Data read and publishing the chain. */
 type ChainIntake = {
+  cell: VoiceHandleCell<DerivationIntakeOps>;
   owner: VoiceCryptoOwner; key: JoinKeyRecord; channel: RetainedIpcChannel; handleKey: VoiceJoinKeyHandle;
   purpose: VoiceIpcPurpose; row: string; identity: VoiceIpcActionIdentity; expires: number;
-  transferred: boolean; retired: boolean; released: boolean; running: boolean;
+  transferred: boolean; retired: boolean; released: boolean; disposing: boolean; running: boolean;
   fixedBytes: number; variable: boolean; rows: number; unsubscribe: () => void; timer: unknown;
   pending: Promise<VoiceChannelDerivationOutcome> | null; outcome: VoiceChannelDerivationOutcome | null;
   handle: VoiceChannelDerivationHandle; drained: Signal<void>; retire(): void;
@@ -359,13 +408,14 @@ class SharedIpcExecution {
   }
 }
 type ActionRecord = {
+  cell: VoiceHandleCell<ActionHandleOps>;
   owner: VoiceCryptoOwner; pair: VoiceCryptoPair | null;
   identity: VoiceConfirmationIdentity; input: VoiceConfirmationInput | null; bytes: number;
   derivation: VoiceDerivationInput | null; chain: BrowserChain | null;
   protectedInput: VoiceProtectedConfirmationInput | null;
   status: VoiceConfirmationStatus; outcome: ActionOutcome | null;
   attempt: Signal<ActionOutcome> | null; retry: Signal<void> | null;
-  job: Job | null; running: boolean; retired: boolean; drained: boolean; released: boolean;
+  job: Job | null; running: boolean; retired: boolean; drained: boolean; released: boolean; disposing: boolean;
   // Acceptance precedes settleAction's finally. Only the actual job/queued cancellation
   // resolves this one-shot fence; neither inspect() nor an accepted receipt supplies it.
   physicalDrained: Signal<void>;
@@ -446,7 +496,7 @@ function context(label: string, transcript: Uint8Array): Uint8Array<ArrayBuffer>
  * unsettled work. Revoking an owner never frees a running promise; only its real settlement does.
  * A derive pipeline uses one permit for sequential import/ECDH/HKDF work, never parallel calls. */
 export class VoiceCryptoBroker {
-  readonly version = 31;
+  readonly version = 32;
   readonly subtle: SubtleCrypto;
   private readonly native: VoiceCryptoAdmission;
   private active = 0;
@@ -628,6 +678,7 @@ export class VoiceCryptoBroker {
         this.reservedRows -= chain.sdpRows; chain.sdpRows = 0;
         if (this.progress.get(owner.group) === phase) this.progress.delete(owner.group);
         this.refund(owner, VOICE_SDP_SDK_BYTES);
+        if (!chain.owner.isCurrent()) this.releaseChainHistory(chain);
       },
       finishInput: chain => this.retainFinishCustody(chain),
       transitionUpdated: chain => { this.drainChain(chain); if (this.chainCurrent(chain)) this.armChain(chain); },
@@ -806,26 +857,31 @@ export class VoiceCryptoBroker {
         this.actions.size + this.reservedRows + CHAIN_ROWS > MAX_ACTIONS) throw new Error("voice intake capacity reached");
     const fixed = CHAIN_HISTORY + CHAIN_METADATA;
     this.charge(owner, fixed + CHAIN_VARIABLE);
-    const intake: ChainIntake = { owner, key, channel, handleKey: handle, purpose: selected, row, identity: original, expires,
-      transferred: false, retired: false, released: false, running: false, fixedBytes: fixed, variable: true, rows: CHAIN_ROWS,
+    const intake: ChainIntake = { cell: null!, owner, key, channel, handleKey: handle, purpose: selected, row, identity: original, expires,
+      transferred: false, retired: false, released: false, disposing: false, running: false, fixedBytes: fixed, variable: true, rows: CHAIN_ROWS,
       unsubscribe: () => {}, timer: null, pending: null, outcome: null, handle: null!, drained: signal<void>(),
-      retire: () => { intake.retired = true; channel.cancelIntake(intake); this.releaseIntake(intake); } };
-    intake.handle = Object.freeze({ attempt: () => this.attemptIntake(intake) });
+      retire: null! };
+    intake.cell = new VoiceHandleCell({ attempt: () => this.attemptIntake(intake),
+      retire: () => { intake.retired = true; channel.cancelIntake(intake); this.releaseIntake(intake); },
+      timer: () => this.expireIntake(intake) });
+    intake.retire = derivationIntakeRetirement(intake.cell);
+    intake.handle = derivationIntakeHandle(intake.cell);
     this.reservedRows += CHAIN_ROWS; this.progress.set(owner.group, intake);
     const records = this.intakes.get(owner) ?? new Map<string, ChainIntake>(); records.set(row, intake); this.intakes.set(owner, records);
     // Publish before any subscription/scheduler callback can run. End never loses a claim.
     try {
       channel.reserveIntake(intake);
       intake.unsubscribe = owner.onRetired(intake.retire);
-      const expire = () => {
-        if (intake.released || intake.transferred) return;
-        const remaining = intake.expires - this.now();
-        if (remaining > 0) intake.timer = this.ipcClock.schedule(expire, remaining);
-        else intake.retire();
-      };
-      if (!intake.retired) intake.timer = this.ipcClock.schedule(expire, 15_000);
+      if (!intake.retired) intake.timer = this.ipcClock.schedule(derivationIntakeTimer(intake.cell), 15_000);
     } catch (error) { intake.retired = true; this.releaseIntake(intake); throw error; }
     return intake.handle;
+  }
+
+  private expireIntake(intake: ChainIntake): void {
+    if (intake.released || intake.transferred) return;
+    const remaining = intake.expires - this.now();
+    if (remaining > 0) intake.timer = this.ipcClock.schedule(derivationIntakeTimer(intake.cell), remaining);
+    else intake.retire();
   }
 
   private attemptIntake(intake: ChainIntake): Promise<VoiceChannelDerivationOutcome> {
@@ -881,6 +937,19 @@ export class VoiceCryptoBroker {
         if (this.progress.get(intake.owner.group) === intake) this.progress.delete(intake.owner.group);
       }
       intake.channel.releaseIntake(intake); intake.drained.resolve();
+    }
+    if (!intake.transferred && !intake.owner.isCurrent() && !intake.cell.detached) {
+      if (!intake.disposing) {
+        intake.disposing = true;
+        // End does not refund a caller-entered dispatch. Publish the negative cell now,
+        // then join its actual synchronous frame before clearing the retained target.
+        const returned = intake.cell.detach();
+        if (!intake.cell.detached) {
+          void returned.then(() => { intake.disposing = false; this.releaseIntake(intake); });
+          return;
+        }
+        intake.disposing = false;
+      } else return;
     }
     if (intake.transferred || !intake.owner.isCurrent()) {
       intake.unsubscribe();
@@ -1048,16 +1117,19 @@ export class VoiceCryptoBroker {
         (channel && !channel.canLink(intake))) throw new Error("voice chain capacity reached");
     const fixed = CHAIN_HISTORY + CHAIN_METADATA;
     if (!intake) this.charge(owner, fixed + CHAIN_VARIABLE);
-    const chain: BrowserChain = {
-      owner, key, binding: Object.freeze({ ...binding }), expires, closed: false,
+    const chain: BrowserChain = { cell: null!,
+      owner, key, binding: Object.freeze({ ...binding }), expires, closed: false, historyDisposing: false,
       setup: Object.freeze({ localPublicKey: new Uint8Array(setup.localPublicKey), peerPublicKey: new Uint8Array(setup.peerPublicKey), transcript: new Uint8Array(setup.transcript) }),
       rowIssued: false, reservedRows: CHAIN_ROWS, running: false, execution: true,
       variable: true, fixedBytes: fixed, record: null, unsubscribe: () => {}, handle: null!, timer: null,
       records: new Map(), queue: [], retainedBytes: 130 + setup.transcript.length, enginePeak: 0,
       continuation: null, confirmations: new Map(),
-      channel, drained: signal<void>(), custody: null, sdp: null, sdpRows: 0, mediaIndexed: false,
+      channel, origin: intake ?? null, drained: signal<void>(), custody: null, sdp: null, sdpRows: 0, mediaIndexed: false,
     };
-    chain.handle = Object.freeze({ close: () => this.closeChain(chain), isCurrent: () => this.chainCurrent(chain) });
+    chain.cell = new VoiceHandleCell({ close: () => this.closeChain(chain), current: () => this.chainCurrent(chain),
+      retired: () => { this.closeChain(chain); this.releaseChainHistory(chain); },
+      timer: () => { chain.timer = null; if (this.chainCurrent(chain)) this.armChain(chain); } });
+    chain.handle = chainHandle(chain.cell);
     if (intake) { intake.transferred = true; intake.rows = 0; intake.fixedBytes = 0; intake.variable = false; }
     else this.reservedRows += CHAIN_ROWS;
     if (channel) channel.link(chain, intake); else this.protectedPositions++;
@@ -1066,7 +1138,7 @@ export class VoiceCryptoBroker {
     // plan and cannot leave a successful, untracked reservation behind.
     const owned = stamps ?? new Map<string, BrowserChain>();
     owned.set(binding.handshake, chain); this.chainStamps.set(owner, owned);
-    try { chain.unsubscribe = owner.onRetired(() => { this.closeChain(chain); this.releaseChainHistory(chain); }); current(owner); }
+    try { chain.unsubscribe = owner.onRetired(chainRetirement(chain.cell)); current(owner); }
     catch (error) { this.closeChain(chain); this.releaseChainHistory(chain); throw error; }
     this.armChain(chain);
     return chain.handle;
@@ -1078,10 +1150,7 @@ export class VoiceCryptoBroker {
     // A pending/current key adoption retains only the SAME paid keys/history. It is not
     // another confirmation timer or a grant to use those keys. End still closes first.
     if (deadline === null) return;
-    chain.timer = setTimeout(() => {
-      chain.timer = null;
-      if (this.chainCurrent(chain)) this.armChain(chain);
-    }, Math.max(1, Math.ceil(deadline - this.now())));
+    chain.timer = setTimeout(chainTimer(chain.cell), Math.max(1, Math.ceil(deadline - this.now())));
   }
   private chainCurrent(chain: BrowserChain): boolean {
     // Indexed media is a different owner. Old key/plan cleanup must not turn its
@@ -1157,8 +1226,28 @@ export class VoiceCryptoBroker {
     this.pump();
   }
   private releaseChainHistory(chain: BrowserChain): void {
-    if (chain.running || chain.continuation?.running || chain.channel?.retainsHistory(chain) || chain.fixedBytes === 0) return;
+    if (chain.running || chain.continuation?.running || chain.channel?.retainsHistory(chain) || chain.sdp !== null || chain.fixedBytes === 0) return;
+    if (chain.historyDisposing) return;
+    // Transfer publishes this actual association BEFORE the ready outcome or any owner
+    // callback. End may remove the intake from its lookup map before ready is published;
+    // the original chain must still own/detach that paid public dispatch target.
+    const transferred = chain.origin ? [chain.origin] : [];
+    const cells = [chain.cell, ...[...chain.records.values()].map(record => record.cell),
+      ...[...chain.confirmations.values()].map(intake => intake.cell), ...transferred.map(intake => intake.cell)];
+    if (cells.some(cell => !cell.detached)) {
+      chain.historyDisposing = true; // Before a synchronous dispatch can reenter disposal.
+      const returned = cells.map(cell => cell.detach());
+      if (cells.some(cell => !cell.detached)) {
+        // Original fixed history remains charged until every entered frame actually returns.
+        void Promise.all(returned).then(() => {
+          chain.historyDisposing = false; this.releaseChainHistory(chain);
+        });
+        return;
+      }
+      chain.historyDisposing = false;
+    }
     const fixed = chain.fixedBytes; chain.fixedBytes = 0; chain.unsubscribe();
+    chain.unsubscribe = () => {}; this.chains.delete(chain.handle);
     for (const intake of chain.confirmations.values()) {
       if (intake.rowClaim) { intake.rowClaim = false; this.reservedRows--; }
     }
@@ -1175,6 +1264,14 @@ export class VoiceCryptoBroker {
     // no individual retirement subscription, so collect their SAME global slots here in
     // both orderings, after fixed custody and actual local/channel work have ended.
     for (const record of chain.records.values()) this.releaseAction(record);
+    // Retained public handles/timer thunks contain only detached cells. Erase the broker's
+    // old heavyweight edges too, so terminal metadata cannot keep Phase/SDK/native adapters.
+    for (const intake of chain.confirmations.values()) {
+      intake.cell.row = null; intake.native = null; intake.record = null; intake.outcome = null;
+    }
+    for (const intake of transferred) { intake.outcome = null; intake.pending = null; }
+    chain.records.clear(); chain.confirmations.clear(); chain.queue.length = 0;
+    chain.record = null; chain.continuation = null; chain.custody = null; chain.sdp = null; chain.channel = null; chain.origin = null;
   }
 
   registerProtectedDerivation(owner: VoiceCryptoOwner, plan: VoiceCryptoChain, native: VoiceDerivationNative, input: VoiceDerivationInput): VoiceDerivationHandle {
@@ -1202,16 +1299,15 @@ export class VoiceCryptoBroker {
     const identity = Object.freeze({ owner: owner.token, action: input.action, version: input.version, inputTag: input.inputTag });
     const owned = Object.freeze({ ...identity, binding: chain.binding, engineBytes: input.engineBytes,
       localPublicKey: new Uint8Array(input.localPublicKey), peerPublicKey: new Uint8Array(input.peerPublicKey), transcript: new Uint8Array(input.transcript) });
-    const record: ActionRecord = {
+    const record: ActionRecord = { cell: null!,
       operation: "derive", native, owner, pair: null, identity, input: null, derivation: owned, protectedInput: null, chain, bytes: 0,
       status: "queued", outcome: null, attempt: null, retry: null, job: null, running: false,
-      retired: false, drained: false, released: false, physicalDrained: signal<void>(), unsubscribe: () => {}, handle: null!,
+      retired: false, drained: false, released: false, disposing: false, physicalDrained: signal<void>(), unsubscribe: () => {}, handle: null!,
     };
-    const action: VoiceDerivationHandle = Object.freeze({
-      attempt: () => this.attemptAction(record) as Promise<VoiceDerivationOutcome>, inspect: () => record.status,
+    record.cell = new VoiceHandleCell({ attempt: () => this.attemptAction(record), inspect: () => record.status,
       pair: () => this.chainCurrent(chain) && record.outcome?.kind === "accepted" ? record.pair : null,
-      retire: () => this.retireAction(record),
-    });
+      retire: () => this.retireAction(record) });
+    const action = derivationHandle(record.cell);
     record.handle = action;
     chain.rowIssued = true; chain.reservedRows--; this.reservedRows--;
     chain.record = record; chain.records.set(0, record); chain.retainedBytes = retained; chain.enginePeak = peak;
@@ -1268,13 +1364,14 @@ export class VoiceCryptoBroker {
     // Uint8Array subclasses may override slice; Buffer.slice is a shared view. Construct real
     // owned arrays so caller mutation cannot change input after its native identity is fixed.
     const owned = Object.freeze({ ...input, binding: chain.binding, aad: new Uint8Array(input.aad), body: new Uint8Array(input.body) });
-    const record: ActionRecord = {
+    const record: ActionRecord = { cell: null!,
       operation: "protected", native, owner, pair, identity, input: null, derivation: null, protectedInput: owned, chain, bytes: 0,
       status: "queued", outcome: null, attempt: null, retry: null, job: null, running: false,
-      retired: false, drained: false, released: false, physicalDrained: signal<void>(), unsubscribe: () => {}, handle: null!,
+      retired: false, drained: false, released: false, disposing: false, physicalDrained: signal<void>(), unsubscribe: () => {}, handle: null!,
     };
-    record.handle = Object.freeze({ attempt: () => this.attemptAction(record) as Promise<VoiceConfirmationOutcome>,
-      inspect: () => record.status, retire: () => this.retireAction(record) });
+    record.cell = new VoiceHandleCell({ attempt: () => this.attemptAction(record), inspect: () => record.status,
+      retire: () => this.retireAction(record), pair: () => null });
+    record.handle = confirmationHandle(record.cell);
     chain.records.set(input.row, record); chain.retainedBytes = retained; chain.enginePeak = peak;
     // A channel descriptor already owns this fixed row. Transfer its SAME global slot
     // into actions; ordinary direct registration consumes a previously unused row instead.
@@ -1326,16 +1423,12 @@ export class VoiceCryptoBroker {
     // Four maximum frame/input copies plus a conservative16KiB engine ceiling overlap
     // retained chain inputs. They are a slice of the original96KiB, never a fresh charge.
     if (chain.retainedBytes + Math.max(chain.enginePeak, 16 * 1024) + 4 * 2064 > CHAIN_VARIABLE) throw new Error("voice continuation intake capacity reached");
-    const intake: ConfirmationIntake = { chain, purpose: selected, row: row ?? null, identity: original,
+    const intake: ConfirmationIntake = { cell: null!, chain, purpose: selected, row: row ?? null, identity: original,
       native: original ? channel.confirmationNative(selected, row!, original) : null, record: null, handle: null!, pending: null,
       running: false, returned: false, outcome: null, rowClaim: true, rowAuthenticated: false };
-    intake.handle = Object.freeze({ attempt: () => {
-      if (intake.outcome) return Promise.resolve(intake.outcome);
-      if (!intake.pending) intake.pending = signal<VoiceChannelConfirmationOutcome>();
-      const answer = intake.pending.promise;
-      intake.record?.retry?.resolve(); channel.wake(); this.startConfirmation(intake);
-      return answer;
-    }, row: () => intake.rowAuthenticated ? intake.row : null });
+    intake.cell = new VoiceHandleCell({ attempt: () => this.attemptConfirmationIntake(intake),
+      row: () => intake.rowAuthenticated ? intake.row : null });
+    intake.handle = confirmationIntakeHandle(intake.cell);
     // Publish before any transport, subscription, engine or scheduler callback. End sees
     // this purpose even if its Begin was never attempted or its row reply was lost.
     chain.reservedRows--; // claimed history cannot be refunded as unused by End
@@ -1343,6 +1436,14 @@ export class VoiceCryptoBroker {
     // history collection. A historical/no-Input descriptor still occupies one logical slot.
     chain.confirmations.set(key, intake); chain.continuation = intake;
     return intake.handle;
+  }
+
+  private attemptConfirmationIntake(intake: ConfirmationIntake): Promise<VoiceChannelConfirmationOutcome> {
+    if (intake.outcome) return Promise.resolve(intake.outcome);
+    if (!intake.pending) intake.pending = signal<VoiceChannelConfirmationOutcome>();
+    const answer = intake.pending.promise;
+    intake.record?.retry?.resolve(); intake.chain.channel!.wake(); this.startConfirmation(intake);
+    return answer;
   }
 
   private startConfirmation(intake: ConfirmationIntake): void {
@@ -1549,20 +1650,24 @@ export class VoiceCryptoBroker {
       deliveryToken: input.deliveryToken, kind: input.kind, sequence: input.sequence,
       aad: new Uint8Array(input.aad), ciphertext: new Uint8Array(input.ciphertext),
     });
-    const record: ActionRecord = {
+    const record: ActionRecord = { cell: null!,
       operation: "confirmation", native, derivation: null, protectedInput: null, chain: null,
       owner, pair, identity, input: owned, bytes, status: "queued", outcome: null,
       attempt: null, retry: null, job: null, running: false, retired: false,
-      drained: false, released: false, physicalDrained: signal<void>(), unsubscribe: () => {}, handle: null!,
+      drained: false, released: false, disposing: false, physicalDrained: signal<void>(), unsubscribe: () => {}, handle: null!,
     };
-    record.handle = Object.freeze({
-      attempt: () => this.attemptAction(record),
-      inspect: () => record.status,
-      retire: () => this.retireAction(record),
-    });
+    record.cell = new VoiceHandleCell({ attempt: () => this.attemptAction(record), inspect: () => record.status,
+      retire: () => this.retireAction(record), pair: () => null });
+    record.handle = confirmationHandle(record.cell);
     this.actions.set(key, record);
     try { record.unsubscribe = owner.onRetired(() => this.retireAction(record)); }
-    catch (error) { this.releaseAction(record); throw error; }
+    catch (error) {
+      // Subscription failed before any job, native admission or SDK handoff exists.
+      // Mark only this proven-unstarted registration drained; active work elsewhere
+      // still requires its actual finally before releaseAction can dispose it.
+      record.drained = true; record.physicalDrained.resolve();
+      this.releaseAction(record); throw error;
+    }
     return record.handle as VoiceConfirmationHandle;
   }
 
@@ -1818,8 +1923,19 @@ export class VoiceCryptoBroker {
     // Plan-final may still be Pending. Preserve its actual global row position as well as
     // the chain's byte payment until cleanup unlinks that metadata. Variable input is
     // zeroed separately by drainChain; this guard does not keep the physical lane busy.
-    if (record.chain?.channel?.retainsHistory(record.chain)) return;
-    record.released = true; record.unsubscribe();
+    if (record.chain?.channel?.retainsHistory(record.chain) || !record.drained) return;
+    if (!record.cell.detached) {
+      if (!record.disposing) {
+        record.disposing = true;
+        const returned = record.cell.detach();
+        if (!record.cell.detached) {
+          void returned.then(() => { record.disposing = false; this.releaseAction(record); });
+          return;
+        }
+        record.disposing = false;
+      } else return;
+    }
+    record.released = true; record.unsubscribe(); record.unsubscribe = () => {};
     record.input?.aad.fill(0); record.input?.ciphertext.fill(0);
     record.input = null; record.pair = null;
     record.protectedInput?.aad.fill(0); record.protectedInput?.body.fill(0); record.protectedInput = null;
@@ -1828,6 +1944,10 @@ export class VoiceCryptoBroker {
       record.derivation = null;
     }
     this.actions.delete(record.identity.owner + "/" + record.identity.action);
+    // No computation/settlement is running and the public target has physically detached.
+    // This adapter may close over the complete old channel, so it cannot survive disposal.
+    record.chain = null; record.native = null!; record.job = null; record.outcome = null;
+    record.attempt = null; record.retry = null;
     this.bytes -= record.bytes;
     const remaining = (this.groupBytes.get(record.owner.group) ?? 0) - record.bytes;
     if (remaining) this.groupBytes.set(record.owner.group, remaining); else this.groupBytes.delete(record.owner.group);
@@ -3426,7 +3546,7 @@ export function windowVoiceCryptoBroker(
   const host = window as Record<symbol, unknown>;
   const previous = host[BROKER] as VoiceCryptoBroker | undefined;
   if (previous) {
-    if (previous.version !== 31 || typeof previous.collectNativeNegotiationHistory !== "function" || typeof previous.retireNativeNegotiation !== "function" || typeof previous.completeNativeMediaHandoff !== "function" || typeof previous.completeNativeSdpRtcRound !== "function" || typeof previous.prepareNativeSdpRtc !== "function" || typeof previous.prepareNativeSdpCrypto !== "function" || typeof previous.prepareNativePcIntent !== "function" || typeof previous.prepareNativeSdpHandoff !== "function" || typeof previous.observeNativeWork !== "function" || typeof previous.returnNativeDerivation !== "function" || typeof previous.nativeConfirmationFromChannel !== "function" || typeof previous.nativeDerivationFromChannel !== "function" || typeof previous.recoverChannelHistory !== "function" || typeof previous.prepareChainFromChannel !== "function" || typeof previous.nativeChannel !== "function" || typeof previous.run !== "function" || typeof previous.selectJoinKey !== "function" || typeof previous.retrySelectedJoinKeys !== "function" ||
+    if (previous.version !== 32 || typeof previous.collectNativeNegotiationHistory !== "function" || typeof previous.retireNativeNegotiation !== "function" || typeof previous.completeNativeMediaHandoff !== "function" || typeof previous.completeNativeSdpRtcRound !== "function" || typeof previous.prepareNativeSdpRtc !== "function" || typeof previous.prepareNativeSdpCrypto !== "function" || typeof previous.prepareNativePcIntent !== "function" || typeof previous.prepareNativeSdpHandoff !== "function" || typeof previous.observeNativeWork !== "function" || typeof previous.returnNativeDerivation !== "function" || typeof previous.nativeConfirmationFromChannel !== "function" || typeof previous.nativeDerivationFromChannel !== "function" || typeof previous.recoverChannelHistory !== "function" || typeof previous.prepareChainFromChannel !== "function" || typeof previous.nativeChannel !== "function" || typeof previous.run !== "function" || typeof previous.selectJoinKey !== "function" || typeof previous.retrySelectedJoinKeys !== "function" ||
         typeof previous.registerProtectedConfirmation !== "function" ||
         typeof previous.registerProtectedDerivation !== "function" || typeof previous.registerConfirmation !== "function" || typeof previous.createPair !== "function") {
       throw new Error("voice crypto broker version changed; reload required");

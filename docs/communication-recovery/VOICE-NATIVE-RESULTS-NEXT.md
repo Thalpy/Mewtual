@@ -1,5 +1,19 @@
 # Next voice milestone: native result recovery
 
+## Current work: End cells reviewed; live compaction and composition next (26 October)
+
+Broker32 now detaches caller-retained negotiation handles/timer cells after actual End cleanup,
+including transfer-before-ready and entered-callback races. Old adapters/indexes are cleared;
+304 focused tests and read-only re-review pass. HANDOVER records pending complete gates and
+separate Native fixture validation. This does not yet compact browser history during live media.
+
+Next implement the coalesced live compaction transaction after exact native mode8 collection,
+transfer a measured terminal-record fee from existing history, and sever every old heavy edge.
+Then admit a second generation-bound negotiation on the SAME paid physical Session/keys/
+counters/executor, with bounded fair media refresh and peer-local failure. Preserve existing
+Root16-incarnation/browser256KiB limits. Operational renewal, App/RTC tracks, TURN/member relay
+and combined/physical acceptance follow. App V2 stays OFF; external resume remains separate.
+
 ## Current work: finish consumer gates, then browser terminal-handle detachment (26 October)
 
 Broker31 now uses real authenticated mode8, retains uncertainty/payment on pending or lost

@@ -1,5 +1,15 @@
 # Threat model; client integrity & enforcement boundaries
 
+## End-only browser handle detachment (26 October; inactive)
+
+Caller-retained handles and queued timer callbacks must not pin unpaid native/SDK graphs after
+End. Separate factory scopes capture detachable cells; negative publication precedes callback
+reentry and entered synchronous dispatch joins before fixed-history refund. Native final/ACK
+and actual SDK/IO joins remain independent prerequisites. Actual intake-to-chain ownership must
+survive End between transfer and Ready publication; lookup/outcome absence is insufficient.
+Subscription refusal can abandon only a proven-unstarted record, never active native work.
+HMR31 cannot reuse the new disposal shape. This is not live reclamation or multiparty authority.
+
 ## Browser native-history observation (26 October; inactive)
 
 Live cleanup cannot monopolize the physical lane across multiple returning requests and
