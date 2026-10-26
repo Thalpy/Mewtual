@@ -242,6 +242,65 @@ async fn a_dropped_remove_still_owns_its_delete_until_the_worker_ends() {
     assert!(!fake.exists());
 }
 
+/// Fix-the-lows round (follow-up "Clear on a saved row with an unplugged folder"): a stuck Clear
+/// of a saved row says what is left, a temporary copy of the saved file, not "the partly saved
+/// file", and Keep's "already gone" says the saved file and its copy were both gone. A Remove of a
+/// partly saved file keeps its own wording. Neither names a Keep label the row may not show.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_stuck_clear_of_a_saved_row_is_not_called_a_partly_saved_file() {
+    for published in [false, true] {
+        let (root, staging, journal) = partial();
+        let (fake, _release, _inside) = Fake::new(&journal);
+        fake.gate.lock().unwrap().take(); // no barrier in this test
+        if published {
+            fake.record.lock().unwrap().export = Some(ExportState::Published(journal.clone()));
+        }
+        let key = id(if published { 0xB2 } else { 0xB1 });
+        // The folder is unplugged (moved away): Remove stays Removing and says so.
+        let downloads = staging.parent().unwrap().to_owned();
+        let moved = root.path().join("Unplugged");
+        std::fs::rename(&downloads, &moved).unwrap();
+        let claim = CleanupClaim::acquire(7, key).unwrap();
+        let stuck = remove_sequence(&fake, claim, false).await;
+        let expected = if published {
+            REMOVE_UNREACHABLE_SAVED
+        } else {
+            REMOVE_UNREACHABLE
+        };
+        assert_eq!(stuck, Err(expected.to_owned()), "published: {published}");
+        assert_eq!(
+            stuck.unwrap_err().contains("partly saved"),
+            !published,
+            "published: {published}"
+        );
+        assert!(fake.exists(), "the record stays tracked in Removing");
+        // Reconnected, but the file is gone by now: Keep says what it found.
+        std::fs::rename(&moved, &downloads).unwrap();
+        std::fs::remove_file(&staging).unwrap();
+        let claim = CleanupClaim::acquire(7, key).unwrap();
+        let expected = if published {
+            ALREADY_REMOVED_SAVED
+        } else {
+            ALREADY_REMOVED
+        };
+        assert_eq!(
+            remove_sequence(&fake, claim, true).await,
+            Ok(Some(expected)),
+            "published: {published}"
+        );
+        assert!(!fake.exists());
+    }
+    for message in [
+        REMOVE_RETRY,
+        REMOVE_RETRY_SAVED,
+        REMOVE_UNREACHABLE,
+        REMOVE_UNREACHABLE_SAVED,
+    ] {
+        assert!(message.contains("choose Keep to leave"), "{message}");
+        assert!(!message.contains("Keep partly saved file"), "{message}");
+    }
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn keep_partial_releases_without_deleting_when_nothing_else_owns_the_cleanup() {
     let (_root, staging, journal) = partial();

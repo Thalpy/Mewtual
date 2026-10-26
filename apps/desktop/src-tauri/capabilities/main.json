@@ -231,6 +231,7 @@
     "allow-retry-private-download",
     "allow-cancel-private-download",
     "allow-check-saved-download",
+    "allow-reveal-saved-download",
 
     "allow-call-media-key",
     "allow-begin-inline-download",

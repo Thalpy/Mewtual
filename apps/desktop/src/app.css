@@ -3300,6 +3300,379 @@ button.primary:hover:not(:disabled) {
   white-space: nowrap;
 }
 
+/* ============================================================
+   Saved downloads (Transfers tab): .sdl  (Transfers UX, PR #51; design row.md)
+   One ruled card per private download, grouped Needs you / In progress / Saved. Tone comes from
+   data-tone on the row and feeds a 3px left rule, the chip and the bar fill; the chip always
+   carries an icon and a word, so colour is a hint and never the only signal. Tokens only:
+   presets and liveries restyle it for free. Disabled actions use aria-disabled (they stay
+   focusable so their reason can be read), so every :disabled rule here also covers it.
+   ============================================================ */
+
+/* ---- group: micro-label heading over a ruled list ---- */
+.sdl {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  min-width: 0;
+}
+.sdl + .sdl { margin-top: 14px; }
+.sdl-group {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 0;
+  font: 600 0.62rem/1 var(--mono);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+.sdl-group:focus { outline: none; }
+.sdl-group:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.sdl-group::after {
+  content: "";
+  flex: 1;
+  height: 1px;
+  background: var(--border-soft);
+}
+/* The attention group is tinted gold; its word already says "Needs you". */
+.sdl-group[id="sdl-needs"] { color: var(--warn); }
+.sdl-group[id="sdl-needs"]::after { background: var(--warn-brd); }
+.sdl-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+/* Visually hidden, still read: the live region and disabled reasons. */
+.sdl-sr {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+/* ---- row ----
+   A two-column grid: everything spans both columns except the byte bar (column 1) and the
+   chunk count (column 2), which share a line. Rows without a bar never create that line. */
+.sdl-row {
+  --tone: var(--muted);
+  --tone-ink: var(--text-2);
+  --tone-dim: color-mix(in oklab, var(--tone) 12%, var(--panel));
+  --tone-brd: color-mix(in oklab, var(--tone) 40%, var(--panel));
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  column-gap: 10px;
+  row-gap: 6px;
+  align-items: center;
+  min-width: 0;
+  padding: calc(var(--panel-pad) * 0.8) var(--panel-pad);
+  background: var(--panel);
+  border: 1px solid var(--border-soft);
+  border-radius: var(--r-lg);
+  box-shadow: inset 3px 0 0 var(--tone);
+}
+.sdl-row > * {
+  grid-column: 1 / -1;
+  min-width: 0;
+}
+/* Tone map. Semantic tokens keep their jobs across themes: green done, gold needs attention,
+   red danger, blue bytes moving, accent (the user's own colour) for "ready", a choice waiting. */
+.sdl-row[data-tone="ok"] {
+  --tone: var(--ok); --tone-ink: var(--ok);
+  --tone-dim: var(--ok-dim); --tone-brd: var(--ok-brd);
+}
+.sdl-row[data-tone="warn"] {
+  --tone: var(--warn); --tone-ink: var(--warn);
+  --tone-dim: var(--warn-dim); --tone-brd: var(--warn-brd);
+  background: color-mix(in oklab, var(--warn) 4%, var(--panel));
+}
+.sdl-row[data-tone="danger"] {
+  --tone: var(--danger); --tone-ink: var(--danger-hi);
+  --tone-dim: var(--danger-dim); --tone-brd: var(--danger-brd);
+  background: color-mix(in oklab, var(--danger) 5%, var(--panel));
+}
+.sdl-row[data-tone="transfer"] { --tone: var(--transfer); --tone-ink: var(--transfer); }
+.sdl-row[data-tone="accent"] {
+  --tone: var(--accent); --tone-ink: var(--accent-hi);
+  --tone-dim: var(--accent-dim);
+}
+.sdl-row[data-tone="muted"] { box-shadow: inset 3px 0 0 var(--border); }
+
+/* ---- head: name plus status chip ---- */
+.sdl-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 10px;
+}
+.sdl-name {
+  flex: 1 1 14ch;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 0.86rem;
+  font-weight: 600;
+  color: var(--text);
+}
+.sdl-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 2px 8px 2px 5px;
+  border: 1px solid var(--tone-brd);
+  border-radius: 999px;
+  background: var(--tone-dim);
+  color: var(--tone-ink);
+  font: 600 0.62rem/1.2 var(--mono);
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+.sdl-chip .ico { width: 1.6em; height: 1.6em; }
+/* Live states breathe through the icon; paused rows at the same fill stay still. */
+.sdl-row[data-state="receiving"] .sdl-chip .ico,
+.sdl-row[data-state="saving"] .sdl-chip .ico {
+  animation: sdl-breathe 1.2s ease-in-out infinite alternate;
+}
+@keyframes sdl-breathe {
+  from { opacity: 0.5; }
+  to { opacity: 1; }
+}
+/* A small celebration when a row lands as saved; runs once per mount. */
+.sdl-row[data-state="saved"][data-tone="ok"] .sdl-chip .ico {
+  animation: sdl-pop 320ms cubic-bezier(0.3, 1.6, 0.5, 1) 1;
+}
+@keyframes sdl-pop {
+  from { transform: scale(0.6); }
+  to { transform: scale(1); }
+}
+
+/* ---- byte bar ----
+   Fill width is --p (0..1). The label keeps its own translucent panel backing, so it stays
+   readable over the filled and the unfilled part in every preset. No percentage anywhere. */
+.sdl-row > .sdl-bar {
+  grid-column: 1;
+  position: relative;
+  height: 18px;
+  overflow: hidden;
+  border-radius: var(--r);
+  background: var(--bg-elev);
+  box-shadow: inset 0 0 0 1px var(--border-soft);
+}
+.sdl-bar-fill {
+  position: absolute;
+  inset: 0 auto 0 0;
+  width: calc(var(--p, 0) * 100%);
+  min-width: 2px; /* a started transfer always shows a sliver */
+  background: color-mix(in oklab, var(--tone) 70%, var(--panel));
+  border-right: 1px solid var(--tone);
+  transition: width 240ms ease-out;
+}
+.sdl-row[data-state="receiving"] .sdl-bar-fill,
+.sdl-row[data-state="saving"] .sdl-bar-fill {
+  background-image: repeating-linear-gradient(
+    -45deg,
+    transparent 0 6px,
+    color-mix(in oklab, var(--tone) 18%, transparent) 6px 12px
+  );
+  animation: sdl-flow 1.4s linear infinite;
+}
+@keyframes sdl-flow {
+  to { background-position-x: 16.97px; } /* one stripe period at 45deg */
+}
+.sdl-bar-label {
+  position: absolute;
+  right: 5px;
+  top: 50%;
+  transform: translateY(-50%);
+  padding: 1px 5px;
+  border-radius: var(--r);
+  background: color-mix(in oklab, var(--panel) 80%, transparent);
+  font: 600 0.64rem/1.3 var(--mono);
+  letter-spacing: 0.02em;
+  color: var(--text);
+  white-space: nowrap;
+  pointer-events: none;
+}
+.sdl-row > .sdl-chunks {
+  grid-column: 2;
+  font: 0.64rem/1.3 var(--mono);
+  letter-spacing: 0.04em;
+  color: var(--muted);
+  white-space: nowrap;
+}
+
+/* ---- why, where ---- */
+.sdl-why {
+  margin: 0;
+  font-size: 0.8rem;
+  line-height: 1.4;
+  color: var(--text-2);
+}
+.sdl-where {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 2px 10px;
+  margin: 0;
+  font-size: 0.76rem;
+  color: var(--muted);
+}
+.sdl-hint {
+  padding-left: 8px;
+  border-left: 1px solid var(--border);
+  font: 0.62rem/1.4 var(--mono);
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+/* Text button inside prose: a 28px hit target that does not grow the line. */
+.sdl-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  min-height: 28px;
+  margin: -6px 0;
+  padding: 0 4px;
+  border: 0;
+  border-radius: var(--r);
+  background: none;
+  font: inherit;
+  font-weight: 600;
+  color: var(--accent-hi);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  text-decoration-color: color-mix(in oklab, var(--accent) 45%, transparent);
+  cursor: pointer;
+}
+.sdl-link .ico { width: 14px; height: 14px; }
+.sdl-link:hover:not(:disabled, [aria-disabled="true"]) {
+  background: var(--accent-dim);
+  color: var(--accent-hi);
+  text-decoration-color: currentColor;
+}
+.sdl-link[aria-disabled="true"] { opacity: 0.6; cursor: progress; }
+.sdl-link[aria-disabled="true"]:hover { background: none; }
+
+/* ---- actions ----
+   .sdl-act alone is the primary (solid accent). .ghost is secondary. .danger is outlined red
+   and, when it is the last control, pushed to the far end so it never sits beside the primary. */
+.sdl-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  padding-top: 2px;
+}
+.sdl-act {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 28px;
+  padding: 3px 10px;
+  border: 1px solid transparent;
+  border-radius: var(--r);
+  background: var(--accent);
+  color: var(--on-accent);
+  font: 600 0.76rem/1.2 var(--ui);
+  cursor: pointer;
+}
+.sdl-act:hover:not(:disabled, [aria-disabled="true"]) { background: var(--accent-hi); }
+.sdl-act[aria-disabled="true"]:hover { background: var(--accent); }
+.sdl-act.ghost {
+  background: transparent;
+  border-color: var(--border);
+  color: var(--text-2);
+  font-weight: 500;
+}
+.sdl-act.ghost:hover:not(:disabled, [aria-disabled="true"]) {
+  background: var(--bg-elev);
+  color: var(--text);
+}
+.sdl-act.danger {
+  background: transparent;
+  border-color: var(--danger-brd);
+  color: var(--danger-hi);
+}
+.sdl-act.danger:hover:not(:disabled, [aria-disabled="true"]) {
+  background: var(--danger-dim);
+  border-color: var(--danger);
+}
+.sdl-act.ghost[aria-disabled="true"]:hover,
+.sdl-act.danger[aria-disabled="true"]:hover { background: transparent; }
+.sdl-actions > .danger:last-of-type,
+.sdl-actions > .sdl-confirm:last-of-type { margin-inline-start: auto; }
+.sdl-act:disabled,
+.sdl-act[aria-disabled="true"] {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+.sdl-act:focus-visible,
+.sdl-link:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+/* Inline confirmation: replaces Remove in its slot. Confirm is the filled-in version of the
+   outlined danger button, Cancel a plain ghost. */
+.sdl-confirm {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  animation: sdl-in 160ms ease-out;
+}
+.sdl-confirm .sdl-act.danger {
+  background: var(--danger-dim);
+  border-color: var(--danger);
+}
+@keyframes sdl-in {
+  from { opacity: 0; transform: translateX(-4px); }
+  to { opacity: 1; transform: none; }
+}
+
+/* ---- motion off: nothing moves ---- */
+:root[data-motion="off"] .sdl *,
+:root[data-motion="off"] .sdl *::before,
+:root[data-motion="off"] .sdl *::after {
+  animation: none !important;
+  transition: none !important;
+}
+@media (prefers-reduced-motion: reduce) {
+  .sdl *,
+  .sdl *::before,
+  .sdl *::after {
+    animation: none !important;
+    transition: none !important;
+  }
+}
+
+/* ---- compact density: tighter, hit targets stay 28px ---- */
+:root[data-density="compact"] .sdl + .sdl { margin-top: 10px; }
+:root[data-density="compact"] .sdl-list { gap: 4px; }
+:root[data-density="compact"] .sdl-row { row-gap: 4px; }
+:root[data-density="compact"] .sdl-row > .sdl-bar { height: 16px; }
+:root[data-density="compact"] .sdl-name { font-size: 0.82rem; }
+:root[data-density="compact"] .sdl-why { font-size: 0.76rem; }
+
+/* ---- terminal chrome: squarer, bracketed readouts, dotted rules ---- */
+:root[data-chrome="terminal"] .sdl-row,
+:root[data-chrome="terminal"] .sdl-chip { border-radius: var(--r); }
+:root[data-chrome="terminal"] .sdl-group::before { content: "\25AE"; }
+:root[data-chrome="terminal"] .sdl-group::after {
+  background: repeating-linear-gradient(90deg, var(--border) 0 4px, transparent 4px 7px);
+}
+:root[data-chrome="terminal"] .sdl-bar-label::before,
+:root[data-chrome="terminal"] .sdl-chunks::before { content: "["; }
+:root[data-chrome="terminal"] .sdl-bar-label::after,
+:root[data-chrome="terminal"] .sdl-chunks::after { content: "]"; }
+
 /* File-info progress remains a continuous pill; Transfers uses chunk pieces above. */
 .dl-progress progress {
   border-radius: 999px;

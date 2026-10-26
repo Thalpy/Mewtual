@@ -1,6 +1,40 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { VISUAL_FIXTURE_NOW, visualFixtureResponse } from "./visual-fixture.ts";
+import { VISUAL_TRANSFER_ROWS } from "./visual-transfers-fixture.ts";
+import { checkedPrivateDownloads, checkedSavedCheck, type SavedCheck } from "./private-downloads.ts";
+import { savedRowView } from "./transfer-rows.ts";
+
+test("the Transfers fixture shows every row state, closed and path free", () => {
+  // Transfers UX (PR #51): `?fixture=chat&transfers=1` lists one row per state for screenshots.
+  const rows = checkedPrivateDownloads(visualFixtureResponse("get_private_downloads", { server: 1 }, false, true));
+  assert.equal(rows.length, VISUAL_TRANSFER_ROWS.length);
+  const statuses = new Set(rows.map((row) => row.status));
+  for (const status of ["receiving", "incomplete", "ready", "paused", "exhausted", "blocked", "removing", "saving",
+    "save-interrupted", "save-paused", "destination-unavailable", "destination-changed", "saved"]) {
+    assert.ok(statuses.has(status as never), status);
+  }
+  const checks = rows.filter((row) => row.status === "saved").map((row) =>
+    checkedSavedCheck(visualFixtureResponse("check_saved_download",
+      { server: 1, download: row.id, expectedIntent: row.intent }, false, true)));
+  assert.deepEqual([...checks].sort(), ["missing", "present", "replaced", "unknown"]);
+  // Every row has a listed name, and the rows fill all three groups.
+  const files = visualFixtureResponse("get_files", { server: 1 }, false, true) as { files: { cid: string; name: string }[] };
+  const views = rows.map((row) => {
+    const name = files.files.find((file) => file.cid === row.cid)?.name;
+    assert.ok(name, row.status);
+    const check = row.status === "saved"
+      ? visualFixtureResponse("check_saved_download", { download: row.id }, false, true) as SavedCheck : null;
+    return savedRowView(row, check, name!, null, { busy: false, saving: false });
+  });
+  assert.deepEqual([...new Set(views.map((view) => view.group))].sort(), ["needs", "progress", "saved"]);
+  assert.equal(new Set(views.map((view) => `${view.state}:${view.check}`)).size, VISUAL_TRANSFER_ROWS.length);
+  assert.equal(visualFixtureResponse("reveal_saved_download", { server: 1, download: rows[0].id, expectedIntent: "1" }, false, true), null);
+  assert.doesNotMatch(JSON.stringify(rows), /path|folder|[A-Z]:\\|\/Users\//);
+  // Without the flag the chat fixture stays as it was.
+  assert.deepEqual(visualFixtureResponse("get_private_downloads"), []);
+  assert.equal(visualFixtureResponse("reveal_saved_download", { server: 1, download: "ab".repeat(32), expectedIntent: "1" }), null);
+});
 
 test("visual fixture explicitly supports native call controller lifecycle", () => {
   const candidate = visualFixtureResponse("prepare_call_mapping_controller");

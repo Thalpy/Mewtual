@@ -11,10 +11,10 @@
 use super::*;
 use catcoms_app::{DownloadExportEdge, DownloadExportTransition, DownloadPreflight, DownloadReady};
 use catcoms_storage::kept::{
-    flush_destination, partial_presence, remove_partial, saved_presence, ChoiceRefusal,
-    ChosenDestination, DownloadId, DownloadStatus, ExportError, ExportFile, ExportHalt,
-    ExportJournal, ExportPlan, ExportProbe, ExportProgress, ExportReopen, ExportState, ExportView,
-    KeepPhase, PartialPresence, PartialRemoval, Publication, SavedPresence,
+    flush_destination, partial_presence, remove_partial, saved_file_path, saved_presence,
+    ChoiceRefusal, ChosenDestination, DownloadId, DownloadStatus, ExportError, ExportFile,
+    ExportHalt, ExportJournal, ExportPlan, ExportProbe, ExportProgress, ExportReopen, ExportState,
+    ExportView, KeepPhase, PartialPresence, PartialRemoval, Publication, SavedPresence,
     EXPORT_CHECKPOINT_CHUNKS,
 };
 
@@ -32,6 +32,17 @@ pub(super) struct UiDownload {
     total_chunks: usize,
     /// A "Save as" choice is remembered for this row's next save. Never the path or name.
     chosen_place: bool,
+    /// Transfers UX (PR #51): plaintext byte counts, sizes only. `received_bytes` is what the
+    /// private copy holds, `saved_bytes` what the external save's durable checkpoint covers (the
+    /// whole file once saved), `total_bytes` the declared size. All `null` when native cannot read
+    /// the saved manifest; the renderer then shows chunk counts only.
+    received_bytes: Option<u64>,
+    saved_bytes: Option<u64>,
+    total_bytes: Option<u64>,
+    /// Saved rows only: `"downloads"` when native proves the saved file's folder is the resolved
+    /// Downloads folder, `"other"` otherwise (a place chosen in Save as, or a Downloads folder
+    /// that moved since). `None` for every other state. Never a path or folder name.
+    saved_to: Option<&'static str>,
 }
 
 /// Closed renderer status, highest precedence first. Typed storage state decides it; nothing is
@@ -73,7 +84,11 @@ fn status(download: &DownloadStatus) -> &'static str {
         "incomplete"
     }
 }
-fn project(download: DownloadStatus) -> UiDownload {
+/// The renderer row. `in_downloads` answers, for a saved row only, whether its file sits in the
+/// resolved Downloads folder (`Some(true)`), proven elsewhere (`Some(false)`), or could not be
+/// told (`None`: no resolvable Downloads folder, or the journal could not be read); see
+/// [`UiDownload::saved_to`]. It is ignored for every other state.
+fn project(download: DownloadStatus, in_downloads: Option<bool>) -> UiDownload {
     let status = status(&download);
     let total_chunks = download.state.plan.chunks.len();
     let saved_chunks = match download.export {
@@ -82,6 +97,12 @@ fn project(download: DownloadStatus) -> UiDownload {
         ExportView::None => 0,
     };
     let chosen_place = download.planned;
+    let saved_to = match (status == "saved", in_downloads) {
+        (true, Some(true)) => Some("downloads"),
+        (true, Some(false)) => Some("other"),
+        _ => None,
+    };
+    let bytes = download.bytes;
     let state = download.state;
     UiDownload {
         id: hex::encode(download.id.as_bytes()),
@@ -93,6 +114,10 @@ fn project(download: DownloadStatus) -> UiDownload {
         saved_chunks,
         total_chunks,
         chosen_place,
+        received_bytes: bytes.map(|bytes| bytes.received),
+        saved_bytes: bytes.map(|bytes| bytes.saved),
+        total_bytes: bytes.map(|bytes| bytes.total),
+        saved_to,
     }
 }
 pub(super) fn id(text: &str) -> Result<DownloadId, String> {
@@ -122,6 +147,7 @@ pub(super) fn intent(text: &str) -> Result<u64, String> {
 
 #[tauri::command]
 pub(super) async fn get_private_downloads(
+    app: AppHandle,
     state: State<'_, AppState>,
     server: u64,
 ) -> Result<Vec<UiDownload>, String> {
@@ -129,7 +155,34 @@ pub(super) async fn get_private_downloads(
     let (actor, instance) = actor_instance_of(&state, server).await?;
     let downloads =
         commit_kept_command(&state, server, instance, generation, actor.downloads()).await?;
-    Ok(downloads.into_iter().map(project).collect())
+    // Transfers UX: a saved row says "Saved to Downloads" only when its published journal's
+    // folder is exactly the resolved Downloads folder, and "another folder" only when the journal
+    // was read and its folder differs; anything else names no folder. One journal read per saved
+    // row (at most 32), outside the session commit guard so Lock never waits behind them, then a
+    // cheap generation check so nothing from another session is returned. No filesystem access:
+    // the journal's folder is compared as recorded.
+    let folder = app.path().download_dir().ok();
+    let mut rows = Vec::with_capacity(downloads.len());
+    for download in downloads {
+        let in_downloads = match (&folder, download.export == ExportView::Published) {
+            (Some(folder), true) => match actor.download_export_state(download.id).await {
+                Ok(Some(ExportState::Published(journal))) => Some(journal.is_in_folder(folder)),
+                _ => None,
+            },
+            _ => None,
+        };
+        rows.push(project(download, in_downloads));
+    }
+    if keep_session::invocation_generation(&state).await? != generation {
+        return Err("the UI session changed while the operation was in progress".into());
+    }
+    if !actor_instance_of(&state, server)
+        .await
+        .is_ok_and(|(_, now)| now == instance)
+    {
+        return Err("server changed".into());
+    }
+    Ok(rows)
 }
 #[tauri::command]
 pub(super) async fn set_private_download_paused(
@@ -229,11 +282,22 @@ pub(super) async fn remove_download(
     };
     remove_sequence(&ports, claim, keep_partial).await
 }
-const REMOVE_RETRY: &str = "The partly saved file could not be removed. Close any app using it, then choose Remove again, or choose Keep partly saved file.";
-const REMOVE_UNREACHABLE: &str = "The folder with the partly saved file is unavailable. Reconnect it and choose Remove again, or choose Keep partly saved file.";
+// A Removing row's Keep reads "Keep partly saved file", or "Keep the file" once every part was
+// written (the renderer decides from the row's counts), so these messages name only "Keep".
+// Fix-the-lows round (follow-up "Clear on a saved row with an unplugged folder"): a Clear of a
+// saved row (`published`) has its own wording, because what it removes is a temporary second name
+// of the complete saved file, not a partly saved file.
+const REMOVE_RETRY: &str = "The partly saved file could not be removed. Close any app using it, then choose Remove again, or choose Keep to leave it there.";
+const REMOVE_RETRY_SAVED: &str = "A temporary copy of the saved file could not be removed. Close any app using it, then choose Remove again, or choose Keep to leave it there.";
+const REMOVE_UNREACHABLE: &str = "The folder with the partly saved file is unavailable. Reconnect it and choose Remove again, or choose Keep to leave the file there.";
+const REMOVE_UNREACHABLE_SAVED: &str = "The folder with the saved file is unavailable. Reconnect it and choose Remove again, or choose Keep to leave the file there.";
 const CLEANUP_BUSY: &str = "This file is still being removed. Try again shortly.";
 const ALREADY_REMOVED: &str =
     "The partly saved file had already been removed, so there was nothing to keep.";
+/// Keep of a saved row whose check found neither the saved name nor its temporary copy holding
+/// the file (`partial_presence` looks at both).
+const ALREADY_REMOVED_SAVED: &str =
+    "The saved file and its temporary copy were already gone, so there was nothing to keep.";
 
 /// Process-wide ownership of every destructive cleanup (Remove, Save new copy) and every
 /// preserve decision ("Keep partly saved file") for one Download, keyed by (server, Download ID).
@@ -605,6 +669,109 @@ pub(super) async fn check_saved_download(
     saved_check_sequence(&ports, expected).await
 }
 
+/// "Show in folder" refusals (Transfers UX, PR #51). None names a path or a file.
+pub(super) const REVEAL_MISSING: &str = "The saved file is no longer there.";
+pub(super) const REVEAL_REPLACED: &str =
+    "Another file is at the saved name now, so Mewtual did not show it.";
+pub(super) const REVEAL_UNCHECKED: &str =
+    "Mewtual could not check the saved file right now. Try again shortly.";
+pub(super) const REVEAL_FAILED: &str = "The folder could not be opened.";
+
+/// The effects of "Show in folder" beyond a saved-file check, behind a seam for tests.
+#[async_trait::async_trait]
+pub(super) trait SavedRevealPorts: SavedCheckPorts {
+    /// The saved file's path, only while the same read-only check as [`saved_presence`] proves
+    /// the saved name still holds our file; otherwise the presence that says why not. Production
+    /// waits for one of the check slots, like [`SavedCheckPorts::presence`].
+    async fn locate(
+        &self,
+        journal: ExportJournal,
+    ) -> Result<Result<PathBuf, SavedPresence>, String>;
+    /// Show `path` selected in the system file manager. Never opens or runs the file.
+    fn reveal(&self, path: &Path) -> Result<(), String>;
+}
+
+/// "Show in folder" for a Saved row: the same fenced, bounded, read-only identity check as
+/// [`saved_check_sequence`], then the system file manager shows the file selected. Nothing is
+/// returned to the renderer but success or one of the fixed refusals, so the path never leaves
+/// native. A row that changed meanwhile gets the stale-download error.
+pub(super) async fn reveal_saved_sequence(
+    ports: &impl SavedRevealPorts,
+    expected_intent: u64,
+) -> Result<(), String> {
+    let Some((intent, journal)) = ports.saved().await? else {
+        return Err(STALE_DOWNLOAD.into());
+    };
+    if intent != expected_intent {
+        return Err(STALE_DOWNLOAD.into());
+    }
+    let located = tokio::select! {
+        biased;
+        located = ports.locate(journal.clone()) => located.ok(),
+        () = ports.wait(SAVED_CHECK_WAIT) => None,
+    };
+    match ports.saved().await? {
+        Some((now, again)) if now == intent && again == journal => {}
+        _ => return Err(STALE_DOWNLOAD.into()),
+    }
+    if !ports.current().await {
+        return Err("The download is no longer active.".into());
+    }
+    match located {
+        Some(Ok(path)) => ports.reveal(&path).map_err(|_| REVEAL_FAILED.into()),
+        Some(Err(SavedPresence::Missing)) => Err(REVEAL_MISSING.into()),
+        Some(Err(SavedPresence::Replaced)) => Err(REVEAL_REPLACED.into()),
+        Some(Err(SavedPresence::Ours | SavedPresence::Unknown)) | None => {
+            Err(REVEAL_UNCHECKED.into())
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl SavedRevealPorts for ActorSavedCheck<'_> {
+    async fn locate(
+        &self,
+        journal: ExportJournal,
+    ) -> Result<Result<PathBuf, SavedPresence>, String> {
+        let Ok(slot) = check_slots().acquire_owned().await else {
+            return Ok(Err(SavedPresence::Unknown));
+        };
+        blocking(move || {
+            let _held = slot;
+            saved_file_path(&journal)
+        })
+        .await
+    }
+    fn reveal(&self, path: &Path) -> Result<(), String> {
+        reveal_path(path)
+    }
+}
+
+/// Show a Saved row's file in the system file manager (Transfers UX, PR #51), after the same
+/// read-only identity check as [`check_saved_download`]. Returns nothing on success and a fixed
+/// message when the file is missing, replaced or cannot be checked; never the path.
+#[tauri::command]
+pub(super) async fn reveal_saved_download(
+    state: State<'_, AppState>,
+    server: u64,
+    download: String,
+    expected_intent: String,
+) -> Result<(), String> {
+    let generation = keep_session::invocation_generation(&state).await?;
+    let id = id(&download)?;
+    let expected = intent(&expected_intent)?;
+    let (actor, instance) = actor_instance_of(&state, server).await?;
+    let ports = ActorSavedCheck {
+        state: &state,
+        server,
+        instance,
+        generation,
+        actor: &actor,
+        id,
+    };
+    reveal_saved_sequence(&ports, expected).await
+}
+
 /// Blocking delete work for one proven partial; see [`CleanupPorts::remover`].
 pub(super) type Remover = Box<dyn FnOnce() -> Result<PartialRemoval, ExportError> + Send>;
 
@@ -650,16 +817,22 @@ pub(super) async fn remove_sequence(
             () = ports.wait(KEEP_PRESENCE_WAIT) => None,
         };
         match checked {
+            Some(PartialPresence::Gone) if published => Some(ALREADY_REMOVED_SAVED),
             Some(PartialPresence::Gone) => Some(ALREADY_REMOVED),
             Some(PartialPresence::Present | PartialPresence::Unknown) | None => None,
         }
     } else {
         // Only an outcome that settles the question may forget the journal. A partial that cannot
         // be checked right now stays tracked in Removing.
+        let (unreachable, retry) = if published {
+            (REMOVE_UNREACHABLE_SAVED, REMOVE_RETRY_SAVED)
+        } else {
+            (REMOVE_UNREACHABLE, REMOVE_RETRY)
+        };
         match delete_owned(ports, journal, published, &claim).await? {
             Ok(outcome) if outcome.settled() => outcome.notice(published),
-            Ok(PartialRemoval::FolderUnreachable) => return Err(REMOVE_UNREACHABLE.into()),
-            Ok(_) | Err(_) => return Err(REMOVE_RETRY.into()),
+            Ok(PartialRemoval::FolderUnreachable) => return Err(unreachable.into()),
+            Ok(_) | Err(_) => return Err(retry.into()),
         }
     };
     ports.finish_cleanup().await?;
@@ -2004,6 +2177,11 @@ mod tests {
             checked,
             export,
             planned: false,
+            bytes: Some(catcoms_storage::kept::DownloadBytes {
+                received: 3_100_000,
+                saved: 1_000_000,
+                total: 12_400_000,
+            }),
         }
     }
     #[test]
@@ -2124,22 +2302,35 @@ mod tests {
             ),
         ];
         for (download, expected) in cases {
-            let projected = project(download);
+            // `in_downloads` is ignored for every state but saved.
+            let projected = project(download, Some(true));
             assert_eq!(projected.status, expected);
             let json = serde_json::to_string(&projected).unwrap();
             assert!(!json.contains("path") && !json.contains("folder"), "{json}");
+            assert!(
+                json.contains("\"receivedBytes\":3100000")
+                    && json.contains("\"savedBytes\":1000000")
+                    && json.contains("\"totalBytes\":12400000"),
+                "{json}"
+            );
             if expected == "saved" {
                 assert_eq!(projected.saved_chunks, projected.total_chunks);
+                assert_eq!(projected.saved_to, Some("downloads"));
+            } else {
+                assert!(json.contains("\"savedTo\":null"), "{json}");
             }
         }
-        let json = serde_json::to_string(&project(download(
-            KeepPhase::Completed,
-            writing(None, false),
-            |_| {},
-            true,
-        )))
+        let json = serde_json::to_string(&project(
+            download(KeepPhase::Completed, writing(None, false), |_| {}, true),
+            Some(false),
+        ))
         .unwrap();
         assert!(json.contains("\"savedChunks\":1"), "{json}");
+        // A saved row whose journal was read and whose folder differs says "other"; one where
+        // nothing could be told (no Downloads folder, an unreadable journal) says nothing.
+        let saved = || download(KeepPhase::Completed, ExportView::Published, |_| {}, true);
+        assert_eq!(project(saved(), Some(false)).saved_to, Some("other"));
+        assert_eq!(project(saved(), None).saved_to, None);
     }
 
     #[test]

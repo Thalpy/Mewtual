@@ -357,6 +357,10 @@ export const TAURI_COMMAND_GROUPS = {
       // `saveAs` flag makes native open the OS "Save as" dialog itself; no path, folder or name
       // ever comes from the renderer (its signature is pinned by a test).
       "save_group_file",
+      // Show a Saved row's file in the system file manager, selected (never opened or run),
+      // after the same bounded read-only identity check as `check_saved_download`. It takes only
+      // the Download ID and revision; the path stays native and only fixed refusals come back.
+      "reveal_saved_download",
     ],
   },
 } as const;

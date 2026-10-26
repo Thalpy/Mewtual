@@ -62,6 +62,62 @@ fn a_held_folder_reads_names_inside_itself_and_never_takes_a_link_for_ours() {
         .expect("no handle inside the folder was left open");
 }
 
+/// Re-review LOW-a (fixed in the fix-the-lows round): a removal through the held folder deletes
+/// our own file inside that folder even after its path leads elsewhere, and never anything that
+/// is not ours: another file, a junction at the name, or nothing at all.
+#[cfg(windows)]
+#[test]
+fn a_held_folder_removes_only_our_own_file_inside_itself() {
+    let dir = tempfile::tempdir().unwrap();
+    let real = dir.path().join("Real");
+    fs::create_dir(&real).unwrap();
+    let path = dir.path().join("Through link");
+    if !link_directory(&real, &path) {
+        eprintln!("skipped: this host cannot create a directory link");
+        return;
+    }
+    let ours = create_leaf(&path.join("ours")).unwrap();
+    let id = session_id(&ours).unwrap();
+    fs::write(real.join("theirs"), b"the user's file").unwrap();
+    let held = hold_folder_holding(&path, folder_identity(&path).unwrap(), "ours", id)
+        .unwrap()
+        .expect("the folder holds our file");
+    // The path now leads to another folder holding a file at our name: not touched.
+    let decoy = dir.path().join("Decoy");
+    fs::create_dir(&decoy).unwrap();
+    fs::write(decoy.join("ours"), b"someone else's").unwrap();
+    fs::remove_dir(&path)
+        .or_else(|_| fs::remove_file(&path))
+        .unwrap();
+    assert!(link_directory(&decoy, &path));
+    assert_eq!(
+        held.remove_session("theirs", id).unwrap(),
+        Verified::NotOurs
+    );
+    assert_eq!(
+        held.remove_session("missing", id).unwrap(),
+        Verified::Missing
+    );
+    if link_directory(&decoy, &real.join("linked")) {
+        assert_eq!(
+            held.remove_session("linked", id).unwrap(),
+            Verified::NotOurs
+        );
+        assert!(real.join("linked").exists(), "a junction at the name stays");
+    }
+    assert!(matches!(
+        held.remove_session("ours", id).unwrap(),
+        Verified::Removed { links: 1 }
+    ));
+    assert!(
+        !real.join("ours").exists(),
+        "ours went from the held folder"
+    );
+    assert_eq!(fs::read(decoy.join("ours")).unwrap(), b"someone else's");
+    assert_eq!(fs::read(real.join("theirs")).unwrap(), b"the user's file");
+    drop(ours);
+}
+
 #[test]
 fn identity_follows_the_object_not_the_name_and_counts_hard_links() {
     let dir = tempfile::tempdir().unwrap();

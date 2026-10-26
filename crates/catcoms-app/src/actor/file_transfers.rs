@@ -84,6 +84,9 @@ fn kept_plan(
 /// catches it first.
 const SAVE_AS_OVER_JOURNAL: &str =
     "This file already has a partly saved copy. Choose Save new copy or Remove in Transfers first.";
+/// Refusal for a start that names no record while that file's journaled save is running (a
+/// stale list's one-click Download). Nothing was changed; the running save continues.
+const SAVE_RUNNING: &str = "This file is being saved right now. Its progress is in Transfers.";
 
 /// Undo a Download run whose "Save as" choice could not be written (picker review L2).
 ///
@@ -986,6 +989,22 @@ impl FileTransfers {
                     .is_some_and(|d| !matches!(d.export, catcoms_storage::kept::ExportView::None));
                 if journaled && planned.is_some() {
                     return Err(SAVE_AS_OVER_JOURNAL.into());
+                }
+                // Fix-the-lows round (picker re-review design question): a start that names no
+                // record (the chat's one-click Download from a list that did not show this save
+                // yet) must not take over a record whose journaled save is running right now,
+                // because resuming retires that save's read epoch and interrupts it. Refused here
+                // for the same reason as above, before `resume_download`. An explicit Resume names
+                // its record and is fenced by the intent CAS instead; an interrupted save (no live
+                // session) still resumes in one click, as before.
+                let running = found.as_ref().is_some_and(|d| {
+                    matches!(
+                        d.export,
+                        catcoms_storage::kept::ExportView::Writing { active: true, .. }
+                    )
+                });
+                if resume.is_none() && running {
+                    return Err(SAVE_RUNNING.into());
                 }
                 found
             } else {

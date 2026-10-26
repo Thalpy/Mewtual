@@ -1178,6 +1178,33 @@ manual: a real Save as dialog per OS, Pause/Lock during real writes, restart aft
 save, FAT/exFAT/SMB/ReFS/OneDrive volumes, power loss, and macOS. The acceptance ledger has the
 same summary.
 
+Transfers UX (24 October, on top of `95eaeda6`): one row per file (a save's live progress shows in
+its private download row, and the live list leaves that file out), rows grouped Needs you / In
+progress / Saved with an icon and a word per state, a byte bar ("3.1 MB / 12.4 MB", 1000-based,
+no percentage) plus the chunk count, one checked sentence per state, "Saved to Downloads" or
+"Saved to another folder" with Show in folder (new `os-facing` command `reveal_saved_download`),
+inline Confirm remove, file-specific accessible names, disabled reasons, one polite live region
+for state changes. Native rows carry byte counts and `savedTo`. Deferred to a follow-up PR (owner
+decision): "Replace my older saved copy", which needs a durable record of saved copies first. On
+hold (owner): keeping finished saves listed; a finished save still releases its row (and its
+private copy) and shows done in the live list, so a Saved row is only an interrupted cleanup's
+leftover. A row reads Saving from the first written byte of its save. An adversarial review and a
+re-review found no blocker or high; their mediums (Saving state, unproven "another folder", focus
+handling) are fixed. `cargo deny` now fails on RUSTSEC-2026-0387 (`crypto-bigint` through `p256`),
+published after `95eaeda6` and unrelated to this work. Details, dispositions and the ledger are in
+the design document's Transfers UX section.
+
+Fix-the-lows round (24 October, on top of `3f14ee2e`; focused checks only, CI runs the suites):
+Clear on a Saved row checks the file again before skipping its confirmation; Explorer gets
+`/select,"<path>"` (a comma no longer splits it) and `xdg-open` the folder with a trailing `/`
+(never the file itself); a name check that could not be made is no longer reported as "the folder
+changed"; on Windows a refused creation removes its empty partial through the held folder even
+after a junction retarget; a stale list's one-click start no longer interrupts a running
+journaled save; the plain save item reads "Save to chosen place" while a Save as choice would be
+used; a stuck Clear offers "Keep the file" and native's messages describe a temporary copy. The
+remaining items, each with its reason (no safe API, macOS, out of scope), are in the design
+document's "Fix-the-lows round" section.
+
 ## Chat history adversarial checkpoint (2026-10-20)
 
 The latest user request is to explain/test additive chat history across MLS epochs, disconnected

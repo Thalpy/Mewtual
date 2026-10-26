@@ -621,6 +621,11 @@ writer keeps those properties.
   name with delete access and without delete sharing, without following a reparse point, verifies
   that handle and deletes through it, so nobody can rename, replace or delete the name meanwhile
   (guaranteed against every process); no attribute is ever changed, through a path or a handle.
+  One exception: a creation refused after its folder recheck removes its own empty partial
+  relative to the held folder handle (fix-the-lows round), and fs_at opens that name sharing
+  delete, so another process could rename it between the check and the delete. The delete still
+  goes through the handle whose identity was verified, so it can only remove that object, our
+  never-published empty partial.
   Unix has no delete-by-inode, so the guarantee is narrower: **automatic deletion is guaranteed
   only against processes running as other accounts.** In a folder other accounts can modify (owner
   neither us nor root, or group- or other-writable without the sticky bit; a group-writable folder
@@ -671,8 +676,14 @@ writer keeps those properties.
   otherwise, even if a file was planted at our name. The recheck reads the folder identity and the
   name through one held folder handle (Unix: a descriptor and `openat`; Windows: a directory handle
   and fs_at's handle-relative open), so a third swap, or a junction retargeted on the way, cannot
-  pass it, and a failed check is the same refusal as a changed folder (never a quiet switch to the
-  non-resumable writer). Before that, the Windows name check was the path-based link probe alone:
+  pass it. A check that finds another folder or another object, or a path that leads to no folder
+  any more, is the changed-folder refusal; one that cannot be made (descriptor exhaustion, an I/O
+  error, a folder its owner cannot read) says the new file could not be checked, with the
+  system's reason; neither is ever a quiet switch to the non-resumable writer.
+  The folder handle that passed is kept for the rest of creation: on Windows a junction retargeted
+  after the recheck (the link probe then reports a changed folder) no longer strands our empty
+  partial, which is removed relative to that handle, still only once its identity proves it ours.
+  Before that, the Windows name check was the path-based link probe alone:
   retargeting a junction to another folder just before it let the whole plaintext be written into
   that folder, with publication then halting and Remove unable to clean it there (the
   coordinator's review L1). The Unix name check was lost when PR51 M3 replaced the Unix link probe
@@ -694,8 +705,10 @@ writer keeps those properties.
 - **Save as.** Native opens the OS dialog itself; the renderer sends only a flag and the command's
   parameter list is pinned so no path can be added. The chosen place authorizes saves of that one
   Download only: it stays the destination of every save of it (a later plain one-click Download
-  of the same file included) until a save begins there, a newer Save as replaces it or the record
-  is released. It is never logged (`rfd` logs only in backends this build does not compile), and
+  of the same file included; its file and embed menu items, image viewer and file pane button then
+  read "Save to chosen place" when the Transfers list shows the row, while the attachment chip,
+  the .pixa viewer's button and Unlock copy still do not say so) until a save begins there, a
+  newer Save as replaces it or the record is released. It is never logged (`rfd` logs only in backends this build does not compile), and
   persists only in the sealed record. An explicit Resume of a completed copy checks a remembered
   place read-only before spending allowance. An existing name is refused even if the dialog asked to
   replace it. The peer-chosen suggestion is sanitized (Windows device names including `COM¹` and
@@ -711,6 +724,26 @@ writer keeps those properties.
   included (R2-M3). A cloud-synced or shared chosen folder (for example OneDrive Desktop or Documents)
   uploads the partial plaintext and the probe name as they are written. A chosen folder inside the
   app's own data or vault folder is not refused (documented, not enforced).
+- **Transfers rows and Show in folder (Transfers UX, PR #51).** The row projection now also
+  carries plaintext byte counts (received, saved, declared total) and, for a saved row, one word
+  saying whether its recorded folder is exactly the resolved Downloads folder. Sizes and that word
+  only: no path, folder or file name reaches the renderer through them. `reveal_saved_download`
+  is `os-facing`: it takes a Download ID and revision, runs the same bounded read-only identity
+  check as the saved-file check, then asks the system file manager to show the file selected; it
+  never opens or runs it and returns no path. The check and the reveal are separate steps, so
+  another account able to rename entries in that folder could swap the name between them; the
+  file manager then shows the swapped-in file selected, still without opening it. On Linux and
+  other non-macOS Unix the reveal hands the folder to `xdg-open`, with a trailing `/`, so a
+  launcher that resolves the path itself refuses a file swapped in for that folder in the same
+  window instead of opening it; a launcher that normalizes the path first (GIO may drop the slash)
+  would still open such a file (only someone able to rename the folder's parent could arrange it;
+  the complete fix is the file manager's D-Bus `ShowItems`, a new dependency, not taken). A path
+  with no parent folder is refused rather than handed to `xdg-open` itself. Windows passes the path
+  quoted inside `/select,"<path>"` (raw, so it is not quoted twice), which keeps a comma in the
+  saved name from splitting it; a path containing `"` (no Windows name can) is refused. A
+  compromised renderer can call it repeatedly: the two saved-check slots bound how many checks run
+  at once, not how many windows open, which matches opening links (`open_external_url` has no
+  bound either); the windows show Mewtual's own saved files only.
 - **Fences.** In-session journal transitions require the original export lease; the Resume
   preflight's edges require a preflight observation bound to the actor lifetime, Root authority,
   storage mount and transfer epoch, plus an exact journal CAS; all require the original native
