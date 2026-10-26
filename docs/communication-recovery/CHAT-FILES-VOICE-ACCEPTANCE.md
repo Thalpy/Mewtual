@@ -1,5 +1,19 @@
 # Chat, files and voice implementation evidence
 
+## Broker39 full-run failure and retained retry regression (26 October)
+
+Full native at4c290a5c:865 passed/20 failed. First failure: fixture Derive Admit returned
+a refusal where a one-shot assertion expected a permit, hiding its exact code. Nineteen
+later cases were refused by the fixture shutdown safety gate. Original isolated case
+passes8.29s; the initial deterministic UI-contention fix passes8.15s. Exact historical
+refusal cause remains unproven; this is not dismissed as flaky and no deadline is raised.
+
+Final fixture correction retains the original identity/bytes/deadline, retries only exact
+Capacity, collects each real reply and preserves full diagnostics for other refusals.
+Whole-stage watchdogs include Actor/guard/sleep waits and reject success after the original
+deadline. Its final focused/full rerun and strict lint remain pending. Frontend3047 and
+matching Root3679/24-ignore evidence below remain valid for their unchanged source.
+
 ## Broker39 known failed-plan retirement (26 October; native focused passes, full pending)
 
 Focused 335 tests plus the SDK-close reentry regression pass; final complete frontend 3,047

@@ -1,5 +1,22 @@
 # Mewtual; Handover
 
+## Native validation checkpoint (26 October; full rerun required)
+
+The frozen Broker39 suite at4c290a5c FAILED:865 passed,20 failed. One first failure was
+the derivation fixture's one-shot engine Admit returning a refusal; its two-byte assertion
+discarded the refusal code. The other19 were blocked by FixtureAdmission's deliberate
+shutdown safety gate after that failure. This is not20 independently diagnosed defects.
+The original isolated case passes8.29s; the first deterministic-contention correction
+passes8.15s. Neither replaces a green full run or proves the historical refusal's cause.
+
+The fixture now retries ONLY exact authenticated Capacity using the same Row/Action,
+engine bytes and absolute original deadline, returning every physical reply before retry.
+Actual UI contention deterministically prevents admission and preserves original Status.
+All other refusal bytes remain in diagnostics. Whole Admit and Result stages, including
+Actor awaits/guard acquisition/sleeps, have remaining-original-deadline watchdogs and reject
+late success. The final bounded variant awaits focused/full execution; strict lint has not
+yet run. The previous pending descriptions below are superseded by this result. App OFF.
+
 ## Broker39 failed-peer cleanup (known receipts; native validation in progress)
 
 An attached failed plan can now retire without replacing the selected key, Session or
