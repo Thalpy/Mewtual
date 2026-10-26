@@ -29,13 +29,17 @@ opt-in setting that may replace Mewtual's own earlier copy of a file saved again
   including birth time, (c) still has exactly the bytes Mewtual saved (length and plaintext CID,
   equal to the copy just published), (d) has one name, is not read-only and is not a reparse point
   of any kind, (e) sits in the same folder as the new copy, and on Unix that folder and file are
-  not writable by other accounts. Windows hashes and deletes through one handle that shares only
-  reading; Unix hashes first, then renames aside, rechecks and unlinks. The new copy takes the old
-  name only through a no-replace link, only when a one-click save asked for exactly that name, and
-  its first name is removed only while the old name still holds it (held by a delete-denying pin
-  on Windows). So flipping it can only delete Mewtual's own unchanged earlier output after an
-  identical copy was published beside it, and it never renames a name the user typed. A copy that
-  cannot be proven is kept and the save result says so.
+  not writable by other accounts, (f) only while the new copy, pinned before the check (a
+  delete-denying pin on Windows, a descriptor elsewhere), still has its name, checked right before
+  the delete and on Unix again before the unlink. Windows hashes and deletes through one handle
+  that shares only reading; Unix hashes first, then renames aside, rechecks and unlinks. The new
+  copy takes the old name only through a no-replace link, only when a fresh one-click save into
+  Downloads asked for exactly that name (never a Save as name, a resumed journal or a recovered
+  save), and its first name is removed only while the old name still holds it (held by a
+  delete-denying pin on Windows). So flipping it can only delete Mewtual's own unchanged earlier
+  output after an identical copy was published beside it and while that copy is still there, and
+  it never renames a name the user typed. A copy that cannot be proven is kept and the save result
+  says so.
 - **Found while building it:** on Windows a delete-denying handle on one hard link does not stop
   another link of the same file from being deleted (share access is checked per name here). The
   replace pins the other name itself. PR #51's removal of a published row's `.mewtual-part` name
@@ -45,8 +49,12 @@ opt-in setting that may replace Mewtual's own earlier copy of a file saved again
   not cover (alternate data streams, extended attributes, permissions, timestamps). On Unix a
   process of the same account that already had the old copy open could change it between the hash
   and the unlink, or remove the other name before the first name goes; timestamps are too coarse to
-  see a same-size write in one tick. On Windows a writable memory mapping made before the check,
-  or a read-only attribute set after it, is not covered by share modes. A Unix crash between the
+  see a same-size write in one tick. On Unix a descriptor does not keep the new copy's name, so a
+  same-account process removing the new copy between the last check and the unlink leaves no copy
+  at a name (Windows' pin closes that window). On Windows a writable memory mapping made before
+  the check, or a read-only attribute set after it, is not covered by share modes. The list's bulk
+  check can hold both PR #51 check slots for up to 5 s per call (bounded; a spamming renderer
+  delays PR #51's checks and reveals). A Unix crash between the
   rename aside and the unlink leaves the old copy at a `mewtual-removing-` name (its entry stays,
   reading "missing"). "Every server" in the setting means every account using the same OS user.
   The ReFS file index and the other PR #51 limits apply unchanged.

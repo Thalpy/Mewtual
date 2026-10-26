@@ -23,9 +23,10 @@ Finished saves of shared files are now remembered per server on this device
   same file in the same folder that it proves is its own and unchanged (identity, one name, not
   read-only, no reparse point, exact length and CID; Unix not writable by other accounts), deletes
   it through the verified object (Windows: the hashed handle; Unix: rename aside, recheck,
-  unlinkat), and gives the new copy the old name by a no-replace link only for a one-click save that
-  asked for that name. The first name goes only while the old name still holds the copy. Every
-  refusal keeps the old copy and says why.
+  unlinkat) only while the pinned new copy still has its name, and gives the new copy the old name
+  by a no-replace link only for a fresh one-click save into Downloads that asked for that name. The
+  first name goes only while the old name still holds the copy. Every refusal keeps the old copy
+  and says why.
 - **Found:** on Windows a delete-denying handle on one hard link does not protect another link of
   the same file; the replace pins the other name. PR #51's Clear of a published row deletes the
   staging name after checking the final name without such a pin (follow-up for #51's code, in
@@ -39,7 +40,8 @@ Finished saves of shared files are now remembered per server on this device
   refresh also checks the list; PR #51's "no trace of the replace setting" assertion became a
   positive one.
 - **Limits:** see the design's residuals (old copy's streams and metadata go with it, Unix
-  same-account windows, Windows memory mappings and late read-only attribute, Unix crash leftover
+  same-account windows including removal of the new copy just before the unlink, Windows memory
+  mappings and late read-only attribute, the bulk check holding PR #51's check slots, Unix crash leftover
   at a `mewtual-removing-` name, unreached entries stay unchecked, `save_group_file` itself is
   covered by its port seams and a text-order test, not end to end).
 

@@ -229,9 +229,12 @@ uses the same Windows or Unix user.
 - the old name already holds the new copy (the old copy was gone and the new save took its name,
   possibly differing only in case on Windows): nothing to delete; the older entry is forgotten (its
   name is the new copy's now);
-- the new save started from the old copy's name (`base_name` of its journal equals the old leaf,
-  compared case-insensitively for Windows) and was numbered because that name was taken: delete the
-  old copy, then give the new copy the old name;
+- the new save started from the old copy's name and was numbered because that name was taken:
+  delete the old copy, then give the new copy the old name. "Started from" is the name a **fresh
+  one-click save into Downloads** asked for (`Exported::started_from`, set only in that branch of
+  `export_sequence`), compared case-insensitively on Windows. A Save as name, a reopened journal
+  (a plain Resume of an interrupted Save as reopens the chosen folder's journal with the name the
+  user typed) and a recovered save have none (adversarial review M2);
 - otherwise (a different listed name, or a name the user typed in Save as): delete the old copy and
   leave the new copy's name alone. A name the user chose is never renamed.
 
@@ -251,7 +254,13 @@ the sanctioned clock, runs before each effect and every 1 MiB of hashing, revisi
 1. **Hold the folder** at the new copy's folder path, requiring the new copy's folder identity.
    Unix: classify it (the existing `pin_folder(.., classify: true)`), but act on "shared" only
    after step 2 has seen that the old copy is there and ours (revision 2, review M3(a): never say
-   anything about a copy that may not exist).
+   anything about a copy that may not exist). Windows reads the folder identity before opening the
+   old copy, so a folder that went or moved reads as "could not be checked", never as "the old copy
+   is missing" (which would forget an entry whose file still exists; adversarial review L4).
+   **Pin the new copy** (adversarial review H1): Windows opens it with the delete-denying pin of
+   publication (`open_leaf_pinned`), elsewhere with a descriptor, and requires its identity and
+   size; a new copy that is already gone refuses here. The pin is held through steps 2 to 4. If the
+   old name already holds the new copy (any case on Windows), nothing is pinned or deleted.
 2. **Prove the old copy, read-only.**
    - Windows: open `folder/old_leaf` with `DELETE | FILE_READ_DATA | FILE_READ_ATTRIBUTES |
      SYNCHRONIZE`, share mode `FILE_SHARE_READ` only, `FILE_FLAG_OPEN_REPARSE_POINT |
@@ -264,20 +273,26 @@ the sanctioned clock, runs before each effect and every 1 MiB of hashing, revisi
      identity equal to the entry's, then read the whole content through this handle: exact length
      equal to the entry's size and plaintext CID equal to the entry's.
    - Unix: `openat` no-follow in the held folder; regular file, identity equal, link count 1, owner
-     write bit set and no group or other write bit (review L8: then only this account or root can
-     change it), then hash through that descriptor with its size, modification time and change
-     time read before and after the hash (a change during the hash refuses).
-3. **Delete the old copy through the verified object.** Windows: `delete_by_handle` on the handle
-   that was just hashed (the PR #51 fs_at path). Unix: rename the name aside (no replace, random
-   name from the RNG seam) relative to the held folder, open the aside name, require the same
-   identity, size and modification time as when hashed, then `unlinkat`; anything else puts it back
-   without replacing and refuses. Hashing happens before the rename (PR #51 review H3), so the
-   user's file is never hidden while it is read. Native then forgets the old entry.
-4. **Give the new copy the old name, without replacing** (only in the rename case above). Pin the
-   new copy (Windows: the delete-denying pin of publication; Linux and Android: its descriptor) and
-   require its identity, then the existing no-replace `link_open` to `old_leaf`, then read
-   `old_leaf` where it was linked and require the new copy's identity. A taken name, or any other
-   failure, stops here: the new copy keeps its own name and the user is told.
+     write bit set, and the folder's sharing rule applied to the file itself (owned by this
+     account, no other-write bit, group write only for a proven user-private group without an
+     extended ACL; review L8 and adversarial review L1, so a umask-002 export in the user's own
+     folder is accepted while a file another account may write is not), then hash through that
+     descriptor with its size, modification time and change time read before and after the hash
+     (a change during the hash refuses).
+3. **Delete the old copy through the verified object**, only if the pinned new copy still has its
+   name (checked right before the delete, and on Unix again right before the unlink with a put-back
+   otherwise; adversarial review H1). Windows: `delete_by_handle` on the handle that was just
+   hashed (the PR #51 fs_at path); the pin stops the new copy's name going meanwhile. Unix: rename
+   the name aside (no replace, random name from the RNG seam) relative to the held folder, open the
+   aside name, require the same identity, size and modification time as when hashed, then
+   `unlinkat`; anything else puts it back without replacing and refuses. Hashing happens before the
+   rename (PR #51 review H3), so the user's file is never hidden while it is read. Native forgets
+   the old entry once the storage call returns (after step 4 when it runs).
+4. **Give the new copy the old name, without replacing** (only in the rename case above). Through
+   the pin from step 1, the existing no-replace `link_open` to `old_leaf`, then read `old_leaf`
+   where it was linked and require the new copy's identity. A taken name, or any other failure,
+   stops here: the new copy keeps its own name and the user is told; if the new copy's own name is
+   gone too, the note says the new copy was moved or deleted instead of naming it.
 5. **Record the new name**: the list entry of this save changes its leaf from the new name to the
    old one, compare-and-swap on entry id and leaf, under the store and registry locks. If this does
    not succeed, step 6 does not run (review M4).
@@ -295,13 +310,16 @@ exists unless step 2 saw it):
 | Replaced (renamed into place, or deleted beside a new name) | "It replaced the copy Mewtual saved before." |
 | Old copy missing, or its name already holds the new copy | none |
 | No candidate in this folder (only copies elsewhere) | "Mewtual did not replace the copy it saved before, because this one went to another folder." |
-| Changed, read-only, or another object at the name | "Mewtual did not replace the copy it saved before, because that copy was changed or is not the one Mewtual saved." |
+| Changed, or another object at the name | "Mewtual did not replace the copy it saved before, because that copy was changed or is not the one Mewtual saved." |
+| Read-only | "Mewtual did not replace the copy it saved before, because that copy is read-only." |
 | More than one name | "Mewtual did not replace the copy it saved before, because that file has another name too." |
-| Shared folder (after seeing it is ours) | "Mewtual did not replace the copy it saved before, because other accounts may change that folder." |
-| Could not be checked (busy, held open, error, a second save of the same file, time out) | "Mewtual did not replace the copy it saved before, because it could not be checked right now." |
+| Shared folder or file (after seeing it is ours) | "Mewtual did not replace the copy it saved before, because other accounts may change it there." |
+| Could not be checked (busy, held open, error, a second save of the same file, time out, the folder moved; adversarial review L2) | "Mewtual did not replace the copy it saved before, because it could not be checked right now." |
 | No identity (either copy), a reparse point, another platform | "Mewtual did not replace the copy it saved before, because it cannot check files in that folder." |
-| List not readable, entry not recorded, record kept | "Mewtual did not replace the copy it saved before this time." |
+| The new copy went before the delete (adversarial review H1) | "Mewtual did not replace the copy it saved before, because the new copy was moved or deleted meanwhile." |
+| List not readable, entry not recorded, record kept, a recovered save | "Mewtual did not replace any earlier copy this time." (adversarial review L3: no claim that an earlier copy exists) |
 | Old deleted, the move failed (name taken or otherwise) | "Mewtual removed the copy it saved before, but could not give this copy its name, so it keeps the name <new name>." |
+| Old deleted, the move failed and the new copy's own name is gone too | "Mewtual removed the copy it saved before, but the new copy was moved or deleted meanwhile." |
 | Second name left | "The saved file also kept the name <new name>. Both names are the same file, so deleting either one keeps the other." |
 | Unix put-back failed | "Mewtual could not finish replacing the copy it saved before. It may be in that folder under a name starting with mewtual-removing-." |
 
@@ -310,10 +328,11 @@ exists unless step 2 saw it):
 | # | Crash after | State on disk | List | Next |
 | --- | --- | --- | --- | --- |
 | R1 | the new entry, before step 3 | old and new copies | both entries | Consistent: two copies, two rows. |
-| R2 | step 3 (old deleted), before the old entry is forgotten | new copy at its own name | both; the old one reads "missing" | The old row offers Clear. |
-| R3 | step 4 (linked), before step 5 | the new copy under both names | old entry gone, new at the new name (present) | A second name stays; consistent. |
-| R4 | step 5, before step 6 | both names | new entry at the old name (present) | A second name stays; consistent. |
-| R5 | Unix, inside step 3 between the rename aside and the unlink | old copy at `mewtual-removing-<random>` | the old entry is kept (it is forgotten only after step 3), reading "missing" | Residual: the old (complete, verified) copy stays in that folder under that random name; the old row's "missing" is literally true for its name. |
+| R2 | step 3 (old deleted), before step 4 and before the old entry is forgotten | new copy at its own name | both; the old one reads "missing" | The old row offers Clear. |
+| R3 | step 4 (linked), before the old entry is forgotten (adversarial review L5) | the new copy under both names | both; the old one reads "replaced" (a different file, by identity, is at its name), the new one present at its first name | The old row offers Clear and Save again; a second name stays. Consistent, and no file is claimed as the old copy. |
+| R4 | the old entry forgotten, before step 5 | the new copy under both names | new entry at the new name (present) | A second name stays; consistent. |
+| R5 | step 5, before step 6 | both names | new entry at the old name (present) | A second name stays; consistent. |
+| R6 | Unix, inside step 3 between the rename aside and the unlink | old copy at `mewtual-removing-<random>` | the old entry is kept (it is forgotten only after the storage call returns), reading "missing" | Residual: the old (complete, verified) copy stays in that folder under that random name; the old row's "missing" is literally true for its name. |
 
 Lock, a server change, the invocation ending or the deadline stops the sequence before its next
 effect; every stopping point is one of the rows above.
@@ -324,9 +343,11 @@ only native writes after a real publication, names as this server's earlier save
 file, (b) is that exact object by handle identity including birth time, (c) still has exactly the
 bytes Mewtual saved (length and plaintext CID, which equals the copy just published), (d) has one
 name, is not read-only and is not a reparse point, (e) is in the same folder as the new copy, and on
-Unix that folder is not one other accounts can modify. So flipping it can only delete Mewtual's own
-unchanged earlier output, after an identical copy was published beside it, and it never renames a
-name the user typed. `forget_saved_file` and `reset_saved_files` only change list entries;
+Unix neither that folder nor the file is one other accounts can modify, and (f) only while the new
+copy, pinned, still has its name (on Windows the pin keeps it there through the delete). So
+flipping it can only delete Mewtual's own unchanged earlier output, after an identical copy was
+published beside it and while that copy is still there, and it never renames a name the user
+typed. `forget_saved_file` and `reset_saved_files` only change list entries;
 `reveal_saved_file` is PR #51's read-only check and reveal.
 
 **Residuals.** Replacing removes the old copy as a whole, including anything another program added
@@ -336,8 +357,14 @@ already had the old copy open (Unix has no share modes) could change it between 
 unlink, and file timestamps are too coarse to catch a same-size write in the same tick. On Windows,
 a writable memory mapping made before step 2 is not covered by share modes, and a read-only
 attribute set after the step 2 check is ignored by the POSIX delete (attribute writes are not
-covered by share modes either). The Windows 64-bit file index on ReFS and the Unix limits of PR #51
-apply unchanged.
+covered by share modes either). On Unix the new copy's descriptor does not stop its name going, so
+a same-account process that removes or renames the new copy between the last check and the unlink
+(a few system calls) leaves neither copy at a name; Windows has no such window. The list's bulk
+check can hold both of PR #51's shared check slots for up to 5 s per call, so a renderer that
+spams it delays PR #51's checks and reveals (bounded, adversarial review L7). Recording holds the
+registry lock across sealing and the `fsync` of the list (as `persist_captured` does); a
+performance cost only (adversarial review L6). The Windows 64-bit file index on ReFS and the Unix
+limits of PR #51 apply unchanged.
 
 ### 6. Compatibility
 
@@ -354,8 +381,8 @@ apply unchanged.
   same-place replacement of entries and both caps; read-only entry checks; the replace sequence for
   each interleaving (old changed, replaced, missing, read-only, a second name, a reparse point, held
   open on Windows, name taken, a case-only difference, the user's own name kept, a swap before each
-  step through test hooks, the other name removed between link and removal), on Windows and in WSL
-  Linux.
+  step through test hooks, the other name removed between link and removal, the new copy removed
+  before the delete, a rename onto an entry's place), on Windows and in WSL Linux.
 - App: the sealed record round trip across a store reopen, another owner, each unreadable kind left
   byte-identical, `remove_server` deletes it.
 - Native: recording at each publication path and the incarnation fence; get, check (bounded,
@@ -394,3 +421,26 @@ the cap and the byte bound.
 | L10: crash between release and entry write | Taken: the entry is recorded first in every case. |
 | L11: Windows residuals | Documented (memory mappings, a read-only attribute set after the check, "every server" means every account of the same OS user). |
 | L12: documentation drift and the fixture | Taken: cache housekeeping, HANDOVER, THREAT-MODEL, INTERFACES and the visual fixture are updated with the implementation. |
+
+## Adversarial review dispositions (26 October)
+
+Read-only review of the whole diff `0c32f7ae..8ad6ce7a`, code and docs: no blocker; one HIGH, two
+MEDIUM, seven LOW. It checked and found sound: lock order against leave and `persist_captured`,
+the incarnation and owner fences, no path or identity crossing IPC, the command policy and
+capabilities, unreadable records never written over, the pin on the other name before the first
+name goes, claim, release and fence order, no `unsafe`, no ambient time or randomness, and no "·"
+or em dash in app text. Fixes in `5466c28e` and `702fa266`; every new regression was break-checked
+(it fails with its guard removed).
+
+| Finding | Disposition |
+| --- | --- |
+| H1: the old copy could be deleted after the new copy had already gone (the user deleting the apparent duplicate, antivirus), leaving no copy, and the note then named a file that no longer existed | Taken: the new copy is pinned before step 2 (Windows: the delete-denying pin, so its name cannot go during the delete; elsewhere a descriptor) and must still have its name right before the delete and, on Unix, again before the unlink (put back otherwise). New refusal `NewGone` and outcome `RemovedNotMoved { still_named }`, with truthful notes. Tests: `the_old_copy_is_kept_when_the_new_copy_is_gone_before_the_delete` (Windows: the hook's delete of the new copy fails while pinned; Unix: refused, old copy kept). |
+| M1: a failed `forget(old)` then a successful rename wrote two entries for one place, which reads as damaged | Taken: `SavedFiles::rename` drops any other entry at the target place; `save_saved_files` refuses to seal a list that would not decode. Tests: `renaming_onto_an_old_entrys_place_keeps_the_list_readable` (storage) and `a_rename_after_a_failed_forget_keeps_the_list_readable` (native, real store). |
+| M2: a name typed in Save as could be renamed after a plain Resume (the chosen-folder journal reopened with destination Downloads) | Taken: `Exported::started_from` is set only by a fresh one-click save into Downloads. Test: `only_a_fresh_one_click_save_names_what_it_asked_for` (fresh, chosen, resumed and recovered). |
+| L1: Unix refused group-writable files outright, so umask-002 exports never replaced | Taken: the folder's sharing rule (owner, other-write, proven private group without an extended ACL) applies to the file. |
+| L2: `FolderChanged` read as "that copy was changed" before the copy was seen | Taken: it reads "could not be checked right now". |
+| L3: "did not replace the copy it saved before this time" assumed an earlier copy | Taken: "Mewtual did not replace any earlier copy this time." |
+| L4: Windows read a moved folder as "old copy missing" and forgot an entry whose file still existed | Taken: the folder identity is checked before the old copy is opened; an unreachable folder is "folder changed". |
+| L5: no crash row between the link and `forget(old)` | Taken: crash row R3. |
+| L6: the registry lock is held across sealing and `fsync` | Recorded as a residual: performance only, the same shape as `persist_captured`; narrowing it would change the leave fence this design relies on. |
+| L7: a spamming renderer can hold both shared check slots | Recorded as a residual: bounded by the 5 s wait per call. |

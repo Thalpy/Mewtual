@@ -607,11 +607,13 @@ the saved files stay where they are.
 **Replace my older saved copy** (Settings → Chat & Media → Saved files, off by default, on this
 device for every server): when you save a file again, Mewtual replaces the copy it saved before,
 if it can prove that copy is its own and still unchanged (same file, same content, one name, not
-read-only, in the same folder as the new copy). When you saved from the chat or Transfers, the new
-copy then takes the old name; a name you typed in **Save as** is kept. If the older copy cannot be
-proven (it was changed, renamed, is read-only, has another name, sits in another folder, is a
-cloud placeholder, or on Linux and macOS sits in a folder other accounts can change), Mewtual keeps
-it, saves the new copy beside it as usual and says why. Replacing removes the old copy as a whole,
+read-only, in the same folder as the new copy) and the new copy is still there. When you saved
+with one click from the chat or Transfers (straight into Downloads), the new copy then takes the
+old name; a name you typed in **Save as** is kept, and so is the name of a save that was
+interrupted and then resumed. If the older copy cannot be proven (it was changed, renamed, is
+read-only, has another name, sits in another folder, is a cloud placeholder, or on Linux and macOS
+it or its folder can be changed by other accounts), Mewtual keeps it, saves the new copy beside it
+as usual and says why. Replacing removes the old copy as a whole,
 including any tags or other properties another program added to it.
 
 A **Saved** row of the older kind, with its private copy still kept, appears only when the tidy-up
