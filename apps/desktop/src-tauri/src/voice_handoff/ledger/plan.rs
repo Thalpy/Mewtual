@@ -131,10 +131,17 @@ impl ResolvedRow {
             {
                 return Err(VoiceError::Unauthorized);
             }
+            // Intent closes first; issuance still waits for every original obligation.
+            // A lost Claim/key/storage/SDK reply needs this negative fence BEFORE its
+            // admission-shaped history recovery can safely run on a still-live Session.
+            // Do not cancel a live Answer Source merely because the browser lost its
+            // media-admission reply: native media/Source custody is authoritative here.
             if plan
                 .transition
                 .as_ref()
-                .is_some_and(|claim| !claim.all_released())
+                .and_then(|claim| claim.key.as_ref())
+                .and_then(|key| key.sdp.as_ref())
+                .is_some_and(|storage| !super::media::negotiation_may_close(storage))
             {
                 return Err(VoiceError::Capacity);
             }
@@ -142,6 +149,17 @@ impl ResolvedRow {
                 // The existing Retirement ticket is between native publication and Root
                 // witness installation. Its missing control is not retirement evidence.
                 return Err(VoiceError::Capacity);
+            }
+            // A parked Ready/SDK/SDP worker can already own a clone of this Root binding.
+            // Fence that SAME binding before publishing the irreversible native intent.
+            // This atomic negative operation releases nothing and invokes no callback;
+            // actual control retirement and affine destruction stay outside all guards.
+            if let Some(key) = plan
+                .transition
+                .as_ref()
+                .and_then(|claim| claim.key.as_ref())
+            {
+                key.custody.close_successor_effects();
             }
             state.session_collected = false; // prior physical proof cannot cover new intent
             let Body::Drained(delivery, ..) = &mut state.body else {

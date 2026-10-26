@@ -1,5 +1,29 @@
 # Threat model; client integrity & enforcement boundaries
 
+## Early Plan fence and uncertain native custody (26 October; inactive)
+
+An ordinary admission-shaped retry on a live lease can create work that never began. A
+failed attached browser negotiation therefore joins actual work and parent/child Returns,
+then waits for its exact native Plan closing fence to return through authenticated framing
+and finally before attempting receipt recovery. finalIntentStarted, a timeout, transport
+loss or Capacity does not establish that fence. Each retry observes the SAME Plan intent;
+it cannot relabel an ambiguous Phase intent or replenish attempts/deadlines.
+
+Native closing keeps original Session/selection/child/Return gates and checks authoritative
+native media/Source custody BEFORE mutation. Actual Root media admission and this fence
+serialize on the same parent; root.was_admitted covers a lost publication reply. A live
+Source refuses closure without changing the key's currency. On acceptance, the SAME
+established-key binding is atomically closed before intent publication, fencing parked
+Ready/SDP/SDK continuations. Control destruction stays outside native guards. Frozen missing
+history refuses before Actor/candidate preparation; existing obligations remain recoverable.
+
+No release, worker destruction or proof is inferred from closing. Final issuance retains
+all_released, original Root drainage and independent executor/IO checks. A real allocated
+SDK candidate or retained native copy must continue to block it until actual return. Native
+execution evidence for this extension is pending. The earlier Broker39 quarantine-only
+description below is historical; any-per-N-media fallback, unknown-parent quarantine and
+App/physical limits remain current.
+
 ## Failed-plan certificates and admission ambiguity (26 October; inactive)
 
 Plan-kind final issuance already requires original action Return, closed children and full

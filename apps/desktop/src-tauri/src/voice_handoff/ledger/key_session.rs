@@ -119,7 +119,13 @@ impl ResolvedRow {
         {
             return Err(VoiceError::Unauthorized);
         }
-        Ok(claim.key_snapshot(self.row.id, action, handshake))
+        let receipt = claim.key_snapshot(self.row.id, action, handshake);
+        // No history after original Plan closure is a permanent local refusal, not an
+        // invitation to preflight Actor authority and install a missing key obligation.
+        if receipt.is_none() && state.final_delivery().is_some() {
+            return Err(VoiceError::Unauthorized);
+        }
+        Ok(receipt)
     }
     /// Final synchronous UI→Coordinator→Route→Index→parent admission. The original Root
     /// Finish proof is already in Claim; converting it requires no asynchronous Root lookup.

@@ -308,6 +308,18 @@ async fn exercise_impl(
         Err(VoiceError::Capacity)
     ));
     assert!(current.current && child.is_current());
+    let key = parent.key_custody_for_test();
+    assert!(key.is_current());
+    assert!(matches!(
+        super::super::plan_final::request(&Context::new(state), route, parent).await,
+        Err(super::super::factory::Refused::Protocol(
+            VoiceError::Capacity
+        ))
+    ));
+    assert!(
+        key.is_current() && child.is_current(),
+        "refused early Plan fence must not close the original key binding or live Answer Source"
+    );
 
     let mut child = Some(child); // Preserve the previous fixture's intentional owner unless probing last Drop.
     let mut prepared = None;

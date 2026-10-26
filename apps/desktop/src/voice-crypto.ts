@@ -486,7 +486,7 @@ function context(label: string, transcript: Uint8Array): Uint8Array<ArrayBuffer>
  * unsettled work. Revoking an owner never frees a running promise; only its real settlement does.
  * A derive pipeline uses one permit for sequential import/ECDH/HKDF work, never parallel calls. */
 export class VoiceCryptoBroker {
-  readonly version = 39;
+  readonly version = 40;
   readonly subtle: SubtleCrypto;
   private readonly native: VoiceCryptoAdmission;
   private active = 0;
@@ -2822,9 +2822,9 @@ class RetainedIpcChannel {
     this.wake();
   }
 
-  /** One attached failed plan with no per-negotiation media record. This slice quarantines
-   * ambiguous positive admissions: a live Session's ordinary Admit/Claim must never be
-   * used as a negative lookup, since it could create an effect which never began. */
+  /** One attached failed plan with no per-negotiation media record. Recover uncertain
+   * admission only AFTER its native irreversible Plan fence has physically returned;
+   * an ordinary live Admit/Claim is otherwise capable of creating a new obligation. */
   retireFailedNegotiation(chain: BrowserChain): Promise<void> {
     const state = this.negotiation;
     if (state.linked !== chain && !(state.failedReturned && state.failedPlan === chain.handle))
@@ -2875,13 +2875,17 @@ class RetainedIpcChannel {
         if (state.sdpAction && !state.sdpAction.returned) await state.sdpAction.cleanup();
         if (!this.live() || this.negotiation !== state || this.drained) return false;
         const custody = chain.custody, phase = chain.sdp;
-        // Missing observations are not absence. Existing global-End cleanup can safely
-        // recover these through revoked native admission. A live peer-local path needs
-        // a new native negative fence/lookup first; do not manufacture fresh authority.
-        if (custody?.needsClaim || custody?.needsKeyRecovery || phase?.needsStorageRecovery || phase?.needsSdkRecovery)
-          throw new Error("failed native admission remains uncertain");
         await this.cleanupConfirmationIntents(true, state);
         if (!state.derivationReturned) await this.returnDerivation(chain, state);
+        if (custody?.needsClaim || custody?.needsKeyRecovery || phase?.needsStorageRecovery || phase?.needsSdkRecovery) {
+          // Native Pending means the SAME Plan intent has closed first admission, not
+          // that its obligations drained. Await the COMPLETE authenticated frame/finally
+          // before using admission-shaped history recovery on this still-live Session.
+          // Lost/refused fence replies throw and repeat this same intent on the next turn.
+          await this.retireOriginalAction(true, state, true);
+          if (custody?.needsClaim) await this.transitionRpc(chain, { kind: "claim" }, true, state);
+          if (custody?.needsKeyRecovery) await this.keySessionRpc(chain, { kind: "adopt" }, true, state);
+        }
         await this.cleanupSdp(chain, true, state);
         if (custody?.needsKeyRelease)
           await this.keySessionRpc(chain, { kind: "release", receipt: custody.keyReceipt!.receipt }, true, state);
@@ -4153,7 +4157,8 @@ class RetainedIpcChannel {
   /** After intake/SDK/result settlement drainage. End and live retirement give each
    * physical RPC a separate turn so another peer/Session's Current can interleave.
    * Preserve original keys/counters and never recursively acquire the lane-owned default. */
-  private async retireOriginalAction(separate = false, pairState: RetainedNativeNegotiation): Promise<void> {
+  private async retireOriginalAction(separate = false, pairState: RetainedNativeNegotiation, fenceOnly = false): Promise<void> {
+    if (fenceOnly && pairState.finalMode !== "retire-plan") throw new Error("original Plan closing fence required");
     const original = pairState.terminalAction!;
     const exchange = async <T>(request: VoiceIpcActionRequest, length: number,
       decode: (opened: Uint8Array<ArrayBuffer>) => T): Promise<T> => {
@@ -4200,7 +4205,12 @@ class RetainedIpcChannel {
       if (reply.kind === "refused") {
         throw new Error("native terminal cleanup unresolved");
       }
-      if (reply.stage === "pending") throw new Error("native terminal cleanup pending");
+      if (reply.stage === "pending") {
+        // This return is an authenticated negative fence observation AFTER complete IO
+        // and body-clearing finally. It is never final/ACK, drainage or advance evidence.
+        if (fenceOnly) return;
+        throw new Error("native terminal cleanup pending");
+      }
       pairState.finalProof = reply.proof;
       pairState.finalAcknowledged = reply.stage === "acknowledged";
     }
@@ -4226,7 +4236,7 @@ export function windowVoiceCryptoBroker(
   const host = window as Record<symbol, unknown>;
   const previous = host[BROKER] as VoiceCryptoBroker | undefined;
   if (previous) {
-    if (previous.version !== 39 || typeof previous.retireFailedNativeNegotiation !== "function" || typeof previous.observeNativeLifecycle !== "function" || typeof previous.advanceNativeNegotiation !== "function" || typeof previous.compactNativeNegotiation !== "function" || typeof previous.collectNativeNegotiationHistory !== "function" || typeof previous.retireNativeNegotiation !== "function" || typeof previous.completeNativeMediaHandoff !== "function" || typeof previous.completeNativeSdpRtcRound !== "function" || typeof previous.prepareNativeSdpRtc !== "function" || typeof previous.prepareNativeSdpCrypto !== "function" || typeof previous.prepareNativePcIntent !== "function" || typeof previous.prepareNativeSdpHandoff !== "function" || typeof previous.observeNativeWork !== "function" || typeof previous.returnNativeDerivation !== "function" || typeof previous.nativeConfirmationFromChannel !== "function" || typeof previous.nativeDerivationFromChannel !== "function" || typeof previous.recoverChannelHistory !== "function" || typeof previous.prepareChainFromChannel !== "function" || typeof previous.nativeChannel !== "function" || typeof previous.run !== "function" || typeof previous.selectJoinKey !== "function" || typeof previous.retrySelectedJoinKeys !== "function" ||
+    if (previous.version !== 40 || typeof previous.retireFailedNativeNegotiation !== "function" || typeof previous.observeNativeLifecycle !== "function" || typeof previous.advanceNativeNegotiation !== "function" || typeof previous.compactNativeNegotiation !== "function" || typeof previous.collectNativeNegotiationHistory !== "function" || typeof previous.retireNativeNegotiation !== "function" || typeof previous.completeNativeMediaHandoff !== "function" || typeof previous.completeNativeSdpRtcRound !== "function" || typeof previous.prepareNativeSdpRtc !== "function" || typeof previous.prepareNativeSdpCrypto !== "function" || typeof previous.prepareNativePcIntent !== "function" || typeof previous.prepareNativeSdpHandoff !== "function" || typeof previous.observeNativeWork !== "function" || typeof previous.returnNativeDerivation !== "function" || typeof previous.nativeConfirmationFromChannel !== "function" || typeof previous.nativeDerivationFromChannel !== "function" || typeof previous.recoverChannelHistory !== "function" || typeof previous.prepareChainFromChannel !== "function" || typeof previous.nativeChannel !== "function" || typeof previous.run !== "function" || typeof previous.selectJoinKey !== "function" || typeof previous.retrySelectedJoinKeys !== "function" ||
         typeof previous.registerProtectedConfirmation !== "function" ||
         typeof previous.registerProtectedDerivation !== "function" || typeof previous.registerConfirmation !== "function" || typeof previous.createPair !== "function") {
       throw new Error("voice crypto broker version changed; reload required");

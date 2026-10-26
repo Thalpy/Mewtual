@@ -1,5 +1,23 @@
 # Mewtual; Interfaces & Hooks Schema
 
+## Broker40 original Plan closing intent (26 October; inactive)
+
+`close-plan` can now latch its SAME original Session intent while nested custody awaits
+Release. This is an irreversible closing operation, never a harmless readiness query.
+Original parent Return/settlement, closed children, exact selection/Session, final-kind
+and native media/Source gates remain. No new opcode, field, attempt or capacity is added.
+Its Pending reply certifies only the closing fence. Issued proof/ACK still require complete
+original release and actual drainage; direct history and fixed row payments remain.
+
+Original Claim/key/storage/SDK requests recover installed history after closure. Missing
+frozen history returns Unauthorized before Actor preparation; it cannot create an absent
+obligation. Unreleased Claim history is Closing/remaining0. Browser failed-plan cleanup
+uses these admission-shaped requests only after exact authenticated Plan Pending/final IO
+and its body-clearing finally have returned. An ambiguous/Capacity/wrong-kind fence reply
+must repeat the same intent first. This supersedes Broker39's uncertain-admission quarantine
+for attached plans with no per-N media record; all other restrictions below remain.
+HMR broker39 requires reload. App activation and physical acceptance remain unfinished.
+
 ## Broker39 failed-plan retirement and outstanding work (26 October; inactive)
 
 `retireFailedNativeNegotiation(owner, channel, originalPlan)` is negative-only for an attached

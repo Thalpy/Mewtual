@@ -2,7 +2,11 @@
 use super::*;
 use catcoms_sync::voice_v2::VoiceError;
 
-fn body(parent: &ledger::ResolvedRow, claim: [u8; 32], release: Option<[u8; 32]>) -> Vec<u8> {
+pub(super) fn body(
+    parent: &ledger::ResolvedRow,
+    claim: [u8; 32],
+    release: Option<[u8; 32]>,
+) -> Vec<u8> {
     let mut bytes = super::transition::body(parent, None);
     bytes[0] = 4;
     bytes[185] = u8::from(release.is_some());
@@ -12,7 +16,7 @@ fn body(parent: &ledger::ResolvedRow, claim: [u8; 32], release: Option<[u8; 32]>
     }
     bytes
 }
-async fn exchange(
+pub(super) async fn exchange(
     state: &AppState,
     public: &bootstrap::SetupOutput,
     route: &bootstrap::Route,
@@ -81,9 +85,12 @@ pub(super) async fn adopt(
     // Model an ignored authenticated reply: exact retry returns the one original receipt.
     assert_eq!(exchange(state, public, route, parent, &body).await, first);
     assert!(matches!(parent.retire_plan(), Err(VoiceError::Capacity)));
+    // Plan intent now closes first, even while this obligation awaits Release. It is
+    // therefore destructive, not a harmless readiness probe. Without that intent no
+    // final proof may be issued; dedicated fence scenarios exercise early Pending.
     assert!(matches!(
-        plan_final::request(&context::Context::new(state), route, parent).await,
-        Err(factory::Refused::Protocol(VoiceError::Capacity))
+        parent.issue_final(route.session().identity()),
+        Err(VoiceError::Unauthorized)
     ));
     proof
 }

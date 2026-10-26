@@ -339,7 +339,7 @@ async function framedDerivation(f: Awaited<ReturnType<typeof fixture>>, localIsL
   let transitionResponder: Parameters<typeof f.actions>[0] = null;
   let settleHold: ReturnType<typeof gate> | null = null;
   let returnHold: ReturnType<typeof gate> | null = null;
-  let checkFinal: (() => void) | null = null;
+  let checkFinal: (() => boolean | void) | null = null;
   const emptyTag = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
   const receipt = hash(77);
   const proof = hash(78);
@@ -404,7 +404,6 @@ async function framedDerivation(f: Awaited<ReturnType<typeof fixture>>, localIsL
           if (loseReturn) { loseReturn = false; throw new Error("ordinary Return committed but reply lost"); }
           return status();
         }
-        checkFinal?.();
         if (opened[105] === 1) {
           retireCalls++; assert.deepEqual(opened, encodeVoiceIpcAction(historyPurpose, { kind: "close", mode: "retire" }).body);
           assert.equal(planCalls, 0, "Plan retries cannot revert to Phase mode after uncertain intent");
@@ -416,14 +415,16 @@ async function framedDerivation(f: Awaited<ReturnType<typeof fixture>>, localIsL
         }
         if (loseIssuance) { loseIssuance = false; throw new Error("actual native final issuance reply lost"); }
       } else {
-        checkFinal?.();
         finalCalls++; assert.deepEqual(opened, encodeVoiceIpcAction(historyPurpose, { kind: "final", proof: finalMode === 2 ? planProof : proof }).body);
         assert.equal(finalPending, false); finalAcknowledged = true;
         if (loseFinalAck) { loseFinalAck = false; throw new Error("actual native final ACK reply lost"); }
       }
+      const drained = checkFinal?.() !== false;
+      if (header.operation === 7) assert.ok(drained, "final ACK cannot overtake retained native custody");
+      const pending = finalPending || !drained;
       const body = Buffer.concat([Buffer.from([1, 4]), Buffer.from(row, "hex"), integer(BigInt(identity.action), 8), integer(1n, 8),
-        Buffer.from(identity.inputTag, "hex"), Buffer.from([replyMode ?? finalMode, finalPending ? 0 : finalAcknowledged ? 2 : 1]),
-        Buffer.from(finalPending ? "0".repeat(64) : finalMode === 2 ? planProof : proof, "hex")]);
+        Buffer.from(identity.inputTag, "hex"), Buffer.from([replyMode ?? finalMode, pending ? 0 : finalAcknowledged ? 2 : 1]),
+        Buffer.from(pending ? "0".repeat(64) : finalMode === 2 ? planProof : proof, "hex")]);
       return { kind: 0, body };
     }
     assert.equal(header.operation, 5); settlements++; if (settleHold) await settleHold.promise;
@@ -461,7 +462,7 @@ async function framedDerivation(f: Awaited<ReturnType<typeof fixture>>, localIsL
     childReplies(responder: typeof childResponder) { childResponder = responder; },
     transitionReplies(responder: typeof transitionResponder) { transitionResponder = responder; },
     holdSettlement() { settleHold = gate(); return settleHold; },
-    beforeFinal(check: () => void) { checkFinal = check; },
+    beforeFinal(check: () => boolean | void) { checkFinal = check; },
   };
 }
 
@@ -626,13 +627,13 @@ function custodyReplies(f: Awaited<ReturnType<typeof fixture>>, child: Awaited<R
   const proof = hash(96);
   f.cleanup(() => { releaseHold?.release(); keyHold?.release(); sdkHold?.release(); pcHold?.release(); pcCloseHold?.release(); });
   child.parent.beforeFinal(() => {
-    assert.ok(!claimed || released, "parent final cannot overtake native Release");
-    assert.ok(!keyAdopted || keyReleased, "parent final cannot overtake separate native key Release");
-    assert.ok(!storagePrepared || storageReleased, "Final cannot overtake storage Release");
-    assert.ok(!sdkAdmitted || sdkReleased, "Final cannot overtake SDK Release");
-    assert.ok(!pcPrepared || pcClosed, "Final cannot overtake PC Close");
-    assert.ok(!mediaReleased || mediaReleased(), "Final cannot overtake media Release");
+    // Native Plan intent can close before receipts are recovered/released. Its reply
+    // remains Pending; only proof issuance/ACK certifies all original obligations.
+    return (!claimed || released) && (!keyAdopted || keyReleased) &&
+      (!storagePrepared || storageReleased) && (!sdkAdmitted || sdkReleased) &&
+      (!pcPrepared || pcClosed) && (!mediaReleased || mediaReleased());
   });
+  const current = () => f.owner.isCurrent() && child.parent.planCalls() === 0;
   child.parent.transitionReplies(async (header, opened) => {
     if (header.operation === 28) {
       assert.ok(mediaResponder, "unexpected private media operation");
@@ -678,11 +679,11 @@ function custodyReplies(f: Awaited<ReturnType<typeof fixture>>, child: Awaited<R
         storageReleases++; storageReleased = true; effectOrder.push("storage-release");
       } else {
         storagePrepares++;
-        if (!storagePrepared && !f.owner.isCurrent()) return { kind: 0, body: new Uint8Array([1, 3, 5]) };
+        if (!storagePrepared && !current()) return { kind: 0, body: new Uint8Array([1, 3, 5]) };
         storagePrepared = true; effectOrder.push("storage-prepare");
         if (loseStorage) { loseStorage = false; throw new Error("native storage reply lost"); }
       }
-      return { kind: 0, body: Buffer.concat([Buffer.from([5, storageReleased ? 3 : f.owner.isCurrent() ? 1 : 2]), ...prefix(), Buffer.from(storageProof, "hex")]) };
+      return { kind: 0, body: Buffer.concat([Buffer.from([5, storageReleased ? 3 : current() ? 1 : 2]), ...prefix(), Buffer.from(storageProof, "hex")]) };
     }
     if (header.operation === 13) {
       assert.ok(storagePrepared && !storageReleased, "original storage remains until SDK Release");
@@ -696,12 +697,12 @@ function custodyReplies(f: Awaited<ReturnType<typeof fixture>>, child: Awaited<R
         if (loseSdkRelease) { loseSdkRelease = false; throw new Error("native SDK Release reply lost"); }
       } else {
         sdkAdmissions++;
-        if (!sdkAdmitted && !f.owner.isCurrent()) return { kind: 0, body: new Uint8Array([1, 3, 5]) };
+        if (!sdkAdmitted && !current()) return { kind: 0, body: new Uint8Array([1, 3, 5]) };
         sdkAdmitted = true; effectOrder.push("sdk-admit");
         if (sdkHold) await sdkHold.promise;
         if (loseSdk) { loseSdk = false; throw new Error("native SDK Admit reply lost"); }
       }
-      return { kind: 0, body: Buffer.concat([Buffer.from([6, sdkReleased ? 3 : f.owner.isCurrent() ? 1 : 2]), ...prefix(),
+      return { kind: 0, body: Buffer.concat([Buffer.from([6, sdkReleased ? 3 : current() ? 1 : 2]), ...prefix(),
         Buffer.from(storageProof, "hex"), integer(1n, 8), Buffer.from(sdkProof, "hex")]) };
     }
     if (header.operation === 11) {
@@ -715,11 +716,13 @@ function custodyReplies(f: Awaited<ReturnType<typeof fixture>>, child: Awaited<R
         keyReleases++; assert.ok(keyAdopted); keyReleased = true; effectOrder.push("key-release");
       }
       else {
-        keyAdoptions++; keyAdopted = true;
+        keyAdoptions++;
+        if (!keyAdopted && !current()) return { kind: 0, body: new Uint8Array([1, 3, 5]) };
+        keyAdopted = true;
         if (keyHold) await keyHold.promise;
         if (loseAdoption) { loseAdoption = false; throw new Error("key adoption committed; reply lost"); }
       }
-      const state = keyReleased ? 3 : f.owner.isCurrent() ? 1 : 2;
+      const state = keyReleased ? 3 : current() ? 1 : 2;
       const bytes = Buffer.concat([Buffer.from([4, state]), Buffer.from(child.parent.row, "hex"),
         integer(BigInt(child.parent.identity.action), 8), integer(BigInt(child.parent.identity.version), 8),
         Buffer.from(child.parent.identity.inputTag, "hex"), Buffer.from(child.parent.binding.handshake, "hex"),
@@ -739,11 +742,11 @@ function custodyReplies(f: Awaited<ReturnType<typeof fixture>>, child: Awaited<R
       if (loseRelease) { loseRelease = false; throw new Error("Release committed; reply lost"); }
     } else {
       claims++;
-      if (refuse) return { kind: 0, body: new Uint8Array([1, 3, 5]) };
+      if (refuse || (!claimed && !current())) return { kind: 0, body: new Uint8Array([1, 3, 5]) };
       claimed = true;
       if (loseClaim) { loseClaim = false; throw new Error("Claim committed; reply lost"); }
     }
-    const status = released ? 3 : f.owner.isCurrent() ? 1 : 2;
+    const status = released ? 3 : current() ? 1 : 2;
     const bytes = Buffer.concat([Buffer.from([3, status]), Buffer.from(child.parent.row, "hex"),
       integer(BigInt(child.parent.identity.action), 8), integer(BigInt(child.parent.identity.version), 8),
       Buffer.from(child.parent.identity.inputTag, "hex"), Buffer.from(child.parent.binding.handshake, "hex"),
@@ -4457,12 +4460,18 @@ test("exact Plan certificate supersedes a quiet child's lost local Return observ
   f.owner.retire(); await child.channel.close(); assert.equal(f.broker.counts().bytes, 0);
 });
 
-for (const operation of [10, 11, 12, 13]) test(`uncertain live admission ${operation} stays quarantined without replaying an Admit`, async t => {
+for (const operation of [10, 11, 12, 13]) test(`uncertain live admission ${operation} recovers only after its original native Plan fence`, async t => {
   const { first, f, oldResponder } = await indexedMediaFixture(t);
   const child = await framedConfirmation(f, true, true, 2), custody = custodyReplies(f, child);
   const nextResponder = f.actionHandler()!;
-  f.actions((header, body) => header.logical === first.child.parent.row ? oldResponder(header, body) : nextResponder(header, body));
-  let lost = false;
+  let lost = false, unfencedRecovery = false;
+  f.actions((header, body) => {
+    if (lost && f.owner.isCurrent() && header.logical === child.parent.row && header.operation === operation) {
+      unfencedRecovery ||= child.parent.planCalls() === 0;
+      assert.ok(child.parent.planCalls() > 0, "live recovery must follow the original native closing fence");
+    }
+    return header.logical === first.child.parent.row ? oldResponder(header, body) : nextResponder(header, body);
+  });
   f.onResponse(async header => {
     if (!lost && header.logical === child.parent.row && header.operation === operation) {
       lost = true;
@@ -4482,18 +4491,86 @@ for (const operation of [10, 11, 12, 13]) test(`uncertain live admission ${opera
       f.advance(250); await flush();
     }
     const admitted = counts();
-    for (let turn = 0; turn < 8; turn++) {
+    const stopped = observer.close();
+    let returned = false;
+    const cleanup = f.broker.retireFailedNativeNegotiation(f.owner, child.channel, child.ready.chain)
+      .then(() => { returned = true; });
+    while (!returned) {
+      assert.equal(unfencedRecovery, false, "an admission-shaped request reached native before its live closing fence");
+      if (performance.now() >= deadline) throw new Error("failed admission recovery did not physically return");
       await settledVoiceRpc(f);
       f.advance(250); await flush();
     }
+    await cleanup; await stopped;
     assert.equal(f.owner.isCurrent(), true);
-    assert.deepEqual(counts(), admitted, "cleanup must not create or replay a positive admission on a live lease");
-    assert.equal(child.parent.finalCounts().finalAcknowledged, false);
-    assert.equal(f.broker.advanceNativeNegotiation(f.owner, child.channel, child.ready.chain), false);
-    assert.equal(first.sdk.calls.closed, 0, "quarantined peer does not close indexed media");
+    const recovered = admitted.map((value, index) => value + Number(index === operation - 10));
+    assert.deepEqual(counts(), recovered, "only the uncertain original receipt is recovered, with no new successor admission");
+    assert.equal(child.parent.finalCounts().finalAcknowledged, true);
+    assert.equal(f.broker.advanceNativeNegotiation(f.owner, child.channel, child.ready.chain), true);
+    assert.equal(first.sdk.calls.closed, 0, "failed peer does not close indexed media");
   } finally {
     f.owner.retire(); await observer.close(); await child.channel.close();
   }
+  assert.equal(f.broker.counts().bytes, 0);
+});
+
+for (const fault of ["held", "lost-before", "lost-after", "capacity", "wrong-kind"] as const)
+test(`failed-peer recovery waits for exact framed Plan fence: ${fault}`, async t => {
+  const { first, f, oldResponder } = await indexedMediaFixture(t);
+  const child = await framedConfirmation(f, true, true, 2), custody = custodyReplies(f, child);
+  const next = f.actionHandler()!, held = gate(); f.cleanup(held.release);
+  let lost = false, faultSeen = false, fenceAttempts = 0;
+  f.actions(async (header, body) => {
+    if (header.logical === first.child.parent.row) return oldResponder(header, body);
+    if (header.logical === child.parent.row && header.operation === 6 && body[105] === 2) {
+      fenceAttempts++;
+      if (fenceAttempts === 1 && (fault === "lost-before" || fault === "capacity")) {
+        faultSeen = true;
+        if (fault === "lost-before") throw new Error("Plan request lost before native admission");
+        return { kind: 0, body: new Uint8Array([1, 3, 7]) };
+      }
+    }
+    return next(header, body);
+  });
+  f.onResponse(async header => {
+    if (header.logical !== child.parent.row) return;
+    if (!lost && header.operation === 10) {
+      lost = true; child.ready.chain.close();
+      throw new Error("Claim committed; response lost");
+    }
+    if (header.operation === 6 && child.parent.planCalls() === 1 && !faultSeen) {
+      faultSeen = true;
+      if (fault === "held") await held.promise;
+      else if (fault === "lost-after") throw new Error("Plan fence committed; response lost");
+    }
+  });
+  if (fault === "wrong-kind") child.parent.finalReplyMode(1);
+  const observer = f.broker.observeNativeLifecycle(f.owner, child.channel, f.key);
+  try {
+    await child.derive(); await child.handle().attempt();
+    const stopped = observer.close();
+    let returned = false;
+    const cleanup = f.broker.retireFailedNativeNegotiation(f.owner, child.channel, child.ready.chain)
+      .then(() => { returned = true; });
+    await until(() => faultSeen);
+    await flush();
+    assert.equal(custody.counts().claims, 1, "unobserved/held/refused Plan fence cannot permit history-shaped Claim");
+    assert.equal(child.parent.finalCounts().finalAcknowledged, false);
+    assert.equal(returned, false);
+    assert.equal(first.sdk.calls.closed, 0);
+    held.release(); child.parent.finalReplyMode(2);
+    const untilReturned = performance.now() + 5000;
+    while (!returned) {
+      assert.ok(performance.now() < untilReturned, "same original fence did not recover");
+      await settledVoiceRpc(f); f.advance(250); await flush();
+    }
+    await cleanup; await stopped;
+    assert.equal(custody.counts().claims, 2);
+    assert.ok(fenceAttempts >= (fault === "held" ? 2 : 3), "Pending/failure retries keep original Plan intent");
+    assert.equal(child.parent.finalCounts().finalAcknowledged, true);
+    assert.equal(first.sdk.calls.closed, 0);
+    assert.equal(f.broker.advanceNativeNegotiation(f.owner, child.channel, child.ready.chain), true);
+  } finally { held.release(); f.owner.retire(); await observer.close(); await child.channel.close(); }
   assert.equal(f.broker.counts().bytes, 0);
 });
 
@@ -4510,14 +4587,12 @@ test("provisional Finish custody cannot create its first Claim during peer clean
   const cleanup = f.broker.retireFailedNativeNegotiation(f.owner, child.channel, child.ready.chain);
   held.release(); await finishing;
   try {
-    for (let turn = 0; turn < 8; turn++) {
-      await settledVoiceRpc(f);
-      f.advance(250); await flush();
-    }
-    assert.equal(custody.counts().claims, 0);
+    await cleanup;
+    assert.equal(custody.counts().claims, 1, "one history-only lookup after the native closing fence");
+    assert.equal(custody.counts().claimed, false, "frozen absence cannot create its first Claim");
     assert.equal(custody.keyCounts().adoptions, 0);
     assert.equal(first.sdk.calls.closed, 0);
-    assert.equal(f.broker.advanceNativeNegotiation(f.owner, child.channel, child.ready.chain), false);
+    assert.equal(f.broker.advanceNativeNegotiation(f.owner, child.channel, child.ready.chain), true);
   } finally { f.owner.retire(); await cleanup; await child.channel.close(); }
   assert.equal(f.broker.counts().bytes, 0);
 });

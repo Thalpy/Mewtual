@@ -1,5 +1,23 @@
 # Chat, files and voice implementation evidence
 
+## Broker40 early Plan closing fence (26 October; frontend passes, native pending)
+
+Full frontend 3,053 passes in68.84s, focused browser/crypto345 in8.52s, static checks
+zero errors/warnings and production build37.50s pass. Tests exercise committed/lost replies
+for Claim/key/storage/SDK, provisional missing Claim, held fence IO, request loss before
+entry, reply loss after commit, Capacity and wrong-kind fence responses. Exact Plan fence
+observation precedes history recovery; Pending cannot authorize final/ACK or advancement.
+Independent indexed media remains on its original Session. HMR39 requires reload.
+
+The actual native stages0..3/parked-SDK/copy/current-Source regressions are written but
+not yet compiled or executed. The preceding Broker39 native full run failed865/20: one initial one-shot Admit refusal
+assertion and19 fixture safety-gate cascades. Its bounded same-action retry correction is
+included; combined native execution/lint remain pending. No prior result validates this extension. Root sources and lockfiles remain
+unchanged. App OFF, any-per-N-media fallback, unknown parents, renewal, relay, production
+RTC/tracks and physical/combined acceptance remain open. The following Broker39 evidence
+records the older quarantine behavior; attached uncertain-admission cleanup now requires
+the matching early-fence native semantics before activation.
+
 ## Broker39 full-run failure and retained retry regression (26 October)
 
 Full native at4c290a5c:865 passed/20 failed. First failure: fixture Derive Admit returned

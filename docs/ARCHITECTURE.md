@@ -1,5 +1,29 @@
 # Mewtual; Architecture
 
+## Closing before ambiguous admission recovery (26 October; inactive, native gates pending)
+
+Broker40 extends failed attached-plan cleanup with an irreversible native Plan closing
+intent. Ordinary parent Return, closed children, original Session/selection and immutable
+final-kind checks still precede it. The native media/Source barrier must permit closure;
+a lost media reply does not make an admitted native Source absent. Only then does native
+atomically close the exact established-key successor binding and publish closing intent.
+Original control retirement and affine destruction run outside native guards.
+
+This intent retains every original Claim/key/storage/SDK obligation. Installed histories
+remain recoverable; unreleased Claim reports Closing with zero remaining time. Frozen
+missing history refuses before Actor preflight or new candidate construction. Final proof
+issuance still requires all original releases and actual Root/worker drainage. Closing
+intent, Pending, final proof and final ACK are distinct observations.
+
+The browser joins its actual failed work and ordinary Returns before requesting the same
+Plan intent. Only a correctly bound authenticated Pending/final response, after its entire
+framed finally returns, permits admission-shaped history recovery on the live Session.
+Lost/refused/wrong-kind replies keep recovery unreachable and retry the same intent.
+Independent indexed media and original Session counters remain. HMR39 requires reload.
+Any per-N media record, unknown parent publication, renewal, production App/real RTC/tracks,
+relay and physical acceptance remain open. The Broker39 section below records its earlier
+quarantine-only boundary; Broker40 replaces that restriction for the attached pre-media case.
+
 ## Retiring a known failed negotiation (26 October; inactive)
 
 Broker39 separates a failed attached negotiation from its retained Session before any per-N

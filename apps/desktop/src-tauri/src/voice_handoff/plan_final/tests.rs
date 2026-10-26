@@ -125,6 +125,34 @@ async fn once<F: Future>(mut future: Pin<&mut F>) -> Poll<F::Output> {
     poll_fn(|cx| Poll::Ready(future.as_mut().poll(cx))).await
 }
 
+#[tokio::test]
+async fn plan_fence_makes_missing_claim_permanently_historical_without_ending_the_owner() {
+    let case = Case::new();
+    case.returned();
+    let (serial, version, input_tag) = case.row.status().unwrap().action.unwrap();
+    let action = crate::voice_handoff::requests::Action {
+        serial,
+        version,
+        input_tag,
+    };
+    let handshake = case.row.confirmation_handshake().unwrap();
+    assert!(case
+        .row
+        .recover_transition(case.route.session().identity(), action, handshake, 0)
+        .unwrap()
+        .is_none());
+    let context = Context::new(&case.state);
+    let admission = admit(&context, &case.route).await.unwrap();
+    case.row.request_plan_final(&admission).unwrap();
+    case.row.request_plan_final(&admission).unwrap();
+    assert!(matches!(
+        case.row
+            .recover_transition(case.route.session().identity(), action, handshake, 0),
+        Err(VoiceError::Unauthorized)
+    ));
+    assert!(!case.row.has_transition_claim());
+}
+
 pub(super) fn future_layout_bytes() -> usize {
     fn handler<F: Future>(
         _: impl FnOnce(&'static Context, &'static Route, Incoming) -> F,

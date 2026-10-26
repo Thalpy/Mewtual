@@ -1,5 +1,32 @@
 # Mewtual; Handover
 
+## Broker40 admission-reply recovery (26 October; native validation pending, App OFF)
+
+The next attached pre-media failure slice is implemented and awaiting native execution.
+Native original Plan intent can close before nested releases, preserving its media/Source,
+Return, child, Session and immutable-kind gates. It atomically fences the same Root key
+binding before publication; actual control destruction remains outside native guards.
+Existing receipts recover Closing; missing frozen history refuses before Actor preparation.
+Final proof still waits for all releases and actual Root/SDK/IO drainage.
+
+Browser recovery now waits for exact authenticated Plan Pending/final IO and its finally
+before recovering uncertain Claim/key/storage/SDK receipts. Lost/refused/wrong-kind fence
+replies retry the same intent. Full frontend 3,053 passes (68.84 s), static checks pass with
+zero diagnostics, build passes (37.50 s); focused browser/crypto 345 passes (8.52 s).
+Read-only design/adversarial review has no substantiated blocker/high/medium so far.
+New native cases cover stages0..3, frozen missing histories, an actual parked SDK candidate,
+retained copy debt and current-media refusal. They are NOT compiled/executed yet: the
+previous Broker39 full native run failed865/20 (one initial refusal assertion,19
+fixture safety-gate cascades). Its bounded same-action retry correction is included; final
+combined native execution and strict lint remain pending.
+
+Broker40 requires HMR reload of broker39. No Root source/lockfile change is included.
+Unknown parent publication, any per-N media record fallback, operational renewal/Root
+lifetime capacity, production App/real RTC/tracks, relay, combined acceptance and physical
+two-computer/network/audio evidence remain open. External download resume remains separate.
+The Broker39 sections below record the preceding checkpoint, including its earlier
+quarantine-only behavior, and do not claim validation of Broker40.
+
 ## Native validation checkpoint (26 October; full rerun required)
 
 The frozen Broker39 suite at4c290a5c FAILED:865 passed,20 failed. One first failure was

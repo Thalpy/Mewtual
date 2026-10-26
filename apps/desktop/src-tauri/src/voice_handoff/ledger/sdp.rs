@@ -176,11 +176,17 @@ impl ResolvedRow {
         let _index = self.transition_index()?;
         let state = try_lock(&self.row.state)?;
         let key = claim(self, &state, session, request)?;
-        Ok(key
+        let receipt = key
             .sdp
             .as_ref()
             .filter(|sdp| sdp.worker || sdp.closed || sdp.phase.is_some())
-            .map(|sdp| snapshot(self.row.id, request, sdp, key.custody.is_current())))
+            .map(|sdp| snapshot(self.row.id, request, sdp, key.custody.is_current()));
+        // An idle failed preparation is retryable only before the original Plan fence.
+        // Frozen missing history must never allocate a replacement 64KiB sidecar.
+        if receipt.is_none() && state.final_delivery().is_some() {
+            return Err(VoiceError::Unauthorized);
+        }
+        Ok(receipt)
     }
     /// Latch the small fixed intent BEFORE any64KiB reserve. The existing row pays for
     /// this inline state and the returned ticket keeps that exact row allocation alive.

@@ -929,69 +929,79 @@ async fn native_v2_discovers_blocked_endpoints_through_unjoined_tcp_bridge_then_
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn native_v2_confirmation_child_uses_the_returned_actual_parent_over_blocked_tcp_discovery() {
-    confirmation_over_blocked_tcp(false, false, false, false, None).await;
+    confirmation_over_blocked_tcp(false, false, false, false, None, None).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn native_v2_confirmation_framed_result_uses_actual_actor_body_and_original_phase() {
-    confirmation_over_blocked_tcp(true, false, false, false, None).await;
+    confirmation_over_blocked_tcp(true, false, false, false, None, None).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn native_v2_plan_closing_fence_recovers_claim_and_key_without_new_admission_or_end() {
+    confirmation_over_blocked_tcp(true, false, false, false, None, Some(0)).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn native_v2_plan_closing_fence_keeps_storage_copy_and_sdk_debt_until_actual_release() {
+    confirmation_over_blocked_tcp(true, false, false, false, None, Some(1)).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn native_v2_confirmation_rejected_result_remains_original_history_after_return() {
-    confirmation_over_blocked_tcp(true, true, false, false, None).await;
+    confirmation_over_blocked_tcp(true, true, false, false, None, None).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn native_v2_confirmation_known_incoming_retry_survives_permanent_input_loss() {
-    confirmation_over_blocked_tcp(true, false, true, false, None).await;
+    confirmation_over_blocked_tcp(true, false, true, false, None, None).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn native_v2_abandoned_custody_needs_exact_physical_collection_dead_lease_and_root_drain() {
-    confirmation_over_blocked_tcp(true, false, false, true, None).await;
+    confirmation_over_blocked_tcp(true, false, false, true, None, None).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn native_v2_pc_intent_close_and_sdk_release_order_actual_queued_and_returned_actor_work() {
-    confirmation_over_blocked_tcp(true, false, false, false, Some(0)).await;
+    confirmation_over_blocked_tcp(true, false, false, false, Some(0), None).await;
 }
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn native_v2_pc_intent_sdk_release_before_begin_and_lost_queued_waiter_never_revive() {
-    confirmation_over_blocked_tcp(true, false, false, false, Some(1)).await;
+    confirmation_over_blocked_tcp(true, false, false, false, Some(1), None).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn native_v2_pc_intent_changed_sdp_input_refuses_before_publication_and_writer_blocks_close()
 {
-    confirmation_over_blocked_tcp(true, false, false, false, Some(2)).await;
+    confirmation_over_blocked_tcp(true, false, false, false, Some(2), None).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn native_v2_pc_intent_recorded_sdp_keeps_admitted_engine_until_actual_settlement() {
-    confirmation_over_blocked_tcp(true, false, false, false, Some(3)).await;
+    confirmation_over_blocked_tcp(true, false, false, false, Some(3), None).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn native_v2_pc_intent_lost_publication_recovers_original_outcome_after_parent_close() {
-    confirmation_over_blocked_tcp(true, false, false, false, Some(4)).await;
+    confirmation_over_blocked_tcp(true, false, false, false, Some(4), None).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn native_v2_pc_intent_recorded_actor_outcomes_retire_before_actual_io_collection() {
-    confirmation_over_blocked_tcp(true, false, false, false, Some(5)).await;
+    confirmation_over_blocked_tcp(true, false, false, false, Some(5), None).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn native_v2_pc_intent_original_sdp_worker_retries_local_refusal_and_collects_after_waiter_loss(
 ) {
-    confirmation_over_blocked_tcp(true, false, false, false, Some(6)).await;
+    confirmation_over_blocked_tcp(true, false, false, false, Some(6), None).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn native_v2_pc_intent_original_sdp_completion_retires_body_but_keeps_task_and_ui_until_collection(
 ) {
-    confirmation_over_blocked_tcp(true, false, false, false, Some(7)).await;
+    confirmation_over_blocked_tcp(true, false, false, false, Some(7), None).await;
 }
 
 async fn confirmation_over_blocked_tcp(
@@ -1000,6 +1010,7 @@ async fn confirmation_over_blocked_tcp(
     known_incoming: bool,
     orphan: bool,
     pc_cases: Option<u8>,
+    fence_cases: Option<u8>,
 ) {
     let clock = (pc_cases == Some(8)).then(crate::voice_handoff::integration::ExpiryClock::new);
     if matches!(pc_cases, Some(10..=13)) {
@@ -1011,6 +1022,7 @@ async fn confirmation_over_blocked_tcp(
                 known_incoming,
                 orphan,
                 pc_cases,
+                fence_cases,
                 None,
             ),
         )
@@ -1024,21 +1036,32 @@ async fn confirmation_over_blocked_tcp(
                 known_incoming,
                 orphan,
                 pc_cases,
+                fence_cases,
                 Some(clock),
             ),
         )
         .await;
     } else {
-        confirmation_over_blocked_tcp_inner(framed, reject, known_incoming, orphan, pc_cases, None)
-            .await;
+        confirmation_over_blocked_tcp_inner(
+            framed,
+            reject,
+            known_incoming,
+            orphan,
+            pc_cases,
+            fence_cases,
+            None,
+        )
+        .await;
     }
 }
+#[allow(clippy::too_many_arguments)]
 async fn confirmation_over_blocked_tcp_inner(
     framed: bool,
     reject: bool,
     known_incoming: bool,
     orphan: bool,
     pc_cases: Option<u8>,
+    fence_cases: Option<u8>,
     clock: Option<Arc<crate::voice_handoff::integration::ExpiryClock>>,
 ) {
     let mut scenario = Scenario::new(false, isolate().await);
@@ -1114,6 +1137,7 @@ async fn confirmation_over_blocked_tcp_inner(
                 &cp,
                 orphan,
                 pc_cases,
+                fence_cases,
             )
             .await;
         } else {
@@ -1157,6 +1181,7 @@ async fn confirmation_over_blocked_tcp_inner(
             &ap,
             orphan,
             pc_cases,
+            fence_cases,
         )
         .await;
     } else {
@@ -1275,35 +1300,35 @@ async fn native_v2_confirmation_alias_claims_refuse_before_publication_in_both_b
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn native_v2_pc_intent_original_http_begin_history_return_and_premature_high_refusal() {
-    confirmation_over_blocked_tcp(true, false, false, false, Some(8)).await;
+    confirmation_over_blocked_tcp(true, false, false, false, Some(8), None).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn native_v2_original_sdp_engine_uses_actual_actor_and_recovers_lost_permit_after_queue_and_lock_races(
 ) {
-    confirmation_over_blocked_tcp(true, false, false, false, Some(9)).await;
+    confirmation_over_blocked_tcp(true, false, false, false, Some(9), None).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn native_v2_original_sdp_result_uses_actual_actor_and_survives_eager_cancellation_lock_and_history_retries(
 ) {
-    confirmation_over_blocked_tcp(true, false, false, false, Some(10)).await;
+    confirmation_over_blocked_tcp(true, false, false, false, Some(10), None).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn native_v2_sdp_result_lost_after_commit_recovers_original_seal_and_plaintext_open_through_tcp_bridge(
 ) {
-    confirmation_over_blocked_tcp(true, false, false, false, Some(11)).await;
+    confirmation_over_blocked_tcp(true, false, false, false, Some(11), None).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn native_v2_sdp_empty_result_cannot_replace_nonempty_original_open() {
-    confirmation_over_blocked_tcp(true, false, false, false, Some(12)).await;
+    confirmation_over_blocked_tcp(true, false, false, false, Some(12), None).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn native_v2_sdp_maximum_seal_and_open_cross_actual_native_result_and_tcp_bridge() {
-    confirmation_over_blocked_tcp(true, false, false, false, Some(13)).await;
+    confirmation_over_blocked_tcp(true, false, false, false, Some(13), None).await;
 }
 
 /// Actual two-process retained brokers + authenticated HTTP/BYOB/WebCrypto and normal

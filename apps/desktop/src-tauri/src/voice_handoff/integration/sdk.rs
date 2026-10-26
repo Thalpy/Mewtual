@@ -298,3 +298,123 @@ pub(super) async fn close_preparation_then_unwind(
     drop(physical);
     drop(incoming);
 }
+
+/// The actual SDK candidate is parked across an early Plan fence. Direct trusted-native
+/// cleanup below intentionally retains the original physical position; a second HTTP
+/// request could not enter it. This tests final admission/destruction, not another wire.
+pub(super) async fn fence_preparation_then_unwind(
+    state: &AppState,
+    public: &bootstrap::SetupOutput,
+    route: &bootstrap::Route,
+    parent: &ledger::ResolvedRow,
+    storage_body: &[u8],
+    storage: [u8; 32],
+    claim: [u8; 32],
+) {
+    let mut body = storage_body[..121].to_vec();
+    body[0] = 6;
+    body.extend_from_slice(&storage);
+    body.push(0);
+    let request = requests::sdk::Request::decode(parent.id().logical(), &body).unwrap();
+    let context = context::Context::new(state);
+    factory::preflight_binding(&context, route).await.unwrap();
+    let incoming = opened_frame(
+        public,
+        route,
+        (
+            route.session().fixture_counts().1 + 1,
+            13,
+            0,
+            parent.id().logical(),
+        ),
+        &body,
+        None,
+    );
+    let physical = incoming.hold_position().unwrap();
+    let mut preparation = crate::voice_handoff::sdp::current(&context, route, |admission| {
+        parent.begin_sdk(admission, &physical, route.session(), &request)
+    })
+    .unwrap()
+    .unwrap();
+    preparation.allocate().unwrap();
+    let original_key = parent.key_custody_for_test();
+    assert!(plan_final::request(&context, route, parent)
+        .await
+        .unwrap()
+        .proof
+        .is_none());
+    assert!(!original_key.is_current());
+    assert!(matches!(
+        crate::voice_handoff::sdp::current(&context, route, |admission| {
+            parent.attach_sdk(admission, &request, &mut preparation)
+        }),
+        Err(factory::Refused::Protocol(VoiceError::Unauthorized))
+    ));
+    assert!(
+        matches!(
+            parent.recover_sdk(route.session().identity(), &request),
+            Err(VoiceError::Unauthorized)
+        ),
+        "unattached frozen SDK cannot enter Actor preflight"
+    );
+    parent
+        .release_sdp(route.session().identity(), &request.base, storage)
+        .unwrap();
+    assert!(
+        parent.sdp_test_drained(),
+        "no copy/input may mask the original SDK worker"
+    );
+    parent
+        .release_key_session(
+            route.session().identity(),
+            request.base.action,
+            request.base.handshake,
+            claim,
+            request.base.key,
+        )
+        .unwrap();
+    parent
+        .release_transition(
+            route.session().identity(),
+            request.base.action,
+            request.base.handshake,
+            claim,
+            crate::voice_runtime(state).clock().monotonic_ms(),
+        )
+        .unwrap();
+    assert!(
+        !parent.sdp_test_whole_drained(),
+        "actual SDK candidate alone still owns its paid obligation"
+    );
+    assert!(
+        plan_final::request(&context, route, parent)
+            .await
+            .unwrap()
+            .proof
+            .is_none(),
+        "released Claim/key/storage cannot certify a parked candidate's destruction"
+    );
+    assert!(std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let _owned = preparation;
+        panic!("actual failed candidate unwinds after its Plan fence");
+    }))
+    .is_err());
+    assert!(parent.sdp_test_whole_drained());
+    drop(physical);
+    drop(incoming);
+    let clock = crate::voice_runtime(state).clock();
+    let receipt = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            let receipt = plan_final::request(&context, route, parent).await.unwrap();
+            if receipt.proof.is_some() {
+                break receipt;
+            }
+            clock.sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("original parked SDK did not drain after its real destruction");
+    parent
+        .acknowledge_final(route.session().identity(), receipt.proof.unwrap())
+        .unwrap();
+}

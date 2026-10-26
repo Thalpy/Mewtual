@@ -1,5 +1,24 @@
 # Next voice milestone: native result recovery
 
+## Broker40 fence implemented; native validation next (26 October; App OFF)
+
+The early Plan fence described in the older Broker39 section below is now implemented:
+original Return/child/Session/kind checks and native media/Source barrier precede irreversible
+successor closure. Nested obligations remain until release and actual worker drainage.
+Frozen missing history refuses before Actor preflight; existing Claim reports Closing0.
+The browser waits for exact authenticated Plan Pending/final and complete framed finally
+before recovery-shaped admission. Lost/refused responses repeat the same intent first.
+Final issuance/ACK and full next-generation quiescence remain separate required barriers.
+
+Frontend full3053/focused345/static/build pass. Actual native stages0..3, parked candidate,
+retained-copy and current-Source regressions await compilation/execution. The preceding checkpoint's full native suite failed865/20
+(one initial admission-refusal assertion,19 safety-gate cascades); the same-action bounded
+retry correction is included and requires a final combined run. HANDOVER records current gates. This is still
+inactive: any-per-N-media fallback, unknown parents, renewal/Root lifetime capacity,
+production App/real RTC/tracks, relay, combined and physical acceptance remain unfinished.
+The text below records the earlier checkpoint and must not be read as current implementation
+or current validation status.
+
 ## Broker39 known-receipt retirement and the next native fence (26 October; App OFF)
 
 Known attached failed plans now have peer-local retirement, preserving original Session

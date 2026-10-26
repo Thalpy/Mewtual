@@ -3,7 +3,11 @@
 //! literal unlocked/confirmed booleans stand in for the process publication fence.
 use super::*;
 use catcoms_sync::voice_v2::VoiceError;
-fn body(parent: &ledger::ResolvedRow, key: [u8; 32], release: Option<[u8; 32]>) -> Vec<u8> {
+pub(super) fn body(
+    parent: &ledger::ResolvedRow,
+    key: [u8; 32],
+    release: Option<[u8; 32]>,
+) -> Vec<u8> {
     let (serial, version, tag) = parent.status().unwrap().action.unwrap();
     let mut bytes = vec![5];
     bytes.extend_from_slice(&serial.to_be_bytes());
@@ -18,7 +22,7 @@ fn body(parent: &ledger::ResolvedRow, key: [u8; 32], release: Option<[u8; 32]>) 
     }
     bytes
 }
-async fn exchange(
+pub(super) async fn exchange(
     state: &AppState,
     public: &bootstrap::SetupOutput,
     route: &bootstrap::Route,

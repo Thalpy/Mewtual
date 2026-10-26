@@ -73,6 +73,273 @@ pub(super) enum Cleanup {
     Ended,
     Orphan,
 }
+
+/// Real actor-committed Finish, framed admissions and original retained Root observers.
+/// The four stages lose observation at Claim/key/storage/SDK boundaries. Closing intent
+/// must permit exact history recovery while refusing every missing next admission; final
+/// proof still waits for the actual copy/SDK/Claim/key obligations, without owner End.
+pub(super) async fn fenced_custody_cycle(
+    state: &AppState,
+    selected: &Arc<SelectedHandoffOwner>,
+    parent: &ledger::ResolvedRow,
+    stage: u8,
+    peers: &tokio::sync::Barrier,
+) {
+    assert!(stage <= 3);
+    let bootstrap::Status::Ready(public) = bootstrap::ensure(
+        state,
+        selected.id(),
+        selected.executor(),
+        &mut catcoms_rt::OsCryptoRng,
+    )
+    .await
+    .unwrap() else {
+        panic!("original native channel")
+    };
+    let route = state.voice_channels.route(public.public().slot).unwrap();
+    route.acknowledge_setup().unwrap();
+    let context = context::Context::new(state);
+    let clock = crate::voice_runtime(state).clock();
+    let claim_body = body(parent, None);
+    let capacity = replies::refused(factory::Refused::Protocol(VoiceError::Capacity));
+    let unauthorized = replies::refused(factory::Refused::Protocol(VoiceError::Unauthorized));
+    let first = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            let reply = exchange(state, &public, &route, parent, &claim_body).await;
+            if reply != capacity {
+                break reply;
+            }
+            clock.sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("actual original Claim did not admit");
+    assert_eq!(&first[..2], &[3, 1]);
+    let claim = first[182..214].try_into().unwrap();
+    let key = if stage >= 1 {
+        Some(super::key_session::adopt(state, &public, &route, parent, claim).await)
+    } else {
+        None
+    };
+    if stage >= 2 {
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            while !parent.ready_test_complete() {
+                clock.sleep(std::time::Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("actual Ready/core did not drain");
+    }
+    // Neither side may close its binding while its partner still needs Ready. Stages
+    // 0/1 intentionally never wait for Ready, since one side has not adopted keys.
+    peers.wait().await;
+    let storage_body = key.map(|key| super::sdp::body(parent, key, None));
+    let storage = if stage >= 2 {
+        let prepared = super::sdp::exchange(
+            state,
+            &public,
+            &route,
+            parent,
+            storage_body.as_ref().unwrap(),
+        )
+        .await;
+        assert_eq!(&prepared[..2], &[5, 1]);
+        Some(prepared[138..170].try_into().unwrap())
+    } else {
+        None
+    };
+    if stage == 2 {
+        // Native-only race boundary: keep the actual admitted preparation/physical
+        // owner while its original Plan closes. The peer stage3 covers framed SDK
+        // receipt recovery and the independent retained-copy boundary below.
+        super::sdk::fence_preparation_then_unwind(
+            state,
+            &public,
+            &route,
+            parent,
+            storage_body.as_ref().unwrap(),
+            storage.unwrap(),
+            claim,
+        )
+        .await;
+        crate::end_voice_owner_inner(state, selected.id()).await;
+        return;
+    }
+    let sdk = if stage == 3 {
+        Some(
+            super::sdk::start(
+                state,
+                &public,
+                &route,
+                parent,
+                storage_body.as_ref().unwrap(),
+                storage.unwrap(),
+            )
+            .await,
+        )
+    } else {
+        None
+    };
+    // This is an actual paid native owner, not a fixture busy flag. Source close, native
+    // receipt recovery and final intent cannot release its original bytes or reservation.
+    let copy = storage.map(|_| {
+        parent
+            .sdp_test_phase()
+            .unwrap()
+            .copy(8192)
+            .unwrap()
+            .adopt(vec![77; 8192])
+            .unwrap()
+    });
+    let original_key = key.map(|_| parent.key_custody_for_test());
+    let closing = plan_final::request(&context, &route, parent).await.unwrap();
+    assert_eq!(closing.kind, ledger::FinalKind::Plan);
+    assert!(
+        closing.proof.is_none(),
+        "intent cannot issue over unreleased original Claim"
+    );
+    assert!(plan_final::request(&context, &route, parent)
+        .await
+        .unwrap()
+        .proof
+        .is_none());
+    if let Some(original) = &original_key {
+        assert!(
+            !original.is_current(),
+            "fence must close the exact binding a parked worker owns"
+        );
+        assert!(matches!(
+            original.prepare_sdp_handoff(),
+            Err(VoiceError::Unauthorized)
+        ));
+    }
+    let recovered = exchange(state, &public, &route, parent, &claim_body).await;
+    assert_eq!(&recovered[..2], &[3, 2]);
+    assert_eq!(&recovered[2..178], &first[2..178]);
+    assert_eq!(&recovered[178..182], &[0; 4]);
+    assert_eq!(&recovered[182..214], &claim);
+    let (serial, version, input_tag) = parent.status().unwrap().action.unwrap();
+    let action = requests::Action {
+        serial,
+        version,
+        input_tag,
+    };
+    let handshake = parent.confirmation_handshake().unwrap();
+    let key_reply = super::key_session::exchange(
+        state,
+        &public,
+        &route,
+        parent,
+        &super::key_session::body(parent, claim, None),
+    )
+    .await;
+    if let Some(key) = key {
+        assert_eq!(&key_reply[..2], &[4, 2]);
+        assert_eq!(&key_reply[202..234], &key);
+        let request =
+            requests::sdp::Request::decode(parent.id().logical(), storage_body.as_ref().unwrap())
+                .unwrap();
+        if storage.is_none() {
+            assert!(
+                matches!(
+                    parent.recover_sdp(route.session().identity(), &request),
+                    Err(VoiceError::Unauthorized)
+                ),
+                "frozen missing storage must refuse BEFORE Actor preflight"
+            );
+            assert_eq!(
+                super::sdp::exchange(
+                    state,
+                    &public,
+                    &route,
+                    parent,
+                    storage_body.as_ref().unwrap()
+                )
+                .await,
+                unauthorized
+            );
+        }
+        if let Some(proof) = storage {
+            let mut sdk_body = storage_body.as_ref().unwrap()[..121].to_vec();
+            sdk_body[0] = 6;
+            sdk_body.extend_from_slice(&proof);
+            sdk_body.push(0);
+            let sdk_request =
+                requests::sdk::Request::decode(parent.id().logical(), &sdk_body).unwrap();
+            if sdk.is_none() {
+                assert!(
+                    matches!(
+                        parent.recover_sdk(route.session().identity(), &sdk_request),
+                        Err(VoiceError::Unauthorized)
+                    ),
+                    "frozen missing SDK must refuse BEFORE Actor/candidate construction"
+                );
+            }
+            let reply = super::sdp::exchange(
+                state,
+                &public,
+                &route,
+                parent,
+                &super::sdp::body(parent, key, Some(proof)),
+            )
+            .await;
+            assert_eq!(&reply[..2], &[5, 2]);
+            assert_eq!(copy.as_ref().unwrap().bytes()[0], 77);
+            assert!(!parent.sdp_test_drained());
+            assert!(plan_final::request(&context, &route, parent)
+                .await
+                .unwrap()
+                .proof
+                .is_none());
+            drop(copy);
+            let reply = super::sdp::exchange(
+                state,
+                &public,
+                &route,
+                parent,
+                &super::sdp::body(parent, key, Some(proof)),
+            )
+            .await;
+            assert_eq!(&reply[..2], &[5, 3]);
+        }
+        super::key_session::release(state, &public, &route, parent, claim, key, true).await;
+        if let Some(sdk) = &sdk {
+            super::sdk::release_after_key_release(state, &public, &route, parent, sdk).await;
+        }
+    } else {
+        assert_eq!(key_reply, unauthorized);
+        assert!(
+            matches!(
+                parent.recover_key_session(route.session().identity(), action, handshake, claim),
+                Err(VoiceError::Unauthorized)
+            ),
+            "frozen missing key must refuse BEFORE Actor preflight"
+        );
+    }
+    assert!(plan_final::request(&context, &route, parent)
+        .await
+        .unwrap()
+        .proof
+        .is_none());
+    let released = exchange(state, &public, &route, parent, &body(parent, Some(claim))).await;
+    assert_eq!(&released[..2], &[3, 3]);
+    let final_receipt = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            let receipt = plan_final::request(&context, &route, parent).await.unwrap();
+            if receipt.proof.is_some() {
+                break receipt;
+            }
+            clock.sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .expect("actual fenced plan did not drain after its original releases");
+    parent
+        .acknowledge_final(route.session().identity(), final_receipt.proof.unwrap())
+        .unwrap();
+    crate::end_voice_owner_inner(state, selected.id()).await;
+}
+
 pub(super) async fn custody_cycle(
     state: &AppState,
     selected: &Arc<SelectedHandoffOwner>,
@@ -184,9 +451,11 @@ pub(super) async fn custody_cycle(
         matches!(parent.retire_plan(), Err(VoiceError::Capacity)),
         "browser key custody must precede normal whole-plan retirement"
     );
+    // Early Plan intent is now an irreversible fence, not a non-mutating readiness
+    // query. Keep this live scenario open; proof issuance still requires an intent.
     assert!(matches!(
-        plan_final::request(&context, &route, parent).await,
-        Err(factory::Refused::Protocol(VoiceError::Capacity))
+        parent.issue_final(route.session().identity()),
+        Err(VoiceError::Unauthorized)
     ));
 
     // A distinct actual Session allocation may have the same public hash/keys. It cannot
@@ -331,8 +600,8 @@ pub(super) async fn custody_cycle(
             "old Release alone cannot cover established key custody"
         );
         assert!(matches!(
-            plan_final::request(&context, &route, parent).await,
-            Err(factory::Refused::Protocol(VoiceError::Capacity))
+            parent.issue_final(route.session().identity()),
+            Err(VoiceError::Unauthorized)
         ));
         super::key_session::release(state, &public, &route, parent, receipt, key_proof, false)
             .await;

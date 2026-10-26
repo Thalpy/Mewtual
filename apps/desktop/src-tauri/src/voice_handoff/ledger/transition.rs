@@ -131,13 +131,19 @@ impl ResolvedRow {
             return Err(VoiceError::Unauthorized);
         }
         let Some(claim) = &plan.transition else {
-            return Ok(None);
+            // Frozen absence must not fall through to Actor preflight or fresh Claim.
+            return if state.final_delivery().is_some() {
+                Err(VoiceError::Unauthorized)
+            } else {
+                Ok(None)
+            };
         };
         if !Arc::ptr_eq(session, &claim.session) {
             return Err(VoiceError::Unauthorized);
         }
         let mut receipt = claim.snapshot(self.row.id, action, handshake, mono);
-        if !self.row.key.lease.is_live() && receipt.state == 1 {
+        if (state.final_delivery().is_some() || !self.row.key.lease.is_live()) && receipt.state == 1
+        {
             receipt.state = 2;
             receipt.remaining = 0;
         }

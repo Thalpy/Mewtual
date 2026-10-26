@@ -145,10 +145,16 @@ impl ResolvedRow {
     ) -> Result<Option<Receipt>, VoiceError> {
         let _index = self.transition_index()?;
         let state = try_lock(&self.row.state)?;
-        Ok(storage(self, &state, session, request)?
+        let receipt = storage(self, &state, session, request)?
             .sdk
             .as_ref()
-            .map(|sdk| snapshot(self.row.id, request, sdk)))
+            .map(|sdk| snapshot(self.row.id, request, sdk));
+        // Historical lookup may recover an installed obligation after closure; an
+        // absent one must refuse before Actor preflight/candidate construction.
+        if receipt.is_none() && state.final_delivery().is_some() {
+            return Err(VoiceError::Unauthorized);
+        }
+        Ok(receipt)
     }
     /// The exact physical position and sdk_preparing bit bound candidate allocation to one.
     /// Construction is inert and paid; no browser SDK work is authorized by this method.

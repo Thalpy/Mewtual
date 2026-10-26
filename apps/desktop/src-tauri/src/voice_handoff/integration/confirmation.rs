@@ -1248,6 +1248,7 @@ pub(crate) async fn confirmation_framed_round_trip(
     high_parent: &ledger::ResolvedRow,
     orphan_low: bool,
     pc_cases: Option<u8>,
+    fence_cases: Option<u8>,
 ) {
     confirmation_round_trip_inner(
         low_state,
@@ -1256,7 +1257,9 @@ pub(crate) async fn confirmation_framed_round_trip(
         high_state,
         high,
         high_parent,
-        if let Some(reverse) = pc_cases {
+        if let Some(case) = fence_cases {
+            ConfirmationMode::Fence(case)
+        } else if let Some(reverse) = pc_cases {
             ConfirmationMode::Pc(reverse)
         } else if orphan_low {
             ConfirmationMode::Orphan
@@ -1431,6 +1434,7 @@ enum ConfirmationMode {
     Framed,
     Orphan,
     Pc(u8),
+    Fence(u8),
 }
 async fn confirmation_round_trip_inner(
     low_state: &AppState,
@@ -1584,6 +1588,25 @@ async fn confirmation_round_trip_inner(
         // Only actual application-framed Finish results arm native custody. The legacy
         // test-only result path deliberately cannot manufacture this transition proof.
         let peer_ready = tokio::sync::Barrier::new(2);
+        if let ConfirmationMode::Fence(case) = mode {
+            tokio::join!(
+                super::transition::fenced_custody_cycle(
+                    high_state,
+                    high,
+                    high_parent,
+                    case * 2,
+                    &peer_ready
+                ),
+                super::transition::fenced_custody_cycle(
+                    low_state,
+                    low,
+                    low_parent,
+                    case * 2 + 1,
+                    &peer_ready
+                )
+            );
+            return;
+        }
         tokio::join!(
             super::transition::custody_cycle(
                 high_state,
