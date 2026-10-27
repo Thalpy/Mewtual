@@ -26,6 +26,8 @@ const ROW_BYTES: usize = 2304;
 mod children;
 mod collection;
 mod continuation;
+#[cfg(test)]
+mod diagnostics;
 mod key_session;
 mod media;
 mod media_index;

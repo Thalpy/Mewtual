@@ -13,7 +13,11 @@ changed-helper TypeScript pass. Owned-process cleanup5 passes. A fairness fixtur
 was corrected with actual physical-return gating and a held early-adopt response; the
 coarse-codec mutation still fails promptly1.67s, restored fairness/held5s expiry both pass.
 No timeout/starvation oracle changed. Native check/strict lint/current-source scan pass;
-full native is running serially. Root3691/24 existing ignores on unchanged Rust inputs is green. Read-only reviews found
+full native FAILED850/40: one newcomer/second-pair Derive attachment timeout plus39 intentional
+fixture-admission gate cascades. First-pair RTC/history collection had succeeded. The causal
+case passed alone58.51s; its cause remains open. Seven focused test-only diagnostic/held-lock/
+non-ownership and unchanged12KiB layout checks pass; a fresh combined native gate is required.
+Root3691/24 existing ignores on unchanged Root inputs passed. Read-only reviews found
 and fixed capture closure-retention and harness interruption/stale-PID Mediums; re-review
 has no remaining actionable finding. Fresh inherited dependency audit remains red.
 

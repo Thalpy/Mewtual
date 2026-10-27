@@ -123,6 +123,8 @@ impl Cursor {
         // Ready scan runs in the same cadence. Discharging Ready's priority on that
         // refusal lets ordinary reacquire the free slot every next cadence forever.
         let cursor = self.ready_rows[index];
+        #[cfg(test)]
+        route.session().fixture_maintenance_turn(4, cursor);
         let admitted = native::produce_ready(context, route, cursor).is_ok();
         if admitted {
             self.ready_first[index] = false;
@@ -140,6 +142,10 @@ impl Cursor {
         index: usize,
     ) -> (bool, Option<catcoms_sync::voice_v2::presence::PairSelector>) {
         let stage = self.stage[index];
+        #[cfg(test)]
+        route
+            .session()
+            .fixture_maintenance_turn(stage, self.peers[index]);
         let (admitted, selected) = if matches!(stage, 1 | 3) {
             let cursor = self.continuations[index];
             let admitted = native::produce_confirmation(context, route, cursor, stage == 3).is_ok();

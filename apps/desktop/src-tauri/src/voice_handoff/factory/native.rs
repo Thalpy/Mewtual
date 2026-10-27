@@ -134,6 +134,34 @@ pub(in crate::voice_handoff) fn produce_ready(
 }
 
 fn spawn(context: &Context, route: &Route, selector: Selection) -> Result<NativeWaiter, Refused> {
+    #[cfg(test)]
+    let (kind, cursor) = diagnostic_selection(&selector);
+    let result = spawn_inner(context, route, selector);
+    #[cfg(test)]
+    route
+        .session()
+        .fixture_native_admission(kind, cursor, result.as_ref().err().copied());
+    result
+}
+
+#[cfg(test)]
+fn diagnostic_selection(selection: &Selection) -> (u8, u8) {
+    match selection {
+        Selection::Exact(_) => (0, u8::MAX),
+        Selection::Discover { cursor, .. } => (1, *cursor),
+        Selection::Confirmation { cursor, incoming } => {
+            (if incoming.is_some() { 3 } else { 2 }, *cursor)
+        }
+        Selection::Ready { cursor } => (4, *cursor),
+        Selection::Consumed => (5, u8::MAX),
+    }
+}
+
+fn spawn_inner(
+    context: &Context,
+    route: &Route,
+    selector: Selection,
+) -> Result<NativeWaiter, Refused> {
     let runtime = tokio::runtime::Handle::try_current().map_err(|_| Refused::Stopped)?;
     {
         let live = context.upgrade().ok_or(Refused::Closed)?;
@@ -230,10 +258,22 @@ fn layout<F: std::future::Future<Output = NativeCompletion>>(future: &F) -> usiz
             .max(ready::layout_bytes())
 }
 async fn run_native(mut worker: Worker) -> NativeCompletion {
+    #[cfg(test)]
+    worker
+        .custody
+        .route
+        .session()
+        .fixture_native_started(diagnostic_selection(&worker.selector).0);
     // Complete preparation/publication in one paid state machine. Returning an intermediate
     // Effect enum embedded a second full registration/output graph in this outer future
     // throughout publication. No such copied admission result needs to survive this await.
     let result = execute(&mut worker).await;
+    #[cfg(test)]
+    worker
+        .custody
+        .route
+        .session()
+        .fixture_native_finished(result.as_ref().err().copied());
     NativeCompletion {
         result,
         _custody: worker.custody,
@@ -249,6 +289,12 @@ async fn execute(worker: &mut Worker) -> Result<RowId, Refused> {
         Selection::Ready { cursor } => return ready::execute(worker, cursor).await,
         Selection::Consumed => return Err(Refused::Closed),
     };
+    #[cfg(test)]
+    worker
+        .custody
+        .route
+        .session()
+        .fixture_native_selector(selector);
     execute_selected(worker, selector).await
 }
 
@@ -372,12 +418,18 @@ async fn discover(
     let selected = route.selected();
     let (actor, grant) = {
         let live = context.upgrade().ok_or(Refused::Closed)?;
+        #[cfg(test)]
+        route.session().fixture_native_stage(7);
         if !live.try_unlocked()? {
             return Err(Refused::Closed);
         }
+        #[cfg(test)]
+        route.session().fixture_native_stage(8);
         if !live.ledger.automatic_parent_available(selected)? {
             return Err(VoiceError::Capacity.into());
         }
+        #[cfg(test)]
+        route.session().fixture_native_stage(9);
         let servers = live.servers.try_lock().map_err(|_| VoiceError::Capacity)?;
         let binding = selected.binding();
         let actor = servers
@@ -387,6 +439,8 @@ async fn discover(
             .ok_or(Refused::Closed)?;
         (actor, selected.grant()?)
     }; // No upgraded mounted Store, server map or Coordinator crosses the Actor wait.
+    #[cfg(test)]
+    route.session().fixture_native_stage(2);
     let snapshot = actor.voice_participant_peer_snapshot(grant, permit).await?;
     let (epoch, peers) = snapshot.result()?;
     let live = context.upgrade().ok_or(Refused::Closed)?;
@@ -415,9 +469,15 @@ async fn execute_selected(worker: &Worker, selector: PairSelector) -> Result<Row
     let context = worker.context.as_ref().ok_or(Refused::Closed)?;
     let route = &worker.custody.route;
     let selected = route.selected().clone();
+    #[cfg(test)]
+    route.session().fixture_native_stage(3);
     let commit = preflight_binding(context, route).await?;
+    #[cfg(test)]
+    route.session().fixture_native_stage(4);
     let commit = commit.lock_owned().await;
     let context = context.upgrade().ok_or(Refused::Closed)?;
+    #[cfg(test)]
+    route.session().fixture_native_stage(10);
     context
         .gate()
         .require_unlocked()
@@ -435,6 +495,8 @@ async fn execute_selected(worker: &Worker, selector: PairSelector) -> Result<Row
     {
         // Same final order as the physical factory: UI commit -> Coordinator -> Route.
         // Both entry paths must repeat these checks after preflight and the UI wait.
+        #[cfg(test)]
+        route.session().fixture_native_stage(11);
         let authority = context.authority.lock().unwrap_or_else(|e| e.into_inner());
         require_current_selection(context.gate(), &authority, &selected)?;
         route.require_open().map_err(|_| Refused::Closed)?;
@@ -448,6 +510,8 @@ async fn execute_selected(worker: &Worker, selector: PairSelector) -> Result<Row
     {
         return Err(VoiceError::Capacity.into());
     }
+    #[cfg(test)]
+    route.session().fixture_native_stage(12);
     let registration = match context
         .ledger
         .begin(selected.clone(), Purpose::Derive(selector))?
@@ -459,6 +523,8 @@ async fn execute_selected(worker: &Worker, selector: PairSelector) -> Result<Row
     // Only this task's weak context remains; no mounted Store/registry/Coordinator crosses
     // Actor publication. Retain the original selected owner and UI commit to the end of
     // this scope, after the shared exact-publication path has collected its Actor replies.
+    #[cfg(test)]
+    route.session().fixture_native_stage(5);
     let result = publish_derivation(registration, actor, grant, selector).await;
     drop(commit);
     drop(selected);

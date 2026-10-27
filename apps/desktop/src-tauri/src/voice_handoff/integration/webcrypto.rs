@@ -137,6 +137,7 @@ impl Endpoint {
         owner: String,
         pause_setup: bool,
     ) -> Result<Self, Failure> {
+        super::super::channel::Session::fixture_prepare_native_diagnostics();
         let runtime = crate::voice_runtime(&state);
         let bound = match service::BoundServer::bind_application(
             state.voice_channels.clone(),
@@ -516,6 +517,7 @@ impl Endpoint {
         // No fixture factory call: the ordinary application service must independently
         // discover this proven counterpart and attach the original native Derive. The
         // browser then reads its descriptor through the actual metadata IPC handler.
+        let began = clock.monotonic_ms();
         let row = tokio::time::timeout(std::time::Duration::from_secs(10), async {
             loop {
                 if let Some(row) = self
@@ -531,7 +533,15 @@ impl Endpoint {
             }
         })
         .await
-        .expect("automatic native producer did not attach the original Derive");
+        .unwrap_or_else(|error| {
+            // Non-creating snapshots use try-locks and primitive comparisons. Do not
+            // query a potentially parked Actor, keep rows/Inputs alive, renew authority,
+            // or infer successful publication from a spawned worker's layout log.
+            let ledger = self.state.voice_handoff.fixture_derivation_diagnostic(&selected, selector);
+            let native = self.state.voice_channels.fixture_native_diagnostic(&selected, selector);
+            panic!("automatic native producer did not attach the original Derive: {error:?}; elapsed_ms={}; selected_live={}; {native}; {ledger}",
+                clock.monotonic_ms().saturating_sub(began), selected.lease().is_live());
+        });
         assert!(row.status().unwrap().action.is_some());
         assert!(
             row.status().unwrap().engine.receipt.is_none(),

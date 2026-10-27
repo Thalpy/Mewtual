@@ -13,6 +13,9 @@ use catcoms_sync::voice_v2::resources::{Credit, ProcessRetainedCredit, ResourceK
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, Weak};
 
+#[cfg(test)]
+mod diagnostics;
+
 const ROWS: usize = 64;
 const INDEX_BYTES: usize = 4096;
 const ROW_BYTES: usize = 8192;

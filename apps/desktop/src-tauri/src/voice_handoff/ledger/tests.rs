@@ -12,6 +12,31 @@ mod finalization;
 mod pending;
 mod retirement;
 
+#[test]
+fn derivation_diagnostics_do_not_create_or_retire_original_pending_and_refuse_contention() {
+    let (_coordinator, selected, selector) = selection();
+    let ledger = Arc::new(Ledger::default());
+    let registration = ticket(&ledger, selected.clone(), selector);
+    registration.mark_handoff().unwrap();
+    let before = selected.resources().counts();
+    for _ in 0..3 {
+        let observed = ledger.fixture_derivation_diagnostic(&selected, selector);
+        assert!(observed.contains("parents=1"));
+        assert!(observed.contains("pending"));
+        assert_eq!(selected.resources().counts(), before);
+    }
+    let index = ledger.index.lock().unwrap();
+    assert_eq!(
+        ledger.fixture_derivation_diagnostic(&selected, selector),
+        "ledger contended"
+    );
+    drop(index);
+    assert!(matches!(
+        ledger.status(registration.id()).unwrap().pending,
+        PendingStatus::Open
+    ));
+}
+
 fn noop_waker() -> std::task::Waker {
     struct Idle;
     impl std::task::Wake for Idle {

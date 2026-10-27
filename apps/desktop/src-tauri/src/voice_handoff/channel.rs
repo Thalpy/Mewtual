@@ -18,6 +18,8 @@ use zeroize::Zeroizing;
 
 pub(super) mod bootstrap;
 mod crypto;
+#[cfg(test)]
+mod diagnostics;
 pub(in crate::voice_handoff) mod sdp;
 pub(super) use crypto::{BodyKind, Operation};
 use crypto::{Direction, Header, Keys};

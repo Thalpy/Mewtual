@@ -91,6 +91,48 @@ fn ready(status: Status) -> Arc<SetupOutput> {
     }
 }
 
+#[tokio::test]
+async fn native_diagnostic_report_refuses_held_registry_and_row_without_waiting_or_creating_work() {
+    Session::fixture_prepare_native_diagnostics();
+    let f = Fixture::new().await;
+    let (owner, selected) = select(&f, point()).await;
+    let _output = ready(
+        ensure(&f.state, &owner, [9; 32], &mut Rng::new())
+            .await
+            .unwrap(),
+    );
+    let (_coordinator, _foreign, expected) = crate::voice_handoff::ledger::tests::selection();
+    let registry = &f.state.voice_channels;
+    let before = selected.resources().counts();
+    let index = registry.index.lock().unwrap();
+    assert!(registry
+        .fixture_native_diagnostic(&selected, expected)
+        .contains("registry contended"));
+    let row = index
+        .as_ref()
+        .unwrap()
+        .rows
+        .iter()
+        .flatten()
+        .find(|row| Arc::ptr_eq(&row.selected, &selected))
+        .unwrap()
+        .clone();
+    drop(index);
+    let state = row.state.lock().unwrap();
+    assert!(registry
+        .fixture_native_diagnostic(&selected, expected)
+        .contains("channel row contended"));
+    drop(state);
+    assert!(registry
+        .fixture_native_diagnostic(&selected, expected)
+        .contains("pending/effects_closed/closed/browser_setup=(false, false, false, true)"));
+    assert_eq!(
+        selected.resources().counts(),
+        before,
+        "observation creates no grant/row/work"
+    );
+}
+
 #[test]
 fn fixed_index_and_row_graph_fit_their_separate_real_payments() {
     let arc_words = 2 * std::mem::size_of::<usize>();

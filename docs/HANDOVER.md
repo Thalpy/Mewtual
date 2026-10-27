@@ -1,6 +1,6 @@
 # Mewtual; Handover
 
-## Audio SDK checkpoint (27 October; Broker44, App OFF; final gates pending)
+## Audio SDK checkpoint (27 October; Broker44, App OFF; native gate failed)
 
 A real Edge probe reproduced HIGH defaulting recvonly: LOW negotiated sendonly and HIGH
 recvonly despite a sendrecv offer. The Source now selects sendrecv on the SAME single audio
@@ -32,11 +32,23 @@ return before advancing extra synthetic cadence. Its early native-adopt marker n
 held-response barrier; finally releases it BEFORE joins. The coarse-codec mutation still
 fails the intended starvation oracle and exits promptly1.67s; the restored fairness and
 unchanged held5s expiry tests both pass. No timeout or starvation oracle was relaxed.
-Native check, strict native Clippy and current-native construction scan pass. The full
-native suite is running serially on matching frozen production TS/Rust inputs; the later
-fairness correction changes only the frontend test. Complete Root3691/24 existing ignores
-passes on byte-identical Rust/Cargo/native inputs; no duplicate Root suite is run.
-Read-only design/adversarial re-reviews have no remaining actionable finding. Inherited
+Native check, strict native Clippy and current-native construction scan passed before the
+new test-only diagnostic changes. Full native FAILED:850 library tests passed/40 failed.
+One second-peer original-Derive attachment timeout in
+`native_browser_failed_attached_peer_preserves_original_session_and_indexed_peer` caused
+39 intentional fixture-admission shutdown-gate cascades. The first pair's RTC and native
+history collection had succeeded; the newcomer's second Derive did not attach within the
+unchanged10s bound. The same case passed alone58.51s; that does not close the failure.
+
+Bounded test-only diagnostic observations are being added to distinguish absent/different
+selectors, Pending/worker state, maintenance visits and publication progress. They use a
+fixed harness-owned Weak-identity table, not extra paid Session fields, and timeout snapshots
+use try-locks without Actor queries or blocking resource getters. Seven focused diagnostic,
+held-lock, non-ownership and unchanged12KiB codec-layout checks pass. All three second-peer lifecycle variants and four storage checks also passed together
+(7 tests,212.69s). Fresh combined native validation is still required; the cause remains unproven. Later fairness changes are frontend
+test only. Complete Root3691/24 existing ignores passed on unchanged Root Rust/Cargo inputs.
+The published audio runtime passed read-only design/adversarial re-review; the diagnostic
+WIP is receiving separate review and validation. Inherited
 dependency audit remains red on RUSTSEC-2026-0387/crypto-bigint0.5.5; no waiver.
 
 Next: integrate paid audio cells, capture/pool ledger ownership, per-peer disabled clones

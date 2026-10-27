@@ -3,6 +3,59 @@ use rand_chacha::ChaCha20Rng;
 use rand_core::SeedableRng;
 
 #[test]
+fn native_diagnostics_cannot_complete_a_hold_or_change_nonce_counters() {
+    let (session, _) = session(Arc::new(Resources::default()), [3; 32]);
+    let before = session.fixture_counts();
+    let native = session.native_hold().unwrap();
+    session.fixture_native_admission(0, u8::MAX, None);
+    session.fixture_native_started(0);
+    session.fixture_native_finished(None);
+    assert_eq!(session.fixture_counts(), before);
+    assert!(
+        matches!(session.native_hold(), Err(Refused::Capacity)),
+        "diagnostic completion is not actual custody return"
+    );
+    drop(native);
+    session.close_admission();
+    session.fixture_native_started(1);
+    session.fixture_native_finished(None);
+    assert!(
+        matches!(session.native_hold(), Err(Refused::Binding)),
+        "observation cannot reopen a closed original Session"
+    );
+}
+
+#[test]
+fn native_diagnostic_contention_is_nonblocking_and_marks_missing_observations() {
+    let (session, _) = session(Arc::new(Resources::default()), [3; 32]);
+    let guard = Session::fixture_hold_diagnostic_table();
+    session.fixture_native_started(0);
+    assert!(session.fixture_native_snapshot().is_missing());
+    assert_eq!(session.fixture_counts(), (false, 0, 0));
+    drop(guard);
+}
+
+#[test]
+fn native_diagnostics_retain_no_session_or_credit_owner() {
+    let resources = Arc::new(Resources::default());
+    let (session, _) = session(resources.clone(), [3; 32]);
+    let weak = Arc::downgrade(&session);
+    let identity_owners = Arc::strong_count(&session.identity);
+    session.fixture_native_started(0);
+    assert_eq!(Arc::strong_count(&session.identity), identity_owners);
+    drop(session);
+    assert!(
+        weak.upgrade().is_none(),
+        "harness observations retain no Session"
+    );
+    assert_eq!(
+        resources.counts(),
+        Resources::default().counts(),
+        "harness observations retain no paid work"
+    );
+}
+
+#[test]
 fn native_sdp_header_matrix_and_valid_mac_rejections_pin_all_directions_classes_and_bounds() {
     let (session, keys) = session(Arc::new(Resources::default()), [3; 32]);
     let operations = [
@@ -159,6 +212,7 @@ fn concurrent_native_acquisition_has_one_actual_owner_without_spending_a_nonce()
 }
 
 fn session(resources: Arc<Resources>, group: [u8; 32]) -> (Arc<Session>, Keys) {
+    Session::fixture_prepare_native_diagnostics();
     use catcoms_rt::RngCore;
     let mut rng = ChaCha20Rng::from_seed([37; 32]);
     let mut browser_rng = rng.clone();
