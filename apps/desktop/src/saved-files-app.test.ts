@@ -122,12 +122,13 @@ test("a lower choice says what it forgets before anything changes, and applies o
     ({ limit, forgets: 84, applied: apply }));
   await t.apply();
   // Only a preview so far: nothing applied, the count is shown for confirmation.
-  assert.deepEqual(t.calls.slice(1), [["set_saved_files_limit", { server: 1, limit: 128, apply: false }]]);
+  assert.deepEqual(t.calls.slice(1), [["set_saved_files_limit", { server: 1, limit: 128, apply: false, expectedForgets: null }]]);
   assert.equal(t.state().savedLimitForgets, 84);
   assert.equal(t.notices.length, 0);
-  // Confirmed: applied, the toast says what was forgotten, the list and the setting refresh.
+  // Confirmed: applied only for the count the user saw, the toast says what was forgotten, the
+  // list and the setting refresh.
   await t.apply();
-  assert.deepEqual(t.calls.at(-2), ["set_saved_files_limit", { server: 1, limit: 128, apply: true }]);
+  assert.deepEqual(t.calls.at(-2), ["set_saved_files_limit", { server: 1, limit: 128, apply: true, expectedForgets: 84 }]);
   assert.deepEqual(t.calls.at(-1), ["get_saved_files_limit", { server: 1 }]);
   assert.equal(t.notices[0][0], "Remembering 128 saved files on this device. Forgot the 84 oldest entries.");
   assert.equal(t.state().refreshes, 1);
@@ -143,7 +144,8 @@ test("a choice that forgets nothing applies at once, and a refusal is said and r
   t.replies.set("set_saved_files_limit", ({ limit, apply }: { limit: number; apply: boolean }) =>
     ({ limit, forgets: 0, applied: apply }));
   await t.apply();
-  assert.deepEqual(t.calls.slice(1, 3).map(([, args]: [string, { apply: boolean }]) => args.apply), [false, true]);
+  assert.deepEqual(t.calls.slice(1, 3).map(([, args]: [string, { apply: boolean; expectedForgets: number | null }]) =>
+    [args.apply, args.expectedForgets]), [[false, null], [true, 0]]);
   assert.equal(t.notices[0][0], "Remembering 1024 saved files on this device.");
   assert.equal(t.state().refreshes, 0, "nothing was forgotten, so the list is not reloaded");
   t.choose("16");
@@ -151,6 +153,8 @@ test("a choice that forgets nothing applies at once, and a refusal is said and r
   await t.apply();
   assert.match(String(t.notices.at(-1)[0]), /kept the current setting/);
   assert.equal(t.state().savedLimitForgets, null);
+  // Any refusal reloads the list, so a failure after it was shortened never leaves a stale list.
+  assert.equal(t.state().refreshes, 1);
   // Nothing is sent without a readable view or a choice.
   const u = limitApp();
   await u.apply();

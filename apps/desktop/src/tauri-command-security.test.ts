@@ -511,7 +511,7 @@ test("saved-files list commands take only a server and an entry ID", () => {
     ["forget_saved_file", ["state", "server", "entry"]],
     ["reset_saved_files", ["state", "server"]],
     ["get_saved_files_limit", ["state", "server"]],
-    ["set_saved_files_limit", ["state", "server", "limit", "apply"]],
+    ["set_saved_files_limit", ["state", "server", "limit", "apply", "expected_forgets"]],
   ] as const) {
     const start = source.indexOf(`pub(super) async fn ${command}(`);
     assert.ok(start > 0, `${command} is declared`);

@@ -7575,20 +7575,28 @@
     if (server === null || !savedLimit || savedLimitBusy || !savedLimitDraft || !Number.isSafeInteger(limit)) return;
     savedLimitBusy = true;
     try {
-      if (savedLimitForgets === null) {
-        const preview = checkedSavedLimitChange(await invoke<unknown>("set_saved_files_limit", { server, limit, apply: false }));
+      // The count the user confirmed (or a preview's zero): native applies only while the choice
+      // still forgets exactly that many, so saves made meanwhile can never be forgotten unseen.
+      let expectedForgets = savedLimitForgets;
+      if (expectedForgets === null) {
+        const preview = checkedSavedLimitChange(await invoke<unknown>("set_saved_files_limit",
+          { server, limit, apply: false, expectedForgets: null }));
         if (preview.forgets > 0) {
           if (server === activeServerId) savedLimitForgets = preview.forgets;
           return;
         }
+        expectedForgets = 0;
       }
-      const done = checkedSavedLimitChange(await invoke<unknown>("set_saved_files_limit", { server, limit, apply: true }));
+      const done = checkedSavedLimitChange(await invoke<unknown>("set_saved_files_limit",
+        { server, limit, apply: true, expectedForgets }));
       toast(savedLimitDone(done), "ok", 4000);
       // A shorter list: Transfers and the chat mark follow it.
       if (done.forgets > 0 && server === activeServerId) void refreshFiles();
       await refreshSavedLimit(server);
     } catch (e) {
       savedLimitForgets = null;
+      // A failure after the list was shortened says so; the list on screen follows the disk.
+      if (server === activeServerId) void refreshFiles();
       toast(`Couldn't change how many saved files are remembered: ${e}`, "err", 6000);
     } finally {
       savedLimitBusy = false;

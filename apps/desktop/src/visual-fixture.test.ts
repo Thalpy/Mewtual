@@ -70,12 +70,15 @@ test("the fixture answers the Remember saved files setting like native, clamped 
   const view = checkedSavedFilesLimit(visualFixtureResponse("get_saved_files_limit", { server: 1 }));
   assert.deepEqual(view, { state: "ok", limit: 256, listed: 212, min: 16, max: 4096, default: 256 });
   // A lower choice is previewed with what it forgets; out-of-range choices are clamped.
-  assert.deepEqual(checkedSavedLimitChange(visualFixtureResponse("set_saved_files_limit", { server: 1, limit: 128, apply: false })),
-    { limit: 128, forgets: 84, applied: false });
-  assert.deepEqual(checkedSavedLimitChange(visualFixtureResponse("set_saved_files_limit", { server: 1, limit: 1, apply: true })),
-    { limit: 16, forgets: 196, applied: true });
-  assert.deepEqual(checkedSavedLimitChange(visualFixtureResponse("set_saved_files_limit", { server: 1, limit: 99999, apply: true })),
-    { limit: 4096, forgets: 0, applied: true });
+  assert.deepEqual(checkedSavedLimitChange(visualFixtureResponse("set_saved_files_limit",
+    { server: 1, limit: 128, apply: false, expectedForgets: null })), { limit: 128, forgets: 84, applied: false });
+  assert.deepEqual(checkedSavedLimitChange(visualFixtureResponse("set_saved_files_limit",
+    { server: 1, limit: 1, apply: true, expectedForgets: 196 })), { limit: 16, forgets: 196, applied: true });
+  assert.deepEqual(checkedSavedLimitChange(visualFixtureResponse("set_saved_files_limit",
+    { server: 1, limit: 99999, apply: true, expectedForgets: 0 })), { limit: 4096, forgets: 0, applied: true });
+  // An apply for another count than the choice forgets changes nothing, as natively.
+  assert.throws(() => visualFixtureResponse("set_saved_files_limit", { server: 1, limit: 128, apply: true, expectedForgets: 80 }),
+    /changed meanwhile/);
   assert.equal(checkedSavedFilesLimit(visualFixtureResponse("get_saved_files_limit", { server: 1 })).limit, 256);
 });
 

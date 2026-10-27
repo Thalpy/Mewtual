@@ -361,7 +361,12 @@ export function visualFixtureResponse(command: string, payload: InvokeArgs = {},
     case "set_saved_files_limit": {
       const asked = typeof args.limit === "number" ? args.limit : 256;
       const limit = Math.min(4096, Math.max(16, Math.trunc(asked)));
-      return { limit, forgets: Math.max(0, (server === 1 ? 212 : 0) - limit), applied: args.apply === true };
+      const forgets = Math.max(0, (server === 1 ? 212 : 0) - limit);
+      // Like native, an apply holds only for the count the user confirmed.
+      if (args.apply === true && args.expectedForgets !== forgets) {
+        throw new Error("The list of saved files changed meanwhile, so Mewtual kept the current setting. Choose again.");
+      }
+      return { limit, forgets, applied: args.apply === true };
     }
     case "save_group_file": {
       // Mirrors the native contract: the renderer sends a name and an optional `saveAs` flag,

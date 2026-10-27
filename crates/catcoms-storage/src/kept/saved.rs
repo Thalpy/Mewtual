@@ -283,6 +283,17 @@ fn same_leaf(platform: u8, a: &str, b: &str) -> bool {
     }
 }
 
+/// A key for which equal keys mean [`same_leaf`]: the lowercased name on Windows (two names that
+/// are equal are equal lowercased, so `same_leaf` is exactly lowercase equality there), the exact
+/// name elsewhere. Lets a decode check one entry per place in one pass.
+fn leaf_key(platform: u8, leaf: &str) -> String {
+    if platform == external::PLATFORM_WINDOWS {
+        leaf.to_lowercase()
+    } else {
+        leaf.to_owned()
+    }
+}
+
 /// One finished save.
 #[derive(Clone, PartialEq, Eq)]
 pub struct SavedFile {
@@ -595,13 +606,26 @@ impl SavedFiles {
         if count > max_entries {
             return Err(SavedListError::Malformed);
         }
+        // One pass with sets, the same rule as [`SavedLocation::same_place`] (adversarial review of
+        // the setting, HIGH-1): comparing every pair is quadratic, and at 4096 entries it would run
+        // for seconds under the store and registry locks on every save.
         let mut entries: Vec<SavedFile> = Vec::with_capacity(count);
+        let mut ids = std::collections::HashSet::with_capacity(count);
+        let mut identities = std::collections::HashSet::with_capacity(count);
+        let mut places = std::collections::HashSet::with_capacity(count);
         for _ in 0..count {
             let entry = SavedFile::decode(&mut d).ok_or(SavedListError::Malformed)?;
-            if entries
-                .iter()
-                .any(|other| other.id == entry.id || other.location.same_place(&entry.location))
-            {
+            let location = &entry.location;
+            let fresh_identity = match location.identity {
+                Some((_, file)) => identities.insert(file.encode()),
+                None => true,
+            };
+            let place = (
+                location.platform,
+                location.folder.clone(),
+                leaf_key(location.platform, &location.leaf),
+            );
+            if !ids.insert(entry.id) || !fresh_identity || !places.insert(place) {
                 return Err(SavedListError::Malformed);
             }
             entries.push(entry);

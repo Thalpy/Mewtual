@@ -374,7 +374,7 @@ fn choosing_the_setting_previews_clamps_and_forgets_only_the_oldest() {
         .unwrap();
 
     // A preview changes nothing; a request below the range is clamped to 16.
-    let preview = change_limit(&store, 1, OWNER, 1, false).unwrap();
+    let preview = change_limit(&store, 1, OWNER, 1, None).unwrap();
     assert_eq!(
         preview,
         UiSavedLimitChange {
@@ -392,8 +392,24 @@ fn choosing_the_setting_previews_clamps_and_forgets_only_the_oldest() {
         SavedLimitLoad::Missing
     );
 
-    // Applied: the 24 oldest entries are forgotten, the 16 newest stay, the setting is stored.
-    let applied = change_limit(&store, 1, OWNER, 1, true).unwrap();
+    // A save meanwhile changed what the confirmed count would forget: nothing changes (review
+    // LOW-1), and the page asks again.
+    assert_eq!(
+        change_limit(&store, 1, OWNER, 1, Some(23)),
+        Err(LIMIT_LIST_CHANGED.to_string())
+    );
+    assert_eq!(
+        store.load_saved_files(1, OWNER),
+        SavedFilesLoad::Found(list.clone())
+    );
+    assert_eq!(
+        store.load_saved_files_limit(1, OWNER),
+        SavedLimitLoad::Missing
+    );
+
+    // Applied as confirmed: the 24 oldest entries are forgotten, the 16 newest stay, the setting
+    // is stored.
+    let applied = change_limit(&store, 1, OWNER, 1, Some(24)).unwrap();
     assert_eq!(
         (applied.limit, applied.forgets, applied.applied),
         (16, 24, true)
@@ -408,7 +424,7 @@ fn choosing_the_setting_previews_clamps_and_forgets_only_the_oldest() {
     );
 
     // Raising (above the range: clamped to 4096) keeps every entry.
-    let raised = change_limit(&store, 1, OWNER, 100_000, true).unwrap();
+    let raised = change_limit(&store, 1, OWNER, 100_000, Some(0)).unwrap();
     assert_eq!((raised.limit, raised.forgets), (4096, 0));
     assert_eq!(
         store.load_saved_files(1, OWNER),
@@ -432,7 +448,7 @@ fn an_unreadable_setting_or_list_is_never_guessed_at() {
     std::fs::write(servers.join("1.saved-limit"), b"damaged").unwrap();
     let view = limit_view(&store, 1, OWNER);
     assert_eq!((view.state, view.limit), ("unreadable", None));
-    change_limit(&store, 1, OWNER, 300, true).unwrap();
+    change_limit(&store, 1, OWNER, 300, Some(0)).unwrap();
     assert_eq!(
         store.load_saved_files_limit(1, OWNER),
         SavedLimitLoad::Found(SavedLimit::clamped(300))
@@ -441,12 +457,68 @@ fn an_unreadable_setting_or_list_is_never_guessed_at() {
     std::fs::write(servers.join("1.saved"), b"damaged list").unwrap();
     let view = limit_view(&store, 1, OWNER);
     assert_eq!(view.listed, None);
-    let lowered = change_limit(&store, 1, OWNER, 16, true).unwrap();
+    let lowered = change_limit(&store, 1, OWNER, 16, Some(0)).unwrap();
     assert_eq!((lowered.limit, lowered.forgets), (16, 0));
     assert_eq!(
         std::fs::read(servers.join("1.saved")).unwrap(),
         b"damaged list"
     );
+}
+
+/// Adversarial review of the setting, MEDIUM-1: while the list cannot be read (a newer build's
+/// record, or an I/O error right now) its length is unknown, so nothing could be shown before
+/// confirming. Only a choice that keeps every entry is accepted; a lower one would let the next
+/// save forget entries without warning once the list reads again.
+#[test]
+fn a_list_of_unknown_length_accepts_only_a_setting_that_keeps_every_entry() {
+    let at = SavedLimit::clamped;
+    let cases = [
+        (SavedLimitLoad::Found(at(256)), [false, true, true]),
+        (SavedLimitLoad::Found(at(1024)), [false, false, true]),
+        // No setting stored: the default 256 is in force.
+        (SavedLimitLoad::Missing, [false, true, true]),
+        // The setting itself cannot be read: only the largest keeps every entry for sure.
+        (SavedLimitLoad::Unreadable, [false, false, true]),
+    ];
+    for (current, allowed) in cases {
+        for (limit, allowed) in [at(16), at(256), at(4096)].into_iter().zip(allowed) {
+            assert_eq!(
+                unknown_list_allows(current, limit),
+                allowed,
+                "{current:?} -> {limit:?}"
+            );
+        }
+    }
+}
+
+/// Review LOW-2: when the new setting cannot be stored after the list was shortened, the error
+/// says how many entries went, so the page does not claim nothing changed.
+#[test]
+fn a_setting_that_cannot_be_stored_after_the_trim_says_what_was_forgotten() {
+    const OWNER: &[u8] = b"group+member";
+    let dir = tempfile::tempdir().unwrap();
+    let folder = dir.path().join("Downloads");
+    let store = store_in(dir.path());
+    let mut list = SavedFiles::new(OWNER);
+    for n in 0..20u8 {
+        assert!(list.record_default(entry(n, &[n], &folder, &format!("f{n}.txt"), u64::from(n))));
+    }
+    store
+        .save_saved_files(1, OWNER, &list, &mut OsCryptoRng)
+        .unwrap();
+    // A folder where the setting's record goes: it reads as unreadable, and writing over it fails.
+    std::fs::create_dir(dir.path().join("servers").join("1.saved-limit")).unwrap();
+    let error = change_limit(&store, 1, OWNER, 16, Some(4)).unwrap_err();
+    assert!(
+        error.starts_with(
+            "Mewtual forgot the 4 oldest saved files from the list, but could not store the new setting."
+        ),
+        "{error}"
+    );
+    let SavedFilesLoad::Found(trimmed) = store.load_saved_files(1, OWNER) else {
+        panic!("the shortened list reads");
+    };
+    assert_eq!(trimmed.entries(), &list.entries()[4..]);
 }
 
 #[tokio::test]

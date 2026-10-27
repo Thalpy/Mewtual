@@ -52,6 +52,21 @@ pub(super) const RESET_REFUSED: &str =
 /// first, and an unreadable list cannot be trimmed (nor may its read bound shrink under it).
 pub(super) const LIMIT_LIST_UNREADABLE: &str =
     "Mewtual could not read its list of saved files right now, so it kept the current setting.";
+/// The list changed between the preview the user confirmed and the change (a save meanwhile).
+pub(super) const LIMIT_LIST_CHANGED: &str =
+    "The list of saved files changed meanwhile, so Mewtual kept the current setting. Choose again.";
+/// The shortened list could not be written (or not finished): the setting was not stored.
+pub(super) const LIMIT_NOT_TRIMMED: &str =
+    "Mewtual could not finish shortening the list of saved files, so it kept the current setting.";
+/// The list was shortened, but the new setting could not be stored afterwards.
+fn limit_not_stored(forgot: usize) -> String {
+    let entries = if forgot == 1 {
+        "the oldest saved file".to_owned()
+    } else {
+        format!("the {forgot} oldest saved files")
+    };
+    format!("Mewtual forgot {entries} from the list, but could not store the new setting.")
+}
 
 // "Replace my older saved copy" notes (design section 5). None claims a copy exists unless the
 // sequence saw it.
@@ -187,21 +202,35 @@ pub(super) fn limit_view(store: &ServerStore, server: u64, owner: &[u8]) -> UiSa
     }
 }
 
-/// Choose the setting: `requested` is clamped into the range. With `apply` false nothing changes
-/// and the answer says how many of the oldest entries it would forget; with `apply` it changes.
+/// Whether `limit` may be stored while the list cannot be read (a newer build's record, or an I/O
+/// error right now), so its length is unknown and nothing could be shown before confirming. Only
+/// a choice that keeps every entry the current setting keeps: at least the setting in force (the
+/// default when none was chosen), or the largest when the setting itself cannot be read. A lower
+/// one would let the next save, once the list reads again, forget entries without warning, and
+/// could narrow the read bound under a list that then reads as damaged (adversarial review of the
+/// setting, MEDIUM-1).
+pub(super) fn unknown_list_allows(current: SavedLimitLoad, limit: SavedLimit) -> bool {
+    limit == SavedLimit::LARGEST || current.limit().is_some_and(|now| limit >= now)
+}
+
+/// Choose the setting: `requested` is clamped into the range. With `apply` `None` nothing changes
+/// and the answer says how many of the oldest entries it would forget (the preview the page shows
+/// before the user confirms). With `apply: Some(expected)` it changes, but only while it forgets
+/// exactly `expected` entries: saves made while the user decided may have changed that, and then
+/// nothing changes and the page asks again (review LOW-1).
 ///
 /// Lowering forgets the oldest entries from the list (never a file): the trimmed list is written
 /// first and the setting second, so the list always fits what the stored setting lets a reader
-/// read, and a failure in between leaves the earlier, larger setting over a shorter list. A
-/// setting that would narrow the read bound is refused while the list cannot be read (a newer
-/// build's record, or an I/O error): it could not be trimmed, and a narrower bound could make it
-/// read as damaged. Raising keeps every entry and writes only the setting.
+/// read, and a failure in between leaves the earlier, larger setting over a shorter list (the
+/// error then says how many entries went, review LOW-2). While the list cannot be read only a
+/// choice that keeps every entry is accepted ([`unknown_list_allows`]); a damaged list is left
+/// alone. Raising keeps every entry and writes only the setting.
 pub(super) fn change_limit(
     store: &ServerStore,
     server: u64,
     owner: &[u8],
     requested: u64,
-    apply: bool,
+    apply: Option<u64>,
 ) -> Result<UiSavedLimitChange, String> {
     let limit = SavedLimit::clamped(requested);
     let current = store.load_saved_files_limit(server, owner);
@@ -209,31 +238,39 @@ pub(super) fn change_limit(
     match store.load_saved_files(server, owner) {
         SavedFilesLoad::Found(mut list) => {
             forgets = list.trimmed_by(limit);
-            if apply && forgets > 0 {
-                list.trim(limit);
-                store
-                    .save_saved_files(server, owner, &list, &mut OsCryptoRng)
-                    .map_err(|error| error.to_string())?;
+            if let Some(expected) = apply {
+                if forgets as u64 != expected {
+                    return Err(LIMIT_LIST_CHANGED.into());
+                }
+                if forgets > 0 {
+                    list.trim(limit);
+                    store
+                        .save_saved_files(server, owner, &list, &mut OsCryptoRng)
+                        .map_err(|error| format!("{LIMIT_NOT_TRIMMED} {error}"))?;
+                }
             }
         }
         // Nothing to trim: no list yet, or a damaged one (which only "Start a new list" or
         // leaving replaces; its size says nothing).
         SavedFilesLoad::Missing | SavedFilesLoad::Damaged => {}
         SavedFilesLoad::Newer | SavedFilesLoad::Unavailable => {
-            if limit.read_bound() < current.read_bound() {
+            if !unknown_list_allows(current, limit) {
                 return Err(LIMIT_LIST_UNREADABLE.into());
             }
         }
     }
-    if apply && current != SavedLimitLoad::Found(limit) {
+    if apply.is_some() && current != SavedLimitLoad::Found(limit) {
         store
             .save_saved_files_limit(server, owner, limit, &mut OsCryptoRng)
-            .map_err(|error| error.to_string())?;
+            .map_err(|error| match forgets {
+                0 => error.to_string(),
+                n => format!("{} {error}", limit_not_stored(n)),
+            })?;
     }
     Ok(UiSavedLimitChange {
         limit: limit.get(),
         forgets,
-        applied: apply,
+        applied: apply.is_some(),
     })
 }
 
@@ -1131,14 +1168,21 @@ pub(super) async fn get_saved_files_limit(
 
 /// Choose this server's "Remember saved files" setting, clamped into 16 to 4096. With `apply`
 /// false it only says how many of the oldest entries the choice would forget, so the renderer can
-/// ask first; with `apply` it changes the setting, forgetting those entries (never files).
+/// ask first; with `apply` it changes the setting, forgetting those entries (never files), but
+/// only while that is still exactly `expected_forgets` (the count the user confirmed; required).
 #[tauri::command]
 pub(super) async fn set_saved_files_limit(
     state: State<'_, AppState>,
     server: u64,
     limit: u64,
     apply: bool,
+    expected_forgets: Option<u64>,
 ) -> Result<UiSavedLimitChange, String> {
+    let apply = match (apply, expected_forgets) {
+        (false, _) => None,
+        (true, Some(expected)) => Some(expected),
+        (true, None) => return Err(LIMIT_LIST_CHANGED.into()),
+    };
     let generation = keep_session::invocation_generation(&state).await?;
     let (_, instance) = actor_instance_of(&state, server).await?;
     // The session must still be the one that asked. Checked, not held: the guard is never held

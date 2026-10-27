@@ -306,6 +306,54 @@ fn the_largest_setting_stays_within_16_mib_and_writes_version_2() {
 }
 
 #[test]
+fn a_full_list_in_one_windows_folder_decodes_in_one_pass() {
+    // Adversarial review of the setting, HIGH-1: one-click saves all go to Downloads, so a full
+    // list is 4096 entries in one folder, and on Windows every pairwise comparison lowercased both
+    // names. Comparing every pair (about 8.4 million at 4096) ran for seconds under the store and
+    // registry locks on every save; the one-pass check is linear.
+    use catcoms_rt::Clock;
+    let mut list = SavedFiles::new(&OWNER);
+    list.entries = (0..4096)
+        .map(|n| {
+            let mut entry = numbered(n, None);
+            entry.location.platform = external::PLATFORM_WINDOWS;
+            entry
+        })
+        .collect();
+    let bytes = list.encode();
+    let clock = catcoms_rt::SystemClock;
+    let started = clock.monotonic_ms();
+    assert_eq!(SavedFiles::decode(&bytes).unwrap(), list);
+    let took = clock.monotonic_ms() - started;
+    // About 10 ms here in a debug build; the pairwise check took about 1.6 s.
+    assert!(took < 500, "decoding a full list took {took} ms");
+    // The same rule as before: a name differing only in case is the same place on Windows (not
+    // on Unix), and the same file identity under another name is too.
+    let mut twice = list.clone();
+    let identity = Some((
+        FileIdentity::for_test(external::PLATFORM_WINDOWS, 1, 1),
+        FileIdentity::for_test(external::PLATFORM_WINDOWS, 1, 2),
+    ));
+    twice.entries[2].location.identity = identity;
+    assert!(SavedFiles::decode(&twice.encode()).is_ok());
+    twice.entries[3].location.identity = identity;
+    assert_eq!(
+        SavedFiles::decode(&twice.encode()),
+        Err(SavedListError::Malformed)
+    );
+    let mut cased = list.clone();
+    cased.entries[1].location.leaf = cased.entries[0].location.leaf.to_uppercase();
+    assert_eq!(
+        SavedFiles::decode(&cased.encode()),
+        Err(SavedListError::Malformed)
+    );
+    for entry in &mut cased.entries {
+        entry.location.platform = external::PLATFORM_UNIX;
+    }
+    assert!(SavedFiles::decode(&cased.encode()).is_ok());
+}
+
+#[test]
 fn version_1_is_written_within_its_bounds_and_neither_version_reads_past_its_own() {
     let mut list = SavedFiles::new(&OWNER);
     for n in 0..257 {
