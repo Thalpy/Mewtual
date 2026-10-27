@@ -1,5 +1,17 @@
 # Mewtual; Handover
 
+## Backlog integration in progress (27 October)
+
+PRs #26/#54 have landed in main; #57 has landed in the chat-recovery branch. Draft #74
+combines the reviewed recovery/V2 stack, dependency upgrade and newer Gate7 send fixes,
+including the original upload/lock repair. Fresh combined frontend/MLS/flow checks pass;
+complete backend gates are pending. Both dependency audits now pass after the separate
+native follow-up, with a documented and constrained GTK build-time maintenance decision.
+[PR-BACKLOG-INTEGRATION](communication-recovery/PR-BACKLOG-INTEGRATION.md) records exact
+sources, current results and held PR findings. Older dated evidence below retains its
+original scope. V2 stays OFF; production audio, multi-peer admission, relay and physical
+acceptance remain unfinished.
+
 ## Welcome joins past expired KeyPackage leaves (26 October, branch `mls-leaf-lifetime`)
 
 Base `chat-update-implementation` (openmls 0.8.1); also checked merged onto PR #57 (openmls 0.9.2,

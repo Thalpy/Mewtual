@@ -26,6 +26,11 @@ to stay current without manual work.
 
 ## The updater's trust root
 
+The native updater consumes signed raw NSIS `.exe` and Linux AppImage artifacts. Its
+legacy v1-compatible ZIP input is disabled to remove an unsafe extraction dependency.
+Artifact-format changes must review the native feature graph and manifest consumer;
+the official `createUpdaterArtifacts: true` configuration remains the supported format.
+
 The app will only install an update whose bundle carries a valid **minisign** signature from the
 keypair named in
 [`tauri.official.conf.json`](../apps/desktop/src-tauri/tauri.official.conf.json). That public key is

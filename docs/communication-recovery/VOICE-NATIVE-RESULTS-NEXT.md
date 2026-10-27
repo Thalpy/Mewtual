@@ -1,5 +1,19 @@
 # Next voice milestone: native result recovery
 
+## Current integration status (27 October; App V2 OFF)
+
+Draft #74 combines the reviewed voice/recovery checkpoints with Rust 1.94 and the
+dependency upgrade. See [PR-BACKLOG-INTEGRATION](PR-BACKLOG-INTEGRATION.md) for the exact
+combined source, pending full backend gates and independently checked dependency graphs.
+Both audits now pass after the native follow-up and its constrained maintenance decision.
+Previous results below apply to their original sources. The crypto-bigint exception is
+the reviewed fenced policy, not removal of all old arithmetic crates.
+
+The Source's bounded SDP shape gate is implemented before HIGH's constructor and on
+local output. Runtime transceiver/receiver/direction validation and actual audio cells,
+capture/playback, App lifecycle/renewal, automatic multi-peer admission, member relay
+and combined/physical acceptance remain open. One desktop is available; V2 stays OFF.
+
 ## Real RTC direction fixed; audio cells and App still next (27 October)
 
 Actual Edge showed the remote-created HIGH transceiver was recvonly. The Source now
@@ -15,9 +29,9 @@ failure cleanup are corrected; the intended coarse-codec mutation is still caugh
 The capture helper now handles pending permission across End/new listen-only selectors,
 actual late-track stopping, failed cleanup and independent original-group payment. Its
 heavy worker and4KiB fixed completion tail have separate lexical scopes. Broker funding
-and construction are NOT integrated. The UDP-only bounded SDP shape helper also remains
-unwired. Next connect paid per-PC audio/event cells, enforce the byte/shape gate BEFORE
-HIGH's PC constructor, validate actual transceiver/receiver/direction, share one mic with
+and construction are NOT integrated. The UDP-only bounded SDP shape helper was subsequently
+wired in Broker45, before HIGH's PC constructor and on local output. Next connect paid
+per-PC audio/event cells, validate actual transceiver/receiver/direction, share one mic with
 private per-peer clones and implement streamless sinks plus actual SDK promise drainage.
 Global mute/PTT/End must gate every clone, not just its master. Then complete App lifecycle,
 renewal, authenticated WebView, member relay and combined/independent physical acceptance.

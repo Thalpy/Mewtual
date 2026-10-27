@@ -1,5 +1,16 @@
 # Threat model; client integrity & enforcement boundaries
 
+## Native dependency follow-up (27 October; candidate)
+
+The native graph now omits the updater's unused legacy ZIP extractor, uses patched H2,
+updates Tauri's URL-pattern dependencies and replaces a yanked arithmetic patch. Official
+updater input remains signed raw NSIS/AppImage artifacts. Generated authority and parser
+tests cover remote-labelled loopback and deceptive URL boundaries; current capabilities
+still grant no remote scope. A single GTK build-time maintenance decision is constrained
+to reviewed stable macro versions/parents, with positive and mutation controls. It is not
+a general security proof. [NATIVE-DEPENDENCY-AUDIT](communication-recovery/NATIVE-DEPENDENCY-AUDIT.md)
+records source analysis, exact checkpoint, policy limits and pending full native validation.
+
 ## Expired KeyPackage leaves, Welcome joins and admission lifetimes (26 October, branch `mls-leaf-lifetime`)
 
 Design and review: `docs/design-mls-leaf-lifetime.md`.
