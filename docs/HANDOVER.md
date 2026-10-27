@@ -10,6 +10,13 @@ to each observed run; not every earlier failure is assigned to that cycle. Do no
 automatic all-three progress from the passing selected/two-peer fixtures. The reproduction,
 immutable-history boundaries and required pre-admission/round work are recorded in
 [VOICE-MULTIPEER-ADMISSION-NEXT](communication-recovery/VOICE-MULTIPEER-ADMISSION-NEXT.md).
+Read-only retirement review also identifies the required failed-plan collection and exact
+lost-reply recovery contract before new rounds can safely replace failed ones. Current
+live-lease media-history collection cannot collect failed plans without an indexed media
+entry. Fresh round nonces alone would exhaust retained state; Root's 32 Action slots are
+reusable occupancy credits,
+not a lifetime action allowance. These are unimplemented design requirements, not approval
+for retries, resource refunds or an unspecified replacement protocol.
 The original two-peer positive passes40.19s; the new all-three scenario remains red.
 Full frontend3,205, Svelte check and36.04s build pass, including all11 diagnostic helper
 regressions. The non-creating native diagnostic unit passes. Final all-three run remains

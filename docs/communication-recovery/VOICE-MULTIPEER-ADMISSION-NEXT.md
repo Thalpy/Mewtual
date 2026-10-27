@@ -123,22 +123,28 @@ derivation would leave the current terminal-handshake problem intact.
    round identity and conservative recovery for a lost committed-start message. The round
    must enter the Root pair/transcript, native Purpose/history, browser input validation and
    derived keys. A new nonce on a control packet alone cannot renew the old handshake.
-   Prefer a bounded ordinal in repeated native selectors, with the full signed agreement/
-   nonce bound into the Root handshake. Blindly adding32/64 bytes to every Control purpose
-   risks the unchanged272-byte/12-KiB native inventories; measure the complete new path.
+   Select the upgraded request shape only after measuring its complete inventory. An opaque
+   RoundRef32 looked up in the original native record may avoid expanding every legacy
+   selector. Adding 32 bytes to the longest 154-byte child prefix makes its ACK ciphertext
+   282 bytes, including the 80-byte suffix and 16-byte AEAD tag, exceeding Control's 272 bytes.
+   Even an eight-byte ordinal needs the complete 12-KiB handler-graph check. Neither
+   representation is implemented or approved.
 5. Retain the old round's replay/terminal floor and actual outstanding owners. A fresh round
    needs its own bounded native allowance and admission; no terminal boolean manufactures
    drainage. Define collection and restart semantics before discarding a failed round.
    Fresh intent cannot silently exhaust a lifetime table or replay an old effect.
-   Specify and prepay a finite per-base-pair/epoch fresh-round allowance, separately from
-   the three Hello attempts inside an existing plan. Current retained pair/history/action
-   tables are finite; a new nonce alone does not provide capacity or unlimited repair.
+   Define bounded retained state and refillable admission rate limits separately from the
+   three Hello attempts inside an existing plan. A lifetime fresh-round allowance merely
+   postpones exhaustion during a long call. Root retains at most 16 confirmation-pair entries
+   and 16 packet-pair entries per LocalJoin, keyed by handshake. Its 32-slot ActionQueue is an
+   occupancy limit, not a lifetime action counter: returned slot credits are reusable, while
+   action serials remain monotone.
    Browser `failedHistoryRetained` also keeps actual fixed history until End. The
    configured/audio peak already fills its group envelope. Fresh retry therefore needs
    measured prepayment and, where necessary, exact failed-history collection/compaction
    while retaining terminal floors; a nominal round allowance cannot create that room.
-   A terminal exhausted outcome still needs truthful local behavior and later lifecycle
-   recovery. No arbitrary-size full mesh or indefinite retry guarantee is established.
+   Retained actual owners may legitimately prevent reuse; deleting an index entry cannot
+   make them free. No arbitrary-size full mesh or indefinite retry guarantee is established.
    State exactly when future-round allowance is consumed: a definite unstarted Busy/probe
    must not cost an ambiguously committed round. Signed requests keep their own original
    deadline/identity/tombstone; expiry is not a general refund or renewal.
@@ -151,6 +157,60 @@ Applied acknowledgement and actual lower-owner joins. Local media Current, SDK c
 a renderer flag and helper receipt are insufficient. Faster retirement alone does not solve
 admission while the counterpart is busy.
 
+## Failed-round retirement: reviewed requirements, not implementation
+
+The read-only review confirms that a failed plan without an indexed media entry cannot use
+the existing live-lease media-history collection path. That path in native
+`ledger/collection.rs` requires a retiring media entry. `ledger/media_index/history.rs`
+validates that entry's exact original parent, action, Session
+and issued/ACKed Plan proof. Browser `failedPlanCompletion` retains failed fixed history
+until End, and `prepareChainCompaction` requires `mediaIndexed`. Do not manufacture a media
+entry or remove that guard to permit retry.
+
+A future explicit failed-plan Forget operation needs an independently prepaid terminal
+anchor. It must bind the original round and exact Session, grant/executor/lease, browser
+preclaim generation, group/policy/room/epoch, endpoint joins/keys and agreement. Original
+Return/settlement, closed children, exact Plan issuance and ACK, and actual Claim/key/storage/
+SDK/Source/Lower/IO return remain required. Native scheduling availability alone grants no
+Forget authority.
+
+Install the paid anchor and permanent negative replay floor before unlinking rows. Extend
+the existing affine collector and exact-subtree removal rather than bypassing them. Rows
+must drop outside Index/Row guards. Only actual removal-batch destruction may request the
+original Root `PlanActionHistory` collection; positive completion additionally requires
+`is_collected()`, including actual fixed-credit return. Dead-owner/End cleanup remains a
+separate path.
+
+Browser failed-history compaction must follow the failed worker's actual finally without
+awaiting that worker from itself. It needs the exact generation, original final ACK and
+authenticated native collection receipt. Preserve negative publication before callbacks,
+dispatch-cell detachment, physical joins, graph-edge clearing, synchronous commit and refund
+after the heavy frame returns. Advancement still requires the full `negotiationQuiet`
+barrier. Old exported handles stay inert; a detached handle and its closures do not cease
+to occupy memory merely because their heavy target has been removed.
+
+Retain separate issued/rejected and actually-collected floors. A terminal ordinal may
+include never-admitted or cancelled gaps, so `ordinal <= floor` cannot establish collection.
+An old opaque RoundRef cannot be authenticated after its original anchor disappears merely
+by comparing a number. Retain the exact paid completed receipt until authenticated browser
+forget acknowledgement or an exact successor transfer makes recovery unnecessary. A
+stateless certificate would need its own specified and reviewed authentication contract.
+Lost ordinary terminal replies must remain recoverable until explicit Forget begins.
+
+Funding and overlap need executable inventories before publication. A failed anchor lacks
+the successful media entry's complementary 2-KiB funding. Its whole allocation, candidate
+overlap, Session/provenance and collector frames must be prepaid; the existing 2304-byte Row
+fee cannot return while the old Row or handle remains. Browser compaction currently retains
+2 KiB per plan until Session collection, rather than one marker per peer. The configured
+audio peak already fills 256 KiB. Floors, completed receipts and old caller-held handles need
+a bounded transfer strategy, not an extra pool or a nominal counter reset. A bounded
+peer-floor table also needs eviction semantics that preserve old signed authority and
+actual outstanding owners. Distinct-device churn is not covered by the current design.
+
+These are design blockers for new-round recovery, not newly demonstrated bypasses in the
+existing refusal behavior. No failed-plan Forget, floor/receipt protocol or new key domain
+is implemented by this branch. The review does not approve an unspecified replacement.
+
 ## Acceptance required for the implementation
 
 Keep the positive all-three test; it must pass without scripted pairing or manufactured
@@ -160,6 +220,10 @@ or lost Proposal/Accept/Commit/replies, duplicate and expired intents, busy/reti
 preclaims, peer fairness, full tables and group pressure, epoch/lock/unlock/restart, old round
 traffic after replacement, held actual transport/SDK owners, incompatible peers, and progress
 of a different group. Assert exact peers and endpoint receipt over forbidden-edge real TCP.
+Also cover more than 32 sequential retired rounds without monotonically retained resources;
+held original Action/Row/SDK/Source/Lower owners; lost Forget, Collected and forget-ACK replies;
+floor gaps; delayed old Begin/Input/Result/confirmation; cancelled preclaims; retained browser
+handles; full peer-floor tables; and native/Control/Sourcebook/configured-audio inventories.
 
 An aggregate multi-peer test bound must follow its proven number of serial protocol phases;
 it cannot hide an unresolved first-attempt failure. Do not change the original per-attempt
