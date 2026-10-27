@@ -20,8 +20,8 @@ Full frontend:3,194 passed65.21s; Svelte:zero diagnostics; production build:36.4
 configuration/helper TypeScript and441 focused checks pass. Read-only review reproduced
 sliced credential storage before the fix and independent sequential storage afterward,
 through the actual configuration owner and constructor dictionary. No remaining B/H/M.
-The frozen Broker45/897-test combined native gate is still running; it does not validate
-these changed Broker46 imports. Earlier Root3,691/24 existing ignores apply to unchanged
+The frozen Broker45 ecfd3cd3 checkpoint passed897 native library+5 ACL tests; it does not
+validate these changed Broker46 imports, whose complete native gate remains pending. Earlier Root3,691/24 existing ignores apply to unchanged
 Root Rust/Cargo inputs. Inherited dependency audit remains red; no waiver. No setup or
 live App/send/friend path changed; startup/flow gates were not rerun.
 
