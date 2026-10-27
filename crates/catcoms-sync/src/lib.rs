@@ -97,6 +97,9 @@ mod registry_ingress;
 mod registry_publication;
 #[cfg(test)]
 mod response_budget_tests;
+// The admission KeyPackage lifetime policy on the real join path (docs/design-mls-leaf-lifetime.md).
+#[cfg(test)]
+mod admission_lifetime_tests;
 mod studio_exchange;
 pub use studio_exchange::StudioWatch;
 pub mod registry_seed;
@@ -971,9 +974,10 @@ pub enum JoinOutcome {
     /// is not an admin; so it refused to relay rather than park the joiner on a Welcome the
     /// owner would never send.
     NotAuthorized,
-    /// Every check passed and the admission itself still failed: a malformed KeyPackage, an
-    /// invite binding the KeyPackage does not satisfy, a concurrent staged commit, or an MLS
-    /// error. The one outcome that means "look at the debug log".
+    /// Every check passed and the admission itself still failed: a malformed KeyPackage, one
+    /// refused on its lifetime (it expires within 30 days, or spans more than openmls's cap;
+    /// logged at warn with the reason), an invite binding the KeyPackage does not satisfy, a
+    /// concurrent staged commit, or an MLS error. The one outcome that means "look at the log".
     AdmissionFailed,
 }
 
@@ -14479,7 +14483,8 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         }
         let key_package = self
             .device
-            .parse_key_package(&kp_bytes)
+            .parse_admitted_key_package(&kp_bytes, self.clock.now_ms())
+            .inspect_err(log_admission_refusal)
             .map_err(|_| JoinOutcome::AdmissionFailed)?;
         self.group
             .validate_invite_binding(&key_package, &invite)
@@ -14532,7 +14537,11 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         if !self.invite_policy_matches(invite) {
             return None;
         }
-        let key_package = self.device.parse_key_package(kp_bytes).ok()?;
+        let key_package = self
+            .device
+            .parse_admitted_key_package(kp_bytes, self.clock.now_ms())
+            .inspect_err(log_admission_refusal)
+            .ok()?;
         let base_authenticator = self.group.epoch_authenticator_id();
         self.snapshot_epoch_keys();
         let outcome = self
@@ -14741,7 +14750,11 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         if self.ledger.check(&invite, now).is_err() {
             return;
         }
-        let Ok(key_package) = self.device.parse_key_package(&kp_bytes) else {
+        let Ok(key_package) = self
+            .device
+            .parse_admitted_key_package(&kp_bytes, self.clock.now_ms())
+            .inspect_err(log_admission_refusal)
+        else {
             return;
         };
         if self
@@ -14983,8 +14996,12 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         // 9. The expensive part: the KeyPackage parses, its leaf key is the request key, and its
         //    credential binds it to (this group, THIS certificate); so a relay cannot swap a
         //    KeyPackage minted against a different certificate into this admission.
-        let Ok(key_package) = self.device.parse_key_package(kp_bytes) else {
-            return Err("malformed key package");
+        let Ok(key_package) = self
+            .device
+            .parse_admitted_key_package(kp_bytes, self.clock.now_ms())
+            .inspect_err(log_admission_refusal)
+        else {
+            return Err("malformed key package, or its lifetime is refused");
         };
         if catcoms_mls::key_package_signature_key(&key_package) != pubkey {
             return Err("key package leaf key does not match the request");
@@ -15099,7 +15116,11 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         kp_bytes: &[u8],
     ) -> Option<(Vec<u8>, Vec<u8>, [u8; 64])> {
         self.policy_admission_ready().ok()?;
-        let key_package = self.device.parse_key_package(kp_bytes).ok()?;
+        let key_package = self
+            .device
+            .parse_admitted_key_package(kp_bytes, self.clock.now_ms())
+            .inspect_err(log_admission_refusal)
+            .ok()?;
         let bind = device_bind_nonce(cert);
         // Re-check the leaf binding at the moment of the Add (a queued request may have waited).
         self.group
@@ -16009,6 +16030,13 @@ pub async fn request_join_from_switchboards_tracking<T: MeshTransport>(
             None => return Err(SyncError::JoinRejected),
         }
     }
+}
+
+/// Log why a joiner's KeyPackage was refused at admission. Several admission paths drop the error
+/// (`ok()?`) and the join-attempt ring records only `AdmissionFailed`, so without this an honest
+/// joiner refused for its lifetime (a clock far behind the committer's) would leave no trace.
+fn log_admission_refusal(error: &catcoms_mls::MlsError) {
+    tracing::warn!(%error, "joiner KeyPackage refused at admission");
 }
 
 /// Verify a Welcome was signed by the invite's inviter and join from it.
