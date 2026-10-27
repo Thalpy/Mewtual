@@ -287,6 +287,10 @@ async function fixture(t: TestContext, sharedBroker?: VoiceCryptoBroker, identit
     operations: () => [...operations], bodyReads: () => [...bodyReads],
     sdpSdkCount: () => sdpSdkCalls,
     providers: () => ({ active: providerActive, peak: providerPeak }),
+    physicalIdle(): boolean {
+      const session = (broker as unknown as { ipcChannels: Map<string, { controller: AbortController | null }> }).ipcChannels.get(owner.token);
+      return !!session && session.controller === null && providerActive === 0;
+    },
     rowBudget() {
       // Read-only unit observation of actual retained claims. Public counts intentionally
       // expose no capability/history internals to application callers.
@@ -3100,6 +3104,7 @@ function sdpRtcProvider(t: TestContext, localIsLow: boolean, onLocal: () => void
     iceGatheringState = "complete";
     get localDescription() { onDescription(); return { type: localIsLow ? "offer" : "answer", sdp: "s".repeat(8192) }; }
     addTransceiver() {}
+    getTransceivers() { return [{ direction: "recvonly", receiver: { track: { kind: "audio" } } }]; }
     async setLocalDescription() { calls.local++; onLocal(); if (localHeld) await localHeld.promise; }
     async setRemoteDescription(value: RTCSessionDescriptionInit) {
       calls.remote++; descriptor = value; assert.equal(value.type, localIsLow ? "answer" : "offer"); assert.equal(value.sdp, "s".repeat(8192));
@@ -4251,6 +4256,8 @@ test("new-peer Claim/adopt and storage/SDK admission yield codec turns to indexe
   const child = await framedConfirmation(f, true, true, 2), custody = custodyReplies(f, child);
   const nextResponder = f.actionHandler()!;
   const delayed: number[] = [];
+  const keyReply = gate(); let keyReplyEntered = false;
+  f.cleanup(keyReply.release);
   f.actions(async (header, body) => {
     if (header.logical === first.child.parent.row) return oldResponder(header, body);
     const reply = await nextResponder(header, body);
@@ -4259,24 +4266,35 @@ test("new-peer Claim/adopt and storage/SDK admission yield codec turns to indexe
       // Each actual complete request returns within the unchanged5s physical bound.
       // Two queued together would still starve an old peer's Current for6s.
       f.advance(3000); await flush();
+      if (header.operation === 11) { keyReplyEntered = true; await keyReply.promise; }
     }
     return reply;
   });
   const observer = f.broker.observeNativeLifecycle(f.owner, child.channel, f.key);
   try {
     await child.derive(); await child.handle().attempt();
-    await until(() => custody.keyCounts().adopted);
+    await until(() => custody.keyCounts().adopted && keyReplyEntered);
     assert.equal(first.sdk.calls.closed, 0, "old Current must interleave between Claim and key-adopt");
+    assert.equal(f.physicalIdle(), false, "the fixture's early adoption marker is NOT an actual response return");
+    keyReply.release();
     const deadline = performance.now() + 15_000;
     while (custody.effectCounts().sdkAdmissions === 0) {
-      if (performance.now() >= deadline) throw new Error(`SDK admission stalled after ${delayed}`);
-      const cadence = f.timers().delays.find(delay => delay > 0 && delay <= 250);
-      if (cadence !== undefined) f.advance(cadence);
+      if (performance.now() >= deadline) throw new Error(`SDK admission stalled after ${delayed.slice(0, 8)}; physicalIdle=${f.physicalIdle()}; providers=${f.providers().active}; timers=${f.timers().delays.slice(0, 8)}`);
+      // The independent fixture records key adoption BEFORE its encrypted response
+      // has returned. Do not turn that early observation into extra simulated time
+      // while actual WebCrypto/read/cancel work still owns the physical RPC. Each
+      // deliberate3000ms delay above is the complete request's intended duration;
+      // CPU scheduling must not invent additional elapsed native/Current time.
+      if (f.physicalIdle()) {
+        const cadence = f.timers().delays.find(delay => delay > 0 && delay <= 250);
+        if (cadence !== undefined) f.advance(cadence);
+      }
       await flush();
     }
     assert.equal(first.sdk.calls.closed, 0, "old Current must interleave between storage and SDK admission");
     assert.deepEqual(delayed.slice(0, 4), [10, 11, 12, 13]);
   } finally {
+    keyReply.release(); // Before joining a transition, including an assertion-failure path.
     await observer.close(); f.owner.retire(); await child.channel.close();
   }
   assert.equal(f.broker.counts().bytes, 0);

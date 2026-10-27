@@ -163,6 +163,23 @@ export class VoiceSdpRtcOwner {
     this.flight = flight; return flight;
   }
 
+  /** Remote-offer-created transceivers start recvonly. Merely replaceTrack later
+   * cannot add the missing negotiated send direction. Select sendrecv on the SAME
+   * single audio transceiver before answering; the SDK still intersects this with
+   * the offer's direction. Never add another m-line or renegotiate after adoption.
+   * This synchronous frame ends before the description await; no receiver/array
+   * graph or provider getter survives in its asynchronous scope. */
+  private prepareAnswerAudio(peer: RTCPeerConnection): void {
+    const read = peer.getTransceivers;
+    if (!this.live()) return unavailable();
+    const transceivers = read.call(peer);
+    if (!this.live() || transceivers.length !== 1) return unavailable();
+    const transceiver = transceivers[0], kind = transceiver.receiver.track.kind;
+    if (!this.live() || kind !== "audio") return unavailable();
+    transceiver.direction = "sendrecv";
+    if (!this.live()) return unavailable(); // A direction setter may synchronously End.
+  }
+
   /** Fresh same-original14 admission must FULLY finish its physical lane before this
    * method invokes setLocalDescription. An old PcReceipt/cryptoBinding is insufficient.
    * The void preparation keeps its UTF8 slot private; takeLocal is legal only after it joins. */
@@ -180,7 +197,7 @@ export class VoiceSdpRtcOwner {
           const add = peer.addTransceiver;
           if (!this.live()) return unavailable();
           add.call(peer, "audio", { direction: "sendrecv" });
-        }
+        } else this.prepareAnswerAudio(peer);
         const prepare: (this: RTCPeerConnection) => Promise<void> = peer.setLocalDescription;
         if (!this.live()) return unavailable(); // Method getters/provider hooks may End.
         await prepare.call(peer);

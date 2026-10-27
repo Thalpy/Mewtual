@@ -1,5 +1,28 @@
 # Next voice milestone: native result recovery
 
+## Real RTC direction fixed; audio cells and App still next (27 October)
+
+Actual Edge showed the remote-created HIGH transceiver was recvonly. The Source now
+prefers sendrecv on that SAME single audio transceiver after fresh14, before answering,
+with getter/setter End fences. All four real-browser direction intersections pass through
+the shipped Source. Broker44 forces reload for retained43; negative cleanup remains usable.
+The maintained browser gate is SDK negotiation with controlled admission, no mic/native
+channel/WebView/physical audio. Full frontend3168/static/build116s/strict TypeScript pass.
+Root3691/24 existing ignores, native check/strict lint/current-source scan are green; the
+matching frozen-source full native suite remains in progress. Fairness fixture clock and
+failure cleanup are corrected; the intended coarse-codec mutation is still caught promptly.
+
+The capture helper now handles pending permission across End/new listen-only selectors,
+actual late-track stopping, failed cleanup and independent original-group payment. Its
+heavy worker and4KiB fixed completion tail have separate lexical scopes. Broker funding
+and construction are NOT integrated. The UDP-only bounded SDP shape helper also remains
+unwired. Next connect paid per-PC audio/event cells, enforce the byte/shape gate BEFORE
+HIGH's PC constructor, validate actual transceiver/receiver/direction, share one mic with
+private per-peer clones and implement streamless sinks plus actual SDK promise drainage.
+Global mute/PTT/End must gate every clone, not just its master. Then complete App lifecycle,
+renewal, authenticated WebView, member relay and combined/independent physical acceptance.
+One desktop is available. V2 stays OFF; external resume/dependency work are separately owned.
+
 ## Configured RTC composed; private audio and App adoption next (27 October)
 
 Broker43's explicit configured factory snapshots only bounded local device settings under

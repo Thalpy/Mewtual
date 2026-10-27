@@ -1,5 +1,24 @@
 # Threat model; client integrity & enforcement boundaries
 
+## Audio direction and pending permission ownership (27 October; inactive)
+
+Answer preference never authorizes microphone transmission. The Source changes only the
+exact existing audio transceiver after fresh native14 and rechecks its original currentness
+after getters/setters. Zero/extra/non-audio RTP transceivers refuse before answering.
+getTransceivers excludes SCTP: this check alone does not reject an application section.
+The separate unwired pre-SDK audio-profile guard remains necessary before HIGH allocates
+its PC. Native CompleteSdpV1 is a transport profile, not native audio-shape authorization.
+
+The inactive capture helper detaches pending permission work on End. Late results stop
+all actual returned tracks and cannot enter a replacement session. Failed stop preserves
+the original stream/payment for retry; local capture refusal is listen-only. Separate
+module-level SDK and completion factories avoid retaining an old admission/Session wrapper
+through conservative JS closure environments. The fixed4KiB pool pays the small post-SDK
+refund tail; the8KiB capsule pays actual SDK inputs/master until return/stop. Broker payment
+and actual audio-cell integration are still required; no present application mic guarantee
+is claimed. Muting/stopping a master alone does not gate clones. Existing native/Source
+attempts, caps, identities and deadlines are unchanged; Broker43 reload is required.
+
 ## Local ICE settings and exact SDK custody (27 October; inactive)
 
 Untrusted invite/server relay hints must not enter the configured factory. It accepts only

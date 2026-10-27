@@ -60,6 +60,7 @@ function installCoordinatedRtc(): void {
     iceGatheringState = "complete";
     get localDescription() { assert.ok(this.local); return { type: this.local, sdp: "s".repeat(8192) }; }
     addTransceiver() { assert.equal(this.remote, null); }
+    getTransceivers() { return [{ direction: "recvonly", receiver: { track: { kind: "audio" } } }]; }
     async setLocalDescription() {
       assert.equal(++this.calls.local, 1); this.local = this.remote === "offer" ? "answer" : "offer";
     }
@@ -575,6 +576,7 @@ async function step(value: Step): Promise<unknown> {
         iceGatheringState = "complete";
         get localDescription() { assert.ok(this.local); return { type: this.local, sdp: "s".repeat(8192) }; }
         addTransceiver() { assert.equal(this.remote, null); }
+        getTransceivers() { return [{ direction: "recvonly", receiver: { track: { kind: "audio" } } }]; }
         async setLocalDescription() { calls.local++; assert.equal(calls.local, 1); this.local = this.remote === "offer" ? "answer" : "offer"; }
         async setRemoteDescription(value: RTCSessionDescriptionInit) {
           calls.remote++; assert.equal(calls.remote, 1);

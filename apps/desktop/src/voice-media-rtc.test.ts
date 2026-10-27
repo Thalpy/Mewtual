@@ -8,11 +8,13 @@ function fixture(low = true) {
   let live = true, currentHook: (() => void) | null = null, clockHook: (() => void) | null = null;
   let closeHook: (() => void) | null = null, hold: ReturnType<typeof gate> | null = null;
   const calls = { created: 0, local: 0, remote: 0, closed: 0, clock: 0 };
+  const transceiver = { direction: "recvonly", receiver: { track: { kind: "audio" } } };
   class Peer {
     constructor() { calls.created++; }
     get iceGatheringState() { return "complete"; }
     get localDescription() { return { type: low ? "offer" : "answer", sdp: "v=0\r\n" }; }
     addTransceiver() {}
+    getTransceivers() { return [transceiver]; }
     async setLocalDescription() { calls.local++; }
     async setRemoteDescription() { calls.remote++; if (hold) await hold.promise; }
     addEventListener() {}
@@ -34,6 +36,7 @@ function fixture(low = true) {
       } else {
         await source.applyRemote(new TextEncoder().encode("v=0"), "offer");
         await source.prepareLocal(async () => 30_000, "answer"); source.takeLocal().fill(0);
+        assert.equal(transceiver.direction, "sendrecv", "the transferred HIGH peer permits both negotiated audio directions");
       }
     },
   };

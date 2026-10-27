@@ -1,5 +1,49 @@
 # Mewtual; Handover
 
+## Audio SDK checkpoint (27 October; Broker44, App OFF; final gates pending)
+
+A real Edge probe reproduced HIGH defaulting recvonly: LOW negotiated sendonly and HIGH
+recvonly despite a sendrecv offer. The Source now selects sendrecv on the SAME single audio
+transceiver under fresh native14 before answering. It adds no m-line/round/grant. End from
+method/receiver/direction getters and native refusal prevent local description submission.
+Broker44 refuses retained43 code while preserving old cleanup; facade bundle3 is unchanged.
+
+The maintained `npm --prefix apps/desktop run test:voice-rtc-browser` passes actual browser
+intersections for sendrecv, sendonly, recvonly and inactive, with exactly two PCs and one
+audio MID each. It bundles the shipped Source, uses controlled admission/currentness and
+requests no microphone. It is neither authenticated native V2/WebView nor captured/audible
+or physical-network evidence. The owned browser/server/profile cleanup joins actual exit,
+handles repeated SIGINT/SIGTERM, avoids known stale PIDs and fails visibly on cleanup failure.
+
+The capture helper's16 regressions pass, including held OS permission, old/new selectors,
+maximum device input, actual SDK/stop return, refund reentry and failed-stop quarantine.
+Read-only review found and corrected a closure-retention Medium: heavy SDK and minimal
+completion factories now have separate lexical scopes. A separately paid4KiB fixed pool
+covers the final empty-capsule reaction; the original8KiB capsule survives actual SDK and
+track cleanup. The helper is NOT yet constructed by the broker/App. The UDP-only audio
+shape helper is also unwired; its byte bound must precede use and its guard must precede
+HIGH's constructor, followed by exact runtime receiver/direction/currentness checks.
+
+Complete frontend3168 passes122.45s; static checks have zero diagnostics; production build
+passes116s. Strict changed-helper TypeScript, actual four-direction Edge and5 owned-process
+cleanup tests pass. Earlier failures are corrected: the older HIGH media fake now models
+its single transceiver, and the fairness fixture waits for actual physical RPC/provider
+return before advancing extra synthetic cadence. Its early native-adopt marker now has a
+held-response barrier; finally releases it BEFORE joins. The coarse-codec mutation still
+fails the intended starvation oracle and exits promptly1.67s; the restored fairness and
+unchanged held5s expiry tests both pass. No timeout or starvation oracle was relaxed.
+Native check, strict native Clippy and current-native construction scan pass. The full
+native suite is running serially on matching frozen production TS/Rust inputs; the later
+fairness correction changes only the frontend test. Complete Root3691/24 existing ignores
+passes on byte-identical Rust/Cargo/native inputs; no duplicate Root suite is run.
+Read-only design/adversarial re-reviews have no remaining actionable finding. Inherited
+dependency audit remains red on RUSTSEC-2026-0387/crypto-bigint0.5.5; no waiver.
+
+Next: integrate paid audio cells, capture/pool ledger ownership, per-peer disabled clones
+and global mute/PTT, streamless remote playback and actual SDK promise joins; then App
+lock/room/unmount ownership, renewal, authenticated WebView, member media relay and combined/
+independent physical acceptance. Only one desktop is available. External resume is separate.
+
 ## Configured RTC checkpoint (27 October; Broker43/facade3, App OFF)
 
 The explicit configured factory now carries an immutable, bounded local-device ICE snapshot

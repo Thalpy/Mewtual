@@ -1,5 +1,23 @@
 # Mewtual; Architecture
 
+## Answering RTC audio (27 October; Broker44, App OFF)
+
+Before answering under the same fresh native14 admission, the private RTC source now
+selects sendrecv on its exact single audio transceiver. A remote-created transceiver
+otherwise defaults recvonly; replaceTrack after negotiation cannot supply the missing
+send direction. No new m-line, round, native grant or async SDK worker is added. Actual
+negotiated direction remains the intersection with the remote offer. Original currentness
+checks surround SDK getters/setters; their synchronous scope ends before the description
+await. Broker43 retained code requires reload; original negative cleanup remains usable.
+
+A separate inactive audio helper owns one paid OS capture capsule through actual SDK
+return/track stop, including End/replacement and failed cleanup. Its fixed4KiB pool and
+lazy8KiB original-group capsule still need broker/payment integration. The audio-only SDP
+shape helper also remains unwired: enforce8KiB UTF8 first, then scan before HIGH's PC
+construction, repeat currentness and validate the actual receiver/transceiver at adoption.
+Its frontend profile supports UDP/TLS/RTP/SAVPF only; CompleteSdpV1 itself promises neither
+this media shape nor native URL/media policy. Mic clones, playback and relay remain open.
+
 ## Device ICE configuration custody (27 October; Broker43, App inactive)
 
 The explicit configured App-call factory prepays a separate64KiB window inventory and

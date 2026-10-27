@@ -1,5 +1,27 @@
 # Mewtual; Interfaces & Hooks Schema
 
+## RTC answer preference and audio helper contracts (27 October; inactive)
+
+Broker44 requires reload for retained43 code; facade bundle3's shape is unchanged. The
+original HIGH answer now uses the SAME single audio transceiver with preferred sendrecv,
+after fresh native14 and before setLocalDescription. No new round, sender track or native
+capability is created. Runtime currentDirection still decides the supported media direction.
+
+`VoiceAudioCapturePool` is an internal, currently unconstructed helper: the future broker
+must prepay its4KiB fixed window inventory and accepted-group binding before session creation.
+Its lazy8KiB capture payment must be a synchronous atomic shared-ledger/group adapter,
+never a Call/native/N/Phase closure. It snapshots actual independent media status/shared
+clock, and its detached OS request retains only paid SDK inputs and its original capsule.
+End permits a new listen-only selector; pending/failed old cleanup keeps the original fee.
+
+`voiceAudioSdpShape` takes original already8KiB UTF8-bounded text and returns only frozen
+MID/protocol metadata. It rejects extra/rejected media sections and unsupported framing,
+requires one audio MID/rtcp-mux and optional matching singleton BUNDLE, and checks answer
+MID/protocol against the offer. Its UDP-only frontend profile leaves full negotiation to
+the SDK; caller currentness/runtime receiver checks and production wiring remain required.
+`test:voice-rtc-browser` checks actual browser direction negotiation with controlled
+admission. It requests no microphone and is not native/WebView/physical acceptance.
+
 ## Configured App-call factory (27 October; Broker43, facade3, inactive)
 
 `nativeConfiguredAppCalls(native, selected, ipc, source, transport?)` explicitly selects

@@ -13,6 +13,9 @@ function fixture(low = true, configuration: VoiceRtcConfigurationLease | null = 
   let registrationHook: (() => void) | null = null;
   let closeHook: (() => void) | null = null;
   let remoteFails = false, local = "v=0\r\n";
+  let answerDirection = "recvonly", transceiverCount = 1, directionHook: (() => void) | null = null;
+  const transceiver = { receiver: { track: { kind: "audio" } },
+    get direction() { return answerDirection; }, set direction(value: string) { directionHook?.(); answerDirection = value; } };
   const calls = { created: 0, local: 0, remote: 0, closed: 0, audio: 0 };
   const listeners = new Set<() => void>(), timers = new Map<object, { run: () => void; deadline: number }>();
   let incoming: RTCSessionDescriptionInit | null = null;
@@ -22,6 +25,7 @@ function fixture(low = true, configuration: VoiceRtcConfigurationLease | null = 
     get iceGatheringState() { return complete ? "complete" : "gathering"; }
     get localDescription() { return { type: low ? "offer" : "answer", sdp: local }; }
     addTransceiver() { calls.audio++; }
+    getTransceivers() { return Array.from({ length: transceiverCount }, () => transceiver); }
     async setLocalDescription() { calls.local++; if (localHeld) await localHeld.promise; }
     async setRemoteDescription(description: RTCSessionDescriptionInit) {
       calls.remote++; incoming = description; if (remoteHeld) await remoteHeld.promise;
@@ -39,6 +43,8 @@ function fixture(low = true, configuration: VoiceRtcConfigurationLease | null = 
   };
   owner = new VoiceSdpRtcOwner(low, () => { currentHook?.(); return live; }, clock, configuration);
   return { owner, clock, calls, configurations, timers, listeners, incoming: () => incoming,
+    transceiver, direction: () => answerDirection, transceivers(count: number) { transceiverCount = count; },
+    onDirection(run: () => void) { directionHook = run; },
     restore() { globalThis.RTCPeerConnection = old; }, local(text: string) { local = text; }, time(value: number) { now = value; },
     onRegistration(run: () => void) { registrationHook = run; },
     onClose(run: () => void) { closeHook = run; },
@@ -55,6 +61,45 @@ function configured() {
     username: "device-user", credential: "device-secret", policy: "relay" }), () => true);
   return owner;
 }
+
+test("HIGH answers with the same audio transceiver prepared for both negotiated directions", async t => {
+  const f = fixture(false); t.after(f.restore);
+  await f.owner.applyRemote(new TextEncoder().encode("v=0"), "offer");
+  assert.equal(f.direction(), "recvonly");
+  await f.owner.prepareLocal(async () => 30_000, "answer");
+  assert.equal(f.direction(), "sendrecv"); assert.equal(f.calls.audio, 0); assert.equal(f.calls.local, 1);
+  f.owner.takeLocal().fill(0); await f.owner.drain();
+});
+
+for (const invalid of ["none", "extra", "video"] as const) test(`HIGH refuses unexpected actual SDK media before answering: ${invalid}`, async t => {
+  const f = fixture(false); t.after(f.restore);
+  await f.owner.applyRemote(new TextEncoder().encode("v=0"), "offer");
+  if (invalid === "video") f.transceiver.receiver.track.kind = "video";
+  else f.transceivers(invalid === "none" ? 0 : 2);
+  await assert.rejects(f.owner.prepareLocal(async () => 30_000, "answer"));
+  assert.equal(f.calls.local, 0); assert.equal(f.calls.closed, 1); await f.owner.drain();
+});
+
+test("End in the HIGH direction setter closes the actual peer before description submission", async t => {
+  const f = fixture(false); t.after(f.restore);
+  await f.owner.applyRemote(new TextEncoder().encode("v=0"), "offer");
+  f.onDirection(() => f.stop());
+  await assert.rejects(f.owner.prepareLocal(async () => 30_000, "answer"));
+  assert.equal(f.calls.local, 0); assert.equal(f.calls.closed, 1); await f.owner.drain();
+});
+
+for (const boundary of ["transceivers", "receiver-kind", "native14"] as const) test(`HIGH refuses before direction mutation at ${boundary}`, async t => {
+  const f = fixture(false); t.after(f.restore);
+  await f.owner.applyRemote(new TextEncoder().encode("v=0"), "offer");
+  if (boundary === "transceivers") {
+    const prototype = globalThis.RTCPeerConnection.prototype, read = prototype.getTransceivers;
+    Object.defineProperty(prototype, "getTransceivers", { get() { f.stop(); return read; } });
+  } else if (boundary === "receiver-kind") {
+    Object.defineProperty(f.transceiver.receiver.track, "kind", { get() { f.stop(); return "audio"; } });
+  }
+  await assert.rejects(f.owner.prepareLocal(async () => { if (boundary === "native14") throw new Error("native admission refused"); return 30_000; }, "answer"));
+  assert.equal(f.direction(), "recvonly"); assert.equal(f.calls.local, 0); await f.owner.drain();
+});
 
 test("configured private constructor still waits for native14 and retains the loan through held admission End", async t => {
   const settings = configured(), lease = settings.borrow(), f = fixture(true, lease); t.after(f.restore);

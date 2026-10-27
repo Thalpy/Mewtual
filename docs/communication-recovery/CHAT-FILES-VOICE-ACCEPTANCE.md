@@ -1,5 +1,27 @@
 # Chat, files and voice implementation evidence
 
+## Actual browser audio-direction evidence (27 October; Broker44, inactive)
+
+The shipped Source's HIGH recvonly defect was reproduced in actual Edge, then corrected
+under original native14 without a new m-line, negotiation round or grant. The repeatable
+`test:voice-rtc-browser` now passes sendrecv/sendonly/recvonly/inactive intersections, two
+PCs and one audio MID each. Admission/currentness are controlled; no mic is requested.
+This does not establish native authorization, WebView, captured/audible media or a relay.
+
+Full frontend3168 passes122.45s; static checks have zero diagnostics; build116s and strict
+changed-helper TypeScript pass. Owned-process cleanup5 passes. A fairness fixture failure
+was corrected with actual physical-return gating and a held early-adopt response; the
+coarse-codec mutation still fails promptly1.67s, restored fairness/held5s expiry both pass.
+No timeout/starvation oracle changed. Native check/strict lint/current-source scan pass;
+full native is running serially. Root3691/24 existing ignores on unchanged Rust inputs is green. Read-only reviews found
+and fixed capture closure-retention and harness interruption/stale-PID Mediums; re-review
+has no remaining actionable finding. Fresh inherited dependency audit remains red.
+
+The paid-capture and UDP-only audio-profile helpers remain unconstructed/unwired in App
+and broker: no production microphone or pre-SDK shape enforcement is claimed yet. Sender
+clones/mute/PTT, playback, App adoption, renewal, authenticated WebView, member relay and
+combined/physical acceptance remain open. One desktop is available; V2 remains OFF.
+
 ## Configured RTC evidence (27 October; inactive, final native gates pending)
 
 Broker43/facade3 adds explicit local-device ICE configuration with a separately prepaid64KiB
