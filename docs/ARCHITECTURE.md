@@ -1,5 +1,16 @@
 # Mewtual; Architecture
 
+## Owned microphone device setting (27 October; inactive)
+
+The capture helper materializes admitted device IDs in bounded numeric UTF16 chunks after
+its original8KiB fee and before asynchronous SDK setup. Pending constraints cannot retain
+a large caller substring backing. Code units remain exact. Copy/join/SDK inventories are
+6080/6432/5664 bytes under the unchanged8192-byte capsule; fixed4KiB pool/caps are unchanged.
+End during copying prevents SDK admission, and proven pre-SDK copy refusal releases only
+the exact original capsule. Broker46/facade3 and native/wire formats are unchanged. V2 does
+not construct the helper yet; actual private media Current/PC provenance and audio wiring
+remain required. Logical owned graphs exclude borrowed synchronous input/opaque VM heaps.
+
 ## Configuration storage ownership (27 October; Broker46, inactive)
 
 The configuration owner independently materializes admitted settings from bounded UTF16

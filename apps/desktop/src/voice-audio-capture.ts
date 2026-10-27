@@ -18,6 +18,37 @@ import type { VoiceSdpRtcClock } from "./voice-sdp-rtc.ts";
 // In particular the completion reaction is NOT unpaid just because SDK IO returned.
 export const VOICE_AUDIO_CAPTURE_POOL_BYTES = 4 * 1024;
 export const VOICE_AUDIO_CAPTURE_BYTES = 8 * 1024;
+const MAX_DEVICE_UNITS = 1024;
+const COPY_CHUNK_UNITS = 256;
+
+/** Executable inventory of serial application-owned stages, not VM/SDK heap or RSS.
+ * The caller's borrowed input may have a large backing; it never crosses the synchronous
+ * copy frame. Numeric arguments end before join, and all copy scratch ends before SDK IO.
+ * The fixed4KiB pool still separately pays its post-SDK completion/refund tail. */
+export function voiceAudioCaptureInventory(): Readonly<{ copy: number; join: number; sdk: number }> {
+  const fixed = 1024; // Capsule/current/payment/master refs and small synchronous wrappers.
+  const pieces = Math.ceil(MAX_DEVICE_UNITS / COPY_CHUNK_UNITS) * (COPY_CHUNK_UNITS * 2 + 32);
+  const index = 128, owned = MAX_DEVICE_UNITS * 2 + 32;
+  return Object.freeze({
+    copy: fixed + pieces + index + (COPY_CHUNK_UNITS * 2 + 64) + (COPY_CHUNK_UNITS * 8 + 128),
+    join: fixed + pieces + index + owned + 1024,
+    sdk: fixed + owned + 512 + 2048, // Constraints plus actual SDK await/completion frames.
+  });
+}
+
+/** A short substring can retain an arbitrarily large caller backing. Create each bounded
+ * UTF16 chunk from numeric code units, then join only those owned chunks. A UTF8 roundtrip
+ * would alter unpaired surrogates in opaque device IDs; slice/join need not detach backing. */
+function ownedDevice(value: string): string {
+  const pieces: string[] = [];
+  for (let from = 0; from < value.length; from += COPY_CHUNK_UNITS) {
+    const length = Math.min(COPY_CHUNK_UNITS, value.length - from);
+    const units = new Uint16Array(length);
+    for (let at = 0; at < length; at++) units[at] = value.charCodeAt(from + at);
+    pieces.push(String.fromCharCode(...units));
+  }
+  return pieces.join("");
+}
 
 /** Must capture only the prepaid broker/group ledger, never an old native owner,
  * Call, negotiation, Phase, or UI component. It returns the SAME capsule payment. */
@@ -119,7 +150,7 @@ export class VoiceAudioCapturePool {
   begin(session: VoiceAudioCaptureSession, budget: VoiceAudioCaptureBudget,
       authority: VoiceAudioCaptureCurrent, device: string, devices: Devices): boolean {
     if (this.#active !== session || session.closed || this.#pending || this.#reserving) return false;
-    if (typeof device !== "string" || device.length > 1024) return false;
+    if (typeof device !== "string" || device.length > MAX_DEVICE_UNITS) return false;
     // A ledger/Clock getter may End and create a replacement session. The fixed
     // pool's latch fences its nested reserve, including before we own a capsule.
     this.#reserving = true;
@@ -134,9 +165,19 @@ export class VoiceAudioCapturePool {
       // Publish before any remaining provider/Clock callbacks. reserve may have Ended.
       this.#pending = capsule;
       if (this.#active !== session || session.closed) capsule.target = null;
-      const constraints: MediaStreamConstraints = { video: false, audio: device
-        ? { deviceId: { exact: device }, echoCancellation: true, noiseSuppression: true, autoGainControl: true }
-        : true };
+      let constraints: MediaStreamConstraints;
+      try {
+        // The original fee and discoverable capsule precede every copying callback. End
+        // during copying detaches its target; the later SDK leaf will refuse to start.
+        const owned = ownedDevice(device);
+        constraints = { video: false, audio: owned
+          ? { deviceId: { exact: owned }, echoCancellation: true, noiseSuppression: true, autoGainControl: true }
+          : true };
+      } catch {
+        // Proven local refusal BEFORE constructing any SDK promise/registration. There
+        // is no ambiguous handoff here. Return only this exact original capsule payment.
+        capsule.target = null; capsule.settled = true; this.retry(); return false;
+      }
       capsule.task = finishCapture(this, capsule, startCapture(this, capsule, devices, constraints));
       return true;
     } finally { this.#reserving = false; }

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { VoiceAudioCapturePool, VOICE_AUDIO_CAPTURE_BYTES,
-  type VoiceAudioCaptureBudget } from "./voice-audio-capture.ts";
+  voiceAudioCaptureInventory, type VoiceAudioCaptureBudget } from "./voice-audio-capture.ts";
 import { VoiceMediaStatus } from "./voice-media-status.ts";
 
 function gate<T>() { let release!: (value: T) => void; const promise = new Promise<T>(yes => { release = yes; }); return { promise, release }; }
@@ -29,6 +29,106 @@ function stream(options: { kind?: string; count?: number; onTracks?(): void; onE
   const actual = { getTracks() { options.onTracks?.(); return Array.from({ length: options.count ?? 1 }, () => track); } } as unknown as MediaStream;
   return { actual, enabled: () => enabled, stopped: () => stopped };
 }
+
+test("capture owns a large-parent device substring before SDK IO within the same8KiB inventory", async () => {
+  const pool = new VoiceAudioCapturePool(), fees = ledger(), session = pool.session(fees.budget), live = authority();
+  const device = ("x".repeat(1024 * 1024) + "device-id-from-a-large-parent-0123456789").slice(-38);
+  const original = String.fromCharCode;
+  let copies = 0, maximum = 0, requests = 0;
+  const media = stream();
+  String.fromCharCode = (...units: number[]) => {
+    assert.equal(fees.paid(), VOICE_AUDIO_CAPTURE_BYTES, "copy must have original capsule funding");
+    copies++; maximum = Math.max(maximum, units.length); return original(...units);
+  };
+  try {
+    assert.equal(session.request(live, device, { async getUserMedia(constraints) {
+      requests++;
+      assert.ok(constraints);
+      const audio = constraints.audio; assert.ok(audio && typeof audio === "object");
+      const id = audio.deviceId; assert.ok(id && typeof id === "object");
+      assert.equal((id as ConstrainDOMStringParameters).exact, device);
+      return media.actual;
+    } }), true);
+    assert.ok(copies > 0, "persistent constraints must come from numeric copies");
+    assert.ok(maximum <= 256);
+  } finally { String.fromCharCode = original; }
+  await pool.settlement(); assert.equal(requests, 1); assert.equal(session.available, true);
+  for (const bytes of Object.values(voiceAudioCaptureInventory())) assert.ok(bytes <= VOICE_AUDIO_CAPTURE_BYTES);
+  session.close(); assert.equal(fees.paid(), 0);
+});
+
+test("capture copies the maximum device ID preserving split pairs and unpaired UTF16 units", async () => {
+  const pool = new VoiceAudioCapturePool(), fees = ledger(), session = pool.session(fees.budget), live = authority();
+  const device = "x".repeat(255) + "\ud83d\ude00\ud800" + "z".repeat(766);
+  assert.equal(device.length, 1024);
+  let observed: string | null = null, maximum = 0;
+  const original = String.fromCharCode;
+  String.fromCharCode = (...units: number[]) => { maximum = Math.max(maximum, units.length); return original(...units); };
+  const media = stream();
+  try {
+    assert.equal(session.request(live, device, { async getUserMedia(constraints) {
+      assert.ok(constraints);
+      const audio = constraints.audio; assert.ok(audio && typeof audio === "object");
+      observed = (audio.deviceId as ConstrainDOMStringParameters).exact as string;
+      return media.actual;
+    } }), true);
+    assert.ok(maximum > 0 && maximum <= 256, "maximum device must keep numeric arguments bounded");
+  } finally { String.fromCharCode = original; }
+  await pool.settlement(); assert.equal(observed, device);
+  assert.equal(session.available, true); session.close(); assert.equal(fees.paid(), 0);
+});
+
+test("oversized device refusal precedes capsule charge and numeric materialization", () => {
+  const pool = new VoiceAudioCapturePool(), fees = ledger(), session = pool.session(fees.budget), live = authority();
+  const original = String.fromCharCode; let copies = 0;
+  String.fromCharCode = (...units: number[]) => { copies++; return original(...units); };
+  try {
+    assert.equal(session.request(live, "x".repeat(1025), { async getUserMedia() { assert.fail("no SDK"); } }), false);
+  } finally { String.fromCharCode = original; }
+  assert.equal(copies, 0); assert.equal(fees.reserves(), 0); assert.equal(pool.pending, false); session.close();
+});
+
+for (const throws of [false, true]) {
+  test(`End during device copying fences the original capsule and replacement SDK: throw=${throws}`, async () => {
+    const pool = new VoiceAudioCapturePool(), oldFees = ledger(), nextFees = ledger(), live = authority();
+    const old = pool.session(oldFees.budget), original = String.fromCharCode;
+    let next: ReturnType<VoiceAudioCapturePool["session"]> | null = null, copies = 0;
+    const forbidden = { async getUserMedia(): Promise<MediaStream> { assert.fail("cancelled copy cannot enter SDK"); } };
+    String.fromCharCode = (...units: number[]) => {
+      if (++copies === 1) {
+        assert.equal(oldFees.paid(), VOICE_AUDIO_CAPTURE_BYTES); old.close(); next = pool.session(nextFees.budget);
+        assert.equal(next.request(live, "replacement", forbidden), false);
+        if (throws) throw new Error("local copy refused");
+      }
+      return original(...units);
+    };
+    try { assert.equal(old.request(live, "device-" + "x".repeat(512), forbidden), !throws); }
+    finally { String.fromCharCode = original; }
+    await pool.settlement();
+    assert.equal(old.available, false); assert.equal(oldFees.paid(), 0); assert.equal(oldFees.returns(), 1);
+    assert.equal(nextFees.reserves(), 0);
+    // The synchronous provider callback wrote this; TS cannot follow that reentry.
+    const replacement = next as ReturnType<VoiceAudioCapturePool["session"]> | null;
+    assert.ok(replacement);
+    const media = stream();
+    assert.equal(replacement.request(live, "replacement", { async getUserMedia() { return media.actual; } }), true);
+    await pool.settlement(); assert.equal(replacement.available, true); replacement.close(); assert.equal(nextFees.paid(), 0);
+  });
+}
+
+test("a copy refusal before any SDK registration returns only its original capsule payment", async () => {
+  const pool = new VoiceAudioCapturePool(), fees = ledger(), session = pool.session(fees.budget), live = authority();
+  const original = String.fromCharCode;
+  String.fromCharCode = () => { throw new Error("local copy refused"); };
+  try {
+    assert.equal(session.request(live, "device", { async getUserMedia() { assert.fail("no SDK"); } }), false);
+  } finally { String.fromCharCode = original; }
+  assert.equal(fees.reserves(), 1); assert.equal(fees.returns(), 1); assert.equal(fees.paid(), 0);
+  assert.equal(pool.pending, false); assert.equal(session.available, false);
+  const media = stream();
+  assert.equal(session.request(live, "device", { async getUserMedia() { return media.actual; } }), true);
+  await pool.settlement(); assert.equal(session.available, true); session.close(); assert.equal(fees.paid(), 0);
+});
 
 test("one paid OS request is coalesced; the same capsule owns the disabled master until actual stop", async () => {
   const pool = new VoiceAudioCapturePool(), fees = ledger(), session = pool.session(fees.budget), live = authority();

@@ -1,5 +1,36 @@
 # Chat, files and voice implementation evidence
 
+## Microphone device IDs own their storage (27 October; helper inactive)
+
+The inactive capture helper now copies admitted device IDs into independent numeric UTF16
+chunks after its original8KiB capsule payment and before constructing SDK work. A short
+caller substring previously retained its large parent through pending permission. The
+copy preserves split surrogate pairs and unpaired code units, bounds numeric calls to256
+units and rejects IDs over1024 units before payment/materialization. End during copying
+fences the old capsule and replacement capture. A proven synchronous copy refusal before
+any SDK registration returns only that original capsule payment.
+
+The executable application-owned inventory is6080/8192 bytes while copying,6432/8192 during
+join and5664/8192 through SDK work. Stages are serial; fixed pool4KiB and capsule8KiB fees,
+group/process caps and all native/wire formats are unchanged. Borrowed input is confined
+to synchronous materialization. Opaque VM/SDK/GC heaps and RSS are not this inventory.
+
+Twenty-two capture tests pass, including six new backing/boundary/UTF16/cancellation cases;
+strict helper/test TypeScript passes. The actual owned-constraints V8 probe reports caller
+SLICED backing and SDK SEQ backing. A return-original-string mutation fails the intended
+numeric-copy regression, then exact source SHA restoration and all22 positive tests pass.
+Full frontend3200 tests pass74.24s; Svelte has zero diagnostics; production build36.65s.
+Read-only adversarial re-review has no remaining finding. Native matching gates remain pending: the
+frozen parent Broker46 run was interrupted across the computer restart, without a result.
+Earlier completed Broker45 ecfd3cd3 has897 native library+5 ACL passes; earlier Root3691/24
+existing ignores apply to unchanged Root Rust/Cargo inputs. Dependency audit remains red;
+no waiver. No setup/live App/send/friend behavior changed; startup/flow were not rerun.
+
+V2 does not construct this helper yet. Broker46/facade3 are unchanged; this adds no native
+Current/speak/listen permission. Private Current/PC binding, paid audio cells and actual
+capture/playback wiring, App lifecycle/renewal, automatic multi-peer admission, member relay
+and combined/physical acceptance remain open. One desktop is available; V2 stays OFF.
+
 ## Owned RTC setting strings (27 October; Broker46, App OFF)
 
 RTC configuration now copies admitted URL/credential strings from bounded UTF16 code-unit
