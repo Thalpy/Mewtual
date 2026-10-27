@@ -342,6 +342,9 @@ pub(super) fn open_leaf_pinned(path: &Path) -> io::Result<Leaf> {
 
 #[cfg(windows)]
 const PINNED_SHARE: u32 = 0x1 | 0x2; // FILE_SHARE_READ | FILE_SHARE_WRITE, never FILE_SHARE_DELETE
+/// Win32 `ERROR_SHARING_VIOLATION`: an open refused because of another handle's share mode.
+#[cfg(windows)]
+const ERROR_SHARING_VIOLATION: i32 = 32;
 
 #[cfg_attr(not(windows), allow(unused_variables))]
 fn open_leaf_as(path: &Path, write: bool, pinned: bool) -> io::Result<Leaf> {
@@ -739,7 +742,8 @@ thread_local! {
         const { std::cell::RefCell::new(None) };
     /// Test-only interleaving point in [`remove_verified`], after the identity was verified and
     /// before the delete (PR51 H1): a test replaces the name with someone else's file there. The
-    /// hook gets the original name's path.
+    /// hook gets the original name's path. Unix [`sweep_aside`] calls it too, before deleting a
+    /// leftover at a "removing" name (with that name's path).
     pub(in crate::kept) static BEFORE_REMOVE: std::cell::RefCell<LinkHook> =
         const { std::cell::RefCell::new(None) };
     /// Test-only interleaving point in Unix [`remove_verified`], right after the name was renamed
@@ -748,6 +752,20 @@ thread_local! {
     #[cfg(unix)]
     pub(in crate::kept) static AFTER_ASIDE: std::cell::RefCell<AsideHook> =
         const { std::cell::RefCell::new(None) };
+    /// Test-only interleaving point in Windows [`remove_verified`] with `keep`: after the kept
+    /// name was pinned and verified and before the delete (published-staging review). A test tries
+    /// to delete the kept name there. The hook gets the kept name's path.
+    #[cfg(windows)]
+    pub(in crate::kept) static WHILE_KEPT: std::cell::RefCell<LinkHook> =
+        const { std::cell::RefCell::new(None) };
+}
+#[cfg(all(test, windows))]
+fn while_kept(path: &Path) {
+    WHILE_KEPT.with(|hook| {
+        if let Some(hook) = hook.borrow_mut().as_mut() {
+            hook(path);
+        }
+    });
 }
 #[cfg(all(test, unix))]
 pub(in crate::kept) type AsideHook = Option<Box<dyn FnMut(&Path, &Path)>>;
@@ -1012,6 +1030,10 @@ pub(super) enum Verified {
     /// Unix: the folder opened at this path is no longer the expected one.
     #[cfg_attr(not(unix), allow(dead_code))]
     FolderChanged,
+    /// The name the caller asked to keep (`keep`, the published final name) no longer holds the
+    /// verified object, so nothing was deleted: `leaf` may now be the object's only name, and the
+    /// only copy of the saved file (published-staging review, 26 October).
+    KeepGone,
 }
 
 /// Delete `folder/leaf` only if it is the expected object (PR51 H1). Never deletes or changes the
@@ -1038,10 +1060,29 @@ pub(super) enum Verified {
 ///   the save). A process running as the same account that watches the folder could still swap
 ///   the random name in the window before the unlink; such a process already has the authority
 ///   to delete the file itself.
+///
+/// `keep` (published-staging review, 26 October): when the object's other name must outlive this
+/// delete (a published save's final name, while `leaf` is its temporary staging name), `leaf` is
+/// deleted only while `folder/keep` still holds the same verified object, checked immediately
+/// before the delete; otherwise nothing is deleted and the answer is [`Verified::KeepGone`].
+/// Without this, a final name deleted after the caller's own check left the staging delete
+/// removing the last copy. On Windows a handle that denies delete sharing on one hard link does
+/// not stop another link of the same file being deleted, so holding the staging handle protects
+/// nothing here: the final name itself is opened with the delete-denying pin, verified, and held
+/// across the delete, which blocks deleting or renaming it (and renaming its folders) until the
+/// staging name is gone; no window remains (local NTFS; a network server may not enforce share
+/// modes). If that pin is refused with a sharing violation (a filesystem checking delete sharing
+/// per file, where the staging handle itself already protects the final name, or another program
+/// holding the final name with delete access), the final name is verified without the pin instead,
+/// leaving only the instant between that check and the delete. On Unix no name can be pinned: the
+/// final name is checked relative to the pinned folder
+/// after the rename aside and the verification, immediately before `unlinkat`, and a same-account
+/// process deleting it in the instant between that check and the unlink still leaves no copy.
 pub(super) fn remove_verified(
     folder: &Path,
     folder_id: Option<FileIdentity>,
     leaf: &str,
+    keep: Option<&str>,
     expected: Expected,
     rng: &mut dyn catcoms_rt::CryptoRngCore,
 ) -> io::Result<Verified> {
@@ -1056,6 +1097,33 @@ pub(super) fn remove_verified(
             return Ok(Verified::NotOurs);
         };
         before_remove(&path);
+        // The other name is pinned (delete sharing denied) and verified now, and the pin is held
+        // until the delete below has finished, so it cannot be deleted or renamed in between.
+        let _kept = match keep {
+            None => None,
+            Some(keep) => match open_nofollow(&folder.join(keep), true) {
+                Ok(AtName::Object(pin)) if verify(&pin, expected)?.is_some() => Some(pin),
+                Ok(_) => return Ok(Verified::KeepGone),
+                // Review M2: a sharing violation means either a filesystem that checks delete
+                // sharing per file rather than per link (unverified ReFS, WinFsp or Dokan
+                // volumes), where our staging handle conflicts with the pin and, denying delete
+                // sharing itself, already stops the final name being deleted; or another program
+                // holding the final name with delete access, where the window is back to the
+                // instant between this check and the delete (still far shorter than before).
+                // Check it without pinning rather than refusing every Clear there forever.
+                Err(error) if error.raw_os_error() == Some(ERROR_SHARING_VIOLATION) => {
+                    match open_nofollow(&folder.join(keep), false)? {
+                        AtName::Object(found) if verify(&found, expected)?.is_some() => None,
+                        _ => return Ok(Verified::KeepGone),
+                    }
+                }
+                Err(error) => return Err(error),
+            },
+        };
+        #[cfg(test)]
+        if let Some(keep) = keep {
+            while_kept(&folder.join(keep));
+        }
         inject(Effect::Remove)?;
         use fs_at::os::windows::FileExt;
         handle.delete_by_handle().map_err(|(_, error)| error)?;
@@ -1119,6 +1187,27 @@ pub(super) fn remove_verified(
         match verdict {
             Ok(Some(links)) => {
                 before_remove(&folder.join(leaf));
+                // The other name must still hold the object right before the unlink; if it is
+                // gone, the aside name is the only one left, so it goes back to `leaf`.
+                if let Some(keep) = keep {
+                    let kept = match open_at_nofollow(&pinned.dir, keep) {
+                        Ok(Some(file)) => verify(&file, expected).map(|found| found.is_some()),
+                        Ok(None) => Ok(false),
+                        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(false),
+                        Err(error) => Err(error),
+                    };
+                    match kept {
+                        Ok(true) => {}
+                        Ok(false) => {
+                            put_back(&pinned)?;
+                            return Ok(Verified::KeepGone);
+                        }
+                        Err(error) => {
+                            put_back(&pinned)?;
+                            return Err(error);
+                        }
+                    }
+                }
                 let removed = inject(Effect::Remove).and_then(|()| {
                     rustix::fs::unlinkat(&pinned.dir, aside.as_str(), rustix::fs::AtFlags::empty())
                         .map_err(io::Error::from)
@@ -1144,7 +1233,7 @@ pub(super) fn remove_verified(
     }
     #[cfg(not(any(windows, unix)))]
     {
-        let _ = (folder, folder_id, leaf, expected, rng);
+        let _ = (folder, folder_id, leaf, keep, expected, rng);
         Err(io::Error::new(
             io::ErrorKind::Unsupported,
             "verified removal is unavailable on this platform",
@@ -1161,19 +1250,41 @@ pub(super) enum Aside {
     #[cfg_attr(not(unix), allow(dead_code))]
     Removed,
     /// One does and stays: only looking, a folder other accounts can modify (`shared`), or the
-    /// unlink failed.
+    /// unlink or the put-back failed.
     #[cfg_attr(not(unix), allow(dead_code))]
     Left { shared: bool },
+    /// One did and was put back at the staging name, because it may be the only copy of a saved
+    /// file (published-staging review).
+    #[cfg_attr(not(unix), allow(dead_code))]
+    Restored,
 }
 
-/// Unix: find (and, with `remove`, delete) an object of this save that a crash left at a random
-/// "removing" name, between the rename aside and the unlink of [`remove_verified`]. Matching is by
-/// the journal's identity, never by name. Windows never renames aside, so it finds nothing.
+/// What [`sweep_aside`] does with an object of this save it finds at a "removing" name. Only Unix
+/// renames aside, so elsewhere the names are never read.
+#[derive(Debug, Clone, Copy)]
+#[cfg_attr(not(unix), allow(dead_code))]
+pub(super) enum Sweep<'a> {
+    /// Only look.
+    Look,
+    /// Delete it, never in a folder other accounts can modify. With `keep` (a published save's
+    /// final name and its staging name, in that order) only while the final name still holds the
+    /// file, checked right before the unlink; otherwise it goes back to the staging name, since it
+    /// may be the only copy (published-staging review).
+    Remove { keep: Option<(&'a str, &'a str)> },
+    /// Put it back at the staging name: a published save whose final name is gone or replaced,
+    /// where it is the only copy of the saved bytes.
+    Restore { staging: &'a str },
+}
+
+/// Unix: find (and per `action`, delete or put back) an object of this save that a crash left at a
+/// random "removing" name, between the rename aside and the unlink or put-back of
+/// [`remove_verified`]. Matching is by the journal's identity, never by name. Windows never renames
+/// aside, so it finds nothing.
 pub(super) fn sweep_aside(
     folder: &Path,
     folder_id: FileIdentity,
     expected: FileIdentity,
-    remove: bool,
+    action: Sweep<'_>,
 ) -> io::Result<Aside> {
     #[cfg(unix)]
     {
@@ -1196,24 +1307,52 @@ pub(super) fn sweep_aside(
             if verify(&file, Expected::Journal(expected))?.is_none() {
                 continue;
             }
-            if !remove || pinned.shared {
-                return Ok(Aside::Left {
+            // Put back without replacing anything; a failure leaves it where it is.
+            let restore = |staging: &str| match rename_back(&pinned.dir, &name, staging) {
+                Ok(()) => Aside::Restored,
+                Err(_) => Aside::Left {
                     shared: pinned.shared,
-                });
-            }
-            return Ok(
-                match rustix::fs::unlinkat(&pinned.dir, name.as_str(), rustix::fs::AtFlags::empty())
-                {
-                    Ok(()) => Aside::Removed,
-                    Err(_) => Aside::Left { shared: false },
                 },
-            );
+            };
+            return Ok(match action {
+                Sweep::Look => Aside::Left {
+                    shared: pinned.shared,
+                },
+                // Re-review LOW: never in a folder other accounts can (or may) modify, like any
+                // automatic change: there the put-back can fall back to link and unlink (no
+                // no-replace rename on most network mounts), and another account could swap the
+                // aside name in between, so a planted file would be reported as the only copy.
+                Sweep::Restore { .. } if pinned.shared => Aside::Left { shared: true },
+                Sweep::Restore { staging } => restore(staging),
+                Sweep::Remove { .. } if pinned.shared => Aside::Left { shared: true },
+                Sweep::Remove { keep } => {
+                    before_remove(&folder.join(&name));
+                    if let Some((keep, staging)) = keep {
+                        let kept = matches!(
+                            open_at_nofollow(&pinned.dir, keep),
+                            Ok(Some(found))
+                                if matches!(verify(&found, Expected::Journal(expected)), Ok(Some(_)))
+                        );
+                        if !kept {
+                            return Ok(restore(staging));
+                        }
+                    }
+                    match rustix::fs::unlinkat(
+                        &pinned.dir,
+                        name.as_str(),
+                        rustix::fs::AtFlags::empty(),
+                    ) {
+                        Ok(()) => Aside::Removed,
+                        Err(_) => Aside::Left { shared: false },
+                    }
+                }
+            });
         }
         Ok(Aside::Nothing)
     }
     #[cfg(not(unix))]
     {
-        let _ = (folder, folder_id, expected, remove);
+        let _ = (folder, folder_id, expected, action);
         Ok(Aside::Nothing)
     }
 }

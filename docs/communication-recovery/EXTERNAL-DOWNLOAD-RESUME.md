@@ -1122,8 +1122,10 @@ this interleaving; review L-7). Writers without a journal flush the folder when 
 staging name, after the guard. A Published record whose final name is not proven ours is never
 re-published automatically (the design review's resurrection hazard: the user may have deleted the
 saved file on purpose), and its Clear deletes nothing (review M-1): the staging name, when it is
-the only copy, is kept (`KeptOnlyCopy`, "The saved file was no longer in its folder, so its copy
-under the temporary .mewtual-part name was kept. Rename that file to keep it."); when another file
+the only copy, is kept (`KeptOnlyCopy`, "The saved file is no longer in its folder. Its copy in
+that same folder, whose name ends in .mewtual-part, was kept and is now the only copy. Rename it
+to keep it."; since the published-staging review the staging delete also
+requires the final name at the delete itself, see that section); when another file
 now has the saved name (an editor's atomic save), the original copy is kept and the notice says
 exactly that (`SavedNameReplaced`); both names gone is `SavedFileMissing` ("The saved file was no
 longer in its folder."); a final or staging name that cannot be checked right now (an indexer
@@ -1649,6 +1651,91 @@ Focused checks for this round (the coordinator's process: CI runs the complete s
   `cargo test -p catcoms-app --lib actor::file_transfers` serially (63); Clippy for storage and
   app; fmt;
   `scripts/check-no-ambient.sh`; `scripts/check-store-raw-fs.sh`.
+
+## Published-staging review (PR #51, 26 October)
+
+Found by the #56 work on top of `bad25ad3`: Clear on a Saved (published) row checked the final
+name, then deleted the `.mewtual-part` staging name without holding the final name. A final name
+deleted in that gap made the staging delete remove the last copy. Holding the staging handle does
+not help: on Windows a handle that denies delete sharing on one hard link does not stop another
+link of the same file being deleted (checked on this host: with the staging name held that way,
+deleting the final name succeeds; with the final name itself held that way, deleting or renaming
+it fails).
+
+Fix: `remove_verified` takes `keep`, and `remove_partial` passes the final name for a published
+save (Clear, `ExportFile::finish` right after publication, the recovered-publication cleanup).
+The staging name is deleted only while the final name holds the same verified file at the delete:
+
+- Windows: after the staging handle is opened and verified, the final name is opened with the
+  delete-denying pin (`open_nofollow(.., true)`), verified, and held until `delete_by_handle` has
+  finished, so it cannot be deleted or renamed in between. No window remains on local NTFS; a
+  network server may not enforce share modes. If the pin is refused with a sharing violation, the
+  final name is verified without it, right before the delete: on a filesystem that checks delete
+  sharing per file rather than per link (unverified ReFS, WinFsp or Dokan volumes) our own staging
+  handle conflicts with the pin but, denying delete sharing itself, already stops the final name
+  being deleted; when another program holds the final name with delete access, the window is back
+  to the instant between that check and the delete. (Refusing instead would have turned every
+  Clear there into "could not check" for good; review M2.)
+- Unix: after the rename aside and the verification at the aside name, the final name is opened
+  relative to the pinned folder (no follow) and verified immediately before `unlinkat`; if it is
+  gone the aside name goes back to the staging name. Residual: a same-account process deleting the
+  final name in the instant between that check and the unlink still leaves no copy (no name can be
+  pinned on Unix, and an unlinked file cannot be linked back).
+- Unix crash leftovers (review L1): a copy that an interrupted Clear left at a `mewtual-removing-`
+  name is deleted by `sweep_aside` under the same rule (`Sweep::Remove { keep }`: the final name is
+  checked right before that unlink, and the copy goes back to the staging name if it is gone); and
+  when the final name is already gone or replaced, such a copy is put back at the staging name
+  (`Sweep::Restore`) instead of staying hidden there behind "could not check" on every Clear.
+- A final name gone at the delete is the new `Verified::KeepGone` (or `Aside::Restored`), which
+  `remove_partial` reports as `KeptOnlyCopy` (or `SavedNameReplaced` when another file took the
+  name). The notice says the kept copy is the only copy and where it is: "in that same folder,
+  whose name ends in .mewtual-part" (not "the saved name plus .mewtual-part": a final name numbered
+  at publication keeps the staging name it started with; review M1). Notices carry no path.
+- Not covered: the writers without a journal (the fallback writer, the GIF export) remove their
+  staging name right after their own link without this check; there is no row or Clear, and the
+  window is between this process's link and its removal. Recorded in THREAT-MODEL.
+
+Tests (each broken on purpose and seen failing):
+
+- `a_saved_name_deleted_before_the_staging_delete_keeps_the_only_copy` (Windows and WSL Ubuntu):
+  the final name is deleted, or replaced by another file, at `BEFORE_REMOVE` (after the staging
+  name was opened and verified; on Unix after its rename aside). The copy survives at its name and
+  the outcome is `KeptOnlyCopy` or `SavedNameReplaced`; the notice says "only copy" and "ends in
+  .mewtual-part". Fails with `keep` dropped on Windows and with the Unix check skipped in WSL.
+- Windows: `a_saved_name_cannot_be_deleted_while_its_staging_name_goes` (a delete of the final name
+  attempted at the new `WHILE_KEPT` seam is refused, the staging name goes and the saved file
+  stays; fails when the pin is released before the delete) and
+  `a_saved_name_whose_pin_is_refused_is_checked_without_it` (another handle with delete access on
+  the final name; Clear completes as `KeptSaved` instead of `Unchecked`; fails without the
+  fallback).
+- Unix (WSL): `a_crash_leftover_is_put_back_when_the_saved_name_goes_before_its_delete` (fails
+  without `keep` in the sweep) and `a_hidden_only_copy_of_a_saved_file_is_put_back_at_its_staging_name`
+  (fails with the old look-only sweep).
+
+Adversarial review of the fix (read-only): no blocker or high. M1 (the notice named a file that
+does not exist after a numbered publication): fixed as above. M2 (a pin refused for good on a
+filesystem checking delete sharing per file would wedge Clear): fixed with the unpinned fallback.
+L1 (the Unix crash-leftover sweep was a staging delete without the check, and a hidden only copy
+could wedge Clear): fixed as above. L2 (coverage): the replaced-name, pin-refused and Unix sweep
+cases above were added; a failed Unix put-back stays an error (the row stays tracked), as before.
+Also confirmed: the pin is held until `delete_by_handle` has closed the staging handle; identity
+checks compare volume, index and birth time, which hard links share; native already treats
+`KeptOnlyCopy` as settled (record released with the notice), which predates this fix.
+
+A short re-review of those fixes: no blocker, high or medium. The unpinned fallback reopens a
+window on NTFS only while another program holds the final name with delete access (mid-rename or
+mid-delete; a rename keeps the file), and is safe on filesystems checking sharing per file. One
+LOW, fixed: `Sweep::Restore` changed a folder other accounts can modify, where the put-back can
+fall back to link and unlink and pick up a swapped-in file; it now leaves the leftover in place
+there (the row stays "could not check", as before), like every other automatic change. Test: the
+shared case in `a_hidden_only_copy_of_a_saved_file_is_put_back_at_its_staging_name` (WSL; fails
+without the guard). Residual: such a leftover in a shared folder stays at its `mewtual-removing-`
+name until the folder is no longer shared or the user moves it.
+
+Focused checks: `cargo test -p catcoms-storage --lib kept::` on Windows (162) and the WSL Ubuntu
+storage suite (238) with Unix Clippy clean; Clippy for storage and app; `catcoms-app`
+`actor::file_transfers` serially (63); the native `--lib` filters `private_downloads streamed_save
+fallback publish` (68); fmt; the ambient and raw-fs gates.
 
 ## Ledger (24 October, Transfers UX)
 
