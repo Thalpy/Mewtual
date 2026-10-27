@@ -83,7 +83,10 @@ image = { version = "0.25", default-features = false, features = [
 # shared GIF to a still frame is a visible product regression. Same 0.18 line `image` resolves, so
 # this adds a direct path to a crate already in the graph rather than a second copy of it.
 png = "0.18"
-tauri-plugin-updater = "2"
+# Official releases use raw NSIS/AppImage artifacts (`createUpdaterArtifacts: true`).
+# ZIP is legacy v1-compatible updater input; its extractor is unnecessary here and carries
+# RUSTSEC-2026-0367/-0368/-0369. Keep TLS while excluding that optional extraction path.
+tauri-plugin-updater = { version = "2", default-features = false, features = ["rustls-tls"] }
 tauri-plugin-process = "2"
 
 [dev-dependencies]

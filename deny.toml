@@ -18,6 +18,18 @@ reason = "paste: unmaintained, no vulnerability, transitive, no upgrade availabl
 id = "RUSTSEC-2026-0173"
 reason = "proc-macro-error2: unmaintained, no vulnerability, transitive, no upgrade available"
 
+# Linux GTK 3's two proc-macro crates still use proc-macro-error 1.0.4. This advisory is
+# maintenance-only, with no announced vulnerability or safe upgrade. These macros process
+# trusted build input and ship no proc-macro code into the app. This is a recorded maintenance
+# risk, not a general security proof. The version/wrapper bans below reject new direct uses
+# and stable version changes. Current GTK requirements select stable 0.18 releases; changing
+# them to admit prereleases also requires review (ordinary semver bans skip prereleases).
+# Remove this decision when GTK replaces/backports the dependency, and
+# re-evaluate immediately if a vulnerability or another use is announced.
+[[advisories.ignore]]
+id = "RUSTSEC-2024-0370"
+reason = "GTK build-only proc-macro-error 1.0.4 via reviewed glib-macros 0.18.5/gtk3-macros 0.18.2; maintenance advisory only, no announced vulnerability or safe upgrade; exact version/wrapper bans force re-review"
+
 # hickory-proto arrives through libp2p-dns 0.44 (libp2p 0.56), which pins the 0.25 line. Both
 # advisories below sit behind that pin: drop them the moment libp2p moves to a hickory 0.26 line.
 #
@@ -85,6 +97,19 @@ allow-wildcard-paths = true
 # the reviewed 0.26.11 forwarding crate and fixed >=1.0.10 bundles are permitted. Its parent
 # appears as a separate package in the graph, so resolving it to 1.0.9 fails these bans.
 deny = [
+    { name = "h2", version = "<0.4.16", reason = "RUSTSEC-2026-0258: refuse unbounded empty-DATA queue versions" },
+    { name = "zip", version = "<9.0.0", reason = "RUSTSEC-2026-0367/-0368/-0369: unsafe extraction; official updater artifacts need no legacy ZIP support" },
+
+    # Exact maintenance exception above. A new direct user or macro version must not quietly
+    # inherit it, even though no runtime vulnerability is announced by this advisory.
+    { name = "proc-macro-error", version = "<1.0.4", reason = "Only reviewed GTK build-time proc-macro-error 1.0.4 is admitted" },
+    { name = "proc-macro-error", version = ">1.0.4", reason = "Re-review or remove the maintenance exception before changing versions" },
+    { name = "proc-macro-error", version = "=1.0.4", wrappers = ["glib-macros", "gtk3-macros"], reason = "GTK build-only maintenance exception; no direct application use" },
+    { name = "glib-macros", version = "<0.18.5", reason = "RUSTSEC-2024-0370 maintenance decision pins reviewed GTK wrappers" },
+    { name = "glib-macros", version = ">0.18.5", reason = "Re-review or remove the GTK maintenance decision on wrapper upgrade" },
+    { name = "gtk3-macros", version = "<0.18.2", reason = "RUSTSEC-2024-0370 maintenance decision pins reviewed GTK wrappers" },
+    { name = "gtk3-macros", version = ">0.18.2", reason = "Re-review or remove the GTK maintenance decision on wrapper upgrade" },
+
     { name = "webpki-roots", version = "<0.26.11", reason = "RUSTSEC-2026-0381: vulnerable concrete root bundle" },
     { name = "webpki-roots", version = ">0.26.11, <1.0.10", reason = "RUSTSEC-2026-0381: only exact 0.26.11 forwarding shim is exempt before fixed 1.0.10" },
     # Ordinary semver ranges exclude prereleases. Explicitly cover the published alpha.0/.1/.2
