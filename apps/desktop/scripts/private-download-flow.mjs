@@ -51,10 +51,13 @@ export const privateDownloadFlowExpression = String.raw`(async () => {
   if (!tab) throw new Error('Transfers tab missing'); tab.scrollIntoView({ block: 'nearest', inline: 'nearest' }); tab.click();
   // Transfers UX (PR #51): private downloads are .sdl-row cards (one row per file, carrying a
   // save's live progress); the live list below keeps .dl-item rows. Disabled row actions use
-  // aria-disabled so their reason stays readable.
+  // aria-disabled so their reason stays readable. Compact rows: a row's actions are icon buttons
+  // whose accessible name is the action plus the file name ("Resume download drawing.bin"), so
+  // they are found by that name; text buttons (the live list) still by their text.
   const rows = () => [...document.querySelectorAll('.downloads-tab .sdl-row, .downloads-tab .dl-item')];
   const row = name => rows().find(r => r.textContent.includes(name));
-  const action = (name,label) => [...(row(name)?.querySelectorAll('button') ?? [])].find(b => b.textContent.trim() === label);
+  const action = (name,label) => [...(row(name)?.querySelectorAll('button') ?? [])]
+    .find(b => b.textContent.trim() === label || b.getAttribute('aria-label') === `${label} ${name}`);
   const off = button => !button || button.disabled || button.getAttribute('aria-disabled') === 'true';
   const click = async (name,label) => { await wait(() => action(name,label) && !off(action(name,label)),label); action(name,label).click(); };
   await wait(() => row('Interrupted drawing.bin'),'saved progress after opening Transfers');

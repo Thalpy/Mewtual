@@ -69,6 +69,15 @@ export const TRANSFER_ICONS = {
   removing: [{ d: "M2.5 4h11" }, { d: "M6 4V2.5h4V4" }, { d: "M4 4v9.5h8V4" }, { d: "M6.5 7v4M9.5 7v4" }],
   "show-in-folder": [{ d: "M1.5 13.5V4.5L3 2l1.5 2.5h1.5L7.5 2 9 4.5h5.5v9z" }, { d: "M6 11l4-4" }, { d: "M7.5 7H10v2.5" }],
   ready: [{ rect: { x: 1.5, y: 2, width: 13, height: 3.5, rx: 1 } }, { d: "M3 5.5v7.5a1 1 0 0 0 1 1h8a1 1 0 0 0 1-1V5.5" }, { d: "M6 9.5l1.5 1.5 3-3" }],
+  // Compact row controls (design file `compact.md`, section 4).
+  play: [{ d: "M5.5 3.5v9l7.5-4.5z" }],
+  pause: [{ d: "M5.5 3v10" }, { d: "M10.5 3v10" }],
+  "cancel-x": [{ d: "M4 4l8 8M12 4l-8 8" }],
+  more: [{ d: "M3.5 8h.01M8 8h.01M12.5 8h.01" }],
+  "save-as": [{ d: "M1.5 13.5V4.5L3 2l1.5 2.5h1.5L7.5 2 9 4.5h5.5v9z" }, { d: "M8 7v4M6 9h4" }],
+  "save-copy": [{ d: "M5.5 4.5V2.5h5l3 3v6h-2" }, { d: "M2.5 5.5h5l3 3v6h-8z" }, { d: "M7.5 5.5v3h3" }],
+  clear: [{ d: "M9.5 2.5 13.5 6.5 7 13H3.5L2 11.5z" }, { d: "M5.5 7.5l3.5 3.5" }, { d: "M8.5 13h5" }],
+  keep: [{ d: "M6 2.5h4l-.5 4 2 2.5H4.5l2-2.5z" }, { d: "M8 9v4.5" }],
 } as const satisfies Record<string, readonly IconShape[]>;
 export type TransferIcon = keyof typeof TRANSFER_ICONS;
 
@@ -132,8 +141,13 @@ export type SavedRowView = {
   icon: TransferIcon;
   /** The chip's word; the icon is decoration. */
   word: string;
-  /** One plain sentence under the row, or `null`. */
+  /** The row's plain sentence, or `null`. Shown under the row only when `showWhy`. */
   why: string | null;
+  /** Compact rows: the sentence is visible on NEEDS YOU rows only; elsewhere it is the status
+   * symbol's tooltip (and hidden text for assistive technology). */
+  showWhy: boolean;
+  /** The status symbol's tooltip: the sentence on NEEDS YOU rows, a short line elsewhere. */
+  statusTitle: string;
   bar: SavedRowBar | null;
   /** "12 of 40 chunks", alongside the bar. */
   chunks: string | null;
@@ -186,18 +200,93 @@ function explanation(state: PrivateDownloadStatus, check: SavedCheck | null, bus
     case "exhausted": return "It ran out of attempts to fetch the missing parts. Retry download tries again.";
     case "blocked": return "Some received data did not pass its check, so the download stopped. Resume download tries again.";
     case "save-interrupted": return "Saving stopped partway, for example when Mewtual closed or locked. Resume saving picks up from the last saved part.";
-    case "destination-unavailable": return "The folder or the partly saved file cannot be reached right now. Reconnect it and choose Try again, or save a new copy.";
+    // Compact rows (design `compact.md`): actions are icons with tooltips now, so the sentences
+    // name them by verb, not as buttons to choose: Try again is the row's primary icon, Save new
+    // copy is in its menu.
+    case "destination-unavailable": return "The folder or the partly saved file cannot be reached right now. Reconnect it and try again, or save a new copy.";
     case "destination-changed": return "The partly saved file was changed by something else, so Mewtual stopped adding to it. Save new copy starts a separate file.";
     // Busy covers Remove, Clear and Keep alike, so the running sentence names none of them; the
     // stuck one names "a file it created" because a Clear removes only a temporary second name.
+    // Remove (the red x) retries at once; Keep is in the menu, worded as the row's Keep label.
     case "removing": return busy
       ? "Working on it. The other actions wait until this one finishes."
-      : `Mewtual could not finish removing a file it created for this save. Choose Remove to try again, or ${keepLabel}.`;
+      : `Mewtual could not finish removing a file it created for this save. Remove tries again, or ${keepLabel === "Keep the file" ? "keep the file" : "keep the partly saved file"}.`;
     case "saved":
       if (check === "missing") return "The saved file is no longer there. Save again makes a fresh copy.";
       if (check === "replaced") return "A different file is at the saved name now. Save again makes a fresh copy.";
       return null;
   }
+}
+
+/** The status symbol's tooltip on rows outside NEEDS YOU (design `compact.md`, section 1): the
+ * row's own sentence where it has one (ready, paused, saving paused), else a short line. */
+function statusLine(state: PrivateDownloadStatus, check: SavedCheck | null, why: string | null, word: string): string {
+  switch (state) {
+    case "receiving": return "Receiving the encrypted copy.";
+    case "saving": return "Writing the readable file.";
+    case "saved":
+      if (check === "present") return "Saved. The file was there when Mewtual last checked.";
+      if (check === "unknown") return "Saved. Mewtual could not check the file just now.";
+      return "Saved. Mewtual has not checked the file yet.";
+    default: return why ?? `${word}.`;
+  }
+}
+
+/** One control of a compact row: an action drawn as an icon, or Show in folder. */
+export type CompactControl =
+  | { kind: "action"; action: SavedRowAction; icon: TransferIcon; look: "go" | "stop" | "" }
+  | { kind: "reveal"; icon: "show-in-folder"; look: ""; label: string; accessibleName: string };
+/** The compact row's controls (design `compact.md`, section 5.1): the primary icon left of the
+ * chip, the red x, and the "more" menu in order. */
+export type CompactControls = {
+  /** The icon left of the chip, or `null` (Removing: the x is its retry). */
+  primary: CompactControl | null;
+  /** The red x: the row's remove-kind action (Remove or Clear), or `null`. */
+  remove: SavedRowAction | null;
+  /** The "more" menu in order; empty means the row has no More button. */
+  menu: (CompactControl | { kind: "separator" })[];
+};
+
+/** Menu icon per action kind. */
+const MENU_ICONS: Record<SavedRowAction["kind"], TransferIcon> = {
+  saveAs: "save-as", fresh: "save-copy", keep: "keep", resume: "play", pause: "pause", remove: "clear",
+};
+
+/** Arrange a row's actions for the compact row. Every action of the view appears exactly once:
+ * the remove-kind action as the x, one primary (the first of pause, resume or fresh; Show in
+ * folder on a Saved row in the SAVED group), everything else in the menu in the view's order,
+ * then Show in folder after a separator when the row offers it and it is not the primary. */
+export function compactControls(view: SavedRowView): CompactControls {
+  const remove = view.actions.find((action) => action.kind === "remove") ?? null;
+  const reveal: CompactControl = {
+    kind: "reveal", icon: "show-in-folder", look: "", label: "Show in folder",
+    accessibleName: `Show ${view.name} in folder`,
+  };
+  const others = view.actions.filter((action) => action.kind !== "remove");
+  let primary: CompactControl | null = null;
+  if (view.state === "saved" && view.group === "saved") {
+    primary = view.canReveal ? reveal : null;
+  } else if (view.state !== "removing") {
+    const first = others.find((action) => action.kind === "pause" || action.kind === "resume" || action.kind === "fresh");
+    if (first) primary = { kind: "action", action: first, ...primaryLook(view, first) };
+  }
+  const menu: CompactControls["menu"] = others
+    .filter((action) => primary?.kind !== "action" || action !== primary.action)
+    .map((action): CompactControl => ({ kind: "action", action, icon: MENU_ICONS[action.kind], look: "" }));
+  if (view.canReveal && primary?.kind !== "reveal") {
+    if (menu.length > 0) menu.push({ kind: "separator" });
+    menu.push(reveal);
+  }
+  return { primary, remove, menu };
+}
+
+/** The primary icon and look (design `compact.md`, section 5.1, rule 3). */
+function primaryLook(view: SavedRowView, action: SavedRowAction): { icon: TransferIcon; look: "go" | "stop" } {
+  if (action.kind === "pause") return { icon: "pause", look: "stop" };
+  if (action.kind === "fresh") return { icon: view.state === "destination-changed" ? "save-copy" : "saving", look: "go" };
+  if (view.state === "exhausted" || view.state === "destination-unavailable") return { icon: "retry", look: "go" };
+  if (view.state === "ready") return { icon: "saving", look: "go" };
+  return { icon: "play", look: "go" };
 }
 
 /** States whose bar counts the private copy; the save-side states count the saved file. */
@@ -274,12 +363,16 @@ export function savedRowView(
       accessibleName: `${action.label} ${name}`,
       // Remove deletes saved progress and any partly saved file Mewtual created. Clear on a
       // saved row deletes the private copy and only a temporary second name of the saved file,
-      // so it asks first unless the saved file was just found where it was saved.
-      confirm: action.kind === "remove" && !(saved && check === "present"),
+      // so it asks first unless the saved file was just found where it was saved. On a Removing
+      // row the x retries a removal the user already confirmed, so it does not ask again
+      // (compact rows, design `compact.md`).
+      confirm: action.kind === "remove" && state !== "removing" && !(saved && check === "present"),
       disabled: disabledReason !== null,
       disabledReason,
     };
   });
+  const why = explanation(state, saved ? check : null, activity.busy,
+    actions.find((action) => action.kind === "keep")?.label ?? "Keep partly saved file");
   return {
     id: row.id,
     name,
@@ -289,8 +382,9 @@ export function savedRowView(
     tone: look.tone,
     icon: look.icon,
     word: look.word,
-    why: explanation(state, saved ? check : null, activity.busy,
-      actions.find((action) => action.kind === "keep")?.label ?? "Keep partly saved file"),
+    why,
+    showWhy: look.group === "needs" && why !== null,
+    statusTitle: look.group === "needs" && why !== null ? why : statusLine(state, saved ? check : null, why, look.word),
     bar: progress,
     chunks,
     where,

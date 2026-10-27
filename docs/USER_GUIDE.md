@@ -536,9 +536,15 @@ and only a fully verified file ever gets the real name. On most local drives an 
 
 In **Transfers**, each file you are downloading or saving has one row, grouped as **Needs you**
 (something stopped and waits for your choice), **In progress** and **Saved**. A row shows how much
-has arrived or been written, such as "3.1 MB / 12.4 MB" and "12 of 40 chunks", a short sentence
-when it needs you, and its actions. **Remove** asks you to confirm first, because it deletes the
-progress and any partly saved file Mewtual created.
+has arrived or been written, such as "3.1 MB / 12.4 MB" and "12 of 40 chunks", and a short
+sentence when it needs you (elsewhere that sentence is the tooltip of the small symbol before the
+name). Its controls sit on the name line: the main action as an icon (green play to resume, pause,
+retry or save, or a folder to **Show in folder** on a saved file), a **⋯** button with every other
+action (Save as, Save new copy, Save another copy, Keep), and a red **✕** to **Remove** (or
+**Clear** a saved row). Every icon has a tooltip and a name for screen readers, and the ⋯ menu
+works from the keyboard. **Remove** asks you to confirm first, because it deletes the progress and
+any partly saved file Mewtual created; on a row that is already being removed, ✕ simply tries
+again.
 
 Where it works:
 
@@ -575,8 +581,8 @@ your file manager with the saved file selected (on Linux, its folder), after the
 **Clear** on a Saved row checks the file once more first: it clears at once only when the file is
 still there, and otherwise asks you to confirm, because the private copy may then be the only one
 left. If Mewtual cannot finish removing a file it created for a save (the folder is unplugged,
-for example), the row offers **Keep the file** when every part of that file had been written, or
-**Keep partly saved file** when not; either leaves the file where it is and drops the row.
+for example), its ⋯ menu offers **Keep the file** when every part of that file had been written,
+or **Keep partly saved file** when not; either leaves the file where it is and drops the row.
 
 If you choose **Save as** for a file and its save has not started yet, Mewtual remembers that
 place. The file's save item in the chat and file menus, the image viewer and the file pane then

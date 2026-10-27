@@ -3406,15 +3406,51 @@ button.primary:hover:not(:disabled) {
 }
 .sdl-row[data-tone="muted"] { box-shadow: inset 3px 0 0 var(--border); }
 
-/* ---- head: name plus status chip ---- */
+/* ---- head: status symbol, name, control cluster (compact rows, design compact.md) ----
+   flex-wrap with a 12ch name basis: the cluster stays on the name line while the name can keep
+   about twelve characters; otherwise the whole cluster drops to its own line, right-aligned. The
+   controls never split across lines because they share one flex item (.sdl-ctl). */
 .sdl-head {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
-  gap: 4px 10px;
+  gap: 4px 8px;
+  min-width: 0;
+}
+.sdl-status {
+  position: relative; /* anchors the visually hidden text */
+  display: inline-grid;
+  place-items: center;
+  flex: none;
+  width: 16px;
+  height: 16px;
+  color: var(--tone-ink);
+}
+.sdl-status .ico {
+  width: 16px;
+  height: 16px;
+  display: block;
+}
+/* Live states breathe through the status symbol (the chip carries no icon); paused rows at the
+   same fill stay still. */
+.sdl-row[data-state="receiving"] .sdl-status .ico,
+.sdl-row[data-state="saving"] .sdl-status .ico {
+  animation: sdl-breathe 1.2s ease-in-out infinite alternate;
+}
+@keyframes sdl-breathe {
+  from { opacity: 0.5; }
+  to { opacity: 1; }
+}
+/* A small celebration when a row lands as saved; runs once per mount. */
+.sdl-row[data-state="saved"][data-tone="ok"] .sdl-status .ico {
+  animation: sdl-pop 320ms cubic-bezier(0.3, 1.6, 0.5, 1) 1;
+}
+@keyframes sdl-pop {
+  from { transform: scale(0.6); }
+  to { transform: scale(1); }
 }
 .sdl-name {
-  flex: 1 1 14ch;
+  flex: 1 1 12ch;
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -3423,11 +3459,21 @@ button.primary:hover:not(:disabled) {
   font-weight: 600;
   color: var(--text);
 }
+.sdl-ctl {
+  display: inline-flex;
+  flex-wrap: wrap; /* only when even its own line is too narrow (the longest chip plus the pair) */
+  justify-content: flex-end;
+  align-items: center;
+  gap: 4px 6px;
+  flex: none;
+  max-width: 100%;
+  margin-inline-start: auto;
+}
+/* Word-only chip: the glyph for the state lives in .sdl-status, once. */
 .sdl-chip {
   display: inline-flex;
   align-items: center;
-  gap: 5px;
-  padding: 2px 8px 2px 5px;
+  padding: 3px 8px;
   border: 1px solid var(--tone-brd);
   border-radius: 999px;
   background: var(--tone-dim);
@@ -3436,24 +3482,6 @@ button.primary:hover:not(:disabled) {
   letter-spacing: 0.06em;
   text-transform: uppercase;
   white-space: nowrap;
-}
-.sdl-chip .ico { width: 1.6em; height: 1.6em; }
-/* Live states breathe through the icon; paused rows at the same fill stay still. */
-.sdl-row[data-state="receiving"] .sdl-chip .ico,
-.sdl-row[data-state="saving"] .sdl-chip .ico {
-  animation: sdl-breathe 1.2s ease-in-out infinite alternate;
-}
-@keyframes sdl-breathe {
-  from { opacity: 0.5; }
-  to { opacity: 1; }
-}
-/* A small celebration when a row lands as saved; runs once per mount. */
-.sdl-row[data-state="saved"][data-tone="ok"] .sdl-chip .ico {
-  animation: sdl-pop 320ms cubic-bezier(0.3, 1.6, 0.5, 1) 1;
-}
-@keyframes sdl-pop {
-  from { transform: scale(0.6); }
-  to { transform: scale(1); }
 }
 
 /* ---- byte bar ----
@@ -3534,44 +3562,9 @@ button.primary:hover:not(:disabled) {
   letter-spacing: 0.04em;
   text-transform: uppercase;
 }
-/* Text button inside prose: a 28px hit target that does not grow the line. */
-.sdl-link {
-  display: inline-flex;
-  align-items: center;
-  gap: 4px;
-  min-height: 28px;
-  margin: -6px 0;
-  padding: 0 4px;
-  border: 0;
-  border-radius: var(--r);
-  background: none;
-  font: inherit;
-  font-weight: 600;
-  color: var(--accent-hi);
-  text-decoration: underline;
-  text-underline-offset: 2px;
-  text-decoration-color: color-mix(in oklab, var(--accent) 45%, transparent);
-  cursor: pointer;
-}
-.sdl-link .ico { width: 14px; height: 14px; }
-.sdl-link:hover:not(:disabled, [aria-disabled="true"]) {
-  background: var(--accent-dim);
-  color: var(--accent-hi);
-  text-decoration-color: currentColor;
-}
-.sdl-link[aria-disabled="true"] { opacity: 0.6; cursor: progress; }
-.sdl-link[aria-disabled="true"]:hover { background: none; }
-
-/* ---- actions ----
-   .sdl-act alone is the primary (solid accent). .ghost is secondary. .danger is outlined red
-   and, when it is the last control, pushed to the far end so it never sits beside the primary. */
-.sdl-actions {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 6px;
-  padding-top: 2px;
-}
+/* ---- text buttons ----
+   Compact rows keep .sdl-act only for the inline confirmation pair. .sdl-act alone is solid
+   accent, .ghost secondary, .danger outlined red. */
 .sdl-act {
   display: inline-flex;
   align-items: center;
@@ -3608,29 +3601,202 @@ button.primary:hover:not(:disabled) {
 }
 .sdl-act.ghost[aria-disabled="true"]:hover,
 .sdl-act.danger[aria-disabled="true"]:hover { background: transparent; }
-.sdl-actions > .danger:last-of-type,
-.sdl-actions > .sdl-confirm:last-of-type { margin-inline-start: auto; }
 .sdl-act:disabled,
 .sdl-act[aria-disabled="true"] {
   opacity: 0.45;
   cursor: not-allowed;
 }
-.sdl-act:focus-visible,
-.sdl-link:focus-visible {
-  outline: 2px solid var(--accent);
-  outline-offset: 2px;
-}
-/* Inline confirmation: replaces Remove in its slot. Confirm is the filled-in version of the
-   outlined danger button, Cancel a plain ghost. */
+/* Inline confirmation: replaces the x in its slot; the primary and More are not rendered while
+   it shows, so the row offers exactly two choices. Smaller type so the pair can share the name
+   line; when it cannot, the whole cluster wraps under the name. */
 .sdl-confirm {
   display: inline-flex;
   align-items: center;
   gap: 6px;
+  flex: none;
   animation: sdl-in 160ms ease-out;
+}
+.sdl-confirm .sdl-act {
+  min-height: 28px;
+  padding: 0 9px;
+  font-size: 0.72rem;
 }
 .sdl-confirm .sdl-act.danger {
   background: var(--danger-dim);
   border-color: var(--danger);
+  color: var(--danger-hi);
+}
+
+/* ---- icon buttons (compact rows) ----
+   A 28x28 hit target around a 16px glyph. The base look is neutral (Show in folder, More). .go
+   is the filled green "do it" (Resume, Retry, Try again, Save ...). .stop is the outlined green
+   Pause, so Pause and Resume read as one toggle in one slot. .danger is the outlined red x. The
+   :not() guards keep hover off a disabled or busy button. */
+.sdl-ico-btn {
+  position: relative;
+  display: inline-grid;
+  place-items: center;
+  flex: none;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: var(--r);
+  background: transparent;
+  color: var(--text-2);
+  cursor: pointer;
+}
+.sdl-ico-btn .ico {
+  width: 16px;
+  height: 16px;
+  display: block;
+}
+/* Review of the compact rows (MEDIUM 3): the global `button:hover` (accent background, 0,1,1)
+   beats `.sdl-ico-btn` (0,1,0), so a disabled or busy icon button flashed accent on hover. This
+   guard sits before the looks below, which keep their own backgrounds. */
+.sdl-ico-btn:hover,
+.sdl-menu-item:hover { background: transparent; }
+.sdl-ico-btn:hover:not(:disabled, [aria-disabled="true"]) {
+  background: var(--bg-elev);
+  border-color: var(--border);
+  color: var(--text);
+}
+.sdl-ico-btn.go {
+  color: var(--ok);
+  background: var(--ok-dim);
+  border-color: var(--ok-brd);
+}
+.sdl-ico-btn.go:hover:not(:disabled, [aria-disabled="true"]) {
+  background: color-mix(in oklab, var(--ok) 24%, var(--panel));
+  border-color: var(--ok);
+  color: var(--ok);
+}
+.sdl-ico-btn.stop {
+  color: var(--ok);
+  border-color: var(--border);
+}
+.sdl-ico-btn.stop:hover:not(:disabled, [aria-disabled="true"]) {
+  background: var(--ok-dim);
+  border-color: var(--ok-brd);
+  color: var(--ok);
+}
+.sdl-ico-btn.danger {
+  color: var(--danger-hi);
+  border-color: var(--danger-brd);
+}
+.sdl-ico-btn.danger:hover:not(:disabled, [aria-disabled="true"]) {
+  background: var(--danger-dim);
+  border-color: var(--danger);
+  color: var(--danger-hi);
+}
+.sdl-more { color: var(--text-2); }
+.sdl-more[aria-expanded="true"] {
+  background: var(--bg-elev);
+  border-color: var(--border);
+  color: var(--text);
+}
+.sdl-ico-btn:disabled,
+.sdl-ico-btn[aria-disabled="true"] {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+/* Busy: the glyph fades and a ring draws around it; the button keeps full opacity so the ring
+   reads. Under motion-off the ring is a static dotted circle. */
+.sdl-ico-btn[aria-busy="true"] {
+  opacity: 1;
+  cursor: progress;
+}
+.sdl-ico-btn[aria-busy="true"] .ico { opacity: 0.35; }
+.sdl-ico-btn[aria-busy="true"]::after {
+  content: "";
+  position: absolute;
+  inset: 4px;
+  border: 2px solid currentColor;
+  border-right-color: transparent;
+  border-radius: 50%;
+  animation: sdl-spin 0.8s linear infinite;
+}
+@keyframes sdl-spin {
+  to { transform: rotate(360deg); }
+}
+.sdl-ico-btn:focus-visible,
+.sdl-menu-item:focus-visible,
+.sdl-act:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+/* ---- "more" menu ----
+   Mounted at the top level (where .ctx-menu lives) and positioned fixed from the More button's
+   rect, so the scrolling Transfers panel cannot clip it. .up is set when it opens above. */
+.sdl-menu {
+  position: fixed;
+  z-index: 901;
+  box-sizing: border-box;
+  min-width: 184px;
+  max-width: min(260px, calc(100vw - 16px));
+  padding: 4px;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: var(--r-lg);
+  box-shadow:
+    0 12px 32px color-mix(in oklab, var(--bg-0) 75%, transparent),
+    0 0 0 1px color-mix(in oklab, var(--accent) 10%, transparent);
+  color: var(--text);
+  outline: none;
+  animation: sdl-menu-in 80ms ease-out;
+}
+.sdl-menu.up { animation-name: sdl-menu-in-up; }
+@keyframes sdl-menu-in {
+  from { opacity: 0; transform: translateY(-2px); }
+}
+@keyframes sdl-menu-in-up {
+  from { opacity: 0; transform: translateY(2px); }
+}
+.sdl-menu-item {
+  display: grid;
+  grid-template-columns: 14px minmax(0, 1fr);
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  min-height: 28px;
+  box-sizing: border-box;
+  padding: 0 8px;
+  border: 0;
+  border-radius: var(--r);
+  background: transparent;
+  color: var(--text);
+  font: 400 0.8rem/1.2 var(--ui);
+  text-align: left;
+  white-space: nowrap;
+  cursor: pointer;
+}
+.sdl-menu-item .ico {
+  width: 14px;
+  height: 14px;
+  display: block;
+  color: var(--muted);
+}
+.sdl-menu-item:hover:not(:disabled, [aria-disabled="true"]),
+.sdl-menu-item:focus-visible {
+  background: var(--accent-dim);
+  color: var(--text);
+}
+.sdl-menu-item:hover:not(:disabled, [aria-disabled="true"]) .ico,
+.sdl-menu-item:focus-visible .ico { color: var(--accent-hi); }
+.sdl-menu-item:focus-visible { outline-offset: -2px; } /* ring stays inside the menu */
+.sdl-menu-item:disabled,
+.sdl-menu-item[aria-disabled="true"] {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+.sdl-menu-sep {
+  height: 1px;
+  margin: 3px 4px;
+  background: var(--border-soft);
 }
 @keyframes sdl-in {
   from { opacity: 0; transform: translateX(-4px); }
@@ -3652,6 +3818,23 @@ button.primary:hover:not(:disabled) {
     transition: none !important;
   }
 }
+/* The menu is mounted outside .sdl; the busy ring becomes a static dotted circle. */
+:root[data-motion="off"] .sdl-menu,
+:root[data-motion="off"] .sdl-menu *,
+:root[data-motion="off"] .sdl-ico-btn::after {
+  animation: none !important;
+  transition: none !important;
+}
+:root[data-motion="off"] .sdl-ico-btn[aria-busy="true"]::after { border: 2px dotted currentColor; }
+@media (prefers-reduced-motion: reduce) {
+  .sdl-menu,
+  .sdl-menu *,
+  .sdl-ico-btn::after {
+    animation: none !important;
+    transition: none !important;
+  }
+  .sdl-ico-btn[aria-busy="true"]::after { border: 2px dotted currentColor; }
+}
 
 /* ---- compact density: tighter, hit targets stay 28px ---- */
 :root[data-density="compact"] .sdl + .sdl { margin-top: 10px; }
@@ -3660,6 +3843,9 @@ button.primary:hover:not(:disabled) {
 :root[data-density="compact"] .sdl-row > .sdl-bar { height: 16px; }
 :root[data-density="compact"] .sdl-name { font-size: 0.82rem; }
 :root[data-density="compact"] .sdl-why { font-size: 0.76rem; }
+:root[data-density="compact"] .sdl-head { gap: 2px 6px; }
+:root[data-density="compact"] .sdl-ctl { gap: 4px; }
+:root[data-density="compact"] .sdl-menu-item { min-height: 26px; }
 
 /* ---- terminal chrome: squarer, bracketed readouts, dotted rules ---- */
 :root[data-chrome="terminal"] .sdl-row,
@@ -3672,6 +3858,14 @@ button.primary:hover:not(:disabled) {
 :root[data-chrome="terminal"] .sdl-chunks::before { content: "["; }
 :root[data-chrome="terminal"] .sdl-bar-label::after,
 :root[data-chrome="terminal"] .sdl-chunks::after { content: "]"; }
+:root[data-chrome="terminal"] .sdl-ico-btn,
+:root[data-chrome="terminal"] .sdl-menu,
+:root[data-chrome="terminal"] .sdl-menu-item { border-radius: var(--r); }
+:root[data-chrome="terminal"] .sdl-menu { box-shadow: none; }
+:root[data-chrome="terminal"] .sdl-more[aria-expanded="true"] { border-style: dashed; }
+:root[data-chrome="terminal"] .sdl-menu-sep {
+  background: repeating-linear-gradient(90deg, var(--border) 0 4px, transparent 4px 7px);
+}
 
 /* File-info progress remains a continuous pill; Transfers uses chunk pieces above. */
 .dl-progress progress {

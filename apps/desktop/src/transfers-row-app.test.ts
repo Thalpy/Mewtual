@@ -10,7 +10,7 @@ const source = readFileSync(new URL("./App.svelte", import.meta.url), "utf8");
 const script = source.slice(source.indexOf(">", source.indexOf("<script")) + 1, source.indexOf("</script>"));
 const tree = ts.createSourceFile("App.ts", script, ts.ScriptTarget.ES2022, true, ts.ScriptKind.TS);
 const names = new Set(["liveSaveFor", "confirmingRemove", "askRemove", "cancelRemove", "runSavedRowAction",
-  "rowButtonClick", "clearSavedRow", "revealSavedRow", "rowFocusTarget"]);
+  "rowButtonClick", "clearSavedRow", "revealSavedRow", "rowFocusTarget", "pressRowControl"]);
 const handlers = tree.statements.filter((n) => ts.isFunctionDeclaration(n) && n.name && names.has(n.name.text));
 assert.equal(handlers.length, names.size);
 const constant = (name: string) => {
@@ -19,7 +19,7 @@ const constant = (name: string) => {
   assert.ok(found, name);
   return found!;
 };
-const production = ts.transpileModule([constant("confirmToken"), constant("focusLost"), ...handlers]
+const production = ts.transpileModule([constant("confirmToken"), constant("focusLost"), constant("pressedBy"), ...handlers]
   .map((n) => n.getFullText(tree)).join("\n"), { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText;
 
 const row = { id: "d".repeat(64), cid: "c".repeat(64), intent: "3", status: "paused" };
@@ -30,6 +30,7 @@ function app() {
   return new Function("rowValue", "nextValue", `
     let activeServerId = 1, viewGeneration = 1, locked = false, savedCheckVisit = 4;
     let downloads = {}, activeSaves = {}, confirmRemove = {}, revealingSaved = {}, savedChecks = {}, clearingSaved = {};
+    let pressedControl = {}, pressCount = 0;
     let privateDownloads = [rowValue, nextValue];
     // The real validator accepts exactly these answers; anything else is "unknown".
     const checkedSavedCheck = (value) => ["present", "missing", "replaced", "unknown"].includes(value) ? value : "unknown";
@@ -59,7 +60,7 @@ function app() {
       querySelector(selector) {
         const row = selector.match(/data-sdl-row="([0-9a-f]+)"/);
         if (row) return present.has(row[1]) ? element(selector) : null;
-        if (selector === ".sdl-row .sdl-act") return present.size ? element(selector) : null;
+        if (selector === ".sdl-row :is(.sdl-ico-btn, .sdl-act)") return present.size ? element(selector) : null;
         return element(selector);
       },
       getElementById(id) {
@@ -68,8 +69,10 @@ function app() {
       },
     };
     const persist = new Set();
+    let hold = null;
     const runPrivateDownloadAction = async (target, kind) => {
       ran.push([target.id, kind]);
+      if (hold) await hold;
       // The control that ran it (Confirm remove) is gone after the action, whatever happened; a
       // control that had focus and is taken away leaves focus on <body>.
       confirmShown = false;
@@ -98,6 +101,9 @@ function app() {
       set savedChecks(value) { savedChecks = value; }, get savedChecks() { return savedChecks; },
       set privateDownloads(value) { privateDownloads = value; },
       get clearingSaved() { return clearingSaved; },
+      get pressedControl() { return pressedControl; },
+      holdRuns(value) { hold = value; },
+      press(id, slot) { pressRowControl(id, slot); },
       set generation(value) { viewGeneration = value; },
       get confirmRemove() { return confirmRemove; },
       keep(id) { persist.add(id); },
@@ -157,6 +163,37 @@ test("a confirmation never carries over to a row that changed meanwhile", async 
   assert.equal(a.confirmingRemove(otherState), false);
 });
 
+test("only the control that started an action shows it running, until it settles", async () => {
+  // Compact rows: the pressed icon (the primary or the x) carries the busy ring, not its siblings.
+  const a = app();
+  const resume = { kind: "resume", label: "Resume download", confirm: false, disabled: false, disabledReason: null };
+  a.rowButtonClick(row, resume, "progress");
+  assert.equal(a.pressedControl[row.id], "primary", "set as the action starts");
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  assert.equal(a.pressedControl[row.id], undefined, "cleared once it settled");
+  const b = app();
+  await b.askRemove(row);
+  b.rowButtonClick(row, remove, "needs");
+  assert.equal(b.pressedControl[row.id], "remove");
+  // A press that only asks for confirmation marks nothing.
+  const c = app();
+  c.rowButtonClick(row, remove, "needs");
+  assert.equal(c.pressedControl[row.id], undefined);
+  // Review LOW 4: an earlier action settling does not clear a later press's marker (Remove while
+  // a resumed save still runs keeps the x's ring).
+  const d = app();
+  d.keep(row.id);
+  let finish: () => void = () => {};
+  d.holdRuns(new Promise<void>((resolve) => { finish = resolve; }));
+  d.rowButtonClick(row, resume, "progress");
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  assert.equal(d.pressedControl[row.id], "primary", "the resume is still running");
+  d.press(row.id, "remove"); // the user pressed the x meanwhile; that removal is still running
+  finish();
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  assert.equal(d.pressedControl[row.id], "remove", "the resume settling later leaves the newer marker");
+});
+
 test("actions that need no confirmation run at once, and disabled ones do nothing", async () => {
   const a = app();
   a.rowButtonClick(row, { kind: "resume", label: "Resume download", confirm: false, disabled: false, disabledReason: null }, "progress");
@@ -193,7 +230,8 @@ test("focus never falls to <body> when a confirmation or a row goes away", async
   // Away from a confirmation, a row that stays gets its first action, not Remove.
   const f = app();
   f.keep(row.id);
-  assert.equal(f.rowFocusTarget(row.id, "needs", undefined, false).key, `[data-sdl-row="${row.id}"] .sdl-act`);
+  // Compact rows: a row's controls are icon buttons (or the confirmation pair).
+  assert.equal(f.rowFocusTarget(row.id, "needs", undefined, false).key, `[data-sdl-row="${row.id}"] :is(.sdl-ico-btn, .sdl-act)`);
   assert.equal(f.rowFocusTarget(row.id, "needs", undefined, true).key, `[data-sdl-row="${row.id}"] [data-sdl-remove]`);
 });
 
@@ -293,13 +331,40 @@ test("the Transfers markup keeps one row per file and the new contracts", () => 
   assert.doesNotMatch(source, /Resume continues a partly saved file only if it is still the file Mewtual created/);
   // The replace setting was deferred to a follow-up PR: no trace of it here.
   assert.doesNotMatch(source, /Replace my older saved copy|replaceOlder/);
-  // Action buttons name their file and say why they are disabled.
-  assert.match(source, /aria-label=\{action\.accessibleName\}/);
-  assert.match(source, /title=\{action\.disabledReason \?\? undefined\}/);
-  // A Clear whose re-check is running is marked busy (review LOW-6 of the fix-the-lows round).
-  assert.match(source, /aria-busy=\{action\.kind === "remove" && clearingSaved\[saved\.id\] \? "true" : undefined\}/);
-  assert.match(source, /title=\{action\.kind === "remove" && clearingSaved\[saved\.id\] \? "Checking the saved file" : action\.disabledReason \?\? undefined\}/);
-  assert.match(source, /aria-label=\{`Show \$\{saved\.name\} in folder`\}/);
+  // Compact rows (design compact.md): the old text-button row and the inline link are gone; every
+  // control is an icon button with a verb as its tooltip and the file in its accessible name.
+  assert.doesNotMatch(source, /class="sdl-actions"|class="sdl-link"/);
+  assert.match(source, /\{@const controls = compactControls\(saved\)\}/);
+  assert.match(source, /<span class="sdl-status" title=\{saved\.statusTitle\}>/);
+  assert.match(source, /\{#if !saved\.showWhy\}<span class="sdl-sr">\{saved\.statusTitle\}<\/span>\{\/if\}/);
+  assert.match(source, /\{#if saved\.showWhy\}<p class="sdl-why">\{saved\.why\}<\/p>\{\/if\}/);
+  assert.match(source, /<span class="sdl-chip">\{saved\.word\}<\/span>/, "the chip is word-only");
+  // The primary: an action (with its label as tooltip, or the disabled reason) or Show in folder.
+  assert.match(source, /title=\{primary\.action\.disabledReason \?\? primary\.action\.label\}\s*aria-label=\{primary\.action\.accessibleName\}/);
+  assert.match(source, /aria-label=\{primary\.accessibleName\}/);
+  // More: a menu button naming the file; the menu is keyboard operable and mounted at the top.
+  assert.match(source, /aria-haspopup="menu" aria-expanded=\{rowMenu\?\.rowId === saved\.id \? "true" : "false"\}/);
+  assert.match(source, /aria-label=\{`More actions for \$\{saved\.name\}`\}/);
+  assert.match(source, /<div class="sdl-menu" class:up=\{rowMenu\.up\} id=\{`sdl-menu-\$\{rowMenu\.rowId\}`\} role="menu"/);
+  assert.equal(source.match(/class="sdl-menu-item" role="menuitem"/g)?.length, 2);
+  assert.match(source, /tabindex=\{rowMenuFocus === index \? 0 : -1\}/, "roving tabindex");
+  // The x: Remove or Clear, busy while Clear re-checks, with the disabled reason described.
+  assert.match(source, /<button class="sdl-ico-btn danger" type="button" data-sdl-remove=\{saved\.id\}/);
+  assert.match(source, /title=\{clearingSaved\[saved\.id\] \? "Checking the saved file" : remove\.disabledReason \?\? remove\.label\}\s*aria-label=\{remove\.accessibleName\}/);
+  assert.match(source, /\{@const removeBusy = clearingSaved\[saved\.id\] \|\| \(saved\.busy && pressedControl\[saved\.id\] === "remove"\)\}/);
+  // While confirming, only the chip and the pair show.
+  assert.match(source, /\{#if !confirming && controls\.primary\}/);
+  assert.match(source, /\{#if confirming && remove\}/);
+  // Review MEDIUM 3: the global button hover (accent) must not show through a disabled or busy
+  // icon button or menu item; the guard comes before the looks that keep their own backgrounds.
+  const css = readFileSync(new URL("./app.css", import.meta.url), "utf8");
+  const guard = css.indexOf(".sdl-ico-btn:hover,\n.sdl-menu-item:hover { background: transparent; }");
+  assert.ok(guard > 0, "the hover guard");
+  assert.ok(guard < css.indexOf(".sdl-ico-btn.go {") && guard < css.indexOf(".sdl-more[aria-expanded=\"true\"] {"));
+  // The listeners closing the menu on an outside press, a scroll or a resize.
+  assert.match(source, /window\.addEventListener\("pointerdown", rowMenuPointerDown, true\)/);
+  assert.match(source, /document\.addEventListener\("scroll", rowMenuMoved, true\)/);
+  assert.match(source, /window\.addEventListener\("resize", rowMenuMoved\)/);
 });
 
 test("the menu, image viewer and file pane save items take their label from the file's row", () => {
