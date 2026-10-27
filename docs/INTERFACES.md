@@ -6676,7 +6676,11 @@ and every drop handler returns early on a drop that carries no files.
   identity taken over by a lock or the pending-message work). `send()` keeps this press's dispatch
   evidence (`mayHaveGone`, set by `submitPendingSend`'s `onDispatch`) separate from its original
   prior-attempt uncertainty (`priorMayHaveGone`), never reconstructing either from a later queue
-  lookup. Composer and background retry warnings retain that earlier uncertainty too. An
+  lookup. Composer and background retry warnings retain that earlier uncertainty too.
+  `sendRefusedUnaccepted` separately identifies native non-acceptance, including
+  `CHAT_SEND_CAPACITY` and `CHAT_SEND_DOCUMENT_PENDING`. These allow a retained entry to retry,
+  but prove THIS attempt absent once its entry is resolved; they cannot erase an earlier
+  ambiguous attempt. An
   announcement is never `uncertain`. The
   toast reports that outcome, before a move away ends the batch, and never the composer's
   contents, which cannot tell a sent message whose draft was kept from an unsent one: "sent",

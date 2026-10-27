@@ -40,7 +40,7 @@
     type MessagePage, type PageAnchor, type PageRequest, type PagedRowContext, type UnreadSummary,
   } from "./message-paging";
   import { persistenceWarning, sendAndRefresh, sendOutcome, type SendMessageResult, type SendOutcome } from "./message-send";
-  import { addPendingSend, matchingPendingSend, pendingSendRetryBlock, resolvePendingSend, type PendingResolution, type PendingSend, type PendingSends } from "./pending-sends";
+  import { addPendingSend, matchingPendingSend, pendingSendRetryBlock, resolvePendingSend, sendRefusedUnaccepted, type PendingResolution, type PendingSend, type PendingSends } from "./pending-sends";
   import PendingSendManager from "./PendingSendManager.svelte";
   import { PendingSendRetry } from "./pending-send-retry";
   import { ImageSrcCache } from "./image-src";
@@ -20032,16 +20032,17 @@
       // errors do not prove absence. It is "uncertain" when its sealed identity stays pending
       // without a retry block (the quiet retry sends it by itself), when a lock kept it in the
       // vault to retry after unlock, or when it may have been dispatched (`mayHaveGone`) and the
-      // error is not a definite native refusal, even if the pending-message manager has since
-      // recovered or stopped the entry. An older ambiguous attempt remains uncertain even when
-      // this invocation is definitely refused: only exact historical evidence could resolve it.
-      // Calling those unsent invited a second send under a new token (found in review).
+      // native side has not proved it unaccepted, even if the pending-message manager has since
+      // recovered or stopped the entry. The unaccepted classifier includes capacity refusals,
+      // which permit automatic retry while the entry remains. A prior ambiguous attempt still
+      // stays uncertain even when THIS attempt is proven unaccepted; otherwise a retry refusal
+      // could invite a duplicate send under a new token.
       const kept = intent ? pendingSends[intent.token] : undefined;
-      const refusedForGood = pendingSendRetryBlock(errorText(e)) !== undefined;
+      const provenUnaccepted = sendRefusedUnaccepted(errorText(e));
       const outcome: SendOutcome = !intent ? "failed"
         : !sessionCurrent() || (kept && !kept.retryBlock) ? "uncertain"
         : priorMayHaveGone ? "uncertain"
-        : mayHaveGone && !refusedForGood ? "uncertain"
+        : mayHaveGone && !provenUnaccepted ? "uncertain"
         : "failed";
       if (!sessionCurrent()) return outcome;
       error = String(e);

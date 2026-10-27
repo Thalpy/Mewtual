@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import ts from "typescript";
-import { addPendingSend, matchingPendingSend, pendingSendRetryBlock, resolvePendingSend } from "./pending-sends.ts";
+import { addPendingSend, matchingPendingSend, pendingSendRetryBlock, resolvePendingSend, sendRefusedUnaccepted } from "./pending-sends.ts";
 import { readFileSync } from "node:fs";
 import { persistenceWarning, sendAndRefresh, sendOutcome, type SendMessageResult } from "./message-send.ts";
 
@@ -45,7 +45,7 @@ function composer(submit: (args: Record<string, unknown>) => Promise<SendMessage
   const source = readFileSync(new URL("./App.svelte", import.meta.url), "utf8");
   const body = ts.transpile(source.slice(source.indexOf("  async function submitPendingSend("),
     source.indexOf("  // Inline edit of one of your own messages.")), { target: ts.ScriptTarget.ES2022 });
-  return new Function("submit", "refresh", "context", "onSeal", "sendAndRefresh", "persistenceWarning", "sendOutcome", "addPendingSend", "matchingPendingSend", "pendingSendRetryBlock", "resolvePendingSend", `
+  return new Function("submit", "refresh", "context", "onSeal", "sendAndRefresh", "persistenceWarning", "sendOutcome", "addPendingSend", "matchingPendingSend", "pendingSendRetryBlock", "resolvePendingSend", "sendRefusedUnaccepted", `
     let draft = "one message", cur = { active: "1" }, activeServerId = 1, sending = false;
     let locked = false, uiStateLoadGeneration = 0, replyingTo = "", mentionQuery = null;
     let drafts = { room: draft }, draftRevisions = {}, pendingSendNonce = 0, chatStickToBottom = false;
@@ -68,7 +68,7 @@ function composer(submit: (args: Record<string, unknown>) => Promise<SendMessage
       lock() { sealed = JSON.parse(continuityJson()); locked = true; uiStateLoadGeneration++; draft = ""; drafts = {}; pendingSends = {}; sending = false; pendingSendNonce++; },
       state() { return { draft, drafts, pendingSends, recoveredSendDrafts, sealed, warnings, error, sending }; }
     };
-  `)(submit, refresh, context, onSeal, sendAndRefresh, persistenceWarning, sendOutcome, addPendingSend, matchingPendingSend, pendingSendRetryBlock, resolvePendingSend);
+  `)(submit, refresh, context, onSeal, sendAndRefresh, persistenceWarning, sendOutcome, addPendingSend, matchingPendingSend, pendingSendRetryBlock, resolvePendingSend, sendRefusedUnaccepted);
 }
 
 test("composer keeps the draft until its retry identity can be sealed", async () => {
@@ -209,7 +209,7 @@ test("a send that threw after sealing is uncertain, since its identity retries b
   assert.equal(await invalid.send(), "failed");
 });
 
-test("a request recovered or stopped while it is still out stays uncertain when its reply fails", async () => {
+test("a request recovered or stopped while it is still out stays uncertain when its reply fails, unless native proves it unaccepted", async () => {
   // Found in review: the outcome read the pending entry back after the failure, so resolving the
   // entry in Pending messages while the request was out turned a possibly accepted message into
   // "not sent", inviting the recovered text to be sent again under a new token.
@@ -232,14 +232,34 @@ test("a request recovered or stopped while it is still out stays uncertain when 
     }
   }
 
-  // A definite native refusal is still "failed", resolved entry or not.
-  let refuse!: (failure: Error) => void;
-  const refused = composer(() => new Promise((_, reject) => { refuse = reject; }));
-  const pending = refused.send();
-  for (let n = 0; n < 40 && !refuse; n++) await Promise.resolve();
-  await refused.resolvePendingMessage(Object.keys(refused.state().pendingSends)[0], "cancel");
-  refuse(new Error("CHAT_SEND_INVALID: length"));
-  assert.equal(await pending, "failed");
+  // A refusal the native side makes only for a token it holds no record of proves the request was
+  // never accepted, so once the entry is resolved (nothing will retry it) the send failed. Found
+  // in review: the two temporary refusals, capacity and a channel's outstanding preparation, were
+  // still reported "don't send it again" there.
+  for (const refusal of ["CHAT_SEND_INVALID: length", "CHAT_SEND_CAPACITY: retained retry/publication capacity exhausted",
+    "CHAT_SEND_DOCUMENT_PENDING: retry the outstanding send for this channel first"]) {
+    for (const action of ["recover", "cancel"] as const) {
+      let refuse!: (failure: Error) => void;
+      const refused = composer(() => new Promise((_, reject) => { refuse = reject; }));
+      const pending = refused.send();
+      for (let n = 0; n < 40 && !refuse; n++) await Promise.resolve();
+      await refused.resolvePendingMessage(Object.keys(refused.state().pendingSends)[0], action);
+      refuse(new Error(refusal));
+      assert.equal(await pending, "failed", `${refusal.split(":")[0]} after ${action}`);
+      assert.deepEqual(refused.state().pendingSends, {});
+    }
+  }
+
+  // Control: the same temporary refusal with the entry kept is uncertain, because the quiet retry
+  // will send it later; it must not be blocked from that.
+  for (const refusal of ["CHAT_SEND_CAPACITY: retained retry/publication capacity exhausted",
+    "CHAT_SEND_DOCUMENT_PENDING: retry the outstanding send for this channel first"]) {
+    const kept = composer(async () => { throw new Error(refusal); });
+    assert.equal(await kept.send(), "uncertain", `${refusal.split(":")[0]} with its entry kept`);
+    const [intent] = Object.values(kept.state().pendingSends) as Array<{ retryBlock?: string }>;
+    assert.ok(intent, "still pending");
+    assert.equal(intent.retryBlock, undefined, "and still retried automatically");
+  }
 });
 
 test("a send whose sealed identity is taken over before dispatch is uncertain, not refused", async () => {
@@ -254,7 +274,7 @@ test("a send whose sealed identity is taken over before dispatch is uncertain, n
 });
 
 test("a refused retry cannot disprove an earlier ambiguous send, even after pending resolution", async () => {
-  for (const response of ["context", "invalid", "superseded"] as const) {
+  for (const response of ["context", "invalid", "capacity", "document_pending", "superseded"] as const) {
     for (const action of [undefined, "recover", "cancel"] as const) {
       const tokens: unknown[] = [];
       let resolve!: (result: SendMessageResult) => void;
@@ -272,7 +292,12 @@ test("a refused retry cannot disprove an earlier ambiguous send, even after pend
       assert.equal(tokens[0], tokens[1]);
       if (action) await app.resolvePendingMessage(Object.keys(app.state().pendingSends)[0], action);
       if (response === "superseded") resolve({ accepted: false, persistence: { status: "superseded" } });
-      else reject(new Error(response === "context" ? "CHAT_SEND_CONTEXT_CHANGED: conversation replaced" : "CHAT_SEND_INVALID: length"));
+      else reject(new Error({
+        context: "CHAT_SEND_CONTEXT_CHANGED: conversation replaced",
+        invalid: "CHAT_SEND_INVALID: length",
+        capacity: "CHAT_SEND_CAPACITY: retained retry/publication capacity exhausted",
+        document_pending: "CHAT_SEND_DOCUMENT_PENDING: retry the outstanding send for this channel first",
+      }[response]));
       assert.equal(await retry, "uncertain", `${response}/${action ?? "kept"}: this refusal concerns the retry, not its lost predecessor`);
       assert.equal(tokens.length, 2, "classification never submits another identity");
       if (response === "superseded") {

@@ -6221,6 +6221,11 @@ mediums and a low. Fixed with regression tests, each confirmed to fail without i
     entry back after a failure, so recovering or stopping it in Pending messages while the
     request was still out turned a possibly accepted message into "not sent". `send()` now keeps
     its own evidence that the identity may have been dispatched.
+  - The external review of `fd788d80` closed that medium and its own `test:flows` run passed 9/9
+    (isolated Linux checkout). One P3, fixed: the "proven unaccepted" test reused the retry-block
+    classifier, so capacity and document-pending refusals (which keep retrying while the entry
+    exists, but prove non-acceptance) still said "don't send it again" once the entry was
+    resolved. `sendRefusedUnaccepted` now answers that question separately.
 - **HIGH follow-up from the Gate7 clip-editor review**: the native
   upload/lock race. `finish_file_upload` (`src-tauri/src/lib.rs`) reads the unlocked state, then
   awaits the uploads mutex, removes the reservation on that earlier answer, and awaits
