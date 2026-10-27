@@ -819,6 +819,13 @@ async fn range_limit_is_checked_before_any_network_request() {
 
 #[tokio::test]
 async fn accepted_crossing_range_chunk_renews_quiet_deadline_before_fetching_the_next_chunk() {
+    // Keep the observer bound unchanged, but identify the exact stalled owner. A generic
+    // timeout here cannot distinguish fixture startup from a missed transfer completion.
+    async fn stage<F: Future>(name: &'static str, future: F) -> F::Output {
+        tokio::time::timeout(Duration::from_secs(5), future)
+            .await
+            .unwrap_or_else(|error| panic!("crossing-range stage {name} stalled: {error}"))
+    }
     let data: Vec<_> = (0..CHUNK_BYTES + 64).map(|i| (i % 223) as u8).collect();
     let Pair {
         mut requester,
@@ -828,7 +835,7 @@ async fn accepted_crossing_range_chunk_renews_quiet_deadline_before_fetching_the
         gate,
         clock,
         ..
-    } = bounded(pair_with_data(data.clone())).await;
+    } = stage("pair setup", pair_with_data(data.clone())).await;
     let manifest = FileManifest::decode_or_legacy(&requester.files()[0].file_ref).unwrap();
     assert_eq!(manifest.chunks.len(), 2);
     let first = manifest.chunks[0].ciphertext_cid;
@@ -838,6 +845,9 @@ async fn accepted_crossing_range_chunk_renews_quiet_deadline_before_fetching_the
         .unwrap();
     let version = requester.file_head(&cid).unwrap().manifest_version;
     let (source, _events, source_task) = spawn(holder);
+    // This FIFO command proves the actual actor finished setup before the shared clock
+    // jumps. Starting the source is a prerequisite, not part of the renewal being tested.
+    assert_eq!(stage("source startup", source.member_count()).await, 2);
     let mut transfers = isolated_transfers();
     let old_deadline = clock.monotonic_ms() + READ_MS;
     let at_accept = clock.clone();
@@ -855,18 +865,65 @@ async fn accepted_crossing_range_chunk_renews_quiet_deadline_before_fetching_the
         None,
         reply,
     );
-    let attempt = bounded(entered.recv()).await.unwrap();
+    assert_eq!(clock.monotonic_ms(), old_deadline - 1);
+    let attempt = stage("second chunk transport admission", entered.recv())
+        .await
+        .unwrap();
     clock.set_ms(old_deadline + 1);
+    assert!(!attempt.is_cancelled(), "renewed request remains current");
     gate.add_permits(1);
-    let completed = bounded(transfers.next()).await.unwrap();
+    eprintln!(
+        "crossing-range completion: mono={}, requests={}, running={}, inflight={}",
+        clock.monotonic_ms(),
+        requester
+            .sync
+            .transport()
+            .sent_blob_requests
+            .load(std::sync::atomic::Ordering::Acquire),
+        transfers.running.len(),
+        transfers.inflight.len(),
+    );
+    let completed = tokio::time::timeout(Duration::from_secs(5), transfers.next())
+        .await
+        .unwrap_or_else(|error| {
+            panic!(
+                "crossing-range second chunk completion stalled: mono={}, requests={}, running={}, inflight={}: {error}",
+                clock.monotonic_ms(),
+                requester
+                    .sync
+                    .transport()
+                    .sent_blob_requests
+                    .load(std::sync::atomic::Ordering::Acquire),
+                transfers.running.len(),
+                transfers.inflight.len(),
+            )
+        })
+        .unwrap();
+    let TransferStep::Network(network) = &completed else {
+        panic!("crossing range must complete its actual second-chunk request")
+    };
+    assert_eq!(network.job.index, 1);
+    assert_eq!(network.job.deadline, old_deadline - 1 + READ_MS);
+    assert!(
+        network.result.is_ok(),
+        "second-chunk worker did not complete normally: {:?}",
+        network.result.as_ref().err()
+    );
     transfers.complete(&mut requester, completed);
+    assert!(
+        transfers.is_empty(),
+        "crossing range must settle its result"
+    );
     assert_eq!(
-        bounded(result).await.unwrap().unwrap().bytes,
+        stage("range result", result).await.unwrap().unwrap().bytes,
         data[start..start + 32]
     );
     drop(attempt);
-    source.shutdown().await;
-    bounded(source_task).await.unwrap();
+    stage("source shutdown", async {
+        source.shutdown().await;
+        source_task.await.unwrap();
+    })
+    .await;
 }
 
 #[tokio::test]

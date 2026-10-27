@@ -9,7 +9,7 @@ tests cover remote-labelled loopback and deceptive URL boundaries; current capab
 still grant no remote scope. A single GTK build-time maintenance decision is constrained
 to reviewed stable macro versions/parents, with positive and mutation controls. It is not
 a general security proof. [NATIVE-DEPENDENCY-AUDIT](communication-recovery/NATIVE-DEPENDENCY-AUDIT.md)
-records source analysis, exact checkpoint, policy limits and pending full native validation.
+records source analysis, exact checkpoint, policy limits and validation boundaries.
 
 ## Expired KeyPackage leaves, Welcome joins and admission lifetimes (26 October, branch `mls-leaf-lifetime`)
 

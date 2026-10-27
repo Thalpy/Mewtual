@@ -4,8 +4,10 @@
 
 PRs #26/#54 have landed in main; #57 has landed in the chat-recovery branch. Draft #74
 combines the reviewed recovery/V2 stack, dependency upgrade and newer Gate7 send fixes,
-including the original upload/lock repair. Fresh combined frontend/MLS/flow checks pass;
-complete backend gates are pending. Both dependency audits now pass after the separate
+including the original upload/lock repair. Fresh frontend/MLS/flow checks pass, as do
+899 native library and six ACL tests. Root validation is blocked by the crossing-range
+observer failure; its diagnostic follow-up still needs execution. Build/startup remain
+pending. Both dependency audits now pass after the separate
 native follow-up, with a documented and constrained GTK build-time maintenance decision.
 [PR-BACKLOG-INTEGRATION](communication-recovery/PR-BACKLOG-INTEGRATION.md) records exact
 sources, current results and held PR findings. Older dated evidence below retains its

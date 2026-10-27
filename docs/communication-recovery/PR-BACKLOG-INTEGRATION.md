@@ -50,16 +50,20 @@ dependency graph and policy pass both audits, including all four categories. Fou
 upload/session regressions passed before the native dependency follow-up. The WMI-only
 Windows check passes after its ABI correction. Six actual native authority/parser
 regressions, strict native Clippy and the separate native check also pass on the new
-graph. The complete native run was interrupted to correct the fixture ordering below;
-its partial result is not a full-suite pass. Fresh native gates are running serially.
-Root Rust/Cargo/toolchain inputs are byte-identical to the initial
-combined source being tested by hosted Windows/Linux jobs. Runtime manifests record
+graph. The first native run was interrupted to correct the fixture ordering below;
+its partial result is not a full-suite pass. The fresh `121ad952` native run passes all
+899 library tests in 2,186.57 seconds and all six ACL/parser tests. Fresh native formatting
+and strict Clippy pass too. Native build/startup are running serially before Root diagnosis.
+Through `121ad952`, Root Rust/Cargo/toolchain inputs are byte-identical to the initial
+combined source tested by hosted Windows/Linux jobs. The Root observer change below
+requires new execution; the earlier Root result cannot validate it. Runtime manifests record
 1,477 file hashes; documentation updates do not change those inputs.
 
 Read-only reviews of the actual merge and neighboring enforcement found no new blocker,
 high or medium in the scoped send/upload, MLS/dependency and native custody boundaries.
 The stale commit-refusal comment was corrected. These reviews are not a fresh audit of
-every inherited file. Full gates and native layout guards still need their new results.
+every inherited file. The new full native run includes its vectors/layout guards; Root
+validation and build/startup still need completion.
 
 The separate completed `05c97adb` checkpoint passed 897 native library plus 5 ACL tests,
 3,691 Root tests with 24 existing ignores, and 3,200 frontend tests. Its native run used a
@@ -74,8 +78,8 @@ unmaintained proc-macro-error/UNIC advisories. The follow-up at `c4aa9064` updat
 removes unused ZIP extraction, updates the Tauri utility/parser graph to remove UNIC,
 and replaces a newly yanked native arithmetic release. Both audits now pass. One new
 build-only maintenance decision has exact stable-version/parent fences and tested
-positive/negative controls. All six actual native authority/parser regressions pass;
-the full native gates still need completion on this changed graph. See
+positive/negative controls. The full native suite and all six actual native
+authority/parser regressions pass on this changed graph; build/startup remain pending. See
 [NATIVE-DEPENDENCY-AUDIT](NATIVE-DEPENDENCY-AUDIT.md) for the source analysis and limits.
 
 The upgrade's existing crypto-bigint exception remains the reviewed, constrained policy:
@@ -84,6 +88,29 @@ X25519/Ed25519 suite and dependency bans. This is not removal of every old crate
 New OpenMLS 0.9-created/joined group records do not safely downgrade to older builds.
 Use isolated validation profiles; the compatibility limits are in
 [the upgrade design](../design-crypto-bigint-upgrade.md).
+
+## Root crossing-range observer failure
+
+The initial combined Linux Root job `122321586207` failed in
+`accepted_crossing_range_chunk_renews_quiet_deadline_before_fetching_the_next_chunk`:
+the App library reported 1,257 passed, one failed and 23 ignored. Its generic five-second
+observer does not identify whether setup, transport admission/completion, the range
+result or shutdown stalled. The workspace command stopped at that crate; this is not a
+complete Root pass. The failure's production cause has not been established.
+
+Inspection confirms the intended cached-chunk acceptance renews the quiet deadline
+synchronously before the second request is prepared. The next two-millisecond clock
+advance should leave both renewed quiet and attempt deadlines current. No production
+deadline or cancellation change is justified by the available log.
+
+The diagnostic follow-up labels the same five-second bounds, awaits an actual FIFO
+holder command before advancing its shared clock, and checks the real network step's
+chunk and renewed deadline. A fixed-count observation and immediate completion checks
+distinguish a pending retry from an accepted range result. CI runs the focused actor
+module before the complete Root suite for earlier feedback; it still runs the full gate.
+Read-only review found no remaining actionable findings. Focused execution, a
+renewal-removal mutation and fresh complete Root gates remain required. These changes
+are not evidence that the historical failure is fixed.
 
 ## Shared expiry-clock fixture ordering
 
@@ -105,9 +132,10 @@ Additional diagnostics contain only fixed roles/stages, times and atomic observa
 The corrected actual test passes 1/1 in 10.75 seconds. A missing-await mutation fails
 at the intended ordering invariant, 0/1 in 10.01 seconds; the correct source was restored
 byte-for-byte with a fresh timestamp and rebuilt before the positive run. A read-only
-review of the actual restored diff found no actionable findings. The complete native
-suite and hosted Linux rerun remain required; a focused pass does not clear the old CI
-failure by itself.
+review of the actual restored diff found no actionable findings. The complete local
+native suite now passes 899 library and six ACL tests, including this case. The hosted
+Linux rerun remains required; the original focused pass alone did not clear the old CI
+failure.
 
 ## Held PRs and remaining implementation
 

@@ -27,6 +27,10 @@ jobs:
         run: cargo fmt --all -- --check
       - name: Clippy
         run: cargo clippy --all-targets --all-features -- -D warnings
+      # These bounded actor tests diagnose clock/transport boundaries before the much longer
+      # complete workspace run. A failure still fails this job; no full-suite gate is replaced.
+      - name: File transfer actor boundaries
+        run: cargo test -p catcoms-app --all-features actor::file_transfers::tests
       - name: Test
         run: cargo test --all --all-features
       # WMI accepts independent broad windows/windows-core ranges. A valid lock resolution
