@@ -29,14 +29,15 @@ cryptographic proof or a claim that every dependency is maintained.
   non-yanked 0.7.10, with `ctutils` 0.4.6. Native P-256 remains 0.14 and the injected RNG,
   transcript and encoding contracts remain required. The fresh `121ad952` full native
   run passes 899 library tests, including its vectors/layout guards, and six ACL tests.
-  Native strict Clippy/check pass; build/startup and Root validation remain pending.
+  Native strict Clippy/check, build and real application startup pass. Root validation
+  remains pending after its separate fixture-setup failure.
 - A Windows build exposed WMI 0.18.4 selecting `windows` 0.62.2 with an incompatible
   direct `windows-core` 0.61.2. Its published ranges permit both independently. Only
   WMI's core edge is restored to 0.62.2; other legitimate 0.61 users remain. Locked
   metadata accepts the graph, and the targeted Windows check passes in 14.47 seconds.
   CI now runs that native dependency check on Windows so a Linux-only native build
   cannot hide the same COM mismatch. The fresh full native suite now passes; native
-  build/startup remain pending.
+  build/startup also pass.
 
 CI now performs all four cargo-deny categories on the separate desktop manifest using
 the shared root policy. Its previous native step checked bans only, so a Root audit pass

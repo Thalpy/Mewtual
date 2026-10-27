@@ -51,9 +51,11 @@ upload/session regressions passed before the native dependency follow-up. The WM
 Windows check passes after its ABI correction. Six actual native authority/parser
 regressions, strict native Clippy and the separate native check also pass on the new
 graph. The first native run was interrupted to correct the fixture ordering below;
-its partial result is not a full-suite pass. The fresh `121ad952` native run passes all
+its partial result is not a full-suite pass. The fresh local Windows `121ad952` native run passes all
 899 library tests in 2,186.57 seconds and all six ACL/parser tests. Fresh native formatting
-and strict Clippy pass too. Native build/startup are running serially before Root diagnosis.
+and strict Clippy pass too. Native build and real application startup also pass; the app
+was not unlocked. Hosted Linux native validation still fails at the separate Begin-reply
+observer below. Fresh Root validation remains required.
 Through `121ad952`, Root Rust/Cargo/toolchain inputs are byte-identical to the initial
 combined source tested by hosted Windows/Linux jobs. The Root observer change below
 requires new execution; the earlier Root result cannot validate it. Runtime manifests record
@@ -63,7 +65,7 @@ Read-only reviews of the actual merge and neighboring enforcement found no new b
 high or medium in the scoped send/upload, MLS/dependency and native custody boundaries.
 The stale commit-refusal comment was corrected. These reviews are not a fresh audit of
 every inherited file. The new full native run includes its vectors/layout guards; Root
-validation and build/startup still need completion.
+validation still needs completion.
 
 The separate completed `05c97adb` checkpoint passed 897 native library plus 5 ACL tests,
 3,691 Root tests with 24 existing ignores, and 3,200 frontend tests. Its native run used a
@@ -79,7 +81,7 @@ removes unused ZIP extraction, updates the Tauri utility/parser graph to remove 
 and replaces a newly yanked native arithmetic release. Both audits now pass. One new
 build-only maintenance decision has exact stable-version/parent fences and tested
 positive/negative controls. The full native suite and all six actual native
-authority/parser regressions pass on this changed graph; build/startup remain pending. See
+authority/parser regressions pass on this changed graph, as do build/startup. See
 [NATIVE-DEPENDENCY-AUDIT](NATIVE-DEPENDENCY-AUDIT.md) for the source analysis and limits.
 
 The upgrade's existing crypto-bigint exception remains the reviewed, constrained policy:
@@ -108,9 +110,32 @@ holder command before advancing its shared clock, and checks the real network st
 chunk and renewed deadline. A fixed-count observation and immediate completion checks
 distinguish a pending retry from an accepted range result. CI runs the focused actor
 module before the complete Root suite for earlier feedback; it still runs the full gate.
-Read-only review found no remaining actionable findings. Focused execution, a
-renewal-removal mutation and fresh complete Root gates remain required. These changes
-are not evidence that the historical failure is fixed.
+Read-only review found no remaining actionable findings. The following watchdog
+correction and execution narrow the failure; they do not establish the historical cause.
+
+The next focused Windows job (`122398330559`, `ec4e63f8`) identifies **pair setup** as
+the failing stage: 46 passed, one failed. It fails before the range, storage hook or
+renewal starts. That aggregate observer includes sealing a real 8 MiB chunk and making
+MLS identities, as well as Join/catch-up. This identifies the stage of this newer failure;
+it does not establish whether local preparation or networking consumed its time, nor
+prove the earlier Linux failure had the same cause.
+
+The fixture contract is now explicit: fixed local cryptographic preparation is not a
+five-second performance gate. After that preparation, membership, file subscription
+and catch-up share **one unchanged five-second watchdog**, with phase-specific failures
+and timeout priority. It is never restarted between those stages. Concrete MemNetwork
+preparation performs local publication/subscription; any future peer wait must stay
+under the watchdog. The small-data helper's aggregate five-second bound remains. A new
+negative fixture withholds actual holder Join service and requires the watchdog's exact
+rejection. All range/currentness, Lower custody and production timing remain unchanged.
+The corrected range test passes in 4.80 seconds. Removing only its production renewal
+fails at the intended currentness assertion in 4.72 seconds; production source was
+restored byte-for-byte with a fresh timestamp. The final Clock-based fixture rebuild
+passes all 48 file-transfer module tests in 20.98 seconds, including the unserved Join.
+Root formatting, strict Clippy and the ambient gate pass. Complete Root execution remains
+required in hosted CI; the local full run was interrupted to serialize the new native
+diagnosis and is not counted as a pass. The earlier unchanged Root inputs passed 3,726
+tests with 25 existing ignores on hosted Windows, while Linux had the failure above.
 
 ## Shared expiry-clock fixture ordering
 
@@ -136,6 +161,23 @@ review of the actual restored diff found no actionable findings. The complete lo
 native suite now passes 899 library and six ACL tests, including this case. The hosted
 Linux rerun remains required; the original focused pass alone did not clear the old CI
 failure.
+
+## Later Linux native Begin-reply failure
+
+At `121ad952`, Linux job `122376872569` reports 880 native library tests passed and
+19 failed. One real failure is
+`native_v2_original_sdp_result_uses_actual_actor_and_survives_eager_cancellation_lock_and_history_retries`:
+`confirmation::outgoing` authenticated a three-byte reply, then blindly required a
+242-byte status. The remaining 18 failures are the closed fixture admission gate.
+The reply code was not logged, so its historical refusal cause remains unknown.
+
+Begin legitimately returns three-byte Closed, Stopped or Protocol refusals, including
+Capacity under transient local contention. The fixture must distinguish them, retain
+the same channel/parent/purpose/body and original deadline, and retry only exact Capacity.
+Capacity can also follow reservation/publication: it never proves no attempt occurred
+and must not trigger a refund, replacement or renewed authority. The correction and
+deterministic contention/rejection tests remain pending. Local Windows success does not
+clear this Linux failure.
 
 ## Held PRs and remaining implementation
 

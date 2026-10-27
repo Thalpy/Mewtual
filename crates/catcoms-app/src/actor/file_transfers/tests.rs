@@ -257,6 +257,14 @@ async fn pair_inner() -> Pair {
 }
 
 async fn pair_with_data(data: Vec<u8>) -> Pair {
+    pair_with_service(data, true).await
+}
+
+/// Build real encrypted test data before starting the async-stall watchdog. A full-size
+/// chunk is 8 MiB: its bounded local cryptographic work is not a five-second performance
+/// contract. Membership, subscription and catch-up then share ONE five-second deadline.
+/// `serve_join = false` injects an unavailable peer to prove that deadline still rejects.
+async fn pair_with_service(data: Vec<u8>, serve_join: bool) -> Pair {
     let hub = Hub::new();
     let clock = ManualClock::new(1_000);
     let clock_hook: ClockHook = Arc::new(std::sync::Mutex::new(None));
@@ -278,6 +286,12 @@ async fn pair_with_data(data: Vec<u8>) -> Pair {
         .await
         .unwrap();
     let invite = holder.mint_invite([7; 16], u64::MAX, vec![]).unwrap();
+    let joiner = MlsDevice::generate().unwrap();
+    // The concrete MemNetwork subscriptions/publication above are local operations. Any
+    // future peer wait belongs BELOW this watchdog, which must not restart between stages.
+    let setup_clock = catcoms_rt::SystemClock;
+    let setup_deadline = setup_clock.sleep(Duration::from_secs(5));
+    tokio::pin!(setup_deadline);
     let mut requester = {
         let joining = Server::join(
             GatedTransport {
@@ -289,7 +303,7 @@ async fn pair_with_data(data: Vec<u8>) -> Pair {
                 legacy_blob_only: std::sync::atomic::AtomicBool::new(false),
                 sent_blob_requests: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             },
-            MlsDevice::generate().unwrap(),
+            joiner,
             ChaCha20Rng::seed_from_u64(2),
             Box::new(ValidationClock {
                 inner: clock.clone(),
@@ -301,15 +315,29 @@ async fn pair_with_data(data: Vec<u8>) -> Pair {
         );
         tokio::pin!(joining);
         loop {
-            tokio::select! { result = &mut joining => break result.unwrap(), _ = holder.sync_once() => {} }
+            tokio::select! {
+                biased;
+                _ = &mut setup_deadline => panic!("file-transfer pair stalled during member join"),
+                result = &mut joining => break result.unwrap(),
+                _ = holder.sync_once(), if serve_join => {}
+            }
         }
     };
-    requester.open_files().await.unwrap();
+    tokio::select! {
+        biased;
+        _ = &mut setup_deadline => panic!("file-transfer pair stalled during file subscription"),
+        result = requester.open_files() => result.unwrap(),
+    }
     {
         let catchup = requester.request_files_catchup(holder_peer);
         tokio::pin!(catchup);
         loop {
-            tokio::select! { result = &mut catchup => { result.unwrap(); break; }, _ = holder.sync_once() => {} }
+            tokio::select! {
+                biased;
+                _ = &mut setup_deadline => panic!("file-transfer pair stalled during file catch-up"),
+                result = &mut catchup => { result.unwrap(); break; },
+                _ = holder.sync_once() => {}
+            }
         }
     }
     assert!(requester.sync.blob_cids().is_empty());
@@ -325,6 +353,12 @@ async fn pair_with_data(data: Vec<u8>) -> Pair {
         clock,
         clock_hook,
     }
+}
+
+#[tokio::test]
+#[should_panic(expected = "file-transfer pair stalled during member join")]
+async fn pair_network_watchdog_rejects_an_unserved_join() {
+    pair_with_service(b"unserved join".to_vec(), false).await;
 }
 
 #[tokio::test]
@@ -827,6 +861,8 @@ async fn accepted_crossing_range_chunk_renews_quiet_deadline_before_fetching_the
             .unwrap_or_else(|error| panic!("crossing-range stage {name} stalled: {error}"))
     }
     let data: Vec<_> = (0..CHUNK_BYTES + 64).map(|i| (i % 223) as u8).collect();
+    // The helper bounds actual network waits after fixed 8 MiB cryptographic preparation;
+    // it does not treat aggregate fixture construction as a five-second performance test.
     let Pair {
         mut requester,
         holder,
@@ -835,7 +871,7 @@ async fn accepted_crossing_range_chunk_renews_quiet_deadline_before_fetching_the
         gate,
         clock,
         ..
-    } = stage("pair setup", pair_with_data(data.clone())).await;
+    } = pair_with_data(data.clone()).await;
     let manifest = FileManifest::decode_or_legacy(&requester.files()[0].file_ref).unwrap();
     assert_eq!(manifest.chunks.len(), 2);
     let first = manifest.chunks[0].ciphertext_cid;
