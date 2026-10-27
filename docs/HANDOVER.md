@@ -1,16 +1,22 @@
 # Mewtual; Handover
 
-## Backlog integration in progress (27 October)
+## Backlog integration checkpoint (27 October)
 
-PRs #26/#54 have landed in main; #57 has landed in the chat-recovery branch. Draft #74
+PRs #26/#54 have landed in main; #57 has landed in the chat-recovery branch. PR #74
 combines the reviewed recovery/V2 stack, dependency upgrade and newer Gate7 send fixes,
-including the original upload/lock repair. Fresh frontend/MLS/flow checks pass, as do
-899 native library and six ACL tests on Windows. The crossing-range fixture correction
-passes all 48 file-transfer tests locally and in both hosted OS jobs; complete Root suites
-are running. The Begin-refusal observer's corrected original-deadline retry passes
-positive/mutation/restoration tests and the complete local native suite. Linux then
-found a pure SDP observer unwrapping legitimate Index contention; its test-only fix is
-in validation. Production admission remains nonblocking. Hosted Linux is not yet green.
+including the original upload/lock repair. At code checkpoint `c20a64d0`, full Windows
+and Linux native runs pass 900 library plus six ACL/parser tests. The full frontend suite
+passes 3,201 tests; Svelte check/build, all ten rendered flows and focused MLS checks pass.
+Complete Root runs at `8e2e7aaf` pass 3,727 tests with 25 existing ignores on Windows
+and 3,733 with 26 on Linux. Compiled Root inputs are unchanged through `c20a64d0`; the Root test that
+also scans native Rust source separately passes on that current source. All 48 focused
+file-transfer tests pass on both hosted OSes.
+The shared-clock, Begin-refusal and pure SDP/media observer corrections have positive
+and mutation/restoration evidence. Production admission remains nonblocking.
+Store mutation coverage is complete: all 22 pairs pass in Linux CI; Windows has
+19 verified hosted pairs plus three completed local pairs on the same code. Its hosted
+90-minute job stopped during a rebuild and is not counted as green. The aggregate
+CI allowance is now 120 minutes; assertions and test/command deadlines are unchanged.
 Native build/startup pass. Both dependency audits now pass after the separate
 native follow-up, with a documented and constrained GTK build-time maintenance decision.
 [PR-BACKLOG-INTEGRATION](communication-recovery/PR-BACKLOG-INTEGRATION.md) records exact
