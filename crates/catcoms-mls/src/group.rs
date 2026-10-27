@@ -90,6 +90,41 @@ impl ServerGroup {
         })
     }
 
+    /// Test-only: [`ServerGroup::create`] with an explicit founder-leaf lifetime (frozen fixtures).
+    #[cfg(test)]
+    pub(crate) fn create_with_lifetime(
+        device: &MlsDevice,
+        lifetime: Lifetime,
+    ) -> Result<Self, MlsError> {
+        let group = MlsGroup::new(
+            device.provider(),
+            device.signer(),
+            &crate::config::create_config_with_lifetime(lifetime),
+            device.credential(),
+        )
+        .map_err(proto)?;
+        Ok(Self {
+            group,
+            catalog: Default::default(),
+        })
+    }
+
+    /// Test-only: `not_after` of every KeyPackage-sourced leaf in the tree. openmls checks these
+    /// lifetimes against the wall clock when a Welcome is joined or an Add is processed.
+    #[cfg(test)]
+    pub(crate) fn key_package_leaf_not_after(&self) -> Vec<u64> {
+        self.group
+            .members()
+            .filter_map(|m| self.group.public_group().leaf(m.index))
+            .filter_map(|leaf| match leaf.leaf_node_source() {
+                openmls::treesync::LeafNodeSource::KeyPackage(lifetime) => {
+                    Some(lifetime.not_after())
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
     /// Join an existing group from a serialized Welcome (as produced by
     /// [`ServerGroup::add_member`]).
     pub fn join(device: &MlsDevice, welcome_bytes: &[u8]) -> Result<Self, MlsError> {
@@ -606,7 +641,22 @@ impl ServerGroup {
                     .map_err(proto)?;
                 Ok(Incoming::CommitApplied { removed })
             }
-            _ => Ok(Incoming::Other),
+            // openmls 0.9 reports a message this client authored (or one whose encrypted sender
+            // data merely CLAIMS our leaf, which any member can write) as a successful process
+            // with no content, where 0.8 returned an error. Keep 0.8's contract: refuse it.
+            // `Incoming::Other` means "processed, nothing to apply", and the sync layer records a
+            // commit as applied on any `Ok` (`apply_commit_in_order`), so mapping these to `Other`
+            // would mark an unmerged, or forged, commit as applied while the epoch stayed put.
+            // Our own staged commit is adopted only through `merge_staged_self`.
+            ProcessedMessageContent::OwnPrivateMessage
+            | ProcessedMessageContent::OwnPendingCommit => Err(MlsError::Protocol(
+                "refused a message attributed to this device's own leaf".into(),
+            )),
+            // Named, not `_`: an openmls upgrade that adds a variant must fail to compile here
+            // rather than silently become "processed, nothing to apply" (that is how the two
+            // variants above would have slipped through).
+            ProcessedMessageContent::ProposalMessage(_)
+            | ProcessedMessageContent::ExternalJoinProposalMessage(_) => Ok(Incoming::Other),
         }
     }
 
@@ -679,6 +729,12 @@ impl fmt::Debug for ServerGroup {
             .finish()
     }
 }
+
+#[cfg(test)]
+mod own_echo_tests;
+
+#[cfg(test)]
+mod suite_refusal_tests;
 
 #[cfg(test)]
 mod m1_tests {

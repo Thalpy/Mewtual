@@ -438,24 +438,61 @@ async fn end_and_atomic_lock_registration_during_rng_each_refuse_final_publicati
 
 #[tokio::test]
 async fn malformed_curve_point_fails_before_rng_and_leaves_closed_counted_fence() {
-    let f = Fixture::new().await;
-    let mut invalid = [0; 65];
-    invalid[0] = 4;
-    let (owner, selected) = select(&f, invalid).await;
-    let mut rng = Rng::new();
-    assert!(matches!(
-        ensure(&f.state, &owner, [9; 32], &mut rng).await,
-        Err(Refused::Binding)
-    ));
-    assert_eq!(rng.draws, 0);
-    assert_eq!(selected.resources().counts().1, 0);
-    assert!(matches!(
-        ensure(&f.state, &owner, [9; 32], &mut rng).await.unwrap(),
-        Status::Closed {
-            native_setup_drained: true
-        }
-    ));
-    f.close().await;
+    // The all-zero encoding, and the generator with its y coordinate changed (a valid 0x04
+    // structure that is not on the curve). Both must be refused by the actual curve check before
+    // any scalar is drawn.
+    let mut zero = [0; 65];
+    zero[0] = 4;
+    let mut off_curve = point();
+    off_curve[64] ^= 1;
+    for invalid in [zero, off_curve] {
+        let f = Fixture::new().await;
+        let (owner, selected) = select(&f, invalid).await;
+        let mut rng = Rng::new();
+        assert!(matches!(
+            ensure(&f.state, &owner, [9; 32], &mut rng).await,
+            Err(Refused::Binding)
+        ));
+        assert_eq!(rng.draws, 0);
+        assert_eq!(selected.resources().counts().1, 0);
+        assert!(matches!(
+            ensure(&f.state, &owner, [9; 32], &mut rng).await.unwrap(),
+            Status::Closed {
+                native_setup_drained: true
+            }
+        ));
+        f.close().await;
+    }
+}
+
+#[tokio::test]
+async fn compressed_point_prefixes_are_refused_at_publication_before_any_bootstrap() {
+    // p256 would decode a compressed (0x02/0x03) point; the voice codec requires exactly the
+    // 65-byte uncompressed form. The only difference from the published `point()` used by every
+    // other test here is the prefix byte, so the refusal is the prefix check.
+    for prefix in [2u8, 3] {
+        let f = Fixture::new().await;
+        let owner = f.candidate().await;
+        crate::activate_voice_owner_inner(&f.state, owner.clone())
+            .await
+            .unwrap();
+        let executor = hex::encode([9; 32]);
+        let admission = crate::voice_join_key::admit_inner(&f.state, &owner, &executor)
+            .await
+            .unwrap();
+        let mut compressed = point();
+        compressed[0] = prefix;
+        assert!(crate::voice_join_key::publish_inner(
+            &f.state,
+            &owner,
+            &executor,
+            &admission.permit,
+            compressed
+        )
+        .await
+        .is_err());
+        f.close().await;
+    }
 }
 
 #[tokio::test]

@@ -814,7 +814,7 @@ const MAX_UPLOAD_ID_BYTES: usize = 64;
 /// always land on a chunk boundary. Sealing happens at [`CHUNK_BYTES`]; this is only about keeping
 /// any single IPC message small enough that serializing it does not stall the webview.
 const UPLOAD_SLICE_BYTES: usize = 1024 * 1024;
-const _: () = assert!(UPLOAD_SLICE_BYTES > 0 && CHUNK_BYTES % UPLOAD_SLICE_BYTES == 0);
+const _: () = assert!(UPLOAD_SLICE_BYTES > 0 && CHUNK_BYTES.is_multiple_of(UPLOAD_SLICE_BYTES));
 
 /// The most a file may be and still be readable through `download_file`, which returns the whole
 /// thing as one base64 string.

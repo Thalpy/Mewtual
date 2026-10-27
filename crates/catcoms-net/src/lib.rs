@@ -2336,7 +2336,7 @@ async fn run_port_mapper_attempt(
     drop(probe_client);
 
     // A probe result says a protocol answered discovery; it does not say the subsequent MAP
-    // request will be granted. `portmapper` 0.18 only logs that request's error and leaves its
+    // request will be granted. `portmapper` (0.18 and 0.19) only logs that request's error and leaves its
     // watch channel open at `None`, so waiting on `changed()` alone can hang forever. Give each
     // advertised protocol its own bounded attempt, allowing NAT-PMP to follow a failed PCP MAP.
     const ACQUIRE_WITHIN: Duration = Duration::from_secs(5);
