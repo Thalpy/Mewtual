@@ -9,12 +9,21 @@ publish = false
 catcoms-wire = { path = "../catcoms-wire" }
 catcoms-crypto = { path = "../catcoms-crypto" }
 thiserror.workspace = true
-openmls = "0.8"
-openmls_rust_crypto = "0.5"
+# 0.9.2 is the floor, not just the lockfile choice. Besides the advisories 0.8.3 fixed
+# (GHSA-gc79-23g3-8g52, GHSA-94v4-rg25-x625, GHSA-p276-g3f3-wwgh), 0.9.0 fixes two
+# pre-authentication DoS issues the 0.8 line never received (GHSA-w62v-gv48-63rh quadratic
+# extension checks, GHSA-rrmv-c79f-cf5r out-of-bounds panic), and 0.9.1 the 0.9.0 recursion
+# variant. Stored state written by 0.8.1 keeps loading: persist/compat_tests.rs pins it, and the
+# 0.9-to-0.8 direction is recorded in docs/design-crypto-bigint-upgrade.md. 0.9 does NOT clear
+# RUSTSEC-2026-0387: openmls_rust_crypto 0.6 and basic_credential 0.6 still use p256 0.13.
+openmls = "0.9.2"
+openmls_rust_crypto = "0.6"
 blake3 = "1"
-openmls_basic_credential = "0.5"
-openmls_traits = "0.5"
-tls_codec = { version = "0.4", features = ["derive", "std"] }
+openmls_basic_credential = "0.6"
+openmls_traits = "0.6"
+# Must match the tls_codec line openmls itself uses (0.5 for openmls 0.9), or its codec traits
+# are not the ones in scope here.
+tls_codec = { version = "0.5", features = ["derive", "std"] }
 zeroize = "1"
 
 [dev-dependencies]

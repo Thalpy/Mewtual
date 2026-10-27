@@ -1,5 +1,40 @@
 # Mewtual; Handover
 
+## Toolchain and crypto dependency update (24 October, branch `crypto-bigint-upgrade`)
+
+One PR, one commit per step, based on `chat-update-implementation`. Merge it only after PR #54 and
+PR #26 are in `main`. The steps:
+
+1. tokio 1.53.3 (RUSTSEC-2026-0386);
+2. openmls 0.8.3 (GHSA fixes), with stored-state fixtures frozen first on 0.8.1;
+3. native voice bootstrap on p256 0.14 (0387's only secret path);
+4. Rust 1.91, then openmls 0.9.2, then portmapper 0.19.3;
+5. Rust 1.94;
+6. the fenced 0387 exception.
+
+The fenced exception covers crypto-bigint 0.5.5, which remains inside openmls's RustCrypto backend
+because every release of it is still on p256 0.13. Root `cargo deny check` now passes. The
+desktop workspace's bans pass, and CI now checks them. Its advisory list keeps the unrelated
+findings it already had, minus tokio. Details, compatibility results and the exit condition are
+in `docs/design-crypto-bigint-upgrade.md` and the THREAT-MODEL section of the same date.
+
+Known limitation: a group created or joined under openmls 0.9.2 does not load in older alphas.
+Testers must not downgrade. The older build skips those servers, and its next registry write
+drops their records, after which their ids can be reused. Reinstalling the newer build recovers
+them only if the older build changed nothing (THREAT-MODEL, 24 October).
+
+Pre-existing, found in review, not fixed here: any member's KeyPackage leaf expires after
+openmls's default 84 days. The designated committer's own leaf is replaced by its commits, but
+non-committing members never refresh their KeyPackage leaves. Once any such leaf in a group is
+that old, every new Welcome join to that group fails with `Lifetime(Expired)`. openmls
+0.8 behaves the same, so alpha groups may already be affected. A second pre-existing issue:
+`catcoms-sync` `apply_commit_in_order` records any `Ok` from `process_incoming` as an applied
+commit, including application messages, so an authorized committer can put a non-commit into
+the commit log. Both need their own follow-ups.
+
+Focused checks for each step are listed in the commit messages. The complete root, native and
+frontend suites have not yet been run on the final commit.
+
 ## Validated proof retention and automatic cleanup retry (22 October)
 
 Frozen runtime `edf923c107f3d11bf635a3e58a04e0b673edd7c1` passed the current native/frontend/static/build gates.
@@ -7147,7 +7182,7 @@ and ranks the live hazards in that path.
   hardening folded in. The whole block ends with a **memory end-to-end test**: a joiner
   discovers the inviter at a zero-knowledge rendezvous and joins with **no hard-coded
   server address**.
-- Toolchain pinned **Rust 1.89.0** (`rust-toolchain.toml`; automerge 0.10 needs it).
+- Toolchain pinned **Rust 1.94.0** (`rust-toolchain.toml`; automerge 0.10 needed 1.89).
 - 11 library crates + 1 binary (+ `apps/desktop`, its own workspace). The protocol
   layers are tested deterministically with
   N in-process nodes over an in-memory transport; the mesh is *additionally* tested

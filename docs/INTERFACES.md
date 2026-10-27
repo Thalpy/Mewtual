@@ -1458,7 +1458,7 @@ Implementations:
     leases and scoped failures labelled by UPnP, PCP or NAT-PMP, TCP or UDP/QUIC, and an optional
     exact local-address owner. `None` is the legacy IPv4/default-gateway path; `Some(IpV6)` is an
     independently managed PCPv6 firewall pinhole, so IPv4 and multiple interfaces cannot collide.
-    PCPv6 uses an internal narrow RFC 6887 MAP client because pinned `portmapper` 0.18 is
+    PCPv6 uses an internal narrow RFC 6887 MAP client because pinned `portmapper` 0.19 is
     IPv4-only: it sends an exact 60-byte MAP request, accepts aligned option-bearing responses up
     to the protocol bound, binds the exact global listener address, and selects the scoped default
     router from the operating system's IPv6 route table and native interface index. It requests

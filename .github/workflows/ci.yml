@@ -19,7 +19,7 @@ jobs:
         os: [ubuntu-latest, windows-latest]
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@1.89.0
+      - uses: dtolnay/rust-toolchain@1.94.0
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
@@ -44,6 +44,19 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: EmbarkStudios/cargo-deny-action@v2
+      # The desktop workspace holds the only secret P-256 path, so the RUSTSEC-2026-0387 fence in
+      # deny.toml must be enforced there too. Bans only: that workspace's advisory list has
+      # unrelated open findings. The config is passed explicitly so a deny.toml placed under
+      # apps/desktop could never silently replace the root one.
+      - name: Desktop workspace bans (RUSTSEC-2026-0387 fence)
+        uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          manifest-path: apps/desktop/src-tauri/Cargo.toml
+          # Setting `arguments` replaces the action's default `--all-features`; keep it, since
+          # release builds enable `custom-protocol`.
+          arguments: --all-features --config=deny.toml
+          command: check
+          command-arguments: bans
 
   linux-desktop:
     name: Linux frontend & Tauri
@@ -55,7 +68,7 @@ jobs:
           mkdir -p .claude
           printf 'must-not-enter-build-context\n' > .claude/review-secret
           docker build --target context-audit -f docker/linux-test.Dockerfile .
-      - uses: dtolnay/rust-toolchain@1.89.0
+      - uses: dtolnay/rust-toolchain@1.94.0
         with:
           components: clippy
       - uses: Swatinem/rust-cache@v2

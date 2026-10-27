@@ -1,5 +1,73 @@
 # Threat model; client integrity & enforcement boundaries
 
+## Crypto dependency boundary (24 October, update PR)
+
+Plan of record and evidence: `docs/design-crypto-bigint-upgrade.md`.
+
+**Native local-channel ECDH (RUSTSEC-2026-0387).** The voice bootstrap is the only place a secret
+P-256 scalar exists in native code. It is reachable through the main-window `setup_voice_channel`
+command, although no UI flow calls it yet. It now uses p256 0.14.0, whose arithmetic runs on
+crypto-bigint 0.7.7, the fixed line. The transcript, point encodings, fixed-width shared secret and
+HKDF are unchanged; the shared Rust/WebCrypto `vectors.json` still matches. The RNG bridge is an
+infallible rand_core 0.6 to 0.10 adapter over the injected catcoms-rt RNG; it never seeds or
+reaches the OS RNG, and a failing RNG still closes the original Pending purpose. p256 0.14 is no
+more audited than 0.13 was; the limits recorded below for the bootstrap still apply.
+
+**The remaining 0387 exception is fenced, not cleared.** crypto-bigint 0.5.5 stays compiled in
+every released openmls RustCrypto backend, via p256/p384/k256 0.13. No secret reaches that code,
+for three reasons:
+
+- `catcoms-mls` pins one X25519/Ed25519 suite and signs with Ed25519 only.
+- openmls 0.9.2 refuses a foreign-suite KeyPackage in an Add (ValSem105) and a Welcome whose suite
+  differs from the KeyPackage (`CiphersuiteMismatch`), both before any HPKE operation.
+- Peers can drive only public-key ECDSA verification.
+
+`group/suite_refusal_tests.rs` pins each step. `deny.toml` ignores the advisory, and its
+`[bans]` enforce four things in both workspaces (CI now also checks the desktop workspace's
+bans):
+
+- the fixed line stays at 0.7.6 or later, prereleases included;
+- 0.5.x is confined to the reviewed backend crates, at their reviewed versions;
+- `openmls` itself is pinned at 0.9.2;
+- any new direct user of the 0.13 curve crates fails.
+
+A new call *inside* `catcoms-mls` cannot be seen by bans. Adding a second suite or signature
+scheme, or moving openmls, requires re-reading the design note first. Lock-file scanners
+(`cargo audit`, GitHub alerts) still report 0.5.5; "cleared" is true for `cargo deny` only. Exit:
+when openmls releases a backend on p256 0.14 (it needs Rust 1.94, the current toolchain), remove
+the ignore and the curve bans.
+
+**Own-leaf messages under openmls 0.9.** openmls 0.9 reports a PrivateMessage attributed to our own
+leaf as a successful process (`OwnPrivateMessage` / `OwnPendingCommit`) where 0.8 erred. That covers
+an echo of our own message, and also a forgery from any member who writes our leaf index into
+the encrypted sender data. `ServerGroup::process_incoming` refuses both, as 0.8 did. Without that
+refusal, the sync layer would record an unmerged or forged commit as applied while the epoch stayed
+put. Two tests in `group/own_echo_tests.rs` fail without the refusal. The match now names every
+variant, so an openmls upgrade that adds one fails to compile instead of degrading to "processed".
+
+**Stored state.** State written by openmls 0.8.1 restores and works under 0.9.2: groups, signer,
+PendingCommits (merge and abort), Welcomes and KeyPackage material. Frozen fixtures
+(`persist/compat_tests.rs`) pin this. Their leaves never expire, so wall-clock time cannot fail
+them. The reverse is not true: a group created **or joined** under 0.9.2 does not load in 0.8.x
+(`MlsGroupJoinConfig` changed shape).
+
+Downgrading a build below this change is therefore not just an inconvenience:
+
+- the older build skips each such server at unlock;
+- its next registry write (almost any action: founding, joining, leaving, renaming, a backup,
+  even showing or copying an invite) rebuilds the registry from the servers it
+  loaded, which drops those records;
+- a later server can then reuse an orphaned id and overwrite its snapshot.
+
+Reinstalling the newer build recovers them only if the older build changed nothing. Testers must
+not downgrade. Servers that existed before the upgrade still load in either build. Keeping
+unrestorable records, and not reusing their ids, is an app follow-up.
+
+**Ambient time in snapshots.** openmls 0.9 stamps each epoch's `MessageSecrets` with
+`SystemTime::now()`, so sealed snapshots and backups now record the local wall-clock time of epoch
+changes. Nothing reads it under the default past-epoch policy (`MaxEpochs(0)`). Like openmls's own
+RNG use, this sits outside the catcoms-rt seams, and the ambient gate does not scan dependencies.
+
 ## Switchable V2 voice transport and pinned call mode (22 October, branch only)
 
 Kind-28 dispatch and the V2 scheduler (`catcoms-sync/src/voice_schedule.rs`) exist behind a local

@@ -5,11 +5,12 @@ use super::{
     Counters, Keys, Refused, Session, BOOTSTRAP_BYTES, BROWSER_CONTROL_BYTES, CONTROL_BYTES,
 };
 use crate::voice_authority::{Binding, SelectedHandoffOwner};
-use catcoms_rt::rng::RngError;
-use catcoms_rt::{CryptoRng, CryptoRngCore, RngCore};
+use catcoms_rt::CryptoRngCore;
 use catcoms_sync::voice_v2::resources::{Credit, ResourceKind, WorkLane};
 use hkdf::Hkdf;
-use p256::{ecdh::EphemeralSecret, elliptic_curve::sec1::ToEncodedPoint, PublicKey};
+use p256::elliptic_curve::{sec1::ToSec1Point, Generate};
+use p256::{ecdh::EphemeralSecret, PublicKey};
+use rand_core_0_10::{Infallible, TryCryptoRng, TryRng};
 use sha2::{Digest, Sha256};
 use std::sync::{Arc, Mutex};
 use zeroize::Zeroizing;
@@ -108,8 +109,11 @@ impl Prepared {
             return Err(Refused::Binding);
         }
         let browser = PublicKey::from_sec1_bytes(&point).map_err(|_| Refused::Binding)?;
-        let ephemeral = EphemeralSecret::random(&mut BorrowedRng(rng));
-        let encoded = ephemeral.public_key().to_encoded_point(false);
+        // Only `generate_from_rng` with the injected adapter: the argument-less `Generate`
+        // constructor would draw from the operating-system RNG behind the catcoms-rt seam
+        // (scripts/check-no-ambient.sh refuses its spellings).
+        let ephemeral = EphemeralSecret::generate_from_rng(&mut BorrowedRng(rng));
+        let encoded = ephemeral.public_key().to_sec1_point(false);
         let native: [u8; 65] = encoded
             .as_bytes()
             .try_into()
@@ -241,24 +245,31 @@ fn agree(
     Ok(Keys::new(&seed))
 }
 
-/// Pinned p256 takes a Sized rand_core0.6 RNG. This borrowed adapter preserves the sanctioned
-/// injected catcoms-rt seam; it never seeds another RNG or reaches ambient OS randomness.
+/// Pinned p256 0.14 draws through rand_core 0.10 (`TryRng` + `TryCryptoRng`), while the
+/// sanctioned catcoms-rt seam is rand_core 0.6. This borrowed adapter bridges the two versions and
+/// nothing else: it never seeds another RNG or reaches ambient OS randomness.
+///
+/// It is deliberately infallible and delegates to the infallible 0.6 methods, so a failing
+/// injected RNG panics exactly as the p256 0.13 `fill_bytes` path did. The caller has already
+/// marked its Pending ticket started, so that unwind closes the original purpose rather than
+/// retrying with fresh randomness (`unwinding_rng_closes_original_ticket_*` pins this). p256 0.14
+/// scalar generation is one 32-byte `try_fill_bytes` per candidate with rejection of values
+/// `>= n` and of zero, the same contract the shared vectors pin.
 struct BorrowedRng<'a>(&'a mut dyn CryptoRngCore);
-impl RngCore for BorrowedRng<'_> {
-    fn next_u32(&mut self) -> u32 {
-        self.0.next_u32()
+impl TryRng for BorrowedRng<'_> {
+    type Error = Infallible;
+    fn try_next_u32(&mut self) -> Result<u32, Infallible> {
+        Ok(self.0.next_u32())
     }
-    fn next_u64(&mut self) -> u64 {
-        self.0.next_u64()
+    fn try_next_u64(&mut self) -> Result<u64, Infallible> {
+        Ok(self.0.next_u64())
     }
-    fn fill_bytes(&mut self, bytes: &mut [u8]) {
+    fn try_fill_bytes(&mut self, bytes: &mut [u8]) -> Result<(), Infallible> {
         self.0.fill_bytes(bytes);
-    }
-    fn try_fill_bytes(&mut self, bytes: &mut [u8]) -> Result<(), RngError> {
-        self.0.try_fill_bytes(bytes)
+        Ok(())
     }
 }
-impl CryptoRng for BorrowedRng<'_> {}
+impl TryCryptoRng for BorrowedRng<'_> {}
 
 #[cfg(test)]
 mod tests;

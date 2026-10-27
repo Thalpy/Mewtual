@@ -15,6 +15,20 @@ patterns=(
   'rand::random'
   'thread_rng'
   'OsRng'
+  # rand_core 0.10 / crypto-common 0.2 spell OS randomness differently: `SysRng`, direct
+  # `getrandom::` calls, and the argument-less `Generate` constructors (which use SysRng; the
+  # feature that enables them is on in both workspaces through openmls 0.9's ml-dsa). The native
+  # p256 0.14 bootstrap must keep using `generate_from_rng` with the injected seam. A bare
+  # `::generate()` would also match `MlsDevice::generate()`, so the secret-key types, the trait
+  # path, the fully qualified form and the fallible variant are named instead.
+  'SysRng'
+  'getrandom::'
+  'EphemeralSecret::generate()'
+  'NonZeroScalar::generate()'
+  'SecretKey::generate()'
+  'Generate::generate'
+  'Generate>::'
+  'try_generate()'
 )
 
 # Files/dirs allowed to use the primitives above (the seam implementations).
@@ -39,6 +53,23 @@ for p in "${patterns[@]}"; do
     fail=1
   done < <(grep -rn --include='*.rs' -- "$p" "${search_roots[@]}" 2>/dev/null || true)
 done
+
+# The argument-less `Generate::generate()` constructor (rand_core 0.10 / crypto-common 0.2) draws
+# from the OS RNG on ANY implementing type once the trait is in scope: secret scalars, field
+# elements, points, byte arrays. Refuse every `::generate()` path call except our own
+# `MlsDevice::generate()`, which is not that trait. The exemption removes only that exact text
+# from each line, so another `::generate()` sharing the line is still caught.
+while IFS= read -r hit; do
+  [ -z "$hit" ] && continue
+  file="${hit%%:*}"
+  if [[ "$file" =~ $allow_regex ]]; then
+    continue
+  fi
+  echo "FORBIDDEN ambient call '::generate()':"
+  echo "    $hit"
+  fail=1
+done < <(grep -rn --include='*.rs' -- '::generate()' "${search_roots[@]}" 2>/dev/null \
+  | sed 's/MlsDevice::generate()//g' | grep -F '::generate()' || true)
 
 if [ "$fail" -ne 0 ]; then
   echo
