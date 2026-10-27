@@ -63,6 +63,14 @@ async fn browser_endpoint(
     index: usize,
     paused: bool,
 ) -> Result<Endpoint, Failure> {
+    browser_endpoint_mode(scenario, index, paused, false).await
+}
+async fn browser_endpoint_mode(
+    scenario: &Scenario,
+    index: usize,
+    paused: bool,
+    deferred: bool,
+) -> Result<Endpoint, Failure> {
     let state = scenario.online(index).state.clone();
     let owner = catch_fixture(async {
         let controller = prepare_voice_controller_inner(&state).await.unwrap();
@@ -80,7 +88,9 @@ async fn browser_endpoint(
     })
     .await?;
     match catch_fixture(async {
-        if paused {
+        if deferred {
+            Endpoint::prepare_deferred_discovery(state, owner).await
+        } else if paused {
             Endpoint::prepare_paused(state, owner).await
         } else {
             Endpoint::prepare(state, owner).await
@@ -420,9 +430,10 @@ async fn coordinated_browser_cycle() {
     scenario.close(&[0, 1, 2]).await;
 }
 
-/// Genuine second native peer on A's original selected key/HTTP Session. Only the RTC
+/// Genuine second native peer on the matching existing endpoint's original selected key/HTTP Session. Only the RTC
 /// provider is controlled. The first A-B path is blocked and uses unjoined helper0;
-/// the second A-C path uses the existing permitted graph and claims no blocked edge.
+/// the newcomer then naturally selects one original endpoint over the permitted graph.
+/// This checks composition on that endpoint, not automatic all-three call progress.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn native_browser_two_peers_share_original_session_after_actual_history_collection() {
     // Three full endpoint lifecycle futures are substantially larger than their metadata.
@@ -438,6 +449,16 @@ async fn native_browser_failed_attached_peer_preserves_original_session_and_inde
     Box::pin(two_browser_peer_cycle(SecondPeer::FailedAttached)).await;
 }
 
+/// Actual local pre-snapshot contention advances C's normal cursor to its other
+/// fresh peer. The SAME native-selected pair must satisfy all preservation assertions.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn native_browser_local_discovery_refusal_selects_other_peer_and_preserves_indexed_sibling() {
+    Box::pin(two_browser_peer_cycle(
+        SecondPeer::FailedAttachedAfterDiscoveryRefusal,
+    ))
+    .await;
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn native_browser_failed_media_peer_preserves_original_session_and_indexed_sibling() {
     Box::pin(two_browser_peer_cycle(SecondPeer::FailedMedia)).await;
@@ -447,6 +468,7 @@ async fn native_browser_failed_media_peer_preserves_original_session_and_indexed
 enum SecondPeer {
     Complete,
     FailedAttached,
+    FailedAttachedAfterDiscoveryRefusal,
     FailedMedia,
 }
 
@@ -461,14 +483,17 @@ async fn two_browser_peer_cycle(second: SecondPeer) {
     for index in [0, 1, 2] {
         enable(&scenario, index).await;
     }
-    // C's ordinary FreshPeer ordering must select A before B. These are actual admitted
-    // device identities, not fixed RNG input or a synthetic selected-peer instruction.
-    let (ai, bi) = if scenario.clients[1].identity.as_ref().unwrap().1
-        < scenario.clients[2].identity.as_ref().unwrap().1
+    // The refusal regression labels native identity order so cursor1 means the other
+    // endpoint. This arranges observations only; no selector is supplied to a producer.
+    // Ordinary cases follow whichever original pair C naturally selects.
+    let forced_refusal = matches!(second, SecondPeer::FailedAttachedAfterDiscoveryRefusal);
+    let (ai, bi) = if forced_refusal
+        && scenario.clients[2].identity.as_ref().unwrap().1
+            < scenario.clients[1].identity.as_ref().unwrap().1
     {
-        (1, 2)
-    } else {
         (2, 1)
+    } else {
+        (1, 2)
     };
     let endpoints = tokio::join!(
         Box::pin(browser_endpoint(&scenario, ai, false)),
@@ -488,19 +513,22 @@ async fn two_browser_peer_cycle(second: SecondPeer) {
     };
     let mut newcomer = None;
     let cycle = catch_fixture(Box::pin(async {
-        let ab = discovered_browser_pair(&scenario, &a, ai, &b, bi).await;
+        let mut ab = discovered_browser_pair(&scenario, &a, ai, &b, bi).await;
         eprintln!("two-peer fixture: first complete pair");
-        let old = Box::pin(complete_browser_media_pair(&mut a, &mut b, ab)).await;
+        let mut old = Box::pin(complete_browser_media_pair(&mut a, &mut b, ab)).await;
         a.current_peers(1).await;
         b.current_peers(1).await;
         // Both native mode8 and browser compaction actually returned before next peer
         // admission. Late old Begin goes over actual authenticated HTTP in this step.
         eprintln!("two-peer fixture: first history collected; advance");
-        a.advance_pair().await;
+        // Both original browsers must be able to drive a naturally selected newcomer.
+        // Their old indexed media stays live; advancing only A silently assumes native
+        // C will never choose B, which is false after a local discovery refusal.
+        tokio::join!(a.advance_pair(), b.advance_pair());
         scenario.reopen(&[3]).await;
         enable(&scenario, 3).await;
         eprintln!("two-peer fixture: newcomer setup");
-        let c = match Box::pin(browser_endpoint(&scenario, 3, true)).await {
+        let c = match Box::pin(browser_endpoint_mode(&scenario, 3, true, forced_refusal)).await {
             Ok(c) => c,
             Err(error) => std::panic::resume_unwind(error),
         };
@@ -539,21 +567,47 @@ async fn two_browser_peer_cycle(second: SecondPeer) {
             },
         )
         .await;
+        let (ac, bc) = tokio::join!(
+            discovered_browser_pair(&scenario, &a, ai, c, 3),
+            discovered_browser_pair(&scenario, &b, bi, c, 3)
+        );
         eprintln!("two-peer fixture: newcomer discovered both; release");
         c.release_discovery();
-        let ac = discovered_browser_pair(&scenario, &a, ai, c, 3).await;
+        if forced_refusal {
+            c.discover_after_local_refusal().await;
+        }
+        let choice = c.naturally_attached_pair([ac[1], bc[1]]).await;
+        if forced_refusal {
+            assert_eq!(
+                choice, 1,
+                "actual admitted local refusal must exercise alternate native pair remapping"
+            );
+        }
+        // Rename the matching existing endpoint A for the shared preservation assertions.
+        // This changes only the oracle/driver, not native selection, timers or authority.
+        // Keep BOTH old peers current, including the endpoint not chosen by C.
+        let ac = if choice == 1 {
+            eprintln!("two-peer fixture: newcomer naturally selected the other original endpoint");
+            std::mem::swap(&mut a, &mut b);
+            old = (old.1, old.0);
+            ab.swap(0, 1);
+            bc
+        } else {
+            ac
+        };
         assert_eq!(
             ab[0].epoch, ac[0].epoch,
             "reopening an existing member must not create a new MLS epoch"
         );
         if !matches!(second, SecondPeer::Complete) {
             eprintln!(
-                "two-peer fixture: fail confirmed attached pair without touching indexed peer"
+                "two-peer fixture: start newcomer confirmation without touching indexed peer"
             );
             let (ap, cp) = tokio::join!(
                 Box::pin(a.automatic_pair(ac[0])),
                 Box::pin(c.automatic_pair(ac[1]))
             );
+            eprintln!("two-peer fixture: naturally selected newcomer pair confirmed");
             let (failed_id, _) = if matches!(second, SecondPeer::FailedMedia) {
                 bounded(
                     "both genuine failed-peer Ready/core owners drain before RTC",

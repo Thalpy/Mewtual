@@ -82,6 +82,8 @@ struct Callbacks {
     expected_parent: Option<ledger::RowId>,
     pause_setup: bool,
     discovery_hold: Option<super::super::channel::NativeHold>,
+    // Negative test-owned cadence barrier; dropping always resumes the actual Host.
+    deferred_maintenance: Option<tokio::sync::oneshot::Sender<()>>,
 }
 impl Default for Callbacks {
     fn default() -> Self {
@@ -94,6 +96,7 @@ impl Default for Callbacks {
             expected_parent: None,
             pause_setup: false,
             discovery_hold: None,
+            deferred_maintenance: None,
         }
     }
 }
@@ -120,7 +123,7 @@ impl Endpoint {
     /// Complete the actual selected-key publication and channel Status before starting a
     /// protected pair. A slow process launch/setup cannot consume the original pair deadline.
     pub(crate) async fn prepare(state: Arc<AppState>, owner: String) -> Result<Self, Failure> {
-        Self::prepare_inner(state, owner, false).await
+        Self::prepare_inner(state, owner, false, false).await
     }
 
     /// Pause only the actual native factory position before delivering Setup/Ready ACK.
@@ -129,17 +132,25 @@ impl Endpoint {
         state: Arc<AppState>,
         owner: String,
     ) -> Result<Self, Failure> {
-        Self::prepare_inner(state, owner, true).await
+        Self::prepare_inner(state, owner, true, false).await
+    }
+
+    pub(crate) async fn prepare_deferred_discovery(
+        state: Arc<AppState>,
+        owner: String,
+    ) -> Result<Self, Failure> {
+        Self::prepare_inner(state, owner, true, true).await
     }
 
     async fn prepare_inner(
         state: Arc<AppState>,
         owner: String,
         pause_setup: bool,
+        defer_maintenance: bool,
     ) -> Result<Self, Failure> {
         super::super::channel::Session::fixture_prepare_native_diagnostics();
         let runtime = crate::voice_runtime(&state);
-        let bound = match service::BoundServer::bind_application(
+        let mut bound = match service::BoundServer::bind_application(
             state.voice_channels.clone(),
             runtime,
             service::Origin::PackagedHttp,
@@ -156,6 +167,7 @@ impl Endpoint {
                 .await)
             }
         };
+        let deferred = defer_maintenance.then(|| service::defer_first_maintenance(&mut bound));
         let port = bound.port();
         let server = match bound.start() {
             Ok(server) => server,
@@ -169,6 +181,27 @@ impl Endpoint {
                 .await)
             }
         };
+        // No browser/HTTP client exists yet. Pin the actual first maintenance sleep
+        // before it can compete with the explicit Cursor's local-refusal regression.
+        if let Some((entered, _)) = &deferred {
+            let clock = crate::voice_runtime(&state).clock();
+            if tokio::time::timeout(std::time::Duration::from_secs(10), async {
+                while !entered.load(std::sync::atomic::Ordering::Acquire) {
+                    clock.sleep(std::time::Duration::from_millis(5)).await;
+                }
+            })
+            .await
+            .is_err()
+            {
+                return Err(preparation_failed(
+                    &state,
+                    &owner,
+                    Some(server),
+                    "first native cadence did not enter its test barrier".into(),
+                )
+                .await);
+            }
+        }
         let script = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../scripts/voice-native-interop.ts");
         let mut command = Command::new("node");
@@ -230,6 +263,7 @@ impl Endpoint {
             selected: None,
             callbacks: Callbacks {
                 pause_setup,
+                deferred_maintenance: deferred.map(|(_, sender)| sender),
                 ..Callbacks::default()
             },
             media_fixture_grant: None,
@@ -336,6 +370,34 @@ impl Endpoint {
 
     pub(crate) fn release_discovery(&mut self) {
         assert!(self.callbacks.discovery_hold.take().is_some());
+    }
+
+    pub(crate) async fn discover_after_local_refusal(&mut self) {
+        let selected = self.selected();
+        let route = (1..=64)
+            .find_map(|slot| {
+                self.state
+                    .voice_channels
+                    .route(slot)
+                    .ok()
+                    .filter(|route| Arc::ptr_eq(route.selected(), &selected))
+            })
+            .unwrap();
+        let clock = crate::voice_runtime(&self.state).clock();
+        service::discovery_after_local_refusal(
+            &context::Context::new(&self.state),
+            &route,
+            clock.as_ref(),
+        )
+        .await;
+        // Resume the original, previously unpolled maintenance turn only AFTER the real
+        // candidate attached. No existing cursor or Root authority is reset/replaced.
+        drop(
+            self.callbacks
+                .deferred_maintenance
+                .take()
+                .expect("original cadence barrier"),
+        );
     }
 
     pub(crate) async fn advance_pair(&mut self) {
@@ -504,6 +566,31 @@ impl Endpoint {
             catcoms_sync::voice_v2::crypto_actions::CryptoOutcome::Derived
         ));
         row
+    }
+
+    /// Read-only choice among the fixture's two independently proven members. Discovery
+    /// may rotate after an admitted worker's local Capacity refusal; an expected peer is
+    /// not a promise about which original parent native will attach first. Never deliver
+    /// these selectors to a factory or reset a producer cursor to impose fixture order.
+    pub(crate) async fn naturally_attached_pair(&self, candidates: [PairSelector; 2]) -> usize {
+        let selected = self.selected();
+        let clock = crate::voice_runtime(&self.state).clock();
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            loop {
+                for (index, selector) in candidates.into_iter().enumerate() {
+                    if self.state.voice_handoff.lookup_original(&selected, ledger::Purpose::Derive(selector))
+                        .is_some_and(|row| row.status().unwrap().action.is_some()) {
+                        return index;
+                    }
+                }
+                clock.sleep(std::time::Duration::from_millis(25)).await;
+            }
+        }).await.unwrap_or_else(|error| {
+            let first = self.state.voice_handoff.fixture_derivation_diagnostic(&selected, candidates[0]);
+            let second = self.state.voice_handoff.fixture_derivation_diagnostic(&selected, candidates[1]);
+            let native = self.state.voice_channels.fixture_native_diagnostic(&selected, candidates[0]);
+            panic!("neither proven native pair attached: {error:?}; first={first}; second={second}; {native}");
+        })
     }
 
     /// Observe original automatic work without delivering a descriptor/Input to Node.
@@ -1192,6 +1279,7 @@ impl Endpoint {
     /// retirement before returning a test failure. Original application history is retained.
     pub(crate) async fn collect(&mut self) -> bool {
         drop(self.callbacks.discovery_hold.take()); // Release real factory custody before failure End.
+        drop(self.callbacks.deferred_maintenance.take()); // A failed test cannot leave its Host parked.
         let ended = catch_fixture(tokio::time::timeout(
             std::time::Duration::from_secs(10),
             crate::end_voice_owner_inner(&self.state, &self.owner),

@@ -21,6 +21,13 @@ use tokio::sync::oneshot;
 // This reduces available bytes within the SAME 2 MiB process cap, never increasing that cap
 // or any group/engine limit. Other layouts still refuse if their actual peak cannot fit.
 // Both runtime admission and the regression below measure the actual nested future.
+// Test-owned negative cadence gate and exact-worker observer. Neither can create a
+// Session/selector/grant, and the Runtime/Root Clock and every production limit remain.
+#[cfg(test)]
+pub(in crate::voice_handoff) use maintenance::tests::{
+    defer_first_maintenance, discovery_after_local_refusal,
+};
+
 const INFRASTRUCTURE_BYTES: usize = 32 * 1024;
 // Pinned Tokio task/oneshot/Arc overhead and two boxed production Clock sleeps (one socket
 // deadline plus the independent maintenance cadence). This is not a

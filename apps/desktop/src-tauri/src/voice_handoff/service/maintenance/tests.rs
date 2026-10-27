@@ -6,6 +6,158 @@ use catcoms_sync::voice_v2::presence::PairSelector;
 use std::sync::Arc;
 
 #[tokio::test]
+async fn discovery_cursor_rotates_after_admitted_worker_refuses_before_peer_snapshot() {
+    let f = Fixture::new().await;
+    let context = Context::new(&f.state);
+    let (_, selected, selector) = selection(&f).await;
+    let route = channel_route(&f, &selected).await;
+    route.acknowledge_setup().unwrap();
+    let mut cursor = Cursor::new();
+    let servers = f.state.servers.lock().await;
+    let (admitted, _, waiter) = cursor.ordinary_work(&context, &route, 0);
+    assert!(admitted);
+    assert_eq!(cursor.peers[0], 1);
+    let completed = bounded_native_outcome(waiter.unwrap()).await;
+    assert_eq!(
+        completed.result(),
+        Err(crate::voice_handoff::factory::Refused::Protocol(
+            catcoms_sync::voice_v2::VoiceError::Capacity
+        ))
+    );
+    drop(completed);
+    assert!(f
+        .state
+        .voice_handoff
+        .lookup_original(&selected, Purpose::Derive(selector))
+        .is_none());
+    drop(servers);
+    assert!(cursor.turn(&context, &f.state.voice_channels).is_none());
+    idle(&route).await;
+    assert_eq!(cursor.stage[0], 2);
+    assert_eq!(cursor.peers[0], 1);
+    f.close().await;
+}
+
+/// Only the test service's first cadence sleep is held. The actual native Runtime Clock
+/// still advances; proof/attempt/deadline authority is never paused or renewed. Install
+/// before start and wait for entered BEFORE launching any browser/HTTP client, so that
+/// this first sleep belongs to maintenance rather than a connection timeout.
+#[derive(Debug)]
+struct DeferredFirstSleep {
+    original: Arc<dyn Clock>,
+    receiver: std::sync::Mutex<Option<tokio::sync::oneshot::Receiver<()>>>,
+    entered: Arc<std::sync::atomic::AtomicBool>,
+}
+impl Clock for DeferredFirstSleep {
+    fn now_ms(&self) -> u64 {
+        self.original.now_ms()
+    }
+    fn monotonic_ms(&self) -> u64 {
+        self.original.monotonic_ms()
+    }
+    fn sleep(
+        &self,
+        duration: Duration,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + '_>> {
+        let receiver = self.receiver.lock().unwrap().take();
+        if let Some(receiver) = receiver {
+            assert!(
+                duration <= Duration::from_millis(CADENCE_MS),
+                "first test sleep must be maintenance"
+            );
+            self.entered
+                .store(true, std::sync::atomic::Ordering::Release);
+            Box::pin(async move {
+                let _ = receiver.await;
+                self.original.sleep(duration).await;
+            })
+        } else {
+            self.original.sleep(duration)
+        }
+    }
+}
+pub(in crate::voice_handoff) fn defer_first_maintenance(
+    bound: &mut BoundServer,
+) -> (
+    Arc<std::sync::atomic::AtomicBool>,
+    tokio::sync::oneshot::Sender<()>,
+) {
+    let (sender, receiver) = tokio::sync::oneshot::channel();
+    let entered = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    bound.clock = Arc::new(DeferredFirstSleep {
+        original: bound.clock.clone(),
+        receiver: std::sync::Mutex::new(Some(receiver)),
+        entered: entered.clone(),
+    });
+    (entered, sender)
+}
+
+/// Timeout only this observer: the worker remains owned by its original task/Session.
+/// In particular, unwinding drops a held map before Endpoint.collect orders End and joins
+/// actual custody. A regression to a blocking map must fail promptly, not hang the harness.
+async fn bounded_native_outcome(waiter: native::NativeWaiter) -> native::NativeCompletion {
+    tokio::time::timeout(Duration::from_secs(10), waiter)
+        .await
+        .expect("actual native discovery worker exceeded its original fixture bound")
+        .expect("original native worker task panicked")
+}
+
+/// Exercise the SAME production Cursor across an admitted, proven local refusal and
+/// its ordinary continuation/discovery turns. The native snapshot chooses the peer;
+/// no supplied expected selector, cursor reset or fabricated grant enters any producer.
+pub(in crate::voice_handoff) async fn discovery_after_local_refusal(
+    context: &Context,
+    route: &Route,
+    clock: &dyn Clock,
+) {
+    assert!(
+        route.native_ready(),
+        "actual setup ACK must precede automatic production"
+    );
+    clock.sleep(Duration::from_millis(CADENCE_MS)).await;
+    let live = context.upgrade().expect("original mounted context");
+    let servers = live.servers.lock().await;
+    let mut cursor = Cursor::new();
+    let (admitted, _, waiter) =
+        cursor.ordinary_work(context, route, usize::from(route.fixture_slot() - 1));
+    assert!(admitted);
+    let completed = bounded_native_outcome(waiter.unwrap()).await;
+    assert_eq!(
+        completed.result(),
+        Err(crate::voice_handoff::factory::Refused::Protocol(
+            catcoms_sync::voice_v2::VoiceError::Capacity
+        ))
+    );
+    drop(completed);
+    assert!(
+        live.ledger
+            .automatic_parent_available(route.selected())
+            .unwrap(),
+        "pre-snapshot refusal created no parent"
+    );
+    drop(servers);
+    drop(live);
+    let index = usize::from(route.fixture_slot() - 1);
+    assert_eq!(cursor.peers[index], 1);
+    clock.sleep(Duration::from_millis(CADENCE_MS)).await;
+    let (admitted, _, waiter) = cursor.ordinary_work(context, route, index);
+    assert!(admitted);
+    drop(bounded_native_outcome(waiter.unwrap()).await); // ordinary local confirmation
+    assert_eq!(cursor.stage[index], 2);
+    assert_eq!(cursor.peers[index], 1);
+    clock.sleep(Duration::from_millis(CADENCE_MS)).await;
+    let (admitted, _, waiter) = cursor.ordinary_work(context, route, index);
+    assert!(admitted);
+    let completed = bounded_native_outcome(waiter.unwrap()).await;
+    assert!(
+        completed.result().is_ok(),
+        "real next native snapshot/publication failed: {:?}",
+        completed.result()
+    );
+    drop(completed);
+}
+
+#[tokio::test]
 async fn exhausted_monotonic_time_disables_maintenance_without_blocking_host_stop() {
     // A guard bounds a regression inside a single poll: timeout alone cannot interrupt an
     // accidentally always-ready async loop. The actual elapsed/wall values use ManualClock.

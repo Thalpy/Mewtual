@@ -26,8 +26,8 @@ that gate nor the controlled exact-8-KiB SDK fixtures establish native authoriza
 WebView, captured/audible audio, ICE connectivity or physical-network acceptance.
 
 Read-only review corrected the MID-retention and accounting Mediums; re-review has no
-remaining blocker/high/medium. Native checks on these changed browser imports remain
-pending behind the frozen parent run. Earlier Root 3,691 passed/24 existing ignores apply
+remaining blocker/high/medium. Native checks on these changed browser imports remain pending. Frozen parent3742fe96
+has passed895 library+5 ACL; the merged fixture and these imports need the combined897-test gate. Earlier Root 3,691 passed/24 existing ignores apply
 to unchanged Root Rust/Cargo inputs. The inherited dependency audit is red; no waiver.
 No setup or live App/send/friend path changed, so startup/flow gates were not rerun.
 
@@ -35,6 +35,47 @@ Next: paid audio cells/capture, sender clones and mute/PTT, playback and SDK pro
 App lifecycle/renewal, automatic multi-peer composition, authenticated WebView, member
 media relay and combined/physical acceptance. Only one desktop is available; V2 stays OFF.
 External download resume and dependency upgrades remain separately owned.
+
+
+## Native discovery ordering regression (27 October; App OFF, combined gates pending)
+
+The second-peer preservation fixture no longer assumes a newcomer selects the lowest-ID
+member first. An admitted discovery can refuse locally before its snapshot and still rotate
+the cursor; the next genuine snapshot may select the other member. Both original browsers
+now advance after their actual history collection. The fixture observes the newcomer's
+actual attached native parent, matches it to genuine watcher evidence, and drives that pair.
+Both old indexed media owners stay current. Original Session/counters, old history/slot and
+new-parent identity assertions remain; no renderer selector or cursor reset creates work.
+
+A new real-transport regression holds only the test Host's first cadence sleep before any
+browser/HTTP client exists. Root's original Clock keeps advancing. The same production
+Cursor then encounters an actual held-map Capacity refusal, takes its ordinary intervening
+turn and naturally attaches the other peer. Each turn keeps the existing 250 ms cadence.
+It must execute the alternate remapping and complete all sibling-preservation assertions.
+The original Host resumes when its negative test token drops. This is one selected new
+pair with the old pair preserved, not proof of automatic all-three Host progress.
+
+Seven focused native checks pass in 270.18s, including all four lifecycle variants, actual
+Capacity observation and unchanged 12 KiB codec/32 KiB service-layout guards. Strict native
+Clippy passes. The blocking-map mutation (try_lock changed to lock().await only in the warm
+validation checkout) fails the intended 10 s observer bound and exits the whole scenario in
+52.90s. All constructed endpoint collectors complete native End, child/stderr exit and
+actual service shutdown without replacing that error. Original bytes were restored and
+SHA256-checked. The restored positive case and actual-Capacity unit both pass in53.08s; mutation changes are never pushed.
+
+Frozen parent3742fe96 separately passed the complete native suite:895 library+5 ACL, with
+zero failures (library2143.43s), native check/strict lint and the current-native construction
+scan. The earlier850/40 failure remains recorded: one second-pair Derive timeout plus39
+intentional admission-gate cascades. Its historical cause is unproven; the invalid ordering
+assumption is independently demonstrated rather than retroactively assigned as its cause.
+The new897-test native input and PR70's changed browser imports still need combined gates.
+Earlier full Root3691/24 existing ignores apply to unchanged Root Rust/Cargo inputs.
+
+Read-only review corrected an unbounded observer wait and required the alternate branch;
+all explicit worker waits now use the unchanged10s harness bound, which never aborts the
+original task. Original protocol deadlines/attempts/capacity remain unchanged. App V2,
+audio actuation/renewal, automatic multi-peer composition, relay, combined and physical
+acceptance remain open. One desktop is available; external resume/dependencies are separate.
 
 
 ## Audio SDK checkpoint (27 October; Broker44, App OFF; native gate failed)
