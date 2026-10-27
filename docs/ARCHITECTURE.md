@@ -1,5 +1,14 @@
 # Mewtual; Architecture
 
+## Configuration storage ownership (27 October; Broker46, inactive)
+
+The configuration owner independently materializes admitted settings from bounded UTF16
+code units before URI parsing. It retains no caller-created substring backing. Canonical
+policy literals, snapshot/loan identity, before-constructor currentness and actual loan
+cleanup remain unchanged. Copy/rope metadata and serial scratch fit the existing64KiB fee:
+52,480/65,536 bytes. Retained45 requires reload for new calls; App V2 remains OFF.
+
+
 ## Audio SDP validation before RTC (27 October; inactive)
 
 The Source admits remote bytes (at most 8 KiB), decodes UTF8, validates the supported audio

@@ -1,5 +1,15 @@
 # Threat model; client integrity & enforcement boundaries
 
+## Caller string backing in RTC configuration (27 October; inactive)
+
+A bounded-looking setting can be a substring of an arbitrarily large caller string. The
+configuration owner now detaches admitted URL/credential values through bounded numeric
+UTF16 copies before persistent parsing/retention. This closes that backing-retention path
+without normalizing credentials or increasing capacity. Reentrant End still prevents
+publication; original PC/configuration/loan and currentness checks remain independent.
+Native media Current is not a distinct server-enforced speaking/mute grant. App remains OFF.
+
+
 ## Frontend audio shape boundary (27 October; inactive)
 
 Authenticated SDP can still contain unsupported media. The Source now rejects extra or

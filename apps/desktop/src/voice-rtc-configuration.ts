@@ -55,6 +55,25 @@ function uri(value: string, turn: boolean): string {
       (scheme === "turns" && transport === "udp") || !hostPort(match[2])) return unavailable();
   return scheme + ":" + match[2] + (transport ? "?transport=" + transport : "");
 }
+// Bounded numeric chunks own their data independently of caller-created substring
+// representations. A slice/join of the original string is not a reliable detach.
+// Preserve UTF16 code units exactly: an encode/decode UTF8 roundtrip would replace
+// unpaired surrogates in a credential or future opaque device ID.
+const COPY_CHUNK = 256;
+const COPY_METADATA_BYTES = 2048;
+const COPY_SCRATCH_BYTES = 4096;
+function ownedSetting(value: string): string {
+  const pieces: string[] = [];
+  for (let from = 0; from < value.length; from += COPY_CHUNK) {
+    const length = Math.min(COPY_CHUNK, value.length - from);
+    const units = new Uint16Array(length);
+    for (let at = 0; at < length; at++) units[at] = value.charCodeAt(from + at);
+    pieces.push(String.fromCharCode(...units));
+  }
+  // Even a rope here can reference only our independently created bounded chunks,
+  // never the caller's original potentially unbounded parent string.
+  return pieces.join("");
+}
 function snapshot(source: VoiceRtcDeviceSettingsSource, current: () => boolean): Snapshot {
   if (!current()) return unavailable();
   const input = source();
@@ -62,13 +81,19 @@ function snapshot(source: VoiceRtcDeviceSettingsSource, current: () => boolean):
   // Read ONLY these bounded fields once. Enumerating a caller's unknown keys would
   // allocate an unbounded key list; no other input property is copied or retained.
   const value = input as VoiceRtcDeviceSettings;
-  const stun = value.stun, turn = value.turn, username = value.username,
-    credential = value.credential, policy = value.policy;
-  if (!current() || (policy !== "all" && policy !== "relay") ||
-      typeof stun !== "string" || typeof turn !== "string" ||
-      typeof username !== "string" || typeof credential !== "string" ||
-      stun.length + turn.length + username.length + credential.length > VOICE_RTC_CONFIGURATION_UNITS ||
-      username.length > MAX_CREDENTIAL_UNITS || credential.length > MAX_CREDENTIAL_UNITS) return unavailable();
+  const rawStun = value.stun, rawTurn = value.turn, rawUsername = value.username,
+    rawCredential = value.credential, rawPolicy = value.policy;
+  if (!current() || (rawPolicy !== "all" && rawPolicy !== "relay") ||
+      typeof rawStun !== "string" || typeof rawTurn !== "string" ||
+      typeof rawUsername !== "string" || typeof rawCredential !== "string" ||
+      rawStun.length + rawTurn.length + rawUsername.length + rawCredential.length > VOICE_RTC_CONFIGURATION_UNITS ||
+      rawUsername.length > MAX_CREDENTIAL_UNITS || rawCredential.length > MAX_CREDENTIAL_UNITS) return unavailable();
+  // Length admission precedes every allocation; all persistent strings are detached
+  // before parsing can create host/token substrings. Canonicalize policy to a literal.
+  const stun = ownedSetting(rawStun), turn = ownedSetting(rawTurn),
+    username = ownedSetting(rawUsername), credential = ownedSetting(rawCredential);
+  const policy = rawPolicy === "relay" ? "relay" : "all";
+  if (!current()) return unavailable();
   // Bounds precede trimming/splitting/regular-expression copies. The callback/input
   // lexical frame ends synchronously, before any key/SDP/SDK promise is started.
   const servers: Server[] = [];
@@ -192,7 +217,13 @@ export function releaseVoiceRtcConfiguration(lease: VoiceRtcConfigurationLease):
  * Capture happens before peers exist, so its temporary strings do not coexist with17 PCs.
  * A future bound increase MUST update this inventory and its tests before allocation. */
 export function voiceRtcConfigurationInventory(): number {
-  const capturePeak = 4 * 2 * VOICE_RTC_CONFIGURATION_UNITS + 4096;
-  const peersPeak = 3 * 2 * VOICE_RTC_CONFIGURATION_UNITS + MAX_PEERS * (MAX_URLS * 128 + 256) + 4096;
-  return Math.max(capturePeak, peersPeak);
+  // Bounded payload copies, not caller-owned opaque source/provider allocations.
+  // At most19 numeric chunks +15 rope nodes fit the2KiB retained metadata inventory
+  // at the existing4096-unit/four-field bound. Even a non-flat result owns only them.
+  const capturePeak = 4 * 2 * VOICE_RTC_CONFIGURATION_UNITS + 4096 + COPY_METADATA_BYTES;
+  // Source values, chunk payloads/join output,256 numeric arguments/Uint16 scratch
+  // are serial before URI parsing or any SDK dictionary/constructor.
+  const detachPeak = 3 * 2 * VOICE_RTC_CONFIGURATION_UNITS + 4096 + COPY_METADATA_BYTES + COPY_SCRATCH_BYTES;
+  const peersPeak = 3 * 2 * VOICE_RTC_CONFIGURATION_UNITS + MAX_PEERS * (MAX_URLS * 128 + 256) + 4096 + COPY_METADATA_BYTES;
+  return Math.max(capturePeak, detachPeak, peersPeak);
 }

@@ -164,10 +164,11 @@ test("owner join finds a published channel even when constructor subscription th
 
 test("retained application facade cannot bypass broker version or allocation checks during remount", async () => {
   const invoke = async <T>() => undefined as T;
-  for (const change of ["version", "broker43", "broker44", "allocation", "deleted", "undefined", "null"] as const) {
+  for (const change of ["version", "broker43", "broker44", "broker45", "allocation", "deleted", "undefined", "null"] as const) {
     const host: Record<symbol, unknown> = {}, calls = windowVoiceAppCalls(invoke, host);
     const broker = windowVoiceCryptoBroker(unavailable, host), call = calls.prepare(1, "2");
     if (change === "version") Object.defineProperty(broker, "version", { value: 41 });
+    else if (change === "broker45") Object.defineProperty(broker, "version", { value: 45 });
     else if (change === "broker44") Object.defineProperty(broker, "version", { value: 44 });
     else if (change === "broker43") Object.defineProperty(broker, "version", { value: 43 });
     else if (change === "allocation") host[Symbol.for("mewtual.voice.crypto-broker.v2")] = new VoiceCryptoBroker(unavailable);

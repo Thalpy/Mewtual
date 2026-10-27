@@ -1,5 +1,15 @@
 # Mewtual; Interfaces & Hooks Schema
 
+## Bounded RTC string copies (27 October; Broker46, inactive)
+
+The existing five-field local-settings contract is unchanged. After length admission,
+URLs/usernames/credentials are materialized in256-unit numeric chunks before parsing or
+snapshot retention; UTF16 code units are preserved exactly. No source graph or substring
+backing is retained. Invalid lengths refuse before copying, and End during a copy refuses
+publication. Snapshot inventory now includes bounded copy/rope metadata and serial scratch
+under the unchanged64KiB fee. Broker46 refuses retained45; facade bundle3 is unchanged.
+
+
 ## Source audio profile contract (27 October; Broker45, inactive)
 
 `VoiceSdpRtcOwner` now enforces `voiceAudioSdpShape` after its existing byte bound and before

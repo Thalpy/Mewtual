@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs";
 import assert from "node:assert/strict";
 import test from "node:test";
 import { VoiceRtcConfigurationOwner, VOICE_RTC_CONFIGURATION_BYTES, VOICE_RTC_CONFIGURATION_UNITS,
@@ -143,4 +144,78 @@ test("coalesced configuration join stays pending through actual borrowed ownersh
   assert.equal(returned, false); assert.throws(() => owner.reset()); assert.equal(voiceRtcConfigurationCurrent(lease), false);
   releaseVoiceRtcConfiguration(lease); await joined; assert.equal(returned, true); owner.reset();
   owner.capture(() => settings({ turn: "" }), () => true); owner.close(); await owner.join(); owner.reset();
+});
+
+function callerSlice(text: string): string {
+  const before = "x".repeat(1024 * 1024), parent = before + text + "ignored-tail";
+  return parent.slice(before.length, before.length + text.length);
+}
+
+test("sliced caller credentials and URL text reach SDK only through owned bounded numeric copies", () => {
+  const owner = new VoiceRtcConfigurationOwner(), seen: RTCConfiguration[] = [];
+  const input = settings({ stun: callerSlice("stun:a-long-local-device-name.example.test:3478"),
+    turn: callerSlice("turns:another-local-device-name.example.test:5349?transport=tcp"),
+    username: callerSlice("u".repeat(1024)), credential: callerSlice("p".repeat(1024)) });
+  const actual = String.fromCharCode; const widths: number[] = [];
+  try {
+    String.fromCharCode = (...units: number[]) => {
+      assert.ok(units.length <= 256); assert.ok(units.every(unit => Number.isInteger(unit) && unit >= 0 && unit <= 65535));
+      widths.push(units.length); return actual(...units);
+    };
+    owner.capture(() => input, () => true);
+  } finally { String.fromCharCode = actual; }
+  assert.ok(widths.includes(256));
+  const lease = owner.borrow(); voiceRtcConfiguredPeer(lease, constructor(seen), () => true);
+  assert.equal(seen[0].iceServers![0].urls, input.stun);
+  assert.equal(seen[0].iceServers![1].urls, input.turn);
+  assert.equal(seen[0].iceServers![1].username, input.username);
+  assert.equal(seen[0].iceServers![1].credential, input.credential);
+  releaseVoiceRtcConfiguration(lease); owner.reset();
+});
+
+test("numeric setting copies preserve exact UTF16, surrogate pairs across chunks and unpaired surrogates", () => {
+  const owner = new VoiceRtcConfigurationOwner(), seen: RTCConfiguration[] = [];
+  const username = "u".repeat(255) + "\ud83d\udc31" + "\ud800" + "v".repeat(20);
+  const credential = "p".repeat(255) + "\ud83d\udc31" + "\udc00" + "q".repeat(20);
+  owner.capture(() => settings({ username, credential }), () => true);
+  const lease = owner.borrow(); voiceRtcConfiguredPeer(lease, constructor(seen), () => true);
+  assert.equal(seen[0].iceServers![1].username, username);
+  assert.equal(seen[0].iceServers![1].credential, credential);
+  releaseVoiceRtcConfiguration(lease); owner.reset();
+});
+
+test("an invalid setting length refuses before any numeric copy, SDK or partial snapshot", () => {
+  const owner = new VoiceRtcConfigurationOwner(), actual = String.fromCharCode;
+  let copied = false;
+  try {
+    String.fromCharCode = (...units: number[]) => { copied = true; return actual(...units); };
+    assert.throws(() => owner.capture(() => settings({ username: "x".repeat(1025) }), () => true));
+  } finally { String.fromCharCode = actual; }
+  assert.equal(copied, false); assert.throws(() => owner.borrow()); owner.reset();
+});
+
+test("End during a numeric copy cannot publish settings or permit a replacement capture", () => {
+  const owner = new VoiceRtcConfigurationOwner(), actual = String.fromCharCode;
+  let entered = false;
+  try {
+    String.fromCharCode = (...units: number[]) => {
+      if (!entered) {
+        entered = true; owner.close();
+        assert.throws(() => owner.capture(() => settings(), () => true));
+      }
+      return actual(...units);
+    };
+    assert.throws(() => owner.capture(() => settings({ username: "u".repeat(1024) }), () => true));
+  } finally { String.fromCharCode = actual; }
+  assert.equal(entered, true); assert.throws(() => owner.borrow()); owner.reset();
+  owner.capture(() => settings(), () => true); const lease = owner.borrow(); releaseVoiceRtcConfiguration(lease); owner.reset();
+});
+
+test("persistent settings cannot bypass numeric detachment through substring/JSON flattening tricks", () => {
+  const source = readFileSync(new URL("./voice-rtc-configuration.ts", import.meta.url), "utf8");
+  const copy = source.slice(source.indexOf("function ownedSetting("), source.indexOf("function snapshot("));
+  assert.ok(copy.includes("charCodeAt") && copy.includes("String.fromCharCode(...units)"));
+  assert.ok(!/\.(?:slice|substring|substr)\(|JSON\./.test(copy));
+  for (const field of ["Stun", "Turn", "Username", "Credential"]) assert.ok(source.includes(`ownedSetting(raw${field})`));
+  assert.ok(voiceRtcConfigurationInventory() <= VOICE_RTC_CONFIGURATION_BYTES);
 });

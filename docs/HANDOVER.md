@@ -1,5 +1,36 @@
 # Mewtual; Handover
 
+## Owned RTC setting strings (27 October; Broker46, App OFF)
+
+RTC configuration now copies admitted URL/credential strings from bounded UTF16 code-unit
+chunks before URI parsing or retention. A short caller substring can otherwise keep its
+whole large source backing alive. Both credentials and normalized URLs now depend only on
+owned bounded storage; policy uses a canonical literal. Copies preserve exact code units,
+including surrogate pairs split across chunks and unpaired surrogates. Length checks come
+before allocation, and reentrant End prevents snapshot publication. Broker46 refuses
+retained45 for new calls; existing cleanup and facade bundle3 remain unchanged.
+
+The executable inventory includes 2 KiB for bounded copy/rope metadata and 4 KiB of serial
+copy scratch, with at most256 numeric arguments per call. Peak:52,480/65,536 bytes. The
+64 KiB fee, group/process limits and all native/wire formats are unchanged. This is an
+application-owned graph bound; caller/provider allocations and opaque VM/RTC heap are
+outside it. The copy frame ends before key work or SDK construction.
+
+Full frontend:3,194 passed65.21s; Svelte:zero diagnostics; production build:36.45s; strict
+configuration/helper TypeScript and441 focused checks pass. Read-only review reproduced
+sliced credential storage before the fix and independent sequential storage afterward,
+through the actual configuration owner and constructor dictionary. No remaining B/H/M.
+The frozen Broker45/897-test combined native gate is still running; it does not validate
+these changed Broker46 imports. Earlier Root3,691/24 existing ignores apply to unchanged
+Root Rust/Cargo inputs. Inherited dependency audit remains red; no waiver. No setup or
+live App/send/friend path changed; startup/flow gates were not rerun.
+
+Capture/playback cells and wiring, App/renewal, automatic multi-peer composition, member
+relay, WebView and combined/physical acceptance remain open. Native Current authorizes its
+original media pair; there is no separate speak/listen/moderator-mute permission in that
+path. Existing mute/deafen are local intent. One desktop is available; V2 stays OFF.
+
+
 ## Audio SDP guard (27 October; Broker45, App OFF)
 
 The inactive RTC Source now checks the audio SDP profile before HIGH constructs its PC
