@@ -1,5 +1,22 @@
 # Next voice milestone: native result recovery
 
+## Root history validation completed (27 October; source daf4ca91, App OFF)
+
+The terminal Root-history implementation below now passes complete validation: Root3691
+passed/24 existing ignores; native890 library+5 ACL passed; frontend3101 passed. Strict
+Root/native Clippy, both formatting checks, native cargo check, current-native construction
+scan, no-ambient, frontend static checks and production build35.22s pass. Root ran on the
+byte-identical runtime/Cargo/lock/toolchain inputs in the warm custody checkout. Native and
+Root gates ran serially; the full Root run finished27 October00:46 UTC. Read-only design,
+adversarial review and re-review have no remaining actionable finding.
+
+Fresh dependency audit still FAILS inherited RUSTSEC-2026-0387/crypto-bigint0.5.5; no waiver.
+No setup/window/send/friend change was made, so startup/flow gates were not rerun for this
+inactive slice. Actual authenticated-facade WebView, production App/audio/renewal, member
+media relay and combined/physical acceptance remain open. One desktop is available.
+This supersedes the older pending-gate status below for source daf4ca91 only; later browser
+changes require their own checks. It does not enable V2 or complete the programme.
+
 ## Broker42 bootstrap composed; App/RTC adoption next (26 October)
 
 The retained production metadata/controller facade now composes native activation, selected
