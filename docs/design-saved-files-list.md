@@ -56,15 +56,17 @@ under the vault `db_key` exactly like `.storage` (`frame(seal(db_key, plaintext)
 non-inventoried record (`write_saved_files_record`, addressed by server number, never by a
 caller-supplied path), so it does not rotate the inventory generation.
 
-Plaintext, version 1 (`catcoms_wire` encoding; the codec lives in
+Plaintext, version 1 or 2 (`catcoms_wire` encoding; the codec lives in
 `catcoms_storage::kept::saved`, because entries carry the external-file identity type that only the
-storage crate constructs):
+storage crate constructs). Version 2 is version 1's layout with the larger bounds of a raised
+"Remember saved files" setting (section 1a); a list within version 1's bounds is always written as
+version 1:
 
 ```
 bytes  domain     "mewtual/saved-files" (exact; a different record moved here reads as unreadable)
-u8     version    1
+u8     version    1 (at most 256 entries and 1 MiB) or 2 (at most 4096 entries and 16 MiB)
 bytes  owner      1..=512 bytes: the server's group id followed by this device's member id in it
-u32    count      0..=256
+u32    count      0..=256 (version 1), 0..=4096 (version 2)
 count times, oldest first:
   bytes  id         16 bytes, random (catcoms-rt RNG); the renderer's handle for actions
   bytes  cid        32 bytes, the file's plaintext CID
@@ -80,10 +82,11 @@ count times, oldest first:
 ```
 
 Rules checked on decode: ids unique, **one entry per saved copy** (no two entries name the same
-place: the same folder and name, or the same file identity), count and lengths in bounds, no
-trailing bytes, and the whole plaintext at most 1 MiB (a 256-entry list of maximal paths would be
-about 4.5 MiB, so the size bound, not the count, is what caps a list of very long folder paths;
-typical entries are about 200 bytes). The reader reads at most 1 MiB plus the seal overhead.
+place: the same folder and name, or the same file identity), count and lengths in their version's
+bounds, no trailing bytes, and the whole plaintext within its version's bytes (an entry of maximal
+paths is about 17.5 KiB, so the size bound, not the count, is what caps a list of very long folder
+paths; typical entries are about 200 bytes). The stored setting does not narrow a decode; the
+reader reads at most the setting's read bound plus the seal overhead (section 1a).
 
 **Several copies of one file** (revision 2, review M1): saving the same file twice makes two copies
 on disk, so the list keeps two entries and Transfers shows two rows, each with its own name. A
@@ -92,9 +95,9 @@ compared case-insensitively for Windows entries, or the same file identity): tha
 the newer copy, so the older entry's file is certainly not there any more. A replace that does not
 happen therefore never forgets the earlier copy.
 
-**Cap: 256 entries per server** (proposed; it matches the file index's own 256-row cap). Adding an
-entry appends it as the newest, then drops the oldest entries until both bounds hold. Dropping an
-entry only forgets it; it never touches a file.
+**Cap: the "Remember saved files" setting, 256 entries by default** (section 1a). Adding an entry
+appends it as the newest, then drops the oldest entries until the list holds at most the setting's
+count and encodes to at most its bytes. Dropping an entry only forgets it; it never touches a file.
 
 **Owner binding** (revision 2, review L3): the record names the group and this device's member id
 for it. Leaving and joining again makes a new member id, so a record that survived a leave (a failed
@@ -144,6 +147,62 @@ saved from it stay where they are."
 
 **Cache housekeeping.** Decided here: the list is **not** a cache pin. It records copies outside
 the vault; its entries name nothing the cache needs. `design-cache-housekeeping.md` is updated.
+
+### 1a. "Remember saved files" (owner request, 27 October)
+
+How many saves one server's list keeps on this device is a per-server setting in Server settings,
+Storage, below the cache limit: "Remember saved files", a choice of 16, 32, 64, 128, 256 (the
+default), 512, 1024, 2048 or 4096 files.
+
+- **Range 16 to 4096.** Below 16 the list stops being useful for the chat mark and for replacing an
+  older copy. 4096, sixteen times the default, keeps the worst-case record at 16 MiB, which is read
+  and rewritten whole on a save; ordinary paths keep even a full list near 800 KiB. Native clamps
+  whatever the renderer sends (`SavedLimit::clamped`); a stored value outside the range is
+  unreadable, never clamped on read. The Transfers Saved group draws every entry, so a list near
+  4096 makes that group long (a follow-up could page it).
+- **Byte bound scales with it: 4 KiB per allowed entry** (`SAVED_ENTRY_ALLOWANCE`). The list may
+  encode to at most `limit * 4096` bytes: 64 KiB at 16, 1 MiB at 256 (exactly version 1's bound),
+  16 MiB at 4096. Even the smallest setting fits one maximal entry (about 17.5 KiB).
+- **Storage.** Its own sealed record, `servers/<id>.saved-limit`, beside `.storage`: domain
+  `"mewtual/saved-files-limit"`, version 1, the list's owner binding (so a setting left by an
+  earlier membership never applies), the count as u32. It does not live inside `.storage`, because
+  extending #55's cache-setting record would make a build before this one read its cache limit as
+  unreadable (pausing eviction) and drop the field on its next write. `remove_server` deletes it
+  after the list, so a removal that stops part way never leaves a large list without its bound.
+- **Reader's bound follows the stored setting.** `load_saved_files` reads at most
+  `max(1 MiB, limit * 4096)` plus the seal (`SavedLimit::read_bound`): the setting's bytes, but never
+  less than version 1's 1 MiB, because a build before the setting may have grown a version 1 list
+  that far even while this vault's setting is lower. No setting: the default's 1 MiB. A setting that
+  cannot be read: the largest, 16 MiB. Never unbounded. A file over the bound reads as damaged, as
+  before; this build never writes one (the store refuses to seal a list larger than the stored
+  setting's read bound).
+- **Unreadable setting.** Saves are not recorded meanwhile (the result says so), because recording
+  trims to the setting and guessing could forget entries the user chose to keep. The list still
+  reads (under the largest bound), Clear and Show in folder work, and the Storage page says the
+  setting could not be read until the user chooses one, which writes over it.
+- **Changing it** (`set_saved_files_limit(server, limit, apply)`, under the store and registry
+  locks for the incarnation). With `apply: false` nothing changes and the answer says how many of
+  the oldest entries the choice would forget; the page shows "This forgets the N oldest saved files
+  from the list. The files themselves stay where they are." and a "Forget and apply" button before
+  anything changes. With `apply: true`: lowering trims the list and writes it **first**, then the
+  setting, so the list always fits what the stored setting lets a reader read (a failure in between
+  leaves the larger setting over a shorter list); raising writes only the setting and keeps every
+  entry. While the list reads as newer or cannot be read right now, a choice that would narrow the
+  read bound is refused (it could not be trimmed, and a narrower bound could make it read as
+  damaged); a damaged list is left alone and only the setting changes.
+- **Compatibility of the list record.** Version 1 stays exactly as it was, and a list within its
+  bounds (any list at the default) is still written as version 1, so the #56 build before the
+  setting keeps reading and writing it (it trims to 256 if it records, forgetting older entries of
+  a larger list, never files). A longer list is written as version 2, which that build reads as
+  written by a newer Mewtual and leaves alone, as long as the record is within the 1 MiB it reads
+  at all. A version 2 list over 1 MiB (more than 256 entries of long paths) it would read as damaged
+  and offer to start anew. That build was never released (#56 and this setting ship together) and
+  builds before #56 never open the file, so no released reader is affected; it is recorded here
+  rather than prevented, because preventing it would cap every list at 1 MiB whatever the setting.
+- **Commands.** `get_saved_files_limit(server) -> { state: "ok" | "unreadable", limit, listed,
+  min, max, default }` (account-read; `limit` is `null` while unreadable, `listed` while the list
+  cannot be read) and `set_saved_files_limit(server, limit, apply) -> { limit, forgets, applied }`
+  (account-write). Numbers only; neither takes or returns a path.
 
 ### 2. Renderer projection and commands
 
@@ -377,11 +436,14 @@ limits of PR #51 apply unchanged.
 ### 6. Compatibility
 
 - A new file; builds before this one never open it. A vault backup copies it as opaque bytes.
-- Version byte: a future version 2 is `Newer` here and stays untouched (above).
-- Going back to the #55 build: the record is ignored, and that build's `remove_server` does not
-  delete it, so leaving a server there leaves a sealed `.saved` behind. It names the group and the
-  member id of that membership, so a later server reusing the number (even for the same group,
-  after joining again) reads it as `Missing` and overwrites it on its first save. Documented.
+- Version byte: versions 1 and 2 are read here (section 1a); a future version 3 is `Newer` and
+  stays untouched (above). The setting's own record has its own version byte; an unknown one reads
+  as an unreadable setting.
+- Going back to the #55 build: the records are ignored, and that build's `remove_server` deletes
+  neither, so leaving a server there leaves a sealed `.saved` and `.saved-limit` behind. Both name
+  the group and the member id of that membership, so a later server reusing the number (even for
+  the same group, after joining again) reads them as `Missing` and overwrites them on its first
+  save or choice. Documented.
 
 ### 7. Verification
 

@@ -22,6 +22,15 @@ opt-in setting that may replace Mewtual's own earlier copy of a file saved again
 - **Non-destructive with unknown records.** A newer version, a damaged record or one that cannot
   be read right now is never written over; saves are then not recorded and say so. Only leaving the
   server removes it (`remove_server`), and only a damaged one can be started anew by the user.
+- **"Remember saved files" (16 to 4096, default 256).** A per-server, per-device setting sealed in
+  its own record `servers/<id>.saved-limit` with the list's owner binding; a renderer value is
+  clamped natively, so a compromised renderer can at most make the list remember 16 entries (it
+  could already Clear every entry). The list's byte bound is 4 KiB per allowed entry, and the
+  reader reads at most `max(1 MiB, limit * 4 KiB)` (16 MiB when the setting cannot be read), so a
+  damaged or hostile record is never read unbounded. Lowering forgets the oldest entries only after
+  the page showed how many and the user confirmed, and trims the list before storing the setting;
+  it never touches a file. While the setting cannot be read, nothing is recorded (an unknown limit
+  could forget entries).
 - **Replace authority.** The setting is a renderer preference (`localStorage`) passed as
   `replace_older` on a save, so a compromised renderer can ask on every save. Native then deletes
   only an object that (a) the sealed list names as this server's earlier saved copy of the same

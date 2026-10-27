@@ -627,15 +627,21 @@ Renderer commands (no new command names):
   `check_saved_download` again before it skips the confirmation (the button is `aria-busy` while
   it runs), and asks unless the answer is `present`.
 - Saved-files list (PR #56, [design](design-saved-files-list.md)). Record: `servers/<id>.saved`,
-  sealed under the vault `db_key`, version 1 plaintext (domain `mewtual/saved-files`, version
-  byte, owner = group id followed by this device's member id, up to 256 entries and 1 MiB; each
-  entry an ID, the plaintext CID, size, saved time, platform, folder, file name and, for a journaled
-  save, folder and file identities). `ServerStore::{save_saved_files, load_saved_files,
-  reset_saved_files}`; `load_saved_files` answers `SavedFilesLoad::{Missing, Found, Newer, Damaged,
-  Unavailable}` and only the first two may be written over; `remove_server` deletes it. Storage:
-  `kept::{SavedFiles, SavedFile, SavedFileId, SavedLocation, NoCandidate, saved_file_presence,
-  saved_file_location, ReplaceRequest, ReplaceOutcome, ReplaceRefusal, replace_older_copy,
-  drop_first_name}` and `ExportPlan::{cid, total}`.
+  sealed under the vault `db_key`, version 1 or 2 plaintext (domain `mewtual/saved-files`, version
+  byte, owner = group id followed by this device's member id; version 1 holds up to 256 entries and
+  1 MiB and is written whenever the list fits, version 2 the same layout up to 4096 entries and
+  16 MiB; each entry an ID, the plaintext CID, size, saved time, platform, folder, file name and,
+  for a journaled save, folder and file identities). "Remember saved files": `servers/<id>.saved-limit`,
+  sealed likewise (domain `mewtual/saved-files-limit`, version 1, the same owner, a u32 within 16 to
+  4096); the list keeps at most that many entries and `limit * 4 KiB` bytes, and is read with at most
+  `max(1 MiB, limit * 4 KiB)` plus the seal. `ServerStore::{save_saved_files, load_saved_files,
+  reset_saved_files, save_saved_files_limit, load_saved_files_limit}`; `load_saved_files` answers
+  `SavedFilesLoad::{Missing, Found, Newer, Damaged, Unavailable}` and only the first two may be
+  written over; `load_saved_files_limit` answers `SavedLimitLoad::{Missing (default 256), Found,
+  Unreadable}`; `remove_server` deletes both. Storage: `kept::{SavedFiles, SavedFile, SavedFileId,
+  SavedLocation, SavedLimit, NoCandidate, saved_file_presence, saved_file_location, ReplaceRequest,
+  ReplaceOutcome, ReplaceRefusal, replace_older_copy, drop_first_name, FirstNameDrop}` and
+  `ExportPlan::{cid, total}`; `SavedFiles::record` takes the setting, `trim` and `trimmed_by` lower it.
   Commands (main window only, none takes a path): `get_saved_files(server) -> { state: "ok" |
   "newer" | "damaged" | "unavailable", files: [{ id, cid, name, savedAt, size, savedTo, checkable
   }] }` (account-read, newest first); `check_saved_files(server) -> [{ id, name, check }]`
@@ -643,7 +649,11 @@ Renderer commands (no new command names):
   answers only for entries unchanged afterwards); `reveal_saved_file(server, entry)` (os-facing;
   `reveal_saved_download`'s check, fences and refusals over an entry); `forget_saved_file(server,
   entry)` (account-write; never touches the file); `reset_saved_files(server)` (account-write;
-  only while the record reads as damaged). `save_group_file` gains `replaceOlder` (a flag) and its
+  only while the record reads as damaged); `get_saved_files_limit(server) -> { state: "ok" |
+  "unreadable", limit, listed, min, max, default }` (account-read; numbers only) and
+  `set_saved_files_limit(server, limit, apply) -> { limit, forgets, applied }` (account-write;
+  clamped natively; `apply: false` changes nothing and says how many of the oldest entries the
+  choice forgets; lowering trims the list before storing the setting). `save_group_file` gains `replaceOlder` (a flag) and its
   result may carry these notes in `warning`: not listed, replaced, or why the older copy was not
   replaced. Private download rows gain `savedEntry` (saved rows only: the list entry with the
   published journal's identity, which the renderer draws as that row). Clear of a Saved row

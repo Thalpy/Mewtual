@@ -5,12 +5,19 @@
 Finished saves of shared files are now remembered per server on this device
 ([design](design-saved-files-list.md), owner decisions and both reviews recorded there).
 
-- **Record.** `servers/<id>.saved`, sealed under the vault `db_key`, version 1, bound to the
-  group and this device's member id, one entry per saved copy (256 entries, 1 MiB). Written by
-  native right after each publication (journaled, recovered and non-resumable writers) under the
-  store and registry locks for the saving incarnation; identities only from a journal. Newer,
-  damaged or unreadable records are never written over; "Start a new list" replaces only a damaged
-  one; `remove_server` (leave) deletes it. Not a cache pin.
+- **Record.** `servers/<id>.saved`, sealed under the vault `db_key`, bound to the group and this
+  device's member id, one entry per saved copy. Written by native right after each publication
+  (journaled, recovered and non-resumable writers) under the store and registry locks for the
+  saving incarnation; identities only from a journal. Newer, damaged or unreadable records are
+  never written over; "Start a new list" replaces only a damaged one; `remove_server` (leave)
+  deletes it. Not a cache pin.
+- **Remember saved files** (owner request, 27 October): a per-server setting in Server settings,
+  Storage, 16 to 4096 files (default 256), sealed in `servers/<id>.saved-limit`. The list keeps at
+  most that many entries and 4 KiB of plaintext per allowed entry, and is read with at most
+  `max(1 MiB, limit * 4 KiB)`. Lowering previews natively and says how many of the oldest entries go
+  (never files) before the user confirms; the list is trimmed before the setting is stored. A list
+  within 256 entries and 1 MiB stays version 1; a longer one is version 2. An unreadable setting
+  stops recording until the user chooses again.
 - **Transfers.** The Saved group shows list rows (newest first) in PR #51's row design: Saved,
   Saved file missing or replaced (with Save again while the file is listed), could not check, or
   cannot check (no identity). Show in folder works by entry ID with PR #51's read-only check; Clear

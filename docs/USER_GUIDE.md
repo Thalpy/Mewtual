@@ -606,6 +606,13 @@ the mark comes from this list and says what this device recorded, not whether th
 there. Saving the same file twice makes two copies and two rows. Leaving a server forgets its list;
 the saved files stay where they are.
 
+**Remember saved files** (Server settings → Storage, on this device, for that server) sets how
+many saves the list keeps: 16 to 4096 files, 256 unless you change it. When the list is full, a
+new save makes Mewtual forget the oldest entry. Choosing a lower number forgets the oldest entries
+beyond it; Mewtual tells you how many before you confirm, and the files themselves stay where they
+are. A higher number keeps every entry. With very long folder paths the list may keep somewhat
+fewer entries than the number, since it also has a size limit.
+
 **Replace my older saved copy** (Settings → Chat & Media → Saved files, off by default, on this
 device for every server): when you save a file again, Mewtual replaces the copy it saved before,
 if it can prove that copy is its own and still unchanged (same file, same content, one name, not
