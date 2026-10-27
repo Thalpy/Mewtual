@@ -180,16 +180,21 @@ default), 512, 1024, 2048 or 4096 files.
   trims to the setting and guessing could forget entries the user chose to keep. The list still
   reads (under the largest bound), Clear and Show in folder work, and the Storage page says the
   setting could not be read until the user chooses one, which writes over it.
-- **Changing it** (`set_saved_files_limit(server, limit, apply)`, under the store and registry
-  locks for the incarnation). With `apply: false` nothing changes and the answer says how many of
-  the oldest entries the choice would forget; the page shows "This forgets the N oldest saved files
-  from the list. The files themselves stay where they are." and a "Forget and apply" button before
-  anything changes. With `apply: true`: lowering trims the list and writes it **first**, then the
-  setting, so the list always fits what the stored setting lets a reader read (a failure in between
-  leaves the larger setting over a shorter list); raising writes only the setting and keeps every
-  entry. While the list reads as newer or cannot be read right now, a choice that would narrow the
-  read bound is refused (it could not be trimmed, and a narrower bound could make it read as
-  damaged); a damaged list is left alone and only the setting changes.
+- **Changing it** (`set_saved_files_limit(server, limit, apply, expectedForgets)`, under the store
+  and registry locks for the incarnation). With `apply: false` nothing changes and the answer says
+  how many of the oldest entries the choice would forget; the page shows "This forgets the N oldest
+  saved files from the list. The files themselves stay where they are." and a "Forget and apply"
+  button before anything changes. With `apply: true` the change holds only while the choice still
+  forgets exactly `expectedForgets` (the count the user confirmed, or the preview's zero); a save
+  meanwhile makes native refuse ("changed meanwhile ... Choose again") with nothing changed.
+  Lowering trims the list and writes it **first**, then the setting, so the list always fits what
+  the stored setting lets a reader read; a failure in between leaves the larger setting over a
+  shorter list, and the error says how many entries were forgotten (the page reloads the list on
+  any refusal). Raising writes only the setting and keeps every entry. While the list reads as
+  newer or cannot be read right now, its length is unknown and nothing could be shown before
+  confirming, so only a choice that keeps every entry is accepted: at least the setting in force
+  (the default without one), or 4096 when the setting itself cannot be read. A damaged list is
+  left alone and only the setting changes.
 - **Compatibility of the list record.** Version 1 stays exactly as it was, and a list within its
   bounds (any list at the default) is still written as version 1, so the #56 build before the
   setting keeps reading and writing it (it trims to 256 if it records, forgetting older entries of
@@ -201,8 +206,17 @@ default), 512, 1024, 2048 or 4096 files.
   rather than prevented, because preventing it would cap every list at 1 MiB whatever the setting.
 - **Commands.** `get_saved_files_limit(server) -> { state: "ok" | "unreadable", limit, listed,
   min, max, default }` (account-read; `limit` is `null` while unreadable, `listed` while the list
-  cannot be read) and `set_saved_files_limit(server, limit, apply) -> { limit, forgets, applied }`
-  (account-write). Numbers only; neither takes or returns a path.
+  cannot be read) and `set_saved_files_limit(server, limit, apply, expectedForgets) -> { limit,
+  forgets, applied }` (account-write; `expectedForgets` is required with `apply`). Numbers only;
+  neither takes or returns a path.
+- **Work.** A list's duplicate check on decode is one pass with sets (ids, file identities, and
+  platform, folder and name key, the name lowercased on Windows exactly as `same_leaf` compares),
+  so a full list decodes in about 10 ms in a debug build; the pairwise check it replaced took about
+  1.6 s at 4096 entries in one folder, under the store and registry locks on every save. Recording
+  measures each entry once per save. The Transfers Saved group still draws every entry (no paging),
+  and a setting file deleted by hand over a list larger than 1 MiB makes that list read as damaged
+  (only tampering gets there: raising stores the setting before the list can grow, and leave
+  removes the list first).
 
 ### 2. Renderer projection and commands
 
@@ -562,3 +576,37 @@ were not run here, as briefed):
 Every regression added for a review finding was break-checked: it fails with its guard removed and
 passes with it restored. Screenshots of the fixture states (900 by 640, headless Edge over CDP,
 after `html[data-visual-ready="chat"]`) are kept outside the repository with the handoff.
+
+## "Remember saved files": review and ledger (27 October)
+
+Built on the pushed `675a244d`: backend `c9170c7e`, Storage page `bee7b751`, docs `f2712e73`,
+review fixes `dd238fe4`, then this record. Read-only adversarial review of `675a244d..f2712e73`: no
+blocker; one HIGH, one MEDIUM, two LOW. It checked and found sound: the size arithmetic and the
+bounds, the write order (list before setting when lowering, setting first and synced when raising,
+list before setting on leave), version 1 kept within its bounds, the incarnation fence, the
+renderer boundary (numbers only, clamped natively, command policy and capabilities), the setting
+record's strict owner-bound decode, preview and trim using one function, and the app text.
+
+| Finding | Disposition |
+| --- | --- |
+| HIGH-1: the decode's pairwise duplicate check, now over up to 4096 entries in one Windows folder, ran for seconds under the store and registry locks on every save | Taken: one pass with sets, the same rule (measured about 10 ms against about 1.6 s in a debug build). Test: `a_full_list_in_one_windows_folder_decodes_in_one_pass` (a 500 ms bound the old check fails; same-identity and case-only duplicates still refused). |
+| MEDIUM-1: a lower setting was accepted while the list read as newer or could not be read, so a later save could forget entries without warning | Taken: only a setting that keeps every entry (`unknown_list_allows`). Test: `a_list_of_unknown_length_accepts_only_a_setting_that_keeps_every_entry`. |
+| LOW-1: the confirmed count could be out of date when the user applied | Taken: `expectedForgets`; a different count changes nothing and asks again. Tests: native `choosing_the_setting_previews_clamps_and_forgets_only_the_oldest`, the frontend handler tests. |
+| LOW-2: a failure after the trim read as if nothing had changed | Taken: the error names how many entries went, and the page reloads the list on any refusal. Tests: `a_setting_that_cannot_be_stored_after_the_trim_says_what_was_forgotten`, the frontend refusal test. |
+| Residuals | Documented in section 1a: a setting file deleted by hand over a list larger than 1 MiB; the backstop's own read of the setting (an unreadable setting allows up to 16 MiB); the Saved group drawing every entry. |
+
+Focused checks (CI runs the complete suites, `test:startup` and `test:flows`, not run here):
+
+| Check | Result |
+| --- | --- |
+| `cargo test -p catcoms-storage --lib kept::` (Windows; WSL Ubuntu `--locked`, with strict Clippy there) | 198 passed; 205 passed, Clippy clean |
+| `cargo test -p catcoms-app --lib store::saved_files_tests` | 7 passed |
+| native `cargo test --lib saved_files`, `private_downloads` | 20, 47 passed |
+| `npm test` (complete frontend unit suite), `npm run check`, `npm run build` | 2602 passed; 0 errors, 0 warnings; built |
+| strict Clippy root (`-p catcoms-storage -p catcoms-app`) and native; fmt both; ambient and raw-fs gates | clean; passed |
+| `cargo deny check` | only RUSTSEC-2026-0387 |
+
+Each new regression was break-checked (the setting's clamp, lowering trimming the oldest, the byte
+bound, the reader's bound following the setting, the store's backstop, recording refused on an
+unreadable setting, the preview changing nothing, the confirmation, and each review fix).
+Screenshots 09 and 10 (the setting, and a lower choice before confirming) are with the others.

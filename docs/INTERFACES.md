@@ -651,9 +651,11 @@ Renderer commands (no new command names):
   entry)` (account-write; never touches the file); `reset_saved_files(server)` (account-write;
   only while the record reads as damaged); `get_saved_files_limit(server) -> { state: "ok" |
   "unreadable", limit, listed, min, max, default }` (account-read; numbers only) and
-  `set_saved_files_limit(server, limit, apply) -> { limit, forgets, applied }` (account-write;
-  clamped natively; `apply: false` changes nothing and says how many of the oldest entries the
-  choice forgets; lowering trims the list before storing the setting). `save_group_file` gains `replaceOlder` (a flag) and its
+  `set_saved_files_limit(server, limit, apply, expectedForgets) -> { limit, forgets, applied }`
+  (account-write; clamped natively; `apply: false` changes nothing and says how many of the oldest
+  entries the choice forgets; `apply: true` needs `expectedForgets` and holds only while the choice
+  still forgets exactly that many; lowering trims the list before storing the setting; while the
+  list cannot be read only a choice that keeps every entry is accepted). `save_group_file` gains `replaceOlder` (a flag) and its
   result may carry these notes in `warning`: not listed, replaced, or why the older copy was not
   replaced. Private download rows gain `savedEntry` (saved rows only: the list entry with the
   published journal's identity, which the renderer draws as that row). Clear of a Saved row
