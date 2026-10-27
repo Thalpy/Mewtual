@@ -1122,8 +1122,10 @@ this interleaving; review L-7). Writers without a journal flush the folder when 
 staging name, after the guard. A Published record whose final name is not proven ours is never
 re-published automatically (the design review's resurrection hazard: the user may have deleted the
 saved file on purpose), and its Clear deletes nothing (review M-1): the staging name, when it is
-the only copy, is kept (`KeptOnlyCopy`, "The saved file was no longer in its folder, so its copy
-under the temporary .mewtual-part name was kept. Rename that file to keep it."); when another file
+the only copy, is kept (`KeptOnlyCopy`, "The saved file is no longer in its folder. Its copy in
+that same folder, whose name ends in .mewtual-part, was kept and is now the only copy. Rename it
+to keep it."; since the published-staging review the staging delete also
+requires the final name at the delete itself, see that section); when another file
 now has the saved name (an editor's atomic save), the original copy is kept and the notice says
 exactly that (`SavedNameReplaced`); both names gone is `SavedFileMissing` ("The saved file was no
 longer in its folder."); a final or staging name that cannot be checked right now (an indexer
@@ -1468,12 +1470,12 @@ agents' `row.md` and `icons.md` (class contract `.sdl`, tokens only, motion and 
   | exhausted | It ran out of attempts to fetch the missing parts. Retry download tries again. | Allowance exhausted; Retry grants a new allowance, then resumes. |
   | blocked | Some received data did not pass its check, so the download stopped. Resume download tries again. | `blocked`: a deterministic content failure retried only after explicit Resume. |
   | save-interrupted | Saving stopped partway, for example when Mewtual closed or locked. Resume saving picks up from the last saved part. | A journal with no active writer and no halt. |
-  | destination-unavailable | The folder or the partly saved file cannot be reached right now. Reconnect it and choose Try again, or save a new copy. | Halt Unavailable: folder missing or unreachable, or the partial gone. |
+  | destination-unavailable | The folder or the partly saved file cannot be reached right now. Reconnect it and try again, or save a new copy. (Compact rows: "choose Try again" became "try again".) | Halt Unavailable: folder missing or unreachable, or the partial gone. |
   | destination-changed | The partly saved file was changed by something else, so Mewtual stopped adding to it. Save new copy starts a separate file. | Halt Changed; Resume is not offered. |
   | saved, missing | The saved file is no longer there. Save again makes a fresh copy. | Saved check `missing`; Save again is the fresh save from the private copy. |
   | saved, replaced | A different file is at the saved name now. Save again makes a fresh copy. | Saved check `replaced`: another object at the name (an in-place edit keeps the identity and reads present). |
   | removing, running | Working on it. The other actions wait until this one finishes. | A row in Deleting while one of its actions (Remove, Clear or Keep) runs; the sentence names none of them. |
-  | removing, stuck | Mewtual could not finish removing a file it created for this save. Choose Remove to try again, or Keep partly saved file. (Or "Keep the file" when every part was written.) | A failed proven removal leaves the row in Removing (unreachable folder or a file in use); for a Clear of a saved row the file is only a temporary second name. The sentence names the row's own Keep label. |
+  | removing, stuck | Mewtual could not finish removing a file it created for this save. Remove tries again, or keep the partly saved file. (Or "keep the file" when every part was written; compact rows reworded it from "Choose Remove to try again, or Keep partly saved file".) | A failed proven removal leaves the row in Removing (unreachable folder or a file in use); for a Clear of a saved row the file is only a temporary second name. The sentence names the row's own Keep label. |
   | any, while a save writes | (none; the row reads Saving) | Native emits `download-progress` only while writing, and the list may not have refreshed since the save began (the non-resumable writer has no journal steps to refresh it); see "One row per file". |
 
   Deviations from the design copy: "Saved to the folder you chose" became "Saved to another
@@ -1649,6 +1651,168 @@ Focused checks for this round (the coordinator's process: CI runs the complete s
   `cargo test -p catcoms-app --lib actor::file_transfers` serially (63); Clippy for storage and
   app; fmt;
   `scripts/check-no-ambient.sh`; `scripts/check-store-raw-fs.sh`.
+
+## Published-staging review (PR #51, 26 October)
+
+Found by the #56 work on top of `bad25ad3`: Clear on a Saved (published) row checked the final
+name, then deleted the `.mewtual-part` staging name without holding the final name. A final name
+deleted in that gap made the staging delete remove the last copy. Holding the staging handle does
+not help: on Windows a handle that denies delete sharing on one hard link does not stop another
+link of the same file being deleted (checked on this host: with the staging name held that way,
+deleting the final name succeeds; with the final name itself held that way, deleting or renaming
+it fails).
+
+Fix: `remove_verified` takes `keep`, and `remove_partial` passes the final name for a published
+save (Clear, `ExportFile::finish` right after publication, the recovered-publication cleanup).
+The staging name is deleted only while the final name holds the same verified file at the delete:
+
+- Windows: after the staging handle is opened and verified, the final name is opened with the
+  delete-denying pin (`open_nofollow(.., true)`), verified, and held until `delete_by_handle` has
+  finished, so it cannot be deleted or renamed in between. No window remains on local NTFS; a
+  network server may not enforce share modes. If the pin is refused with a sharing violation, the
+  final name is verified without it, right before the delete: on a filesystem that checks delete
+  sharing per file rather than per link (unverified ReFS, WinFsp or Dokan volumes) our own staging
+  handle conflicts with the pin but, denying delete sharing itself, already stops the final name
+  being deleted; when another program holds the final name with delete access, the window is back
+  to the instant between that check and the delete. (Refusing instead would have turned every
+  Clear there into "could not check" for good; review M2.)
+- Unix: after the rename aside and the verification at the aside name, the final name is opened
+  relative to the pinned folder (no follow) and verified immediately before `unlinkat`; if it is
+  gone the aside name goes back to the staging name. Residual: a same-account process deleting the
+  final name in the instant between that check and the unlink still leaves no copy (no name can be
+  pinned on Unix, and an unlinked file cannot be linked back).
+- Unix crash leftovers (review L1): a copy that an interrupted Clear left at a `mewtual-removing-`
+  name is deleted by `sweep_aside` under the same rule (`Sweep::Remove { keep }`: the final name is
+  checked right before that unlink, and the copy goes back to the staging name if it is gone); and
+  when the final name is already gone or replaced, such a copy is put back at the staging name
+  (`Sweep::Restore`) instead of staying hidden there behind "could not check" on every Clear.
+- A final name gone at the delete is the new `Verified::KeepGone` (or `Aside::Restored`), which
+  `remove_partial` reports as `KeptOnlyCopy` (or `SavedNameReplaced` when another file took the
+  name). The notice says the kept copy is the only copy and where it is: "in that same folder,
+  whose name ends in .mewtual-part" (not "the saved name plus .mewtual-part": a final name numbered
+  at publication keeps the staging name it started with; review M1). Notices carry no path.
+- Not covered: the writers without a journal (the fallback writer, the GIF export) remove their
+  staging name right after their own link without this check; there is no row or Clear, and the
+  window is between this process's link and its removal. Recorded in THREAT-MODEL.
+
+Tests (each broken on purpose and seen failing):
+
+- `a_saved_name_deleted_before_the_staging_delete_keeps_the_only_copy` (Windows and WSL Ubuntu):
+  the final name is deleted, or replaced by another file, at `BEFORE_REMOVE` (after the staging
+  name was opened and verified; on Unix after its rename aside). The copy survives at its name and
+  the outcome is `KeptOnlyCopy` or `SavedNameReplaced`; the notice says "only copy" and "ends in
+  .mewtual-part". Fails with `keep` dropped on Windows and with the Unix check skipped in WSL.
+- Windows: `a_saved_name_cannot_be_deleted_while_its_staging_name_goes` (a delete of the final name
+  attempted at the new `WHILE_KEPT` seam is refused, the staging name goes and the saved file
+  stays; fails when the pin is released before the delete) and
+  `a_saved_name_whose_pin_is_refused_is_checked_without_it` (another handle with delete access on
+  the final name; Clear completes as `KeptSaved` instead of `Unchecked`; fails without the
+  fallback).
+- Unix (WSL): `a_crash_leftover_is_put_back_when_the_saved_name_goes_before_its_delete` (fails
+  without `keep` in the sweep) and `a_hidden_only_copy_of_a_saved_file_is_put_back_at_its_staging_name`
+  (fails with the old look-only sweep).
+
+Adversarial review of the fix (read-only): no blocker or high. M1 (the notice named a file that
+does not exist after a numbered publication): fixed as above. M2 (a pin refused for good on a
+filesystem checking delete sharing per file would wedge Clear): fixed with the unpinned fallback.
+L1 (the Unix crash-leftover sweep was a staging delete without the check, and a hidden only copy
+could wedge Clear): fixed as above. L2 (coverage): the replaced-name, pin-refused and Unix sweep
+cases above were added; a failed Unix put-back stays an error (the row stays tracked), as before.
+Also confirmed: the pin is held until `delete_by_handle` has closed the staging handle; identity
+checks compare volume, index and birth time, which hard links share; native already treats
+`KeptOnlyCopy` as settled (record released with the notice), which predates this fix.
+
+A short re-review of those fixes: no blocker, high or medium. The unpinned fallback reopens a
+window on NTFS only while another program holds the final name with delete access (mid-rename or
+mid-delete; a rename keeps the file), and is safe on filesystems checking sharing per file. One
+LOW, fixed: `Sweep::Restore` changed a folder other accounts can modify, where the put-back can
+fall back to link and unlink and pick up a swapped-in file; it now leaves the leftover in place
+there (the row stays "could not check", as before), like every other automatic change. Test: the
+shared case in `a_hidden_only_copy_of_a_saved_file_is_put_back_at_its_staging_name` (WSL; fails
+without the guard). Residual: such a leftover in a shared folder stays at its `mewtual-removing-`
+name until the folder is no longer shared or the user moves it.
+
+Focused checks: `cargo test -p catcoms-storage --lib kept::` on Windows (162) and the WSL Ubuntu
+storage suite (238) with Unix Clippy clean; Clippy for storage and app; `catcoms-app`
+`actor::file_transfers` serially (63); the native `--lib` filters `private_downloads streamed_save
+fallback publish` (68); fmt; the ambient and raw-fs gates.
+
+## Compact Transfers rows (PR #51, 27 October)
+
+The owner's design (design agent's `compact.md`, on top of the Transfers UX rows): every control on
+the name line. A row reads `[status symbol] name ... [primary icon] [CHIP] [more] [x]`; the bar
+("3.1 MB / 12.4 MB") and the chunk count stay; the text-button row and the inline Show in folder
+link are gone.
+
+- **Status symbol** (`.sdl-status`): the state's icon, once per row (the chip is word-only now; the
+  breathe and pop animations moved with it). Its tooltip is the row's sentence on NEEDS YOU rows
+  and a short line elsewhere (`statusTitle`); where the sentence is not visible it is also hidden
+  text for assistive technology, so each row's explanation is heard once.
+- **The sentence** (`.sdl-why`) shows on NEEDS YOU rows only (`showWhy`). Two sentences that named
+  old button labels were reworded and checked against behaviour: destination unavailable "...
+  Reconnect it and try again, or save a new copy." (Try again is the primary, Save new copy is in
+  the menu), and a stuck removal "... Remove tries again, or keep the partly saved file." (or
+  "keep the file").
+- **Controls** come from the pure `compactControls(view)`: the primary is the first of pause,
+  resume or fresh (Show in folder on a Saved row in the SAVED group), drawn green (`.go` filled for
+  play, retry, save; `.stop` outlined for pause); the red x is the remove-kind action (Remove or
+  Clear); everything else goes into the "more" menu in the view's order, then Show in folder after
+  a separator if a row ever offers it outside the primary. A row with nothing for the menu has no
+  More button. Every action of every state appears exactly once (tested for all seventeen rows and
+  for rows shown as Saving over another native state). Tooltips are the action labels; accessible
+  names add the file name; disabled controls stay focusable with their reason (`aria-disabled`,
+  `title`, `aria-describedby`); the control that started a running action carries the busy ring.
+- **Confirm** is unchanged in substance: the x swaps in place for Confirm and Cancel (the primary and
+  More are not shown meanwhile), bound to the row's state and revision; Clear of a file just found
+  present keeps its re-check. One change: the x of a stuck Removing row retries at once, since that
+  removal was already confirmed.
+- **The more menu** is mounted at the top level next to `.ctx-menu`, fixed from its button (above
+  it when there is no room), one open at a time: `aria-haspopup="menu"`, `aria-expanded`,
+  `aria-controls` while open, `role="menu"` and `menuitem` with a roving tabindex; ArrowDown or
+  ArrowUp on the button opens it on the first or last item (a click focuses the first); arrows wrap,
+  Home and End jump, Escape closes and returns focus to More, Tab closes with focus back on More
+  first (the menu sits at the end of the page, so the browser's Tab then moves on from More instead
+  of leaving the page). An item closes the menu, focuses More, then runs; a disabled item does
+  nothing. An outside press, a resize, a scroll of the panel holding the button, leaving Transfers,
+  the row leaving the list, a confirmation, or the row's state or items changing close it; when it
+  had focus, focus goes back to More or, if that went too, to the row's neighbours. A menu that stays
+  open follows its button when the list reflows. No native dialogs.
+- **Files**: `transfer-rows.ts` (`compactControls`, `statusTitle`, `showWhy`, eight icons: play,
+  pause, cancel-x, more, save-as, save-copy, clear, keep), `App.svelte` (row markup, the top-level
+  menu, the menu and busy handlers, `rowFocusTarget` selectors), `app.css` (compact parts replace
+  `.sdl-actions` and `.sdl-link`), `scripts/private-download-flow.mjs` (finds icon buttons by
+  accessible name).
+- **Tests**: `transfer-rows.test.ts` (the controls of every state, statuses and sentences),
+  `transfers-row-app.test.ts` (busy markers per press, markup contracts, the CSS hover guard),
+  `transfers-menu-app.test.ts` (the real menu handlers: opening, keys, Tab, items, outside press,
+  scroll filter, staleness, focus after a stale close, following the button), screenshots of every
+  state, an open menu (keyboard), the confirmation and the longest-chip confirmation in
+  `transfers-design/shots-compact/` (scratch).
+
+Accessibility review (read-only) and dispositions: no blocker.
+
+| Finding | Disposition |
+| --- | --- |
+| HIGH 1: Tab from the menu (mounted at the end of the page) left the page | Fixed: Tab returns focus to More and lets the browser's Tab move on. Test updated (break-checked). |
+| MEDIUM 2: focus fell to `<body>` when a refresh removed the row or its More while the menu had focus (the item was already gone when the effect ran) | Fixed: `rowMenuHadFocus` and `settleRowMenu` (More, else the row's neighbours, only if focus fell to `<body>`). Tests (break-checked). |
+| MEDIUM 3: disabled or busy icon buttons and menu items took the global accent hover | Fixed: a hover guard before the looks; static CSS test. |
+| LOW 4: one busy marker per row, so an earlier action settling cleared a later press's ring | Fixed: a number per press; an action clears only its own. Test (break-checked). |
+| LOW 5: any scroll closed the menu; a reflow left it floating | Fixed: only a scroll of something holding the button closes it; a refresh moves it with its button. Tests. |
+| LOW 6: a state change with the same items kept the menu open | Fixed: the key includes state and group. Test. |
+| LOW 7: the longest chip plus the confirmation could overflow | Fixed: the cluster wraps right-aligned when even its own line is too narrow; checked in a screenshot. |
+| LOW 8: no tests for rows shown as Saving over another native state | Added. |
+| LOW 9: titles repeat the start of accessible names; some reasons only in `title` | Disabled menu items now describe their reason; the repeated title is the design's accepted tooltip. |
+
+A short re-review of those fixes found nothing: no focus loop (focus is restored only when it fell
+to `<body>`), repositioning only when the placement changed, the scroll filter closing for the
+panel's container and the page, and the described-by target always rendered. Residuals: a reflow
+can carry the More button (and the menu following it) out of the panel's visible part without a
+scroll; a long save started from the menu keeps its internal marker for the whole save (invisible:
+More is disabled by the saving reason meanwhile).
+
+Focused checks: the complete frontend suite (2,565 passed), `npm run check`, `npm run build`, and
+the screenshots above. Not run here (CI): `test:flows`, whose private-download script now finds
+icon buttons by accessible name.
 
 ## Ledger (24 October, Transfers UX)
 

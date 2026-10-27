@@ -1253,6 +1253,13 @@ used; a stuck Clear offers "Keep the file" and native's messages describe a temp
 remaining items, each with its reason (no safe API, macOS, out of scope), are in the design
 document's "Fix-the-lows round" section.
 
+Published-staging fix (26 October, `a670275f`): a saved file's `.mewtual-part` staging copy is
+deleted only while its final name still holds the same file at the delete itself (Windows pins the
+final name across the delete; Unix checks it just before the unlink), so a final name deleted
+during Clear no longer leaves no copy. Compact Transfers rows (27 October): status symbol, name,
+then the primary icon, the chip word, a keyboard-operable "more" menu and the red x on one line;
+the text-button row is gone. Both are described, with their reviews, in the design document.
+
 ## Chat history adversarial checkpoint (2026-10-20)
 
 The latest user request is to explain/test additive chat history across MLS epochs, disconnected

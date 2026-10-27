@@ -878,7 +878,7 @@ fn remove_created(file: File, created: &Path, rng: &mut dyn CryptoRngCore) {
         return;
     };
     if let Ok(id) = external::session_id(&file) {
-        let _ = external::remove_verified(folder, None, leaf, Expected::Session(id), rng);
+        let _ = external::remove_verified(folder, None, leaf, None, Expected::Session(id), rng);
     }
     drop(file);
 }
@@ -942,14 +942,14 @@ pub fn remove_if_session(
     id: SessionId,
     rng: &mut dyn CryptoRngCore,
 ) -> io::Result<SessionRemoval> {
-    external::remove_verified(folder, None, leaf, Expected::Session(id), rng).map(|verified| {
-        match verified {
-            Verified::Removed { .. } => SessionRemoval::Removed,
-            Verified::Missing => SessionRemoval::Missing,
-            // Without a captured folder identity the folder cannot "change"; treat it as foreign.
-            Verified::NotOurs | Verified::FolderChanged => SessionRemoval::NotOurs,
-            Verified::Shared => SessionRemoval::SharedFolder,
-        }
+    let verified = external::remove_verified(folder, None, leaf, None, Expected::Session(id), rng)?;
+    Ok(match verified {
+        Verified::Removed { .. } => SessionRemoval::Removed,
+        Verified::Missing => SessionRemoval::Missing,
+        // Without a captured folder identity the folder cannot "change"; treat it as foreign.
+        // `KeepGone` needs a name to keep, which this call never passes.
+        Verified::NotOurs | Verified::FolderChanged | Verified::KeepGone => SessionRemoval::NotOurs,
+        Verified::Shared => SessionRemoval::SharedFolder,
     })
 }
 
@@ -1535,7 +1535,9 @@ impl PartialRemoval {
                 "This folder may be changed by other accounts, so Mewtual deletes nothing there automatically and left the partly saved file in place. Delete it yourself if you no longer need it.",
             ),
             Self::KeptOnlyCopy => Some(
-                "The saved file was no longer in its folder, so its copy under the temporary .mewtual-part name was kept. Rename that file to keep it.",
+                // Not "the saved name plus .mewtual-part": a final name numbered at publication
+                // (`notes (1).txt`) keeps the staging name it started with (`notes.txt.mewtual-part`).
+                "The saved file is no longer in its folder. Its copy in that same folder, whose name ends in .mewtual-part, was kept and is now the only copy. Rename it to keep it.",
             ),
             Self::SavedFileMissing => Some("The saved file was no longer in its folder."),
             Self::SavedNameReplaced => Some(
@@ -1628,7 +1630,8 @@ fn locate(journal: &ExportJournal, write: bool) -> Result<Located, ExportError> 
 /// stays in Removing; "Keep partly saved file" remains the escape).
 ///
 /// PR51 M2: `published` is true when the record was already Published. Its staging name is then
-/// deleted only once the final name is proven to hold our file. Otherwise nothing is deleted: a
+/// deleted only once the final name is proven to hold our file, and (published-staging review)
+/// only while it still does at the delete itself. Otherwise nothing is deleted: a
 /// staging name that is the only copy is kept ([`PartialRemoval::KeptOnlyCopy`], or
 /// [`PartialRemoval::SavedNameReplaced`] when another file took the saved name), both names gone
 /// is [`PartialRemoval::SavedFileMissing`], and a name that cannot be checked right now is
@@ -1669,18 +1672,26 @@ pub fn remove_partial(
                     (_, NameState::Other) => PartialRemoval::LeftInPlace,
                     (final_name, NameState::Absent) => {
                         // Unix: a crash during an earlier removal can leave our file at a random
-                        // "removing" name; it would be the only copy. Look without deleting.
+                        // "removing" name; it would be the only copy. It is never deleted here:
+                        // it goes back to the staging name (published-staging review, review
+                        // L1: left aside it read "could not check" forever, hidden from the user).
                         match external::sweep_aside(
                             &folder,
                             journal.folder_id,
                             journal.file_id,
-                            false,
+                            external::Sweep::Restore {
+                                staging: &journal.staging,
+                            },
                         ) {
                             Ok(external::Aside::Nothing) if final_name == NameState::Absent => {
                                 PartialRemoval::SavedFileMissing
                             }
                             // Nothing of ours is left; the saved name holds someone's other file.
                             Ok(external::Aside::Nothing) => PartialRemoval::Removed,
+                            Ok(external::Aside::Restored) if final_name == NameState::Absent => {
+                                PartialRemoval::KeptOnlyCopy
+                            }
+                            Ok(external::Aside::Restored) => PartialRemoval::SavedNameReplaced,
                             Ok(_) | Err(_) => PartialRemoval::Unchecked,
                         }
                     }
@@ -1688,10 +1699,17 @@ pub fn remove_partial(
             }
         }
     }
+    // Published-staging review (26 October): the final name checked above can be deleted before
+    // the staging delete below, and the staging name is then the last copy. So a published save's
+    // staging name is deleted only while its final name is proven, at the delete itself, to hold
+    // the same file (`keep`; Windows pins the final name across the delete, Unix checks it right
+    // before the unlink, see `remove_verified`).
+    let keep = published.then_some(journal.final_leaf.as_str());
     let verified = external::remove_verified(
         &folder,
         Some(journal.folder_id),
         &journal.staging,
+        keep,
         Expected::Journal(journal.file_id),
         rng,
     );
@@ -1713,8 +1731,20 @@ pub fn remove_partial(
         Ok(Verified::Missing) => {
             // Unix: a crash between the rename aside and the unlink leaves our file at a random
             // "removing" name nothing records. Find it (by identity) before claiming "removed".
-            match external::sweep_aside(&folder, journal.folder_id, journal.file_id, true) {
+            // For a published save that copy is deleted only while the final name still holds
+            // the file, like the staging name above; otherwise it goes back to the staging name
+            // (published-staging review, review L1).
+            let keep = published.then_some((journal.final_leaf.as_str(), journal.staging.as_str()));
+            let sweep = external::Sweep::Remove { keep };
+            match external::sweep_aside(&folder, journal.folder_id, journal.file_id, sweep) {
                 Ok(external::Aside::Nothing | external::Aside::Removed) => {}
+                Ok(external::Aside::Restored) => {
+                    return Ok(match final_state() {
+                        NameState::Absent => PartialRemoval::KeptOnlyCopy,
+                        NameState::Other => PartialRemoval::SavedNameReplaced,
+                        NameState::Ours | NameState::Unknown => PartialRemoval::Unchecked,
+                    })
+                }
                 Ok(external::Aside::Left { shared: true }) => {
                     return Ok(PartialRemoval::SharedFolder)
                 }
@@ -1732,6 +1762,13 @@ pub fn remove_partial(
         Ok(Verified::NotOurs) => Ok(PartialRemoval::LeftInPlace),
         Ok(Verified::Shared) => Ok(PartialRemoval::SharedFolder),
         Ok(Verified::FolderChanged) => Ok(PartialRemoval::FolderChanged),
+        // The final name stopped holding our file after the check above; the staging name was
+        // kept (on Unix put back) and may be the only copy. Say what the final name holds now.
+        Ok(Verified::KeepGone) => Ok(match final_state() {
+            NameState::Absent => PartialRemoval::KeptOnlyCopy,
+            NameState::Other => PartialRemoval::SavedNameReplaced,
+            NameState::Ours | NameState::Unknown => PartialRemoval::Unchecked,
+        }),
         Err(_) => Ok(PartialRemoval::Unchecked),
     }
 }
@@ -1817,7 +1854,8 @@ pub fn partial_presence(journal: &ExportJournal) -> PartialPresence {
         (Some(true), _) | (_, Some(true)) => PartialPresence::Present,
         // Unix: a crash mid-removal can leave our file at a "removing" name.
         (Some(false), Some(false)) => {
-            match external::sweep_aside(&folder, journal.folder_id, journal.file_id, false) {
+            let look = external::Sweep::Look;
+            match external::sweep_aside(&folder, journal.folder_id, journal.file_id, look) {
                 Ok(external::Aside::Nothing) => PartialPresence::Gone,
                 Ok(_) => PartialPresence::Present,
                 Err(_) => PartialPresence::Unknown,
@@ -1960,7 +1998,7 @@ fn links_supported(
             // Only our just-made second name for our own file is removed here, wherever the path
             // leads now (a name that is not ours is left alone).
             let removed =
-                external::remove_verified(folder, None, &probe, Expected::Session(id), rng);
+                external::remove_verified(folder, None, &probe, None, Expected::Session(id), rng);
             return match removed {
                 Ok(Verified::Removed { .. }) if landed => LinkProbe::Works,
                 _ if moved() => LinkProbe::FolderChanged,

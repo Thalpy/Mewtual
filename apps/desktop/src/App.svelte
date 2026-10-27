@@ -97,7 +97,7 @@
     completedDownload, downloadSavedNotice, guideSavedNotice, isSaveAsCancelled, saveGroupFile, resumeGroupFile, saveSpaceGuide,
   } from "./native-download";
   import { acceptSaveProgress, checkedPrivateDownloads, checkedSavedCheck, privateDownloadChatLabel, privateDownloadChatSave, privateDownloadOffers, privateDownloadSaveAsIsNewCopy, type PrivateDownload, type PrivateDownloadActionKind, type SavedCheck } from "./private-downloads";
-  import { SAVED_ROW_GROUPS, TRANSFER_ICONS, confirmWords, groupSavedRows, savedRowTransitions, savedRowView, type SavedRowAction, type SavedRowGroup, type SavedRowLive, type TransferIcon } from "./transfer-rows";
+  import { SAVED_ROW_GROUPS, TRANSFER_ICONS, compactControls, confirmWords, groupSavedRows, savedRowTransitions, savedRowView, type CompactControl, type CompactControls, type SavedRowAction, type SavedRowGroup, type SavedRowLive, type SavedRowView, type TransferIcon } from "./transfer-rows";
   import {
     CACHE_LIMIT_CHOICES, cacheBytes, cacheFooter, cachePauseText, cacheShown, checkedCacheStatus, leaveLoss,
     leaveReportText, limitLabel, lowerLimitWarning, pinnedSummary, type CacheStatus, type LeaveLoss,
@@ -12438,12 +12438,14 @@
    * Remove (back from a confirmation) or its first action; else the next row of the same group,
    * the group's heading, the first row of any group, and last the tab's own heading. */
   function rowFocusTarget(rowId: string, group: SavedRowGroup, nextId: string | undefined, fromConfirm: boolean): HTMLElement | null {
+    // A row's controls are its icon buttons (primary, more, the x) or, while confirming, the pair.
+    const control = ":is(.sdl-ico-btn, .sdl-act)";
     const remove = document.querySelector<HTMLElement>(`[data-sdl-row="${rowId}"] [data-sdl-remove]`);
-    const first = document.querySelector<HTMLElement>(`[data-sdl-row="${rowId}"] .sdl-act`);
+    const first = document.querySelector<HTMLElement>(`[data-sdl-row="${rowId}"] ${control}`);
     return (fromConfirm ? remove ?? first : first)
-      ?? (nextId ? document.querySelector<HTMLElement>(`[data-sdl-row="${nextId}"] .sdl-act`) : null)
+      ?? (nextId ? document.querySelector<HTMLElement>(`[data-sdl-row="${nextId}"] ${control}`) : null)
       ?? document.getElementById(`sdl-${group}`)
-      ?? document.querySelector<HTMLElement>(".sdl-row .sdl-act")
+      ?? document.querySelector<HTMLElement>(`.sdl-row ${control}`)
       ?? document.getElementById("transfers-title");
   }
   const focusLost = () => document.activeElement === document.body || !document.activeElement;
@@ -12463,7 +12465,17 @@
       holder = rowFocusTarget(row.id, group, next?.id, action.confirm);
       holder?.focus();
     }
-    await runPrivateDownloadAction(row, action.kind);
+    // Only this press's own marker is cleared: a later press on the same row (Remove while a
+    // resumed save still runs) keeps its busy ring when this action settles.
+    const press = pressedBy.get(row.id);
+    try {
+      await runPrivateDownloadAction(row, action.kind);
+    } finally {
+      if (press !== undefined && pressedBy.get(row.id) === press) {
+        pressedBy.delete(row.id);
+        delete pressedControl[row.id];
+      }
+    }
     await tick();
     if (holder && !holder.isConnected && focusLost()) rowFocusTarget(row.id, group, next?.id, action.confirm)?.focus();
   }
@@ -12493,8 +12505,200 @@
     // Clear of a Saved row is unconfirmed only while its file was found present, and that answer
     // can be from earlier in this visit: check again before releasing the private copy.
     if (!action.confirm && action.kind === "remove" && row.status === "saved") return void clearSavedRow(row, action, group);
+    pressRowControl(row.id, action.kind === "remove" ? "remove" : "primary");
     void runSavedRowAction(row, action, group);
   }
+
+  // Compact Transfers rows (design compact.md): which control of a row started its running action,
+  // so that control (and only it) shows the busy ring. Each press gets its own number in
+  // `pressedBy`, and an action clears the marker only while it is still its own.
+  let pressedControl = $state<Record<string, "primary" | "more" | "remove">>({});
+  const pressedBy = new Map<string, number>();
+  let pressCount = 0;
+  function pressRowControl(rowId: string, slot: "primary" | "more" | "remove") {
+    pressedBy.set(rowId, ++pressCount);
+    pressedControl[rowId] = slot;
+  }
+  // One "more" menu open at a time across the tab, mounted at the top level and positioned fixed
+  // from its button (`top` or `bottom`, and `right`); `key` is the row's state, group and menu
+  // items when it opened, so a row whose state or menu changes closes it; `group` lets focus fall
+  // back to a neighbouring row when this one goes.
+  let rowMenu = $state<{ rowId: string; group: SavedRowGroup; top: number | null; bottom: number | null; right: number; up: boolean; key: string } | null>(null);
+  let rowMenuFocus = $state(0);
+  // Whether focus has been inside the open menu: the menu is mounted outside the tab, and by the
+  // time a refresh removes it the focused item is already gone, so this is what tells the stale
+  // close (below) to put focus back.
+  let rowMenuHadFocus = false;
+  let rowMenuView = $derived(rowMenu ? savedRowViews.find((view) => view.id === rowMenu?.rowId) ?? null : null);
+  const menuKey = (view: SavedRowView, controls: CompactControls) => `${view.state}:${view.group}:` + controls.menu
+    .map((item) => item.kind === "action" ? item.action.kind : item.kind).join(",");
+  /** Where the menu goes for a More button: below it, or above when there is no room. */
+  function rowMenuPlace(button: HTMLElement): { top: number | null; bottom: number | null; right: number; up: boolean } {
+    const rect = button.getBoundingClientRect();
+    const spaceBelow = window.innerHeight - rect.bottom;
+    const up = spaceBelow < 160 && rect.top > spaceBelow; // five items is about 160px
+    return {
+      up,
+      right: Math.max(8, window.innerWidth - rect.right),
+      top: up ? null : rect.bottom + 4,
+      bottom: up ? window.innerHeight - rect.top + 4 : null,
+    };
+  }
+  /** The reason every menu item is unavailable (the row's busy reason), or `null` when at least
+   * one item can run. A More button with nothing to run is `aria-disabled` with that reason. */
+  function rowMenuDisabled(controls: CompactControls): string | null {
+    const items = controls.menu.filter((item) => item.kind !== "separator");
+    const off = items.every((item) => item.kind === "action" && item.action.disabled);
+    return off ? items.find((item) => item.kind === "action")?.action.disabledReason ?? null : null;
+  }
+  const rowMenuItems = () => [...document.querySelectorAll<HTMLElement>(".sdl-menu [role=menuitem]")];
+  const rowMoreButton = (rowId: string) => document.querySelector<HTMLElement>(`[data-sdl-more="${rowId}"]`);
+  const focusInRowMenu = () => !!document.activeElement?.closest?.(".sdl-menu");
+  /** Open a row's menu below its button (above when there is no room) and focus its first item,
+   * or its last for ArrowUp. Opening by click focuses the first item too. */
+  async function openRowMenu(rowId: string, controls: CompactControls, button: HTMLElement, last = false) {
+    const view = savedRowViews.find((v) => v.id === rowId);
+    if (!view) return;
+    rowMenuHadFocus = false;
+    rowMenu = { rowId, group: view.group, key: menuKey(view, controls), ...rowMenuPlace(button) };
+    const items = controls.menu.filter((item) => item.kind !== "separator");
+    rowMenuFocus = controls.menu.indexOf(last ? items[items.length - 1] : items[0]);
+    await tick();
+    const elements = rowMenuItems();
+    (last ? elements[elements.length - 1] : elements[0])?.focus();
+  }
+  /** Close the open menu; with `refocus`, focus goes back to its More button if it is still there. */
+  function closeRowMenu(refocus: boolean) {
+    const open = rowMenu;
+    if (!open) return;
+    rowMenu = null;
+    rowMenuHadFocus = false;
+    if (refocus) rowMoreButton(open.rowId)?.focus();
+  }
+  function moreClick(rowId: string, controls: CompactControls, event: MouseEvent) {
+    if (rowMenu?.rowId === rowId) return closeRowMenu(true);
+    if (rowMenuDisabled(controls) !== null || pressedControl[rowId] === "more") return;
+    void openRowMenu(rowId, controls, event.currentTarget as HTMLElement);
+  }
+  function moreKeydown(rowId: string, controls: CompactControls, event: KeyboardEvent) {
+    if (event.key !== "ArrowDown" && event.key !== "ArrowUp") return;
+    event.preventDefault();
+    if (rowMenuDisabled(controls) !== null) return;
+    void openRowMenu(rowId, controls, event.currentTarget as HTMLElement, event.key === "ArrowUp");
+  }
+  /** Keys inside the menu: arrows move with wrap-around, Home and End jump, Escape closes and
+   * returns focus to the More button. Tab closes too: the menu is mounted at the end of the page,
+   * so focus first goes back to More and the browser's own Tab then moves on from there (to the x,
+   * or with Shift to the primary) instead of leaving the page (review HIGH 1). */
+  function rowMenuKeydown(event: KeyboardEvent) {
+    const items = rowMenuItems();
+    const at = items.indexOf(document.activeElement as HTMLElement);
+    const move = (index: number) => {
+      event.preventDefault();
+      items[(index + items.length) % items.length]?.focus();
+    };
+    switch (event.key) {
+      case "ArrowDown": return move(at + 1);
+      case "ArrowUp": return move(at < 0 ? items.length - 1 : at - 1);
+      case "Home": return move(0);
+      case "End": return move(items.length - 1);
+      case "Escape":
+        event.preventDefault();
+        event.stopPropagation();
+        return closeRowMenu(true);
+      case "Tab": return closeRowMenu(true);
+    }
+  }
+  /** Activate a menu item: close the menu (focus back on More), then run it. A disabled item does
+   * nothing and leaves the menu open, its reason in the title. */
+  async function runRowMenuItem(rowId: string, item: CompactControl) {
+    if (item.kind === "action" && item.action.disabled) return;
+    closeRowMenu(true);
+    const row = privateDownloads.find((r) => r.id === rowId);
+    const view = savedRowViews.find((v) => v.id === rowId);
+    if (!row || !view) return;
+    if (item.kind === "reveal") return revealSavedRow(row);
+    pressRowControl(rowId, "more");
+    await runSavedRowAction(row, item.action, view.group);
+  }
+  /** A pointer press outside the open menu and its More button closes it; focus stays wherever
+   * the pointer put it. */
+  function rowMenuPointerDown(event: PointerEvent) {
+    const open = rowMenu;
+    if (!open) return;
+    const target = event.target as Node | null;
+    if (target && (document.querySelector(".sdl-menu")?.contains(target) || rowMoreButton(open.rowId)?.contains(target))) return;
+    closeRowMenu(false);
+  }
+  /** A resize, or a scroll of something holding the More button (the Transfers panel, the page),
+   * makes the menu's fixed position stale: close it, returning focus to More when focus was in the
+   * menu. Scrolls elsewhere (the chat, the menu itself) leave it open (review LOW 5). */
+  function rowMenuMoved(event: Event) {
+    const open = rowMenu;
+    if (!open) return;
+    if (event.type === "scroll") {
+      const target = event.target as Node | null;
+      const more = rowMoreButton(open.rowId);
+      const holdsMore = !target || target === document || !more || target.contains?.(more);
+      if (!holdsMore) return;
+    }
+    closeRowMenu(focusInRowMenu());
+  }
+  /** Whether the open menu must close: Transfers was left, its row left the list or is being
+   * confirmed for removal, or the row's state, group or menu items changed since it opened. */
+  function rowMenuStale(views: SavedRowView[], shown: boolean): boolean {
+    const open = rowMenu;
+    if (!open) return false;
+    const current = views.find((v) => v.id === open.rowId);
+    const row = privateDownloads.find((r) => r.id === open.rowId);
+    return !shown || !current || !row || confirmingRemove(row) || menuKey(current, compactControls(current)) !== open.key;
+  }
+  /** After a refresh: close a stale menu, and when focus was in it put focus back on its More
+   * button or, if that went with the row's change, on the row or its neighbours (review MEDIUM 2),
+   * but only if focus fell to `<body>`. A menu that stays open follows its button, which a list
+   * reflow can move without any scroll. */
+  function settleRowMenu(views: SavedRowView[], shown: boolean) {
+    const open = rowMenu;
+    if (!open) return;
+    if (!rowMenuStale(views, shown)) {
+      void tick().then(() => {
+        const more = rowMoreButton(open.rowId);
+        if (rowMenu !== open || !more) return;
+        const place = rowMenuPlace(more);
+        if (place.top !== open.top || place.bottom !== open.bottom || place.right !== open.right || place.up !== open.up) {
+          rowMenu = { ...open, ...place };
+        }
+      });
+      return;
+    }
+    const refocus = rowMenuHadFocus || focusInRowMenu();
+    rowMenu = null;
+    rowMenuHadFocus = false;
+    if (!refocus || !shown) return;
+    void tick().then(() => {
+      if (!focusLost()) return;
+      const rows = savedRowGroups[open.group];
+      const at = rows.findIndex((v) => v.id === open.rowId);
+      (rowMoreButton(open.rowId) ?? rowFocusTarget(open.rowId, open.group, at >= 0 ? rows[at + 1]?.id : rows[0]?.id, false))?.focus();
+    });
+  }
+  $effect(() => {
+    if (!rowMenu) return;
+    window.addEventListener("pointerdown", rowMenuPointerDown, true);
+    window.addEventListener("resize", rowMenuMoved);
+    document.addEventListener("scroll", rowMenuMoved, true);
+    return () => {
+      window.removeEventListener("pointerdown", rowMenuPointerDown, true);
+      window.removeEventListener("resize", rowMenuMoved);
+      document.removeEventListener("scroll", rowMenuMoved, true);
+    };
+  });
+  // Each refresh settles the open menu (closes it when stale, else keeps it by its button).
+  $effect(() => {
+    const views = savedRowViews;
+    const shown = view === "downloads";
+    untrack(() => settleRowMenu(views, shown));
+  });
   // Fix-the-lows round, review L9: Clear releases a Saved row's private copy, which is the only
   // copy left once the saved file is gone. The row skips the confirmation when a check found the
   // file present, but that check ran once per visit, so a file deleted since would be released
@@ -12522,7 +12726,10 @@
     const now = privateDownloads.find((other) => other.id === row.id);
     if (!now || now.status !== "saved" || now.intent !== row.intent) return;
     savedChecks[row.id] = { intent: row.intent, result, visit };
-    if (result === "present") return runSavedRowAction(now, action, group);
+    if (result === "present") {
+      pressRowControl(row.id, "remove");
+      return runSavedRowAction(now, action, group);
+    }
     await askRemove(now);
   }
 
@@ -28720,11 +28927,82 @@
                     {#each savedRowGroups[group.id] as saved (saved.id)}
                       {@const row = privateDownloads.find((r) => r.id === saved.id)}
                       {#if row}
+                        {@const controls = compactControls(saved)}
+                        {@const remove = controls.remove}
+                        {@const confirming = !!remove && remove.confirm && confirmingRemove(row)}
+                        {@const offId = `sdl-why-off-${saved.id}`}
+                        <!-- Compact row (design compact.md): status symbol, name, then one cluster of
+                             controls: the primary icon, the chip word, "more" and the red x. -->
                         <li class="sdl-row" data-sdl-row={saved.id} data-state={saved.state} data-tone={saved.tone}
                           data-check={saved.check ?? undefined} aria-busy={saved.busy ? "true" : undefined}>
                           <div class="sdl-head">
+                            <span class="sdl-status" title={saved.statusTitle}>
+                              {@render transferIcon(saved.icon)}
+                              {#if !saved.showWhy}<span class="sdl-sr">{saved.statusTitle}</span>{/if}
+                            </span>
                             <span class="sdl-name" title={saved.name}>{saved.name}</span>
-                            <span class="sdl-chip">{@render transferIcon(saved.icon)} <span>{saved.word}</span></span>
+                            <span class="sdl-ctl">
+                              {#if !confirming && controls.primary}
+                                {@const primary = controls.primary}
+                                {#if primary.kind === "reveal"}
+                                  <button class="sdl-ico-btn" type="button" data-sdl-primary={saved.id}
+                                    title={revealingSaved[saved.id] ? "Checking the saved file" : primary.label}
+                                    aria-label={primary.accessibleName}
+                                    aria-disabled={revealingSaved[saved.id] ? "true" : undefined}
+                                    aria-busy={revealingSaved[saved.id] ? "true" : undefined}
+                                    onclick={() => revealSavedRow(row)}>{@render transferIcon(primary.icon)}</button>
+                                {:else}
+                                  <button class="sdl-ico-btn" class:go={primary.look === "go"} class:stop={primary.look === "stop"}
+                                    type="button" data-sdl-primary={saved.id}
+                                    title={primary.action.disabledReason ?? primary.action.label}
+                                    aria-label={primary.action.accessibleName}
+                                    aria-disabled={primary.action.disabled || (saved.busy && pressedControl[saved.id] === "primary") ? "true" : undefined}
+                                    aria-busy={saved.busy && pressedControl[saved.id] === "primary" ? "true" : undefined}
+                                    aria-describedby={primary.action.disabled ? offId : undefined}
+                                    onclick={() => rowButtonClick(row, primary.action, saved.group)}>{@render transferIcon(primary.icon)}</button>
+                                {/if}
+                              {/if}
+                              <span class="sdl-chip">{saved.word}</span>
+                              {#if confirming && remove}
+                                {@const words = confirmWords(remove, saved.name)}
+                                <!-- Escape on either button cancels, like Cancel. -->
+                                <span class="sdl-confirm" role="group" aria-label={words.group}>
+                                  <button class="sdl-act danger" type="button" data-sdl-confirm={saved.id}
+                                    aria-label={words.confirmName}
+                                    aria-disabled={remove.disabled ? "true" : undefined}
+                                    aria-describedby={remove.disabled ? offId : undefined}
+                                    title={remove.disabledReason ?? undefined}
+                                    onkeydown={(e) => { if (e.key === "Escape") { e.stopPropagation(); void cancelRemove(row); } }}
+                                    onclick={() => rowButtonClick(row, remove, saved.group)}>{words.confirm}</button>
+                                  <button class="sdl-act ghost" type="button" aria-label={words.cancelName}
+                                    onkeydown={(e) => { if (e.key === "Escape") { e.stopPropagation(); void cancelRemove(row); } }}
+                                    onclick={() => cancelRemove(row)}>Cancel</button>
+                                </span>
+                              {:else}
+                                {#if controls.menu.length}
+                                  {@const menuOff = rowMenuDisabled(controls)}
+                                  <button class="sdl-ico-btn sdl-more" type="button" data-sdl-more={saved.id}
+                                    aria-haspopup="menu" aria-expanded={rowMenu?.rowId === saved.id ? "true" : "false"}
+                                    aria-controls={rowMenu?.rowId === saved.id ? `sdl-menu-${saved.id}` : undefined}
+                                    title={menuOff ?? "More actions"} aria-label={`More actions for ${saved.name}`}
+                                    aria-disabled={menuOff || (saved.busy && pressedControl[saved.id] === "more") ? "true" : undefined}
+                                    aria-busy={saved.busy && pressedControl[saved.id] === "more" ? "true" : undefined}
+                                    aria-describedby={menuOff ? offId : undefined}
+                                    onclick={(e) => moreClick(saved.id, controls, e)}
+                                    onkeydown={(e) => moreKeydown(saved.id, controls, e)}>{@render transferIcon("more")}</button>
+                                {/if}
+                                {#if remove}
+                                  {@const removeBusy = clearingSaved[saved.id] || (saved.busy && pressedControl[saved.id] === "remove")}
+                                  <button class="sdl-ico-btn danger" type="button" data-sdl-remove={saved.id}
+                                    title={clearingSaved[saved.id] ? "Checking the saved file" : remove.disabledReason ?? remove.label}
+                                    aria-label={remove.accessibleName}
+                                    aria-disabled={remove.disabled || removeBusy ? "true" : undefined}
+                                    aria-busy={removeBusy ? "true" : undefined}
+                                    aria-describedby={remove.disabled ? offId : undefined}
+                                    onclick={() => rowButtonClick(row, remove, saved.group)}>{@render transferIcon("cancel-x")}</button>
+                                {/if}
+                              {/if}
+                            </span>
                           </div>
                           {#if saved.bar}
                             <div class="sdl-bar" role="progressbar" aria-label={saved.bar.accessibleName}
@@ -28735,53 +29013,13 @@
                             </div>
                             <span class="sdl-chunks">{saved.chunks}</span>
                           {/if}
-                          {#if saved.why}<p class="sdl-why">{saved.why}</p>{/if}
-                          <div class="sdl-actions">
-                            {#each saved.actions as action (action.kind)}
-                              {#if action.confirm && confirmingRemove(row)}
-                                {@const words = confirmWords(action, saved.name)}
-                                <!-- Escape on either button cancels, like Cancel. -->
-                                <span class="sdl-confirm" role="group" aria-label={words.group}>
-                                  <button class="sdl-act danger" type="button" data-sdl-confirm={saved.id}
-                                    aria-label={words.confirmName}
-                                    aria-disabled={action.disabled ? "true" : undefined}
-                                    aria-describedby={action.disabled ? `sdl-why-off-${saved.id}` : undefined}
-                                    title={action.disabledReason ?? undefined}
-                                    onkeydown={(e) => { if (e.key === "Escape") { e.stopPropagation(); void cancelRemove(row); } }}
-                                    onclick={() => rowButtonClick(row, action, saved.group)}>{words.confirm}</button>
-                                  <button class="sdl-act ghost" type="button" aria-label={words.cancelName}
-                                    onkeydown={(e) => { if (e.key === "Escape") { e.stopPropagation(); void cancelRemove(row); } }}
-                                    onclick={() => cancelRemove(row)}>Cancel</button>
-                                </span>
-                              {:else}
-                                <button
-                                  class="sdl-act"
-                                  class:ghost={action.ghost && action.kind !== "remove"}
-                                  class:danger={action.kind === "remove"}
-                                  type="button"
-                                  data-sdl-remove={action.kind === "remove" ? saved.id : undefined}
-                                  aria-label={action.accessibleName}
-                                  aria-disabled={action.disabled || (action.kind === "remove" && clearingSaved[saved.id]) ? "true" : undefined}
-                                  aria-busy={action.kind === "remove" && clearingSaved[saved.id] ? "true" : undefined}
-                                  aria-describedby={action.disabled ? `sdl-why-off-${saved.id}` : undefined}
-                                  title={action.kind === "remove" && clearingSaved[saved.id] ? "Checking the saved file" : action.disabledReason ?? undefined}
-                                  onclick={() => rowButtonClick(row, action, saved.group)}>{action.label}</button>
-                              {/if}
-                            {/each}
-                            {#if saved.actions.some((a) => a.disabled)}
-                              <span class="sdl-sr" id={`sdl-why-off-${saved.id}`}>{saved.actions.find((a) => a.disabled)?.disabledReason}</span>
-                            {/if}
-                          </div>
-                          {#if saved.where || saved.canReveal || saved.hint}
+                          {#if saved.showWhy}<p class="sdl-why">{saved.why}</p>{/if}
+                          {#if saved.actions.some((a) => a.disabled)}
+                            <span class="sdl-sr" id={offId}>{saved.actions.find((a) => a.disabled)?.disabledReason}</span>
+                          {/if}
+                          {#if saved.where || saved.hint}
                             <p class="sdl-where">
                               {#if saved.where}<span>{saved.where}</span>{/if}
-                              {#if saved.canReveal}
-                                <button class="sdl-link" type="button" aria-label={`Show ${saved.name} in folder`}
-                                  aria-disabled={revealingSaved[saved.id] ? "true" : undefined}
-                                  aria-busy={revealingSaved[saved.id] ? "true" : undefined}
-                                  title={revealingSaved[saved.id] ? "Checking the saved file" : undefined}
-                                  onclick={() => revealSavedRow(row)}>{@render transferIcon("show-in-folder")} Show in folder</button>
-                              {/if}
                               {#if saved.hint}<span class="sdl-hint">{saved.hint}</span>{/if}
                             </p>
                           {/if}
@@ -32361,6 +32599,37 @@
       >
         {@render menuRows(menu.items, 0)}
         <div class="ctx-foot" aria-hidden="true"><span>↑↓ move</span><span>⏎ pick</span><span>type to jump</span><span class="sp"></span><span>esc</span></div>
+      </div>
+    {/if}
+
+    {#if rowMenu && rowMenuView}
+      <!-- Compact Transfers rows: a row's "more" menu, mounted here (not inside the row) and fixed
+           from its button, so the scrolling panel never clips it (design compact.md, 5.5). -->
+      <div class="sdl-menu" class:up={rowMenu.up} id={`sdl-menu-${rowMenu.rowId}`} role="menu"
+        aria-label={`More actions for ${rowMenuView.name}`} tabindex="-1"
+        style:top={rowMenu.top === null ? undefined : `${rowMenu.top}px`}
+        style:bottom={rowMenu.bottom === null ? undefined : `${rowMenu.bottom}px`}
+        style:right={`${rowMenu.right}px`}
+        onfocusin={() => (rowMenuHadFocus = true)}
+        onkeydown={rowMenuKeydown}>
+        {#each compactControls(rowMenuView).menu as item, index (index)}
+          {#if item.kind === "separator"}
+            <div class="sdl-menu-sep" role="separator"></div>
+          {:else if item.kind === "reveal"}
+            <button class="sdl-menu-item" role="menuitem" type="button" data-sdl-item={index}
+              tabindex={rowMenuFocus === index ? 0 : -1} aria-label={item.accessibleName}
+              onfocus={() => (rowMenuFocus = index)}
+              onclick={() => runRowMenuItem(rowMenuView.id, item)}>{@render transferIcon(item.icon)} {item.label}</button>
+          {:else}
+            <button class="sdl-menu-item" role="menuitem" type="button" data-sdl-item={index}
+              tabindex={rowMenuFocus === index ? 0 : -1} aria-label={item.action.accessibleName}
+              aria-disabled={item.action.disabled ? "true" : undefined}
+              aria-describedby={item.action.disabled ? `sdl-why-off-${rowMenuView.id}` : undefined}
+              title={item.action.disabledReason ?? undefined}
+              onfocus={() => (rowMenuFocus = index)}
+              onclick={() => runRowMenuItem(rowMenuView.id, item)}>{@render transferIcon(item.icon)} {item.action.label}</button>
+          {/if}
+        {/each}
       </div>
     {/if}
   {/if}
