@@ -1,3 +1,4 @@
+import { VOICE_AUDIO_FIXTURE_SDP } from "../scripts/voice-audio-sdp-fixture.ts";
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { VoiceSdpRtcOwner } from "./voice-sdp-rtc.ts";
@@ -12,7 +13,7 @@ function fixture(low = true) {
   class Peer {
     constructor() { calls.created++; }
     get iceGatheringState() { return "complete"; }
-    get localDescription() { return { type: low ? "offer" : "answer", sdp: "v=0\r\n" }; }
+    get localDescription() { return { type: low ? "offer" : "answer", sdp: VOICE_AUDIO_FIXTURE_SDP }; }
     addTransceiver() {}
     getTransceivers() { return [transceiver]; }
     async setLocalDescription() { calls.local++; }
@@ -32,9 +33,9 @@ function fixture(low = true) {
     async complete() {
       if (low) {
         await source.prepareLocal(async () => 30_000, "offer"); source.takeLocal().fill(0);
-        await source.applyRemote(new TextEncoder().encode("v=0"), "answer");
+        await source.applyRemote(new TextEncoder().encode(VOICE_AUDIO_FIXTURE_SDP), "answer");
       } else {
-        await source.applyRemote(new TextEncoder().encode("v=0"), "offer");
+        await source.applyRemote(new TextEncoder().encode(VOICE_AUDIO_FIXTURE_SDP), "offer");
         await source.prepareLocal(async () => 30_000, "answer"); source.takeLocal().fill(0);
         assert.equal(transceiver.direction, "sendrecv", "the transferred HIGH peer permits both negotiated audio directions");
       }
@@ -76,7 +77,7 @@ test("partial round, retained local bytes and pending SDK do not lose the origin
   assert.throws(() => f.source.transferInto(target));
   await f.source.prepareLocal(async () => 30_000, "offer");
   assert.throws(() => f.source.transferInto(target));
-  const held = f.holdRemote(); const remote = f.source.applyRemote(new TextEncoder().encode("v=0"), "answer");
+  const held = f.holdRemote(); const remote = f.source.applyRemote(new TextEncoder().encode(VOICE_AUDIO_FIXTURE_SDP), "answer");
   await turn(); assert.equal(f.calls.remote, 1); assert.throws(() => f.source.transferInto(target));
   held.release(); await remote;
   assert.throws(() => f.source.transferInto(target), "local UTF8 must be consumed before detaching its envelope");

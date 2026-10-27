@@ -11,6 +11,10 @@ import type { VoiceSdpEngineReply } from "./voice-ipc-sdp-engine.ts";
 
 // This is an inventory slice INSIDE the existing64KiB phase, including the old SDK/PC
 // records, both fixed row claims, callback/promise graphs and transient descriptor decode.
+// It includes224B for the original audio-offer shape and its <=64 owned ASCII MID.
+// Temporary answer/parser/detachment scratch has a separate2KiB inventory in the serial
+// UTF16 SDK-text stage, never in a concurrent Begin/Result stage or this nearly full book.
+// No cached token may retain a substring backing into earlier full SDP text.
 // It is not an additional charge or permission to grow any native/browser phase limit.
 export const VOICE_SDP_BROWSER_BOOK_BYTES = 16 * 1024;
 const MAX = 8192;

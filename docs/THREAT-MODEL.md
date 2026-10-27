@@ -1,5 +1,22 @@
 # Threat model; client integrity & enforcement boundaries
 
+## Frontend audio shape boundary (27 October; inactive)
+
+Authenticated SDP can still contain unsupported media. The Source now rejects extra or
+rejected audio/video/application sections before HIGH allocates its original PC, and checks
+answers against its original offer MID/protocol. Local gathered output is checked before
+publication. The SDK still validates full SDP/ICE/DTLS, and these checks neither authorize
+remote candidate addresses nor replace native14/currentness or runtime track/direction
+checks before audio actuation. App V2 remains OFF.
+
+A short MID must not retain the previous full SDP backing into later crypto stages. Tokens
+are materialized from bounded checked ASCII code values. The fixed original-offer record
+and separate serial parser scratch have explicit executable inventories under existing
+limits. This bounds application-owned live graphs, not opaque VM/SDK/GC heap or RSS.
+Reentrant End after validation prevents construction; held actual SDK work remains joined
+before cleanup can refund custody. Retained broker44 cannot silently bypass new checks.
+
+
 ## Audio direction and pending permission ownership (27 October; inactive)
 
 Answer preference never authorizes microphone transmission. The Source changes only the

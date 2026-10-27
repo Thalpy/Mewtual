@@ -1,3 +1,4 @@
+import { VOICE_AUDIO_SDP_RETAINED_BYTES, VOICE_AUDIO_SDP_PARSE_BYTES } from "./voice-audio-profile.ts";
 import test from "node:test";
 import assert from "node:assert/strict";
 import { webcrypto, createHash } from "node:crypto";
@@ -40,7 +41,7 @@ async function fixture(purpose: "seal" | "open" = "seal", length = 8192, brokenT
   let live = true, began = false, settled = false, acknowledged = false, drained = false;
   let receipt: VoiceIpcReceipt | null = null, previousOutput: Uint8Array | null = null;
   let lose: keyof typeof counts | null = null, hold: keyof typeof counts | null = null, held = gate();
-  let inputBacking: Uint8Array | null = null, capacity = false, throwSdk = false, admissionHistory = false;
+  let inputBacking: Uint8Array<ArrayBuffer> | null = null, capacity = false, throwSdk = false, admissionHistory = false;
   let positionAvailable = true, positions = 0, peakPositions = 0;
   const oldReceipt = (): VoiceIpcReceipt => ({ action: identity.action, inputTag: identity.inputTag, outputTag: hash(90), retired: false, digest: hash(91),
     outcome: { kind: "sealed", message: hash(92), hash: hash(93) } });
@@ -206,7 +207,7 @@ test("serial browser stage inventory fits the original64KiB without retaining Be
   // first Action/history/adapter graph ends before its successor is constructed.
   const composition = 16 + 2 * 256;
   const sdkPositionLoan = 128 + 3 * 128 + 2 * 128; // bounded FIFO entry, return cell, promise/continuations
-  const fixedInventory = existingSdkPc + originalBindingStrings + 2 * historyStrings + callbacksAndFrames + rowClaimsAndLoans + rtcInventory + composition + sdkPositionLoan;
+  const fixedInventory = VOICE_AUDIO_SDP_RETAINED_BYTES + existingSdkPc + originalBindingStrings + 2 * historyStrings + callbacksAndFrames + rowClaimsAndLoans + rtcInventory + composition + sdkPositionLoan;
   assert.ok(fixedInventory <= fixed, `complete fixed browser owner: ${fixedInventory}/${fixed}`);
   const begin = 8192 + 2 * 8419 + 2 * 8435 + 2 * 236 + 220 + wireScratch + fixed;
   const input = 2 * 66 + 2 * 82 + 2 * 9232 + 9216 + wireScratch + fixed;
@@ -215,11 +216,13 @@ test("serial browser stage inventory fits the original64KiB without retaining Be
   for (const [stage, bytes] of Object.entries({ begin, input, crypto, result })) assert.ok(bytes <= 65536, `${stage}: ${bytes}/65536`);
   // Original UTF16 is consumed before the async Begin frame; it cannot coexist with the
   // later Result frame. Input's descriptor scope ends before Result encoding starts.
-  assert.ok(16384 + 8192 + fixed <= 65536);
+  // The original offer's224B stays in fixed; temporary answer/BUNDLE tokens,
+  // bounded numeric detachment scratch and parser wrappers end in this text stage.
+  assert.ok(16384 + 8192 + fixed + VOICE_AUDIO_SDP_PARSE_BYTES <= 65536);
   // Remote application is serial AFTER fresh26 finally, before true26/Answer crypto.
   // Include the one owned UTF16 string AND a known RTC conversion snapshot; neither
   // survives into the60649B crypto Result stage. Opaque PC/GC heap is outside this proof.
-  assert.ok(8192 + 2 * 16384 + fixed + 1024 <= 65536);
+  assert.ok(8192 + 2 * 16384 + fixed + 1024 + VOICE_AUDIO_SDP_PARSE_BYTES <= 65536);
 });
 
 

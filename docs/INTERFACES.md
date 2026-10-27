@@ -1,5 +1,20 @@
 # Mewtual; Interfaces & Hooks Schema
 
+## Source audio profile contract (27 October; Broker45, inactive)
+
+`VoiceSdpRtcOwner` now enforces `voiceAudioSdpShape` after its existing byte bound and before
+HIGH's constructor/remote SDK call, and on gathered local output before export. Answers
+retain the original offer's MID/protocol. The supported frontend shape is one nonzero UDP
+RTP audio section with MID/rtcp-mux and optional matching singleton BUNDLE. This does not
+add a native/wire audio-profile guarantee or validate ICE URLs, codecs or DTLS.
+
+The private Source caches only independently materialized ASCII MID/protocol metadata:
+224 bytes inside the unchanged 16 KiB book. Temporary parser/answer scratch is separately
+counted in the serial text stage. The exported byte constants document that inventory;
+they grant no new capacity. Broker45 refuses retained44; facade bundle3 has no shape change.
+Original owner/PC/configuration identity, actual SDK joins and cleanup remain required.
+
+
 ## RTC answer preference and audio helper contracts (27 October; inactive)
 
 Broker44 requires reload for retained43 code; facade bundle3's shape is unchanged. The

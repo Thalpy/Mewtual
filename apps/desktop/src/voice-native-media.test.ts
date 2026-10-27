@@ -1,3 +1,4 @@
+import { VOICE_AUDIO_FIXTURE_SDP } from "../scripts/voice-audio-sdp-fixture.ts";
 import { test, type TestContext } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
@@ -29,7 +30,7 @@ async function fixture(t: TestContext) {
   class Peer {
     constructor() { counts.created++; }
     iceGatheringState = "complete";
-    get localDescription() { return { type: "offer", sdp: "v=0" }; }
+    get localDescription() { return { type: "offer", sdp: VOICE_AUDIO_FIXTURE_SDP }; }
     addTransceiver() {} addEventListener() {} removeEventListener() {}
     async setLocalDescription() {} async setRemoteDescription() {}
     close() { counts.closed++; if (failClose) throw new Error("SDK close failed"); }
@@ -46,7 +47,7 @@ async function fixture(t: TestContext) {
     finally { inCurrent = false; }
   }, clock);
   await source.prepareLocal(async () => 30_000, "offer"); source.takeLocal().fill(0);
-  await source.applyRemote(new TextEncoder().encode("v=0"), "answer");
+  await source.applyRemote(new TextEncoder().encode(VOICE_AUDIO_FIXTURE_SDP), "answer");
   driver = new VoiceNativeMedia(original, source, { clock, live: () => { if (inCurrent && expireInCurrent) now = 6000; return live; },
     begin: () => { counts.active++; }, end: () => { counts.active--; },
     refund: () => { counts.refund++; counts.paid = 0; },

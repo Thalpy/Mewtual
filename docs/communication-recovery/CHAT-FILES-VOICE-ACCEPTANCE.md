@@ -1,5 +1,42 @@
 # Chat, files and voice implementation evidence
 
+## Audio SDP guard (27 October; Broker45, App OFF)
+
+The inactive RTC Source now checks the audio SDP profile before HIGH constructs its PC
+or calls the remote-description SDK. The existing 8 KiB byte bound comes first. Gathered
+local descriptions receive the same check before plaintext leaves Source. Answers must
+keep the original offer's MID and RTP profile. Extra or rejected audio/video/application
+sections, unsupported framing and TCP RTP profiles refuse; the browser still validates
+complete codecs, ICE and DTLS. Runtime receiver/currentDirection checks are still required
+before future audio actuation.
+
+Review found that a cached MID substring could retain the whole previous SDP backing.
+MID/BUNDLE tokens now come from bounded ASCII code values with independent storage; Unicode
+is checked before byte assignment. The fixed inventory explicitly includes the 224-byte
+persistent offer record (16,360/16,384 bytes). The 2 KiB temporary parser/answer scratch is
+serial with the text/SDK stage: local 43,008/65,536 and remote 60,416/65,536 bytes. No pool,
+fee, attempt or deadline increased. Close and transfer clear the private offer record.
+
+Full frontend: 3,188 passed in 75.94s; Svelte: zero errors/warnings; production build:36.54s.
+The 483 focused checks, executable stage inventory and strict changed-helper TypeScript
+pass. A type annotation on the existing test Input backing was narrowed to its actual
+ArrayBuffer type. The real Edge four-direction SDK gate also passes, using the shipped
+Source. It requests no microphone and uses controlled admission/currentness. Neither
+that gate nor the controlled exact-8-KiB SDK fixtures establish native authorization,
+WebView, captured/audible audio, ICE connectivity or physical-network acceptance.
+
+Read-only review corrected the MID-retention and accounting Mediums; re-review has no
+remaining blocker/high/medium. Native checks on these changed browser imports remain
+pending behind the frozen parent run. Earlier Root 3,691 passed/24 existing ignores apply
+to unchanged Root Rust/Cargo inputs. The inherited dependency audit is red; no waiver.
+No setup or live App/send/friend path changed, so startup/flow gates were not rerun.
+
+Next: paid audio cells/capture, sender clones and mute/PTT, playback and SDK promise joins,
+App lifecycle/renewal, automatic multi-peer composition, authenticated WebView, member
+media relay and combined/physical acceptance. Only one desktop is available; V2 stays OFF.
+External download resume and dependency upgrades remain separately owned.
+
+
 ## Actual browser audio-direction evidence (27 October; Broker44, inactive)
 
 The shipped Source's HIGH recvonly defect was reproduced in actual Edge, then corrected

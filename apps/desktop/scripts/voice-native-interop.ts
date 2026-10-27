@@ -1,3 +1,4 @@
+import { VOICE_AUDIO_FIXTURE_MAX_SDP } from "./voice-audio-sdp-fixture.ts";
 /** Test-only Node endpoint for native/WebCrypto interoperability. It imports the actual
  * broker, uses its non-extractable selected key and actual fetch/BYOB channel, and never
  * sends crypto Input, Result, private keys or plaintext over this control pipe. The Rust
@@ -58,7 +59,7 @@ function installCoordinatedRtc(): void {
     private readonly calls = { local: 0, remote: 0, closed: 0 };
     constructor() { assert.ok(coordinatedPeers.length < 2); coordinatedPeers.push(this.calls); }
     iceGatheringState = "complete";
-    get localDescription() { assert.ok(this.local); return { type: this.local, sdp: "s".repeat(8192) }; }
+    get localDescription() { assert.ok(this.local); return { type: this.local, sdp: VOICE_AUDIO_FIXTURE_MAX_SDP }; }
     addTransceiver() { assert.equal(this.remote, null); }
     getTransceivers() { return [{ direction: "recvonly", receiver: { track: { kind: "audio" } } }]; }
     async setLocalDescription() {
@@ -67,7 +68,7 @@ function installCoordinatedRtc(): void {
     async setRemoteDescription(value: RTCSessionDescriptionInit) {
       assert.equal(++this.calls.remote, 1);
       assert.equal(value.type, this.local === "offer" ? "answer" : "offer");
-      assert.equal(value.sdp, "s".repeat(8192)); this.remote = value.type as "offer" | "answer";
+      assert.equal(value.sdp, VOICE_AUDIO_FIXTURE_MAX_SDP); this.remote = value.type as "offer" | "answer";
     }
     addEventListener() {} removeEventListener() {}
     close() { this.calls.closed++; }
@@ -574,14 +575,14 @@ async function step(value: Step): Promise<unknown> {
         private remote: "offer" | "answer" | null = null;
         constructor() { calls.created++; assert.equal(calls.created, 1); }
         iceGatheringState = "complete";
-        get localDescription() { assert.ok(this.local); return { type: this.local, sdp: "s".repeat(8192) }; }
+        get localDescription() { assert.ok(this.local); return { type: this.local, sdp: VOICE_AUDIO_FIXTURE_MAX_SDP }; }
         addTransceiver() { assert.equal(this.remote, null); }
         getTransceivers() { return [{ direction: "recvonly", receiver: { track: { kind: "audio" } } }]; }
         async setLocalDescription() { calls.local++; assert.equal(calls.local, 1); this.local = this.remote === "offer" ? "answer" : "offer"; }
         async setRemoteDescription(value: RTCSessionDescriptionInit) {
           calls.remote++; assert.equal(calls.remote, 1);
           assert.equal(value.type, this.local === "offer" ? "answer" : "offer");
-          assert.equal(value.sdp, "s".repeat(8192)); this.remote = value.type as "offer" | "answer";
+          assert.equal(value.sdp, VOICE_AUDIO_FIXTURE_MAX_SDP); this.remote = value.type as "offer" | "answer";
         }
         addEventListener() {} removeEventListener() {}
         close() { calls.closed++; mediaEvent("peer-close"); }

@@ -1,3 +1,4 @@
+import { VOICE_AUDIO_FIXTURE_MAX_SDP } from "../scripts/voice-audio-sdp-fixture.ts";
 import { encodeVoiceMediaOriginal, encodeVoiceMediaExisting } from "./voice-ipc-media.ts";
 import { VOICE_SESSION_LIFECYCLE_BYTES } from "./voice-session-lifecycle.ts";
 import { encodeVoicePcIntent } from "./voice-ipc-pc.ts";
@@ -2808,7 +2809,10 @@ async function framedSdpOffer(t: TestContext, localIsLow = true, plaintextLength
   const original = { parentRow, identity: child.parent.identity, handshake: child.parent.binding.handshake,
     key: hash(99), sequence: "1", storage: hash(100), sdkGeneration: "1", sdkProof: hash(101), pcProof: hash(102) };
   const selector = { parentRow, row, purpose: localSeal ? "seal" as const : "open" as const };
-  const plaintext = new Uint8Array(plaintextLength).fill(115), aad = new Uint8Array(579).fill(4);
+  // The RTC cases traverse the shipped profile guard. Preserve the actual maximum
+  // byte length in both the native mock's sealed Input and the controlled SDK output.
+  const plaintext = plaintextLength === 8192 ? new TextEncoder().encode(VOICE_AUDIO_FIXTURE_MAX_SDP)
+    : new Uint8Array(plaintextLength).fill(115), aad = new Uint8Array(579).fill(4);
   const incoming = localSeal ? plaintext : await child.parent.incoming(plaintext, aad, (answer ? 43n : 42n));
   if (authenticationFails) incoming[0] ^= 1;
   const engineBytes = 4 * (aad.length + incoming.length + (localSeal ? 16 : 0)) + 3 * 8192 + 2048;
@@ -2920,7 +2924,7 @@ async function framedSdpOffer(t: TestContext, localIsLow = true, plaintextLength
 
 test("maximum browser SDP runs through original authenticated IPC and retries Result without another SDK", async t => {
   const f = await framedSdpOffer(t); const before = f.cryptoCount(); f.lose("result");
-  const first = f.start("s".repeat(8192)); assert.equal(f.start(), first); assert.equal(await first, undefined);
+  const first = f.start(VOICE_AUDIO_FIXTURE_MAX_SDP); assert.equal(f.start(), first); assert.equal(await first, undefined);
   assert.equal(f.counts.result, 1); await f.start(); assert.equal(f.counts.result, 2);
   assert.equal(f.cryptoCount() - before, 1); assert.equal(f.counts.input, 1); assert.equal(f.counts.admit, 1);
   assert.ok(f.f.bodyReads().includes(277 + 579 + 8192 + 16), "dedicated op17 reader consumes maximum Seal Input");
@@ -2951,14 +2955,14 @@ test("End during retained HIGH RX SDK is retirement rather than a forged AEAD fa
 });
 
 test("lost browser SDP Begin recovers its exact row before any SDK work", async t => {
-  const f = await framedSdpOffer(t); f.lose("begin"); await f.start("s".repeat(8192));
+  const f = await framedSdpOffer(t); f.lose("begin"); await f.start(VOICE_AUDIO_FIXTURE_MAX_SDP);
   assert.equal(f.counts.begin, 1); assert.equal(f.counts.input, 0);
   await f.start(); assert.equal(f.counts.resolve, 1); assert.equal(f.counts.begin, 1); assert.equal(f.counts.result, 1);
   f.f.owner.retire(); await f.child.channel.close();
 });
 
 test("End with a held browser SDP Result keeps funding and joins native cleanup outside the lane", async t => {
-  const f = await framedSdpOffer(t), held = f.hold("result"), pending = f.start("s".repeat(8192));
+  const f = await framedSdpOffer(t), held = f.hold("result"), pending = f.start(VOICE_AUDIO_FIXTURE_MAX_SDP);
   await until(() => f.counts.result === 1); const payment = f.f.broker.counts().bytes;
   let closed = false; f.f.owner.retire(); const closing = f.child.channel.close().then(() => { closed = true; });
   await new Promise<void>(yes => setImmediate(yes)); assert.equal(closed, false); assert.equal(f.counts.settle, 0);
@@ -2970,7 +2974,7 @@ test("End with a held browser SDP Result keeps funding and joins native cleanup 
 test("End in Input timer finally refuses the loan before engine admission", async t => {
   const f = await framedSdpOffer(t);
   f.onInput(() => f.f.onCancel(() => f.f.owner.retire()));
-  await f.start("s".repeat(8192)); await f.child.channel.close();
+  await f.start(VOICE_AUDIO_FIXTURE_MAX_SDP); await f.child.channel.close();
   assert.equal(f.counts.input, 1); assert.equal(f.counts.admit, 0); assert.equal(f.counts.result, 0);
   assert.equal(f.counts.settle, 1); assert.equal(f.counts.returned, 1); assert.equal(f.f.broker.counts().bytes, 0);
 });
@@ -2979,7 +2983,7 @@ test("End joins actual held SDP WebCrypto before releasing its original input/pa
   const f = await framedSdpOffer(t);
   const held = f.f.holdWhen((name, args) => name === "encrypt" &&
     (args[0] as AesGcmParams)?.additionalData?.byteLength === 579);
-  const pending = f.start("s".repeat(8192)); await until(held.entered);
+  const pending = f.start(VOICE_AUDIO_FIXTURE_MAX_SDP); await until(held.entered);
   let closed = false; const payment = f.f.broker.counts().bytes;
   f.f.owner.retire(); const closing = f.child.channel.close().then(() => { closed = true; });
   await new Promise<void>(yes => setImmediate(yes)); assert.equal(closed, false); assert.equal(f.counts.settle, 0);
@@ -3002,7 +3006,7 @@ test("SDP reserves both rows before unknown admission and refuses a retained bro
 });
 
 test("Pending native SDP retries the same Begin bytes until Action attachment", async t => {
-  const f = await framedSdpOffer(t); f.pendingBegin(true); await f.start("s".repeat(8192));
+  const f = await framedSdpOffer(t); f.pendingBegin(true); await f.start(VOICE_AUDIO_FIXTURE_MAX_SDP);
   assert.equal(f.counts.begin, 2); assert.equal(f.counts.input, 0);
   f.pendingBegin(false); await f.start(); assert.equal(f.counts.begin, 3); assert.equal(f.counts.input, 1); assert.equal(f.counts.result, 1);
   f.f.owner.retire(); await f.child.channel.close();
@@ -3010,14 +3014,14 @@ test("Pending native SDP retries the same Begin bytes until Action attachment", 
 
 test("reentrant SDP creation clock cannot install a second owner", async t => {
   const f = await framedSdpOffer(t);
-  f.f.onNow(() => assert.throws(() => f.start("s".repeat(8192)), /creation is already in progress/));
-  await f.start("s".repeat(8192)); assert.equal(f.counts.begin, 1); assert.equal(f.counts.result, 1);
+  f.f.onNow(() => assert.throws(() => f.start(VOICE_AUDIO_FIXTURE_MAX_SDP), /creation is already in progress/));
+  await f.start(VOICE_AUDIO_FIXTURE_MAX_SDP); assert.equal(f.counts.begin, 1); assert.equal(f.counts.result, 1);
   f.f.owner.retire(); await f.child.channel.close();
 });
 
 test("an engine permit held beyond the original PC deadline cannot start SDP WebCrypto", async t => {
   const f = await framedSdpOffer(t), before = f.cryptoCount(), held = f.hold("admit");
-  const pending = f.start("s".repeat(8192)); await until(() => f.counts.admit === 1);
+  const pending = f.start(VOICE_AUDIO_FIXTURE_MAX_SDP); await until(() => f.counts.admit === 1);
   f.f.advance(10_000); held.release(); await pending;
   assert.equal(f.cryptoCount() - before, 0); assert.equal(f.counts.result, 0);
   f.f.owner.retire(); await f.child.channel.close(); assert.equal(f.counts.settle, 1); assert.equal(f.counts.returned, 1);
@@ -3102,12 +3106,12 @@ function sdpRtcProvider(t: TestContext, localIsLow: boolean, onLocal: () => void
   class Peer {
     constructor(configuration: RTCConfiguration) { configurations.push(configuration); calls.created++; }
     iceGatheringState = "complete";
-    get localDescription() { onDescription(); return { type: localIsLow ? "offer" : "answer", sdp: "s".repeat(8192) }; }
+    get localDescription() { onDescription(); return { type: localIsLow ? "offer" : "answer", sdp: VOICE_AUDIO_FIXTURE_MAX_SDP }; }
     addTransceiver() {}
     getTransceivers() { return [{ direction: "recvonly", receiver: { track: { kind: "audio" } } }]; }
     async setLocalDescription() { calls.local++; onLocal(); if (localHeld) await localHeld.promise; }
     async setRemoteDescription(value: RTCSessionDescriptionInit) {
-      calls.remote++; descriptor = value; assert.equal(value.type, localIsLow ? "answer" : "offer"); assert.equal(value.sdp, "s".repeat(8192));
+      calls.remote++; descriptor = value; assert.equal(value.type, localIsLow ? "answer" : "offer"); assert.equal(value.sdp, VOICE_AUDIO_FIXTURE_MAX_SDP);
       if (held) await held.promise;
     }
     addEventListener() {} removeEventListener() {}

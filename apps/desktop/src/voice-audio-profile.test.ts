@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs";
 import assert from "node:assert/strict";
 import test from "node:test";
 import { voiceAudioSdpShape } from "./voice-audio-profile.ts";
@@ -65,4 +66,16 @@ test("bounded scanner refuses control/oversize/empty media while tolerating ordi
     sdp() + " m=video 9 UDP/TLS/RTP/SAVPF 111\r\n", sdp() + "M=video 9 UDP/TLS/RTP/SAVPF 111\r\n"])
     assert.throws(() => voiceAudioSdpShape(input));
   assert.equal(voiceAudioSdpShape(sdp() + "a=unknown:" + "x".repeat(4096) + "\r\n").mid, "0");
+});
+
+test("retained MID materialization has no substring/rope backedge to the original SDP", () => {
+  // Portable structural guard for a representation invariant: nondeterministic GC is
+  // not an oracle. Edge/V8 can otherwise keep an8KiB parent through a13..64-char slice.
+  const source = readFileSync(new URL("./voice-audio-profile.ts", import.meta.url), "utf8");
+  const detached = source.slice(source.indexOf("function ownedToken("), source.indexOf("export function voiceAudioSdpShape("));
+  assert.ok(detached.includes("charCodeAt") && detached.includes("String.fromCharCode(...bytes)"));
+  assert.ok(!/\.(?:slice|substring|substr)\(/.test(detached), "cached token must be made from bounded code values");
+  assert.ok(source.includes("mid = ownedToken(text, from + 6, until)"));
+  const unicode = sdp().replace("BUNDLE 0", "BUNDLE \u0130").replace("mid:0", "mid:\u0130");
+  assert.throws(() => voiceAudioSdpShape(unicode), "Unicode must not truncate into ASCII0");
 });

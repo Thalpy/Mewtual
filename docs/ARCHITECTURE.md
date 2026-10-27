@@ -1,5 +1,18 @@
 # Mewtual; Architecture
 
+## Audio SDP validation before RTC (27 October; inactive)
+
+The Source admits remote bytes (at most 8 KiB), decodes UTF8, validates the supported audio
+shape and repeats currentness before HIGH's original constructor or remote SDK entry.
+LOW's answer must match the original offer. Local SDK output is byte-bounded and checked
+after gathering, before Begin can consume its plaintext. Only a detached, frozen MID/RTP
+record persists; the input string is never used as its substring backing. Close/transfer
+clear that record. The existing fixed SDP book covers its 224-byte inventory; temporary
+parser/answer scratch belongs to the serial text stage. Complete SDK negotiation, runtime
+receiver/direction checks and native authorization remain distinct boundaries. Broker45
+rejects retained44 for new calls while preserving existing cleanup. App stays OFF.
+
+
 ## Answering RTC audio (27 October; Broker44, App OFF)
 
 Before answering under the same fresh native14 admission, the private RTC source now

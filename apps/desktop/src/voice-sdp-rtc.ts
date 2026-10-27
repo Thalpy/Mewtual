@@ -2,6 +2,7 @@
  * factory/description permit: the retained channel creates this owner before any SDK callback,
  * supplies fresh native admission and joins its void observers before releasing native custody.
  * Application text/copies are bounded here; opaque browser RTC/GC heap is outside that proof. */
+import { voiceAudioSdpShape, type VoiceAudioSdpShape } from "./voice-audio-profile.ts";
 import { voiceSdpUtf8 } from "./voice-sdp-action.ts";
 import { voiceRtcConfigurationCurrent, voiceRtcConfiguredPeer, releaseVoiceRtcConfiguration,
   type VoiceRtcConfigurationLease } from "./voice-rtc-configuration.ts";
@@ -65,6 +66,10 @@ export type VoiceMediaRtcOwner = MediaRtcOwner;
 
 export class VoiceSdpRtcOwner {
   #peer: RTCPeerConnection | null = null;
+  // Only the original offer's <=64-unit MID/protocol metadata survives synchronous
+  // validation. No SDP text is cached here. Its224B inventory is inside the existing
+  //16KiB book; temporary parser/answer scratch is serial with the UTF16 SDK text stage.
+  #offerShape: VoiceAudioSdpShape | null = null;
   #configuration: VoiceRtcConfigurationLease | null;
   #stopped = false;
   #peerClosed = false;
@@ -127,6 +132,7 @@ export class VoiceSdpRtcOwner {
     // allocation, await or fallible operation after the first mutation. The SAME actual
     // peer moves once; old close/drain loses all authority over it. Clear the old current
     // closure so retaining this stopped source cannot pin its channel/chain/phase graph.
+    this.#offerShape = null;
     target.peer = this.#peer;
     target.configuration = this.#configuration;
     target.adopted = true;
@@ -211,6 +217,17 @@ export class VoiceSdpRtcOwner {
       } catch (error) { this.close(); throw error; }
     });
   }
+  /** Validate the original already-byte-bounded text synchronously. HIGH must do
+   * this before its first SDK constructor, not after setRemoteDescription has already
+   * created receivers or SCTP state. The SDK still owns complete SDP negotiation.
+   * Private original-offer metadata prevents an answer substituting another MID. */
+  private requireAudioShape(text: string, kind: "offer" | "answer"): void {
+    const offer = this.#offerShape;
+    if (kind === "answer" && offer === null) return unavailable();
+    const shape = voiceAudioSdpShape(text, kind === "answer" ? offer : null);
+    if (!this.live()) return unavailable();
+    if (kind === "offer") this.#offerShape = shape;
+  }
   /** Ends this entire getter/text frame synchronously, before its caller may start Begin.
    * No fulfilled description promise or async continuation retains the UTF16 text. */
   private captureLocal(peer: RTCPeerConnection, kind: "offer" | "answer"): void {
@@ -222,7 +239,8 @@ export class VoiceSdpRtcOwner {
       if (!description || description.type !== kind || !this.live()) return unavailable();
       text = description.sdp;
       if (!this.live()) return unavailable();
-      bytes = voiceSdpUtf8(text);
+      bytes = voiceSdpUtf8(text); // UTF8 bound BEFORE shape parsing, including local SDK output.
+      this.requireAudioShape(text, kind);
       if (!this.live()) return unavailable();
       this.localBytes = bytes; bytes = null;
     } finally { bytes?.fill(0); text = null; description = null; }
@@ -243,9 +261,10 @@ export class VoiceSdpRtcOwner {
       let description: RTCSessionDescriptionInit | null = null;
       let text: string | null = null;
       try {
-        const peer = this.originalPeer();
         text = decoder.decode(bytes); // Native Open UTF8 also checks; malformed never becomes AEAD failure.
         if (text.length > 8192 || !this.live()) return unavailable();
+        this.requireAudioShape(text, kind);
+        const peer = this.originalPeer(); // HIGH construction follows successful byte/shape admission.
         description = { type: kind, sdp: text };
         const apply: (this: RTCPeerConnection, description: RTCSessionDescriptionInit) => Promise<void> = peer.setRemoteDescription;
         if (!this.live()) return unavailable(); // Final callback-free flags follow the last getter.
@@ -314,6 +333,7 @@ export class VoiceSdpRtcOwner {
    * returns. A rejected/hanging SDK call is not made drained by close or timer expiry. */
   close(): void {
     this.#stopped = true;
+    this.#offerShape = null;
     this.localBytes?.fill(0); this.localBytes = null;
     const stop = this.gatherStop; this.gatherStop = null;
     try { stop?.(); } catch { /* Preserve Close even if an injected observer throws. */ }
