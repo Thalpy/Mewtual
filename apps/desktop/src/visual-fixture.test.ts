@@ -4,7 +4,9 @@ import { VISUAL_FIXTURE_NOW, visualFixtureResponse } from "./visual-fixture.ts";
 import { VISUAL_SAVED_FILES, VISUAL_TRANSFER_ROWS } from "./visual-transfers-fixture.ts";
 import { checkedPrivateDownloads, checkedSavedCheck, type SavedCheck } from "./private-downloads.ts";
 import { savedRowView } from "./transfer-rows.ts";
-import { checkedSavedFileChecks, checkedSavedFiles, savedListRowView } from "./saved-files.ts";
+import {
+  checkedSavedFileChecks, checkedSavedFiles, checkedSavedFilesLimit, checkedSavedLimitChange, savedListRowView,
+} from "./saved-files.ts";
 
 test("the Transfers fixture shows every row state, closed and path free", () => {
   // Transfers UX (PR #51): `?fixture=chat&transfers=1` lists one row per state for screenshots.
@@ -62,6 +64,19 @@ test("the Transfers fixture lists saved files in every list-row state, display d
   assert.deepEqual(visualFixtureResponse("check_saved_files"), []);
   assert.ok(!(visualFixtureResponse("get_messages", { server: 1, channel: "general" }) as { text: string }[])
     .some((m) => m.text.includes("(file:")));
+});
+
+test("the fixture answers the Remember saved files setting like native, clamped and never persisted", () => {
+  const view = checkedSavedFilesLimit(visualFixtureResponse("get_saved_files_limit", { server: 1 }));
+  assert.deepEqual(view, { state: "ok", limit: 256, listed: 212, min: 16, max: 4096, default: 256 });
+  // A lower choice is previewed with what it forgets; out-of-range choices are clamped.
+  assert.deepEqual(checkedSavedLimitChange(visualFixtureResponse("set_saved_files_limit", { server: 1, limit: 128, apply: false })),
+    { limit: 128, forgets: 84, applied: false });
+  assert.deepEqual(checkedSavedLimitChange(visualFixtureResponse("set_saved_files_limit", { server: 1, limit: 1, apply: true })),
+    { limit: 16, forgets: 196, applied: true });
+  assert.deepEqual(checkedSavedLimitChange(visualFixtureResponse("set_saved_files_limit", { server: 1, limit: 99999, apply: true })),
+    { limit: 4096, forgets: 0, applied: true });
+  assert.equal(checkedSavedFilesLimit(visualFixtureResponse("get_saved_files_limit", { server: 1 })).limit, 256);
 });
 
 test("visual fixture explicitly supports native call controller lifecycle", () => {

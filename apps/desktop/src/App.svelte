@@ -99,10 +99,12 @@
   import { acceptSaveProgress, checkedPrivateDownloads, checkedSavedCheck, privateDownloadChatLabel, privateDownloadChatSave, privateDownloadOffers, privateDownloadSaveAsIsNewCopy, type PrivateDownload, type PrivateDownloadActionKind, type SavedCheck } from "./private-downloads";
   import { SAVED_ROW_GROUPS, TRANSFER_ICONS, confirmWords, groupSavedRows, savedRowTransitions, savedRowView, type SavedRowAction, type SavedRowGroup, type SavedRowLive, type TransferIcon } from "./transfer-rows";
   import {
-    REPLACE_OLDER_HELP, REPLACE_OLDER_KEY, REPLACE_OLDER_LABEL, SAVED_MARK_LABEL, SAVED_MARK_TITLE,
-    checkedSavedFileChecks, checkedSavedFiles, liveTransferShown, replaceOlderFrom, savedCidSet,
-    savedFileCheckKey, savedListNotice, savedListRowView, savedListRows, type SavedFile, type SavedFilesList,
-    type SavedListAction,
+    REPLACE_OLDER_HELP, REPLACE_OLDER_KEY, REPLACE_OLDER_LABEL, SAVED_LIMIT_CHOICES, SAVED_LIMIT_HELP,
+    SAVED_LIMIT_LABEL, SAVED_MARK_LABEL, SAVED_MARK_TITLE,
+    checkedSavedFileChecks, checkedSavedFiles, checkedSavedFilesLimit, checkedSavedLimitChange,
+    liveTransferShown, replaceOlderFrom, savedCidSet, savedFileCheckKey, savedLimitDone, savedLimitLabel,
+    savedLimitWarning, savedListNotice, savedListRowView, savedListRows, type SavedFile, type SavedFilesList,
+    type SavedFilesLimit, type SavedListAction,
   } from "./saved-files";
   import {
     CACHE_LIMIT_CHOICES, cacheBytes, cacheFooter, cachePauseText, cacheShown, checkedCacheStatus, leaveLoss,
@@ -3845,6 +3847,13 @@
   let cacheLimitDraft = $state("");
   let cacheLimitConfirming = $state(false);
   let cacheLimitBusy = $state(false);
+  // The Storage page's "Remember saved files" picker (PR #56 follow-up): the stored setting, the
+  // chosen count as a string, and, once native previewed a lower choice, how many of the oldest
+  // entries it forgets (shown before the user confirms; `null` = not asked yet).
+  let savedLimit = $state<SavedFilesLimit | null>(null);
+  let savedLimitDraft = $state("");
+  let savedLimitForgets = $state<number | null>(null);
+  let savedLimitBusy = $state(false);
   // Leave confirmation: what leaving will permanently delete from this device, loaded on request.
   let leaveConfirm = $state<{ id: number; name: string; loss: LeaveLoss | null } | null>(null);
   // Second review R2-M1: the Pause/Remove/Keep (and pre-acquisition Resume) owner of each row, by
@@ -7536,8 +7545,55 @@
       void refreshCacheStatus().then(() => {
         cacheLimitDraft = !cacheStatus ? "" : cacheStatus.unlimited ? "null" : String(cacheStatus.limit_bytes ?? "");
       });
+      void refreshSavedLimit();
     });
   });
+
+  /** This server's "Remember saved files" setting for the Storage page, seeding its picker. A
+   * reply for a server that is no longer selected is dropped. */
+  async function refreshSavedLimit(server: number | null = activeServerId) {
+    savedLimitForgets = null;
+    if (server === null || locked) {
+      savedLimit = null;
+      return;
+    }
+    try {
+      const view = checkedSavedFilesLimit(await invoke<unknown>("get_saved_files_limit", { server }));
+      if (server !== activeServerId) return;
+      savedLimit = view;
+      savedLimitDraft = view.limit === null ? "" : String(view.limit);
+    } catch {
+      if (server === activeServerId) savedLimit = null;
+    }
+  }
+
+  /** Apply the Storage page's "Remember saved files". Native first previews the choice (nothing
+   * changes); when it would forget entries, the page says how many before the user confirms. */
+  async function applySavedLimit() {
+    const server = activeServerId;
+    const limit = Number(savedLimitDraft);
+    if (server === null || !savedLimit || savedLimitBusy || !savedLimitDraft || !Number.isSafeInteger(limit)) return;
+    savedLimitBusy = true;
+    try {
+      if (savedLimitForgets === null) {
+        const preview = checkedSavedLimitChange(await invoke<unknown>("set_saved_files_limit", { server, limit, apply: false }));
+        if (preview.forgets > 0) {
+          if (server === activeServerId) savedLimitForgets = preview.forgets;
+          return;
+        }
+      }
+      const done = checkedSavedLimitChange(await invoke<unknown>("set_saved_files_limit", { server, limit, apply: true }));
+      toast(savedLimitDone(done), "ok", 4000);
+      // A shorter list: Transfers and the chat mark follow it.
+      if (done.forgets > 0 && server === activeServerId) void refreshFiles();
+      await refreshSavedLimit(server);
+    } catch (e) {
+      savedLimitForgets = null;
+      toast(`Couldn't change how many saved files are remembered: ${e}`, "err", 6000);
+    } finally {
+      savedLimitBusy = false;
+    }
+  }
 
   /** Apply the Storage page's limit. Lowering below what is cached asks once before applying. */
   async function applyCacheLimit() {
@@ -32159,6 +32215,36 @@
                   <p class="warn-t small">{lowerLimitWarning(cacheStatus, cacheLimitDraft === "null" ? null : Number(cacheLimitDraft))}</p>
                 {/if}
                 <p class="muted small">Only this device. Other members choose their own, and nothing here changes what the server shares.</p>
+              </section>
+              <!-- PR #56 follow-up: how many saves this server's list keeps on this device. Native
+                   clamps the choice into its range; a lower one is previewed first, and the page
+                   says how many of the oldest entries go (never files) before the user confirms. -->
+              <section class="set-section saved-limit-set">
+                <h3>Saved files</h3>
+                <label class="saved-limit-label" for="saved-limit">{SAVED_LIMIT_LABEL}</label>
+                <form class="rename-row" onsubmit={(e) => { e.preventDefault(); void applySavedLimit(); }}>
+                  <select id="saved-limit" bind:value={savedLimitDraft} onchange={() => (savedLimitForgets = null)} disabled={!savedLimit || savedLimitBusy}>
+                    {#if savedLimit?.state === "unreadable"}
+                      <option value="" disabled>Choose again</option>
+                    {/if}
+                    {#if savedLimit && savedLimit.limit !== null && !SAVED_LIMIT_CHOICES.includes(savedLimit.limit)}
+                      <option value={String(savedLimit.limit)}>{savedLimitLabel(savedLimit.limit, savedLimit.default)}</option>
+                    {/if}
+                    {#each SAVED_LIMIT_CHOICES as choice (choice)}
+                      <option value={String(choice)}>{savedLimitLabel(choice, savedLimit?.default ?? 256)}</option>
+                    {/each}
+                  </select>
+                  <button class="ghost small" disabled={!savedLimit || savedLimitBusy || !savedLimitDraft || (savedLimitForgets === null && savedLimit.limit !== null && String(savedLimit.limit) === savedLimitDraft)}>
+                    {savedLimitBusy ? "Saving…" : savedLimitForgets !== null ? "Forget and apply" : "Apply"}
+                  </button>
+                </form>
+                {#if savedLimitForgets !== null}
+                  <p class="warn-t small">{savedLimitWarning(savedLimitForgets)}</p>
+                {/if}
+                {#if savedLimit?.state === "unreadable"}
+                  <p class="warn-t small">Mewtual could not read this setting, so it lists no new saves for this server until you choose one again.</p>
+                {/if}
+                <p class="muted small">{savedLimit && savedLimit.listed !== null ? `The list holds ${savedLimit.listed} saved ${savedLimit.listed === 1 ? "file" : "files"} now. ` : ""}{SAVED_LIMIT_HELP}</p>
               </section>
             {:else if serverSettingsPage === "leave"}
               <div class="stx-crumb">SERVER // {cur?.name?.toUpperCase()} // LEAVE</div>

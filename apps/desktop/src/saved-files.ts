@@ -37,8 +37,9 @@ export type SavedListState = "ok" | "newer" | "damaged" | "unavailable";
 export type SavedFilesList = { state: SavedListState; files: SavedFile[] };
 const listStates = new Set<string>(["ok", "newer", "damaged", "unavailable"]);
 
-/** Native's caps, mirrored for validation only (native enforces them). */
-export const MAX_SAVED_FILES = 256;
+/** Native's caps, mirrored for validation only (native enforces them). A list holds at most the
+ * largest "Remember saved files" setting. */
+export const MAX_SAVED_FILES = 4096;
 const MAX_NAME_LENGTH = 1024;
 const MAX_FILE_BYTES = 1024 * 1024 * 1024;
 
@@ -231,4 +232,76 @@ export const REPLACE_OLDER_HELP =
 /** Only the exact stored word turns it on; anything else (missing, damaged, an old value) is off. */
 export function replaceOlderFrom(stored: string | null): boolean {
   return stored === "on";
+}
+
+/** "Remember saved files": how many saves one server's list keeps on this device (Server
+ * settings, Storage). Native stores it sealed per server and clamps whatever is sent into
+ * `min..=max`. `limit` is `null` while the stored setting cannot be read (`state: "unreadable"`),
+ * `listed` while the list cannot be read. */
+export type SavedFilesLimit = {
+  state: "ok" | "unreadable";
+  limit: number | null;
+  listed: number | null;
+  min: number;
+  max: number;
+  default: number;
+};
+/** What a choice would do (`applied: false`, a preview) or did. */
+export type SavedLimitChange = { limit: number; forgets: number; applied: boolean };
+
+/** The choices offered: powers of two across native's range, the default among them. */
+export const SAVED_LIMIT_CHOICES: readonly number[] = [16, 32, 64, 128, 256, 512, 1024, 2048, 4096];
+export const SAVED_LIMIT_LABEL = "Remember saved files";
+export const SAVED_LIMIT_HELP =
+  "How many of your saves Transfers lists for this server on this device. " +
+  "Lowering it forgets the oldest entries from the list; the saved files stay where they are.";
+
+const limitUnreadable = () => new Error("The saved files setting could not be read.");
+const count = (value: unknown, max: number) => Number.isSafeInteger(value) && (value as number) >= 0 && (value as number) <= max;
+
+/** Closed validation of `get_saved_files_limit`. */
+export function checkedSavedFilesLimit(value: unknown): SavedFilesLimit {
+  if (!value || typeof value !== "object") throw limitUnreadable();
+  const row = value as Record<string, unknown>;
+  const { state, limit, listed, min, max } = row;
+  const fallback = row.default;
+  if ((state !== "ok" && state !== "unreadable") ||
+      !count(min, MAX_SAVED_FILES) || !count(max, MAX_SAVED_FILES) || !count(fallback, MAX_SAVED_FILES) ||
+      (min as number) < 1 || (min as number) > (fallback as number) || (fallback as number) > (max as number) ||
+      !(listed === null || count(listed, MAX_SAVED_FILES)) ||
+      (state === "ok" ? !count(limit, max as number) || (limit as number) < (min as number) : limit !== null)) {
+    throw limitUnreadable();
+  }
+  return { state: state as SavedFilesLimit["state"], limit: limit as number | null,
+    listed: listed as number | null, min: min as number,
+    max: max as number, default: fallback as number };
+}
+
+/** Closed validation of `set_saved_files_limit`. */
+export function checkedSavedLimitChange(value: unknown): SavedLimitChange {
+  if (!value || typeof value !== "object") throw limitUnreadable();
+  const { limit, forgets, applied } = value as Record<string, unknown>;
+  if (!count(limit, MAX_SAVED_FILES) || (limit as number) < 1 || !count(forgets, MAX_SAVED_FILES) ||
+      typeof applied !== "boolean") {
+    throw limitUnreadable();
+  }
+  return { limit: limit as number, forgets: forgets as number, applied };
+}
+
+/** "256 files" (the default is marked, so the user can find it again). */
+export function savedLimitLabel(limit: number, fallback: number): string {
+  return `${limit} files${limit === fallback ? " (default)" : ""}`;
+}
+
+/** Said before the user confirms a lower setting: what the list forgets, and that files stay. */
+export function savedLimitWarning(forgets: number): string {
+  const entries = forgets === 1 ? "the oldest saved file" : `the ${forgets} oldest saved files`;
+  return `This forgets ${entries} from the list. The files themselves stay where they are.`;
+}
+
+/** The toast after a change. */
+export function savedLimitDone(change: SavedLimitChange): string {
+  const forgot = change.forgets === 0 ? "" : change.forgets === 1 ? " Forgot the oldest entry."
+    : ` Forgot the ${change.forgets} oldest entries.`;
+  return `Remembering ${change.limit} saved files on this device.${forgot}`;
 }

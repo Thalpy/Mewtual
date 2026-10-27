@@ -2,9 +2,10 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import type { PrivateDownload } from "./private-downloads.ts";
 import {
-  MAX_SAVED_FILES, REPLACE_OLDER_HELP, REPLACE_OLDER_LABEL, SAVED_MARK_TITLE, checkedSavedFileChecks,
-  checkedSavedFiles, liveTransferShown, replaceOlderFrom, savedCidSet, savedFileCheckKey, savedListNotice,
-  savedListRowView, savedListRows, type SavedFile,
+  MAX_SAVED_FILES, REPLACE_OLDER_HELP, REPLACE_OLDER_LABEL, SAVED_LIMIT_CHOICES, SAVED_LIMIT_HELP, SAVED_LIMIT_LABEL,
+  SAVED_MARK_TITLE, checkedSavedFileChecks, checkedSavedFiles, checkedSavedFilesLimit, checkedSavedLimitChange,
+  liveTransferShown, replaceOlderFrom, savedCidSet, savedFileCheckKey, savedLimitDone, savedLimitLabel,
+  savedLimitWarning, savedListNotice, savedListRowView, savedListRows, type SavedFile,
 } from "./saved-files.ts";
 
 const day = (ms: number) => `day ${ms}`;
@@ -174,6 +175,44 @@ test("the replace preference is on only for its exact word, and its copy follows
   assert.match(REPLACE_OLDER_HELP, /^When you save a file again, Mewtual replaces the copy it saved before, if that copy is still unchanged\. It replaces only a copy it can prove it saved\./);
   // No absolute claim (design review M3(g)).
   assert.doesNotMatch(REPLACE_OLDER_HELP, /\bnever\b/);
+});
+
+test("the Remember saved files setting is validated closed, within native's range", () => {
+  const good = { state: "ok", limit: 256, listed: 212, min: 16, max: 4096, default: 256 };
+  assert.deepEqual(checkedSavedFilesLimit({ ...good, extra: "C:\\secret" }), good);
+  assert.deepEqual(checkedSavedFilesLimit({ ...good, state: "unreadable", limit: null, listed: null }),
+    { ...good, state: "unreadable", limit: null, listed: null });
+  const bad: unknown[] = [
+    null, [], { ...good, state: "maybe" }, { ...good, limit: null }, { ...good, state: "unreadable" },
+    { ...good, limit: 8 }, { ...good, limit: 5000 }, { ...good, limit: 300.5 }, { ...good, listed: -1 },
+    { ...good, listed: "212" }, { ...good, min: 0 }, { ...good, default: 8000 }, { ...good, max: 5000 },
+  ];
+  for (const value of bad) assert.throws(() => checkedSavedFilesLimit(value), /could not be read/, JSON.stringify(value));
+  assert.deepEqual(checkedSavedLimitChange({ limit: 16, forgets: 196, applied: true, path: "x" }),
+    { limit: 16, forgets: 196, applied: true });
+  for (const value of [null, { limit: 16, forgets: -1, applied: true }, { limit: 16, forgets: 1, applied: "yes" },
+    { limit: 0, forgets: 0, applied: false }, { limit: 16, forgets: 5000, applied: false }]) {
+    assert.throws(() => checkedSavedLimitChange(value), /could not be read/, JSON.stringify(value));
+  }
+});
+
+test("the setting's choices, labels and warnings say what happens to entries and files", () => {
+  assert.equal(SAVED_LIMIT_CHOICES[0], 16);
+  assert.equal(SAVED_LIMIT_CHOICES.at(-1), 4096);
+  assert.ok(SAVED_LIMIT_CHOICES.includes(256));
+  assert.equal(SAVED_LIMIT_LABEL, "Remember saved files");
+  assert.equal(savedLimitLabel(256, 256), "256 files (default)");
+  assert.equal(savedLimitLabel(1024, 256), "1024 files");
+  // Lowering forgets entries, never files, and the page says so before the user confirms.
+  assert.match(SAVED_LIMIT_HELP, /Lowering it forgets the oldest entries from the list; the saved files stay where they are\./);
+  assert.equal(savedLimitWarning(1), "This forgets the oldest saved file from the list. The files themselves stay where they are.");
+  assert.equal(savedLimitWarning(84), "This forgets the 84 oldest saved files from the list. The files themselves stay where they are.");
+  assert.equal(savedLimitDone({ limit: 512, forgets: 0, applied: true }), "Remembering 512 saved files on this device.");
+  assert.equal(savedLimitDone({ limit: 16, forgets: 1, applied: true }), "Remembering 16 saved files on this device. Forgot the oldest entry.");
+  for (const text of [SAVED_LIMIT_LABEL, SAVED_LIMIT_HELP, savedLimitWarning(2), savedLimitDone({ limit: 16, forgets: 3, applied: true })]) {
+    assert.doesNotMatch(text, /[·—]/, text);
+    assert.doesNotMatch(text, /\bnever\b/, text);
+  }
 });
 
 test("no list row text uses a middle dot or an em dash", () => {

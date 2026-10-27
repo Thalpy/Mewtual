@@ -3,7 +3,8 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import ts from "typescript";
 import {
-  SAVED_MARK_LABEL, SAVED_MARK_TITLE, checkedSavedFileChecks, replaceOlderFrom, savedFileCheckKey,
+  SAVED_MARK_LABEL, SAVED_MARK_TITLE, checkedSavedFileChecks, checkedSavedFilesLimit, checkedSavedLimitChange,
+  replaceOlderFrom, savedFileCheckKey, savedLimitDone,
 } from "./saved-files.ts";
 
 // PR #56: the real App.svelte handlers for the saved-files list (its batch check, Clear, Save
@@ -58,6 +59,103 @@ function app(files: ReturnType<typeof entry>[], listed: string[] = []) {
       state: () => ({ refreshes, savedFileChecks, savedFileBusy, replaceOlder, store }) };
   `)(files, listed, savedFileCheckKey, checkedSavedFileChecks, replaceOlderFrom, SAVED_MARK_LABEL, SAVED_MARK_TITLE);
 }
+
+// The Storage page's "Remember saved files" handlers, from the production script too.
+const limitNames = new Set(["refreshSavedLimit", "applySavedLimit"]);
+const limitHandlers = tree.statements.filter((n) => ts.isFunctionDeclaration(n) && n.name && limitNames.has(n.name.text));
+assert.equal(limitHandlers.length, limitNames.size);
+const limitProduction = ts.transpileModule(limitHandlers.map((n) => n.getFullText(tree)).join("\n"),
+  { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText;
+
+const limitView = (over: Record<string, unknown> = {}) =>
+  ({ state: "ok", limit: 256, listed: 212, min: 16, max: 4096, default: 256, ...over });
+
+function limitApp() {
+  return new Function("checkedSavedFilesLimit", "checkedSavedLimitChange", "savedLimitDone", `
+    let activeServerId = 1, locked = false;
+    let savedLimit = null, savedLimitDraft = "", savedLimitForgets = null, savedLimitBusy = false;
+    const calls = [], notices = [];
+    let refreshes = 0, replies = new Map();
+    const invoke = async (command, args) => {
+      calls.push([command, args]);
+      const reply = replies.get(command);
+      if (reply instanceof Error) throw reply;
+      return typeof reply === "function" ? reply(args) : reply ?? null;
+    };
+    const refreshFiles = async () => { refreshes++; };
+    const toast = (...args) => notices.push(args);
+    ${limitProduction}
+    return { calls, notices, replies, refresh: refreshSavedLimit, apply: applySavedLimit,
+      choose(value) { savedLimitDraft = value; savedLimitForgets = null; },
+      server(value) { activeServerId = value; },
+      state: () => ({ savedLimit, savedLimitDraft, savedLimitForgets, savedLimitBusy, refreshes }) };
+  `)(checkedSavedFilesLimit, checkedSavedLimitChange, savedLimitDone);
+}
+
+test("the Storage page reads the setting and seeds its picker; a stale or unreadable answer claims nothing", async () => {
+  const t = limitApp();
+  t.replies.set("get_saved_files_limit", limitView());
+  await t.refresh();
+  assert.deepEqual(t.calls, [["get_saved_files_limit", { server: 1 }]]);
+  assert.equal(t.state().savedLimit.limit, 256);
+  assert.equal(t.state().savedLimitDraft, "256");
+  // An unreadable setting seeds nothing, so the user must choose again.
+  t.replies.set("get_saved_files_limit", limitView({ state: "unreadable", limit: null }));
+  await t.refresh();
+  assert.equal(t.state().savedLimitDraft, "");
+  // A reply for a server no longer selected is dropped; a malformed one clears the view.
+  t.replies.set("get_saved_files_limit", () => { t.server(2); return limitView({ limit: 1024 }); });
+  await t.refresh();
+  assert.equal(t.state().savedLimit.state, "unreadable");
+  t.server(1);
+  t.replies.set("get_saved_files_limit", { state: "ok", limit: "C:\\x" });
+  await t.refresh();
+  assert.equal(t.state().savedLimit, null);
+});
+
+test("a lower choice says what it forgets before anything changes, and applies only when confirmed", async () => {
+  const t = limitApp();
+  t.replies.set("get_saved_files_limit", limitView());
+  await t.refresh();
+  t.choose("128");
+  t.replies.set("set_saved_files_limit", ({ limit, apply }: { limit: number; apply: boolean }) =>
+    ({ limit, forgets: 84, applied: apply }));
+  await t.apply();
+  // Only a preview so far: nothing applied, the count is shown for confirmation.
+  assert.deepEqual(t.calls.slice(1), [["set_saved_files_limit", { server: 1, limit: 128, apply: false }]]);
+  assert.equal(t.state().savedLimitForgets, 84);
+  assert.equal(t.notices.length, 0);
+  // Confirmed: applied, the toast says what was forgotten, the list and the setting refresh.
+  await t.apply();
+  assert.deepEqual(t.calls.at(-2), ["set_saved_files_limit", { server: 1, limit: 128, apply: true }]);
+  assert.deepEqual(t.calls.at(-1), ["get_saved_files_limit", { server: 1 }]);
+  assert.equal(t.notices[0][0], "Remembering 128 saved files on this device. Forgot the 84 oldest entries.");
+  assert.equal(t.state().refreshes, 1);
+  assert.equal(t.state().savedLimitForgets, null);
+  assert.equal(t.state().savedLimitBusy, false);
+});
+
+test("a choice that forgets nothing applies at once, and a refusal is said and resets the question", async () => {
+  const t = limitApp();
+  t.replies.set("get_saved_files_limit", limitView());
+  await t.refresh();
+  t.choose("1024");
+  t.replies.set("set_saved_files_limit", ({ limit, apply }: { limit: number; apply: boolean }) =>
+    ({ limit, forgets: 0, applied: apply }));
+  await t.apply();
+  assert.deepEqual(t.calls.slice(1, 3).map(([, args]: [string, { apply: boolean }]) => args.apply), [false, true]);
+  assert.equal(t.notices[0][0], "Remembering 1024 saved files on this device.");
+  assert.equal(t.state().refreshes, 0, "nothing was forgotten, so the list is not reloaded");
+  t.choose("16");
+  t.replies.set("set_saved_files_limit", new Error("Mewtual could not read its list of saved files right now, so it kept the current setting."));
+  await t.apply();
+  assert.match(String(t.notices.at(-1)[0]), /kept the current setting/);
+  assert.equal(t.state().savedLimitForgets, null);
+  // Nothing is sent without a readable view or a choice.
+  const u = limitApp();
+  await u.apply();
+  assert.equal(u.calls.length, 0);
+});
 
 test("the list's rows are checked in one batch per visit, and only answered entries get an answer", async () => {
   const a = entry(1), b = entry(2), plain = entry(3, { checkable: false });
@@ -213,4 +311,11 @@ test("the saved-files markup: list rows in Saved, the marks, the setting and the
   assert.match(source, /Files you saved from it stay where they are\. Mewtual forgets where they went\./);
   // Another server's list never marks this server's files.
   assert.match(source, /savedFiles = \{ state: "ok", files: \[\] \};\s*savedFileChecks = \{\};/);
+  // "Remember saved files" in Server settings, Storage: the picker, the confirmation before a
+  // lower choice applies, and the help text; the page reads it whenever Storage opens.
+  assert.match(source, /<section class="set-section saved-limit-set">\s*<h3>Saved files<\/h3>/);
+  assert.match(source, /<label class="saved-limit-label" for="saved-limit">\{SAVED_LIMIT_LABEL\}<\/label>/);
+  assert.match(source, /savedLimitForgets !== null \? "Forget and apply" : "Apply"/);
+  assert.match(source, /\{#if savedLimitForgets !== null\}\s*<p class="warn-t small">\{savedLimitWarning\(savedLimitForgets\)\}<\/p>/);
+  assert.match(source, /void refreshSavedLimit\(\);\s*\}\);\s*\}\);/);
 });

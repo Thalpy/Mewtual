@@ -353,6 +353,16 @@ export function visualFixtureResponse(command: string, payload: InvokeArgs = {},
     case "forget_saved_file":
     case "reset_saved_files":
       return null;
+    // "Remember saved files" (Server settings, Storage). Lantern Room's list is said to hold 212
+    // entries (display data for that page only), so a lower choice previews what it forgets. A
+    // choice is clamped and echoed back like native, never persisted.
+    case "get_saved_files_limit":
+      return { state: "ok", limit: 256, listed: server === 1 ? 212 : 0, min: 16, max: 4096, default: 256 };
+    case "set_saved_files_limit": {
+      const asked = typeof args.limit === "number" ? args.limit : 256;
+      const limit = Math.min(4096, Math.max(16, Math.trunc(asked)));
+      return { limit, forgets: Math.max(0, (server === 1 ? 212 : 0) - limit), applied: args.apply === true };
+    }
     case "save_group_file": {
       // Mirrors the native contract: the renderer sends a name and an optional `saveAs` flag,
       // never a path or folder. A fixture "Save as" behaves as if the user closed the dialog, so
