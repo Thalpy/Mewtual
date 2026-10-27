@@ -430,6 +430,118 @@ async fn coordinated_browser_cycle() {
     scenario.close(&[0, 1, 2]).await;
 }
 
+/// Three unscripted production browser coordinators must each adopt BOTH real peers.
+/// The actual TCP graph still forbids direct1--2;0 joins no voice call. The controlled
+/// RTC provider is not audible/ICE/WebView evidence, nor member media relay acceptance.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn three_production_browser_coordinators_adopt_every_peer_without_pair_selection() {
+    Box::pin(three_coordinated_browser_cycle()).await;
+}
+async fn three_coordinated_browser_cycle() {
+    let mut scenario = Scenario::new(false, isolate().await);
+    scenario.admit().await;
+    scenario.close(&[4, 5]).await;
+    scenario.rules.drop_gossip.store(true, Ordering::Release);
+    for index in [0, 1, 2, 3] {
+        enable(&scenario, index).await;
+    }
+    let (ar, br, cr) = tokio::join!(
+        Box::pin(browser_endpoint(&scenario, 1, false)),
+        Box::pin(browser_endpoint(&scenario, 2, false)),
+        Box::pin(browser_endpoint(&scenario, 3, false))
+    );
+    // Preserve all successful endpoint owners even if a sibling setup failed. Every
+    // actual process/HTTP/native owner must collect before surfacing that original error.
+    let mut endpoints = Vec::with_capacity(3);
+    let mut failure = None;
+    for result in [ar, br, cr] {
+        match result {
+            Ok(endpoint) => endpoints.push(endpoint),
+            Err(error) => {
+                if failure.is_none() {
+                    failure = Some(error);
+                }
+            }
+        }
+    }
+    if let Some(error) = failure {
+        let mut collected = true;
+        for endpoint in &mut endpoints {
+            collected &= catch_fixture(endpoint.collect()).await.is_ok();
+        }
+        if !collected {
+            eprintln!("three-coordinator setup also failed actual endpoint collection");
+        }
+        std::panic::resume_unwind(error);
+    }
+    let mut c = endpoints.pop().unwrap();
+    let mut b = endpoints.pop().unwrap();
+    let mut a = endpoints.pop().unwrap();
+    let cycle = catch_fixture(Box::pin(async {
+        // Join every original observation even if one fails. Cancelling sibling readers
+        // on the first panic hides which genuine negotiation stalled on those endpoints.
+        // This catches only the test observation, never restarts a coordinator or its work.
+        let (ar, br, cr) = tokio::join!(
+            Box::pin(catch_fixture(a.coordinate_peers(2))),
+            Box::pin(catch_fixture(b.coordinate_peers(2))),
+            Box::pin(catch_fixture(c.coordinate_peers(2)))
+        );
+        for result in [ar, br, cr] {
+            if let Err(error) = result {
+                std::panic::resume_unwind(error);
+            }
+        }
+        let devices =
+            [1_usize, 2, 3].map(|index| scenario.clients[index].identity.as_ref().unwrap().1);
+        a.assert_coordinated_peer_ids([devices[1], devices[2]]);
+        b.assert_coordinated_peer_ids([devices[0], devices[2]]);
+        c.assert_coordinated_peer_ids([devices[0], devices[1]]);
+        // Independent native history and exact SDK local/remote/close counters are the
+        // existing oracle. No test supplies a peer selector, ExpectedRow or native factory.
+        a.end_coordinated_peers(2).await;
+        b.end_coordinated_peers(2).await;
+        c.end_coordinated_peers(2).await;
+        scenario.rules.assert_graph();
+    }))
+    .await;
+    if let Err(error) = cycle {
+        let peers = [1_usize, 2, 3].map(|index| {
+            (
+                scenario.clients[index].identity.as_ref().unwrap().1,
+                index as u8,
+            )
+        });
+        for (label, endpoint) in [(1, &a), (2, &b), (3, &c)] {
+            eprintln!(
+                "coordinator {label}: {}",
+                endpoint.coordinator_diagnostic(&peers)
+            );
+        }
+        let (ar, br, cr) = tokio::join!(
+            Box::pin(catch_fixture(a.collect())),
+            Box::pin(catch_fixture(b.collect())),
+            Box::pin(catch_fixture(c.collect()))
+        );
+        assert!(
+            ar.is_ok() && br.is_ok() && cr.is_ok(),
+            "all failed three-coordinator endpoints must collect"
+        );
+        std::panic::resume_unwind(error);
+    }
+    let (ar, br, cr) = tokio::join!(
+        Box::pin(catch_fixture(a.close())),
+        Box::pin(catch_fixture(b.close())),
+        Box::pin(catch_fixture(c.close()))
+    );
+    for result in [ar, br, cr] {
+        match result {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) | Err(error) => std::panic::resume_unwind(error),
+        }
+    }
+    scenario.close(&[0, 1, 2, 3]).await;
+}
+
 /// Genuine second native peer on the matching existing endpoint's original selected key/HTTP Session. Only the RTC
 /// provider is controlled. The first A-B path is blocked and uses unjoined helper0;
 /// the newcomer then naturally selects one original endpoint over the permitted graph.

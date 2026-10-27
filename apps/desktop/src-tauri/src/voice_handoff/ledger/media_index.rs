@@ -96,6 +96,26 @@ pub(super) struct Entry {
     root: Arc<SdpMedia>,
 }
 impl Entry {
+    /// Nonblocking failure metadata only. Root's history observer reads fixed atomics;
+    /// no Actor, resource getter or current/effect check runs under this Entry guard.
+    /// Return copies, never a last-owner-bearing Entry/History/Action reference.
+    #[cfg(test)]
+    pub(super) fn fixture_history_diagnostic(
+        &self,
+        selected: &SelectedHandoffOwner,
+    ) -> Option<(catcoms_crypto::DeviceId, Option<bool>)> {
+        if !std::ptr::eq(self.selected.as_ref(), selected) {
+            return None;
+        }
+        Some((
+            self.purpose.peer,
+            self.state
+                .try_lock()
+                .ok()
+                .map(|state| state.history_collected()),
+        ))
+    }
+
     pub(super) fn may_close(&self, selected: &SelectedHandoffOwner) -> bool {
         !std::ptr::eq(self.selected.as_ref(), selected)
             || self
@@ -409,6 +429,31 @@ impl Ledger {
                         .history_collected()
             })
             .count()
+    }
+
+    /// Exact native identity oracle alongside the history count. This cannot make
+    /// two histories for one device stand in for the other actual group member.
+    #[cfg(test)]
+    pub(in crate::voice_handoff) fn collected_media_peer_ids(
+        &self,
+        selected: &Arc<SelectedHandoffOwner>,
+    ) -> Vec<catcoms_crypto::DeviceId> {
+        let index = self.index.lock().unwrap_or_else(|error| error.into_inner());
+        let mut peers = Vec::with_capacity(index.media.len());
+        for entry in index.media.iter().flatten() {
+            if Arc::ptr_eq(&entry.selected, selected)
+                && entry
+                    .state
+                    .lock()
+                    .unwrap_or_else(|error| error.into_inner())
+                    .history_collected()
+            {
+                peers.push(entry.purpose.peer);
+            }
+        }
+        peers.sort_unstable();
+        peers.dedup();
+        peers
     }
 
     /// Run BEFORE old-parent resolution, and OUTSIDE final UI/Coordinator/Route guards.

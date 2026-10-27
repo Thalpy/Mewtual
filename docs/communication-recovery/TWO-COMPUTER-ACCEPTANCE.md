@@ -53,7 +53,9 @@ Do not record microphone content unless both participants consent.
 
 The primary voice implementation still owns operational Ready/admission and negotiation
 retirement, production App/native/RTC composition, peer-local failure recovery, member media
-relay and combined acceptance. Native two-peer TCP acceptance is under active validation.
+relay and combined acceptance. Selected/two-peer native TCP fixtures now pass; the unscripted three-coordinator positive
+test remains red. See [multi-peer admission](VOICE-MULTIPEER-ADMISSION-NEXT.md). Neither
+physical V2 nor member-media cases meet their entry conditions yet.
 External-download resume and the dependency/toolchain upgrade are separate branches; verify
 their integration rather than assuming their existence changes this head. Physical acceptance
 remains unrun because only one desktop is currently available.

@@ -1,4 +1,5 @@
 import { VOICE_AUDIO_FIXTURE_MAX_SDP } from "./voice-audio-sdp-fixture.ts";
+import { NativeCoordinatorDiagnostics } from "./voice-coordinator-diagnostics.ts";
 /** Test-only Node endpoint for native/WebCrypto interoperability. It imports the actual
  * broker, uses its non-extractable selected key and actual fetch/BYOB channel, and never
  * sends crypto Input, Result, private keys or plaintext over this control pipe. The Rust
@@ -50,6 +51,8 @@ let originalSession: { keys: unknown; bootstrap: unknown; tx: bigint } | null = 
 const coordinatedPeers: { local: number; remote: number; closed: number }[] = [];
 let previousCoordinatedRtc: typeof RTCPeerConnection | undefined;
 let coordinatedObserver: ReturnType<VoiceCryptoBroker["observeNativeLifecycle"]> | null = null;
+let coordinatorDiagnostic: NativeCoordinatorDiagnostics | null = null;
+let coordinatorFailureMetadata: string | null = null;
 function installCoordinatedRtc(): void {
   if (coordinatedObserver) return;
   previousCoordinatedRtc = globalThis.RTCPeerConnection;
@@ -130,6 +133,8 @@ const provider = new Proxy(webcrypto.subtle as unknown as SubtleCrypto, { get(ta
         loss.modes.add(mediaRequestMode); view.fill(0);
         throw new Error("test-only authenticated media observation lost");
       }
+      if (currentStep === "coordinator" && name === "decrypt")
+        coordinatorDiagnostic?.refusal(view, performance.now());
       if (name === "decrypt" && view.length === 3 && view[0] === 1 && view[1] === 3) {
         detail += "/refused-" + view[2];
         if (view[2] === 7) capacityRefusals++;
@@ -368,6 +373,11 @@ async function step(value: Step): Promise<unknown> {
       return { kind: "failed-plan-retired", peers: value.peers, closed: 0 };
     }
     case "coordinator": {
+      // Each observation step owns only its own diagnostics; remount/repeated steps
+      // retain the original production observer and peers, never stale failure text.
+      const began = performance.now(), deadline = began + 55_000;
+      coordinatorDiagnostic = new NativeCoordinatorDiagnostics(began);
+      coordinatorFailureMetadata = null;
       assert.ok(value.peers === 1 || value.peers === 2);
       installCoordinatedRtc();
       const observer = broker.observeNativeLifecycle(owner, channel, key);
@@ -376,15 +386,32 @@ async function step(value: Step): Promise<unknown> {
       // Start only the normal production lifecycle. Native callbacks remain serviced by
       // Rust during this entire step. The test merely observes completed browser history;
       // Rust separately checks original native History::Collected, not this boolean.
-      const deadline = performance.now() + 55_000;
       for (;;) {
         const session = (broker as unknown as { ipcChannels: Map<string, {
           retired: boolean; peers: Map<unknown, { compacted: boolean; compactionReturned: boolean; advanced: boolean }>;
+          lifecycleObservation(): { stage: string };
+          negotiation: { generation: object; failed: boolean; linked: null | { expires: number;
+            records: Map<unknown, { outcome: { kind: string; code?: string } | null }> } };
         }> }).ipcChannels.get(owner.token);
         assert.ok(session && !session.retired, "production coordinator retired before completion");
         const completed = [...session.peers.values()].filter(peer => peer.compacted && peer.compactionReturned && peer.advanced).length;
         if (completed === value.peers) break;
-        assert.ok(performance.now() < deadline, `coordinator history stalled: completed=${completed} sdk=${coordinatedPeers.length}`);
+        const stage = session.lifecycleObservation().stage;
+        const negotiation = session.negotiation, linked = negotiation.linked;
+        let rejected = "none", inspected = 0;
+        if (stage === "failed" && linked) {
+          for (const record of linked.records.values()) {
+            if (++inspected > 12) { rejected = "inventory-overflow"; break; } // Original CHAIN_ROWS.
+            if (record.outcome?.kind === "rejected") { rejected = record.outcome.code ?? "unknown"; break; }
+          }
+        }
+        coordinatorDiagnostic.observe(stage, negotiation.generation, linked?.expires ?? null, rejected, performance.now(), negotiation.failed);
+        if (performance.now() >= deadline) {
+          // Only this bounded known-metadata string receives the longer failure prefix.
+          // General exception messages retain their existing160-byte redaction bound.
+          coordinatorFailureMetadata = coordinatorDiagnostic.summary(completed, coordinatedPeers.length);
+          throw new Error("coordinator stalled");
+        }
         await new Promise<void>(yes => setTimeout(yes, 25));
       }
       assert.equal(coordinatedPeers.length, value.peers);
@@ -812,7 +839,9 @@ function accept(value: unknown): void {
     }, error => {
       stepRunning = false;
       // Fixed-size diagnostics only: no Input/Result/body bytes are ever serialized here.
-      send({ tag: "failed", reason: ("step="+currentStep+" "+String(error instanceof Error ? error.message : "endpoint failed").slice(0,160)+
+      send({ tag: "failed", reason: ("step="+currentStep+" "+(currentStep === "coordinator" && coordinatorFailureMetadata !== null
+        ? coordinatorFailureMetadata.slice(0,320)
+        : String(error instanceof Error ? error.message : "endpoint failed").slice(0,160))+
         " stages="+stages.join(",")+" media="+mediaEvents.join(",")).slice(0,512) });
     }).catch(() => {
       // send()/response-handler failures belong to this same control step. Never leave
