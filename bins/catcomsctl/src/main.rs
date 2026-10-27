@@ -948,10 +948,11 @@ async fn join_and_converge(
 /// Print a node's sync diagnostics in a compact, greppable line.
 fn print_stats(label: &str, s: &SyncStats) {
     println!(
-        "  [stats] {label:<6} epoch-applied={} buffered={} served={} \
+        "  [stats] {label:<6} epoch-applied={} commit-records-refused={} buffered={} served={} \
 commit-catchups={} ops={} past-epoch-recovered={} future-dropped={} \
 old-dropped={} doc-catchups={} | gauges: past-keys={} pending={} log={} peers={}",
         s.commits_applied,
+        s.commit_records_refused,
         s.commits_buffered,
         s.commits_served,
         s.commit_catchups_requested,
