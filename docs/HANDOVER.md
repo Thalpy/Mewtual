@@ -19,8 +19,8 @@ finds no blocker/high/medium; its retained bundle2 compatibility regression is a
 Strict changed-helper TypeScript passes. The large IPC fixture has8 inherited standalone
 strict diagnostics, unchanged against the parent; the added typed bootstrap is clean.
 Current final native checks of these changed browser inputs remain pending. The preceding
-Root-history source daf4ca91 has native890+5 ACL, native check and Root/native strict Clippy
-green; its complete Root suite is still running serially. Dependency audit remains red on
+Root-history source daf4ca91 has Root3691 passed/24 existing ignores, native890+5 ACL, native
+check and Root/native strict Clippy green. All of that source's complete suites have finished. Dependency audit remains red on
 inherited RUSTSEC-2026-0387/crypto-bigint0.5.5; no waiver or dependency changes here.
 
 Still open: private mic/remote audio/data-channel ownership, production App lock/room/unmount
@@ -28,6 +28,24 @@ adoption, operational renewal, actual authenticated-facade WebView acceptance, m
 relay, combined acceptance and independent physical network/audio testing. Only one desktop
 is available. External download resume and dependency remediation are separately owned.
 The dated entries below retain prior source-specific results and pending-state history.
+
+## Root history validation completed (27 October; source daf4ca91, App OFF)
+
+The terminal Root-history implementation below now passes complete validation: Root3691
+passed/24 existing ignores; native890 library+5 ACL passed; frontend3101 passed. Strict
+Root/native Clippy, both formatting checks, native cargo check, current-native construction
+scan, no-ambient, frontend static checks and production build35.22s pass. Root ran on the
+byte-identical runtime/Cargo/lock/toolchain inputs in the warm custody checkout. Native and
+Root gates ran serially; the full Root run finished27 October00:46 UTC. Read-only design,
+adversarial review and re-review have no remaining actionable finding.
+
+Fresh dependency audit still FAILS inherited RUSTSEC-2026-0387/crypto-bigint0.5.5; no waiver.
+No setup/window/send/friend change was made, so startup/flow gates were not rerun for this
+inactive slice. Actual authenticated-facade WebView, production App/audio/renewal, member
+media relay and combined/physical acceptance remain open. One desktop is available.
+This supersedes the older pending-gate status below for source daf4ca91 only; later browser
+changes require their own checks. It does not enable V2 or complete the programme.
+
 
 ## Root terminal history retirement (26 October; implementation, validation pending)
 

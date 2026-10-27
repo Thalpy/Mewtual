@@ -12,8 +12,8 @@ instead of silently ignoring relay-only intent. Existing frontend256KiB/group ca
 Frontend3126/static/build pass. Actual WebCrypto/framed IPC with controlled native/RTC fixtures
 covers complete LOW/HIGH rounds, fresh14 refusal and two configured indexed peers. Read-only
 review has no blocker/high/medium. Final native execution of changed TS inputs remains pending;
-the previous Root-history source has native895/check/strict lint green and its full Root run
-continues serially. Fresh dependency audit remains red on inherited crypto-bigint0.5.5.
+the previous Root-history source has native895/check/strict lint and complete Root3691/24
+existing ignores green. Fresh dependency audit remains red on inherited crypto-bigint0.5.5.
 
 Next implement shared microphone and independently owned per-peer sender clones, remote audio
 including streamless track events, and actual SDK-promise drainage. Global mute/End must gate
@@ -23,6 +23,24 @@ paid and be stopped on late return, never adopted by a replacement call. Capture
 actual adopted/current media, not historical bootstrap-ready. App lock/room/unmount integration,
 renewal, authenticated WebView, member relay and combined/physical acceptance still follow.
 App V2 remains OFF; only one desktop exists. Older sections below are checkpoint history.
+
+## Root history validation completed (27 October; source daf4ca91, App OFF)
+
+The terminal Root-history implementation below now passes complete validation: Root3691
+passed/24 existing ignores; native890 library+5 ACL passed; frontend3101 passed. Strict
+Root/native Clippy, both formatting checks, native cargo check, current-native construction
+scan, no-ambient, frontend static checks and production build35.22s pass. Root ran on the
+byte-identical runtime/Cargo/lock/toolchain inputs in the warm custody checkout. Native and
+Root gates ran serially; the full Root run finished27 October00:46 UTC. Read-only design,
+adversarial review and re-review have no remaining actionable finding.
+
+Fresh dependency audit still FAILS inherited RUSTSEC-2026-0387/crypto-bigint0.5.5; no waiver.
+No setup/window/send/friend change was made, so startup/flow gates were not rerun for this
+inactive slice. Actual authenticated-facade WebView, production App/audio/renewal, member
+media relay and combined/physical acceptance remain open. One desktop is available.
+This supersedes the older pending-gate status below for source daf4ca91 only; later browser
+changes require their own checks. It does not enable V2 or complete the programme.
+
 
 ## Broker42 bootstrap composed; App/RTC adoption next (26 October)
 

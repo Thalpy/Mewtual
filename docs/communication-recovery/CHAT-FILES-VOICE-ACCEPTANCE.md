@@ -14,9 +14,27 @@ and HIGH rounds, refuse construction after fresh14 denial, and exercise two inde
 on one configured Session. They do not prove actual native WebView ICE/media. Read-only review
 has no actionable blocker/high/medium; bundle2 compatibility coverage is added. Final native
 checks with the changed TS imports remain pending. Frozen daf4ca91 native895/check/strict lint
-pass; its complete Root run remains in progress. Fresh inherited dependency audit is red.
+and complete Root3691/24 existing ignores pass. Fresh inherited dependency audit is red.
 App activation, mic/audio/data channels, renewal, WebView, member relay and combined/physical
 acceptance remain open. One desktop is available; V2 stays OFF.
+
+## Root history validation completed (27 October; source daf4ca91, App OFF)
+
+The terminal Root-history implementation below now passes complete validation: Root3691
+passed/24 existing ignores; native890 library+5 ACL passed; frontend3101 passed. Strict
+Root/native Clippy, both formatting checks, native cargo check, current-native construction
+scan, no-ambient, frontend static checks and production build35.22s pass. Root ran on the
+byte-identical runtime/Cargo/lock/toolchain inputs in the warm custody checkout. Native and
+Root gates ran serially; the full Root run finished27 October00:46 UTC. Read-only design,
+adversarial review and re-review have no remaining actionable finding.
+
+Fresh dependency audit still FAILS inherited RUSTSEC-2026-0387/crypto-bigint0.5.5; no waiver.
+No setup/window/send/friend change was made, so startup/flow gates were not rerun for this
+inactive slice. Actual authenticated-facade WebView, production App/audio/renewal, member
+media relay and combined/physical acceptance remain open. One desktop is available.
+This supersedes the older pending-gate status below for source daf4ca91 only; later browser
+changes require their own checks. It does not enable V2 or complete the programme.
+
 
 ## Root history extension under validation (26 October; inactive)
 
