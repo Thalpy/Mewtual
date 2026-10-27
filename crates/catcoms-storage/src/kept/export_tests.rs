@@ -1677,6 +1677,161 @@ fn a_saved_rows_final_name_held_by_another_program_is_not_treated_as_gone() {
     assert_eq!(fs::read(&path).unwrap(), CHUNKS.concat());
 }
 
+/// Published-staging review (26 October): Clear checks the saved (final) name, then deletes the
+/// staging name. A saved name deleted in between (here at `BEFORE_REMOVE`: after the staging name
+/// was opened and verified, on Unix after its rename aside) left that delete removing the last
+/// copy. The staging name now goes only while the saved name holds the file at the delete itself,
+/// so the copy survives at its own name and the row says it is now the only copy.
+#[test]
+fn a_saved_name_deleted_before_the_staging_delete_keeps_the_only_copy() {
+    // Also when another file took the saved name meanwhile (an editor's atomic save): the
+    // original bytes stay under the staging name and the row says the name was replaced.
+    for replaced in [false, true] {
+        let fx = fixture();
+        let (path, saved) = saved_row_without_finish(&fx);
+        let doomed = path.clone();
+        external::BEFORE_REMOVE.with(|hook| {
+            *hook.borrow_mut() = Some(Box::new(move |_| {
+                fs::remove_file(&doomed).unwrap();
+                if replaced {
+                    fs::write(&doomed, b"a different file").unwrap();
+                }
+            }))
+        });
+        let outcome = remove_partial(&saved, true, &mut rng());
+        external::BEFORE_REMOVE.with(|hook| *hook.borrow_mut() = None);
+        let expected = if replaced {
+            PartialRemoval::SavedNameReplaced
+        } else {
+            PartialRemoval::KeptOnlyCopy
+        };
+        assert_eq!(outcome.unwrap(), expected, "replaced={replaced}");
+        assert_eq!(
+            fs::read(staging(&fx.downloads)).unwrap(),
+            CHUNKS.concat(),
+            "the original copy survives, at its own name (replaced={replaced})"
+        );
+        if replaced {
+            assert_eq!(fs::read(&path).unwrap(), b"a different file");
+        } else {
+            assert!(!path.exists(), "the saved name was deleted meanwhile");
+        }
+    }
+    // The notice says it is the only copy and where, without assuming the staging name is the
+    // saved name plus a suffix (a final name numbered at publication keeps its original staging
+    // name).
+    let notice = PartialRemoval::KeptOnlyCopy.notice(true).unwrap();
+    assert!(notice.contains("only copy") && notice.contains("ends in .mewtual-part"));
+    assert!(!notice.contains("saved name with"));
+}
+
+/// Review M2 of the published-staging fix: when the pin on the saved name is refused with a
+/// sharing violation (here another program holds it with delete access; on a filesystem that
+/// checks delete sharing per file our own staging handle would do the same), the saved name is
+/// verified without the pin instead of turning every Clear into "could not check" forever.
+#[cfg(windows)]
+#[test]
+fn a_saved_name_whose_pin_is_refused_is_checked_without_it() {
+    use std::os::windows::fs::OpenOptionsExt;
+    const DELETE: u32 = 0x0001_0000;
+    const FILE_READ_ATTRIBUTES: u32 = 0x0080;
+    let fx = fixture();
+    let (path, saved) = saved_row_without_finish(&fx);
+    let holder = fs::OpenOptions::new()
+        .access_mode(DELETE | FILE_READ_ATTRIBUTES)
+        .share_mode(0x7)
+        .open(&path)
+        .unwrap();
+    let outcome = remove_partial(&saved, true, &mut rng());
+    drop(holder);
+    assert_eq!(outcome.unwrap(), PartialRemoval::KeptSaved);
+    assert!(!staging(&fx.downloads).exists());
+    assert_eq!(fs::read(&path).unwrap(), CHUNKS.concat());
+}
+
+/// Review L1 of the published-staging fix (Unix): a crash between the rename aside and the
+/// unlink of an earlier Clear left our file at a "removing" name. The sweep that deletes it is a
+/// staging delete too: with the saved name deleted before that unlink, the leftover goes back to
+/// the staging name instead of being deleted as the last copy.
+#[cfg(unix)]
+#[test]
+fn a_crash_leftover_is_put_back_when_the_saved_name_goes_before_its_delete() {
+    let fx = fixture();
+    let (path, saved) = saved_row_without_finish(&fx);
+    let aside = fx
+        .downloads
+        .join("mewtual-removing-00000000000000000000000000000001");
+    fs::rename(staging(&fx.downloads), &aside).unwrap();
+    let doomed = path.clone();
+    external::BEFORE_REMOVE.with(|hook| {
+        *hook.borrow_mut() = Some(Box::new(move |_| fs::remove_file(&doomed).unwrap()))
+    });
+    let outcome = remove_partial(&saved, true, &mut rng());
+    external::BEFORE_REMOVE.with(|hook| *hook.borrow_mut() = None);
+    assert!(!path.exists(), "the saved name was deleted meanwhile");
+    assert_eq!(outcome.unwrap(), PartialRemoval::KeptOnlyCopy);
+    assert!(!aside.exists());
+    assert_eq!(fs::read(staging(&fx.downloads)).unwrap(), CHUNKS.concat());
+}
+
+/// Review L1 (Unix): the saved name is already gone and the only copy sits at a "removing" name
+/// from a crashed Clear. It used to stay hidden there ("could not check" on every Clear); it is
+/// put back at the staging name and the row says it is the only copy.
+#[cfg(unix)]
+#[test]
+fn a_hidden_only_copy_of_a_saved_file_is_put_back_at_its_staging_name() {
+    let fx = fixture();
+    let (path, saved) = saved_row_without_finish(&fx);
+    fs::remove_file(&path).unwrap();
+    let aside = fx
+        .downloads
+        .join("mewtual-removing-00000000000000000000000000000002");
+    fs::rename(staging(&fx.downloads), &aside).unwrap();
+    // Re-review LOW: in a folder other accounts can (or may) modify, here a network or FUSE
+    // mount modelled through the filesystem-class seam, nothing is changed automatically: the
+    // put-back could fall back to link and unlink there and pick up a swapped-in file. The
+    // leftover stays where it is and the row says it could not check.
+    let shared = injected(Effect::FsClass, io::ErrorKind::Other, || {
+        remove_partial(&saved, true, &mut rng()).unwrap()
+    });
+    assert_eq!(shared, PartialRemoval::Unchecked);
+    assert!(aside.exists() && !staging(&fx.downloads).exists());
+    assert_eq!(
+        remove_partial(&saved, true, &mut rng()).unwrap(),
+        PartialRemoval::KeptOnlyCopy
+    );
+    assert!(!aside.exists());
+    assert_eq!(fs::read(staging(&fx.downloads)).unwrap(), CHUNKS.concat());
+}
+
+/// Published-staging review: on Windows the saved name is pinned (delete sharing denied) and
+/// verified before the staging delete and held across it, so nothing can delete it in between;
+/// a handle on the staging name alone would not stop that, because Windows lets another link of
+/// the same file be deleted.
+#[cfg(windows)]
+#[test]
+fn a_saved_name_cannot_be_deleted_while_its_staging_name_goes() {
+    let fx = fixture();
+    let (path, saved) = saved_row_without_finish(&fx);
+    let tried = std::rc::Rc::new(std::cell::Cell::new(None));
+    let (target, seen) = (path.clone(), tried.clone());
+    external::WHILE_KEPT.with(|hook| {
+        *hook.borrow_mut() = Some(Box::new(move |_| {
+            seen.set(Some(fs::remove_file(&target).is_ok()));
+        }))
+    });
+    let outcome = remove_partial(&saved, true, &mut rng());
+    external::WHILE_KEPT.with(|hook| *hook.borrow_mut() = None);
+    assert_eq!(
+        tried.get(),
+        Some(false),
+        "deleting the saved name was refused"
+    );
+    assert_eq!(outcome.unwrap(), PartialRemoval::KeptSaved);
+    assert!(!staging(&fx.downloads).exists());
+    assert_eq!(fs::read(&path).unwrap(), CHUNKS.concat());
+}
+
 #[test]
 fn clearing_a_saved_row_never_changes_the_saved_files_attributes() {
     // Review U-L2: hard links share attributes. A read-only saved file must not lose that

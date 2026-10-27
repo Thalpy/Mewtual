@@ -566,9 +566,15 @@ and only a fully verified file ever gets the real name. On most local drives an 
 
 In **Transfers**, each file you are downloading or saving has one row, grouped as **Needs you**
 (something stopped and waits for your choice), **In progress** and **Saved**. A row shows how much
-has arrived or been written, such as "3.1 MB / 12.4 MB" and "12 of 40 chunks", a short sentence
-when it needs you, and its actions. **Remove** asks you to confirm first, because it deletes the
-progress and any partly saved file Mewtual created.
+has arrived or been written, such as "3.1 MB / 12.4 MB" and "12 of 40 chunks", and a short
+sentence when it needs you (elsewhere that sentence is the tooltip of the small symbol before the
+name). Its controls sit on the name line: the main action as an icon (green play to resume, pause,
+retry or save, or a folder to **Show in folder** on a saved file), a **⋯** button with every other
+action (Save as, Save new copy, Save another copy, Keep), and a red **✕** to **Remove** (or
+**Clear** a saved row). Every icon has a tooltip and a name for screen readers, and the ⋯ menu
+works from the keyboard. **Remove** asks you to confirm first, because it deletes the progress and
+any partly saved file Mewtual created; on a row that is already being removed, ✕ simply tries
+again.
 
 Where it works:
 
@@ -597,9 +603,11 @@ Once a file is saved, Mewtual drops its private encrypted copy and remembers whe
 on this device, for each server: the **Saved** group lists your finished saves, newest first, with
 the date and whether the file went to your Downloads folder or another folder. These rows survive
 restarts. When Transfers is open Mewtual checks each listed file, read-only, and says when it is no
-longer there or a different file now has its name; **Save again** (while the file is still shared)
-saves a fresh copy, **Show in folder** opens your file manager with the file selected after the
-same check, and **Clear** only forgets the row (the file stays where it is). Files saved to a
+longer there or a different file now has its name. These rows use the same controls as the others:
+the folder icon (**Show in folder**) opens your file manager with the file selected after the same
+check; once the file is gone, the main icon is **Save again** instead, which saves a fresh copy
+(while the file is still shared); **⋯** offers **Save another copy**; and the red **✕** is
+**Clear**, which only forgets the row without asking (the file stays where it is). Files saved to a
 network folder, or by a save that could not be resumed there, are listed but cannot be checked.
 Files you have saved show a small **Saved** mark in chat, in the Files list and in the file details;
 the mark comes from this list and says what this device recorded, not whether the file is still
@@ -637,8 +645,8 @@ your file manager with the saved file selected (on Linux, its folder), after the
 **Clear** on a Saved row checks the file once more first: it clears at once only when the file is
 still there, and otherwise asks you to confirm, because the private copy may then be the only one
 left. If Mewtual cannot finish removing a file it created for a save (the folder is unplugged,
-for example), the row offers **Keep the file** when every part of that file had been written, or
-**Keep partly saved file** when not; either leaves the file where it is and drops the row.
+for example), its ⋯ menu offers **Keep the file** when every part of that file had been written,
+or **Keep partly saved file** when not; either leaves the file where it is and drops the row.
 
 If you choose **Save as** for a file and its save has not started yet, Mewtual remembers that
 place. The file's save item in the chat and file menus, the image viewer and the file pane then

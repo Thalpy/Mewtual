@@ -10,7 +10,7 @@
  * list rows and private Download rows share the Saved group without duplicating a file, the chat
  * mark, and the "Replace my older saved copy" preference. */
 import type { PrivateDownload, SavedCheck } from "./private-downloads.ts";
-import type { SavedRowTone, TransferIcon } from "./transfer-rows.ts";
+import type { SavedListRowAction, SavedRowTone, TransferIcon } from "./transfer-rows.ts";
 
 /** One finished save as native projects it. */
 export type SavedFile = {
@@ -144,17 +144,12 @@ export function liveTransferShown(
     transfer.cid !== undefined && savedCids.has(transfer.cid));
 }
 
-export type SavedListActionKind = "again" | "forget";
-export type SavedListAction = {
-  kind: SavedListActionKind;
-  label: string;
-  /** "Clear report.pdf", for assistive technology. */
-  accessibleName: string;
-  ghost: boolean;
-  disabled: boolean;
-  disabledReason: string | null;
-};
-/** One list row, shaped like a PR #51 Saved row so the same markup and styles apply. */
+export type SavedListActionKind = SavedListRowAction["kind"];
+/** A list row's action, in the compact rows' action model (`compactListControls`). */
+export type SavedListAction = SavedListRowAction;
+/** One list row, shaped like a PR #51 Saved row so the same compact row markup and styles apply:
+ * the status symbol with `statusTitle`, Show in folder as the primary, Save again in the menu and
+ * Clear as the red x (`compactListControls`). */
 export type SavedListRowView = {
   id: string;
   cid: string;
@@ -164,10 +159,16 @@ export type SavedListRowView = {
   icon: TransferIcon;
   word: string;
   why: string | null;
+  /** The status symbol's tooltip (and hidden text): the row's sentence when it has one, else a
+   * short line saying what the last check found. List rows sit in SAVED, so like a Saved private
+   * row there their sentence is never shown under the row (compact rows, design `compact.md`). */
+  statusTitle: string;
   /** "Saved to Downloads, 26 Oct", without naming a folder native did not prove. */
   where: string;
   /** Offer Show in folder: checkable and not known to be gone. */
   canReveal: boolean;
+  /** The last check found the file missing or replaced at its name (checkable rows only). */
+  gone: boolean;
   hint: string | null;
   actions: SavedListAction[];
   busy: boolean;
@@ -199,19 +200,28 @@ export function savedListRowView(
   const where = `${gone ? "Was saved" : "Saved"}${place}, ${day(file.savedAt)}`;
   const hint = !file.checkable ? "Mewtual cannot check files in that folder"
     : check === "unknown" ? "Could not check the file" : null;
+  // The same short lines as a Saved private row's status symbol (transfer-rows.ts `statusLine`).
+  const statusTitle = why ?? (!file.checkable ? "Saved. Mewtual cannot check files in that folder."
+    : check === "present" ? "Saved. The file was there when Mewtual last checked."
+      : check === "unknown" ? "Saved. Mewtual could not check the file just now."
+        : "Saved. Mewtual has not checked the file yet.");
   const reason = (needsIdle: boolean) => activity.busy ? BUSY_REASON : needsIdle && activity.saving ? SAVING_REASON : null;
   const actions: SavedListAction[] = [];
-  if (gone && listed) {
+  // The ordinary save of the listed file, as a Saved private row offers it: Save again once the
+  // saved copy is gone (the row's primary), Save another copy while it may still be there (in the
+  // menu). Only while the file is still shared in the server.
+  if (listed) {
     const disabledReason = reason(true);
-    actions.push({ kind: "again", label: "Save again", accessibleName: `Save again ${file.name}`, ghost: false,
+    const label = gone ? "Save again" : "Save another copy";
+    actions.push({ kind: "again", label, accessibleName: `${label} ${file.name}`,
       disabled: disabledReason !== null, disabledReason });
   }
   const forgetReason = reason(false);
-  actions.push({ kind: "forget", label: "Clear", accessibleName: `Clear ${file.name}`, ghost: true,
+  actions.push({ kind: "forget", label: "Clear", accessibleName: `Clear ${file.name}`,
     disabled: forgetReason !== null, disabledReason: forgetReason });
   return {
-    id: file.id, cid: file.cid, name: file.name, check, tone, icon, word, why, where,
-    canReveal: file.checkable && !gone, hint, actions, busy: activity.busy,
+    id: file.id, cid: file.cid, name: file.name, check, tone, icon, word, why, statusTitle, where,
+    canReveal: file.checkable && !gone, gone, hint, actions, busy: activity.busy,
   };
 }
 

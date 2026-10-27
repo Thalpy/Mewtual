@@ -4,7 +4,7 @@
 #[cfg(unix)]
 use super::super::external::AFTER_ASIDE;
 #[cfg(windows)]
-use super::super::external::BEFORE_REMOVE;
+use super::super::external::WHILE_KEPT;
 use super::super::external::{BEFORE_LINK, BEFORE_REPLACE_DELETE};
 use super::*;
 use rand_chacha::ChaCha20Rng;
@@ -1227,8 +1227,9 @@ fn unix_the_new_copy_gone_after_the_rename_aside_puts_the_old_copy_back() {
 fn windows_the_other_name_cannot_go_while_the_first_one_is_removed() {
     // A delete-denying handle on one name does not protect another hard link of the same file on
     // Windows (seen here: share access is checked per name), so the removal pins the old name
-    // itself while it deletes the first one. Deleting or replacing the old name at that moment
-    // fails, and the copy is never left with no name at all.
+    // itself while it deletes the first one (the published-staging Clear's `keep` rule, merged
+    // from #51). Deleting or replacing the old name at that moment fails, and the copy is never
+    // left with no name at all.
     let fx = second_save("report.pdf");
     assert!(matches!(
         replace_older_copy(&fx.request, &go, &mut rng()),
@@ -1238,7 +1239,7 @@ fn windows_the_other_name_cannot_go_while_the_first_one_is_removed() {
     let dir = fx.dir.clone();
     let refused = Rc::new(Cell::new(0));
     let seen = refused.clone();
-    BEFORE_REMOVE.with(|hook| {
+    WHILE_KEPT.with(|hook| {
         *hook.borrow_mut() = Some(Box::new(move |_: &Path| {
             let removed = fs::remove_file(&other);
             fs::write(dir.join("intruder"), b"x").unwrap();
@@ -1247,7 +1248,7 @@ fn windows_the_other_name_cannot_go_while_the_first_one_is_removed() {
         }));
     });
     let dropped = drop_first_name(&fx.request.new, "report (1).pdf", "report.pdf", &mut rng());
-    BEFORE_REMOVE.with(|hook| hook.borrow_mut().take());
+    WHILE_KEPT.with(|hook| hook.borrow_mut().take());
     assert_eq!(
         refused.get(),
         2,

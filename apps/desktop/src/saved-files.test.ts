@@ -90,10 +90,17 @@ test("a list row says where the file went and offers only what applies", () => {
   assert.equal(present.why, null);
   assert.equal(present.hint, null);
   assert.equal(present.canReveal, true);
-  assert.deepEqual(present.actions.map((a) => a.label), ["Clear"]);
-  assert.equal(present.actions[0].accessibleName, "Clear report.pdf");
+  assert.equal(present.gone, false);
+  // Compact rows (merged from #51): like a Saved private row, a file that may still be there can
+  // be saved once more (Save another copy), and the status symbol's title says what was found.
+  assert.deepEqual(present.actions.map((a) => a.label), ["Save another copy", "Clear"]);
+  assert.equal(present.actions[1].accessibleName, "Clear report.pdf");
+  assert.equal(present.statusTitle, "Saved. The file was there when Mewtual last checked.");
+  assert.deepEqual(savedListRowView(file(), "present", false, day, idle).actions.map((a) => a.label), ["Clear"],
+    "a file no longer shared cannot be saved again from here");
   // Not checked yet reads the same as present.
   assert.equal(savedListRowView(file(), null, true, day, idle).word, "Saved");
+  assert.equal(savedListRowView(file(), null, true, day, idle).statusTitle, "Saved. Mewtual has not checked the file yet.");
   // Another folder, and a folder native could not tell.
   assert.equal(savedListRowView(file({ savedTo: "other" }), null, true, day, idle).where, "Saved to another folder, day 1000");
   assert.equal(savedListRowView(file({ savedTo: null }), null, true, day, idle).where, "Saved, day 1000");
@@ -102,6 +109,7 @@ test("a list row says where the file went and offers only what applies", () => {
   assert.equal(unknown.tone, "muted");
   assert.equal(unknown.hint, "Could not check the file");
   assert.equal(unknown.canReveal, true);
+  assert.equal(unknown.statusTitle, "Saved. Mewtual could not check the file just now.");
 });
 
 test("a missing or replaced file says so and offers Save again while the file is still listed", () => {
@@ -113,7 +121,10 @@ test("a missing or replaced file says so and offers Save again while the file is
     assert.match(row.why ?? "", /Save again makes a fresh copy\.$/);
     assert.equal(row.where, "Was saved to Downloads, day 1000");
     assert.equal(row.canReveal, false, "nothing to show");
+    assert.equal(row.gone, true);
+    assert.equal(row.statusTitle, row.why, "the sentence is the status symbol's title");
     assert.deepEqual(row.actions.map((a) => a.kind), ["again", "forget"]);
+    assert.equal(row.actions[0].label, "Save again");
     // A file no longer listed in the server cannot be saved again from here.
     assert.deepEqual(savedListRowView(file(), check, false, day, idle).actions.map((a) => a.kind), ["forget"]);
   }
@@ -124,8 +135,10 @@ test("a file Mewtual cannot check is never called missing and offers no Show in 
   assert.equal(row.word, "Saved");
   assert.equal(row.hint, "Mewtual cannot check files in that folder");
   assert.equal(row.canReveal, false);
+  assert.equal(row.gone, false);
   assert.equal(row.why, null);
-  assert.deepEqual(row.actions.map((a) => a.kind), ["forget"]);
+  assert.equal(row.statusTitle, "Saved. Mewtual cannot check files in that folder.");
+  assert.deepEqual(row.actions.map((a) => a.label), ["Save another copy", "Clear"]);
 });
 
 test("a row's actions wait for its own running action and Save again for a running save", () => {

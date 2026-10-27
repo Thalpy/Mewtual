@@ -53,8 +53,9 @@ opt-in setting that may replace Mewtual's own earlier copy of a file saved again
 - **Found while building it:** on Windows a delete-denying handle on one hard link does not stop
   another link of the same file from being deleted (share access is checked per name here). The
   replace pins the other name itself. PR #51's removal of a published row's `.mewtual-part` name
-  checks the final name and then deletes the staging name without such a pin, so a final name
-  deleted in that gap would leave no copy; recorded as a follow-up for PR #51's code.
+  had the same gap; #51 fixed it (`a670275f`, merged here through #55 at `d58c52c1`) with
+  `remove_verified`'s `keep`, and the replace's first-name removal now uses that same `keep` rule
+  rather than a separate path, so both deletes of a second name follow one implementation.
 - **Residuals.** Replacing removes the old copy as a whole, including what the content check does
   not cover (alternate data streams, extended attributes, permissions, timestamps). On Unix a
   process of the same account that already had the old copy open could change it between the hash
@@ -778,7 +779,26 @@ writer keeps those properties.
   name: a journaled save finds it later by identity, never by name; a writer without a journal has
   no record of it. Writers without a journal verify against the in-session number of the handle
   they still hold (without the handle only after a worker panic). A saved row whose final name is
-  not proven ours deletes nothing on Clear. Identity is still the only proof: a real identity
+  not proven ours deletes nothing on Clear. A published save's staging name (Clear, the cleanup
+  right after publication, a recovered publication) is deleted only while the final name still
+  holds the same file at the delete itself (published-staging review, 26 October): before that,
+  a final name deleted between Clear's check and the staging delete left no copy anywhere. On
+  Windows a handle denying delete sharing on one hard link does not stop another link of the
+  same file being deleted, so the final name itself is opened with the delete-denying pin,
+  verified and held across the delete, which closes the window on local NTFS (a network server
+  may not enforce share modes). If that pin is refused with a sharing violation (a filesystem
+  checking delete sharing per file, where the staging handle itself protects the final name, or
+  another program holding the final name with delete access), the final name is verified without
+  it right before the delete, leaving that instant. On Unix the final name is checked relative to
+  the pinned folder immediately before `unlinkat`; a same-account process deleting it in that
+  instant still leaves no copy. The same rule covers a copy an interrupted Clear left at a
+  `mewtual-removing-` name, and such a copy of a saved file whose final name is gone is put back
+  at its staging name rather than left hidden. If the final name is gone the staging copy is kept
+  (on Unix put back at its name) and the user is told it is now the only copy, in the same folder
+  with a name ending in `.mewtual-part`. The writers without a journal (the fallback writer, the
+  GIF export) remove their staging name right after their own link without this check: no row or
+  Clear exists there, and the window is between this process's link and its removal. Identity is
+  still the only proof: a real identity
   collision (possible in principle on ReFS, whose 64-bit index is not guaranteed unique) could let
   Remove delete a foreign file.
 - **Publication (PR51 M1).** Both writers give the final name to exactly the object behind the

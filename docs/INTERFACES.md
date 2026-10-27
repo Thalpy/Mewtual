@@ -626,6 +626,12 @@ Renderer commands (no new command names):
   remembers a Save as choice that item would use, else "Download". Clear of a Saved row runs
   `check_saved_download` again before it skips the confirmation (the button is `aria-busy` while
   it runs), and asks unless the answer is `present`.
+- Renderer (compact rows, 27 October): `compactControls(view)` in `transfer-rows.ts` arranges a
+  row's actions into `{ primary, remove, menu }` (the primary icon, the red x, the "more" menu
+  with separators); every action of the view appears exactly once. `SavedRowView` adds
+  `showWhy` (the sentence is visible on NEEDS YOU rows only) and `statusTitle` (the status
+  symbol's tooltip). The x of a Removing row no longer confirms (it retries a removal already
+  confirmed). No native command changed.
 - Saved-files list (PR #56, [design](design-saved-files-list.md)). Record: `servers/<id>.saved`,
   sealed under the vault `db_key`, version 1 or 2 plaintext (domain `mewtual/saved-files`, version
   byte, owner = group id followed by this device's member id; version 1 holds up to 256 entries and
@@ -660,8 +666,12 @@ Renderer commands (no new command names):
   replaced. Private download rows gain `savedEntry` (saved rows only: the list entry with the
   published journal's identity, which the renderer draws as that row). Clear of a Saved row
   (`cancel_private_download`) also forgets that entry once the record is released. Renderer:
-  `saved-files.ts` (validation, `savedListRows`, `savedListRowView`, `liveTransferShown`, the mark
-  and the replace preference, `localStorage` key `catcoms.saves.replaceOlder`).
+  `saved-files.ts` (validation, `savedListRows`, `savedListRowView` with `statusTitle` and `gone`,
+  `liveTransferShown`, the mark and the replace preference, `localStorage` key
+  `catcoms.saves.replaceOlder`); `transfer-rows.ts` `compactListControls(view)` arranges a list
+  row like `compactControls` (Show in folder or, once gone, Save again as the primary; Save another
+  copy in the menu; Clear as the x) with `SavedListRowAction`, and `CompactControl(s)` take the
+  row's action type as a parameter.
 
 Rust interfaces:
 

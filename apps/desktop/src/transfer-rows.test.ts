@@ -2,9 +2,11 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { checkedPrivateDownloads, type PrivateDownload, type PrivateDownloadStatus, type SavedCheck } from "./private-downloads.ts";
 import {
-  SAVED_ROW_GROUPS, TRANSFER_ICONS, byteLabel, byteValueText, chunkLabel, confirmWords, formatDecimalBytes,
-  groupSavedRows, savedRowTransitions, savedRowView, type SavedRowView,
+  SAVED_ROW_GROUPS, TRANSFER_ICONS, byteLabel, byteValueText, chunkLabel, compactControls, compactListControls, confirmWords,
+  formatDecimalBytes, groupSavedRows, savedRowTransitions, savedRowView, type CompactControl, type SavedListRowAction,
+  type SavedRowView,
 } from "./transfer-rows.ts";
+import { savedListRowView } from "./saved-files.ts";
 
 const base: PrivateDownload = {
   id: "ab".repeat(32), cid: "cd".repeat(32), intent: "3", grant: "1", status: "incomplete",
@@ -174,11 +176,153 @@ test("each state has its one-line explanation, plain and without separators", ()
     }
   }
   // Fix-the-lows round: a stuck Clear of a saved row (every part written) keeps a complete file,
-  // and its sentence names the row's own Keep button.
+  // and its sentence names the row's own Keep action. Compact rows: the actions are icons and a
+  // menu now, so the sentences name them by verb ("Remove tries again", "try again").
   const stuckClear = view("removing", null, { savedChunks: 40, totalChunks: 40 });
-  assert.match(stuckClear.why!, /or Keep the file\.$/);
+  assert.match(stuckClear.why!, /Remove tries again, or keep the file\.$/);
   assert.ok(stuckClear.actions.some((a) => a.label === "Keep the file"));
-  assert.match(view("removing").why!, /or Keep partly saved file\.$/);
+  assert.match(view("removing").why!, /Remove tries again, or keep the partly saved file\.$/);
+  assert.match(view("destination-unavailable").why!, /Reconnect it and try again, or save a new copy\.$/);
+  assert.doesNotMatch(view("destination-unavailable").why!, /choose/i);
+});
+
+test("compact rows show the sentence on NEEDS YOU rows only and title every status symbol", () => {
+  const cases: [PrivateDownloadStatus, SavedCheck | null][] = [
+    ["receiving", null], ["saving", null], ["ready", null], ["paused", null], ["save-paused", null],
+    ["incomplete", null], ["exhausted", null], ["blocked", null], ["save-interrupted", null],
+    ["destination-unavailable", null], ["destination-changed", null], ["removing", null],
+    ["saved", "present"], ["saved", "unknown"], ["saved", null], ["saved", "missing"], ["saved", "replaced"],
+  ];
+  for (const [status, check] of cases) {
+    const v = view(status, check);
+    assert.equal(v.showWhy, v.group === "needs", `${status}/${check}: the sentence shows on NEEDS YOU rows only`);
+    assert.ok(v.statusTitle.length > 0 && v.statusTitle.length < 160, `${status}/${check}`);
+    assert.doesNotMatch(v.statusTitle, /[·—]/);
+    if (v.group === "needs") assert.equal(v.statusTitle, v.why, `${status}: the visible sentence is the tooltip`);
+  }
+  assert.equal(view("receiving").statusTitle, "Receiving the encrypted copy.");
+  assert.equal(view("saving").statusTitle, "Writing the readable file.");
+  assert.equal(view("paused").statusTitle, view("paused").why, "a progress row's sentence moves to the tooltip");
+  assert.equal(view("saved", "present").statusTitle, "Saved. The file was there when Mewtual last checked.");
+  assert.equal(view("saved", "unknown").statusTitle, "Saved. Mewtual could not check the file just now.");
+});
+
+test("compact controls put every action of every state in exactly one place", () => {
+  type Expect = { primary: string | null; look?: string; icon?: string; x: string | null; menu: string[] };
+  const expected: [PrivateDownloadStatus, SavedCheck | null, Expect][] = [
+    ["receiving", null, { primary: "Pause", look: "stop", icon: "pause", x: "Remove", menu: [] }],
+    ["saving", null, { primary: "Pause", look: "stop", icon: "pause", x: "Remove", menu: [] }],
+    ["ready", null, { primary: "Save to Downloads", look: "go", icon: "saving", x: "Remove", menu: ["Save as"] }],
+    ["paused", null, { primary: "Resume download", look: "go", icon: "play", x: "Remove", menu: ["Save as"] }],
+    ["save-paused", null, { primary: "Resume saving", look: "go", icon: "play", x: "Remove", menu: [] }],
+    ["incomplete", null, { primary: "Resume download", look: "go", icon: "play", x: "Remove", menu: ["Save as"] }],
+    ["exhausted", null, { primary: "Retry download", look: "go", icon: "retry", x: "Remove", menu: [] }],
+    ["blocked", null, { primary: "Resume download", look: "go", icon: "play", x: "Remove", menu: [] }],
+    ["save-interrupted", null, { primary: "Resume saving", look: "go", icon: "play", x: "Remove", menu: [] }],
+    ["destination-unavailable", null, { primary: "Try again", look: "go", icon: "retry", x: "Remove", menu: ["Save new copy", "Save as"] }],
+    ["destination-changed", null, { primary: "Save new copy", look: "go", icon: "save-copy", x: "Remove", menu: ["Save as"] }],
+    ["saved", "missing", { primary: "Save again", look: "go", icon: "saving", x: "Clear", menu: ["Save as"] }],
+    ["saved", "replaced", { primary: "Save again", look: "go", icon: "saving", x: "Clear", menu: ["Save as"] }],
+    ["removing", null, { primary: null, x: "Remove", menu: ["Keep partly saved file"] }],
+    ["saved", "present", { primary: "Show in folder", look: "", icon: "show-in-folder", x: "Clear", menu: ["Save another copy", "Save as"] }],
+    ["saved", "unknown", { primary: "Show in folder", look: "", icon: "show-in-folder", x: "Clear", menu: ["Save another copy", "Save as"] }],
+    ["saved", null, { primary: "Show in folder", look: "", icon: "show-in-folder", x: "Clear", menu: ["Save another copy", "Save as"] }],
+  ];
+  for (const [status, check, want] of expected) {
+    const v = view(status, check);
+    const c = compactControls(v);
+    const key = `${status}/${check}`;
+    const label = (item: CompactControl | { kind: "separator" }) =>
+      item.kind === "action" ? item.action.label : item.kind === "reveal" ? item.label : "---";
+    assert.equal(c.primary ? label(c.primary) : null, want.primary, `${key}: primary`);
+    if (c.primary) {
+      assert.equal(c.primary.look, want.look, `${key}: look`);
+      assert.equal(c.primary.icon, want.icon, `${key}: icon`);
+      assert.ok(c.primary.icon in TRANSFER_ICONS);
+    }
+    assert.equal(c.remove?.label ?? null, want.x, `${key}: the x`);
+    assert.deepEqual(c.menu.map(label), want.menu, `${key}: menu`);
+    // No action is lost or shown twice: primary, x and menu together are the view's actions.
+    const shown = [c.primary, c.remove ? { kind: "action" as const, action: c.remove } : null, ...c.menu]
+      .filter((item): item is CompactControl => !!item && item.kind === "action").map((item) => item.action.kind);
+    assert.deepEqual([...shown].sort(), v.actions.map((a) => a.kind).sort(), `${key}: every action exactly once`);
+    for (const item of c.menu) if (item.kind !== "separator") assert.ok(item.icon in TRANSFER_ICONS, `${key}: menu icon`);
+  }
+  // Rows shown as Saving while native still reports another state (a save being written): the
+  // actions are native's, so each still appears exactly once, the save starters disabled.
+  const live = { done: 2, total: 40, bytesDone: 200, bytesTotal: 4000, fresh: false };
+  for (const status of ["ready", "receiving", "destination-unavailable", "saved"] as const) {
+    const v = savedRowView(row(status), status === "saved" ? "present" : null, "report.pdf", live, { busy: false, saving: true });
+    assert.equal(v.state, "saving", status);
+    const c = compactControls(v);
+    const kinds = [c.primary, ...c.menu].filter((item): item is CompactControl => !!item && item.kind === "action")
+      .map((item) => item.action.kind).concat(c.remove ? [c.remove.kind] : []);
+    assert.deepEqual([...kinds].sort(), v.actions.map((a) => a.kind).sort(), `${status} shown as saving`);
+    for (const item of [c.primary, ...c.menu]) {
+      if (item?.kind === "action" && item.action.needsIdle) assert.equal(item.action.disabledReason, "A save of this file is running", status);
+    }
+  }
+  // The x confirms as before, except a retry on a Removing row (already confirmed) and Clear of a
+  // file just found present (it re-checks first).
+  assert.equal(compactControls(view("removing")).remove!.confirm, false);
+  assert.equal(compactControls(view("saved", "present")).remove!.confirm, false);
+  assert.equal(compactControls(view("paused")).remove!.confirm, true);
+  assert.equal(compactControls(view("saved", "missing")).remove!.confirm, true);
+  // A remembered Save as choice is the primary's tooltip on a ready row.
+  assert.equal(compactControls(view("ready", null, { chosenPlace: true })).primary!.kind === "action"
+    && (compactControls(view("ready", null, { chosenPlace: true })).primary as { action: { label: string } }).action.label,
+  "Save to chosen place");
+  // The reveal names the file; a Keep on a complete file says so in the menu.
+  const reveal = compactControls(view("saved", "present")).primary!;
+  assert.equal(reveal.kind === "reveal" && reveal.accessibleName, "Show report.pdf in folder");
+  const keep = compactControls(view("removing", null, { savedChunks: 40, totalChunks: 40 })).menu[0];
+  assert.equal(keep.kind === "action" && keep.action.label, "Keep the file");
+  assert.equal(keep.kind === "action" && keep.icon, "keep");
+});
+
+test("a saved-files list row is arranged by the same rules as a Saved private row", () => {
+  // PR #56 merged with the compact rows: one model for both kinds of row in SAVED.
+  type Want = { primary: string | null; look?: string; icon?: string; menu: string[] };
+  const file = { id: "a".repeat(32), cid: "c".repeat(64), name: "report.pdf", savedAt: 1, size: 1,
+    savedTo: "downloads" as const, checkable: true };
+  const cases: [string, SavedCheck | null, boolean, boolean, Want][] = [
+    // Still there (or not checked yet, or could not check): Show in folder, Save another copy in More.
+    ["present", "present", true, true, { primary: "Show in folder", look: "", icon: "show-in-folder", menu: ["Save another copy"] }],
+    ["not checked", null, true, true, { primary: "Show in folder", look: "", icon: "show-in-folder", menu: ["Save another copy"] }],
+    ["unknown", "unknown", true, true, { primary: "Show in folder", look: "", icon: "show-in-folder", menu: ["Save another copy"] }],
+    // Gone: Save again is the primary, as on a Saved private row whose file is missing.
+    ["missing", "missing", true, true, { primary: "Save again", look: "go", icon: "saving", menu: [] }],
+    ["replaced", "replaced", true, true, { primary: "Save again", look: "go", icon: "saving", menu: [] }],
+    // Gone and no longer shared: nothing to save or show, only Clear.
+    ["missing, not shared", "missing", false, true, { primary: null, menu: [] }],
+    // Present but no longer shared: Show in folder only.
+    ["present, not shared", "present", false, true, { primary: "Show in folder", look: "", icon: "show-in-folder", menu: [] }],
+    // Native cannot check it: never Show in folder.
+    ["not checkable", "missing", true, false, { primary: null, menu: ["Save another copy"] }],
+  ];
+  for (const [key, check, listed, checkable, want] of cases) {
+    const v = savedListRowView({ ...file, checkable }, check, listed, () => "today", idle);
+    const c = compactListControls(v);
+    const label = (item: CompactControl<SavedListRowAction> | { kind: "separator" }) =>
+      item.kind === "action" ? item.action.label : item.kind === "reveal" ? item.label : "---";
+    assert.equal(c.primary ? label(c.primary) : null, want.primary, `${key}: primary`);
+    if (c.primary) {
+      assert.equal(c.primary.look, want.look, `${key}: look`);
+      assert.equal(c.primary.icon, want.icon, `${key}: icon`);
+      assert.ok(c.primary.icon in TRANSFER_ICONS);
+    }
+    assert.equal(c.remove?.label, "Clear", `${key}: the x is Clear`);
+    assert.deepEqual(c.menu.map(label), want.menu, `${key}: menu`);
+    for (const item of c.menu) if (item.kind !== "separator") assert.ok(item.icon in TRANSFER_ICONS, `${key}: menu icon`);
+    // Every action exactly once.
+    const shown = [c.primary, c.remove ? { kind: "action" as const, action: c.remove } : null, ...c.menu]
+      .filter((item): item is CompactControl<SavedListRowAction> => !!item && item.kind === "action").map((item) => item.action.kind);
+    assert.deepEqual([...shown].sort(), v.actions.map((a) => a.kind).sort(), `${key}: every action exactly once`);
+  }
+  // The reveal names the file; the actions carry their file-specific names.
+  const present = compactListControls(savedListRowView(file, "present", true, () => "today", idle));
+  assert.equal(present.primary?.kind === "reveal" && present.primary.accessibleName, "Show report.pdf in folder");
+  assert.equal(present.remove?.accessibleName, "Clear report.pdf");
 });
 
 test("saved rows say where the file went without naming a folder native did not prove", () => {

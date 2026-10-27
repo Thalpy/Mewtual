@@ -247,21 +247,26 @@ test is updated: still no path, folder or destination parameter.
   away instead of revealing a second one.
 - The live transfer list already leaves out files with a private row; it now also leaves out a
   finished download (`done`) whose CID has a list entry, so a finished save shows once, in Saved.
-- A list row reuses the `.sdl` row design and icons:
+- A list row is one of #51's compact rows (merged at `d58c52c1`), arranged by the same action model
+  as a Saved private row (`compactListControls` in `transfer-rows.ts`): the status symbol (its
+  tooltip and hidden text are the row's sentence, or a short line saying what the last check found;
+  rows in SAVED never show the sentence under the row), the name, the primary icon, the chip word,
+  the "more" menu (the one shared menu, under the row id `saved-<entry id>`) and the red x:
 
-  | Check | Icon, word | Sentence | Actions |
-  | --- | --- | --- | --- |
-  | present, not checked yet | saved, "Saved" | none | Show in folder, Clear |
-  | could not check | saved (muted), "Saved", hint "Could not check the file" | none | Show in folder, Clear |
-  | no identity | saved (muted), "Saved", hint "Mewtual cannot check files in that folder" | none | Clear |
-  | missing | saved-missing, "Saved file missing" | The saved file is no longer there. Save again makes a fresh copy. | Save again, Clear |
-  | replaced | saved-replaced, "Saved file replaced" | A different file is at the saved name now. Save again makes a fresh copy. | Save again, Clear |
+  | Check | Status icon, chip | Primary | More | x |
+  | --- | --- | --- | --- | --- |
+  | present, not checked yet | saved, "Saved" | Show in folder | Save another copy | Clear |
+  | could not check | saved (muted), "Saved", hint "Could not check the file" | Show in folder | Save another copy | Clear |
+  | no identity | saved (muted), "Saved", hint "Mewtual cannot check files in that folder" | none | Save another copy | Clear |
+  | missing | saved-missing, "Saved file missing" | Save again | none | Clear |
+  | replaced | saved-replaced, "Saved file replaced" | Save again | none | Clear |
 
   Where line: "Saved to Downloads, 26 Oct" or "Saved to another folder, 26 Oct" ("Was saved to"
-  when missing or replaced; no folder named when `savedTo` is `null`). Save again is the ordinary
-  chat save of that file and is offered only while the file is still listed in the server. Clear
-  asks nothing (it forgets a record; the file stays). List rows stay in Saved when missing or
-  replaced: nothing of the device is held for them, unlike a private row, so nothing needs the user.
+  when missing or replaced; no folder named when `savedTo` is `null`). Save again and Save another
+  copy are the ordinary chat save of that file (as a Saved private row offers Save again and Save
+  another copy) and are offered only while the file is still listed in the server. Clear asks
+  nothing (it forgets a record; the file stays). List rows stay in Saved when missing or replaced:
+  nothing of the device is held for them, unlike a private row, so nothing needs the user.
 - Checks: once per Transfers visit, one batch, results kept only for the same entry id and name.
 
 ### 4. The chat mark
@@ -369,10 +374,15 @@ the sanctioned clock, runs before each effect and every 1 MiB of hashing, revisi
 5. **Record the new name**: the list entry of this save changes its leaf from the new name to the
    old one, compare-and-swap on entry id and leaf, under the store and registry locks. If this does
    not succeed, step 6 does not run (review M4).
-6. **Remove the new copy's first name** through `remove_verified` in a **must-keep-another-name**
-   mode (revision 2, review H1): Windows requires a link count of at least 2 on the delete handle,
-   which denies delete sharing, so the other name cannot go between the check and the delete; Unix
-   requires it on the aside descriptor and otherwise puts the name back. When nothing was removed,
+6. **Remove the new copy's first name** through `remove_verified` with `keep: old_leaf` (revision
+   2, review H1; since the merge of #51 at `d58c52c1` this is the same rule #51's published-staging
+   Clear uses for a save's final name): the first name goes only while the old name still holds the
+   verified copy at the delete itself. Windows opens the old name with the delete-denying pin,
+   verifies it and holds it across the delete (a delete-denying handle on one hard link does not
+   protect another, so the pin is on the name that must stay), falling back to an unpinned check
+   right before the delete when the pin is refused with a sharing violation; Unix checks the old
+   name relative to the pinned folder right before the unlink and otherwise puts the first name
+   back (`Verified::KeepGone`). When nothing was removed,
    both names are looked at again, read-only and by file identity (`FirstNameDrop`, re-review
    MEDIUM): the result names a second name only if both were seen to hold the copy; if only the
    first name holds it (the old name went or holds another file), the entry moves back to the first
@@ -610,3 +620,25 @@ Each new regression was break-checked (the setting's clamp, lowering trimming th
 bound, the reader's bound following the setting, the store's backstop, recording refused on an
 unreadable setting, the preview changing nothing, the confirmation, and each review fix).
 Screenshots 09 and 10 (the setting, and a lower choice before confirming) are with the others.
+
+## Merge of #55 at `d58c52c1` (27 October)
+
+#55 brought #51's compact Transfers rows and its published-staging Clear fix. Resolved as follows:
+
+- **One second-name delete.** #51's `remove_verified(.., keep, ..)` (the staging copy goes only
+  while the final name holds the file, pinned on Windows, checked before the unlink on Unix) and
+  this PR's `remove_second_name` (the new copy's first name goes only while the old name holds it)
+  were the same rule. `remove_second_name` is now `remove_verified` with `keep: old_leaf`, the
+  separate `keep_another` path and `Verified::OnlyName` are gone (`Verified::KeepGone` is the one
+  answer), and the Windows regression drives #51's `WHILE_KEPT` hook. Step 6 above describes it.
+- **Compact list rows.** The SAVED group's list rows render as #51's compact rows through one action
+  model: `compactListControls` beside `compactControls` in `transfer-rows.ts`, `CompactControl(s)`
+  generic over the row's action type, and the one shared "more" menu and its handlers (open, keys,
+  stale, settle) serving list rows under the row id `saved-<entry id>`. Like a Saved private row,
+  a list row whose file may still be there offers Save another copy in the menu (new), and one
+  whose file is gone has Save again as its primary.
+- **Checks after the merge:** storage `kept::` 201 on Windows and 208 in WSL (Clippy clean there);
+  native `saved_files` 20 and `private_downloads` 47; the complete frontend suite (2615) with
+  `npm run check` and `npm run build`; strict Clippy root and native, fmt, the ambient and raw-fs
+  gates. The SAVED-group and setting screenshots were retaken (01 to 10, with 05b showing a list
+  row's menu).

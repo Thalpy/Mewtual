@@ -18,10 +18,11 @@ Finished saves of shared files are now remembered per server on this device
   (never files) before the user confirms; the list is trimmed before the setting is stored. A list
   within 256 entries and 1 MiB stays version 1; a longer one is version 2. An unreadable setting
   stops recording until the user chooses again.
-- **Transfers.** The Saved group shows list rows (newest first) in PR #51's row design: Saved,
-  Saved file missing or replaced (with Save again while the file is listed), could not check, or
-  cannot check (no identity). Show in folder works by entry ID with PR #51's read-only check; Clear
-  forgets the entry. A Saved private row stands for its own entry (`savedEntry`) and its Clear
+- **Transfers.** The Saved group shows list rows (newest first) as PR #51's compact rows, arranged
+  by the same action model (`compactListControls`): Saved, Saved file missing or replaced, could
+  not check, or cannot check (no identity). Show in folder (by entry ID, with PR #51's read-only
+  check) is the primary icon, or Save again once the file is gone; Save another copy is in the
+  "more" menu while the file is still shared; the red x Clears (forgets the entry). A Saved private row stands for its own entry (`savedEntry`) and its Clear
   forgets it; a finished download whose file is listed leaves the live list.
 - **Chat mark.** "Saved" on file cards in chat (also cards built earlier), the Files list and the
   file details, from the list only.
@@ -35,9 +36,9 @@ Finished saves of shared files are now remembered per server on this device
   first name goes only while the old name still holds the copy. Every refusal keeps the old copy
   and says why.
 - **Found:** on Windows a delete-denying handle on one hard link does not protect another link of
-  the same file; the replace pins the other name. PR #51's Clear of a published row deletes the
-  staging name after checking the final name without such a pin (follow-up for #51's code, in
-  THREAT-MODEL). #55's `bc891185` (a Download fills the cache only once its save publishes) is
+  the same file; the replace pins the other name. PR #51 fixed the same gap in its Clear of a
+  published row (`a670275f`, merged here with #55 at `d58c52c1`), and the replace's first-name
+  removal now uses that fix's `remove_verified` `keep` rule. #55's `bc891185` (a Download fills the cache only once its save publishes) is
   merged here; it also fixed the two six-client private download tests that failed on #55's
   earlier head. A replace releases the record (`FinishDownloadExport`, which now promotes the
   staged chunks) before it runs, exactly as an ordinary save does afterwards.
@@ -1305,6 +1306,13 @@ journaled save; the plain save item reads "Save to chosen place" while a Save as
 used; a stuck Clear offers "Keep the file" and native's messages describe a temporary copy. The
 remaining items, each with its reason (no safe API, macOS, out of scope), are in the design
 document's "Fix-the-lows round" section.
+
+Published-staging fix (26 October, `a670275f`): a saved file's `.mewtual-part` staging copy is
+deleted only while its final name still holds the same file at the delete itself (Windows pins the
+final name across the delete; Unix checks it just before the unlink), so a final name deleted
+during Clear no longer leaves no copy. Compact Transfers rows (27 October): status symbol, name,
+then the primary icon, the chip word, a keyboard-operable "more" menu and the red x on one line;
+the text-button row is gone. Both are described, with their reviews, in the design document.
 
 ## Chat history adversarial checkpoint (2026-10-20)
 

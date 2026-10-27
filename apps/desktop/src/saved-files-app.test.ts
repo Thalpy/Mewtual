@@ -299,10 +299,20 @@ test("the replace preference is off by default and stored only as its exact word
 });
 
 test("the saved-files markup: list rows in Saved, the marks, the setting and the leave note", () => {
-  // List rows sit in the Saved group after the private rows, in the same row design.
+  // List rows sit in the Saved group after the private rows, as the same compact rows (#51): the
+  // shared action model arranges them, under the row id `saved-<entry id>`.
   assert.match(source, /\{#if group\.id === "saved"\}\s*<!-- PR #56[^]*?\{#each savedListViews as listed \(listed\.id\)\}/);
-  assert.match(source, /data-sdl-row=\{`saved-\$\{listed\.id\}`\} data-state="saved" data-tone=\{listed\.tone\}/);
-  assert.match(source, /onclick=\{\(\) => revealSavedListRow\(file\)\}>\{@render transferIcon\("show-in-folder"\)\} Show in folder<\/button>/);
+  assert.match(source, /\{@const listRowId = `saved-\$\{listed\.id\}`\}\s*\{@const listControls = compactListControls\(listed\)\}/);
+  assert.match(source, /data-sdl-row=\{listRowId\} data-state="saved" data-tone=\{listed\.tone\}/);
+  // Status symbol with its title, the primary (Show in folder, or Save again once gone), the chip,
+  // More and the red x for Clear, which runs at once (it only forgets the entry).
+  assert.match(source, /<span class="sdl-status" title=\{listed\.statusTitle\}>/);
+  assert.match(source, /onclick=\{\(\) => revealSavedListRow\(file\)\}>\{@render transferIcon\(reveal\.icon\)\}<\/button>/);
+  assert.match(source, /onclick=\{\(\) => runSavedListAction\(file, again\.action\)\}>\{@render transferIcon\(again\.icon\)\}<\/button>/);
+  assert.match(source, /onclick=\{\(e\) => moreClick\(listRowId, listControls, e\)\}/);
+  assert.match(source, /data-sdl-remove=\{listRowId\}[^]*?onclick=\{\(\) => runSavedListAction\(file, forget\)\}>\{@render transferIcon\("cancel-x"\)\}<\/button>/);
+  // The one shared menu shows a list row's items too.
+  assert.match(source, /\{#each rowMenuShown\.menu as item, index \(index\)\}/);
   // An unreadable list says so; only a damaged one offers a new start.
   assert.match(source, /\{#if savedFiles\.state === "damaged"\}\s*<button class="sdl-act ghost" type="button" onclick=\{resetSavedList\}>Start a new list<\/button>/);
   // The mark in the Files list and the file details, and on chat cards after every resolve pass.
