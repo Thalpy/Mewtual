@@ -43,8 +43,37 @@ as the intended design, not a completion claim; the current product statement is
    an MLS epoch change (using the bounded past-epoch window for in-flight frames). VAD/DTX.
 4. **Ethos-consistent transport (later).** Move media onto the libp2p relay/DCUtR fabric; TURN opt-in.
 
+## Hangup (2026-09-06)
+
+Leaving a room is announced on **both** routes at once, to the **union** of two peer sets
+(`hangupTargets` in `voice-signaling.ts`): every peer with an open data channel, plus every member
+the server's roster currently calls online.
+
+It used to be one `bye` on the signalling path addressed to the online set alone. That is the wrong
+set and the slower route: a peer you are talking to over a direct WebRTC edge does not have to be
+mesh-reachable at that instant, and when they were not they got no farewell at all. Their end simply
+watched ICE go to `disconnected` a few seconds later and drew **LOST**, which is the app's word for
+a link that died on its own — so pressing Leave read as crashing out of the call.
+
+- The **data-channel** `{t:"bye"}` frame is instant and needs no round-trip. It is sent
+  synchronously in `leaveVoice`, before the same call closes the peer connections, and is charged
+  against the ordinary jam frame budget on receipt. A peer can only ever say `bye` for itself: the
+  authority is the authenticated channel it arrived on, never a field in the frame.
+- The **signalling** `{callId, type:"bye"}` is authenticated and durable, and reaches members who
+  are in the room with no edge yet. It needs the roster read, so it completes after teardown has
+  begun; a roster read that fails contributes nothing rather than emptying the target set, because
+  the edges alone are still worth telling.
+
+Both are handled identically on receipt: drop the sender's room presence and remove the peer, so
+the tile disappears instead of going LOST. LOST therefore keeps its meaning — the link died — and
+is no longer what a deliberate departure looks like.
+
 ## Notes
 
+- **Sender identity (Gate 5, design-creative-suite.md 2.18).** `from` is the verified signer's
+  full `DeviceId` (64 lowercase hex), and every call key in the UI uses it. The 4-byte fingerprint
+  (`from_fp`) is a display label only. Outbound signals are addressed by full identity and routed
+  only through that exact member's own signed record. The signal wire itself is unchanged.
 - The signal payload is **opaque** to the core (the frontend JSON-encodes `{callId, type, data}`); the
   core only relays it authenticated + members-only. No dedup (unlike DM invites; every ICE candidate
   must arrive); FIFO-bounded queue.

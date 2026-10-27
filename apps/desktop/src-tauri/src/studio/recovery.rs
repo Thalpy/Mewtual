@@ -1,0 +1,411 @@
+//! Historical-content IPC. Uses the parent module's one custody/session path, without UI work.
+use super::*;
+use catcoms_app::studio::{
+    RecoveryReason, RecoveryTransition, StudioControlAction as Action, StudioControlRequest,
+    StudioControlResponse as Response, StudioRecoveryApply, StudioRecoveryDisposition,
+    StudioRecoveryItem, StudioRecoveryListing, StudioRecoveryMode, StudioRecoverySummary,
+    StudioScoreHeaderField,
+};
+
+/// Typed, exact-key choices; no renderer-provided historical value or author is accepted.
+#[derive(serde::Deserialize)]
+#[serde(tag = "kind", rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) enum ChoiceInput {
+    Frame { id: String, value: String },
+    FrameDeletion { id: String },
+    Title { value: String },
+    Fps { value: String },
+    SoundRecord { value: String },
+    Object { id: String },
+    ObjectTitle { id: String, value: String },
+    ObjectExpiry { id: String, value: String },
+    ObjectDeletion { id: String },
+    ScoreCell { step: u16, row: u8, value: String },
+    ScorePatch { patch: String, value: String },
+    ScoreHeader { field: String, value: String },
+}
+impl ChoiceInput {
+    pub(super) fn checked(self) -> Result<StudioRecoveryItem, String> {
+        use StudioRecoveryItem as I;
+        Ok(match self {
+            Self::Frame { id: element, value } => I::Frame {
+                id: id(&element)?,
+                value: hash(&value)?,
+            },
+            Self::FrameDeletion { id: element } => I::FrameDeletion { id: id(&element)? },
+            Self::Title { value } => I::Title {
+                value: hash(&value)?,
+            },
+            Self::Fps { value } => I::Fps {
+                value: hash(&value)?,
+            },
+            Self::SoundRecord { value } => I::SoundRecord {
+                value: hash(&value)?,
+            },
+            Self::Object { id: element } => I::Object { id: id(&element)? },
+            Self::ObjectTitle { id: element, value } => I::ObjectTitle {
+                id: id(&element)?,
+                value: hash(&value)?,
+            },
+            Self::ObjectExpiry { id: element, value } => I::ObjectExpiry {
+                id: id(&element)?,
+                value: hash(&value)?,
+            },
+            Self::ObjectDeletion { id: element } => I::ObjectDeletion { id: id(&element)? },
+            Self::ScoreCell { step, row, value } => {
+                if step >= SCORE_MAX_STEPS || row >= SCORE_ROWS {
+                    return Err("score coordinate out of range".into());
+                }
+                I::ScoreCell {
+                    step,
+                    row,
+                    value: hash(&value)?,
+                }
+            }
+            Self::ScorePatch { patch, value } => I::ScorePatch {
+                patch: named_hash("score recipe", &patch)?,
+                value: hash(&value)?,
+            },
+            Self::ScoreHeader { field, value } => I::ScoreHeader {
+                field: match field.as_str() {
+                    "title" => StudioScoreHeaderField::Title,
+                    "bpm" => StudioScoreHeaderField::Bpm,
+                    "bpb" => StudioScoreHeaderField::Bpb,
+                    "steps" => StudioScoreHeaderField::Steps,
+                    _ => return Err("unknown score header".into()),
+                },
+                value: hash(&value)?,
+            },
+        })
+    }
+}
+fn mode(mode: &str) -> Result<StudioRecoveryMode, String> {
+    match mode {
+        "restore" => Ok(StudioRecoveryMode::Restore),
+        "copy" => Ok(StudioRecoveryMode::Copy),
+        _ => Err("recovery mode must be restore or copy".into()),
+    }
+}
+
+#[tauri::command]
+// Keep the shipped command's flat arguments and add only the optional family discriminator.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn studio_recovery_preview(
+    state: State<'_, AppState>,
+    server: u64,
+    channel: String,
+    object: Option<String>,
+    object_kind: Option<String>,
+    snapshot: String,
+    choice: ChoiceInput,
+    mode: String,
+) -> Result<Value, String> {
+    invoke_control(
+        &state,
+        server,
+        target_with_kind(&channel, object.as_deref(), object_kind.as_deref())?,
+        Action::Preview {
+            snapshot: hash(&snapshot)?,
+            item: choice.checked()?,
+            mode: self::mode(&mode)?,
+        },
+    )
+    .await
+}
+
+/// A failed response is retried with this exact payload. Re-previewing is a NEW decision and
+/// needs a new nonce; never rewrite a predecessor or body under an earlier nonce.
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct RecoveryApplyInput {
+    snapshot: String,
+    choice: ChoiceInput,
+    mode: String,
+    epoch_id: String,
+    expected_projection: String,
+    nonce: String,
+    body: String,
+}
+impl RecoveryApplyInput {
+    pub(super) fn checked(self) -> Result<StudioRecoveryApply, String> {
+        if self.body.len() > 64 * 1024 {
+            return Err("recovery body exceeds 64 KiB".into());
+        }
+        Ok(StudioRecoveryApply {
+            snapshot: hash(&self.snapshot)?,
+            item: self.choice.checked()?,
+            mode: mode(&self.mode)?,
+            epoch_id: u128::from_be_bytes(id(&self.epoch_id)?),
+            expected_projection: hash(&self.expected_projection)?,
+            nonce: id(&self.nonce)?,
+            body: self.body.into_bytes(),
+        })
+    }
+}
+#[tauri::command]
+pub(crate) async fn studio_recovery_apply(
+    state: State<'_, AppState>,
+    server: u64,
+    channel: String,
+    object: Option<String>,
+    object_kind: Option<String>,
+    edit: RecoveryApplyInput,
+) -> Result<Value, String> {
+    invoke_control(
+        &state,
+        server,
+        target_with_kind(&channel, object.as_deref(), object_kind.as_deref())?,
+        Action::Apply(Box::new(edit.checked()?)),
+    )
+    .await
+}
+
+pub(super) fn hash(value: &str) -> Result<[u8; 32], String> {
+    named_hash("recovery snapshot", value)
+}
+/// The same parse, told to say what it was reading.
+///
+/// The lifecycle commands parse branch, content and archive ids through here too, and a renderer
+/// that mis-formats an archive id deserves to be told that rather than being sent to look at a
+/// recovery snapshot it never sent.
+pub(super) fn named_hash(noun: &str, value: &str) -> Result<[u8; 32], String> {
+    if value.len() != 64
+        || !value
+            .bytes()
+            .all(|c| c.is_ascii_digit() || (b'a'..=b'f').contains(&c))
+    {
+        return Err(format!("{noun} id must be 64 lowercase hex characters"));
+    }
+    hex::decode(value)
+        .map_err(|_| format!("invalid {noun} id"))?
+        .try_into()
+        .map_err(|_| format!("invalid {noun} id"))
+}
+/// Family is part of the trusted request identity, never inferred from an operation body or an
+/// Index hint. Omission retains the legacy art contract; Index has no object family at all.
+pub(super) fn target_with_kind(
+    channel: &str,
+    object: Option<&str>,
+    object_kind: Option<&str>,
+) -> Result<StudioTarget, String> {
+    let channel = channel_id(channel)?;
+    Ok(match (object, object_kind) {
+        (Some(object), None | Some("flipnote")) => StudioTarget::Flipnote {
+            channel,
+            object: id(object)?,
+        },
+        (Some(object), Some("score")) => StudioTarget::Score {
+            channel,
+            object: id(object)?,
+        },
+        (None, None) => StudioTarget::Index { channel },
+        _ => return Err("objectKind must be flipnote or score and requires an object".into()),
+    })
+}
+pub(super) async fn invoke_control(
+    state: &AppState,
+    server: u64,
+    target: StudioTarget,
+    action: Action,
+) -> Result<Value, String> {
+    invoke_custody(
+        state,
+        server,
+        InvokeRequest::Control(StudioControlRequest { target, action }),
+        |response| match response {
+            InvokeResponse::Control(response) => response_value(response),
+            _ => Err("mismatched Studio control response".into()),
+        },
+    )
+    .await
+}
+
+#[tauri::command]
+pub(crate) async fn studio_recovery_list(
+    state: State<'_, AppState>,
+    server: u64,
+    channel: String,
+    object: Option<String>,
+    object_kind: Option<String>,
+) -> Result<Value, String> {
+    invoke_control(
+        &state,
+        server,
+        target_with_kind(&channel, object.as_deref(), object_kind.as_deref())?,
+        Action::List,
+    )
+    .await
+}
+#[tauri::command]
+pub(crate) async fn studio_recovery_restore_pointer(
+    state: State<'_, AppState>,
+    server: u64,
+    channel: String,
+    object: Option<String>,
+    object_kind: Option<String>,
+) -> Result<Value, String> {
+    invoke_control(
+        &state,
+        server,
+        target_with_kind(&channel, object.as_deref(), object_kind.as_deref())?,
+        Action::RestorePointer,
+    )
+    .await
+}
+#[tauri::command]
+pub(crate) async fn studio_recovery_read(
+    state: State<'_, AppState>,
+    server: u64,
+    channel: String,
+    object: Option<String>,
+    object_kind: Option<String>,
+    snapshot: String,
+) -> Result<Value, String> {
+    invoke_control(
+        &state,
+        server,
+        target_with_kind(&channel, object.as_deref(), object_kind.as_deref())?,
+        Action::Read {
+            snapshot: hash(&snapshot)?,
+        },
+    )
+    .await
+}
+#[tauri::command]
+pub(crate) async fn studio_recovery_export(
+    state: State<'_, AppState>,
+    server: u64,
+    channel: String,
+    object: Option<String>,
+    object_kind: Option<String>,
+    snapshot: String,
+) -> Result<Value, String> {
+    invoke_control(
+        &state,
+        server,
+        target_with_kind(&channel, object.as_deref(), object_kind.as_deref())?,
+        Action::Export {
+            snapshot: hash(&snapshot)?,
+        },
+    )
+    .await
+}
+#[tauri::command]
+pub(crate) async fn studio_recovery_acknowledge(
+    state: State<'_, AppState>,
+    server: u64,
+    channel: String,
+    object: Option<String>,
+    object_kind: Option<String>,
+    oldest_snapshot: String,
+    staged_snapshot: String,
+) -> Result<Value, String> {
+    invoke_control(
+        &state,
+        server,
+        target_with_kind(&channel, object.as_deref(), object_kind.as_deref())?,
+        Action::Acknowledge {
+            oldest_snapshot: hash(&oldest_snapshot)?,
+            staged_snapshot: hash(&staged_snapshot)?,
+        },
+    )
+    .await
+}
+
+fn summary(v: &StudioRecoverySummary) -> Value {
+    json!({"snapshot":hex::encode(v.id),"epoch":v.epoch.to_string(),"staged":v.staged,
+    "bytes":v.encoded_bytes,"reason":match v.reason {
+        RecoveryReason::Excluded=>"excluded", RecoveryReason::Rewound=>"rewound",
+        RecoveryReason::ConflictOverflow=>"conflictOverflow", RecoveryReason::Repair=>"repair",
+    }})
+}
+fn listing(v: StudioRecoveryListing) -> Result<Value, String> {
+    let warning = match v.eviction_pending {
+        None => Value::Null,
+        Some(RecoveryTransition::EvictionPending {
+            oldest_snapshot,
+            staged_snapshot,
+            deadline_ms,
+        }) => {
+            json!({"oldestSnapshot":hex::encode(oldest_snapshot),"stagedSnapshot":hex::encode(staged_snapshot),"deadlineMs":deadline_ms.to_string()})
+        }
+        _ => return Err("invalid recovery warning state".into()),
+    };
+    Ok(
+        json!({"v":1,"kind":"recoveryList","channel":u128::from_be_bytes(v.target.channel()).to_string(),
+        "object":match v.target {StudioTarget::Index{..}=>None,StudioTarget::Flipnote{object,..}|StudioTarget::Score{object,..}=>Some(hex::encode(object))},
+        "source":v.source.map(|s|json!({"epochId":format!("{:032x}",s.epoch_id),"epoch":s.epoch.to_string(),
+            "provisional":true,"phase":match s.phase {EpochPhase::Open=>"open",EpochPhase::Closing=>"closing",EpochPhase::Settled=>"settled",EpochPhase::Fault=>"fault"}})),
+        "versions":v.versions.iter().map(summary).collect::<Vec<_>>(),"evictionPending":warning,"pendingIntents":v.pending_intents}),
+    )
+}
+pub(super) fn response_value(response: Response) -> Result<Value, String> {
+    let value = match response {
+        Response::OverlayPreparation(_) | Response::OverlayInspection(_) => {
+            return Err("mismatched recovery response".into());
+        }
+        // The lifecycle family converts itself. Listed by variant rather than caught by a wildcard
+        // so a new response still has to choose a home here.
+        response @ (Response::OverlayLifecycle(_)
+        | Response::OverlayArchived(_)
+        | Response::OverlayExport(_)
+        | Response::OverlayArchive { .. }
+        | Response::OverlayArchiveReleased
+        | Response::OverlayDisposed(_)
+        | Response::OverlayCopyApplied { .. }
+        | Response::OverlayCopyRefused { .. }
+        | Response::UnconfirmedOverlaySaveTicket { .. }
+        | Response::UnconfirmedOverlaySaved { .. }) => {
+            return super::lifecycle::response_value(response)
+        }
+        // Copy's two-visit preview converts at its own call site, which holds the context needed to
+        // name both the source and the destination. Reaching here means a copy response arrived
+        // through a path that cannot describe it.
+        Response::OverlayCopyPreparation(_) | Response::OverlayCopyPreview(_) => {
+            return Err("mismatched overlay copy response".into());
+        }
+        // The fault family converts itself (design 5.8), listed by variant for the same reason.
+        response @ (Response::Fault(_)
+        | Response::Repaired { .. }
+        | Response::RepairStarted { .. }) => return super::fault::response_value(response),
+        Response::PointerRestored {
+            target,
+            epoch,
+            registry_epoch_id,
+        } => json!({"v":1,"kind":"recoveryPointerRestored",
+            "channel":u128::from_be_bytes(target.channel()).to_string(),
+            "object":match target {StudioTarget::Index{..}=>None,StudioTarget::Flipnote{object,..}|StudioTarget::Score{object,..}=>Some(hex::encode(object))},
+            "checkpointEpoch":epoch.to_string(),"registryEpochId":format!("{registry_epoch_id:032x}"),
+            "provisional":true}),
+        Response::Preview(v) => {
+            json!({"v":1,"kind":"recoveryPreview","snapshot":hex::encode(v.snapshot),
+            "epochId":format!("{:032x}",v.epoch_id),"expectedProjection":hex::encode(v.fingerprint),
+            "disposition":match v.plan.disposition {
+                StudioRecoveryDisposition::Ready=>"ready",StudioRecoveryDisposition::Unchanged=>"unchanged",
+                StudioRecoveryDisposition::Conflict=>"conflict",StudioRecoveryDisposition::Deleted=>"deleted",
+                StudioRecoveryDisposition::Full=>"full",StudioRecoveryDisposition::MissingTarget=>"missingTarget",
+            },"body":v.plan.body.map(String::from_utf8).transpose().map_err(|_|"invalid recovery operation encoding")?,
+            "originalAuthor":v.plan.original_author.map(|id|hex::encode(id.as_bytes()))})
+        }
+        Response::Applied {
+            target: _,
+            already_saved,
+        } => json!({"v":1,"kind":"recoveryApplied",
+            "contentSaved":true,"alreadySaved":already_saved,"provisional":true,"pointerRestored":false}),
+        Response::List(value) => listing(value)?,
+        Response::Acknowledged(value) => {
+            let mut value = listing(value)?;
+            value["kind"] = "recoveryAcknowledged".into();
+            value
+        }
+        Response::Version(value) => json!({"v":1,"kind":"recoveryVersion","historical":true,
+            "version":summary(&value.summary),"channel":u128::from_be_bytes(value.projection.channel()).to_string(),
+            "group":hex::encode(&value.projection.document().server_id),"content":projection_content(&value.projection)?}),
+        Response::Export { snapshot, bytes } => {
+            use base64::Engine;
+            json!({"v":1,"kind":"recoveryExport","snapshot":hex::encode(snapshot),
+                "format":"p1-recovery-v1","bytes":bytes.len(),"bytesB64":base64::engine::general_purpose::STANDARD.encode(bytes)})
+        }
+    };
+    bounded_view(value)
+}

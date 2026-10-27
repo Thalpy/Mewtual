@@ -1,0 +1,174 @@
+//! Constant-sized historical repair evidence. It is neither network authority nor a journal:
+//! the source installer still owns durable recovery and the gate transition. Keeping both full
+//! receipts lets restart screen the losing inherited baseline after the selected head advances.
+
+use super::*;
+
+/// Validate canonical, self-signed conflicting receipts without proving owner authority.
+///
+/// Both receipts must have their canonical wire shape and valid self-signatures, name the full
+/// logical document and the same tenure, and actually conflict. Two successive consistent
+/// receipts are progress, not evidence. This mints no verified-receipt capability: callers still
+/// bind their numeric server/channel/store scope and separately establish live repair authority.
+/// In particular, a valid self-signature does not prove the key was ever a member or designated
+/// committer. Report admission must establish owner authority for the claimed historical tenure
+/// independently BEFORE persisting evidence or consuming capacity; authenticating the reporter
+/// does not establish the receipt signer's authority. This helper alone cannot admit a report.
+pub fn conflicting_receipt_pair(
+    document: &LogicalDocument,
+    a: &Receipt,
+    b: &Receipt,
+) -> Result<(), ReplError> {
+    for receipt in [a, b] {
+        // Public fields can bypass decode. Check allocation bounds before making an encoded
+        // copy, then require the decoder's entire schema rather than just a valid signature.
+        if receipt.document.server_id.len() > MAX_SERVER_ID_BYTES
+            || receipt.document.logical_key.len() > MAX_LOGICAL_KEY_BYTES
+            || receipt.owner_public_key.len() != 32
+        {
+            return Err(ReplError::EpochBound);
+        }
+        if Receipt::decode(&receipt.encode())? != *receipt {
+            return Err(ReplError::Malformed);
+        }
+        receipt.verify_signature_only()?;
+        if &receipt.document != document {
+            return Err(ReplError::EpochScope);
+        }
+    }
+    if !receipts_conflict(a, b) {
+        return Err(ReplError::ReceiptConflict);
+    }
+    Ok(())
+}
+
+impl ReceiptRepair {
+    /// Check canonical shape and the historical self-signature without granting authority.
+    /// This is for sealed evidence restore. It does not prove the signer was an owner, admit
+    /// a reported pair, or replace `verify_current_owner` at any live transition.
+    pub fn verify_signature_only(&self) -> Result<(), ReplError> {
+        self.verify_historical()?;
+        Self::decode(&self.encode()).map(|_| ())
+    }
+
+    /// Bind this v2 decision to both complete conflicting receipts and a nonzero sequence.
+    ///
+    /// This checks evidence, NOT this repair's signature or present authority. Live callers must
+    /// first use `verify_current_owner` with independently observed issuer tenure; sealed restore
+    /// additionally checks the historical repair signature, selected/losing roles and sequence.
+    /// Receipt order is immaterial, but the decision's hash pair must be canonical and exact.
+    pub fn check_evidence(&self, a: &Receipt, b: &Receipt) -> Result<(), ReplError> {
+        conflicting_receipt_pair(&self.document, a, b)?;
+        let mut hashes = [a.hash(), b.hash()];
+        hashes.sort_unstable();
+        if self.tenure_id != a.tenure_id
+            || self.receipt_hashes != hashes
+            || !self.receipt_hashes.contains(&self.selected_receipt_hash)
+            || self.issuer_tenure_start_group_epoch.is_none()
+            || self.repair_sequence == 0
+        {
+            return Err(ReplError::ReceiptConflict);
+        }
+        Ok(())
+    }
+}
+
+#[derive(Clone, Debug)]
+pub(super) struct ResolvedRepair {
+    pub(super) repair: ReceiptRepair,
+    pub(super) selected: Receipt,
+    pub(super) losing: Receipt,
+}
+
+impl ResolvedRepair {
+    /// Exact loser or a provable differing-baseline descendant. Same-baseline receipts carry
+    /// no ancestry chain, so a higher epoch alone never makes a receipt covered by this repair.
+    pub(super) fn covers(&self, receipt: &Receipt) -> bool {
+        receipt.document == self.repair.document
+            && receipt.tenure_id == self.repair.tenure_id
+            && (receipt.hash() == self.losing.hash()
+                || (TenureSelection::from(&self.selected) != TenureSelection::from(&self.losing)
+                    && TenureSelection::from(receipt) == TenureSelection::from(&self.losing)))
+    }
+
+    pub(super) fn encode_into(&self, e: &mut Encoder) {
+        for bytes in [
+            self.repair.encode(),
+            self.selected.encode(),
+            self.losing.encode(),
+        ] {
+            e.put_bytes(&bytes).expect("bounded repair evidence fits");
+        }
+    }
+
+    pub(super) fn decode_from(d: &mut Decoder<'_>) -> Result<Self, ReplError> {
+        Ok(Self {
+            repair: ReceiptRepair::decode(d.get_bytes().map_err(|_| ReplError::Malformed)?)?,
+            selected: Receipt::decode(d.get_bytes().map_err(|_| ReplError::Malformed)?)?,
+            losing: Receipt::decode(d.get_bytes().map_err(|_| ReplError::Malformed)?)?,
+        })
+    }
+
+    pub(super) fn verify(
+        &self,
+        document: Option<&LogicalDocument>,
+        sequence: u64,
+    ) -> Result<(), ReplError> {
+        self.repair.verify_historical()?;
+        self.repair.check_evidence(&self.selected, &self.losing)?;
+        if document != Some(&self.repair.document)
+            || self.repair.selected_receipt_hash != self.selected.hash()
+            || sequence != self.repair.repair_sequence
+            || sequence == 0
+        {
+            return Err(ReplError::ReceiptConflict);
+        }
+        Ok(())
+    }
+}
+
+impl ReceiptBook {
+    /// Sequence on the latest retained resolved repair, regardless of which tenure issued it.
+    ///
+    /// This raw value is historical bookkeeping and must not seed a new repair. Issuance and
+    /// replay checks use [`Self::repair_sequence_for_issuer_tenure`] so a predecessor tenure
+    /// cannot exhaust its successor's sequence namespace.
+    pub fn repair_sequence(&self) -> u64 {
+        self.repair_sequence
+    }
+
+    /// Issuance and anti-replay high-water for this exact authenticated owner tenure.
+    ///
+    /// The raw persisted field remains the sequence of `resolved_repair`, preserving every
+    /// existing codec. A successor tenure starts from zero for monotonic comparison while the
+    /// retained historical repair continues screening its named losing branch.
+    pub fn repair_sequence_for_issuer_tenure(&self, issuer_tenure_start: u64) -> u64 {
+        self.resolved_repair
+            .as_ref()
+            .filter(|resolved| {
+                resolved.repair.issuer_tenure_start_group_epoch == Some(issuer_tenure_start)
+            })
+            .map_or(0, |resolved| resolved.repair.repair_sequence)
+    }
+
+    /// Latest exact resolved repair, retained across ordinary head advancement/checkpointing.
+    /// Historical bytes alone never authorize a new repair or prove the current owner's tenure.
+    pub fn latest_repair(&self) -> Option<&ReceiptRepair> {
+        self.resolved_repair
+            .as_ref()
+            .map(|resolved| &resolved.repair)
+    }
+
+    /// All receipt-admission paths screen this BEFORE their opening/high-water shortcuts.
+    /// Different inherited baselines identify a losing branch; same-baseline same-epoch closes
+    /// identify only the named loser because receipts do not contain an ancestry chain. A third
+    /// baseline remains new equivocation, not silently covered by the latest signed choice.
+    pub(super) fn is_repaired_loser(&self, receipt: &Receipt) -> bool {
+        self.resolved_repair
+            .as_ref()
+            .is_some_and(|resolved| resolved.covers(receipt))
+    }
+}
+
+#[cfg(test)]
+mod tests;

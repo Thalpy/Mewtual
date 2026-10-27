@@ -1,0 +1,2097 @@
+// One channel's connected Studio: the Index view, the open flipnote, the pixels held for it, the
+// saves in flight and the recovery rail, all read through the typed native adapter. Plain data
+// plus a change signal, so the two surfaces re-read it the way they read the old fixture, and the
+// unit tests drive it with a fake bridge.
+//
+// Rules this class exists to keep (docs/FLIPNOTE-UI-HOOKS.md):
+// - A save is one complete request. A retry resends exactly it, nonce and epoch included; only an
+//   explicit "save again as a new edit" mints a new nonce against the current epoch. Recovery
+//   applies are saves too: their echoed preview payload is retained and retried the same way.
+// - Saves to one document run in order. An uncertain or explicitly not-written save blocks the later saves of its lane
+//   until it is retried or discarded on purpose; other documents keep moving.
+// - Unsaved pixels survive every failure. They stay on the record until the save lands or the
+//   member discards them on purpose.
+// - Every asynchronous result is fenced by scope generation (server, channel, session) and by a
+//   per-target request generation; a late result is dropped even after IPC delivered it, and a
+//   landed write supersedes the reads that were issued before it.
+// - A preview (`awaitingTenureReceipt`) never authorizes an ordinary edit. The editor may save a
+//   ticketed local-only Unconfirmed overlay, which stays visibly separate from installed history.
+// - One fetch scheduler: thumbnails, the open frame, conflict actions and recovery all go through
+//   the same bounded, prioritized, deduplicated queue. A cid that was unavailable or failed
+//   transiently is asked again only after an invalidation or an explicit retry; content the
+//   decoder rejected is kept apart from that.
+// - State the surfaces read is replaced, never mutated in place, so a revision bridge sees a new
+//   reference whenever something changed.
+
+import { PixError, decodePix } from "./pix.ts";
+import { validateJamPatch } from "./jam-patch.ts";
+import type { JamPatch, JamTake } from "./jam-contract.ts";
+import { flipnotePixaFromNative, preflightFlipnoteMedia, scorePlaybackFromNative } from "./studio-resolved-export.ts";
+import type { ScorePlayback } from "./studio-export.ts";
+import { exportStudioGif, publishStudioPixa, type StudioGifSaved } from "./studio-media.ts";
+import { decodePixa, encodePixa, PIXA_MAX_BYTES } from "./pixa.ts";
+import { historicalSoundOperation, soundRecoveryChoices } from "./studio-sound-recovery.ts";
+import { canonicalJson, randomElementId, type FlipnoteOp, type IndexOp, type ScoreOp, type ScoreCell } from "./studio-contract.ts";
+import {
+  DEFAULT_FPS,
+  SETTLEMENT_CHANGED_EVENT,
+  STUDIO_RECEIVE_PAUSED_EVENT,
+  STUDIO_UPDATED_EVENT,
+  StudioNativeError,
+  expiryForBody,
+  flipnoteModel,
+  scoreModel,
+  indexModel,
+  overlayArchive,
+  overlayArchiveExport,
+  overlayArchiveRead,
+  overlayArchiveRelease,
+  overlayCopyApply,
+  overlayCopyPreview,
+  overlayDispose,
+  overlayExport,
+  overlayLifecycle,
+  overlayRead,
+  parseReceivePaused,
+  parseSettlementChanged,
+  parseStudioUpdated,
+  publishPix,
+  recoveryAcknowledge,
+  recoveryApply,
+  recoveryExport,
+  recoveryList,
+  recoveryPreview,
+  recoveryRead,
+  recoveryRestorePointer,
+  requestBlobBounded,
+  studioApply,
+  studioApplyIndex,
+  studioCreate,
+  studioList,
+  studioRead,
+  unconfirmedOverlaySave,
+  unconfirmedOverlaySaveBegin,
+  type ApplyIndexRequest,
+  type ApplyRequest,
+  type CreateRequest,
+  type Decimal,
+  type FlipnoteModel,
+  type FrameConflictValue,
+  type Hex32,
+  type Hex64,
+  type IndexModel,
+  type IndexView,
+  type NativeExpiry,
+  type OverlayArchive,
+  type OverlayCopyApplied,
+  type OverlayCopyApplyEdit,
+  type OverlayCopyPreview,
+  type OverlayDisposalRequest,
+  type OverlayInspection,
+  type OverlayLifecycle,
+  type OverlaySaveRetry,
+  type OverlaySaveRefusal,
+  type PixPublication,
+  type PointerRestored,
+  type RecoveryApplied,
+  type RecoveryApplyEdit,
+  type RecoveryChoice,
+  type RecoveryDisposition,
+  type RecoveryExport,
+  type RecoveryListing,
+  type RecoveryMode,
+  type RecoveryVersionRead,
+  type StudioIpc,
+  type StudioContent,
+  type StudioObjectKind,
+  type StudioObjectView,
+  type ScoreModel,
+  type FlipnoteView,
+  type ScoreView,
+  type RecoveryTargetArgs,
+  type StudioPhase,
+  type StudioUnlisten,
+  type UnconfirmedOverlaySave,
+  type UnconfirmedOverlaySaveInput,
+} from "./studio-native.ts";
+
+export type StudioScope = { server: number; channel: Decimal };
+export type StudioPixaPublished = { publication: PixPublication; referenceSaveId: number | null; warning: string | null };
+
+export type SaveStatus = "queued" | "inflight" | "blocked" | "uncertain";
+export type SaveOutcome = "landed" | "notWritten" | "uncertain" | "discarded";
+type SaveBase = {
+  id: number;
+  label: string;
+  status: SaveStatus;
+  attempts: number;
+  error: string;
+  /// A delivery failure on this exact request has not been reconciled. This remains true while a
+  /// later exact retry is queued or in flight, so its latest attempt cannot hide older uncertainty.
+  mayHaveCommitted: boolean;
+  /// Set when a later read of the same document carries a different epoch than the frozen
+  /// request: the backend decides on retry; the member may instead re-author explicitly.
+  epochChanged: boolean;
+};
+/// What a surface sees of a save: an immutable snapshot, replaced whenever the queue changes.
+export type SaveRecord = SaveBase &
+  (
+    | { kind: "create"; request: CreateRequest<StudioObjectKind>; object: Hex32 }
+    | { kind: "frame"; object: Hex32; frame: Hex32; op: "insert" | "replace"; after: Hex32 | null; pix: Uint8Array; published: PixPublication | null; route: "ordinary" | "unconfirmed"; apply: ApplyRequest | null; overlay: UnconfirmedOverlaySaveInput | null; overlayRetry: OverlaySaveRetry | null; force?: boolean }
+    | { kind: "apply"; object: Hex32; request: ApplyRequest<StudioObjectKind>; op: FlipnoteOp | ScoreOp }
+    | { kind: "applyIndex"; request: ApplyIndexRequest; op: IndexOp; object: Hex32 }
+    | { kind: "overlayApply"; object: Hex32 | null; objectKind?: StudioObjectKind; request: UnconfirmedOverlaySaveInput | null; overlayRetry: OverlaySaveRetry | null; op: FlipnoteOp | IndexOp | ScoreOp }
+    | { kind: "recoveryApply"; object: Hex32 | null; objectKind?: StudioObjectKind; edit: RecoveryApplyEdit; applied: RecoveryApplied | null }
+  );
+/// The queue's own mutable entry, with the callback of whoever awaits its first outcome.
+type SaveEntry = SaveRecord & { settle?: (outcome: SaveOutcome) => void };
+
+/// A typed Flow-S result that proves this attempt did not write. It is deliberately separate from
+/// native/transport errors, whose final-fence timing means the write outcome can be uncertain.
+class OverlayNoWrite extends Error {}
+
+/// held: decoded bytes are cached. fetching/queued: a job for this scope exists. unavailable:
+/// the backend answered null. failed: the request itself failed (busy, transport); retryable.
+/// invalid: the body failed the length or PIX1 check; content, not availability. idle: not asked.
+export type BlobState = "held" | "fetching" | "queued" | "unavailable" | "failed" | "invalid" | "idle";
+
+type DistributiveOmit<T, K extends PropertyKey> = T extends unknown ? Omit<T, K> : never;
+type NewSave = DistributiveOmit<SaveRecord, "id" | "status" | "attempts" | "error" | "mayHaveCommitted" | "epochChanged">;
+
+export type RecoveryItemState = "pending" | "previewing" | "fetching" | "applying" | "applied" | "alreadySaved" | "uncertain" | RecoveryDisposition | "error";
+export type RecoveryItem = {
+  choice: RecoveryChoice;
+  label: string;
+  state: RecoveryItemState;
+  error: string;
+  originalAuthor: Hex64 | null;
+};
+export type RecoveryRun = {
+  snapshot: Hex64;
+  mode: RecoveryMode;
+  object: Hex32 | null;
+  items: RecoveryItem[];
+  status: "running" | "done" | "stopped";
+  error: string;
+};
+export type PointerStep = { status: "idle" | "running" | "done" | "blocked"; error: string; result: PointerRestored | null };
+
+export type OverlayState = {
+  object: Hex32 | null;
+  inspection: OverlayInspection | null;
+  lifecycle: OverlayLifecycle | null;
+  archive: OverlayArchive | null;
+  exported: OverlayArchive | null;
+  copy: {
+    objectKind?: StudioObjectKind;
+    choice: RecoveryChoice;
+    label: string;
+    mode: RecoveryMode;
+    status: "previewing" | "applying" | "applied" | "refused" | "uncertain" | "error" | RecoveryDisposition;
+    error: string;
+    /// Once any Apply delivery is ambiguous, a later pre-write refusal cannot prove what the
+    /// earlier attempt did. Only an applied acknowledgement may clear this uncertainty.
+    mayHaveCommitted: boolean;
+    preview: OverlayCopyPreview | null;
+    edit: OverlayCopyApplyEdit | null;
+    applied: OverlayCopyApplied | null;
+  } | null;
+  loading: boolean;
+  error: string;
+};
+
+type OverlayCopyRun = NonNullable<OverlayState["copy"]>;
+
+export type DocState = {
+  object: Hex32;
+  objectKind: StudioObjectKind;
+  view: StudioObjectView | null;
+  model: FlipnoteModel | null;
+  score: ScoreModel | null;
+  loading: boolean;
+  /// `studio_read` answered null: local absence, not a deletion or proof nobody has it.
+  absent: boolean;
+  error: string;
+};
+
+export type KnownView = { awaiting: boolean; phase: StudioPhase | null; epoch: Decimal };
+
+export type SessionOptions = {
+  ipc: StudioIpc;
+  me: Hex64;
+  now?: () => number;
+  newId?: () => Hex32;
+  /// Coalescing timer seam; returns a cancel function.
+  schedule?: (fn: () => void, ms: number) => () => void;
+  maxFetches?: number;
+  blobCacheBytes?: number;
+};
+
+const REFRESH_COALESCE_MS = 120;
+const BLOB_CACHE_BYTES = 8 * 1024 * 1024;
+const BLOB_CACHE_ENTRIES = 512;
+const RECENT_VIEWS = 8;
+const RETAINED_OVERLAY_COPIES = 8;
+
+type BlobJob = {
+  key: string;
+  cid: Hex64;
+  bytes: number;
+  priority: number;
+  generation: number;
+  started: boolean;
+  waiters: { resolve: (bytes: Uint8Array | null) => void; reject: (e: unknown) => void }[];
+};
+
+export class StudioSession {
+  readonly ipc: StudioIpc;
+  me: Hex64;
+  readonly now: () => number;
+  readonly newId: () => Hex32;
+  private readonly schedule: (fn: () => void, ms: number) => () => void;
+
+  scope: StudioScope | null = null;
+  /// Bumped by every scope change and every reset; captured before each await.
+  generation = 0;
+
+  index: IndexView | null = null;
+  indexModel: IndexModel | null = null;
+  indexLoading = false;
+  indexError = "";
+  doc: DocState | null = null;
+  indexOverlay: OverlayState | null = null;
+  /// The retained local branch is a separate truth from the ordinary/preview projection. It is
+  /// read-only evidence here; edits reach it only through the ticketed Unconfirmed Save below.
+  overlay: OverlayState | null = null;
+  /// Trust state of documents this session has read, for sidebar chips; never a phase claim
+  /// for a document that was not read.
+  readonly known = new Map<Hex32, KnownView>();
+  /// The last view of each recently read document, so a queued save still has its epoch after
+  /// the member moves to another flipnote. Bounded; the open document is always current.
+  private readonly views = new Map<Hex32, { view: StudioObjectView; model: FlipnoteModel | null; score: ScoreModel | null }>();
+  /// Exact retained-draft Copy requests are session work, not panel state. Keeping them here means
+  /// navigation cannot lose an uncertain nonce/body or let a late response overwrite a newer run.
+  /// The map is bounded; unresolved entries are never evicted merely to make room.
+  private readonly overlayCopies = new Map<string, OverlayCopyRun>();
+
+  /// Mutable queue entries (with their settle callbacks); never handed to a surface.
+  private readonly records: SaveEntry[] = [];
+  /// Immutable snapshots of the queue, rebuilt on every change: what the surfaces read.
+  saves: SaveRecord[] = [];
+  private saveSeq = 0;
+  /// The token of the worker that owns the save lane right now (0 = none). Only that worker
+  /// may release it; a worker from a cleared scope finds a different token and stands down.
+  private saving = 0;
+  private workerSeq = 0;
+
+  receivePaused = false;
+  readonly listeners = new Set<() => void>();
+
+  // Blobs
+  private readonly maxFetches: number;
+  private readonly cacheBytesCap: number;
+  private readonly blobs = new Map<Hex64, Uint8Array>();
+  private cacheBytes = 0;
+  private readonly jobs = new Map<string, BlobJob>();
+  private inflight = 0;
+  private readonly unavailable = new Set<Hex64>();
+  private readonly failed = new Map<Hex64, string>();
+  private readonly invalid = new Map<Hex64, string>();
+
+  // Recovery
+  recoveryTarget: Hex32 | null = null;
+  private recoveryFamily: StudioObjectKind | "index" = "index";
+  recoveryListing: RecoveryListing | null = null;
+  recoveryLoading = false;
+  recoveryError = "";
+  readonly versions = new Map<Hex64, RecoveryVersionRead>();
+  readonly exports = new Map<Hex64, RecoveryExport>();
+  /// An immutable snapshot of the current walk; replaced on every change.
+  recoveryRun: RecoveryRun | null = null;
+  pointer: PointerStep = { status: "idle", error: "", result: null };
+  private activeRun: { token: number; stop: boolean } | null = null;
+  private runSeq = 0;
+
+  private indexReq = 0;
+  private indexOverlayReq = 0;
+  private readonly docReq = new Map<Hex32, number>();
+  private readonly overlayReq = new Map<Hex32, number>();
+  private recoveryReq = 0;
+  private pendingIndex = false;
+  private readonly pendingObjects = new Set<Hex32>();
+  private pendingRecovery = false;
+  private cancelFlush: (() => void) | null = null;
+  private unlisten: StudioUnlisten[] = [];
+  // One preparation and one publication/save action may be in flight, even across navigation.
+  // Old work must actually drain before another scope can allocate a second full package.
+  private mediaTask: Promise<unknown> | null = null;
+  private mediaWrite = false;
+  private mediaEpoch = 0;
+  /** Immediate invalidation edge used to revoke an already prepared UI playback snapshot. */
+  get mediaGeneration(): number { return this.mediaEpoch; }
+
+  constructor(opts: SessionOptions) {
+    this.ipc = opts.ipc;
+    this.me = opts.me;
+    this.now = opts.now ?? (() => Date.now());
+    this.newId = opts.newId ?? (() => randomElementId());
+    this.schedule = opts.schedule ?? ((fn, ms) => { const t = setTimeout(fn, ms); return () => clearTimeout(t); });
+    this.maxFetches = opts.maxFetches ?? 2;
+    this.cacheBytesCap = opts.blobCacheBytes ?? BLOB_CACHE_BYTES;
+  }
+
+  // --- Change signal -----------------------------------------------------------------------
+
+  onChange(fn: () => void): () => void {
+    this.listeners.add(fn);
+    return () => this.listeners.delete(fn);
+  }
+  private notify(): void {
+    // The queue entries are mutated in place (their identity is what a retry resends); the
+    // surfaces get fresh copies so a keyed row or a `find` never holds a stale object.
+    this.saves = this.records.map(({ settle: _settle, ...rest }) => rest as SaveRecord);
+    for (const fn of this.listeners) fn();
+  }
+
+  // --- Scope -------------------------------------------------------------------------------
+
+  /// Point the session at a channel. Everything scoped to the previous one is dropped, including
+  /// pending saves: their identity belongs to that channel and a retry there needs its scope back.
+  setScope(scope: StudioScope | null): void {
+    if (this.scope && scope && this.scope.server === scope.server && this.scope.channel === scope.channel) return;
+    if (!this.scope && !scope) return;
+    this.clearScoped();
+    this.scope = scope;
+    this.generation++;
+    this.notify();
+    if (scope) this.invalidate({ index: true });
+  }
+
+  /// Lock or session change: forget everything, including cached pixels and unsaved work.
+  reset(): void {
+    this.clearScoped();
+    this.scope = null;
+    this.generation++;
+    this.blobs.clear();
+    this.cacheBytes = 0;
+    this.notify();
+  }
+
+  private clearScoped(): void {
+    this.mediaEpoch++;
+    this.index = null;
+    this.indexModel = null;
+    this.indexLoading = false;
+    this.indexError = "";
+    this.doc = null;
+    this.indexOverlay = null;
+    this.overlay = null;
+    this.known.clear();
+    this.views.clear();
+    this.overlayCopies.clear();
+    for (const s of this.records) s.settle?.("discarded");
+    this.records.length = 0;
+    this.saving = 0;
+    this.receivePaused = false;
+    // Queued jobs are dropped; started ones keep their slot until they actually finish.
+    for (const [key, job] of this.jobs) {
+      if (job.started) continue;
+      for (const w of job.waiters) w.resolve(null);
+      this.jobs.delete(key);
+    }
+    this.unavailable.clear();
+    this.failed.clear();
+    this.invalid.clear();
+    this.recoveryTarget = null;
+    this.recoveryFamily = "index";
+    this.recoveryListing = null;
+    this.recoveryLoading = false;
+    this.recoveryError = "";
+    this.versions.clear();
+    this.exports.clear();
+    this.recoveryRun = null;
+    this.activeRun = null;
+    this.pointer = { status: "idle", error: "", result: null };
+    this.pendingIndex = false;
+    this.pendingObjects.clear();
+    this.pendingRecovery = false;
+    if (this.cancelFlush) { this.cancelFlush(); this.cancelFlush = null; }
+  }
+
+  private current(gen: number): boolean {
+    return gen === this.generation && this.scope !== null;
+  }
+  private target(): StudioScope {
+    if (!this.scope) throw new StudioNativeError("no channel selected");
+    return this.scope;
+  }
+
+  /** Kind comes from the selected/pinned Index target or retained request, never operation-body guessing. */
+  objectKind(object: Hex32): StudioObjectKind {
+    if (this.doc?.object === object) return this.doc.objectKind;
+    const copy = this.overlayCopyFor(object);
+    if (copy) return copy.objectKind ?? "flipnote";
+    return this.retainedObjectKind(object) ?? this.views.get(object)?.view.content.kind
+      ?? (this.recoveryTarget === object && this.recoveryFamily !== "index" ? this.recoveryFamily : undefined)
+      ?? [...(this.indexModel?.entries ?? []), ...(this.indexModel?.overflow ?? [])].find((entry) => entry.id === object)?.kind ?? "flipnote";
+  }
+
+  private retainedObjectKind(object: Hex32): StudioObjectKind | undefined {
+    const retained = this.records.find((save) => save.kind !== "applyIndex" && save.object === object);
+    if (retained?.kind === "apply" || retained?.kind === "create") return retained.request.objectKind ?? "flipnote";
+    if (retained?.kind === "overlayApply" || retained?.kind === "recoveryApply") return retained.objectKind ?? "flipnote";
+    return retained?.kind === "frame" ? "flipnote" : undefined;
+  }
+
+  private objectTarget(object: Hex32 | null): RecoveryTargetArgs {
+    return object === null ? { ...this.target(), object } : { ...this.target(), object,
+      ...(this.objectKind(object) === "score" ? { objectKind: "score" as const } : {}) };
+  }
+
+  // --- Events --------------------------------------------------------------------------------
+
+  /// Install the three native listeners once; the returned function removes them.
+  async attach(): Promise<() => void> {
+    const handles = await Promise.all([
+      this.ipc.listen<unknown>(STUDIO_UPDATED_EVENT, (e) => this.onStudioUpdated(e.payload)),
+      this.ipc.listen<unknown>(STUDIO_RECEIVE_PAUSED_EVENT, (e) => this.onReceivePaused(e.payload)),
+      this.ipc.listen<unknown>(SETTLEMENT_CHANGED_EVENT, (e) => this.onSettlementChanged(e.payload)),
+    ]);
+    this.unlisten.push(...handles);
+    return () => this.detach();
+  }
+  detach(): void {
+    for (const u of this.unlisten) u();
+    this.unlisten = [];
+  }
+
+  onStudioUpdated(payload: unknown): void {
+    let ev;
+    try { ev = parseStudioUpdated(payload); } catch { return; }
+    if (!this.scope || ev.server !== this.scope.server || ev.channel !== this.scope.channel) return;
+    // Every event invalidates the Index; a named object additionally invalidates that object.
+    // A blob that was unavailable or failed may have arrived with it: let the next request try.
+    if (ev.object) this.releaseTransientFor(ev.object);
+    this.invalidate({ index: true, objects: ev.object ? [ev.object] : [] });
+  }
+  onReceivePaused(payload: unknown): void {
+    let ev;
+    try { ev = parseReceivePaused(payload); } catch { return; }
+    if (!this.scope || ev.server !== this.scope.server) return;
+    this.receivePaused = true;
+    this.notify();
+  }
+  onSettlementChanged(payload: unknown): void {
+    let ev;
+    try { ev = parseSettlementChanged(payload); } catch { return; }
+    if (!this.scope || ev.server !== this.scope.server || ev.channel !== this.scope.channel) return;
+    // Phase and recovery observations are independent, and neither is a projection: re-read
+    // the affected document's actual view and the actual recovery listing.
+    const objects = ev.object ? [ev.object] : [];
+    this.invalidate({ index: ev.object === null, objects, recovery: ev.object === this.recoveryTarget });
+  }
+
+  // --- Coalesced refresh ---------------------------------------------------------------------
+
+  invalidate(what: { index?: boolean; objects?: Hex32[]; recovery?: boolean }): void {
+    if (what.objects?.length) { this.mediaEpoch++; this.notify(); }
+    if (what.index) this.pendingIndex = true;
+    for (const o of what.objects ?? []) this.pendingObjects.add(o);
+    if (what.recovery) this.pendingRecovery = true;
+    if (!this.cancelFlush) this.cancelFlush = this.schedule(() => this.flush(), REFRESH_COALESCE_MS);
+  }
+
+  /// Run the coalesced re-reads now (the timer calls this; tests call it directly).
+  flush(): void {
+    if (this.cancelFlush) { this.cancelFlush(); this.cancelFlush = null; }
+    if (!this.scope) { this.pendingIndex = false; this.pendingObjects.clear(); this.pendingRecovery = false; return; }
+    if (this.pendingIndex) { this.pendingIndex = false; void this.refreshIndex(); }
+    for (const o of this.pendingObjects) {
+      if (this.doc?.object === o) void this.refreshDoc(o);
+      else this.known.delete(o); // its trust state is no longer known until read again
+    }
+    this.pendingObjects.clear();
+    if (this.pendingRecovery) { this.pendingRecovery = false; void this.refreshRecovery(); }
+  }
+
+  async refreshIndex(): Promise<void> {
+    const gen = this.generation;
+    const req = ++this.indexReq;
+    const target = this.target();
+    this.indexLoading = true;
+    this.notify();
+    try {
+      const view = await studioList(this.ipc, target);
+      if (!this.current(gen) || req !== this.indexReq) return;
+      this.index = view;
+      this.indexModel = indexModel(view.content);
+      this.indexError = "";
+      this.receivePaused = false; // a successful explicit read resumes the receiver
+      this.noteEpoch(null, view.epochId);
+    } catch (e) {
+      if (!this.current(gen) || req !== this.indexReq) return;
+      this.indexError = reason(e);
+    } finally {
+      if (this.current(gen) && req === this.indexReq) { this.indexLoading = false; this.notify(); }
+    }
+    if (this.current(gen) && req === this.indexReq) await this.refreshIndexOverlay();
+  }
+
+  private async refreshIndexOverlay(): Promise<void> {
+    const gen = this.generation;
+    const req = ++this.indexOverlayReq;
+    const target = { ...this.target(), object: null };
+    this.indexOverlay = this.indexOverlay
+      ? { ...this.indexOverlay, loading: true }
+      : { object: null, inspection: null, lifecycle: null, archive: null, exported: null, copy: this.overlayCopyFor(null), loading: true, error: "" };
+    this.notify();
+    try {
+      const lifecycle = await overlayLifecycle(this.ipc, target);
+      const inspection = await overlayRead(this.ipc, target);
+      const archive = lifecycle.archive ? await overlayArchiveRead(this.ipc, target) : null;
+      if (!this.current(gen) || req !== this.indexOverlayReq) return;
+      this.indexOverlay = {
+        object: null,
+        lifecycle,
+        inspection,
+        archive,
+        exported: this.indexOverlay?.exported ?? null,
+        copy: this.overlayCopyFor(null),
+        loading: false,
+        error: "",
+      };
+      if (inspection.kind === "local-draft" && inspection.content) {
+        if (inspection.content.kind !== "index") throw new StudioNativeError("local draft has Flipnote content for the Index target");
+        this.indexModel = indexModel(inspection.content);
+      } else if (this.index) {
+        this.indexModel = indexModel(this.index.content);
+      }
+      this.notify();
+    } catch (e) {
+      if (!this.current(gen) || req !== this.indexOverlayReq) return;
+      this.indexOverlay = { ...(this.indexOverlay ?? { object: null, inspection: null, lifecycle: null, archive: null, exported: null, copy: this.overlayCopyFor(null) }), object: null, copy: this.overlayCopyFor(null), loading: false, error: reason(e) };
+      this.notify();
+    }
+  }
+
+  /// Open (or re-read) a flipnote. Opening a different object drops the previous document but
+  /// keeps its pending saves: they are addressed by object and finish or fail on their own.
+  open(object: Hex32 | null, opts: { read?: boolean; objectKind?: StudioObjectKind } = {}): void {
+    if (this.doc?.object !== object) this.mediaEpoch++;
+    if (object === null) {
+      if (this.doc || this.overlay) { this.doc = null; this.overlay = null; this.notify(); }
+      return;
+    }
+    const objectKind = opts.objectKind ?? this.objectKind(object);
+    const retainedKind = this.retainedObjectKind(object);
+    const retainedCopy = this.overlayCopyFor(object);
+    const knownKind = this.views.get(object)?.view.content.kind
+      ?? retainedKind
+      ?? (retainedCopy ? retainedCopy.objectKind ?? "flipnote" : undefined)
+      ?? (this.overlay?.object === object && this.overlay.inspection?.kind === "local-draft" && this.overlay.inspection.content?.kind !== "index" ? this.overlay.inspection.content?.kind : undefined)
+      ?? (this.overlay?.object === object && this.overlay.copy ? this.overlay.copy.objectKind ?? "flipnote" : undefined)
+      ?? [...(this.indexModel?.entries ?? []), ...(this.indexModel?.overflow ?? [])].find((entry) => entry.id === object)?.kind;
+    if (knownKind !== undefined && knownKind !== objectKind) throw new StudioNativeError("an object's known immutable family cannot be changed");
+    if (this.doc?.object !== object || this.doc.objectKind !== objectKind) {
+      this.docReq.set(object, (this.docReq.get(object) ?? 0) + 1);
+      this.overlayReq.set(object, (this.overlayReq.get(object) ?? 0) + 1);
+      if (this.recoveryTarget === object && this.recoveryFamily !== objectKind) {
+        this.recoveryFamily = objectKind;
+        this.recoveryReq++; this.activeRun = null; this.recoveryRun = null; this.recoveryListing = null;
+        this.recoveryError = ""; this.recoveryLoading = false;
+        this.versions.clear(); this.exports.clear();
+        this.pointer = { status: "idle", error: "", result: null };
+      }
+      this.doc = { object, objectKind, view: null, model: null, score: null, loading: opts.read === false, absent: false, error: "" };
+      this.overlay = { object, inspection: null, lifecycle: null, archive: null, exported: null, copy: this.overlayCopyFor(object), loading: opts.read !== false, error: "" };
+      this.notify();
+    }
+    // A just-created object is filled by its Create result; reading it first would only
+    // report the absence that preceded the save.
+    if (opts.read !== false) void this.refreshDoc(object);
+  }
+
+  async refreshDoc(object: Hex32): Promise<void> {
+    const gen = this.generation;
+    const req = (this.docReq.get(object) ?? 0) + 1;
+    this.docReq.set(object, req);
+    const target = this.target();
+    this.patchDoc(object, { loading: true });
+    try {
+      const objectKind = this.objectKind(object);
+      const view = objectKind === "score" ? await studioRead(this.ipc, target, object, "score") : await studioRead(this.ipc, target, object);
+      if (!this.current(gen) || req !== this.docReq.get(object)) return;
+      const model = view?.content.kind === "flipnote" ? flipnoteModel(view.content) : null;
+      const score = view?.content.kind === "score" ? scoreModel(view.content) : null;
+      if (view) {
+        this.known.set(object, { awaiting: view.awaitingTenureReceipt, phase: view.phase, epoch: view.epoch });
+        this.rememberView(object, view, model, score);
+        this.noteEpoch(object, view.epochId);
+      } else { this.known.delete(object); this.views.delete(object); }
+      this.receivePaused = false;
+      this.patchDoc(object, { view, model, score, absent: view === null, error: "", loading: false });
+    } catch (e) {
+      if (!this.current(gen) || req !== this.docReq.get(object)) return;
+      this.patchDoc(object, { error: reason(e), loading: false });
+    }
+    // `studio_read` and `studio_overlay_read` share the native latest-view fence. Awaiting this
+    // second read, rather than starting both from the surface, ensures neither legitimate result
+    // suppresses the other merely because the renderer raced them.
+    if (this.current(gen) && req === this.docReq.get(object) && this.doc?.object === object) {
+      await this.refreshOverlay(object);
+    }
+  }
+
+  /// Replace the open document's state (never mutate it) when it is this object.
+  private patchDoc(object: Hex32, patch: Partial<DocState>): void {
+    if (this.doc?.object !== object) return;
+    if (patch.view && patch.view.content.kind !== this.doc.objectKind) return;
+    this.doc = { ...this.doc, ...patch };
+    this.notify();
+  }
+
+  // --- Retained local draft -----------------------------------------------------------------
+
+  /// Reconcile the live branch, lifecycle terminal and optional archive as one UI observation.
+  /// These are deliberately not inferred from the ordinary view: a branch may outlive a source,
+  /// and a terminal disposition must remain visible instead of collapsing to "absent".
+  async refreshOverlay(object: Hex32): Promise<void> {
+    const gen = this.generation;
+    const req = (this.overlayReq.get(object) ?? 0) + 1;
+    this.overlayReq.set(object, req);
+    const target = this.objectTarget(object);
+    const objectKind = target.objectKind ?? "flipnote";
+    const live = () => this.current(gen) && req === this.overlayReq.get(object) && this.doc?.object === object && this.doc.objectKind === objectKind;
+    if (this.overlay?.object !== object) {
+      this.overlay = { object, inspection: null, lifecycle: null, archive: null, exported: null, copy: this.overlayCopyFor(object), loading: true, error: "" };
+    } else {
+      this.overlay = { ...this.overlay, loading: true };
+    }
+    this.notify();
+    try {
+      // The lifecycle row tells us whether an archive exists. Read it before the branch view so
+      // the latter remains the final latest-view operation at native delivery.
+      const lifecycle = await overlayLifecycle(this.ipc, target);
+      if (!live()) return;
+      const inspection = await overlayRead(this.ipc, target);
+      if (!live()) return;
+      const archive = lifecycle.archive ? await overlayArchiveRead(this.ipc, target) : null;
+      if (!live()) return;
+      this.overlay = {
+        object,
+        lifecycle,
+        inspection,
+        archive,
+        exported: this.overlay?.object === object ? this.overlay.exported : null,
+        copy: this.overlayCopyFor(object),
+        loading: false,
+        error: "",
+      };
+      // A replayable local draft is what the member most recently saved. Display that projection
+      // while keeping the ordinary preview/source view untouched for trust and routing decisions.
+      if (inspection.kind === "local-draft" && inspection.content) {
+        if (inspection.content.kind !== this.objectKind(object)) throw new StudioNativeError("local draft has the wrong object family");
+        this.patchDoc(object, { model: inspection.content.kind === "flipnote" ? flipnoteModel(inspection.content) : null,
+          score: inspection.content.kind === "score" ? scoreModel(inspection.content) : null });
+      } else if (this.doc?.object === object) {
+        const content = this.doc.view?.content;
+        this.patchDoc(object, { model: content?.kind === "flipnote" ? flipnoteModel(content) : null,
+          score: content?.kind === "score" ? scoreModel(content) : null });
+      }
+      this.notify();
+    } catch (e) {
+      if (!this.current(gen) || req !== this.overlayReq.get(object) || this.doc?.object !== object || this.doc.objectKind !== objectKind) return;
+      this.overlay = { ...(this.overlay ?? { object, inspection: null, lifecycle: null, archive: null, exported: null, copy: this.overlayCopyFor(object) }), object, copy: this.overlayCopyFor(object), loading: false, error: reason(e) };
+      this.notify();
+    }
+  }
+
+  private overlayFor(object: Hex32 | null): OverlayState | null {
+    return object === null ? this.indexOverlay : this.overlay?.object === object ? this.overlay : null;
+  }
+
+  private overlayIsCurrent(object: Hex32 | null): boolean {
+    return object === null
+      ? this.indexOverlay?.object === null
+      : this.doc?.object === object && this.overlay?.object === object;
+  }
+
+  private replaceOverlay(object: Hex32 | null, state: OverlayState): void {
+    if (object === null) this.indexOverlay = state;
+    else if (this.doc?.object === object) this.overlay = state;
+  }
+
+  private overlayCopyKey(object: Hex32 | null): string {
+    return object ?? "index";
+  }
+
+  private overlayCopyFor(object: Hex32 | null): OverlayCopyRun | null {
+    return this.overlayCopies.get(this.overlayCopyKey(object)) ?? null;
+  }
+
+  private retainOverlayCopy(object: Hex32 | null, run: OverlayCopyRun): void {
+    const key = this.overlayCopyKey(object);
+    const prior = this.overlayCopies.get(key);
+    if (prior && (prior.status === "previewing" || prior.status === "applying" || prior.status === "refused" || prior.status === "uncertain")) {
+      throw new StudioNativeError("the previous local draft copy is unresolved; retry it before starting another");
+    }
+    if (!prior && this.overlayCopies.size >= RETAINED_OVERLAY_COPIES) {
+      const disposable = [...this.overlayCopies].find(([, copy]) =>
+        copy.status !== "previewing" && copy.status !== "applying" && copy.status !== "refused" && copy.status !== "uncertain");
+      if (disposable) this.overlayCopies.delete(disposable[0]);
+    }
+    if (!prior && this.overlayCopies.size >= RETAINED_OVERLAY_COPIES) {
+      throw new StudioNativeError("too many unresolved local draft copies; resolve one before starting another");
+    }
+    this.overlayCopies.delete(key);
+    this.overlayCopies.set(key, run);
+  }
+
+  private publishOverlayCopy(object: Hex32 | null, run: OverlayCopyRun): void {
+    if (this.overlayCopyFor(object) !== run) return;
+    const overlay = this.overlayFor(object);
+    if (overlay) this.replaceOverlay(object, { ...overlay, copy: run });
+    this.notify();
+  }
+
+  private async refreshOverlayTarget(object: Hex32 | null): Promise<void> {
+    if (object === null) await this.refreshIndexOverlay();
+    else await this.refreshOverlay(object);
+  }
+
+  async exportOverlay(object: Hex32 | null): Promise<OverlayArchive | null> {
+    const gen = this.generation;
+    const exported = await overlayExport(this.ipc, this.objectTarget(object));
+    if (!this.current(gen) || !this.overlayIsCurrent(object)) return null;
+    const overlay = this.overlayFor(object);
+    if (overlay) this.replaceOverlay(object, { ...overlay, exported, error: "" });
+    this.notify();
+    return exported;
+  }
+
+  async archiveOverlay(object: Hex32 | null): Promise<void> {
+    const gen = this.generation;
+    try {
+      await overlayArchive(this.ipc, this.objectTarget(object));
+    } finally {
+      // Archive may have committed even when final delivery failed. Reconcile instead of
+      // resending a write whose outcome is explicitly uncertain.
+      if (this.current(gen) && this.overlayIsCurrent(object)) await this.refreshOverlayTarget(object);
+    }
+  }
+
+  async exportOverlayArchive(object: Hex32 | null): Promise<OverlayArchive | null> {
+    const gen = this.generation;
+    const exported = await overlayArchiveExport(this.ipc, this.objectTarget(object));
+    if (!this.current(gen) || !this.overlayIsCurrent(object)) return null;
+    const overlay = this.overlayFor(object);
+    if (overlay) this.replaceOverlay(object, { ...overlay, exported, error: "" });
+    this.notify();
+    return exported;
+  }
+
+  async releaseOverlayArchive(object: Hex32 | null): Promise<void> {
+    const archive = this.overlayFor(object)?.archive?.archive;
+    if (!archive) throw new StudioNativeError("no retained draft archive to release");
+    const gen = this.generation;
+    try {
+      await overlayArchiveRelease(this.ipc, this.objectTarget(object), archive, "release-local-archive");
+    } finally {
+      if (this.current(gen) && this.overlayIsCurrent(object)) await this.refreshOverlayTarget(object);
+    }
+  }
+
+  async disposeOverlay(object: Hex32 | null, mode: "preserve" | "discard"): Promise<void> {
+    const branch = this.overlayFor(object)?.lifecycle?.branch;
+    if (!branch) throw new StudioNativeError("no live local draft to dispose");
+    const disposal: OverlayDisposalRequest = {
+      branch: branch.branch,
+      content: branch.content,
+      accepted: branch.accepted,
+      mode: mode === "preserve" ? { kind: "preserve" } : { kind: "discard", confirmation: "destroy-local-draft" },
+    };
+    const gen = this.generation;
+    try {
+      await overlayDispose(this.ipc, this.objectTarget(object), disposal);
+    } finally {
+      if (this.current(gen) && this.overlayIsCurrent(object)) await this.refreshOverlayTarget(object);
+    }
+  }
+
+  overlayChoices(mode: RecoveryMode, object: Hex32 | null = this.overlay?.object ?? null): { choice: RecoveryChoice; label: string }[] {
+    const inspection = this.overlayFor(object)?.inspection;
+    return inspection?.kind === "local-draft" && inspection.content
+      ? choicesForContent(inspection.content, mode)
+      : [];
+  }
+
+  /// Preview and apply one retained value into the current ordinary document. The preview body,
+  /// projection fingerprint and nonce are frozen before Apply; if delivery fails, `retryOverlayCopy`
+  /// resends that exact edit and never asks for a different preview under the same UI action.
+  async copyOverlayChoice(object: Hex32 | null, choice: RecoveryChoice, label: string, mode: RecoveryMode): Promise<void> {
+    if (!this.overlayIsCurrent(object)) throw new StudioNativeError("local draft is not open");
+    const gen = this.generation;
+    const source = this.objectTarget(object);
+    const destination = object === null ? { channel: source.channel } : { channel: source.channel, object,
+      ...(source.objectKind === "score" ? { objectKind: "score" as const } : {}) };
+    const run: OverlayCopyRun = {
+      ...(source.objectKind === "score" ? { objectKind: "score" as const } : {}),
+      choice, label, mode, status: "previewing", error: "", mayHaveCommitted: false, preview: null, edit: null, applied: null,
+    };
+    this.retainOverlayCopy(object, run);
+    this.publishOverlayCopy(object, run);
+    try {
+      const inspection = this.overlayFor(object)?.inspection;
+      const preview = await overlayCopyPreview(this.ipc, source, destination, choice, mode);
+      if (!this.current(gen) || this.overlayCopyFor(object) !== run) return;
+      run.preview = preview;
+      if (preview.disposition !== "ready" || preview.body === null) {
+        run.status = preview.disposition;
+        this.publishOverlayCopy(object, run);
+        return;
+      }
+      if (choice.kind === "soundRecord") {
+        if (inspection?.kind !== "local-draft" || !inspection.content) throw new StudioNativeError("the local sound draft cannot be rebuilt");
+        await this.holdRecoveryExport(inspection.content, choice, preview.body, source.server, inspection.group,
+          () => this.current(gen) && this.overlayCopyFor(object) === run && this.overlayFor(object)?.inspection === inspection);
+        if (!this.current(gen) || this.overlayCopyFor(object) !== run) return;
+      }
+      run.edit = {
+        destination,
+        choice,
+        mode,
+        epochId: preview.epochId,
+        expectedProjection: preview.expectedProjection,
+        nonce: this.newId(),
+        body: preview.body,
+      };
+      await this.applyOverlayCopy(object, run, gen);
+    } catch (e) {
+      if (!this.current(gen) || this.overlayCopyFor(object) !== run) return;
+      if (run.edit) run.mayHaveCommitted = true;
+      run.status = run.mayHaveCommitted ? "uncertain" : "error";
+      run.error = reason(e);
+      this.publishOverlayCopy(object, run);
+    }
+  }
+
+  /// Start a deliberately new Copy decision after C4 proved that the frozen proposal wrote
+  /// nothing. This is not an exact retry: it obtains a fresh preview and later mints a fresh nonce.
+  async repreviewOverlayCopy(object: Hex32 | null): Promise<void> {
+    const run = this.overlayCopyFor(object);
+    if (!run || run.status !== "refused" || run.mayHaveCommitted) return;
+    if (!this.overlayIsCurrent(object)) throw new StudioNativeError("local draft is not open");
+    this.overlayCopies.delete(this.overlayCopyKey(object));
+    await this.copyOverlayChoice(object, run.choice, run.label, run.mode);
+  }
+
+  async retryOverlayCopy(object: Hex32 | null): Promise<void> {
+    const run = this.overlayCopyFor(object);
+    if (!run?.edit || run.status !== "uncertain") return;
+    const gen = this.generation;
+    try {
+      await this.applyOverlayCopy(object, run, gen);
+    } catch (e) {
+      if (!this.current(gen) || this.overlayCopyFor(object) !== run) return;
+      run.mayHaveCommitted = true;
+      run.status = "uncertain";
+      run.error = reason(e);
+      this.publishOverlayCopy(object, run);
+    }
+  }
+
+  /// Cancel a Copy only after C4 conclusively refused its exact proposal without writing it.
+  /// This is intentionally separate from `forgetOverlayCopy`: an uncertain request may have
+  /// committed and needs explicit stop-tracking consent, while a refused request has no native
+  /// state to undo. The expected nonce fences a delayed click from cancelling a replacement run.
+  cancelRefusedOverlayCopy(object: Hex32 | null, expectedNonce: string): boolean {
+    const key = this.overlayCopyKey(object);
+    const run = this.overlayCopies.get(key);
+    if (!run || run.status !== "refused" || run.mayHaveCommitted || run.edit?.nonce !== expectedNonce) return false;
+    this.overlayCopies.delete(key);
+    const overlay = this.overlayFor(object);
+    if (overlay?.copy === run) this.replaceOverlay(object, { ...overlay, copy: null });
+    this.notify();
+    return true;
+  }
+
+  /// Forget only the frontend's retained identity for an ambiguous Copy. This deliberately sends
+  /// no native command: the operation may already have landed, and forgetting it neither undoes
+  /// nor disproves that write. The explicit UI confirmation is the user's decision to stop exact
+  /// retries and accept that uncertainty before this bounded slot can be reused.
+  forgetOverlayCopy(object: Hex32 | null, expectedNonce: string): boolean {
+    const key = this.overlayCopyKey(object);
+    const run = this.overlayCopies.get(key);
+    // Bind the confirmation to the exact operation the user saw. A late DOM event must not forget
+    // a different uncertain run that replaced it under the same document key.
+    if (!run || run.status !== "uncertain" || run.edit?.nonce !== expectedNonce) return false;
+    this.overlayCopies.delete(key);
+    const overlay = this.overlayFor(object);
+    if (overlay?.copy === run) this.replaceOverlay(object, { ...overlay, copy: null });
+    this.notify();
+    return true;
+  }
+
+  private async applyOverlayCopy(object: Hex32 | null, run: OverlayCopyRun, gen: number): Promise<void> {
+    if (!run.edit) throw new StudioNativeError("local draft copy has no prepared edit");
+    run.status = "applying";
+    run.error = "";
+    this.publishOverlayCopy(object, run);
+    const applied = await overlayCopyApply(this.ipc, { ...this.target(), object,
+      ...(run.objectKind === "score" ? { objectKind: "score" as const } : {}) }, run.edit);
+    if (!this.current(gen) || this.overlayCopyFor(object) !== run) return;
+    if (applied.kind === "overlayCopyRefused") {
+      if (run.mayHaveCommitted) {
+        run.status = "uncertain";
+        run.error = "the current proposal was refused before writing, but an earlier delivery may already have committed; retry the exact request or discard it";
+      } else {
+        run.status = "refused";
+        run.error = "the destination changed after preview; preview again or cancel this copy";
+      }
+      this.publishOverlayCopy(object, run);
+      return;
+    }
+    run.status = "applied";
+    run.applied = applied;
+    this.publishOverlayCopy(object, run);
+    if (this.overlayIsCurrent(object)) {
+      if (object === null) await this.refreshIndex();
+      else await this.refreshDoc(object);
+    }
+  }
+
+  /// A read carrying a different epoch than an uncertain save used marks that save.
+  private noteEpoch(object: Hex32 | null, epochId: Hex32): void {
+    for (const s of this.records) {
+      if (s.status !== "uncertain") continue;
+      const used = usedEpoch(s);
+      const scope = s.kind === "applyIndex" ? null : s.object;
+      if (used && scope === object && used !== epochId) s.epochChanged = true;
+    }
+  }
+
+  // --- Edits ---------------------------------------------------------------------------------
+
+  /// The current editable epoch for a document, or a reason there is none.
+  editableEpoch(object: Hex32 | null): { epochId: Hex32 } | { refused: string } {
+    const view = object === null ? this.index : this.doc?.object === object ? this.doc.view : this.views.get(object)?.view ?? null;
+    if (!view) return { refused: object === null ? "the channel index is not loaded" : "the flipnote is not loaded" };
+    if (view.awaitingTenureReceipt) return { refused: "read-only preview: the current owner has not confirmed this document's history" };
+    if (view.phase === "fault") return { refused: "history fault: conflicting owner receipts; this document is read-only" };
+    if (view.phase === "closing") return { refused: "rotating: durable edits resume when the owner settles this rotation" };
+    return { epochId: view.epochId };
+  }
+
+  canEdit(object: Hex32 | null): boolean {
+    return !("refused" in this.editRoute(object));
+  }
+
+  /// Why the editor must be locked. Awaiting-tenure content is intentionally not a refusal now:
+  /// edits are saved into a bounded local-only branch through the ticketed route, while the
+  /// preview itself remains non-authoritative and cannot supply an ordinary epoch.
+  editRefusal(object: Hex32 | null): string {
+    const route = this.editRoute(object);
+    return "refused" in route ? route.refused : "";
+  }
+
+  private editRoute(object: Hex32 | null): { kind: "ordinary"; epochId: Hex32 } | { kind: "unconfirmed" } | { refused: string } {
+    const view = object === null ? this.index : this.doc?.object === object ? this.doc.view : this.views.get(object)?.view ?? null;
+    if (!view) return { refused: object === null ? "the channel index is not loaded" : "the flipnote is not loaded" };
+    if (view.awaitingTenureReceipt) return { kind: "unconfirmed" };
+    if (view.phase === "fault") return { refused: "history fault: conflicting owner receipts; this document is read-only" };
+    if (view.phase === "closing") return { refused: "rotating: durable edits resume when the owner settles this rotation" };
+    return { kind: "ordinary", epochId: view.epochId };
+  }
+
+  createFlipnote(title: string): Hex32 {
+    return this.createObject(title, "flipnote");
+  }
+
+  createScore(title: string): Hex32 {
+    return this.createObject(title, "score");
+  }
+
+  private createObject(title: string, objectKind: StudioObjectKind): Hex32 {
+    // Create is a coordinated Index + new-document transaction, not one domain operation. The
+    // Unconfirmed overlay route deliberately accepts only a single target operation, so a preview
+    // cannot make Create appear atomic by saving only half of it.
+    const epoch = this.editableEpoch(null);
+    if (!("epochId" in epoch)) throw new StudioNativeError(epoch.refused);
+    const object = this.newId();
+    this.enqueue({ kind: "create", object, label: `new ${objectKind} "${title}"`, request: { object, nonce: this.newId(), title, createdAtMs: this.now(),
+      ...(objectKind === "score" ? { objectKind } : {}) } });
+    return object;
+  }
+
+  saveFrame(object: Hex32, frame: Hex32, pix: Uint8Array): void {
+    if (this.objectKind(object) !== "flipnote") throw new StudioNativeError("pixels require a Flipnote target");
+    const route = this.editRoute(object);
+    const routeKind = "refused" in route && this.records.some((s) => s.kind === "create" && s.object === object && (s.request.objectKind ?? "flipnote") === "flipnote")
+      ? "ordinary"
+      : "refused" in route ? null : route.kind;
+    if (!routeKind) throw new StudioNativeError((route as { refused: string }).refused);
+    // A newer raster coalesces only into the lane's TAIL when that is a save of this frame with
+    // no apply identity yet (nothing of it can have committed). Anything else queued after it
+    // in this lane (another frame, a chosen conflict value, an insert) keeps its place: the new
+    // pixels are appended behind it, never moved ahead of it.
+    let tail: SaveEntry | undefined;
+    for (const s of this.records) if (laneOf(s) === object) tail = s;
+    // A forced record is an explicit conflict choice: never fold new strokes into it.
+    const prior = tail && tail.kind === "frame" && tail.frame === frame && tail.route === routeKind && !tail.force && tail.status !== "inflight" && tail.apply === null && tail.overlay === null ? tail : undefined;
+    if (prior && prior.kind === "frame") {
+      prior.pix = pix;
+      prior.published = null;
+      prior.error = "";
+      prior.status = "queued";
+      this.notify();
+      this.pump();
+      return;
+    }
+    this.enqueue({ kind: "frame", object, frame, op: "replace", after: null, pix, published: null, route: routeKind, apply: null, overlay: null, overlayRetry: null, label: "frame pixels" });
+  }
+
+  insertFrame(object: Hex32, after: Hex32 | null, pix: Uint8Array): Hex32 {
+    if (this.objectKind(object) !== "flipnote") throw new StudioNativeError("frames require a Flipnote target");
+    const route = this.editRoute(object);
+    const routeKind = "refused" in route && this.records.some((s) => s.kind === "create" && s.object === object && (s.request.objectKind ?? "flipnote") === "flipnote")
+      ? "ordinary"
+      : "refused" in route ? null : route.kind;
+    if (!routeKind) throw new StudioNativeError((route as { refused: string }).refused);
+    const frame = this.newId();
+    this.enqueue({ kind: "frame", object, frame, op: "insert", after, pix, published: null, route: routeKind, apply: null, overlay: null, overlayRetry: null, label: "new frame" });
+    return frame;
+  }
+
+  removeFrame(object: Hex32, frame: Hex32): void {
+    if (this.objectKind(object) !== "flipnote") throw new StudioNativeError("frames require a Flipnote target");
+    this.applyOp(object, { op: "remove_frame", frame }, "remove frame");
+  }
+
+  setTitle(object: Hex32, title: string): void {
+    this.applyOp(object, { op: "set_header", field: "title", value: title }, "title");
+    if (this.indexModel?.entries.some((e) => e.id === object) || this.indexModel?.overflow.some((e) => e.id === object)) {
+      this.applyIndexOp({ op: "set_title", object, title }, object, "index title");
+    }
+  }
+
+  setFps(object: Hex32, fps: number): void {
+    if (this.objectKind(object) !== "flipnote") throw new StudioNativeError("fps requires a Flipnote target");
+    this.applyOp(object, { op: "set_header", field: "fps", value: fps }, "fps");
+  }
+
+  setScoreHeader(object: Hex32, field: "bpm" | "bpb" | "steps", value: number): void {
+    this.scoreOp(object, { op: "set_header", field, value }, `score ${field}`);
+  }
+  setScoreCell(object: Hex32, step: number, row: number, value: ScoreCell): void {
+    this.scoreOp(object, { op: "set_cell", step, row, value }, `score cell ${step}:${row}`);
+  }
+  clearScoreCell(object: Hex32, step: number, row: number): void {
+    this.scoreOp(object, { op: "clear_cell", step, row }, `clear score cell ${step}:${row}`);
+  }
+  setScorePatch(object: Hex32, patch: Hex64, descriptor: unknown): void {
+    const checked = validateJamPatch(descriptor);
+    if (!checked.ok) throw new StudioNativeError(checked.error);
+    this.scoreOp(object, { op: "set_patch", patch, descriptor: checked.patch }, "score recipe");
+  }
+  removeScorePatch(object: Hex32, patch: Hex64): void {
+    this.scoreOp(object, { op: "remove_patch", patch }, "remove score recipe");
+  }
+  private scoreOp(object: Hex32, op: ScoreOp, label: string): void {
+    if (this.objectKind(object) !== "score") throw new StudioNativeError("score edit requires a pinned Score target");
+    this.applyOp(object, op, label);
+  }
+
+  /** A component emits typed Score operations; family and exact retry identity stay session-owned. */
+  applyScoreOp(object: Hex32, op: ScoreOp): void {
+    if (this.objectKind(object) !== "score") throw new StudioNativeError("score edit requires a pinned Score target");
+    if (op.op === "set_header" && op.field === "title") this.setTitle(object, op.value as string);
+    else this.scoreOp(object, op, "score edit");
+  }
+
+  setSoundPatch(object: Hex32, patch: Hex64, descriptor: JamPatch): void {
+    if (this.objectKind(object) !== "flipnote") throw new StudioNativeError("sound requires a Flipnote target");
+    const checked = validateJamPatch(descriptor);
+    if (!checked.ok) throw new StudioNativeError(checked.error);
+    this.applyOp(object, { op: "set_patch", patch, descriptor: checked.patch }, "sound recipe");
+  }
+  removeSoundPatch(object: Hex32, patch: Hex64): void {
+    if (this.objectKind(object) !== "flipnote") throw new StudioNativeError("sound requires a Flipnote target");
+    this.applyOp(object, { op: "remove_patch", patch }, "remove sound recipe");
+  }
+  setSfx(object: Hex32, input: { id: Hex32; frame: Hex32; patch: Hex64; note: number; durationMs: number }): void {
+    if (this.objectKind(object) !== "flipnote") throw new StudioNativeError("SFX requires a Flipnote target");
+    if (!Number.isInteger(input.note) || input.note < 0 || input.note > 127 || !Number.isInteger(input.durationMs) || input.durationMs < 1 || input.durationMs > 600_000) {
+      throw new StudioNativeError("SFX needs a MIDI note and an authored duration of 1–600000ms");
+    }
+    this.applyOp(object, { op: "set_sfx", sfx: input.id, frame: input.frame, patch: input.patch, note: input.note, duration_ms: input.durationMs }, "frame sound");
+  }
+  removeSfx(object: Hex32, sfx: Hex32): void {
+    if (this.objectKind(object) !== "flipnote") throw new StudioNativeError("SFX requires a Flipnote target");
+    this.applyOp(object, { op: "remove_sfx", sfx }, "remove frame sound");
+  }
+  linkScore(object: Hex32, score: Hex32 | null): void {
+    if (this.objectKind(object) !== "flipnote") throw new StudioNativeError("a Score link requires a Flipnote target");
+    this.applyOp(object, { op: "set_header", field: "score", value: score }, "linked Score");
+  }
+
+  /** Capture the displayed projection, not a silently substituted ordinary base beneath a draft. */
+  private mediaSource(object: Hex32, kind: StudioObjectKind): { view: StudioObjectView; server: number; assertCurrent: () => void } {
+    const doc = this.doc, scope = this.target(), gen = this.generation, epoch = this.mediaEpoch;
+    if (!doc || doc.object !== object || doc.objectKind !== kind || !doc.view || doc.loading || this.overlay?.loading) throw new StudioNativeError("wait for this document to finish loading");
+    if (this.pendingFor(object).length) throw new StudioNativeError("finish or reconcile this document's pending saves before playback/export");
+    const base = doc.view, model = doc.model, score = doc.score, inspection = this.overlay?.inspection;
+    let view = base;
+    if (inspection?.kind === "local-draft") {
+      if (!inspection.replayable || !inspection.content) throw new StudioNativeError("the retained local draft cannot be rebuilt; export its private recovery archive instead");
+      if (!inspection.contentEpoch || !inspection.group) throw new StudioNativeError("reopen this local draft to obtain its actual native epoch/group before playback/export");
+      if (inspection.content.kind !== kind) throw new StudioNativeError("local draft has the wrong media family");
+      view = { ...base, epoch: inspection.contentEpoch, group: inspection.group, content: inspection.content } as StudioObjectView;
+    }
+    const assertCurrent = () => {
+      if (!this.current(gen) || this.scope?.server !== scope.server || this.scope?.channel !== scope.channel || epoch !== this.mediaEpoch ||
+          this.doc?.object !== object || this.doc.objectKind !== kind || this.doc.view !== base || this.doc.model !== model || this.doc.score !== score ||
+          this.overlay?.inspection !== inspection || this.doc.loading || this.overlay?.loading || this.pendingFor(object).length) {
+        throw new StudioNativeError("the displayed source changed; start playback/export again");
+      }
+    };
+    assertCurrent();
+    return { view, server: scope.server, assertCurrent };
+  }
+
+  private oneMedia<T>(run: () => Promise<T>): Promise<T> {
+    if (this.mediaTask) return Promise.reject(new StudioNativeError("another media preparation is still running"));
+    const task = run();
+    this.mediaTask = task;
+    void task.finally(() => { if (this.mediaTask === task) this.mediaTask = null; }).catch(() => {});
+    return task;
+  }
+
+  /** Recovery declarations do not prove blob availability. Hold the exact historical PIXA through
+   * the existing native validator/publication before Apply; never put packages in the PIX cache.
+   * Navigation may leave an idempotently published historical blob, but can never redirect Save. */
+  private async holdRecoveryExport(content: StudioContent, choice: RecoveryChoice, body: string, server: number, group: string | undefined, live: () => boolean): Promise<void> {
+    const op = historicalSoundOperation(content, choice);
+    if (choice.kind === "soundRecord" && !op) throw new StudioNativeError("the historical sound operation is not in this version");
+    if (op?.op !== "set_export") return;
+    if (canonicalJson(JSON.parse(body)) !== canonicalJson(op)) throw new StudioNativeError("the export preview differs from its historical value");
+    if (!group) throw new StudioNativeError("reopen this historical sound source to obtain its native group before recovering PIXA");
+    if (op.bytes < 1 || op.bytes > PIXA_MAX_BYTES) throw new StudioNativeError("the historical PIXA declaration exceeds its media bound");
+    if (this.mediaWrite) throw new StudioNativeError("another media save is still running");
+    const assertLive = () => { if (!live()) throw new StudioNativeError("the recovery source changed; no export reference was applied"); };
+    this.mediaWrite = true;
+    try {
+      await this.oneMedia(async () => {
+        assertLive();
+        const bytes = await requestBlobBounded(this.ipc, server, op.cid, op.bytes);
+        assertLive();
+        if (!bytes) throw new StudioNativeError("historical PIXA unavailable; reference not applied");
+        const value = decodePixa(bytes);
+        if (value.take.group !== group) throw new StudioNativeError("historical PIXA belongs to another group; reference not applied");
+        const publication = await publishStudioPixa(this.ipc, server, bytes);
+        assertLive();
+        if (publication.cid !== op.cid || publication.bytes !== op.bytes) throw new StudioNativeError("held PIXA does not name the historical CID and length; reference not applied");
+      });
+    } finally { this.mediaWrite = false; }
+  }
+
+  async prepareScoreTake(object: Hex32): Promise<JamTake> {
+    return (await this.prepareScorePlayback(object)).take;
+  }
+
+  /** The same take plus its authored grid end, which Studio looping must honour. */
+  prepareScorePlayback(object: Hex32): Promise<ScorePlayback> {
+    return this.oneMedia(async () => {
+      const source = this.mediaSource(object, "score");
+      const playback = await scorePlaybackFromNative(object, source.view as ScoreView, this.me);
+      source.assertCurrent();
+      return playback;
+    });
+  }
+
+  private async preparePixa(object: Hex32): Promise<{ bytes: Uint8Array; server: number; assertCurrent: () => void }> {
+    const source = this.mediaSource(object, "flipnote"), view = source.view as FlipnoteView;
+    const model = flipnoteModel(view.content);
+    preflightFlipnoteMedia(view);
+    let linked: { object: string; view: ScoreView } | undefined;
+    if (model.sound.score) {
+      const score = await studioRead(this.ipc, this.target(), model.sound.score, "score");
+      source.assertCurrent();
+      if (!score) throw new StudioNativeError("the linked Score is not held locally; no shorter silent export was made");
+      linked = { object: model.sound.score, view: score };
+    }
+    const held = new Map<string, Uint8Array>();
+    for (const frame of model.frames) {
+      const key = contentKey(frame.cid, frame.bytes);
+      if (held.has(key)) continue;
+      const bytes = await this.fetchNow(frame.cid, frame.bytes);
+      source.assertCurrent();
+      if (!bytes) throw new StudioNativeError("an animation frame is unavailable; no partial export was made");
+      held.set(key, bytes);
+    }
+    const bytes = await flipnotePixaFromNative(object, view, held, this.me, linked);
+    source.assertCurrent();
+    return { bytes, server: source.server, assertCurrent: source.assertCurrent };
+  }
+
+  prepareFlipnotePixa(object: Hex32): Promise<Uint8Array> {
+    return this.oneMedia(async () => (await this.preparePixa(object)).bytes);
+  }
+
+  /** Read the actual immutable record bytes; its sealed blob CID is not a fileshare file CID. */
+  preparePublishedPixa(object: Hex32, exportId: Hex32): Promise<Uint8Array> {
+    return this.oneMedia(async () => {
+      const source = this.mediaSource(object, "flipnote"), view = source.view as FlipnoteView;
+      const record = flipnoteModel(view.content).sound.exports.find((record) => record.id === exportId);
+      if (!record) throw new StudioNativeError("the published animation reference is no longer active");
+      // The one-preparation slot is the bound for this larger media request. Do not feed PIXA
+      // through the thumbnail scheduler: that cache deliberately accepts PIX1 frames only.
+      const bytes = await requestBlobBounded(this.ipc, source.server, record.cid, record.bytes);
+      source.assertCurrent();
+      if (!bytes) throw new StudioNativeError("the exact published animation package is unavailable");
+      const packageValue = decodePixa(bytes);
+      if (!view.group || packageValue.take.group !== view.group) throw new StudioNativeError("published animation package belongs to another group");
+      return encodePixa(packageValue);
+    });
+  }
+  removePublishedPixa(object: Hex32, exportId: Hex32): void {
+    if (this.objectKind(object) !== "flipnote") throw new StudioNativeError("an export reference requires a Flipnote target");
+    this.applyOp(object, { op: "remove_export", export: exportId }, "remove published animation reference");
+  }
+
+  /** Blob custody and the editable export reference are deliberately two different outcomes. */
+  async publishFlipnotePixa(object: Hex32): Promise<StudioPixaPublished> {
+    if (this.mediaWrite) throw new StudioNativeError("another media save is still running");
+    this.mediaWrite = true;
+    try {
+      const source = await this.oneMedia(() => this.preparePixa(object));
+      source.assertCurrent();
+      const publication = await publishStudioPixa(this.ipc, source.server, source.bytes);
+      try {
+        source.assertCurrent();
+        const save = this.applyOp(object, { op: "set_export", export: this.newId(), cid: publication.cid, bytes: publication.bytes }, "published animation reference");
+        return { publication, referenceSaveId: save.id, warning: null };
+      } catch (e) {
+        return { publication, referenceSaveId: null, warning: `blob published, but its Studio reference was not saved: ${reason(e)}` };
+      }
+    } finally { this.mediaWrite = false; }
+  }
+
+  async exportFlipnoteGif(object: Hex32): Promise<StudioGifSaved> {
+    if (this.mediaWrite) throw new StudioNativeError("another media save is still running");
+    this.mediaWrite = true;
+    try {
+      const source = await this.oneMedia(() => this.preparePixa(object));
+      source.assertCurrent();
+      // Native owns server-incarnation and worker fences; a successful file remains a saved file
+      // even if the surface navigates away while the operating system reveals it.
+      return await exportStudioGif(this.ipc, source.server, source.bytes);
+    } finally { this.mediaWrite = false; }
+  }
+
+  /// Use one of a conflicted frame's live values as the frame's pixels: fetch it bounded, hold it
+  /// locally through publication, then replace. The blob is never named by a guessed cid.
+  async useVersion(object: Hex32, frame: Hex32, alt: FrameConflictValue, how: "replace" | "insertAfter"): Promise<void> {
+    const gen = this.generation;
+    const route = this.editRoute(object);
+    if ("refused" in route) throw new StudioNativeError(route.refused);
+    const bytes = await this.fetchNow(alt.cid, alt.bytes);
+    if (!this.current(gen)) return;
+    if (!bytes) throw new StudioNativeError("that version's pixels are not available yet");
+    // Re-putting a value the register already selects is still an operation here: it consumes
+    // every live predecessor and so resolves the conflict on purpose.
+    if (how === "replace") this.enqueue({ kind: "frame", object, frame, op: "replace", after: null, pix: bytes, published: null, route: route.kind, apply: null, overlay: null, overlayRetry: null, force: true, label: `frame pixels by ${alt.author.slice(0, 8)}` });
+    else this.enqueue({ kind: "frame", object, frame: this.newId(), op: "insert", after: frame, pix: bytes, published: null, route: route.kind, apply: null, overlay: null, overlayRetry: null, label: "keep both versions" });
+  }
+
+  renameEntry(object: Hex32, title: string): void {
+    this.applyIndexOp({ op: "set_title", object, title }, object, "index title");
+  }
+  setEntryExpiry(object: Hex32, expiry: NativeExpiry): void {
+    this.applyIndexOp({ op: "set_expiry", object, ...expiryForBody(expiry) } as IndexOp, object, "expiry");
+  }
+  deleteEntry(object: Hex32): void {
+    this.applyIndexOp({ op: "tombstone_object", object }, object, "delete flipnote");
+  }
+
+  private applyOp(object: Hex32, op: FlipnoteOp | ScoreOp, label: string): SaveEntry {
+    const route = this.editRoute(object);
+    if ("refused" in route) throw new StudioNativeError(route.refused);
+    // Cell/recipe objects now cross this seam. Freeze their operation identity immediately rather
+    // than keeping a mutable caller descriptor beside an otherwise exact request/re-author path.
+    const body = canonicalJson(op);
+    op = JSON.parse(body) as FlipnoteOp | ScoreOp;
+    if (route.kind === "ordinary") {
+      return this.enqueue({ kind: "apply", object, op, label, request: { object, epochId: route.epochId, nonce: this.newId(), body,
+        ...(this.objectKind(object) === "score" ? { objectKind: "score" as const } : {}) } });
+    } else {
+      return this.enqueue({ kind: "overlayApply", object, ...(this.objectKind(object) === "score" ? { objectKind: "score" as const } : {}), op, label, request: null, overlayRetry: null });
+    }
+  }
+  private applyIndexOp(op: IndexOp, object: Hex32, label: string): void {
+    const route = this.editRoute(null);
+    if ("refused" in route) throw new StudioNativeError(route.refused);
+    if (route.kind === "ordinary") {
+      this.enqueue({ kind: "applyIndex", object, op, label, request: { epochId: route.epochId, nonce: this.newId(), body: canonicalJson(op) } });
+    } else {
+      this.enqueue({ kind: "overlayApply", object: null, op, label, request: null, overlayRetry: null });
+    }
+  }
+
+  private enqueue(rec: NewSave): SaveEntry {
+    this.mediaEpoch++;
+    const record = { ...rec, id: ++this.saveSeq, status: "queued", attempts: 0, error: "", epochChanged: false, mayHaveCommitted: false } as SaveEntry;
+    this.records.push(record);
+    this.notify();
+    this.pump();
+    return record;
+  }
+
+  /// Resend the same complete request.
+  retry(id: number): void {
+    const s = this.records.find((r) => r.id === id);
+    if (!s || (s.status !== "uncertain" && s.status !== "blocked")) return;
+    const retry = s.kind === "overlayApply" || s.kind === "frame" ? s.overlayRetry : null;
+    if (retry === "newTicket" || retry === "none") return;
+    s.status = "queued";
+    s.error = "";
+    this.notify();
+    this.pump();
+  }
+
+  /// Whether the retained operation is proven not to have written and can therefore be replaced
+  /// by a deliberately new authoring decision. Ambiguous operations keep their exact identity;
+  /// the member must reconcile/retry or explicitly discard them rather than having this method
+  /// silently erase their uncertainty.
+  canReauthor(id: number): boolean {
+    const s = this.records.find((r) => r.id === id);
+    return !!s && s.status === "blocked" && !s.mayHaveCommitted
+      && (s.kind === "frame" || s.kind === "apply" || s.kind === "applyIndex" || s.kind === "overlayApply");
+  }
+
+  /// Explicit re-authoring: replace one proven-no-write entry with a NEW operation selected by
+  /// the document's route *now*. This is deliberately not available for an ambiguous request.
+  /// The replacement gets a fresh queue identity and, on the ordinary route, a fresh nonce.
+  reauthor(id: number): void {
+    const at = this.records.findIndex((r) => r.id === id);
+    const s = this.records[at];
+    if (!s || !this.canReauthor(id)) return;
+    if (s.kind !== "frame" && s.kind !== "apply" && s.kind !== "applyIndex" && s.kind !== "overlayApply") return;
+    const object = s.kind === "applyIndex" ? null : s.object;
+    const originalKind = s.kind === "apply" ? s.request.objectKind ?? "flipnote" : s.kind === "overlayApply" ? s.objectKind ?? "flipnote" : "flipnote";
+    if (object !== null && this.objectKind(object) !== originalKind) throw new StudioNativeError("the object family changed; the retained edit cannot be redirected");
+    const route = this.editRoute(object);
+    if ("refused" in route) throw new StudioNativeError(route.refused);
+    let next: NewSave;
+    if (s.kind === "frame") {
+      // A ticket refusal can mean the publication disappeared or failed validation. Re-publish
+      // retained pixels even when the new route is ordinary; identical valid bytes are
+      // content-addressed, and no stale receipt crosses the route transition.
+      next = { kind: "frame", object: s.object, frame: s.frame, op: s.op, after: s.after,
+        pix: s.pix, published: s.route === "unconfirmed" ? null : s.published,
+        route: route.kind, apply: null, overlay: null, overlayRetry: null,
+        ...(s.force === undefined ? {} : { force: s.force }), label: s.label };
+    } else if (route.kind === "unconfirmed") {
+      next = { kind: "overlayApply", object, ...(object && this.objectKind(object) === "score" ? { objectKind: "score" as const } : {}), op: s.op, label: s.label, request: null, overlayRetry: null };
+    } else if (object === null) {
+      const op = s.op as IndexOp;
+      next = { kind: "applyIndex", object: op.object, op, label: s.label,
+        request: { epochId: route.epochId, nonce: this.newId(), body: canonicalJson(op) } };
+    } else {
+      next = { kind: "apply", object, op: s.op as FlipnoteOp | ScoreOp, label: s.label,
+        request: { object, epochId: route.epochId, nonce: this.newId(), body: canonicalJson(s.op),
+          ...(this.objectKind(object) === "score" ? { objectKind: "score" as const } : {}) } };
+    }
+    const replacement = { ...next, id: ++this.saveSeq, status: "queued", attempts: 0,
+      error: "", epochChanged: false, mayHaveCommitted: false } as SaveEntry;
+    this.records[at] = replacement;
+    this.settleRecord(s, "discarded");
+    this.notify();
+    this.pump();
+  }
+
+  /// Drop a save on purpose. For a frame save this discards its unsaved pixels; the saves that
+  /// waited behind it in the same lane may then run.
+  discard(id: number): void {
+    const at = this.records.findIndex((r) => r.id === id && r.status !== "inflight");
+    if (at < 0) return;
+    const [s] = this.records.splice(at, 1);
+    this.settleRecord(s, "discarded");
+    this.notify();
+    this.pump();
+  }
+
+  /// The newest unsaved pixels for a frame, so an editor reopens what the member drew rather
+  /// than the last saved projection.
+  unsavedPix(object: Hex32, frame: Hex32): Uint8Array | null {
+    for (let i = this.records.length - 1; i >= 0; i--) {
+      const s = this.records[i];
+      if (s.kind === "frame" && s.object === object && s.frame === frame) return s.pix;
+    }
+    return null;
+  }
+
+  pendingFor(object: Hex32 | null): SaveRecord[] {
+    return this.saves.filter((s) => (s.kind === "applyIndex" ? object === null || s.object === object : s.object === object));
+  }
+
+  /// Queued saves that cannot run until this uncertain or known-not-written save is handled.
+  blockedBehind(id: number): number {
+    const s = this.records.find((r) => r.id === id);
+    if (!s || (s.status !== "uncertain" && s.status !== "blocked")) return 0;
+    const lane = laneOf(s);
+    return this.records.filter((r) => r.id !== id && r.status === "queued" && laneOf(r) === lane).length;
+  }
+
+  /// One save at a time, in queue order within each lane (a document, or the Index). An
+  /// uncertain, known-not-written or in-flight save blocks later saves of its lane; other lanes proceed.
+  private pump(): void {
+    if (this.saving) return;
+    const blocked = new Set<string>();
+    let next: SaveEntry | undefined;
+    for (const s of this.records) {
+      const lane = laneOf(s);
+      if (blocked.has(lane)) continue;
+      if (s.status === "queued") { next = s; break; }
+      blocked.add(lane); // blocked/uncertain (or, defensively, inflight): nothing later runs
+    }
+    if (!next) return;
+    const token = ++this.workerSeq;
+    this.saving = token;
+    void this.run(next).finally(() => {
+      if (this.saving !== token) return; // a cleared scope owns a different lane now
+      this.saving = 0;
+      this.pump();
+    });
+  }
+
+  private async run(s: SaveEntry): Promise<void> {
+    const gen = this.generation;
+    const target = this.target();
+    s.status = "inflight";
+    s.attempts++;
+    this.notify();
+    try {
+      if (s.kind === "create") {
+        const view = await studioCreate(this.ipc, target, s.request);
+        if (!this.current(gen)) return;
+        this.landed(s.object, view);
+        this.invalidate({ index: true });
+      } else if (s.kind === "frame") {
+        if (!s.published) {
+          const p = await publishPix(this.ipc, target.server, s.pix);
+          if (!this.current(gen)) return;
+          s.published = p;
+          this.remember(p.cid, s.pix);
+        }
+        const current = this.doc?.object === s.object ? this.doc.model : this.views.get(s.object)?.model ?? null;
+        if (s.op === "replace" && !s.force && current?.frames.find((f) => f.id === s.frame)?.cid === s.published.cid) {
+          this.finish(s); // already the selected value: no operation for an unchanged value
+          return;
+        }
+        const op: FlipnoteOp = s.op === "insert"
+          ? { op: "insert_frame", frame: s.frame, after: s.after, cid: s.published.cid, bytes: s.published.bytes }
+          : { op: "replace_frame", frame: s.frame, cid: s.published.cid, bytes: s.published.bytes };
+        if (s.route === "unconfirmed") {
+          await this.runUnconfirmed(s, s.object, canonicalJson(op), gen);
+          if (!this.current(gen)) return;
+          await this.refreshDoc(s.object);
+          if (!this.current(gen)) return;
+        } else {
+          if (!s.apply) {
+            const ep = this.editableEpoch(s.object);
+            if (!("epochId" in ep)) throw new StudioNativeError(ep.refused);
+            s.apply = { object: s.object, epochId: ep.epochId, nonce: this.newId(), body: canonicalJson(op) };
+          }
+          const view = await studioApply(this.ipc, target, s.apply);
+          if (!this.current(gen)) return;
+          this.landed(s.object, view);
+        }
+      } else if (s.kind === "apply") {
+        const view = await studioApply(this.ipc, target, s.request);
+        if (!this.current(gen)) return;
+        this.landed(s.object, view);
+      } else if (s.kind === "applyIndex") {
+        const view = await studioApplyIndex(this.ipc, target, s.request);
+        if (!this.current(gen)) return;
+        this.landedIndex(view);
+      } else if (s.kind === "overlayApply") {
+        await this.runUnconfirmed(s, s.object, canonicalJson(s.op), gen);
+        if (!this.current(gen)) return;
+        if (s.object) await this.refreshDoc(s.object);
+        else await this.refreshIndex();
+        if (!this.current(gen)) return;
+      } else {
+        const applied = await recoveryApply(this.ipc, { ...target, object: s.object,
+          ...(s.objectKind === "score" ? { objectKind: "score" as const } : {}) }, s.edit);
+        if (!this.current(gen)) return;
+        s.applied = applied;
+        if (s.object) this.invalidate({ objects: [s.object] });
+        else this.invalidate({ index: true });
+      }
+      this.receivePaused = false;
+      this.finish(s);
+    } catch (e) {
+      if (!this.current(gen)) return;
+      // Typed Flow-S refusals and scheduling replies prove that this attempt did not write. Native
+      // errors remain uncertain because they may have crossed a final delivery fence after commit.
+      const noWrite = e instanceof OverlayNoWrite;
+      const earlierAttemptWasUncertain = s.mayHaveCommitted;
+      if (!noWrite) s.mayHaveCommitted = true;
+      s.status = s.mayHaveCommitted ? "uncertain" : "blocked";
+      s.error = noWrite && earlierAttemptWasUncertain
+        ? `${reason(e)}; an earlier attempt may already have committed, so the exact request remains uncertain`
+        : reason(e);
+      this.settleRecord(s, s.mayHaveCommitted ? "uncertain" : "notWritten");
+      this.notify();
+    }
+  }
+
+  /// Execute one visit of a preview-local Save while retaining the exact request on the queue.
+  /// A successful `pending`/`busy` response is not spun here: the member chooses when to repeat
+  /// the same bytes. `busy` proves no write began, while `pending` means a detached job may still
+  /// land and is therefore uncertain. A paused actor is first resumed by an explicit ordinary
+  /// document access, exactly as the native contract requires, then receives the same request.
+  private async runUnconfirmed(
+    s: Extract<SaveEntry, { kind: "frame" }> | Extract<SaveEntry, { kind: "overlayApply" }>,
+    object: Hex32 | null,
+    body: string,
+    gen: number,
+  ): Promise<UnconfirmedOverlaySave> {
+    const target: RecoveryTargetArgs = { ...this.target(), object,
+      ...(s.kind === "overlayApply" && s.objectKind === "score" ? { objectKind: "score" as const } : {}) };
+    if (!this.current(gen)) throw new StudioNativeError("Studio session changed before the local draft Save");
+    let request = s.kind === "frame" ? s.overlay : s.request;
+    if (s.overlayRetry === "afterExplicitAccess") {
+      if (object) await this.refreshDoc(object);
+      else await this.refreshIndex();
+      if (!this.current(gen)) throw new StudioNativeError("Studio session changed before the local draft retry");
+      const accessError = object
+        ? this.doc?.object === object ? this.doc.error : "the flipnote is no longer open"
+        : this.indexError;
+      if (accessError) {
+        throw new OverlayNoWrite(`explicit document access failed; the paused Save was not retried (${accessError})`);
+      }
+    }
+    if (!request) {
+      const begun = await unconfirmedOverlaySaveBegin(this.ipc, target);
+      if (!this.current(gen)) throw new StudioNativeError("Studio session changed while obtaining a local draft ticket");
+      if (begun.kind === "unconfirmedOverlaySave") {
+        s.overlayRetry = begun.retry;
+        throw new OverlayNoWrite(`local draft refused (${overlayRefusalText(begun.reason)}); retry=${begun.retry}`);
+      }
+      request = { basis: begun.basis, branch: begun.branch, nonce: this.newId(), body };
+      if (s.kind === "frame") s.overlay = request;
+      else s.request = request;
+      // Retain the request before invoking Save: a native delivery failure may follow its write.
+      this.notify();
+    }
+    if (!this.current(gen)) throw new StudioNativeError("Studio session changed before the local draft Save");
+    const result = await unconfirmedOverlaySave(this.ipc, target, request);
+    if (result.state === "saved" || result.state === "disposed" || result.state === "handedOff") {
+      s.overlayRetry = null;
+      return result;
+    }
+    s.overlayRetry = result.retry;
+    if (result.state === "refused") {
+      throw new OverlayNoWrite(`local draft refused (${overlayRefusalText(result.reason)}); retry=${result.retry}`);
+    }
+    if (result.state === "paused") {
+      throw new OverlayNoWrite("local draft Save paused; explicit document access is required before retrying the same request");
+    }
+    if (result.state === "busy") {
+      throw new OverlayNoWrite("local draft Save busy; retry the same request");
+    }
+    throw new StudioNativeError("local draft Save pending and may still complete; retry the same request exactly");
+  }
+
+  private landed(object: Hex32, view: StudioObjectView): void {
+    // Offscreen exact requests can complete, but a same-id different-family surface owns its
+    // newer read fence. Never let an older ACK supersede that read or patch mismatched content.
+    const familyMismatch = this.doc?.object === object && this.doc.objectKind !== view.content.kind;
+    // A read issued before this save answered is older than this view: supersede it.
+    if (!familyMismatch) {
+      this.docReq.set(object, (this.docReq.get(object) ?? 0) + 1);
+      this.known.set(object, { awaiting: view.awaitingTenureReceipt, phase: view.phase, epoch: view.epoch });
+    }
+    const model = view.content.kind === "flipnote" ? flipnoteModel(view.content) : null;
+    const score = view.content.kind === "score" ? scoreModel(view.content) : null;
+    this.rememberView(object, view, model, score);
+    if (!familyMismatch) this.patchDoc(object, { view, model, score, absent: false, error: "", loading: false });
+  }
+  /// The Index equivalent: a landed write is newer than any list still in flight.
+  private landedIndex(view: IndexView): void {
+    this.indexReq++;
+    this.index = view;
+    this.indexModel = indexModel(view.content);
+    this.indexError = "";
+    this.indexLoading = false;
+  }
+  private rememberView(object: Hex32, view: StudioObjectView, model: FlipnoteModel | null, score: ScoreModel | null): void {
+    this.views.delete(object);
+    this.views.set(object, { view, model, score });
+    while (this.views.size > RECENT_VIEWS) this.views.delete(this.views.keys().next().value as Hex32);
+  }
+  private finish(s: SaveEntry): void {
+    const at = this.records.indexOf(s);
+    if (at >= 0) this.records.splice(at, 1);
+    this.settleRecord(s, "landed");
+    this.notify();
+  }
+  private settleRecord(s: SaveEntry, outcome: SaveOutcome): void {
+    const settle = s.settle;
+    s.settle = undefined;
+    settle?.(outcome);
+  }
+
+  // --- Blobs ---------------------------------------------------------------------------------
+
+  /// Held bytes for a cid, only when they are the size the caller's record declares. A record
+  /// whose declaration disagrees with what this cid actually holds is not shown as that record.
+  blob(cid: Hex64, bytes?: number): Uint8Array | undefined {
+    const b = this.blobs.get(cid);
+    if (!b) return undefined;
+    if (bytes !== undefined && b.length !== bytes) return undefined;
+    this.blobs.delete(cid);
+    this.blobs.set(cid, b); // LRU touch
+    return b;
+  }
+  /// State for one record's (cid, declared bytes). Availability is per cid; a content rejection
+  /// is per declaration, because another record may declare this cid correctly.
+  blobState(cid: Hex64, bytes?: number): BlobState {
+    const held = this.blobs.get(cid);
+    if (held) return bytes === undefined || held.length === bytes ? "held" : "invalid";
+    const job = bytes === undefined ? this.jobFor(cid) : this.jobs.get(jobKey(this.generation, cid, bytes));
+    if (job) return job.started ? "fetching" : "queued";
+    if (this.invalidFor(cid, bytes) !== undefined) return "invalid";
+    if (this.failed.has(cid)) return "failed";
+    if (this.unavailable.has(cid)) return "unavailable";
+    return "idle";
+  }
+  blobProblem(cid: Hex64, bytes?: number): string {
+    const held = this.blobs.get(cid);
+    if (held && bytes !== undefined && held.length !== bytes) return `held pixels are ${held.length} bytes, not the ${bytes} this record declares`;
+    return this.invalidFor(cid, bytes) ?? this.failed.get(cid) ?? (this.unavailable.has(cid) ? "not available from any reachable member yet" : "");
+  }
+  /// The rejection recorded for this declaration, or for any declaration of the cid when the
+  /// caller has none to check against.
+  private invalidFor(cid: Hex64, bytes: number | undefined): string | undefined {
+    if (bytes !== undefined) return this.invalid.get(contentKey(cid, bytes));
+    for (const [key, why] of this.invalid) if (key.startsWith(`${cid}:`)) return why;
+    return undefined;
+  }
+  private jobFor(cid: Hex64): BlobJob | undefined {
+    for (const job of this.jobs.values()) if (job.cid === cid && job.generation === this.generation) return job;
+    return undefined;
+  }
+
+  /// Ask for a frame's pixels. Lower priority runs first (0 = the frame on screen). A cid that
+  /// answered unavailable or failed, or a declaration that was rejected, is not asked again
+  /// until an invalidation or an explicit retry clears it.
+  want(cid: Hex64, bytes: number, priority = 2): void {
+    if (this.unavailable.has(cid) || this.failed.has(cid) || this.invalid.has(contentKey(cid, bytes))) return;
+    this.scheduleFetch(cid, bytes, priority);
+  }
+
+  /// Explicit retry from the member: clears every hold on this record and asks first.
+  retryBlob(cid: Hex64, bytes: number): void {
+    this.unavailable.delete(cid);
+    this.failed.delete(cid);
+    this.invalid.delete(contentKey(cid, bytes));
+    this.scheduleFetch(cid, bytes, 0);
+  }
+
+  /// One bounded fetch for an action that needs the bytes now: it takes the front of the same
+  /// queue and the same in-flight slots, and shares an existing job for the same (cid, bytes).
+  /// Held bytes of another size than declared are a rejection, not an answer.
+  fetchNow(cid: Hex64, bytes: number): Promise<Uint8Array | null> {
+    const held = this.blobs.get(cid);
+    if (held) {
+      if (held.length === bytes) return Promise.resolve(held);
+      return Promise.reject(new StudioNativeError(`held pixels are ${held.length} bytes, not the ${bytes} declared`));
+    }
+    this.unavailable.delete(cid);
+    this.failed.delete(cid);
+    const job = this.scheduleFetch(cid, bytes, -1);
+    if (!job) return Promise.resolve(null);
+    return new Promise((resolve, reject) => { job.waiters.push({ resolve, reject }); });
+  }
+
+  /// One job per (scope, cid, declared bytes): two records that declare one cid differently get
+  /// two bounded requests, each checked against its own declaration, never a shared answer.
+  private scheduleFetch(cid: Hex64, bytes: number, priority: number): BlobJob | null {
+    if (this.blobs.has(cid) || !this.scope) return null;
+    const key = jobKey(this.generation, cid, bytes);
+    let job = this.jobs.get(key);
+    if (job) {
+      if (!job.started && priority < job.priority) job.priority = priority;
+      return job;
+    }
+    job = { key, cid, bytes, priority, generation: this.generation, started: false, waiters: [] };
+    this.jobs.set(key, job);
+    this.pumpFetches();
+    return job;
+  }
+
+  private pumpFetches(): void {
+    while (this.inflight < this.maxFetches) {
+      let next: BlobJob | null = null;
+      for (const job of this.jobs.values()) {
+        if (job.started || job.generation !== this.generation) continue;
+        if (!next || job.priority < next.priority) next = job;
+      }
+      if (!next) return;
+      void this.fetchOne(next);
+    }
+  }
+
+  private async fetchOne(job: BlobJob): Promise<void> {
+    job.started = true;
+    this.inflight++;
+    const target = this.target();
+    this.notify();
+    let result: Uint8Array | null = null;
+    let failure: unknown = null;
+    try {
+      const got = await requestBlobBounded(this.ipc, target.server, job.cid, job.bytes);
+      if (this.current(job.generation)) {
+        if (!got) this.unavailable.add(job.cid);
+        else {
+          decodePix(got);
+          this.remember(job.cid, got);
+          result = got;
+        }
+      }
+    } catch (e) {
+      failure = e;
+      if (this.current(job.generation)) {
+        // Length/base64/PIX1 failures are about the content named by this cid; anything else
+        // (busy, cancelled, transport) is about this attempt and may succeed next time.
+        if (e instanceof StudioNativeError || e instanceof PixError) this.invalid.set(contentKey(job.cid, job.bytes), reason(e));
+        else this.failed.set(job.cid, reason(e));
+      }
+    } finally {
+      // Release exactly this job's slot and marker; a same-cid job of a newer scope is its own.
+      this.inflight--;
+      if (this.jobs.get(job.key) === job) this.jobs.delete(job.key);
+      for (const w of job.waiters) {
+        if (failure && this.current(job.generation)) w.reject(failure);
+        else w.resolve(result);
+      }
+      this.notify();
+      this.pumpFetches();
+    }
+  }
+
+  private remember(cid: Hex64, bytes: Uint8Array): void {
+    if (this.blobs.has(cid)) return;
+    this.unavailable.delete(cid);
+    this.failed.delete(cid);
+    this.invalid.delete(contentKey(cid, bytes.length));
+    this.blobs.set(cid, bytes);
+    this.cacheBytes += bytes.length;
+    while ((this.cacheBytes > this.cacheBytesCap || this.blobs.size > BLOB_CACHE_ENTRIES) && this.blobs.size > 1) {
+      const oldest = this.blobs.keys().next().value as Hex64;
+      this.cacheBytes -= this.blobs.get(oldest)!.length;
+      this.blobs.delete(oldest);
+    }
+  }
+
+  /// A document changed: what was unavailable or failed for its frames may be reachable now.
+  /// Rejected content stays rejected until an explicit retry.
+  private releaseTransientFor(object: Hex32): void {
+    this.failed.clear();
+    if (this.doc?.object !== object || !this.doc.model) { this.unavailable.clear(); return; }
+    for (const f of this.doc.model.frames) this.unavailable.delete(f.cid);
+  }
+
+  // --- Recovery ------------------------------------------------------------------------------
+
+  /// Point the rail at a document (null = the Index). The same target is a no-op; the listing
+  /// is read on a change of target, on an invalidation, or through an explicit refresh.
+  watchRecovery(object: Hex32 | null): void {
+    const family = object === null ? "index" : this.objectKind(object);
+    if (this.recoveryTarget === object && this.recoveryFamily === family && (this.recoveryListing || this.recoveryLoading || this.recoveryError)) return;
+    this.recoveryTarget = object;
+    this.recoveryFamily = family;
+    this.recoveryListing = null;
+    this.recoveryError = "";
+    this.recoveryRun = null;
+    this.activeRun = null;
+    this.pointer = { status: "idle", error: "", result: null };
+    this.notify();
+    void this.refreshRecovery();
+  }
+
+  async refreshRecovery(): Promise<void> {
+    const gen = this.generation;
+    const req = ++this.recoveryReq;
+    const object = this.recoveryTarget;
+    const family = this.recoveryFamily;
+    const target = this.objectTarget(object);
+    const live = () => this.current(gen) && req === this.recoveryReq && object === this.recoveryTarget && this.recoveryFamily === family &&
+      (object === null ? "index" : this.objectKind(object)) === family;
+    this.recoveryLoading = true;
+    this.notify();
+    try {
+      const listing = await recoveryList(this.ipc, target);
+      if (!live()) return;
+      this.recoveryListing = listing;
+      this.recoveryError = "";
+    } catch (e) {
+      if (!live()) return;
+      this.recoveryError = reason(e);
+    } finally {
+      if (live()) { this.recoveryLoading = false; this.notify(); }
+    }
+  }
+
+  async readVersion(snapshot: Hex64): Promise<RecoveryVersionRead | null> {
+    const object = this.recoveryTarget;
+    const objectKind = object === null ? "index" : this.objectKind(object);
+    const cached = this.versions.get(snapshot);
+    if (cached?.content.kind === objectKind) return cached;
+    const gen = this.generation;
+    const v = await recoveryRead(this.ipc, this.objectTarget(object), snapshot);
+    if (!this.current(gen) || object !== this.recoveryTarget || (object === null ? "index" : this.objectKind(object)) !== objectKind) return null;
+    this.versions.set(snapshot, v);
+    this.notify();
+    return v;
+  }
+
+  async exportVersion(snapshot: Hex64): Promise<RecoveryExport | null> {
+    const gen = this.generation;
+    const object = this.recoveryTarget;
+    const objectKind = object === null ? "index" : this.objectKind(object);
+    const x = await recoveryExport(this.ipc, this.objectTarget(object), snapshot);
+    if (!this.current(gen) || object !== this.recoveryTarget || (object === null ? "index" : this.objectKind(object)) !== objectKind) return null;
+    this.exports.set(snapshot, x);
+    this.notify();
+    return x;
+  }
+
+  async acknowledgeEviction(): Promise<void> {
+    const w = this.recoveryListing?.evictionPending;
+    if (!w) throw new StudioNativeError("no eviction warning to acknowledge");
+    const gen = this.generation;
+    const object = this.recoveryTarget;
+    const objectKind = object === null ? "index" : this.objectKind(object);
+    const listing = await recoveryAcknowledge(this.ipc, this.objectTarget(object), { oldestSnapshot: w.oldestSnapshot, stagedSnapshot: w.stagedSnapshot });
+    if (!this.current(gen) || object !== this.recoveryTarget || (object === null ? "index" : this.objectKind(object)) !== objectKind) return;
+    this.recoveryReq++; // a list still in flight is older than this answer
+    this.recoveryListing = listing;
+    this.recoveryLoading = false;
+    this.notify();
+  }
+
+  /// The choices a historical version offers, in the order Restore walks them. Headers never
+  /// restore automatically: they are listed for Copy only; deletions are Copy only.
+  choicesFor(v: RecoveryVersionRead, mode: RecoveryMode): { choice: RecoveryChoice; label: string }[] {
+    return choicesForContent(v.content, mode);
+  }
+
+  /// Walk a version's choices: preview, apply what is Ready through the save queue, re-read,
+  /// next. A partial walk is saved content; the run reports each item's disposition and never
+  /// calls itself a Restore. An uncertain apply stops the walk: its exact payload stays on the
+  /// save record for retry, and a later walk previews afresh only after that is resolved.
+  async runRecovery(snapshot: Hex64, mode: RecoveryMode): Promise<void> {
+    const gen = this.generation;
+    const object = this.recoveryTarget;
+    const family = this.recoveryFamily;
+    const version = await this.readVersion(snapshot);
+    if (!version || !this.current(gen) || this.recoveryTarget !== object || this.recoveryFamily !== family ||
+      (object === null ? "index" : this.objectKind(object)) !== family) return;
+    const token = ++this.runSeq;
+    const control = { token, stop: false };
+    this.activeRun = control;
+    const run: RecoveryRun = {
+      snapshot, mode, object, status: "running", error: "",
+      items: this.choicesFor(version, mode).map(({ choice, label }) => ({ choice, label, state: "pending", error: "", originalAuthor: null })),
+    };
+    const live = () => this.current(gen) && this.activeRun === control && this.recoveryTarget === object && this.recoveryFamily === family &&
+      (object === null ? "index" : this.objectKind(object)) === family;
+    const publish = () => {
+      if (!live()) return;
+      this.recoveryRun = { ...run, items: run.items.map((i) => ({ ...i })) };
+      this.notify();
+    };
+    publish();
+    const target = this.objectTarget(object);
+    for (const item of run.items) {
+      if (!live()) return;
+      if (control.stop) { run.status = "stopped"; publish(); return; }
+      item.state = "previewing";
+      publish();
+      try {
+        const preview = await recoveryPreview(this.ipc, target, snapshot, item.choice, mode);
+        if (!live()) return;
+        item.originalAuthor = preview.originalAuthor;
+        if (preview.disposition !== "ready" || preview.body === null) { item.state = preview.disposition; publish(); continue; }
+        if (item.choice.kind === "soundRecord") {
+          item.state = "fetching";
+          publish();
+          await this.holdRecoveryExport(version.content, item.choice, preview.body, target.server, version.group, live);
+          if (!live()) return;
+        }
+        if (item.choice.kind === "frame") {
+          // Pixels must be held locally before the Save that references them: fetch the exact
+          // historical value bounded by its declared size, then hold it through publication.
+          const held = historicalBlob(version, item.choice.id, item.choice.value);
+          if (!held) { item.state = "error"; item.error = "the historical frame value is not in this version"; publish(); continue; }
+          item.state = "fetching";
+          publish();
+          const bytes = await this.fetchNow(held.cid, held.bytes);
+          if (!live()) return;
+          if (!bytes) { item.state = "error"; item.error = "pixels unavailable; not applied"; publish(); continue; }
+          const p = await publishPix(this.ipc, target.server, bytes);
+          if (!live()) return;
+          if (p.cid !== held.cid) { item.state = "error"; item.error = "held pixels do not name the historical cid"; publish(); continue; }
+        }
+        item.state = "applying";
+        publish();
+        const edit: RecoveryApplyEdit = { snapshot, choice: item.choice, mode, epochId: preview.epochId, expectedProjection: preview.expectedProjection, nonce: this.newId(), body: preview.body };
+        const record = this.enqueue({ kind: "recoveryApply", object,
+          ...(target.objectKind === "score" ? { objectKind: "score" as const } : {}), edit, applied: null, label: `${mode}: ${item.label}` });
+        const outcome = await new Promise<SaveOutcome>((resolve) => { record.settle = resolve; });
+        if (!live()) return;
+        if (outcome !== "landed") {
+          // The complete payload is on the save record; only its exact retry may finish it.
+          item.state = "uncertain";
+          item.error = outcome === "uncertain" ? "apply uncertain; retry the same request from the save card, then run again" : "discarded";
+          run.status = "stopped";
+          run.error = "stopped at an uncertain apply";
+          publish();
+          return;
+        }
+        const applied = record.kind === "recoveryApply" ? record.applied : null;
+        item.state = applied?.alreadySaved ? "alreadySaved" : "applied";
+        publish();
+        // Re-read before the next preview so its projection fingerprint is the current one.
+        if (object) await this.refreshDoc(object); else await this.refreshIndex();
+      } catch (e) {
+        if (!live()) return;
+        item.state = "error";
+        item.error = reason(e);
+        publish();
+      }
+    }
+    run.status = "done";
+    publish();
+    this.invalidate({ index: true, objects: object ? [object] : [], recovery: true });
+  }
+
+  /// Stop after the item in progress; the walk reports "stopped".
+  stopRecovery(): void {
+    if (this.activeRun && this.recoveryRun?.status === "running") this.activeRun.stop = true;
+  }
+
+  /// The separate, separately retryable Registry pointer step for a document that was saved.
+  async restorePointer(object: Hex32 | null = this.recoveryTarget): Promise<void> {
+    const gen = this.generation;
+    const objectKind = object === null ? "index" : this.objectKind(object);
+    const live = () => this.current(gen) && (object === null ? "index" : this.objectKind(object)) === objectKind;
+    this.pointer = { status: "running", error: "", result: null };
+    this.notify();
+    try {
+      const r = await recoveryRestorePointer(this.ipc, this.objectTarget(object));
+      if (!live()) return;
+      this.pointer = { status: "done", error: "", result: r };
+    } catch (e) {
+      if (!live()) return;
+      this.pointer = { status: "blocked", error: reason(e), result: null };
+    }
+    this.notify();
+  }
+}
+
+/// Domain choices shared by historical recovery and retained-draft copy. Keeping one enumerator is
+/// important: a newly supported operation must not silently appear in one recovery surface while
+/// remaining impossible to preserve from the other.
+function choicesForContent(content: StudioContent, mode: RecoveryMode): { choice: RecoveryChoice; label: string }[] {
+  const out: { choice: RecoveryChoice; label: string }[] = [];
+  if (content.kind === "flipnote") {
+    content.timeline.forEach((id, i) => {
+      const entry = content.frames[id];
+      if (entry) out.push({ choice: { kind: "frame", id, value: entry.pixels.selected.source.opId }, label: `frame ${i + 1}` });
+    });
+    out.push(...soundRecoveryChoices(content.sound, mode));
+    if (mode === "copy") {
+      if (content.title) out.push({ choice: { kind: "title", value: content.title.selected.source.opId }, label: `title "${content.title.selected.value}"` });
+      if (content.fps) out.push({ choice: { kind: "fps", value: content.fps.selected.source.opId }, label: `${content.fps.selected.value} fps` });
+      for (const id of Object.keys(content.tombstones)) out.push({ choice: { kind: "frameDeletion", id }, label: `deletion of frame ${id.slice(0, 8)}` });
+    }
+  } else if (content.kind === "score") {
+    // Recipes precede cells so a copied/restored note can use its prerequisite. A whole-version
+    // walk follows the effective selection; raw alternatives remain available in the read model.
+    const selected = <T>(slot: { removed: boolean; register: { selected: { value: T | null; source: { opId: string } }; conflicts: { value: T | null; source: { opId: string } }[] } }) =>
+      slot.removed ? [slot.register.selected, ...slot.register.conflicts].filter((value) => value.value === null)
+        .sort((a, b) => a.source.opId < b.source.opId ? -1 : 1)[0] : slot.register.selected;
+    for (const [patch, slot] of Object.entries(content.patches).sort(([a], [b]) => a < b ? -1 : 1)) {
+      const value = selected(slot);
+      if (value && (mode === "copy" || value.value !== null)) out.push({ choice: { kind: "scorePatch", patch, value: value.source.opId },
+        label: `${value.value === null ? "remove" : "recipe"} ${patch.slice(0, 8)}` });
+    }
+    if (mode === "copy") for (const field of ["title", "bpm", "bpb", "steps"] as const) {
+      const header = content[field];
+      if (header) out.push({ choice: { kind: "scoreHeader", field, value: header.selected.source.opId }, label: `score ${field}` });
+    }
+    for (const [key, slot] of Object.entries(content.cells).sort(([a], [b]) => {
+      const [as, ar] = a.split(":").map(Number), [bs, br] = b.split(":").map(Number); return as - bs || ar - br;
+    })) {
+      const value = selected(slot), [step, row] = key.split(":").map(Number);
+      if (value && (mode === "copy" || value.value !== null)) out.push({ choice: { kind: "scoreCell", step, row, value: value.source.opId },
+        label: `${value.value === null ? "clear" : "cell"} ${key}` });
+    }
+  } else if (content.kind === "index") {
+    for (const [id, entry] of [...Object.entries(content.objects), ...Object.entries(content.overflow)]) {
+      out.push({ choice: { kind: "object", id }, label: `entry "${entry.title.selected.value}"` });
+      if (mode === "copy") {
+        out.push({ choice: { kind: "objectTitle", id, value: entry.title.selected.source.opId }, label: `title "${entry.title.selected.value}"` });
+        out.push({ choice: { kind: "objectExpiry", id, value: entry.expiry.selected.source.opId }, label: `expiry of "${entry.title.selected.value}"` });
+      }
+    }
+    if (mode === "copy") for (const id of Object.keys(content.tombstones)) out.push({ choice: { kind: "objectDeletion", id }, label: `deletion of entry ${id.slice(0, 8)}` });
+  }
+  return out;
+}
+
+function laneOf(s: SaveRecord): string {
+  return s.kind === "applyIndex" ? "index" : s.object ?? "index";
+}
+
+const jobKey = (generation: number, cid: Hex64, bytes: number) => `${generation}:${cid}:${bytes}`;
+const contentKey = (cid: Hex64, bytes: number) => `${cid}:${bytes}`;
+
+function usedEpoch(s: SaveRecord): Hex32 | null {
+  switch (s.kind) {
+    case "frame": return s.apply?.epochId ?? null;
+    case "apply": case "applyIndex": return s.request.epochId;
+    case "recoveryApply": return s.edit.epochId;
+    default: return null;
+  }
+}
+
+function historicalBlob(v: RecoveryVersionRead, frame: Hex32, opId: Hex64): { cid: Hex64; bytes: number } | null {
+  if (v.content.kind !== "flipnote") return null;
+  const e = v.content.frames[frame];
+  if (!e) return null;
+  for (const x of [e.pixels.selected, ...e.pixels.conflicts]) if (x.source.opId === opId) return x.value;
+  for (const x of e.insertions) if (x.source.opId === opId) return x.value.blob;
+  return null;
+}
+
+export function reason(e: unknown): string {
+  if (e instanceof StudioNativeError) return e.reason;
+  if (e instanceof Error) return e.message;
+  return String(e);
+}
+
+function overlayRefusalText(reason: OverlaySaveRefusal): string {
+  switch (reason) {
+    case "exportUnpublished": return "exportUnpublished: the PIXA package has no matching native publication receipt; explicitly publish again before a new Save";
+    case "exportInvalid": return "exportInvalid: the PIXA package failed complete media validation; no reference was written";
+    case "exportMissing": return "exportMissing: the published PIXA package is no longer held; explicitly publish again before a new Save";
+    default: return reason;
+  }
+}
+
+export { DEFAULT_FPS };

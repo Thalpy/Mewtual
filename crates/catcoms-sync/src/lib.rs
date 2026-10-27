@@ -49,7 +49,6 @@ use catcoms_rt::{
     Clock, ConnectionFamily, ConnectionPath, ConnectionTransport, CryptoRngCore, DiscoveredPeer,
     MeshTransport, PeerId, ProtocolId, RendezvousRegistration, RequestCancellation, Topic,
     TransportError, TransportEvent, MAX_CONNECTED_PEER_SNAPSHOT, MAX_CONNECTION_PATH_SNAPSHOT,
-    MAX_PEER_DIAL_BATCH,
 };
 use catcoms_storage::{
     open_file as open_file_fn, seal_file as seal_file_fn, BlobStore, Cid, FileRef, MemoryBlobStore,
@@ -59,7 +58,42 @@ use catcoms_wire::{Decoder, DocType, Encoder};
 use thiserror::Error;
 use zeroize::Zeroizing;
 
+mod blob_fetch;
+mod member_finalization;
+mod recovery_wait;
+use member_finalization::KIND_MEMBER_FINALIZE;
+pub use member_finalization::{
+    MAX_MEMBER_FINALIZATION_OBSERVATIONS, MEMBER_FINALIZATION_WORK_PER_PASS,
+};
+pub mod checkpoint_exchange;
+pub mod durable_chat;
+pub mod epoch_service;
+mod group_policy;
+mod owner_tenure;
+pub use catcoms_mls::{GroupMode, GroupPolicy, PolicyError};
+pub use owner_tenure::{
+    ArchivedOwnerTenure, ObservedOwnerTenure, MAX_HISTORICAL_OWNER_WITNESS_BYTES,
+};
+pub mod receipt_head;
+#[cfg(test)]
+mod reconciliation_tests;
+
+#[cfg(test)]
+mod catchup_page_tests;
+pub mod registry_catchup;
+mod registry_ingress;
+mod registry_publication;
+#[cfg(test)]
+mod response_budget_tests;
+mod studio_exchange;
+pub use studio_exchange::StudioWatch;
+pub mod registry_seed;
 mod roles;
+pub use blob_fetch::{
+    BlobPage, BlobPageOutcome, CompletedBlobFetch, PendingBlobFetch, MAX_BLOB_FETCH_PEERS,
+};
+pub use registry_ingress::RegistryWatch;
+pub use registry_publication::RegistrySyncInstance;
 // Re-export the role-authority logic so the product/UI layer (catcoms-app) reuses this exact,
 // canonical implementation rather than keeping a second copy that could drift.
 pub use roles::{
@@ -154,10 +188,43 @@ const KIND_DELIVERY_RECEIPT: u8 = 18;
 /// and receives only what is missing. A peer that does not know this kind answers empty, which is
 /// how the requester detects it and falls back to [`KIND_CATCHUP`].
 const KIND_CATCHUP_SINCE: u8 = 19;
+/// P1 registry pages; deliberately no legacy full-history fallback.
+const KIND_REGISTRY_PAGE: u8 = 20;
+/// Keyed P1 receipt-head discovery; no concrete epoch or legacy fallback.
+const KIND_RECEIPT_HEAD: u8 = 21;
+/// Exact expected-hash checkpoint seed, distinct from user operations and file CIDs.
+const KIND_REGISTRY_SEED: u8 = 22;
+/// Typed Studio history pages. No legacy catch-up fallback is permitted.
+const KIND_STUDIO_PAGE: u8 = 23;
+// Additive Studio logical-head and expected-hash checkpoint routes; Registry 21/22 stay v1.
+const KIND_STUDIO_HEAD: u8 = 24;
+const KIND_STUDIO_SEED: u8 = 25;
+/// Request kind: a **byte range** of a content-addressed blob, the paged companion to
+/// [`KIND_BLOB_FETCH`] (26 is `KIND_MEMBER_FINALIZE`).
+///
+/// A separate kind rather than an extra field on the whole-blob request, for the reason the
+/// catch-up paging note gives: `decode_blob_fetch_req` calls `finish()` and rejects trailing
+/// bytes, so an older peer handed a longer request answers *empty*, which on that kind means
+/// "not held". A silent wrong answer is worse than no paging. On this kind, empty means only
+/// "I do not know this request", and the requester falls back to the whole-blob grammar.
+const KIND_BLOB_PAGE: u8 = 27;
 /// Frontier entries one incremental catch-up may name. A document's frontier is one hash per
-/// concurrent writer and normally one or two; this is a bound on the walk a requester can ask a
-/// serving peer to perform, not a limit anyone reaches.
-const MAX_CATCHUP_SINCE_HEADS: usize = 64;
+/// concurrent writer, so it is one or two in ordinary use and as many as the group is wide after
+/// a partition in which everybody wrote.
+///
+/// This is deliberately generous, because the cost it was once thought to bound is not really
+/// there. The serving peer's subtraction walk visits each change at most once (`have` is a set,
+/// and a hash already in it terminates that branch), so it is `O(document)` whether it starts
+/// from two heads or five hundred; naming more of them adds 36 bytes each on the wire and a
+/// handful of misses for hashes the peer cannot resolve. `MAX_CONTROL_REQUEST` still bounds the
+/// frame, and 512 heads sit comfortably inside it.
+///
+/// What the old value of 64 did bound was the requester's ability to describe itself, and a
+/// frontier that cannot say what it holds is not merely incomplete, it is **wrong**: the peer
+/// subtracts less than it should and re-sends history the requester already has. See
+/// `docs/MESSAGE-FLOW.md` section 8 for what that composes into. The paging cursor below is the
+/// actual fix; this value keeps ordinary groups from ever reaching the situation.
+const MAX_CATCHUP_SINCE_HEADS: usize = 512;
 /// Marks a response as coming from a peer that understands [`KIND_CATCHUP_SINCE`], so "you are
 /// already up to date" (a bundle of zero ops) is distinguishable from "I did not understand you"
 /// (an empty response). Everything after it is an ordinary catch-up bundle.
@@ -167,6 +234,15 @@ const CATCHUP_SINCE_UNDERSTOOD: u8 = 1;
 /// inferred it from "did I apply anything" stopped on a chunk of ops it already had, and on a
 /// chunk that could carry nothing because the next op was larger than the budget.
 const CATCHUP_SINCE_MORE: u8 = 2;
+/// As [`CATCHUP_SINCE_MORE`], and the answer begins with a [`CATCHUP_CURSOR_BYTES`]-byte
+/// continuation naming where in the serving peer's log to resume.
+///
+/// Its own marker rather than an optional prefix on [`CATCHUP_SINCE_MORE`], because a cursor is
+/// twenty arbitrary bytes and every twenty bytes decode as one: a requester cannot tell a
+/// continuation from the first twenty bytes of a bundle by looking. Only a request that carried
+/// the cursor field is answered with this, so a build that predates paging never sees it, and if
+/// one somehow does, the unknown-marker path already falls back to whole-history catch-up.
+const CATCHUP_SINCE_PAGE: u8 = 4;
 /// The serving peer understands the request and simply does not hold this document.
 ///
 /// Distinct from [`CATCHUP_SINCE_UNDERSTOOD`] with an empty bundle, which says "you have
@@ -186,6 +262,12 @@ const CATCHUP_SINCE_ABSENT: u8 = 3;
 /// an authenticated peer can repeat forever to keep us asking. A bounded run absorbs the honest
 /// case; past it the peer has told us nothing usable enough times to prefer somebody else.
 const MAX_NONPROGRESSING_CATCHUP_ROUNDS: u8 = 8;
+/// A bounded provider can skip its conservative known closure across empty pages. Permit one
+/// such walk without treating those pages as stalls, but never grant an unlimited stream of
+/// empty positions the authority to keep issuing requests.
+const MAX_EMPTY_CATCHUP_PAGE_GRACE: usize =
+    catcoms_replication::doc::MAX_CATCHUP_PAGE_CLOSURE_STEPS
+        .div_ceil(catcoms_replication::doc::MAX_CATCHUP_PAGE_SCANNED_OPS);
 /// Ceiling on the non-progress ledger. Its keys are all this node's own (documents it has open,
 /// peers it chose to ask), so it cannot be grown from outside; the cap is belt and braces.
 const MAX_CATCHUP_STALL_ENTRIES: usize = 256;
@@ -444,6 +526,11 @@ const CALL_SIGNAL_REFILL_PER_SEC: u64 = 8;
 /// content address is re-verified on store (so a wrong blob is rejected regardless); this
 /// only bounds memory. Mirrors the 16 MiB catch-up ceiling.
 const MAX_BLOB_RESPONSE: usize = 16 * 1024 * 1024;
+
+/// Largest creative blob fetched whole (the `.pixa` envelope ceiling). A caller must also
+/// supply its record's smaller declared limit; this does not replace aggregate Studio caps.
+pub const MAX_BOUNDED_BLOB_BYTES: usize = 9 * 1024 * 1024;
+const SIGNED_BLOB_OVERHEAD: usize = 3 * 4 + 32 + 64;
 /// Per-requesting-**member** blob-serve budget over a fixed window; the anti-amplification rate
 /// limit (a 32-byte CID can elicit up to `MAX_BLOB_RESPONSE` + a signature). A **bytes** budget
 /// (not a per-blob interval) so a single legitimate download can pull many chunks back-to-back
@@ -456,6 +543,36 @@ const MAX_BLOB_RESPONSE: usize = 16 * 1024 * 1024;
 /// boundary. That doesn't change the asymptotic bound and the absolute burst is modest.
 const BLOB_BUDGET_BYTES: u64 = 96 * 1024 * 1024;
 const BLOB_BUDGET_WINDOW_MS: u64 = 1_000;
+
+/// Bytes of blob one **paged** fetch response may carry, and the matching receive-side bound.
+///
+/// Deliberately the same number as [`MAX_CATCHUP_CHUNK`], and for exactly the reason written
+/// there: a deadline is only safe if a legal response can always fit inside it. The document
+/// layer learned that and the blob layer did not, so a file chunk travelled as one 8 MiB
+/// request/response against libp2p's default ten-second request timeout. That is a throughput
+/// requirement of roughly 8 Mb/s dressed up as a deadline: below it a transfer does not get
+/// slow, it fails outright and retries into the same wall, while chat over the same connection
+/// is fine because a chat op is under a kilobyte. A NAT-punched path, which is what two
+/// otherwise-unreachable members end up on, is nowhere near that rate on a burst.
+///
+/// At this size the same ten seconds asks for about 0.2 Mb/s, and every exchange that lands is
+/// progress a retry keeps rather than work a retry repeats.
+pub const MAX_BLOB_PAGE: usize = 256 * 1024;
+
+/// The page size a fetch opens with on a path that is punched, relayed, or otherwise not a
+/// plain direct dial. Small first, grown by the requester as pages land.
+pub const MIN_BLOB_PAGE: usize = 64 * 1024;
+
+/// The serving peer understands [`KIND_BLOB_PAGE`] and does not hold this blob.
+///
+/// Distinct from an empty response, which on this kind means "I am a build that predates
+/// paging" and sends the requester back to the whole-blob grammar. Conflating them would make
+/// every fetch from a peer that simply lacks the file take the slowest path in the protocol.
+const BLOB_PAGE_ABSENT: u8 = 1;
+/// A page, and the blob continues past it: ask again from `offset + len`.
+const BLOB_PAGE_MORE: u8 = 2;
+/// A page, and it reaches the end of the blob.
+const BLOB_PAGE_LAST: u8 = 3;
 /// Cap on peer records returned in one PEX **response**, and the matching receive-side bound.
 /// A wire quantity: both sides of `decode_pex_bundle` depend on it, so it is not the knob for how
 /// many records a node may keep.
@@ -463,9 +580,9 @@ const MAX_PEX_ENTRIES: usize = 64;
 /// Cap on peer records **retained locally**, which is a different question from what fits in one
 /// response and needs a lot more headroom.
 ///
-/// Dropping a record is not merely a dark presence dot: `peer_for_fingerprint` reads this map, so
-/// an evicted member silently cannot be sent a call signal or a DM invite (both just return
-/// `Ok(false)`). At 64 that was reachable by an ordinary group once multi-device grants multiply
+/// Dropping a record is not merely a dark presence dot: `peer_for_device` (call signals) and
+/// `peer_for_fingerprint` (DM invites) read this map, so an evicted member silently cannot be sent
+/// a call signal or a DM invite (both just return `Ok(false)`). At 64 that was reachable by an ordinary group once multi-device grants multiply
 /// each person by their devices, and the eviction that got there was `HashMap` iteration order,
 /// which Rust randomises per process: which member's calls broke would differ every launch.
 const MAX_PEER_RECORDS: usize = 512;
@@ -668,6 +785,16 @@ const PEER_RECORD_DOMAIN: &str = "catcoms/peer-record/v1";
 /// Domain separator for a **responder's** signature over a blob-fetch response (8l);
 /// same binding shape as the catch-up/PEX responses, distinct domain.
 const BLOB_FETCH_RESP_DOMAIN: &str = "catcoms/blob-fetch-resp/v1";
+/// Domain separator for a **responder's** signature over one blob *page*.
+///
+/// Its own domain, and the transcript below binds the window as well as the bytes. A whole-blob
+/// response is self-authenticating because the requester re-hashes it to the content address it
+/// asked for; a page cannot be, since the address only exists for the whole. So the page's
+/// standing is entirely "a current member signed these exact bytes, at this exact offset, of
+/// this exact blob, for this exact request", and the content address is re-checked once over
+/// the reassembly. Leaving the offset or the total out would let a member that is allowed to
+/// serve the blob reorder or truncate it undetectably up to that final hash.
+const BLOB_PAGE_RESP_DOMAIN: &str = "catcoms/blob-page-resp/v1";
 
 /// Tunable bounds for the recovery/key-window machinery. Every field is a hard
 /// cap on memory the node will spend on out-of-order recovery, so a peer cannot
@@ -901,6 +1028,10 @@ pub struct SyncStats {
     pub commits_served: u64,
     /// Commit-catch-up requests this node issued to recover missed commits.
     pub commit_catchups_requested: u64,
+    /// Times a reached source proved it could not chain this node's epoch onward, counted once
+    /// per epoch this node was stuck at rather than once per exchange. See
+    /// [`ChannelSync::membership_chain_gap`] for the detail and for whether one is current.
+    pub commit_chain_gaps_observed: u64,
     /// Live ops decrypted under the current epoch.
     pub ops_ingested: u64,
     /// Live ops recovered with a retained past-epoch key (crossed a boundary).
@@ -936,7 +1067,7 @@ pub struct SyncStats {
 
 /// Deferred recovery work, performed on the next async drain in [`ChannelSync::run_once`]
 /// (the handlers that detect a gap run synchronously while processing an event).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 enum CatchupTask {
     /// Fetch and replay membership commits from `from_epoch` onward.
     Commits {
@@ -961,6 +1092,91 @@ enum CatchupTask {
     },
     /// Fetch a document's history (to recover an op we could not decrypt).
     Doc { doc_type: DocType, doc_id: u128 },
+}
+
+/// A membership chain this node cannot complete from any source it has reached.
+///
+/// The document data plane can repair a member from any peer that holds the history, but it can
+/// only be reached through the current routing label, and that label advances by replaying
+/// membership commits in order. A member that has missed more removals than every reachable peer
+/// still retains is therefore fully connected, still in the roster, and permanently unable to
+/// converge. Nothing in the protocol fixes that on its own, so the first requirement is that the
+/// state be nameable rather than inferred from an absence.
+///
+/// Evidence from the sources actually asked, not a claim about the group: another member may hold
+/// a longer log, which is why `lowest_available` keeps the best offer seen at this epoch and why
+/// the whole record is discarded the moment the epoch moves.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MembershipChainGap {
+    /// The epoch this node is stuck at.
+    pub current_epoch: u64,
+    /// The lowest commit epoch any reached source could still offer. Everything between this and
+    /// `current_epoch` has aged out of every commit log this node has seen.
+    pub lowest_available: u64,
+    /// When this was last observed, on the injected wall clock.
+    pub observed_at_ms: u64,
+}
+
+impl MembershipChainGap {
+    /// How many membership commits are missing from every log this node has reached.
+    pub fn missing_commits(&self) -> u64 {
+        self.lowest_available.saturating_sub(self.current_epoch)
+    }
+}
+
+/// What one commit catch-up exchange **established**, as distinct from how far this node happened
+/// to move while performing it.
+///
+/// The two are routinely different, and only some of them can retire recovery work. An up-to-date
+/// group answers a speculative probe with nothing, and the epoch does not move; a peer that never
+/// replied at all also leaves the epoch where it was. Collapsing both into "zero commits applied"
+/// is what let a timeout close a probe: an ordinary member that missed an epoch while offline
+/// retired its own recovery on the way back and stayed unable to read current traffic until
+/// something unrelated re-detected the gap.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CommitCatchupOutcome {
+    /// A current roster member signed a decodable bundle bound to this exact request.
+    Verified { applied: usize },
+    /// The peer returned no bundle. A member holding nothing from `from_epoch` answers exactly
+    /// this way, and so does one that refused the request: `serve_commit_catchup` sends empty
+    /// bytes for both, so the wire genuinely does not distinguish them. Counted as an
+    /// answer, because the alternative is to treat every honest up-to-date peer as a failure.
+    /// Kept as its own variant so the conflation is visible where it is relied on, and so the
+    /// day the response carries a signed empty bundle there is one place to split it.
+    Empty,
+    /// No answer at all: the request failed or passed its deadline, or what came back was
+    /// oversized, undecodable, or not signed by a current member. A fact about the peer and the
+    /// link, and evidence about the commit log in neither direction.
+    Unanswered,
+    /// The peer answered with authenticated records and none of them chain onto this node's
+    /// epoch: everything it still holds begins above where this node is.
+    ///
+    /// This is the state that was invisible. `serve_commit_catchup` sends a contiguous run from
+    /// the requester's own epoch upward, so a bundle whose lowest record is higher than that says
+    /// the intervening commits have aged out of this peer's retained log. The chain cannot be
+    /// replayed from here, the routing label cannot advance, and the member stays subscribed to
+    /// topics nobody publishes on.
+    ///
+    /// Both bands of it look the same from outside and neither used to be reportable: within
+    /// `max_commit_gap` the records buffer and cannot drain, and past it they are dropped before
+    /// buffering, which produced no evidence at all. Either way the exchange previously returned
+    /// `Verified { applied: 0 }`, which is byte-for-byte what an honest up-to-date peer returns.
+    Stranded { lowest_available: u64 },
+}
+
+impl CommitCatchupOutcome {
+    /// The commits actually applied; zero whenever nothing was established.
+    fn applied(self) -> usize {
+        match self {
+            Self::Verified { applied } => applied,
+            Self::Empty | Self::Unanswered | Self::Stranded { .. } => 0,
+        }
+    }
+
+    /// Whether the peer said anything this node may draw a conclusion from.
+    fn answered(self) -> bool {
+        !matches!(self, Self::Unanswered)
+    }
 }
 
 /// The transcript the admitter signs (and the joiner verifies) to authenticate a
@@ -1025,7 +1241,8 @@ fn catchup_auth_transcript(
 /// the server reconstructs it from where the bytes actually arrived, so a relayed request simply
 /// fails to verify.
 ///
-/// Only `KIND_CATCHUP_SINCE`, and only because it is new on this branch.
+/// New incremental catch-up, registry-page, receipt-head and checkpoint-seed kinds opt into
+/// this binding. Existing released transcripts below remain unchanged.
 ///
 /// The transcript is what a signature is over, so adding a field to it changes what an older
 /// build computes and breaks both directions of a mixed pair. `KIND_PEX` and `KIND_COMMIT_CATCHUP`
@@ -1040,7 +1257,20 @@ fn catchup_auth_transcript(
 /// somebody's behalf and re-authenticates the original bytes at the far end. A delivery receipt is
 /// built once and sent to several targets. Binding either would be wrong rather than safer.
 fn kind_binds_requester_peer(kind: u8) -> bool {
-    matches!(kind, KIND_CATCHUP_SINCE)
+    matches!(
+        kind,
+        KIND_CATCHUP_SINCE
+            | KIND_REGISTRY_PAGE
+            | KIND_RECEIPT_HEAD
+            | KIND_REGISTRY_SEED
+            | KIND_STUDIO_PAGE
+            | KIND_STUDIO_HEAD
+            | KIND_STUDIO_SEED
+            | KIND_MEMBER_FINALIZE
+            // New kind, so there is no released transcript to preserve: it takes the stronger
+            // both-ends binding from the start rather than inheriting the blob path's weaker one.
+            | KIND_BLOB_PAGE
+    )
 }
 
 /// A **responder's** signature transcript over a served bundle (commit catch-up or
@@ -1160,6 +1390,112 @@ fn blob_fetch_resp_transcript(
     )
 }
 
+/// The responder transcript for one blob page.
+///
+/// `offset` and `total` are inside the signature, not merely beside it: see
+/// [`BLOB_PAGE_RESP_DOMAIN`] for why a page, unlike a whole blob, is not self-authenticating.
+#[allow(clippy::too_many_arguments)]
+fn blob_page_resp_transcript(
+    group_id: &[u8],
+    requester_pubkey: &[u8],
+    request_ts_ms: u64,
+    nonce: &[u8; 16],
+    req_epoch: u64,
+    cid: &Cid,
+    offset: u32,
+    total: u32,
+    page: &[u8],
+) -> Vec<u8> {
+    let mut e = Encoder::new();
+    e.put_str(BLOB_PAGE_RESP_DOMAIN).expect("label fits");
+    e.put_bytes(group_id).expect("group id fits");
+    e.put_bytes(requester_pubkey).expect("pubkey fits");
+    e.put_u64(request_ts_ms);
+    e.put_bytes(nonce).expect("16 fits");
+    e.put_u64(req_epoch);
+    e.put_bytes(cid.as_bytes()).expect("32 fits");
+    e.put_u32(offset);
+    e.put_u32(total);
+    e.put_bytes(page).expect("page fits");
+    e.finish()
+}
+
+/// Encode a blob-page request inner body: content address, window start, window limit.
+fn encode_blob_page_req(cid: &Cid, offset: u32, max_bytes: u32) -> Vec<u8> {
+    let mut e = Encoder::new();
+    e.put_bytes(cid.as_bytes()).expect("32 fits");
+    e.put_u32(offset);
+    e.put_u32(max_bytes);
+    e.finish()
+}
+
+/// Decode a blob-page request inner body into `(cid, offset, max_bytes)`.
+fn decode_blob_page_req(bytes: &[u8]) -> Result<(Cid, u32, u32), SyncError> {
+    let mut d = Decoder::new(bytes);
+    let cid_bytes: [u8; 32] = d
+        .get_bytes()
+        .map_err(|_| SyncError::Malformed)?
+        .try_into()
+        .map_err(|_| SyncError::Malformed)?;
+    let offset = d.get_u32().map_err(|_| SyncError::Malformed)?;
+    let max_bytes = d.get_u32().map_err(|_| SyncError::Malformed)?;
+    d.finish().map_err(|_| SyncError::Malformed)?;
+    Ok((Cid::from_bytes(cid_bytes), offset, max_bytes))
+}
+
+/// Frame a signed blob page: `marker ‖ responder_pubkey ‖ sig ‖ offset ‖ total ‖ page`.
+fn encode_blob_page_resp(
+    marker: u8,
+    responder_pubkey: &[u8],
+    signature: &[u8; 64],
+    offset: u32,
+    total: u32,
+    page: &[u8],
+) -> Vec<u8> {
+    let mut e = Encoder::new();
+    e.put_bytes(responder_pubkey).expect("pubkey fits");
+    e.put_bytes(signature).expect("64 fits");
+    e.put_u32(offset);
+    e.put_u32(total);
+    e.put_bytes(page).expect("page fits");
+    let mut out = Vec::with_capacity(1 + e.len());
+    out.push(marker);
+    out.extend_from_slice(&e.finish());
+    out
+}
+
+/// A parsed blob page: `(marker, responder pubkey, signature, offset, total, page)`.
+type BorrowedBlobPage<'a> = (u8, &'a [u8], [u8; 64], u32, u32, &'a [u8]);
+
+/// Borrow a page body only after checking framing and size, as `decode_blob_response` does.
+fn decode_blob_page_resp(
+    bytes: &[u8],
+    max_bytes: usize,
+) -> Result<BorrowedBlobPage<'_>, SyncError> {
+    let (marker, rest) = bytes.split_first().ok_or(SyncError::Malformed)?;
+    if rest.len() > max_bytes.saturating_add(SIGNED_BLOB_OVERHEAD) + 8 {
+        return Err(SyncError::Malformed);
+    }
+    let mut d = Decoder::new(rest);
+    let pubkey = d.get_bytes().map_err(|_| SyncError::Malformed)?;
+    if pubkey.len() != 32 {
+        return Err(SyncError::Malformed);
+    }
+    let signature = d
+        .get_bytes()
+        .map_err(|_| SyncError::Malformed)?
+        .try_into()
+        .map_err(|_| SyncError::Malformed)?;
+    let offset = d.get_u32().map_err(|_| SyncError::Malformed)?;
+    let total = d.get_u32().map_err(|_| SyncError::Malformed)?;
+    let page = d.get_bytes().map_err(|_| SyncError::Malformed)?;
+    if page.len() > max_bytes {
+        return Err(SyncError::Malformed);
+    }
+    d.finish().map_err(|_| SyncError::Malformed)?;
+    Ok((*marker, pubkey, signature, offset, total, page))
+}
+
 /// Encode a blob-fetch request inner body: just the 32-byte content address.
 fn encode_blob_fetch_req(cid: &Cid) -> Vec<u8> {
     let mut e = Encoder::new();
@@ -1194,6 +1530,34 @@ fn encode_signed_commit_resp(
 
 /// A parsed signed commit-catch-up response: `(responder pubkey, signature, bundle)`.
 type SignedCommitResp = (Vec<u8>, [u8; 64], Vec<u8>);
+type BorrowedBlobResp<'a> = (&'a [u8], [u8; 64], &'a [u8]);
+
+/// Borrow the response body only after checking framing and size. The transport has already
+/// buffered its globally bounded frame; this limit is before body copies, hashing and storage,
+/// not a streaming/socket allocation limit. Keep generic commit decoding separate.
+fn decode_blob_response(bytes: &[u8], max_bytes: usize) -> Result<BorrowedBlobResp<'_>, SyncError> {
+    if bytes.len() > MAX_BLOB_RESPONSE
+        || bytes.len() > max_bytes.saturating_add(SIGNED_BLOB_OVERHEAD)
+    {
+        return Err(SyncError::Malformed);
+    }
+    let mut d = Decoder::new(bytes);
+    let pubkey = d.get_bytes().map_err(|_| SyncError::Malformed)?;
+    if pubkey.len() != 32 {
+        return Err(SyncError::Malformed);
+    }
+    let signature = d
+        .get_bytes()
+        .map_err(|_| SyncError::Malformed)?
+        .try_into()
+        .map_err(|_| SyncError::Malformed)?;
+    let blob = d.get_bytes().map_err(|_| SyncError::Malformed)?;
+    if blob.len() > max_bytes {
+        return Err(SyncError::Malformed);
+    }
+    d.finish().map_err(|_| SyncError::Malformed)?;
+    Ok((pubkey, signature, blob))
+}
 
 /// Parse a signed commit-catch-up response into `(responder pubkey, signature, bundle)`.
 fn decode_signed_commit_resp(bytes: &[u8]) -> Result<SignedCommitResp, SyncError> {
@@ -1343,16 +1707,24 @@ fn encode_join_transfer(
     label: u64,
     secrets: &[(u64, [u8; 32])],
     file_wrap_key: &[u8; 32],
+    policy: Option<&GroupPolicy>,
 ) -> Vec<u8> {
     let mut e = Encoder::new();
     e.put_bytes(&encode_routing_state(label, secrets))
         .expect("routing fits");
     e.put_bytes(file_wrap_key).expect("32 fits");
+    // Preserve legacy routing-transfer bytes when the invite itself had no policy.
+    if policy.is_some() {
+        e.put_bytes(&group_policy::encode_pin(policy))
+            .expect("policy fits");
+    }
     e.finish()
 }
 
 #[allow(clippy::type_complexity)]
-fn decode_join_transfer(bytes: &[u8]) -> Result<(u64, Vec<(u64, [u8; 32])>, [u8; 32]), SyncError> {
+fn decode_join_transfer(
+    bytes: &[u8],
+) -> Result<(u64, Vec<(u64, [u8; 32])>, [u8; 32], Option<GroupPolicy>), SyncError> {
     let mut d = Decoder::new(bytes);
     let routing = d.get_bytes().map_err(|_| SyncError::Malformed)?;
     let (label, secrets) = decode_routing_state(routing)?;
@@ -1361,8 +1733,13 @@ fn decode_join_transfer(bytes: &[u8]) -> Result<(u64, Vec<(u64, [u8; 32])>, [u8;
         .map_err(|_| SyncError::Malformed)?
         .try_into()
         .map_err(|_| SyncError::Malformed)?;
+    let policy = if d.is_empty() {
+        None
+    } else {
+        group_policy::decode_pin(d.get_bytes().map_err(|_| SyncError::Malformed)?)?
+    };
     d.finish().map_err(|_| SyncError::Malformed)?;
-    Ok((label, secrets, fwk))
+    Ok((label, secrets, fwk, policy))
 }
 
 /// The routing state (`L` + the retained `ns_secret_L` history) transferred from an
@@ -1380,6 +1757,8 @@ pub struct RoutingState {
     /// routing secrets. `None` for an absent/empty transfer (the joiner then cannot open
     /// group files until it obtains the key).
     file_wrap_key: Option<[u8; 32]>,
+    /// Verified against the joined MLS owner before this opaque transfer can be constructed.
+    policy: Option<GroupPolicy>,
     /// Transient lifecycle state consumed while waiting for a staged Welcome. Never encoded,
     /// sealed, persisted, or sent on the wire; `new_joined` drains it exactly once.
     connection_handoff: PreOwnerConnectionHandoff,
@@ -1423,7 +1802,11 @@ fn open_routing_transfer(
         tracing::warn!("authenticated routing transfer failed to unseal; rejecting join");
         SyncError::JoinRejected
     })?;
-    let (label, secrets, file_wrap_key) = decode_join_transfer(&plaintext)?;
+    let (label, secrets, file_wrap_key, policy) = decode_join_transfer(&plaintext)?;
+    if let Some(policy) = &policy {
+        group_policy::require_supported(policy)?;
+        policy.verify_current_owner(group)?;
+    }
     Ok(RoutingState {
         label,
         secrets: secrets
@@ -1431,6 +1814,7 @@ fn open_routing_transfer(
             .map(|(slot, s)| (slot, Zeroizing::new(s)))
             .collect(),
         file_wrap_key: Some(file_wrap_key),
+        policy,
         connection_handoff: PreOwnerConnectionHandoff::default(),
     })
 }
@@ -1735,6 +2119,9 @@ fn decode_join_resp(bytes: &[u8]) -> Result<JoinResp, SyncError> {
 /// Errors from channel synchronization.
 #[derive(Debug, Error)]
 pub enum SyncError {
+    /// Driver-acknowledged one-shot publication failed; this is not a local-edit rollback.
+    #[error(transparent)]
+    Publication(#[from] catcoms_rt::PublishOnceError),
     /// A transport-level error.
     #[error(transparent)]
     Transport(#[from] catcoms_rt::TransportError),
@@ -1744,12 +2131,18 @@ pub enum SyncError {
     /// An MLS-layer error.
     #[error(transparent)]
     Mls(#[from] catcoms_mls::MlsError),
+    /// Invalid, conflicting, or unsupported authenticated communication policy.
+    #[error(transparent)]
+    Policy(#[from] PolicyError),
     /// A blob-store error (content-addressed storage).
     #[error(transparent)]
     Storage(#[from] StorageError),
     /// The requested document is not open here.
     #[error("document not open")]
     NoSuchDoc,
+    /// A prepared chat owns this document's next local actor sequence until it is committed.
+    #[error("CHAT_SEND_DOCUMENT_PENDING: retry the outstanding send for this channel first")]
+    ChatPreparationPending,
     /// A join request was rejected by the inviter.
     #[error("join request rejected")]
     JoinRejected,
@@ -1941,7 +2334,7 @@ struct ProvenMemberPeer {
     /// Whether the exchange that produced this proof was bound at **both** ends: the request
     /// carrying the peer it was sent from, and the answer carrying the peer that produced it.
     ///
-    /// Only `KIND_CATCHUP_SINCE` is. The released build's PEX and commit-catch-up transcripts do
+    /// New incremental catch-up, registry-page and receipt-head kinds are. Released PEX/commit transcripts do
     /// not bind the requester's peer and cannot start doing so without breaking every mixed pair,
     /// so an endpoint can forward somebody's live request to a real member and hand back the
     /// answer: valid, and no evidence at all about the endpoint. Those proofs are good enough to
@@ -2038,6 +2431,32 @@ pub enum ManualRedialOutcome {
     NoRoutes,
     /// Routes existed, but shared endpoint/process safety limits deferred every one.
     DeferredBySafetyLimit,
+}
+
+/// The single current member whose display fingerprint is `fp`, or `None` when no member or more
+/// than one member carries it.
+///
+/// A fingerprint is only four bytes of a `DeviceId`, and any member can grind a device key whose
+/// id shares a victim's first four bytes. A caller that still addresses members by fingerprint
+/// (the legacy DM-invite route) must therefore refuse an ambiguous name rather than guess. Pure
+/// over the member list so the ambiguity rule is testable with crafted ids.
+fn unique_member_for_fingerprint(
+    members: impl IntoIterator<Item = DeviceId>,
+    fp: &str,
+) -> Option<DeviceId> {
+    let mut found: Option<DeviceId> = None;
+    for device in members {
+        if roles::fingerprint(&device) != fp {
+            continue;
+        }
+        match found {
+            // The same device listed twice is still one member.
+            Some(existing) if existing == device => {}
+            Some(_) => return None,
+            None => found = Some(device),
+        }
+    }
+    found
 }
 
 fn peer_descriptor_hash(descriptor: &PeerDescriptor) -> [u8; 32] {
@@ -3196,6 +3615,8 @@ const CTRL_ADD_REQUEST: u8 = 2;
 /// only the owner runs the MLS Add, so no fork; but the validity condition is a certificate
 /// signed by an admitted member's *origin* device rather than an invite-ledger entry.
 const CTRL_DEVICE_ADD: u8 = 3;
+/// Immutable owner-signed group policy; older peers ignore this additive tag.
+const CTRL_GROUP_POLICY: u8 = 4;
 
 /// Domain separator for the committer's per-commit authorization signature.
 const COMMIT_AUTH_DOMAIN: &str = "catcoms/commit-auth/v1";
@@ -3363,7 +3784,45 @@ fn encode_catchup_req(doc_type: DocType, doc_id: u128) -> Vec<u8> {
     e.finish()
 }
 
-fn encode_catchup_since_req(doc_type: DocType, doc_id: u128, heads: &[[u8; 32]]) -> Vec<u8> {
+/// A serving peer's resume point in its own log, as the requester replays it.
+///
+/// Opaque to the requester and meaningful only to the node that minted it: `provider` is that
+/// node's per-runtime identity, so a cursor replayed to the wrong peer, or to the same peer after
+/// a restart, is recognised as foreign and the walk simply starts again. That check is the whole
+/// of its safety requirement. A forged position can only make a server skip operations the forger
+/// then does not receive, so it is not authenticated; the fence exists to stop an honest mistake
+/// (a cursor crossing peers) from silently hiding history, not to stop a liar harming itself.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct CatchupCursor {
+    provider: [u8; 16],
+    position: u32,
+}
+
+const CATCHUP_CURSOR_BYTES: usize = 20;
+
+impl CatchupCursor {
+    fn encode(&self) -> [u8; CATCHUP_CURSOR_BYTES] {
+        let mut out = [0u8; CATCHUP_CURSOR_BYTES];
+        out[..16].copy_from_slice(&self.provider);
+        out[16..].copy_from_slice(&self.position.to_be_bytes());
+        out
+    }
+
+    fn decode(bytes: &[u8]) -> Option<Self> {
+        let raw: [u8; CATCHUP_CURSOR_BYTES] = bytes.try_into().ok()?;
+        Some(Self {
+            provider: raw[..16].try_into().ok()?,
+            position: u32::from_be_bytes(raw[16..].try_into().ok()?),
+        })
+    }
+}
+
+fn encode_catchup_since_req(
+    doc_type: DocType,
+    doc_id: u128,
+    heads: &[[u8; 32]],
+    cursor: Option<&CatchupCursor>,
+) -> Vec<u8> {
     let mut e = Encoder::new();
     e.put_u16(doc_type.tag());
     e.put_u128(doc_id);
@@ -3371,11 +3830,23 @@ fn encode_catchup_since_req(doc_type: DocType, doc_id: u128, heads: &[[u8; 32]])
     for head in heads {
         e.put_bytes(head).expect("a 32-byte head always encodes");
     }
+    // Trailing and optional, so a build that predates paging still decodes the frame it knows and
+    // answers it. An empty continuation means "I understand cursors and hold none yet", which is
+    // what tells the serving peer it may put one in the reply.
+    e.put_u8(1);
+    // Deliberately not `unwrap_or_default()`: the default of a fixed-size array is that many zero
+    // bytes, not the absence of one, so "no walk in progress" would travel as a real cursor at
+    // position zero under a provider stamp nobody minted.
+    let encoded = cursor.map(CatchupCursor::encode);
+    e.put_bytes(encoded.as_ref().map_or(&[][..], |c| &c[..]))
+        .expect("a 20-byte cursor always encodes");
     e.finish()
 }
 
 #[allow(clippy::type_complexity)]
-fn decode_catchup_since_req(bytes: &[u8]) -> Result<(DocType, u128, Vec<[u8; 32]>), SyncError> {
+fn decode_catchup_since_req(
+    bytes: &[u8],
+) -> Result<(DocType, u128, Vec<[u8; 32]>, Option<Option<CatchupCursor>>), SyncError> {
     let mut d = Decoder::new(bytes);
     let tag = d.get_u16().map_err(|_| SyncError::Malformed)?;
     let doc_type = DocType::from_tag(tag).ok_or(SyncError::Malformed)?;
@@ -3395,8 +3866,26 @@ fn decode_catchup_since_req(bytes: &[u8]) -> Result<(DocType, u128, Vec<[u8; 32]
             .map_err(|_| SyncError::Malformed)?;
         heads.push(head);
     }
+    // Absent for a peer that predates paging, and that is a legal frame rather than a malformed
+    // one: it is answered exactly as it always was. `Some(None)` is a paging-capable requester
+    // starting a fresh walk; `Some(Some(_))` is one continuing an existing one.
+    let cursor = if d.is_empty() {
+        None
+    } else {
+        if d.get_u8().map_err(|_| SyncError::Malformed)? != 1 {
+            return Err(SyncError::Malformed);
+        }
+        let raw = d.get_bytes().map_err(|_| SyncError::Malformed)?;
+        if raw.is_empty() {
+            Some(None)
+        } else {
+            Some(Some(
+                CatchupCursor::decode(raw).ok_or(SyncError::Malformed)?,
+            ))
+        }
+    };
     d.finish().map_err(|_| SyncError::Malformed)?;
-    Ok((doc_type, doc_id, heads))
+    Ok((doc_type, doc_id, heads, cursor))
 }
 
 fn decode_catchup_req(bytes: &[u8]) -> Result<(DocType, u128), SyncError> {
@@ -3663,13 +4152,36 @@ pub enum PostJoinDiscoveryEvent {
 }
 
 pub struct ChannelSync<T: MeshTransport, R: CryptoRngCore> {
-    transport: T,
+    // Only this owner consumes next_event. Detached requests share outbound access without
+    // moving MLS state, document authority, RNG, or the blob store out of the actor.
+    transport: Arc<T>,
+    blob_fetch_instance: Arc<()>,
+    /// Process-local incarnation, freshly allocated by new/restore; never persisted or sent.
+    registry_instance: RegistrySyncInstance,
+    registry_ingress: registry_ingress::RegistryIngress,
+    studio_exchange: studio_exchange::StudioExchange,
+    registry_pages: registry_catchup::RegistryRequests,
+    receipt_heads: receipt_head::HeadRequests,
+    registry_seeds: registry_seed::SeedRequests,
+    epoch_service: epoch_service::EpochService,
+    // A cancelled subscribe/unsubscribe may already have reached the transport. Reconcile this uncertain
+    // topic before calculating the next routing diff; never lose unsubscribe ownership.
+    routing_subscription_pending: Option<Topic>,
     group: ServerGroup,
+    /// Saved with this exact MLS group; never inferred from a received receipt or Welcome.
+    owner_tenure: owner_tenure::OwnerTenure,
+    group_policy: Option<GroupPolicy>,
+    group_policy_active: bool,
+    group_policy_revision: u64,
+    /// Only an explicit post-save publication or restoring a sealed pin arms retries.
+    group_policy_publish_ready: bool,
+    group_policy_last_topic: Option<Topic>,
     device: MlsDevice,
     rng: R,
     clock: Arc<dyn Clock + Send>,
     ledger: InviteLedger,
     docs: HashMap<(DocType, u128), EncryptedDoc>,
+    durable_chat: durable_chat::DurableChatState,
     /// The **current** routing label's control topic (where this node publishes
     /// commits). Recomputed whenever the routing label changes.
     control_topic: Topic,
@@ -3688,7 +4200,9 @@ pub struct ChannelSync<T: MeshTransport, R: CryptoRngCore> {
     /// (subscribing is async, rotation is not).
     needs_resync: bool,
     config: SyncConfig,
-    /// Membership commits queued for the control topic (drained in async run_once).
+    /// Broadcasts queued for a later tick (drained in async `run_once`): membership commits for
+    /// the control topic, and any document operation whose publication the transport refused
+    /// after the edit was already applied (see [`ChannelSync::post`]).
     outbox: Vec<(Topic, Vec<u8>)>,
     /// Transport peers to **evict** (P6): queued by an applied Remove commit, drained in the
     /// async `run_once` (the transport verb is async, the commit path is not). Transient and
@@ -3782,8 +4296,28 @@ pub struct ChannelSync<T: MeshTransport, R: CryptoRngCore> {
     /// addresses), so ordinary message traffic must not rebuild it merely to discover no route
     /// state changed. Session-only and allowed to wrap.
     member_route_revision: u64,
+    member_finalization_served_at: HashMap<DeviceId, u64>,
+    member_finalization_pending: HashMap<DeviceId, PeerId>,
+    member_finalization_cursor: Option<PeerId>,
     /// Recovery work to perform on the next async drain.
     catchup_queue: Vec<CatchupTask>,
+    /// Periodic neighbour reconciliation is paced and rotates through open documents when the
+    /// bounded catch-up queue cannot hold them all. Neither field carries protocol authority.
+    reconciliation_next_ms: u64,
+    reconciliation_cursor: usize,
+    /// Whether this process still owes its restored documents one whole-node catch-up sweep.
+    ///
+    /// Set by [`ChannelSync::restore`] when a snapshot brought documents back, and cleared by the
+    /// first peer that proves it can serve a document catch-up. Gossip replays nothing written
+    /// while this node was off, and `member_peers` holds only this session's proofs, so a restart
+    /// reaches its first connection unable to aim recovery anywhere; without this the sweep waited
+    /// on a second connection edge that a stable link never produces, and a room that stayed quiet
+    /// remained as short as the restore left it.
+    ///
+    /// One sweep per process, and only for a restored one. A node that founded or joined in this
+    /// session has nothing older than the session to recover, and sweeping there costs a tick that
+    /// discovery and presence are still using to converge.
+    first_proof_sweep_owed: bool,
     /// Authenticated acknowledgements waiting for a live route back to each op author. Entries
     /// are queued only after decrypting, signature-verifying and newly applying an op; bounded so
     /// an offline author cannot turn receipt retries into unbounded session state.
@@ -3807,9 +4341,14 @@ pub struct ChannelSync<T: MeshTransport, R: CryptoRngCore> {
     /// moving nothing. Reset the moment that peer applies anything, so only an unbroken run
     /// counts. See [`MAX_NONPROGRESSING_CATCHUP_ROUNDS`].
     catchup_stalls: HashMap<(DocType, u128, PeerId), u8>,
+    /// Empty advancing pages admitted without a stall. Unlike the stall counter, this budget
+    /// survives cooldown and provider changes; only applied history or completion resets it.
+    catchup_empty_page_grace: HashMap<(DocType, u128, PeerId), usize>,
     /// The task whose request is in flight right now, held here rather than on the stack so that
-    /// cancelling the tick cannot lose it. Restored to the queue by the next drain.
+    /// cancelling the tick cannot lose it. Its exact response wait also remains on this owner.
     catchup_inflight: Option<(CatchupTask, Option<PeerId>)>,
+    pending_catchup: Option<recovery_wait::PendingCatchup>,
+    prefer_catchup_response: bool,
     /// `(document, peer)` to the elapsed time before which that peer is not worth asking about
     /// that document again. See [`CATCHUP_PEER_COOLDOWN_MS`].
     catchup_cooldowns: HashMap<(DocType, u128, PeerId), u64>,
@@ -3823,6 +4362,26 @@ pub struct ChannelSync<T: MeshTransport, R: CryptoRngCore> {
     /// that source, not about the group, so it takes every eligible source saying it before the
     /// document is treated as caught up. Reset whenever the version moves.
     catchup_sources_checked: HashMap<(DocType, u128), (u64, BTreeSet<PeerId>)>,
+    /// This node's identity as a catch-up *provider*, minted per runtime.
+    ///
+    /// A resume position means something only against the log that produced it: the same operation
+    /// sits at a different index on every member, and a restored snapshot need not rebuild the
+    /// same order. Stamping each continuation with this lets the serving side recognise one that
+    /// came from somewhere else and start the walk again instead of skipping history. It is not
+    /// persisted, so a restart correctly invalidates every cursor outstanding against this node.
+    catchup_provider: [u8; 16],
+    /// Where this node is in each serving peer's log, per document, for a walk in progress.
+    /// Keyed by peer because a cursor from one is meaningless to another. Bounded like every
+    /// other per-document ledger here; the keys are all this node's own.
+    catchup_cursors: HashMap<(DocType, u128, PeerId), CatchupCursor>,
+    /// The membership chain this node could not complete, if it has met one. Never persisted, and
+    /// read through [`ChannelSync::membership_chain_gap`], which discards it once the epoch moves.
+    commit_chain_gap: Option<MembershipChainGap>,
+    /// Tasks whose lack of an eligible source has already been reported. A kept task is retried
+    /// on every drain, so without this the same stall is restated for as long as it lasts: one
+    /// document with one checked source wrote a line a second for half an hour. Emptied whenever
+    /// eligibility actually changes, so the next stall is reported afresh.
+    catchup_stall_reported: HashSet<CatchupTask>,
     /// An in-progress fork-resolution contest (only when `max_committer_rank >= 1`).
     pending: Option<PendingResolve>,
     /// Provisional-Welcome (or rejection) pushes to deliver to joiners once a
@@ -3888,12 +4447,14 @@ pub struct ChannelSync<T: MeshTransport, R: CryptoRngCore> {
     /// Companion certificates this node admitted and has not yet handed to the product layer,
     /// which writes them into the shared `Devices` document. Drained by `take_admitted_devices`.
     admitted_devices: Vec<DeviceCertificate>,
-    /// **Owner-local authoritative** admin set (fingerprints), persisted in the snapshot. This is
+    /// **Owner-local authoritative** admin set (full device identities), persisted in the snapshot. This is
     /// the security source of truth for the admission gate (`inviter_is_authorized`): a malicious
     /// member cannot write it, so the demoted-admin grant-replay residual is closed (THREAT-MODEL
-    /// item 3). The owner publishes a signed *copy* into the `MemberRoles` doc for display only.
+    /// item 3). The owner publishes a signed *copy* into the `MemberRoles` doc for display and reject-only relay preflight.
     /// Empty on non-owner nodes (they don't admit; they read the published copy for display).
-    admin_roster: BTreeSet<String>,
+    admin_roster: BTreeSet<DeviceId>,
+    /// Native authority writes block delegated admissions until a covering save completes.
+    admin_authority_durable: bool,
     /// Generation counter for the owner's *published* roster copy (monotonic; persisted), so
     /// honest members converge deterministically. Not load-bearing for the local gate.
     roster_gen: u64,
@@ -3924,6 +4485,7 @@ pub struct ChannelSync<T: MeshTransport, R: CryptoRngCore> {
     /// re-checks that exactly one current roster member still claims the authenticated transport
     /// peer, then spends the shared endpoint budget. Transient here; the desktop owns persistence.
     local_reconnect_routes: Vec<(PeerId, String)>,
+    local_reconnect_cursor: Option<PeerId>,
     /// Advisory-only isolation detector (never gates anything): hysteretic over R (roster) / D
     /// (reachable member peers) / S (distinct rendezvous trust roots). Surfaced to the UI as a
     /// "verify out-of-band" hint. Transient; rebuilt on restore.
@@ -3932,10 +4494,15 @@ pub struct ChannelSync<T: MeshTransport, R: CryptoRngCore> {
     /// fingerprint, opaque DM-group invite bytes)`, deduped on the sender. Surfaced to the recipient
     /// as pending friend requests; transient + bounded (`MAX_PENDING_DM_INVITES`).
     pending_dm_invites: Vec<(String, Vec<u8>)>,
-    /// Inbound call-signalling messages received via `KIND_CALL_SIGNAL`: `(sender fingerprint,
-    /// opaque payload)`. Drained by the actor (which emits a `CallSignal` event per item); FIFO,
-    /// bounded (`MAX_PENDING_CALL_SIGNALS`). NOT deduped.
-    pending_call_signals: Vec<(String, Vec<u8>)>,
+    /// Inbound call-signalling messages received via `KIND_CALL_SIGNAL`: `(verified sender
+    /// device, opaque payload)`. Drained by the actor (which emits a `CallSignal` event per item);
+    /// FIFO, bounded (`MAX_PENDING_CALL_SIGNALS`). NOT deduped.
+    ///
+    /// The sender is the **full** `DeviceId` derived from the signature key that authenticated the
+    /// request (Gate 5, design-creative-suite.md 2.18). It used to be cut down to the 4-byte
+    /// display fingerprint right here, which let any member who generated a device key sharing a
+    /// victim's first four bytes be indistinguishable from the victim to every call surface above.
+    pending_call_signals: Vec<(DeviceId, Vec<u8>)>,
     /// Known **member** peer records (this node's own + those learned via PEX), each
     /// self-signed by a current member. The discovery layer turns these into
     /// PEX-sourced dial candidates. Bounded by `MAX_PEER_RECORDS`.
@@ -4064,9 +4631,28 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         // replaces it with the transferred one via `adopt_routing_state`.
         let mut file_wrap_key = Zeroizing::new([0u8; 32]);
         rng.fill_bytes(file_wrap_key.as_mut());
+        // Per-runtime, never persisted: a restart must invalidate the resume positions other
+        // members are holding against this node's log rather than have them silently skip.
+        let mut provider = [0u8; 16];
+        rng.fill_bytes(&mut provider);
         let clock: Arc<dyn Clock + Send> = Arc::from(clock);
         let mut this = Self {
-            transport,
+            transport: Arc::new(transport),
+            blob_fetch_instance: Arc::new(()),
+            registry_instance: RegistrySyncInstance::new(),
+            registry_ingress: registry_ingress::RegistryIngress::default(),
+            studio_exchange: studio_exchange::StudioExchange::default(),
+            registry_pages: registry_catchup::RegistryRequests::default(),
+            receipt_heads: receipt_head::HeadRequests::default(),
+            registry_seeds: registry_seed::SeedRequests::default(),
+            epoch_service: epoch_service::EpochService::default(),
+            routing_subscription_pending: None,
+            owner_tenure: owner_tenure::OwnerTenure::new(&group),
+            group_policy: None,
+            group_policy_active: false,
+            group_policy_revision: 0,
+            group_policy_publish_ready: false,
+            group_policy_last_topic: None,
             group,
             device,
             rng,
@@ -4074,6 +4660,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             file_wrap_key,
             ledger: InviteLedger::new(),
             docs: HashMap::new(),
+            durable_chat: durable_chat::DurableChatState::default(),
             // Placeholder; set from `ns_secret_L` by `capture_routing_secret` below.
             control_topic: Topic::new(Vec::<u8>::new()),
             control_topics: HashSet::new(),
@@ -4106,17 +4693,30 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             peer_record_sources: HashMap::new(),
             manual_redial_last_ms: None,
             member_route_revision: 0,
+            member_finalization_served_at: HashMap::new(),
+            member_finalization_pending: HashMap::new(),
+            member_finalization_cursor: None,
             catchup_queue: Vec::new(),
+            reconciliation_next_ms: 0,
+            reconciliation_cursor: 0,
+            first_proof_sweep_owed: false,
             delivery_receipt_outbox: VecDeque::new(),
             delivery_receipt_targets: VecDeque::new(),
             delivery_receipts: HashMap::new(),
             delivery_receipt_revision: 0,
             failed_catchup_peers: VecDeque::new(),
             catchup_stalls: HashMap::new(),
+            catchup_empty_page_grace: HashMap::new(),
             catchup_inflight: None,
+            pending_catchup: None,
+            prefer_catchup_response: true,
             catchup_cooldowns: HashMap::new(),
             catchup_continuations: HashMap::new(),
             catchup_sources_checked: HashMap::new(),
+            catchup_provider: provider,
+            catchup_cursors: HashMap::new(),
+            commit_chain_gap: None,
+            catchup_stall_reported: HashSet::new(),
             pending: None,
             welcome_outbox: Vec::new(),
             add_request_queue: VecDeque::new(),
@@ -4139,6 +4739,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             revoked_devices: HashSet::new(),
             admitted_devices: Vec::new(),
             admin_roster: BTreeSet::new(),
+            admin_authority_durable: true,
             roster_gen: 0,
             rendezvous_nodes: Vec::new(),
             rendezvous_renewals: BTreeMap::new(),
@@ -4149,6 +4750,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             ),
             dial_retries: HashMap::new(),
             local_reconnect_routes: Vec::new(),
+            local_reconnect_cursor: None,
             eclipse: EclipseDetector::new(EclipseConfig::default()),
             pending_dm_invites: Vec::new(),
             pending_call_signals: Vec::new(),
@@ -4219,10 +4821,8 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         // (also after the peer records, so `peer_addrs_from_snapshot` is still unaffected). This
         // is the security source of truth for the admission gate, so it MUST persist.
         e.put_u64(self.roster_gen);
-        e.put_u32(self.admin_roster.len() as u32);
-        for fp in &self.admin_roster {
-            e.put_str(fp).map_err(|_| oversize())?;
-        }
+        // Empty legacy grants: an old reader must never regain fingerprint authority.
+        e.put_u32(0);
         // Post-join discovery: the rendezvous config, so a reloaded member re-registers/discovers
         // to re-find the group (also appended after the peer records).
         e.put_u32(self.rendezvous_nodes.len() as u32);
@@ -4245,6 +4845,26 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             e.put_bytes(&cached.sealed_routing)
                 .map_err(|_| oversize())?;
             e.put_bytes(&cached.owner_sig).map_err(|_| oversize())?;
+        }
+        // P1 observed tenure is an optional versioned tail for old-snapshot compatibility.
+        // Persist it together with MLS: a separately saved counter could bless an old tenure
+        // after a crash or A -> B -> A. Unknown is encoded explicitly on every new snapshot.
+        e.put_bytes(&self.owner_tenure.encode(&self.group)?)
+            .map_err(|_| oversize())?;
+        e.put_bytes(&group_policy::encode_pin(self.group_policy.as_ref()))
+            .map_err(|_| oversize())?;
+        e.put_bytes(&self.durable_chat.encode()?)
+            .map_err(|_| oversize())?;
+        // Retry correlation only: no connected/bound proof or private listener is restored.
+        e.put_bytes(&self.pending_finalization_snapshot()?)
+            .map_err(|_| oversize())?;
+        // Versioned authority tail. Older strict readers reject this snapshot rather than
+        // silently reviving a legacy fingerprint grant. Exact device grants never inherit.
+        e.put_str("catcoms/admin-authority/v2")
+            .map_err(|_| oversize())?;
+        e.put_u32(self.admin_roster.len() as u32);
+        for id in &self.admin_roster {
+            e.put_bytes(id.as_bytes()).map_err(|_| oversize())?;
         }
         Ok(Zeroizing::new(e.finish()))
     }
@@ -4289,64 +4909,105 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         // Item 3: the owner-local authoritative admin roster + generation. Read gracefully so a
         // pre-item-3 snapshot (no trailing bytes) loads with an empty roster (the owner re-grants;
         // old per-fp grant docs are no longer honored). A new snapshot is decoded strictly.
-        let (roster_gen, admin_roster, rendezvous_nodes, direct_admit_results) = if d.is_empty() {
-            (0u64, BTreeSet::new(), Vec::new(), HashMap::new())
-        } else {
-            let gen = d.get_u64().map_err(|_| bad())?;
-            let count = d.get_u32().map_err(|_| bad())?;
-            let mut set = BTreeSet::new();
-            for _ in 0..count {
-                set.insert(d.get_str().map_err(|_| bad())?.to_string());
-            }
-            // Post-join discovery rendezvous config; also a graceful tail (absent in a snapshot
-            // written before this feature). `get_*` is bounded by the remaining input, so push
-            // (no pre-alloc) can't over-run; the snapshot is sealed, so the count isn't adversarial.
-            let mut nodes = Vec::new();
-            if !d.is_empty() {
-                let n = d.get_u32().map_err(|_| bad())?;
-                for _ in 0..n {
-                    let addr = d.get_str().map_err(|_| bad())?.to_string();
-                    let rz = d.get_bytes().map_err(|_| bad())?.to_vec();
-                    nodes.push((addr, rz));
+        let (roster_gen, _legacy_admin_roster, rendezvous_nodes, direct_admit_results) =
+            if d.is_empty() {
+                (0u64, BTreeSet::new(), Vec::new(), HashMap::new())
+            } else {
+                let gen = d.get_u64().map_err(|_| bad())?;
+                let count = d.get_u32().map_err(|_| bad())?;
+                let mut set = BTreeSet::new();
+                for _ in 0..count {
+                    set.insert(d.get_str().map_err(|_| bad())?.to_string());
                 }
+                // Post-join discovery rendezvous config; also a graceful tail (absent in a snapshot
+                // written before this feature). `get_*` is bounded by the remaining input, so push
+                // (no pre-alloc) can't over-run; the snapshot is sealed, so the count isn't adversarial.
+                let mut nodes = Vec::new();
+                if !d.is_empty() {
+                    let n = d.get_u32().map_err(|_| bad())?;
+                    for _ in 0..n {
+                        let addr = d.get_str().map_err(|_| bad())?.to_string();
+                        let rz = d.get_bytes().map_err(|_| bad())?.to_vec();
+                        nodes.push((addr, rz));
+                    }
+                }
+                let mut direct = HashMap::new();
+                if !d.is_empty() {
+                    let count = d.get_u32().map_err(|_| bad())? as usize;
+                    if count > MAX_DIRECT_ADMIT_RESULTS {
+                        return Err(bad());
+                    }
+                    for _ in 0..count {
+                        let nonce = d
+                            .get_bytes()
+                            .map_err(|_| bad())?
+                            .try_into()
+                            .map_err(|_| bad())?;
+                        let kp_hash = d
+                            .get_bytes()
+                            .map_err(|_| bad())?
+                            .try_into()
+                            .map_err(|_| bad())?;
+                        let welcome = d.get_bytes().map_err(|_| bad())?.to_vec();
+                        let sealed_routing = d.get_bytes().map_err(|_| bad())?.to_vec();
+                        let owner_sig = d
+                            .get_bytes()
+                            .map_err(|_| bad())?
+                            .try_into()
+                            .map_err(|_| bad())?;
+                        direct.insert(
+                            nonce,
+                            CachedAdmit {
+                                kp_hash: Some(kp_hash),
+                                welcome,
+                                sealed_routing,
+                                owner_sig,
+                            },
+                        );
+                    }
+                }
+                (gen, set, nodes, direct)
+            };
+        let tenure_bytes = if d.is_empty() {
+            None
+        } else {
+            Some(d.get_bytes().map_err(|_| bad())?)
+        };
+        let policy = if d.is_empty() {
+            None
+        } else {
+            group_policy::decode_pin(d.get_bytes().map_err(|_| bad())?)?
+        };
+        let durable_chat = if d.is_empty() {
+            durable_chat::DurableChatState::default()
+        } else {
+            durable_chat::DurableChatState::decode(d.get_bytes().map_err(|_| bad())?)?
+        };
+        let pending_finalization = if d.is_empty() {
+            HashMap::new()
+        } else {
+            member_finalization::decode_pending_snapshot(d.get_bytes().map_err(|_| bad())?)?
+        };
+        // Legacy fingerprints contain no trustworthy original-grantee binding, even when
+        // one current member matches. Discard every such grant; require owner re-approval.
+        let mut admin_roster = BTreeSet::new();
+        if !d.is_empty() {
+            if d.get_str().map_err(|_| bad())? != "catcoms/admin-authority/v2" {
+                return Err(bad());
             }
-            let mut direct = HashMap::new();
-            if !d.is_empty() {
-                let count = d.get_u32().map_err(|_| bad())? as usize;
-                if count > MAX_DIRECT_ADMIT_RESULTS {
+            let count = d.get_u32().map_err(|_| bad())?;
+            for _ in 0..count {
+                let id = DeviceId::from_bytes(
+                    d.get_bytes()
+                        .map_err(|_| bad())?
+                        .try_into()
+                        .map_err(|_| bad())?,
+                );
+                if !admin_roster.insert(id) {
                     return Err(bad());
                 }
-                for _ in 0..count {
-                    let nonce = d
-                        .get_bytes()
-                        .map_err(|_| bad())?
-                        .try_into()
-                        .map_err(|_| bad())?;
-                    let kp_hash = d
-                        .get_bytes()
-                        .map_err(|_| bad())?
-                        .try_into()
-                        .map_err(|_| bad())?;
-                    let welcome = d.get_bytes().map_err(|_| bad())?.to_vec();
-                    let sealed_routing = d.get_bytes().map_err(|_| bad())?.to_vec();
-                    let owner_sig = d
-                        .get_bytes()
-                        .map_err(|_| bad())?
-                        .try_into()
-                        .map_err(|_| bad())?;
-                    direct.insert(
-                        nonce,
-                        CachedAdmit {
-                            kp_hash: Some(kp_hash),
-                            welcome,
-                            sealed_routing,
-                            owner_sig,
-                        },
-                    );
-                }
             }
-            (gen, set, nodes, direct)
-        };
+        }
         d.finish().map_err(|_| bad())?;
 
         // Reconstruct the MLS device + group, then build a base synchronizer and override its
@@ -4355,7 +5016,17 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         // file-wrap key is persisted separately (appended last), so the routing struct here
         // carries `None` for it.
         let (device, group) = restore_server(&mls)?;
+        if let Some(policy) = &policy {
+            group_policy::require_supported(policy)?;
+            policy.verify_pin(&group)?;
+        }
+        let tenure = match tenure_bytes {
+            Some(bytes) => owner_tenure::OwnerTenure::decode(bytes, &group)?,
+            None => owner_tenure::OwnerTenure::unknown(&group),
+        };
         let mut this = Self::new(transport, group, device, rng, clock);
+        this.owner_tenure = tenure;
+        this.durable_chat = durable_chat;
         let (label, secrets) = decode_routing_state(&routing_bytes)?;
         this.adopt_routing_state(RoutingState {
             label,
@@ -4364,8 +5035,10 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
                 .map(|(l, s)| (l, Zeroizing::new(s)))
                 .collect(),
             file_wrap_key: None,
+            policy,
             connection_handoff: PreOwnerConnectionHandoff::default(),
         });
+        this.group_policy_publish_ready = this.group_policy.is_some();
         this.file_wrap_key = Zeroizing::new(file_wrap_key);
         this.ledger = InviteLedger::restore(&ledger_bytes).map_err(|_| SyncError::Malformed)?;
         for snap in &doc_snaps {
@@ -4376,14 +5049,22 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             this.docs.insert((doc.doc_type(), doc.doc_id()), doc);
         }
         this.commit_log = commit_log;
+        // A snapshot's documents are as old as the process that wrote them, and nothing else will
+        // notice that. See `first_proof_sweep_owed`; discharged by the first member that proves
+        // it can serve a document catch-up.
+        this.first_proof_sweep_owed = !this.docs.is_empty();
         // Stamp every restored record as seen now. The stamps are transient (they are not in the
         // snapshot), and leaving them absent would make the whole restored map read as maximally
         // stale, so the first new record learned after a reload would evict a real member.
         let restored_at = this.clock.now_ms();
         this.peer_record_seen = peer_records.keys().map(|d| (*d, restored_at)).collect();
         this.peer_records = peer_records;
+        this.restore_pending_finalization(pending_finalization);
         this.roster_gen = roster_gen;
-        this.admin_roster = admin_roster;
+        this.admin_roster = admin_roster
+            .into_iter()
+            .filter(|id| this.group.contains_device(id))
+            .collect();
         this.rendezvous_nodes = rendezvous_nodes;
         this.direct_admit_results = direct_admit_results;
         Ok(this)
@@ -4412,15 +5093,23 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         let Some(owner) = self.group.designated_committer() else {
             return false;
         };
+        if !self.group.contains_device(device_id) {
+            return false;
+        }
         if owner == *device_id {
             return true;
         }
-        let fp = roles::fingerprint(device_id);
         if self.is_designated_committer() {
             // We are the owner; the only node that runs admission (Option C). Consult our LOCAL
             // authoritative roster: replay/deletion/forgery against the shared CRDT cannot touch
             // it, so a demoted admin cannot re-authorize itself (THREAT-MODEL item 3).
-            return self.admin_roster.contains(&fp);
+            return roles::authorizes_device(
+                owner,
+                &self.admin_roster,
+                *device_id,
+                self.group.contains_device(device_id),
+                self.admin_authority_durable,
+            );
         }
         // Non-owner: this never gates admission (only the owner commits, against its local
         // roster). It IS consulted for the relay self-gate via `published_roster_omits`, which
@@ -4429,7 +5118,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         // admission effect. Trust a cleanly-read owner-signed roster.
         match self.doc(DocType::MemberRoles, roles::ROLES_DOC) {
             Some(doc) => roles::read_published_roster(doc.doc(), &self.group.group_id(), &owner)
-                .is_some_and(|s| s.contains(&fp)),
+                .is_some_and(|s| s.contains(device_id)),
             None => false,
         }
     }
@@ -4443,11 +5132,10 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         let Some(owner) = self.group.designated_committer() else {
             return false;
         };
-        let fp = roles::fingerprint(device);
         match self.doc(DocType::MemberRoles, roles::ROLES_DOC) {
             Some(doc) => {
                 match roles::read_published_roster(doc.doc(), &self.group.group_id(), &owner) {
-                    Some(set) => !set.contains(&fp), // read cleanly → trust the positive omission
+                    Some(set) => !set.contains(device), // read cleanly → trust the positive omission
                     None => false, // unreadable/absent → unknown, not unauthorized
                 }
             }
@@ -4455,28 +5143,47 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         }
     }
 
-    /// The owner's local authoritative admin set (fingerprints). Owner-only meaningful; empty on
+    /// The owner's local authoritative admin set (full device identities). Owner-only meaningful; empty on
     /// non-owner nodes. The product layer uses this for the owner's own role display so it always
     /// matches the admission gate (other members read the published copy).
-    pub fn admin_roster(&self) -> HashSet<String> {
+    pub fn admin_roster(&self) -> HashSet<DeviceId> {
         self.admin_roster.iter().cloned().collect()
     }
 
-    /// Owner-only: grant/revoke admin for `fp`, updating the **local authoritative** roster (the
+    /// Owner-only: grant/revoke admin for an exact device, updating the **local authoritative** roster (the
     /// admission source of truth) and publishing a fresh owner-signed copy into the `MemberRoles`
     /// doc for display. The local set is updated first, so a later delete/replay of the published
     /// copy by a malicious member cannot affect the gate. Errors `Unauthorized` if not the owner;
     /// `NoSuchDoc` if the roles doc isn't open.
-    pub async fn set_admin(&mut self, fp: &str, admin: bool) -> Result<(), SyncError> {
+    pub async fn set_admin(&mut self, device: &DeviceId, admin: bool) -> Result<(), SyncError> {
         if !self.is_designated_committer() {
             return Err(SyncError::Unauthorized);
         }
         if admin {
-            self.admin_roster.insert(fp.to_string());
+            if !self.group.contains_device(device) {
+                return Err(SyncError::Unauthorized);
+            }
+            self.admin_roster.insert(*device);
         } else {
-            self.admin_roster.remove(fp);
+            self.admin_roster.remove(device);
         }
         self.publish_roster().await
+    }
+
+    /// Begin a native role transaction. The actor serializes this with all admissions.
+    pub fn require_admin_persistence(&mut self) {
+        self.admin_authority_durable = false;
+    }
+
+    /// Correlate a covering authority save with the exact roster generation. A stale
+    /// concurrent completion must not unblock a newer grant or revocation.
+    pub fn admin_generation(&self) -> u64 {
+        self.roster_gen
+    }
+    pub fn confirm_admin_persistence(&mut self, generation: u64) {
+        if generation == self.roster_gen {
+            self.admin_authority_durable = true;
+        }
     }
 
     /// Sign + publish the current `admin_roster` as the owner-signed `roster` value (display copy).
@@ -4487,7 +5194,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         self.roster_gen = self.roster_gen.saturating_add(1);
         let gen = self.roster_gen;
         let group_id = self.group.group_id();
-        let fps: Vec<String> = self.admin_roster.iter().cloned().collect(); // BTreeSet ⇒ sorted
+        let fps: Vec<DeviceId> = self.admin_roster.iter().copied().collect(); // BTreeSet ⇒ sorted
         let payload = roles::roster_payload(&group_id, gen, &fps);
         let sig = self.device.sign(&payload)?;
         let owner_pk = self.device.public_key_bytes();
@@ -4522,6 +5229,32 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
     /// store (Phase 9h). Inject this right after construction, before any blob is added.
     pub fn set_blob_store(&mut self, blobs: Box<dyn BlobStore + Send>) {
         self.blobs = blobs;
+    }
+
+    /// Saved-content commands must not silently use the process-local attachment fallback.
+    pub fn has_persistent_blob_store(&self) -> bool {
+        self.blobs.is_persistent()
+    }
+
+    /// Local explicit-retention operations. Their policy/consent lives in the owning app actor;
+    /// these calls are never exposed through member requests or replicated expiry fields.
+    pub fn kept_files(&self) -> catcoms_storage::kept::KeptFiles {
+        self.blobs.kept_files()
+    }
+    pub fn begin_keep(&mut self, plan: catcoms_storage::kept::KeepPlan) -> Result<u64, SyncError> {
+        Ok(self.blobs.begin_keep(plan)?)
+    }
+    pub fn put_keep(&mut self, token: u64, bytes: &[u8]) -> Result<(), SyncError> {
+        Ok(self.blobs.put_keep(token, bytes)?)
+    }
+    pub fn finish_keep(&mut self, token: u64) -> Result<(), SyncError> {
+        Ok(self.blobs.finish_keep(token)?)
+    }
+    pub fn abort_keep(&mut self, token: u64) -> Result<(), SyncError> {
+        Ok(self.blobs.abort_keep(token)?)
+    }
+    pub fn forget_kept(&mut self, cid: &Cid) -> Result<(), SyncError> {
+        Ok(self.blobs.forget_kept(cid)?)
     }
 
     /// Encrypt a file under this group's stable file-wrap key (Phase 9h). Returns its
@@ -4567,6 +5300,12 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
     ) -> Self {
         let connection_handoff = std::mem::take(&mut routing.connection_handoff);
         let mut this = Self::new(transport, group, device, rng, clock);
+        // `joined`, not `unknown`. A device that joins into a recycled low leaf becomes the
+        // designated committer, and with `unknown` it could never issue a receipt while every witness
+        // knew the answer. The inference is about current continuous membership: a tenure is an
+        // uninterrupted run as committer, so this device's current tenure cannot predate its current
+        // membership, which began at this epoch.
+        this.owner_tenure = owner_tenure::OwnerTenure::joined(&this.group, &this.device);
         // A joiner has NO group file-wrap key of its own; only the founder mints one. Zero
         // the random key `new` seeded so that an absent/failed transfer leaves `has_file_key`
         // false (and `add_file` refuses), rather than a wrong random key that would silently
@@ -4642,9 +5381,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         expires_at_ms: u64,
         bootstrap: Vec<String>,
     ) -> Result<InviteToken, SyncError> {
-        Ok(self
-            .group
-            .mint_invite(&self.device, invite_nonce, expires_at_ms, bootstrap)?)
+        self.mint_invite_with_rendezvous(invite_nonce, expires_at_ms, bootstrap, Vec::new())
     }
 
     /// Mint an invite that also carries zero-knowledge **rendezvous** infra addresses
@@ -4658,13 +5395,18 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         bootstrap: Vec<String>,
         rendezvous: Vec<String>,
     ) -> Result<InviteToken, SyncError> {
-        Ok(self.group.mint_invite_with_rendezvous(
+        self.policy_admission_ready()?;
+        let mut invite = self.group.mint_invite_with_rendezvous(
             &self.device,
             invite_nonce,
             expires_at_ms,
             bootstrap,
             rendezvous,
-        )?)
+        )?;
+        if let Some(policy) = self.admission_policy()? {
+            invite.bind_policy(&self.device, policy)?;
+        }
+        Ok(invite)
     }
 
     /// Open a document: create it locally (if absent) and subscribe to its topic.
@@ -4688,6 +5430,19 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
     /// **automerge change hash** of the edit; the handle [`ChannelSync::peers_with_change`]
     /// takes to report who has since proved they hold it. Callers that don't track delivery
     /// simply drop it.
+    ///
+    /// **The edit is the acceptance point, not the broadcast.** Everything that can legitimately
+    /// refuse the write happens before it: an unopened document, a missing routing secret, a
+    /// sealing or automerge failure. Past that the operation exists, with a stable hash, in a
+    /// document this process will go on to serve and persist; reporting a failed *publication* as
+    /// a failed post told every caller above that nothing had happened while something had. In
+    /// the product that meant a message committed to the local channel with no delivery tracking,
+    /// no UI event and no save, so retyping it minted a second copy under a new id and both
+    /// surfaced later.
+    ///
+    /// A publication that cannot go out now is queued in the same bounded outbox as a membership
+    /// commit and retried on the next tick, and the operation is recoverable regardless: it is in
+    /// the document, so it persists with it and reaches other members through ordinary catch-up.
     pub async fn post<F>(
         &mut self,
         doc_type: DocType,
@@ -4697,6 +5452,12 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
     where
         F: FnOnce(&mut AutoCommit) -> Result<(), AutomergeError>,
     {
+        let current_context = self.durable_send_context();
+        self.durable_chat
+            .stop_obsolete(current_context.as_ref().ok());
+        if self.durable_chat.blocks(doc_type, doc_id) {
+            return Err(SyncError::ChatPreparationPending);
+        }
         let key = (doc_type, doc_id);
         let doc = self.docs.get_mut(&key).ok_or(SyncError::NoSuchDoc)?;
         let (sealed, change) = doc.edit_tracked(&self.device, &self.group, &mut self.rng, edit)?;
@@ -4712,8 +5473,28 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             bytes = bytes.len(),
             "post op"
         );
-        self.transport.publish(topic, Bytes::from(bytes)).await?;
+        if let Err(error) = self
+            .transport
+            .publish(topic.clone(), Bytes::from(bytes.clone()))
+            .await
+        {
+            tracing::warn!(
+                %error,
+                ?doc_type,
+                doc_id,
+                "op accepted locally but could not be published; queued for the next tick"
+            );
+            self.queue_broadcast(topic, bytes);
+        }
         Ok(change)
+    }
+
+    /// Queue a payload for the next [`Self::drain_outbox`], within `max_outbox` (oldest dropped).
+    fn queue_broadcast(&mut self, topic: Topic, bytes: Vec<u8>) {
+        self.outbox.push((topic, bytes));
+        while self.outbox.len() > self.config.max_outbox {
+            self.outbox.remove(0);
+        }
     }
 
     /// Process one inbound transport event (gossiped op, membership commit, or a
@@ -4735,15 +5516,125 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
     /// `Transport(Closed)`. `member_peers` is written only by `promote_member_peer`, off a
     /// roster-verified signed catch-up, so it means precisely "has proved it can answer".
     ///
-    /// Accepted cost: a freshly restored node has an empty `member_peers` and so does not sweep on
-    /// its first reconnect. It proves a member on the first successful catch-up and sweeps after.
+    /// A freshly restored node has an empty `member_peers` and so does not sweep on its first
+    /// reconnect. It proves a member on the first successful catch-up, and
+    /// [`Self::promote_member_peer_bound`] runs this sweep at that point instead. Leaving that
+    /// second half unwritten was the whole of the restart bug: the gate declined the connection,
+    /// nothing declined it again once the proof arrived, and a channel could stay short for the
+    /// rest of the session.
     fn sweep_docs_on_reconnect(&mut self, peer: PeerId) {
         if !self.peer_is_preferred_source(peer) {
+            tracing::debug!(
+                ?peer,
+                open_docs = self.docs.len(),
+                "recovery sweep declined: peer has not proved it can serve a catch-up"
+            );
             return;
         }
+        let before = self.catchup_queue.len();
         for (doc_type, doc_id) in self.docs.keys().copied().collect::<Vec<_>>() {
             self.enqueue_doc_catchup(doc_type, doc_id);
         }
+        tracing::debug!(
+            ?peer,
+            open_docs = self.docs.len(),
+            queued = self.catchup_queue.len() - before,
+            queue_len = self.catchup_queue.len(),
+            "recovery sweep queued every open document"
+        );
+    }
+
+    /// Revisit completed neighbour exchanges even when no socket or local document changed.
+    /// A neighbour can acquire history from another member after its previous empty answer;
+    /// that answer is not a permanent completeness certificate. Each member runs this pass,
+    /// allowing both directions to converge through retained, originally signed operations.
+    ///
+    /// Only live, current, endpoint-bound members justify this background sweep. Existing work,
+    /// source cooldowns, paging cursors and continuation obligations are left intact. Repeated
+    /// local wakeups are coalesced, and a rotating cursor shares the existing queue capacity.
+    pub fn schedule_reconciliation(&mut self) -> usize {
+        let now = self.clock.monotonic_ms();
+        if now < self.reconciliation_next_ms
+            || !self.member_peers.iter().any(|proof| {
+                proof.bound
+                    && self.group.contains_device(&proof.device)
+                    && self.peer_is_connected(proof.peer)
+            })
+        {
+            return 0;
+        }
+        self.reconciliation_next_ms = now.saturating_add(CATCHUP_PEER_COOLDOWN_MS);
+        let mut docs: Vec<_> = self.docs.keys().copied().collect();
+        docs.sort_unstable_by_key(|(kind, id)| (*kind as u8, *id));
+        let mut queued = 0;
+        // One reserved turn when the queue is full prevents permanently unavailable histories
+        // from occupying every slot forever. The open-document inventory owns parked work;
+        // provider cursors, continuation claims and cooldowns remain attached to that document.
+        let admission_budget = self
+            .config
+            .max_catchup_queue
+            .saturating_sub(self.catchup_queue.len())
+            .max(1);
+        for _ in 0..docs.len() {
+            self.reconciliation_cursor %= docs.len();
+            let (doc_type, doc_id) = docs[self.reconciliation_cursor];
+            let task = CatchupTask::Doc { doc_type, doc_id };
+            let already_queued = self.catchup_queue.contains(&task);
+            if !already_queued && self.catchup_queue.len() >= self.config.max_catchup_queue {
+                if self.config.max_catchup_queue == 0 {
+                    break;
+                }
+                let parked = self.catchup_queue.iter().position(|pending| {
+                    matches!(pending, CatchupTask::Doc { doc_type, doc_id }
+                        if self.docs.contains_key(&(*doc_type, *doc_id)))
+                        && !self
+                            .catchup_inflight
+                            .is_some_and(|(active, _)| active == *pending)
+                });
+                let Some(parked) = parked else { break };
+                self.catchup_queue.remove(parked);
+            }
+            self.reconciliation_cursor += 1;
+            if self
+                .catchup_inflight
+                .is_some_and(|(pending, _)| pending == task)
+            {
+                continue;
+            }
+            if !self.unchecked_source_exists(doc_type, doc_id)
+                && self.catchup_continuation_source(doc_type, doc_id).is_none()
+            {
+                self.clear_sources_checked(doc_type, doc_id);
+            }
+            self.enqueue_doc_catchup(doc_type, doc_id);
+            queued += usize::from(!already_queued);
+            if queued >= admission_budget {
+                break;
+            }
+        }
+        queued
+    }
+
+    /// Wake a quiet owner when a queued document has an eligible source again. Checked sources
+    /// and globally failed sources cannot make progress on this deadline, so do not spin on
+    /// their expired cooldown entries. A zero delay covers expiry between the drain and here.
+    fn next_catchup_retry_delay(&self) -> Option<u64> {
+        let now = self.clock.monotonic_ms();
+        self.catchup_cooldowns
+            .iter()
+            .filter(|((doc_type, doc_id, peer), _)| {
+                self.catchup_queue.contains(&CatchupTask::Doc {
+                    doc_type: *doc_type,
+                    doc_id: *doc_id,
+                }) && self.connected_peers.contains(peer)
+                    && self.peer_is_connected(*peer)
+                    && !self.failed_catchup_peers.contains(peer)
+                    && (self.known_peers.contains(peer)
+                        || self.member_peers.iter().any(|proof| proof.peer == *peer))
+                    && !self.sources_checked(*doc_type, *doc_id).contains(peer)
+            })
+            .map(|(_, until)| until.saturating_sub(now))
+            .min()
     }
 
     fn touch_member_routes(&mut self) {
@@ -4877,6 +5768,18 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             })
             .map(|(device, _)| *device)
             .collect();
+        // The four states a user's report conflates (connected, authenticated, subscribed,
+        // caught up) start being told apart here: this is "connected", and the rest of the line
+        // says how much of the other three this peer already had.
+        tracing::debug!(
+            ?peer,
+            claimed_by_member = !reconnected_devices.is_empty(),
+            proven = self.peer_is_preferred_source(peer),
+            bound = self.peer_has_bound_member_proof(peer),
+            connected = self.connected_peers.len(),
+            epoch = self.group.epoch(),
+            "peer connected"
+        );
         self.topology_promotions
             .retain(|device| !reconnected_devices.contains(device));
         self.remember_peer(peer);
@@ -4964,6 +5867,23 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             }
         }
         evidence.updated_at_ms = now;
+        // How a peer is reachable is the first question any "chat works but bulk transfer does
+        // not" report raises, and it used to be unanswerable from a shared debug log: the
+        // transport's own `connection established` line carries it, but `catcoms_net` sits at
+        // `info` in `APP_FILE_FILTER` (deliberately, because that crate at `debug` narrates every
+        // address the node ever sees). `ConnectionPath` was built to cross this seam with no IP
+        // or connection id in it, so logging it from the product layer costs nothing the filter
+        // was protecting. A punched QUIC path, a plain TCP dial and a relay circuit want three
+        // different transfer policies, and previously the log could not tell them apart.
+        if projection_changed {
+            tracing::debug!(
+                ?peer,
+                paths = ?evidence.active_paths,
+                established = ?coherent_success,
+                claimed_by_member = claimed_by_current_member,
+                "peer paths changed"
+            );
+        }
         self.bound_pairwise_reachability();
         if claimed_by_current_member && projection_changed {
             self.touch_member_routes();
@@ -4976,6 +5896,17 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             return;
         }
         let changes_member_route = self.peer_claimed_by_current_member(peer);
+        tracing::debug!(
+            ?peer,
+            claimed_by_member = changes_member_route,
+            proven = self.peer_is_preferred_source(peer),
+            connected = self.connected_peers.len(),
+            inflight_catchup = self
+                .catchup_inflight
+                .as_ref()
+                .is_some_and(|(_, asked)| *asked == Some(peer)),
+            "peer disconnected"
+        );
         if let Some(evidence) = self.pairwise_reachability.get_mut(&peer) {
             evidence.active_paths.clear();
             evidence.updated_at_ms = self.clock.monotonic_ms();
@@ -5013,7 +5944,11 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         }
     }
 
-    pub async fn run_once(&mut self) -> Result<bool, SyncError> {
+    pub async fn run_once(&mut self) -> Result<bool, SyncError>
+    where
+        T: 'static,
+    {
+        self.drain_durable_chat().await;
         // Admin invites (Option C): re-broadcast any pending Add-request whose retry elapsed
         // (caught up by the owner on its reconnect), then flush the Welcome a result produced;
         // the admin relays it to the joiner here (in single-committer mode the contest path that
@@ -5052,14 +5987,12 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             self.drain_welcome_outbox().await;
             return Ok(true);
         }
-        // Perform recovery work queued by the previous event (commit/doc catch-up).
-        // A tick that spent its turn fetching catch-up yields here instead of
-        // blocking on a fresh event; the recovery *was* this tick's work.
-        if self.drain_catchup_queue().await {
+        // Network waits remain owned on self across a cancelled actor selection. One request
+        // is in flight at a time, and inbound requests remain serviceable while it waits.
+        self.start_queued_catchup();
+        let Some(event) = self.next_recovery_or_event().await else {
             return Ok(true);
-        }
-
-        let event = self.transport.next_event().await;
+        };
         match event {
             None => Ok(false),
             Some(TransportEvent::Gossip { topic, from, data }) => {
@@ -5078,7 +6011,9 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
                     // for the next one would leave the ex-member attached across the rotation.
                     self.drain_evictions().await;
                     self.resync_if_needed().await;
-                } else {
+                } else if !self.on_registry_gossip(&topic, &data)
+                    && !self.on_studio_gossip(&topic, &data)
+                {
                     self.on_gossip(from, &data);
                 }
                 Ok(true)
@@ -5104,6 +6039,32 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
                 };
                 if data.len() > request_limit {
                     responder.respond(Bytes::new());
+                    return Ok(true);
+                }
+                if data.first() == Some(&KIND_REGISTRY_PAGE) {
+                    // A bounded responder is retained on self, never across a cancellable await
+                    // in this stack frame. Durable source I/O belongs to the app's explicit drain.
+                    self.queue_registry_page_request(from, &data[1..], responder);
+                    return Ok(true);
+                }
+                if data.first() == Some(&KIND_STUDIO_PAGE) {
+                    self.queue_epoch_page_request(KIND_STUDIO_PAGE, from, &data[1..], responder);
+                    return Ok(true);
+                }
+                if data.first() == Some(&KIND_RECEIPT_HEAD) {
+                    self.queue_receipt_head(from, &data[1..], responder);
+                    return Ok(true);
+                }
+                if data.first() == Some(&KIND_STUDIO_HEAD) {
+                    self.queue_checkpoint_head(KIND_STUDIO_HEAD, from, &data[1..], responder);
+                    return Ok(true);
+                }
+                if data.first() == Some(&KIND_REGISTRY_SEED) {
+                    self.queue_registry_seed(from, &data[1..], responder);
+                    return Ok(true);
+                }
+                if data.first() == Some(&KIND_STUDIO_SEED) {
+                    self.queue_checkpoint_seed(KIND_STUDIO_SEED, from, &data[1..], responder);
                     return Ok(true);
                 }
                 let response = match data.split_first() {
@@ -5149,15 +6110,22 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
     /// by `max_outbox` (drop oldest on overflow so a persistently failing transport
     /// cannot grow the queue without bound).
     async fn drain_outbox(&mut self) {
-        let pending = std::mem::take(&mut self.outbox);
-        for (topic, bytes) in pending {
+        let mut index = 0;
+        let remaining = self.outbox.len();
+        for _ in 0..remaining {
+            let (topic, bytes) = self.outbox[index].clone();
+            // Queue ownership survives a cancelled actor poll, including a transport which
+            // submitted its command but has not yet acknowledged it. Exact retries may duplicate
+            // delivery; they cannot manufacture another signed operation or lose this one.
             if self
                 .transport
-                .publish(topic.clone(), Bytes::from(bytes.clone()))
+                .publish(topic, Bytes::from(bytes))
                 .await
-                .is_err()
+                .is_ok()
             {
-                self.outbox.push((topic, bytes));
+                self.outbox.remove(index);
+            } else {
+                index += 1;
             }
         }
         while self.outbox.len() > self.config.max_outbox {
@@ -5169,54 +6137,24 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
     /// request/response (best-effort: if the joiner is unreachable the join just
     /// fails and the joiner retries).
     async fn drain_welcome_outbox(&mut self) {
-        let pending = std::mem::take(&mut self.welcome_outbox);
-        for (joiner, payload) in pending {
+        while let Some((joiner, payload)) = self.welcome_outbox.first().cloned() {
             let mut req = vec![KIND_WELCOME];
             req.extend_from_slice(&payload);
             let _ = self
                 .transport
                 .request(joiner, ProtocolId(RR_PROTOCOL), Bytes::from(req))
                 .await;
+            // Existing best-effort disposition applies only after the attempt resolves.
+            self.welcome_outbox.remove(0);
         }
     }
 
-    /// Perform any queued recovery (commit / document catch-up). Tasks queued
-    /// while servicing this drain wait for the next `run_once`, so one tick does
-    /// bounded work. Returns `true` if at least one catch-up request was attempted
-    /// (so `run_once` can yield rather than block on a fresh event); a task with
-    /// no known peer is re-queued and does not count.
-    async fn drain_catchup_queue(&mut self) -> bool {
-        // A task in flight when this future is dropped is put back before anything else happens.
-        //
-        // The actor races `sync_once` against UI commands and its own timer, so any await in here
-        // can simply stop existing mid-tick. The queue used to be emptied into a local vector
-        // before the first request, which meant a cancelled tick took the in-flight task and
-        // every task behind it with it, and nothing remembered the gap: a quiet document has no
-        // later inbound op to rediscover it with, so a UI keystroke could make a channel
-        // permanently short for the rest of the session. Ownership stays on `self` instead: one
-        // task moves into `catchup_inflight` for exactly as long as its request lasts, and the
-        // rest are left in the queue where they started.
-        if let Some((interrupted, asked)) = self.catchup_inflight.take() {
-            // The peer it was mid-conversation with is cooled off before the task goes back.
-            // Without that, a tick cancelled while blocked on an unresponsive peer re-picks the
-            // same peer on the very next tick and blocks again, which is how a node with a
-            // standing task stops serving anybody else: two of them chasing each other never let
-            // go. Cooling the pair off keeps the gap owned while freeing the tick.
-            if let (Some(peer), CatchupTask::Doc { doc_type, doc_id }) = (asked, interrupted) {
-                self.cool_off_catchup_peer(peer, doc_type, doc_id);
-            }
-            // Restored ahead of the cap rather than through it. This task was already admitted
-            // before the drain took it, and the command that cancelled the tick may have filled
-            // the slot it vacated; refusing it there would discard proven recovery work in favour
-            // of work that has not been tried yet.
-            if !self.catchup_queue.contains(&interrupted) {
-                self.catchup_queue.insert(0, interrupted);
-            }
-        }
+    /// Select one queued recovery task with a currently live eligible source. Inspect at most
+    /// the queue admitted on entry; retain unavailable work without retrying it inside this turn.
+    fn select_queued_catchup(&mut self) -> Option<(CatchupTask, PeerId)> {
         // Bounded by what was queued on entry, so a task re-queued by this drain waits for the
         // next tick rather than being retried inside this one.
         let mut remaining = self.catchup_queue.len();
-        let mut attempted = false;
         while remaining > 0 {
             remaining -= 1;
             if self.catchup_queue.is_empty() {
@@ -5257,10 +6195,15 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             // cooling off after failing us, or it has already answered at this version and the
             // sweep is waiting on somebody else. Both keep it out of this attempt; only the
             // second is a discharged obligation.
-            let cooling: Vec<PeerId> = match task {
-                CatchupTask::Doc { doc_type, doc_id } => {
-                    let mut out: Vec<PeerId> = self
-                        .catchup_cooldowns
+            // Kept apart rather than merged into one list, because they are not the same fact and
+            // reading a stall depends on telling them apart: a peer cooling off is one this node
+            // will ask again in [`CATCHUP_PEER_COOLDOWN_MS`], while a peer that has already
+            // answered at this version is one it will not ask again until the document moves.
+            // A stall on the first clears itself; a stall on the second is waiting for a source
+            // that may never arrive. Reported as one number, the two are indistinguishable.
+            let (cooling, checked): (Vec<PeerId>, Vec<PeerId>) = match task {
+                CatchupTask::Doc { doc_type, doc_id } => (
+                    self.catchup_cooldowns
                         .keys()
                         .filter(|(t, id, peer)| {
                             *t == doc_type
@@ -5268,26 +6211,27 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
                                 && self.catchup_peer_is_cooling(*peer, doc_type, doc_id)
                         })
                         .map(|(_, _, peer)| *peer)
-                        .collect();
-                    out.extend(self.sources_checked(doc_type, doc_id));
-                    out
-                }
-                CatchupTask::Commits { .. } => Vec::new(),
+                        .collect(),
+                    self.sources_checked(doc_type, doc_id).into_iter().collect(),
+                ),
+                CatchupTask::Commits { .. } => (Vec::new(), Vec::new()),
             };
+            // Both still rule a peer out of this attempt.
+            let excluded: Vec<PeerId> = cooling.iter().chain(checked.iter()).copied().collect();
             // The peer that said this document has more to come is asked first while its claim
             // stands: it is the only source whose answer can retire that claim.
             let preferred = match task {
                 CatchupTask::Doc { doc_type, doc_id } => self
                     .catchup_continuation_source(doc_type, doc_id)
                     .filter(|peer| {
-                        !cooling.contains(peer)
+                        !excluded.contains(peer)
                             && Some(*peer) != avoid
                             && self.peer_is_connected(*peer)
                     }),
                 CatchupTask::Commits { .. } => None,
             };
             let Some(peer) =
-                preferred.or_else(|| self.pick_catchup_peer_excluding(avoid, &cooling))
+                preferred.or_else(|| self.pick_catchup_peer_excluding(avoid, &excluded))
             else {
                 // No usable catch-up source known yet; keep the task for a later
                 // tick (a new peer may appear), and likewise when the exclusion is
@@ -5304,12 +6248,32 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
                 let keep = self.known_peers.is_empty()
                     || avoid.is_some()
                     || matches!(retry, CatchupTask::Doc { .. });
+                // Once per stall, not once per drain. A kept task is retried on every tick and
+                // its reason for being stuck rarely changes between them, so restating it is
+                // pure volume: the line that matters is the one that says the stall began.
+                if self.catchup_stall_reported.insert(retry) {
+                    tracing::debug!(
+                        task = ?retry,
+                        kept = keep,
+                        known_peers = self.known_peers.len(),
+                        proven_peers = self.member_peers.len(),
+                        failed_peers = self.failed_catchup_peers.len(),
+                        cooling = cooling.len(),
+                        checked = checked.len(),
+                        "no eligible source for a catch-up task"
+                    );
+                }
                 if keep {
                     self.requeue_catchup(retry);
                 }
                 self.catchup_inflight = None;
                 continue;
             };
+            // A source was found, so whatever stall this task was in is over. Forgetting it here
+            // is what lets the *next* stall be reported: a task that alternates between stalled
+            // and served is a different story from one that has been stuck since it was queued,
+            // and only clearing on progress can tell them apart.
+            self.catchup_stall_reported.remove(&retry);
             // Do not sign a request for a peer we are not connected to.
             //
             // A catch-up request carries a signed timestamp and is refused past
@@ -5324,65 +6288,55 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             // Deferring costs nothing: the task is re-queued, connections are established by the
             // dial plan and PEX, and the next tick signs a request that can actually leave.
             if !self.peer_is_connected(peer) {
+                tracing::debug!(
+                    task = ?retry,
+                    ?peer,
+                    "catch-up deferred: chosen source is not connected right now"
+                );
                 self.requeue_catchup(retry);
                 self.catchup_inflight = None;
                 continue;
             }
-            attempted = true;
-            // Now that a peer is chosen, record it with the task: if this tick is cancelled while
-            // waiting on it, the restore knows who not to ask again immediately.
+            tracing::debug!(task = ?task, ?peer, "catch-up request starting");
+            // Record ownership before constructing the wait. Commands may cancel its poll,
+            // but the task and exact request remain together until completion or stale context.
             self.catchup_inflight = Some((task, Some(peer)));
-            match task {
-                CatchupTask::Commits {
-                    from_epoch, gap_at, ..
-                } => {
-                    let before = self.group.epoch();
-                    let _ = self.do_commit_catchup(peer, from_epoch).await;
-                    let here = self.group.epoch();
-                    // "Filled" has to be judged against the proven gap, not against whether
-                    // the reply parsed: an empty bundle used to fall through both arms below,
-                    // marking nothing, so the next op re-picked the same peer forever.
-                    let progressed = here > before;
-                    let closed =
-                        self.pending_commits.is_empty() && gap_at.is_none_or(|gap| here >= gap);
-                    if closed {
-                        if progressed {
-                            // Progress made: clear the failed-peer set and stop chasing.
-                            self.failed_catchup_peers.clear();
-                        }
-                    } else {
-                        if progressed {
-                            // It moved us but did not finish (a bundle truncated to the
-                            // response budget); it is still a good source, so keep asking it.
-                            self.failed_catchup_peers.clear();
-                        } else {
-                            // Nothing usable came back. An **empty** bundle lands here, and
-                            // that is the defect: a member that joined at the missed commit
-                            // holds no commit log, and leaving it unmarked made the drain
-                            // re-pick it, most-recently-seen, on every single op forever.
-                            self.note_failed_catchup_peer(peer);
-                        }
-                        self.enqueue_commit_catchup_for(here, gap_at, None);
-                    }
-                }
-                CatchupTask::Doc { doc_type, doc_id } => {
-                    // A failed request says nothing about whether the gap is still there, so the
-                    // task outlives it. Discarding the result left a timeout, a refusal or a
-                    // malformed answer looking exactly like a completed catch-up: the peer was
-                    // not marked, the document was not re-queued, and a second, healthy source
-                    // was never asked. The serving peer is marked for the same reason the commit
-                    // branch marks one, so the next drain picks somebody else.
-                    if let Err(e) = self
-                        .request_catchup_allowing_legacy(peer, doc_type, doc_id)
-                        .await
-                    {
-                        tracing::debug!(error = %e, ?doc_type, doc_id, ?peer, "doc catch-up failed");
-                        self.cool_off_catchup_peer(peer, doc_type, doc_id);
-                        self.enqueue_doc_catchup(doc_type, doc_id);
-                    }
+            return Some((task, peer));
+        }
+        None
+    }
+
+    /// Manual/test driver: retain the same wait-until-recovery-completes contract, while the
+    /// production owner polls the owned wait alongside inbound events.
+    #[cfg(test)]
+    async fn drain_catchup_queue(&mut self) -> bool
+    where
+        T: 'static,
+    {
+        let mut attempted = false;
+        let turns = self
+            .catchup_queue
+            .len()
+            .max(usize::from(self.pending_catchup.is_some()));
+        for _ in 0..turns {
+            self.start_queued_catchup();
+            if self.pending_catchup.is_none() {
+                break;
+            }
+            attempted = true;
+            loop {
+                let response = self
+                    .pending_catchup
+                    .as_mut()
+                    .expect("owned wait")
+                    .response
+                    .as_mut()
+                    .await;
+                self.complete_queued_catchup(response);
+                if self.pending_catchup.is_none() {
+                    break;
                 }
             }
-            self.catchup_inflight = None;
         }
         attempted
     }
@@ -5396,10 +6350,15 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
                 self.catchup_cooldowns.clear();
             }
         }
+        // Reciprocal requests can time out together because each sync owner was waiting rather
+        // than serving. Give opposite directions different retry times so the earlier requester
+        // finds the other owner listening. Preserve the full minimum backoff on both sides.
+        let reciprocal_stagger_ms = if self.local_peer() < peer { 1_000 } else { 0 };
         let until = self
             .clock
             .monotonic_ms()
-            .saturating_add(CATCHUP_PEER_COOLDOWN_MS);
+            .saturating_add(CATCHUP_PEER_COOLDOWN_MS)
+            .saturating_add(reciprocal_stagger_ms);
         self.catchup_cooldowns
             .insert((doc_type, doc_id, peer), until);
     }
@@ -5433,6 +6392,10 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
     /// Start the sweep again, because this document moved.
     fn clear_sources_checked(&mut self, doc_type: DocType, doc_id: u128) {
         self.catchup_sources_checked.remove(&(doc_type, doc_id));
+        // The sweep starts again, so every source is eligible again and a stall reported under
+        // the old sweep no longer describes this one.
+        self.catchup_stall_reported
+            .remove(&CatchupTask::Doc { doc_type, doc_id });
     }
 
     /// Forget everything `peer` has said about any document's completeness, and re-open the
@@ -5442,16 +6405,19 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
     /// to be a current member. Both mean its earlier answers describe a state that no longer
     /// applies, and the second means a source that was only opportunistic is now one this node
     /// must actually hear from.
-    /// Only forgets. Queueing the work is the caller's, and both callers already have a way to do
-    /// it that is paced: a reconnect runs its own document sweep, and a first proof fills the
-    /// backlog the drain takes a couple from per tick. Enqueueing here as well turned every
-    /// connection edge into a burst of catch-up requests, which is enough on a busy node to keep
-    /// the tick too full to serve anybody.
+    /// Only forgets. Queueing the work is the caller's, and both callers run the same paced sweep
+    /// straight afterwards: a reconnect sweeps for a peer already proven, and a first proof sweeps
+    /// for the peer that has just become one. Enqueueing here as well turned every connection
+    /// edge into a burst of catch-up requests, including for peers that had proved nothing, which
+    /// is enough on a busy node to keep the tick too full to serve anybody.
     fn forget_source_answers(&mut self, peer: PeerId) {
         self.catchup_sources_checked.retain(|_, (_, peers)| {
             peers.remove(&peer);
             !peers.is_empty()
         });
+        // This peer's standing just changed, which is exactly the event that can make a stalled
+        // task movable again. Any stall reported before it is about a pool that no longer holds.
+        self.catchup_stall_reported.clear();
     }
 
     /// The sources already asked at this document's current version. Empty once the version moves,
@@ -5562,10 +6528,24 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
     /// Put a task back on the queue, without letting a re-queue exceed the cap or duplicate a
     /// task already waiting.
     fn requeue_catchup(&mut self, task: CatchupTask) {
+        if let CatchupTask::Commits {
+            from_epoch,
+            gap_at,
+            avoid,
+        } = task
+        {
+            // Events may record a newer gap while the old request is in flight. Retain one
+            // merged obligation, preserving its lowest epoch and largest proven gap.
+            self.enqueue_commit_catchup_for(from_epoch, gap_at, avoid);
+            return;
+        }
         if self.catchup_queue.contains(&task) {
             return;
         }
-        if self.catchup_queue.len() >= self.config.max_catchup_queue {
+        if self.catchup_queue.len()
+            + usize::from(self.catchup_inflight.is_some_and(|(held, _)| held != task))
+            >= self.config.max_catchup_queue
+        {
             tracing::warn!("catch-up queue full; dropping a re-queued task");
             return;
         }
@@ -5631,7 +6611,15 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         let eligible = |p: &PeerId| {
             !self.failed_catchup_peers.contains(p) && Some(*p) != avoid && !cooling.contains(p)
         };
-        let live = |p: &PeerId| eligible(p) && self.connected_peers.contains(p);
+        // The transport publishes its snapshot before the ordered disconnect event reaches us.
+        // A stale event-table entry must not outrank a currently reachable alternative, or an
+        // expired retry timer can keep waking work that always defers on the departed peer.
+        let current = self.transport.connection_snapshot();
+        let live = |p: &PeerId| {
+            eligible(p)
+                && self.connected_peers.contains(p)
+                && current.iter().any(|row| row.peer == *p)
+        };
         let mut proven = self.member_peers.iter().rev().map(|proof| proof.peer);
         proven
             .clone()
@@ -5680,6 +6668,16 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             .iter()
             .any(|proof| proof.peer == peer && proof.device == device);
         if newly_proven {
+            // "Authenticated", in the four-state vocabulary: a roster member answered at this
+            // transport peer. `bound` says whether the exchange also proved the endpoint.
+            tracing::debug!(
+                ?peer,
+                device = %roles::fingerprint(&device),
+                bound,
+                proven_peers = self.member_peers.len() + 1,
+                sweep_owed = self.first_proof_sweep_owed,
+                "peer proven as a current member"
+            );
             // Any document whose search concluded while it was unproven concluded without it, so
             // those go back on the queue.
             self.forget_source_answers(peer);
@@ -5730,6 +6728,30 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         });
         while self.member_peers.len() > self.config.max_known_peers {
             self.member_peers.pop_front();
+        }
+        if newly_proven && bound && self.first_proof_sweep_owed {
+            // The restore's outstanding sweep, discharged now that a source exists for it.
+            //
+            // A restored node reaches its first connection with an empty proof pool, so
+            // [`Self::sweep_docs_on_reconnect`] correctly declines to aim member-only recovery at
+            // a peer that has not shown it can serve one. The moment a peer does show it, the
+            // sweep that connection could not run is the sweep that has to happen, or history
+            // written while this node was away stays missing until something unrelated notices.
+            // Restoring, opening one channel and finding the rest still short is the shape of it.
+            //
+            // **Only a bound proof.** That is exactly a peer that has served *this node* a
+            // document catch-up, which means its membership check ran and passed. The unbound
+            // proofs are PEX and commit catch-up, and a peer still mid-join answers both while
+            // being unable to serve a members-only document request: sweeping on those aimed
+            // recovery at the joiner, blocked this loop on a reply it could not give, and left
+            // the join it was racing unserved. That is the same deadlock
+            // `sweep_docs_on_reconnect`'s gate exists to prevent, reached one step later.
+            //
+            // **Only once, and only after a restore.** See `first_proof_sweep_owed`. Sweeping on
+            // every new binding put a whole node's documents in front of the discovery and
+            // presence work of a session that had nothing older than itself to recover.
+            self.first_proof_sweep_owed = false;
+            self.sweep_docs_on_reconnect(peer);
         }
     }
 
@@ -5797,6 +6819,24 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
     /// it was finished. Only an unbroken run is evidence of anything.
     fn clear_catchup_stall(&mut self, peer: PeerId, doc_type: DocType, doc_id: u128) {
         self.catchup_stalls.remove(&(doc_type, doc_id, peer));
+        self.catchup_empty_page_grace
+            .remove(&(doc_type, doc_id, peer));
+    }
+
+    fn allow_empty_catchup_page(&mut self, peer: PeerId, doc_type: DocType, doc_id: u128) -> bool {
+        let key = (doc_type, doc_id, peer);
+        // Fail closed at the bound. Clearing this map would renew every hostile peer's grace.
+        if !self.catchup_empty_page_grace.contains_key(&key)
+            && self.catchup_empty_page_grace.len() >= MAX_CATCHUP_STALL_ENTRIES
+        {
+            return false;
+        }
+        let used = self.catchup_empty_page_grace.entry(key).or_default();
+        if *used >= MAX_EMPTY_CATCHUP_PAGE_GRACE {
+            return false;
+        }
+        *used += 1;
+        true
     }
 
     /// Queue a membership-commit catch-up from `from_epoch` (deduped: at most one
@@ -5841,7 +6881,13 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             };
             return;
         }
-        if self.catchup_queue.len() >= self.config.max_catchup_queue {
+        if self.catchup_queue.len()
+            + usize::from(
+                self.catchup_inflight
+                    .is_some_and(|(held, _)| !matches!(held, CatchupTask::Commits { .. })),
+            )
+            >= self.config.max_catchup_queue
+        {
             tracing::warn!("catch-up queue full; dropping a commit catch-up task");
             return;
         }
@@ -5870,7 +6916,10 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         if self.catchup_queue.contains(&task) {
             return;
         }
-        if self.catchup_queue.len() >= self.config.max_catchup_queue {
+        if self.catchup_queue.len()
+            + usize::from(self.catchup_inflight.is_some_and(|(held, _)| held != task))
+            >= self.config.max_catchup_queue
+        {
             tracing::warn!("catch-up queue full; dropping a doc catch-up task");
             return;
         }
@@ -6083,6 +7132,16 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
                     set.insert(t);
                 }
             }
+            for watch in self.registry_ingress.watches.values() {
+                if let Some(t) = self.channel_topic_for(DocType::DocRegistry, watch.doc_id, slot) {
+                    set.insert(t);
+                }
+            }
+            for ((doc_type, _), watch) in &self.studio_exchange.watches {
+                if let Some(t) = self.channel_topic_for(*doc_type, watch.doc_id, slot) {
+                    set.insert(t);
+                }
+            }
         }
         set
     }
@@ -6090,14 +7149,31 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
     /// Subscribe the routing topics that should now be subscribed and unsubscribe
     /// those that aged out of the window, so subscriptions track the current label.
     async fn resync_subscriptions(&mut self) -> Result<(), SyncError> {
+        // Keep the retry flag armed across errors AND cancellation. A transport can submit its
+        // command before its future resolves, so first establish the uncertain topic as unsubscribed.
+        self.needs_resync = true;
+        if let Some(topic) = self.routing_subscription_pending.clone() {
+            self.transport.unsubscribe(topic).await?;
+            self.routing_subscription_pending = None;
+        }
         let desired = self.desired_routing_topics();
-        for topic in desired.difference(&self.routing_subs) {
+        let additions: Vec<_> = desired.difference(&self.routing_subs).cloned().collect();
+        for topic in additions {
+            self.routing_subscription_pending = Some(topic.clone());
             self.transport.subscribe(topic.clone()).await?;
+            self.routing_subs.insert(topic);
+            self.routing_subscription_pending = None;
         }
-        for topic in self.routing_subs.difference(&desired) {
-            self.transport.unsubscribe(topic.clone()).await?;
+        let removals: Vec<_> = self.routing_subs.difference(&desired).cloned().collect();
+        for topic in removals {
+            // Do not leave a cancelled removal counted as subscribed: a same-topic rewatch could
+            // otherwise skip re-adding it forever. The uncertain token owns idempotent cleanup.
+            self.routing_subs.remove(&topic);
+            self.routing_subscription_pending = Some(topic.clone());
+            self.transport.unsubscribe(topic).await?;
+            self.routing_subscription_pending = None;
         }
-        self.routing_subs = desired;
+        self.needs_resync = false;
         Ok(())
     }
 
@@ -6136,7 +7212,6 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         if !self.needs_resync {
             return;
         }
-        self.needs_resync = false;
         if let Err(e) = self.resync_subscriptions().await {
             tracing::warn!(error = %e, "failed to resync subscriptions after rotation");
             self.needs_resync = true;
@@ -6439,15 +7514,17 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
     /// retry loop against a closed transport would be pure noise.
     async fn drain_evictions(&mut self) {
         self.reconcile_readmissions();
-        for peer in std::mem::take(&mut self.unevict_outbox) {
+        while let Some(peer) = self.unevict_outbox.first().copied() {
             if let Err(e) = self.transport.unevict_peer(peer).await {
                 tracing::debug!(error = %e, ?peer, "transport declined to lift an eviction");
             }
+            self.unevict_outbox.remove(0);
         }
-        for peer in std::mem::take(&mut self.eviction_outbox) {
+        while let Some(peer) = self.eviction_outbox.first().copied() {
             if let Err(e) = self.transport.evict_peer(peer).await {
                 tracing::debug!(error = %e, ?peer, "transport declined to evict a removed member");
             }
+            self.eviction_outbox.remove(0);
         }
     }
 
@@ -6540,8 +7617,12 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
     /// member may be removed or replace its signed transport descriptor after installation.
     pub fn set_local_reconnect_routes(&mut self, routes: Vec<(PeerId, String)>) {
         let mut accepted = Vec::new();
-        for (peer, address) in routes.into_iter().take(MAX_PEER_DIAL_BATCH) {
-            if address.len() > 512 {
+        use catcoms_discovery::reconnect::{
+            retain_reconnect_routes, MAX_RECONNECT_PEERS, MAX_RECONNECT_ROUTE_BYTES,
+            MAX_RECONNECT_ROUTE_CANDIDATES,
+        };
+        for (peer, address) in routes.into_iter().take(MAX_RECONNECT_ROUTE_CANDIDATES) {
+            if address.len() > MAX_RECONNECT_ROUTE_BYTES {
                 continue;
             }
             let Some(route) = parse_peer_dial_route(&address, peer.as_bytes()) else {
@@ -6563,7 +7644,19 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
                 accepted.push((peer, address));
             }
         }
-        self.local_reconnect_routes = accepted;
+        self.local_reconnect_routes = retain_reconnect_routes(
+            accepted
+                .into_iter()
+                .map(|(peer, address)| (*peer.as_bytes(), address)),
+            if self.policy_allows_member_mesh() {
+                MAX_RECONNECT_PEERS
+            } else {
+                1
+            },
+        )
+        .into_iter()
+        .map(|(peer, address)| (PeerId::new(peer), address))
+        .collect();
     }
 
     /// Mint a short-lived code another existing member can paste to dial this device's current
@@ -6721,6 +7814,9 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
     /// Retry the prior authenticated same-LAN route under the current roster and process-wide
     /// egress limits. Returns the number of peer batches that entered the transport dial path.
     pub async fn dial_local_reconnect_routes(&mut self) -> usize {
+        if !self.group.is_active() || !self.group.contains_device(&self.device.device_id()) {
+            return 0;
+        }
         let mut by_peer: BTreeMap<PeerId, Vec<(String, DialEndpoint)>> = BTreeMap::new();
         for (peer, address) in self.local_reconnect_routes.clone() {
             if peer == self.transport.local_peer()
@@ -6747,8 +7843,21 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
                 .push((address, route.endpoint));
         }
 
+        // Retention diversity is independent of per-pass socket work. Rotate even denied or
+        // failed peers before awaiting transport, so a fixed prefix cannot consume every pass.
+        let mut candidates: Vec<_> = by_peer.into_iter().collect();
+        if let Some(cursor) = self.local_reconnect_cursor {
+            let start = candidates.partition_point(|(peer, _)| *peer <= cursor);
+            if start < candidates.len() {
+                candidates.rotate_left(start);
+            }
+        }
         let mut dialed = 0;
-        for (peer, routes) in by_peer {
+        for (peer, routes) in candidates
+            .into_iter()
+            .take(catcoms_discovery::reconnect::MAX_RECONNECT_DIAL_PEERS_PER_PASS)
+        {
+            self.local_reconnect_cursor = Some(peer);
             let endpoints: Vec<_> = routes
                 .iter()
                 .map(|(_, endpoint)| endpoint.clone())
@@ -7695,22 +8804,25 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
     /// socket, extend discovery authority or stall the actor on request/response; the recipient
     /// either receives this best-effort push or causal evidence remains the fallback.
     async fn drain_delivery_receipt_outbox(&mut self) -> bool {
-        let pending = std::mem::take(&mut self.delivery_receipt_outbox);
         let mut submitted = false;
-        for receipt in pending {
+        let mut index = 0;
+        for _ in 0..self.delivery_receipt_outbox.len() {
+            let receipt = self.delivery_receipt_outbox[index];
             if !self.group.contains_device(&receipt.author) {
+                self.delivery_receipt_outbox.remove(index);
                 continue;
             }
             let Some(peer) = self.transport_peer_of(&receipt.author) else {
-                self.delivery_receipt_outbox.push_back(receipt);
+                index += 1;
                 continue;
             };
             if !self.connected_peers.contains(&peer) {
-                self.delivery_receipt_outbox.push_back(receipt);
+                index += 1;
                 continue;
             }
             let inner = encode_delivery_receipt(receipt.doc_type, receipt.doc_id, receipt.change);
             let Ok((request, _)) = self.build_authed_request(KIND_DELIVERY_RECEIPT, &inner) else {
+                self.delivery_receipt_outbox.remove(index);
                 continue;
             };
             match self
@@ -7718,8 +8830,13 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
                 .notify_connected(peer, ProtocolId(RR_PROTOCOL), Bytes::from(request))
                 .await
             {
-                Ok(()) => submitted = true,
-                Err(_) => self.delivery_receipt_outbox.push_back(receipt),
+                Ok(()) => {
+                    self.delivery_receipt_outbox.remove(index);
+                    submitted = true;
+                }
+                Err(_) => {
+                    index += 1;
+                }
             }
         }
         while self.delivery_receipt_outbox.len() > MAX_DELIVERY_RECEIPT_OUTBOX {
@@ -7751,12 +8868,32 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
     }
 
     /// The transport peer id for a current member by fingerprint, taken from its signed peer record
-    /// (the dial target). `None` if we hold no record for that member yet (no PEX).
+    /// (the dial target). `None` if we hold no record for that member yet (no PEX), **or if the
+    /// fingerprint is ambiguous**.
+    ///
+    /// Legacy route: only the DM-invite path still addresses members by their 4-byte fingerprint.
+    /// A member can generate a device key sharing another member's first four bytes, and this used
+    /// to return whichever colliding record `HashMap` iteration yielded first, which Rust
+    /// randomises per process. It now refuses whenever more than one current member carries the
+    /// fingerprint (design-creative-suite.md 2.18), whether or not each holds a record, so the
+    /// answer can never depend on which of them happened to publish one. Call signalling uses the
+    /// exact [`Self::peer_for_device`] instead.
     fn peer_for_fingerprint(&self, fp: &str) -> Option<PeerId> {
-        self.peer_records.iter().find_map(|(device, desc)| {
-            (self.group.contains_device(device) && roles::fingerprint(device) == fp)
-                .then(|| PeerId::new(desc.peer_id))
-        })
+        let device = unique_member_for_fingerprint(self.group.member_device_ids(), fp)?;
+        self.peer_for_device(&device)
+    }
+
+    /// The transport peer id for exactly this current member, taken from the signed peer record
+    /// stored under its full `DeviceId`. `None` when `device` is not a current member or we hold
+    /// no record for it. A different device that merely shares a display fingerprint can never
+    /// match, because the lookup is keyed by all 32 bytes.
+    fn peer_for_device(&self, device: &DeviceId) -> Option<PeerId> {
+        if !self.group.contains_device(device) {
+            return None;
+        }
+        self.peer_records
+            .get(device)
+            .map(|desc| PeerId::new(desc.peer_id))
     }
 
     /// Deliver a DM (friend) invite to current member `target_fp` over this group, so they receive
@@ -7805,10 +8942,14 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         true
     }
 
-    /// Push a call-signalling message (opaque payload) to current member `target_fp` over this group.
-    /// `Ok(true)` if it was addressed and queued, `Ok(false)` if we hold no peer record for the
-    /// target. Authenticated as coming from a current member (the recipient learns the verified
-    /// sender fingerprint).
+    /// Push a call-signalling message (opaque payload) to current member `target` over this group.
+    /// `Ok(true)` if it was addressed and queued, `Ok(false)` if `target` is not a current member or
+    /// we hold no peer record for it. Authenticated as coming from a current member (the recipient
+    /// learns the verified sender's full `DeviceId`).
+    ///
+    /// The target is the member's **full** device id, never a fingerprint: routing goes through
+    /// [`Self::peer_for_device`], so a forged identity sharing a victim's first four bytes cannot
+    /// pull the victim's call traffic toward itself, nor push its own to the victim.
     ///
     /// Sent through [`MeshTransport::notify`], never `request`: `serve_call_signal` deliberately
     /// answers with no data, so there is nothing in the reply worth blocking for, and blocking is
@@ -7822,10 +8963,10 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
     /// of it.
     pub async fn send_call_signal(
         &mut self,
-        target_fp: &str,
+        target: &DeviceId,
         payload: &[u8],
     ) -> Result<bool, SyncError> {
-        let Some(peer) = self.peer_for_fingerprint(target_fp) else {
+        let Some(peer) = self.peer_for_device(target) else {
             return Ok(false);
         };
         let (req, _auth) = self.build_authed_request(KIND_CALL_SIGNAL, payload)?;
@@ -7855,8 +8996,9 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             tracing::trace!("call signal rate-limited; dropped");
             return;
         }
-        let from = roles::fingerprint(&device);
-        self.pending_call_signals.push((from, payload));
+        // Queue the full verified device id. The 4-byte fingerprint is a display label and is
+        // derived later, by the actor, only for display (design-creative-suite.md 2.18).
+        self.pending_call_signals.push((device, payload));
         self.bound_call_signals();
     }
 
@@ -7922,17 +9064,21 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
     /// oldest one, so a flooder can only starve itself: with `k` senders active nobody is ever
     /// squeezed below `MAX_PENDING_CALL_SIGNALS / k` slots.
     ///
-    /// Ties go to the lowest fingerprint, so the behaviour is deterministic and testable.
+    /// Senders are counted by their **full** `DeviceId`. Keyed by fingerprint, two devices sharing
+    /// four bytes used to share one fair share, so a colliding member could make a victim pay for
+    /// its own flood. Ties go to the lowest `DeviceId` in byte order, so the behaviour is
+    /// deterministic and testable; where fingerprints differ that is also the lowest fingerprint,
+    /// the order this rule always had.
     fn bound_call_signals(&mut self) {
         while self.pending_call_signals.len() > MAX_PENDING_CALL_SIGNALS {
-            let mut counts: BTreeMap<&str, usize> = BTreeMap::new();
+            let mut counts: BTreeMap<DeviceId, usize> = BTreeMap::new();
             for (from, _) in &self.pending_call_signals {
-                *counts.entry(from.as_str()).or_default() += 1;
+                *counts.entry(*from).or_default() += 1;
             }
             let Some(worst) = counts
                 .into_iter()
-                .max_by(|a, b| a.1.cmp(&b.1).then(b.0.cmp(a.0)))
-                .map(|(fp, _)| fp.to_string())
+                .max_by(|a, b| a.1.cmp(&b.1).then(b.0.cmp(&a.0)))
+                .map(|(device, _)| device)
             else {
                 break;
             };
@@ -7949,9 +9095,9 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         }
     }
 
-    /// Drain (return + clear) the buffered inbound call signals; the actor calls this each loop and
-    /// emits a `CallSignal` event per item.
-    pub fn take_call_signals(&mut self) -> Vec<(String, Vec<u8>)> {
+    /// Drain (return + clear) the buffered inbound call signals as `(verified sender device,
+    /// payload)`; the actor calls this each loop and emits a `CallSignal` event per item.
+    pub fn take_call_signals(&mut self) -> Vec<(DeviceId, Vec<u8>)> {
         std::mem::take(&mut self.pending_call_signals)
     }
 
@@ -8176,11 +9322,31 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
     /// by [`Self::ingest_peer_record`]. Returns the number of *newly-known* members
     /// learned. A non-member / unsigned / replayed response yields `0`.
     pub async fn request_pex(&mut self, peer: PeerId) -> Result<usize, SyncError> {
+        self.request_pex_with_route_policy(peer, false).await
+    }
+
+    /// Exchange signed member records over an existing connection without consulting the
+    /// transport's recent-peer redial cache. Admission callbacks and helpers grant bounded
+    /// socket authority, so their eager post-admission PEX must fail if that connection ends.
+    pub async fn request_pex_connected(&mut self, peer: PeerId) -> Result<usize, SyncError> {
+        self.request_pex_with_route_policy(peer, true).await
+    }
+
+    async fn request_pex_with_route_policy(
+        &mut self,
+        peer: PeerId,
+        connected_only: bool,
+    ) -> Result<usize, SyncError> {
         let (req, req_auth) = self.build_authed_request(KIND_PEX, &[])?;
-        let resp = self
-            .transport
-            .request(peer, ProtocolId(RR_PROTOCOL), Bytes::from(req))
-            .await?;
+        let resp = if connected_only {
+            self.transport
+                .request_connected(peer, ProtocolId(RR_PROTOCOL), Bytes::from(req))
+                .await?
+        } else {
+            self.transport
+                .request(peer, ProtocolId(RR_PROTOCOL), Bytes::from(req))
+                .await?
+        };
         if resp.is_empty() {
             return Ok(0);
         }
@@ -8601,8 +9767,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
 
     async fn drain_repair_outbox(&mut self) {
         let now = self.clock.now_ms();
-        let pending = std::mem::take(&mut self.repair_outbox);
-        for item in pending {
+        while let Some(item) = self.repair_outbox.front().cloned() {
             if item.expires_at_ms < now
                 || !self.connected_peers.contains(&item.target)
                 || !item
@@ -8610,6 +9775,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
                     .iter()
                     .all(|reference| self.descriptor_ref_is_current(reference))
             {
+                self.repair_outbox.pop_front();
                 continue;
             }
             let _ = self
@@ -8620,6 +9786,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
                     Bytes::from(item.payload),
                 )
                 .await;
+            self.repair_outbox.pop_front();
         }
     }
 
@@ -9673,6 +10840,13 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
     /// the joiner then keeps its local `L = 0` (correct only for the founder).
     /// Call at the post-merge epoch the joiner's Welcome lands them on.
     fn seal_routing_state(&mut self) -> Vec<u8> {
+        let policy = match self.admission_policy() {
+            Ok(policy) => policy,
+            Err(error) => {
+                tracing::warn!(%error, "cannot attest group policy for admission");
+                return Vec::new();
+            }
+        };
         let key = match self.group.routing_transfer_key(&self.device) {
             Ok(k) => k,
             Err(e) => {
@@ -9689,6 +10863,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             self.routing_label,
             &secrets,
             &self.file_wrap_key,
+            policy.as_ref(),
         ));
         match seal(&key, &plaintext, &mut self.rng) {
             Ok(blob) => encode_sealed(&blob),
@@ -9703,6 +10878,11 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
     /// `L = 0`), so this joiner derives the same topics and namespaces as the group.
     /// A no-op for an empty transfer (keeps the local baseline).
     fn adopt_routing_state(&mut self, routing: RoutingState) {
+        if self.group_policy != routing.policy {
+            self.group_policy_revision = self.group_policy_revision.wrapping_add(1);
+        }
+        self.group_policy = routing.policy;
+        self.group_policy_active = self.group_policy.is_some();
         // Adopt the transferred file-wrap key first (Phase 9h); independent of the routing
         // secrets, so the joiner shares the group's file key even at the L=0 baseline.
         if let Some(k) = routing.file_wrap_key {
@@ -9905,7 +11085,9 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         // departed members on all three branches below.
         let before = self.group.member_device_ids();
         let advanced = match &p.mine {
-            Some(_) if we_won => match self.group.merge_staged_self(&self.device) {
+            Some(_) if we_won => match self
+                .with_observed_mls_transition(|node| node.group.merge_staged_self(&node.device))
+            {
                 // We won: merge our own staged commit.
                 Ok(()) => {
                     if i_removed {
@@ -9927,10 +11109,10 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
                 if let Err(e) = self.group.abort_staged(&self.device) {
                     tracing::error!(error = %e, "abort of losing staged commit failed");
                 }
-                match self
-                    .group
-                    .process_incoming(&self.device, &p.best.mls_commit)
-                {
+                match self.with_observed_mls_transition(|node| {
+                    node.group
+                        .process_incoming(&node.device, &p.best.mls_commit)
+                }) {
                     Ok(inc) => {
                         self.note_commit_applied(&inc, &before);
                         true
@@ -9941,10 +11123,10 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
                     }
                 }
             }
-            None => match self
-                .group
-                .process_incoming(&self.device, &p.best.mls_commit)
-            {
+            None => match self.with_observed_mls_transition(|node| {
+                node.group
+                    .process_incoming(&node.device, &p.best.mls_commit)
+            }) {
                 // Pure applier: apply the winner.
                 Ok(inc) => {
                     self.note_commit_applied(&inc, &before);
@@ -10019,10 +11201,10 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         // The roster as it stands *before* the commit, so an applied removal can name who left
         // (MLS reports only that a removal happened). Bounded by the group size.
         let before = self.group.member_device_ids();
-        match self
-            .group
-            .process_incoming(&self.device, &record.mls_commit)
-        {
+        match self.with_observed_mls_transition(|node| {
+            node.group
+                .process_incoming(&node.device, &record.mls_commit)
+        }) {
             Ok(inc) => {
                 self.evict_past_keys();
                 self.note_commit_applied(&inc, &before);
@@ -10200,7 +11382,9 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         };
         let record = self.sign_staged_record(&staged);
         self.snapshot_epoch_keys();
-        if let Err(e) = self.group.merge_staged_self(&self.device) {
+        if let Err(e) =
+            self.with_observed_mls_transition(|node| node.group.merge_staged_self(&node.device))
+        {
             tracing::error!(error = %e, "merge of remove commit failed");
             let _ = self.group.abort_staged(&self.device);
             return;
@@ -10250,6 +11434,10 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             Some((&CTRL_DEVICE_ADD, rest)) => {
                 // `from` is the relaying member's peer; where the owner returns the result.
                 self.on_device_add_request(from, rest);
+                return;
+            }
+            Some((&CTRL_GROUP_POLICY, rest)) => {
+                self.on_group_policy(rest);
                 return;
             }
             _ => {
@@ -10343,22 +11531,6 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         result
     }
 
-    /// [`Self::request_catchup`] with the whole-history compatibility request allowed.
-    ///
-    /// Only the recovery drain uses this. That request can legally take over two minutes, and the
-    /// drain runs inside the tick the actor cancels whenever a command arrives, so waiting there
-    /// costs nothing anybody is watching; the in-flight task survives the cancellation and is
-    /// tried again. A UI-facing command awaits its request inline and must not spend that long.
-    async fn request_catchup_allowing_legacy(
-        &mut self,
-        peer: catcoms_rt::PeerId,
-        doc_type: DocType,
-        doc_id: u128,
-    ) -> Result<usize, SyncError> {
-        self.request_catchup_inner(peer, doc_type, doc_id, true)
-            .await
-    }
-
     async fn request_catchup_inner(
         &mut self,
         peer: catcoms_rt::PeerId,
@@ -10409,9 +11581,13 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         doc_id: u128,
         heads: &[[u8; 32]],
     ) -> Result<Option<usize>, SyncError> {
+        // Replay only this peer's own continuation. A position from anywhere else names an index
+        // in a different log, and the serving side rejects a foreign one anyway; not sending it is
+        // the half of that fence this node owns.
+        let cursor = self.catchup_cursors.get(&(doc_type, doc_id, peer)).copied();
         let (req, req_auth) = self.build_authed_request(
             KIND_CATCHUP_SINCE,
-            &encode_catchup_since_req(doc_type, doc_id, heads),
+            &encode_catchup_since_req(doc_type, doc_id, heads, cursor.as_ref()),
         )?;
         tracing::debug!(
             ?doc_type,
@@ -10430,6 +11606,17 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             CATCHUP_REQUEST_MS,
         )
         .await?;
+        self.apply_catchup_since_response(peer, doc_type, doc_id, req_auth, &resp)
+    }
+
+    fn apply_catchup_since_response(
+        &mut self,
+        peer: PeerId,
+        doc_type: DocType,
+        doc_id: u128,
+        req_auth: RequestAuth,
+        resp: &[u8],
+    ) -> Result<Option<usize>, SyncError> {
         // Nothing at all is the one answer that needs no proof, because it asserts nothing: it is
         // how a build that does not know this kind, and a peer that refused us, both reply.
         if resp.is_empty() {
@@ -10439,7 +11626,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         // them. Sources are drawn from untrusted candidates as well as proven members, and an
         // empty bundle carries no sealed operation to authenticate, so without this a stranger
         // could end a catch-up, invent a continuation, or push us between sources at will.
-        let (responder_pubkey, signature, answer) = decode_signed_commit_resp(&resp)?;
+        let (responder_pubkey, signature, answer) = decode_signed_commit_resp(resp)?;
         let responder = DeviceId::from_public_key_bytes(&responder_pubkey);
         if !self.group.contains_device(&responder) {
             self.demote_member_peer(peer);
@@ -10474,8 +11661,11 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             // A signed answer with no marker at all says nothing; treat it as unusable.
             None => Ok(None),
             Some((&CATCHUP_SINCE_UNDERSTOOD, bundle)) => {
-                // It is finished with us, so an unbroken run of "ask me again" has ended.
+                // It is finished with us, so an unbroken run of "ask me again" has ended, and the
+                // walk it was continuing is over. A stale position kept here would make the next
+                // pass resume past history this peer accepts after now.
                 self.clear_catchup_stall(peer, doc_type, doc_id);
+                self.catchup_cursors.remove(&(doc_type, doc_id, peer));
                 let applied = self.apply_catchup_response(doc_type, doc_id, bundle)?;
                 // "That is everything I have" is only a completion of the gap when it comes from
                 // the peer that said there was more of it. Peer selection is group-wide, so the
@@ -10507,9 +11697,26 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
                     // but empty document, and answers exactly this.
                     self.note_source_checked(peer, doc_type, doc_id);
                     if self.unchecked_source_exists(doc_type, doc_id) {
+                        tracing::debug!(
+                            ?doc_type,
+                            doc_id,
+                            ?peer,
+                            version = self.doc_version(doc_type, doc_id),
+                            sources_checked = self.sources_checked(doc_type, doc_id).len(),
+                            "source has nothing further; another source still owes an answer"
+                        );
                         self.cool_off_catchup_peer(peer, doc_type, doc_id);
                         self.enqueue_doc_catchup(doc_type, doc_id);
                     } else {
+                        // "Caught up", in the four-state vocabulary: every source this node is
+                        // obliged to hear from has said so at this version.
+                        tracing::debug!(
+                            ?doc_type,
+                            doc_id,
+                            version = self.doc_version(doc_type, doc_id),
+                            sources_checked = self.sources_checked(doc_type, doc_id).len(),
+                            "document converged: every owed source has answered at this version"
+                        );
                         self.clear_catchup_continuation(doc_type, doc_id);
                     }
                 }
@@ -10521,13 +11728,44 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
                 // aside, so the next drain asks somebody else.
                 tracing::debug!(?doc_type, doc_id, ?peer, "peer does not hold this document");
                 self.clear_catchup_stall(peer, doc_type, doc_id);
+                self.catchup_cursors.remove(&(doc_type, doc_id, peer));
                 self.note_source_checked(peer, doc_type, doc_id);
                 self.cool_off_catchup_peer(peer, doc_type, doc_id);
                 self.enqueue_doc_catchup(doc_type, doc_id);
                 Ok(Some(0))
             }
-            Some((&CATCHUP_SINCE_MORE, bundle)) => {
+            // A paging peer puts its resume point first. Retaining it is what makes a round that
+            // applies nothing still be progress: the next request continues past what was just
+            // offered instead of asking for the same prefix again. `CATCHUP_SINCE_MORE` is the
+            // older shape, which recomputes from the frontier every time and so can repeat itself
+            // indefinitely; that is the behaviour the non-progress bound exists for.
+            Some((marker @ (&CATCHUP_SINCE_MORE | &CATCHUP_SINCE_PAGE), rest)) => {
+                let (cursor_advanced, bundle) = if *marker == CATCHUP_SINCE_PAGE {
+                    let Some(cursor) =
+                        CatchupCursor::decode(rest.get(..CATCHUP_CURSOR_BYTES).unwrap_or_default())
+                    else {
+                        tracing::warn!(?peer, "paged catch-up answer without a continuation");
+                        return Err(SyncError::Malformed);
+                    };
+                    let bundle = &rest[CATCHUP_CURSOR_BYTES..];
+                    let previous = self
+                        .catchup_cursors
+                        .insert((doc_type, doc_id, peer), cursor);
+                    // A position moves only within the same provider's walk. A peer changing its
+                    // stamp cannot manufacture progress by comparing unrelated log positions.
+                    let advanced = previous.map_or(cursor.position > 0, |old| {
+                        cursor.provider == old.provider && cursor.position > old.position
+                    });
+                    (advanced, bundle)
+                } else {
+                    (false, rest)
+                };
                 let applied = self.apply_catchup_response(doc_type, doc_id, bundle)?;
+                // A bounded scan can legitimately stop in a prefix the requester already holds.
+                // Grant only a finite empty-page allowance; advancing an invented cursor must
+                // still reach the existing non-progress cooldown even without network traffic.
+                let advanced = cursor_advanced
+                    && (bundle.len() > 4 || self.allow_empty_catchup_page(peer, doc_type, doc_id));
                 // The peer said it withheld some, so ask again whatever this round applied. A
                 // chunk can legitimately apply nothing (ops already held, or one op too large to
                 // share the budget) and the gap still be real.
@@ -10547,6 +11785,14 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
                     // A round that moved us also starts the sweep again: every other source's
                     // last answer was about a frontier this node has now passed.
                     self.clear_sources_checked(doc_type, doc_id);
+                } else if advanced {
+                    // Nothing landed, but the walk advanced through duplicate operations or
+                    // spent one of its bounded empty-page allowances. Neither should punish an
+                    // honest provider for scanning past history the requester already holds.
+                    //
+                    // Deliberately not cleared, and deliberately not treated as a continuation
+                    // claim: the peer chooses its own positions, so this is progress worth not
+                    // punishing rather than evidence worth granting authority on.
                 } else {
                     self.note_nonprogressing_catchup(peer, doc_type, doc_id);
                 }
@@ -10600,10 +11846,20 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             FULL_CATCHUP_REQUEST_MS,
         )
         .await?;
+        self.apply_full_catchup_response(peer, doc_type, doc_id, &resp)
+    }
+
+    fn apply_full_catchup_response(
+        &mut self,
+        peer: PeerId,
+        doc_type: DocType,
+        doc_id: u128,
+        resp: &[u8],
+    ) -> Result<usize, SyncError> {
         let applied = if resp.is_empty() {
             0 // peer had nothing for this document
         } else {
-            self.apply_catchup_response(doc_type, doc_id, &resp)?
+            self.apply_catchup_response(doc_type, doc_id, resp)?
         };
         if applied > 0 {
             self.clear_sources_checked(doc_type, doc_id);
@@ -10701,7 +11957,14 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         if applied_count > 0 {
             self.enqueue_doc_catchup(doc_type, doc_id);
         }
-        tracing::debug!(applied = applied_count, "applied doc catch-up");
+        tracing::debug!(
+            ?doc_type,
+            doc_id,
+            applied = applied_count,
+            offered = bundle.len(),
+            version = self.doc_version(doc_type, doc_id),
+            "applied doc catch-up"
+        );
         Ok(applied_count)
     }
 
@@ -10754,6 +12017,22 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         Ok(self.blobs.promote_staged(cid)?)
     }
 
+    /// Stage, verify, promote and flush one immutable blob before its caller publishes any
+    /// reference. A failure may leave an unreferenced held blob, never a false successful CID.
+    pub fn publish_blob_bounded(&mut self, bytes: &[u8]) -> Result<Cid, SyncError> {
+        if bytes.len() > MAX_BOUNDED_BLOB_BYTES {
+            return Err(SyncError::Malformed);
+        }
+        let cid = self.blobs.put_staged(bytes)?;
+        if !self.blobs.promote_staged_bounded(&cid, bytes.len())? {
+            return Err(SyncError::Malformed);
+        }
+        if self.blobs.get_bounded(&cid, bytes.len())?.as_deref() != Some(bytes) {
+            return Err(SyncError::Malformed);
+        }
+        Ok(cid)
+    }
+
     /// Discard one staged blob. Cannot touch held content.
     pub fn drop_staged_blob(&mut self, cid: &Cid) -> Result<bool, SyncError> {
         Ok(self.blobs.drop_staged(cid)?)
@@ -10781,9 +12060,10 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         self.blobs.cids()
     }
 
-    /// Delete a locally-held blob by content address (`Ok(true)` if it was held). Used by the
-    /// product layer's dedup-safe delete-time garbage collection; deletion is harmless if a peer
-    /// still holds it (the content-addressed blob can be re-fetched).
+    /// Delete a locally-held blob by content address (`Ok(true)` if a held copy was removed). Used by the
+    /// product layer's dedup-safe delete-time garbage collection. Persistent adapters also protect
+    /// Studio history/intents/recovery: false can mean retained, and unknown references refuse.
+    /// Successful metadata unlisting therefore never proves disk space was reclaimed.
     pub fn delete_blob(&mut self, cid: &Cid) -> Result<bool, SyncError> {
         Ok(self.blobs.delete(cid)?)
     }
@@ -10800,10 +12080,18 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         peer: catcoms_rt::PeerId,
         cid: &Cid,
         cancellation: Option<RequestCancellation>,
+        max_bytes: Option<usize>,
     ) -> Result<(bool, Option<DeviceId>), SyncError> {
         // A filename alone is not availability: a corrupt record must fall through to the
         // authenticated fetch path, whose CID check plus BlobStore::put repairs it in place.
-        if matches!(self.blobs.get(cid), Ok(Some(_))) {
+        let held = match max_bytes {
+            Some(limit) => self.blobs.get_bounded(cid, limit),
+            None => self.blobs.get(cid),
+        };
+        if matches!(held, Err(catcoms_storage::StorageError::BlobSizeLimit)) {
+            return Err(catcoms_storage::StorageError::BlobSizeLimit.into());
+        }
+        if matches!(held, Ok(Some(_))) {
             return Ok((true, None));
         }
         let (req, auth) =
@@ -10828,14 +12116,13 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         if resp.is_empty() {
             return Ok((false, None)); // the peer did not have this blob
         }
-        if resp.len() > MAX_BLOB_RESPONSE {
-            tracing::warn!(bytes = resp.len(), "oversized blob response dropped");
-            return Err(SyncError::Malformed);
-        }
-        let (responder_pubkey, signature, blob) = decode_signed_commit_resp(&resp)?;
+        let (responder_pubkey, signature, blob) = decode_blob_response(
+            &resp,
+            max_bytes.unwrap_or(MAX_BLOB_RESPONSE - SIGNED_BLOB_OVERHEAD),
+        )?;
         // The responder must be a current member, and the signature must bind this blob to
         // our exact request (key + ts + nonce + epoch).
-        let responder = DeviceId::from_public_key_bytes(&responder_pubkey);
+        let responder = DeviceId::from_public_key_bytes(responder_pubkey);
         if !self.group.contains_device(&responder) {
             return Err(SyncError::Malformed);
         }
@@ -10845,18 +12132,18 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             auth.ts,
             &auth.nonce,
             auth.epoch,
-            &blob,
+            blob,
         );
-        if !verify_with_public_bytes(&responder_pubkey, &transcript, &signature) {
+        if !verify_with_public_bytes(responder_pubkey, &transcript, &signature) {
             tracing::warn!("blob response signature invalid; dropped");
             return Err(SyncError::Malformed);
         }
         // Verify the served bytes hash to the address we asked for *before* storing them.
-        if Cid::of(&blob) != *cid {
+        if Cid::of(blob) != *cid {
             tracing::warn!("served blob content-address mismatch; dropped");
             return Err(SyncError::Malformed);
         }
-        self.blobs.put(&blob)?;
+        self.blobs.put(blob)?;
         Ok((true, Some(responder)))
     }
 
@@ -10865,7 +12152,8 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         peer: catcoms_rt::PeerId,
         cid: &Cid,
     ) -> Result<(bool, Option<DeviceId>), SyncError> {
-        self.request_blob_tracked_cancellable(peer, cid, None).await
+        self.request_blob_tracked_cancellable(peer, cid, None, None)
+            .await
     }
 
     /// Fetch a blob by content address from `peer`; `Ok(true)` if now held (already-held or
@@ -10889,6 +12177,52 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             Some(peer) => self.request_blob(peer, cid).await,
             None => Ok(false),
         }
+    }
+
+    /// Read locally or ask one known peer, refusing over-declared data before copying/storing
+    /// it. No automatic fallback after a refusal. This is a maximum, not an exact-size promise:
+    /// record consumers must also check equality and validate their own format.
+    pub async fn request_blob_bounded(
+        &mut self,
+        cid: &Cid,
+        max_bytes: usize,
+        mut cancellation: Option<RequestCancellation>,
+    ) -> Result<Option<Vec<u8>>, SyncError> {
+        if max_bytes > MAX_BOUNDED_BLOB_BYTES {
+            return Err(SyncError::Malformed);
+        }
+        if cancellation
+            .as_ref()
+            .is_some_and(RequestCancellation::is_cancelled)
+        {
+            return Err(catcoms_rt::TransportError::Cancelled.into());
+        }
+        match self.blobs.get_bounded(cid, max_bytes) {
+            Ok(Some(bytes)) => return Ok(Some(bytes)),
+            Err(catcoms_storage::StorageError::BlobSizeLimit) => {
+                return Err(catcoms_storage::StorageError::BlobSizeLimit.into())
+            }
+            _ => {} // missing or corrupt: an authenticated response can repair this CID
+        }
+        let Some(peer) = self.pick_catchup_peer() else {
+            return Ok(None);
+        };
+        let fetch =
+            self.request_blob_tracked_cancellable(peer, cid, cancellation.clone(), Some(max_bytes));
+        let available = if let Some(cancel) = cancellation.as_mut() {
+            match futures::future::select(Box::pin(cancel.cancelled()), Box::pin(fetch)).await {
+                futures::future::Either::Left(_) => {
+                    return Err(catcoms_rt::TransportError::Cancelled.into())
+                }
+                futures::future::Either::Right((result, _)) => result?.0,
+            }
+        } else {
+            fetch.await?.0
+        };
+        if !available {
+            return Ok(None);
+        }
+        Ok(self.blobs.get_bounded(cid, max_bytes)?)
     }
 
     /// Like [`Self::request_blob_best`], but returns the **provider's fingerprint**; the signed
@@ -10924,7 +12258,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         }
         match self.pick_catchup_peer() {
             Some(peer) => Ok(self
-                .request_blob_tracked_cancellable(peer, cid, Some(cancellation))
+                .request_blob_tracked_cancellable(peer, cid, Some(cancellation), None)
                 .await?
                 .1
                 .map(|device| roles::fingerprint(&device))),
@@ -10940,14 +12274,17 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         peer: catcoms_rt::PeerId,
         from_epoch: u64,
     ) -> Result<usize, SyncError> {
-        self.do_commit_catchup(peer, from_epoch).await
+        Ok(self.do_commit_catchup(peer, from_epoch).await?.applied())
     }
 
+    /// [`Self::request_commit_catchup`], reporting what the exchange **established** rather than
+    /// only how far it moved this node. The drain needs the difference: an unanswered request and
+    /// a verified "you have everything" leave the epoch in exactly the same place.
     async fn do_commit_catchup(
         &mut self,
         peer: PeerId,
         from_epoch: u64,
-    ) -> Result<usize, SyncError> {
+    ) -> Result<CommitCatchupOutcome, SyncError> {
         let (req, req_auth) =
             self.build_authed_request(KIND_COMMIT_CATCHUP, &encode_commit_catchup_req(from_epoch))?;
         tracing::debug!(from_epoch, ?peer, "request commit catch-up");
@@ -10961,8 +12298,17 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             CATCHUP_REQUEST_MS,
         )
         .await?;
+        self.apply_commit_catchup_response(peer, req_auth, &resp)
+    }
+
+    fn apply_commit_catchup_response(
+        &mut self,
+        peer: PeerId,
+        req_auth: RequestAuth,
+        resp: &[u8],
+    ) -> Result<CommitCatchupOutcome, SyncError> {
         if resp.is_empty() {
-            return Ok(0);
+            return Ok(CommitCatchupOutcome::Empty);
         }
         if resp.len() > MAX_CATCHUP_RESPONSE {
             tracing::warn!(
@@ -10978,7 +12324,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         // (6e-3d-6, below), closing the same-millisecond `ts`-collision window; so a
         // captured member response cannot be replayed against a different request. An
         // invalid response fills no gap, so the drain marks it failed.
-        let (responder_pubkey, signature, bundle) = decode_signed_commit_resp(&resp)?;
+        let (responder_pubkey, signature, bundle) = decode_signed_commit_resp(resp)?;
         let group_id = self.group.group_id();
         let responder = DeviceId::from_public_key_bytes(&responder_pubkey);
         let my_pubkey = self.device.public_key_bytes();
@@ -11001,14 +12347,14 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
                 ?peer,
                 "commit catch-up response from a non-member; demoted + rejected"
             );
-            return Ok(0);
+            return Ok(CommitCatchupOutcome::Unanswered);
         }
         if !verify_with_public_bytes(&responder_pubkey, &transcript, &signature) {
             tracing::warn!(
                 ?peer,
                 "commit catch-up response signature invalid; rejected"
             );
-            return Ok(0);
+            return Ok(CommitCatchupOutcome::Unanswered);
         }
         // A member signature authenticates the bytes but does not make malformed bytes usable.
         // Decode before promotion so operational availability means this peer completed a
@@ -11018,6 +12364,11 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         // does not carry the peer it was sent from.
         self.promote_member_peer(peer, responder);
         let mut applied = 0;
+        // The lowest epoch this peer offered above where we stood. Taken from the records as they
+        // arrive rather than from `pending_commits` afterwards, because a record further ahead
+        // than `max_commit_gap` is dropped before it is ever buffered: reading the buffer alone
+        // made the worse of the two stranded bands the invisible one.
+        let mut lowest_future: Option<u64> = None;
         for record in records {
             if record.group_id != group_id {
                 continue;
@@ -11029,32 +12380,85 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
                         applied += 1;
                     }
                 }
-                Ordering::Greater => self.buffer_future_commit(record),
+                Ordering::Greater => {
+                    lowest_future = Some(
+                        lowest_future
+                            .map_or(record.commit_epoch, |low: u64| low.min(record.commit_epoch)),
+                    );
+                    self.buffer_future_commit(record);
+                }
                 Ordering::Less => {}
             }
         }
         // Buffered successors that the fetch unblocked now drain in order.
         self.drain_pending_commits();
-        if let Some((&lowest_gap, _)) = self.pending_commits.iter().next() {
-            if lowest_gap > self.group.epoch() {
-                tracing::warn!(
-                    current = self.group.epoch(),
-                    lowest_gap,
-                    "commit catch-up left an unfillable gap (source's window evicted it); a full rejoin/snapshot is needed"
-                );
-            }
+        let here = self.group.epoch();
+        tracing::debug!(applied, epoch = here, "applied commit catch-up");
+        // A peer serves a contiguous run from the epoch we named upward, so an offer that still
+        // begins above us after draining means the commits in between have left its log. That is
+        // the whole condition, and it covers both bands: buffered-but-unchainable, and dropped
+        // for being too far ahead.
+        if let Some(lowest) = lowest_future.filter(|lowest| *lowest > here) {
+            self.note_membership_chain_gap(here, lowest);
+            return Ok(CommitCatchupOutcome::Stranded {
+                lowest_available: lowest,
+            });
         }
-        tracing::debug!(
-            applied,
-            epoch = self.group.epoch(),
-            "applied commit catch-up"
+        Ok(CommitCatchupOutcome::Verified { applied })
+    }
+
+    /// Record that a reached source could not chain this node's epoch onward.
+    ///
+    /// Keeps the *best* offer seen at this epoch, because a shorter gap is a better chance: two
+    /// peers with different retention tell this node how far it would have to be repaired, and
+    /// the smaller number is the one worth reporting. Any epoch advance discards the record on
+    /// read, so a node that is subsequently repaired stops claiming to be stranded without any
+    /// path needing to remember to clear it.
+    fn note_membership_chain_gap(&mut self, current_epoch: u64, lowest_available: u64) {
+        let observed_at_ms = self.clock.now_ms();
+        let lowest_available = match self.membership_chain_gap() {
+            Some(previous) => previous.lowest_available.min(lowest_available),
+            None => {
+                self.stats.commit_chain_gaps_observed += 1;
+                lowest_available
+            }
+        };
+        tracing::warn!(
+            current_epoch,
+            lowest_available,
+            missing = lowest_available.saturating_sub(current_epoch),
+            "no reached source retains the membership commits this node is missing; it cannot \
+             rejoin the current routing label without being repaired out of band"
         );
-        Ok(applied)
+        self.commit_chain_gap = Some(MembershipChainGap {
+            current_epoch,
+            lowest_available,
+            observed_at_ms,
+        });
+    }
+
+    /// The membership chain this node cannot complete, if it has met one at its current epoch.
+    ///
+    /// `None` is the ordinary answer and means only that no source has yet said it cannot help:
+    /// a node that has spoken to nobody reports nothing, exactly as one that is up to date does.
+    /// The record is discarded here rather than cleared at every epoch-advance path, so a repair
+    /// through any route retires it without that route having to know about it.
+    pub fn membership_chain_gap(&self) -> Option<MembershipChainGap> {
+        self.commit_chain_gap
+            .filter(|gap| gap.current_epoch == self.group.epoch())
     }
 
     /// Read a document's materialized state.
     pub fn doc(&self, doc_type: DocType, doc_id: u128) -> Option<&EncryptedDoc> {
         self.docs.get(&(doc_type, doc_id))
+    }
+
+    /// Raw versions of every open legacy document, including changes invisible to rendered
+    /// projections. Reading counts does not serialize documents or inspect message bodies.
+    pub fn document_versions(&self) -> impl Iterator<Item = ((DocType, u128), u64)> + '_ {
+        self.docs
+            .iter()
+            .map(|(key, doc)| (*key, doc.op_count() as u64))
     }
 
     /// The ids of every open chat-channel document (excludes profile/roles/status/etc.); lets the
@@ -11422,6 +12826,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
                 self.forwarded_joins.remove(&target);
                 return Vec::new();
             }
+            self.note_member_finalization_candidate(from, joiner_device);
             self.forwarded_joins.remove(&target);
         } else if response.first() != Some(&JOIN_PENDING) {
             self.forwarded_joins.remove(&target);
@@ -11472,6 +12877,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         {
             return;
         }
+        self.note_member_finalization_candidate(pending.joiner, pending.joiner_device);
         let mut request = vec![KIND_WELCOME];
         request.extend_from_slice(payload);
         // A disconnected or hostile pre-member cannot monopolize the group actor. The joiner can
@@ -11510,6 +12916,9 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
                 self.serve_commit_catchup(from, rest).unwrap_or_default()
             }
             Some((&KIND_PEX, rest)) => self.serve_pex(from, rest).unwrap_or_default(),
+            Some((&KIND_MEMBER_FINALIZE, rest)) => self
+                .serve_member_finalization(from, rest)
+                .unwrap_or_default(),
             Some((&KIND_SWITCHBOARD_OFFER, rest)) => {
                 self.serve_switchboard_offer(from, rest).unwrap_or_default()
             }
@@ -11522,6 +12931,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
                 Vec::new()
             }
             Some((&KIND_BLOB_FETCH, rest)) => self.serve_blob_fetch(from, rest).unwrap_or_default(),
+            Some((&KIND_BLOB_PAGE, rest)) => self.serve_blob_page(from, rest).unwrap_or_default(),
             Some((&KIND_ADMIT_RESULT, rest)) => {
                 // Admin invites (Option C): the owner delivered a finalized admission; re-sign +
                 // relay the Welcome to the joiner. Empty ack response.
@@ -11625,6 +13035,94 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         ))
     }
 
+    /// Serve one **window** of a content-addressed blob, on the same members-only, signed,
+    /// rate-limited terms as [`Self::serve_blob_fetch`].
+    ///
+    /// The whole-blob path stays exactly as it was for older peers. What changes here is that
+    /// the responder, not the requester, decides how much to send: the window is clamped to
+    /// [`MAX_BLOB_PAGE`] whatever was asked for, so a legal answer always fits comfortably
+    /// inside the transport's request deadline. That is the property the document layer has had
+    /// since paging landed and this layer never did.
+    fn serve_blob_page(&mut self, from: PeerId, data: &[u8]) -> Option<Vec<u8>> {
+        let (inner, req_pubkey, req_auth) =
+            self.authenticate_request(KIND_BLOB_PAGE, data, from)?;
+        let requester = DeviceId::from_public_key_bytes(&req_pubkey);
+        let now = self.clock.now_ms();
+        let (cid, offset, asked) = decode_blob_page_req(&inner).ok()?;
+        // "Not held" is answered, not left silent: an empty response on this kind is reserved
+        // for "I do not know this request kind", and a requester reading absence as that would
+        // fall back to the whole-blob grammar against a peer that simply lacks the file.
+        let Ok(Some(blob)) = self.blobs.get(&cid) else {
+            return self.sign_blob_page(
+                &req_pubkey,
+                &req_auth,
+                &cid,
+                BLOB_PAGE_ABSENT,
+                offset,
+                0,
+                &[],
+            );
+        };
+        let Ok(total) = u32::try_from(blob.len()) else {
+            return None; // unrepresentable length; nothing in the product reaches 4 GiB
+        };
+        if offset > total {
+            return None; // a window past the end is a malformed request, not an empty page
+        }
+        let end = offset
+            .saturating_add(asked.min(MAX_BLOB_PAGE as u32))
+            .min(total);
+        let slice = &blob[offset as usize..end as usize];
+        // Charged per page on a hit, so the window budget still bounds a flooder in bytes and a
+        // paged download costs exactly what the same bytes cost unpaged.
+        if !self.charge_blob_budget(requester, now, slice.len() as u64) {
+            tracing::trace!("blob page over byte budget; serving empty");
+            return Some(Vec::new());
+        }
+        let marker = if end < total {
+            BLOB_PAGE_MORE
+        } else {
+            BLOB_PAGE_LAST
+        };
+        tracing::debug!(bytes = slice.len(), offset, total, "serving blob page");
+        self.sign_blob_page(&req_pubkey, &req_auth, &cid, marker, offset, total, slice)
+    }
+
+    /// Sign and frame one blob page. Separate from [`Self::serve_blob_page`] only so the
+    /// byte-budget charge, which needs `&mut self`, is not fighting a borrow held for signing.
+    #[allow(clippy::too_many_arguments)]
+    fn sign_blob_page(
+        &self,
+        req_pubkey: &[u8],
+        req_auth: &RequestAuth,
+        cid: &Cid,
+        marker: u8,
+        offset: u32,
+        total: u32,
+        page: &[u8],
+    ) -> Option<Vec<u8>> {
+        let transcript = blob_page_resp_transcript(
+            &self.group.group_id(),
+            req_pubkey,
+            req_auth.ts,
+            &req_auth.nonce,
+            req_auth.epoch,
+            cid,
+            offset,
+            total,
+            page,
+        );
+        let signature = self.device.sign(&transcript).ok()?;
+        Some(encode_blob_page_resp(
+            marker,
+            &self.device.public_key_bytes(),
+            &signature,
+            offset,
+            total,
+            page,
+        ))
+    }
+
     /// Serve a document's history; but only to a requester that proved current
     /// group membership (the bundle, though sealed, still carries member-only
     /// framing/metadata, so it is members-only).
@@ -11669,7 +13167,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
     fn serve_catchup_since(&mut self, from: PeerId, data: &[u8]) -> Option<Vec<u8>> {
         let (inner, req_pubkey, req_auth) =
             self.authenticate_request(KIND_CATCHUP_SINCE, data, from)?;
-        let (doc_type, doc_id, heads) = decode_catchup_since_req(&inner).ok()?;
+        let (doc_type, doc_id, heads, cursor) = decode_catchup_since_req(&inner).ok()?;
         // A document this peer does not hold is answered, not left silent. An empty response is
         // the wire's way of saying "I do not know this request kind", and the requester's only
         // sane reading of that is to fall back to the whole-history grammar; so staying silent
@@ -11686,11 +13184,41 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             answer.extend_from_slice(&empty);
             return self.sign_doc_catchup_answer(&req_pubkey, &req_auth, answer);
         }
+        // A cursor this node did not mint (a different peer's, or its own from before a restart)
+        // names a position in somebody else's log. Starting over is the only safe reading: acting
+        // on it would skip history the requester would then never be offered again.
+        let resume = match cursor.flatten() {
+            Some(cursor) if cursor.provider == self.catchup_provider => cursor.position as usize,
+            Some(_) => {
+                tracing::debug!(
+                    ?doc_type,
+                    doc_id,
+                    ?from,
+                    "catch-up continuation was not minted here; restarting the walk"
+                );
+                0
+            }
+            None => 0,
+        };
+        let provider = self.catchup_provider;
         let doc = self.docs.get_mut(&(doc_type, doc_id))?;
-        match doc.export_catchup_since(&heads, &self.group, &self.device, &mut self.rng) {
-            Ok(bundle) => {
+        let budget = MAX_CATCHUP_CHUNK.min(MAX_SIGNED_CATCHUP_BUNDLE);
+        let page = if cursor.is_some() {
+            doc.export_catchup_page(
+                &heads,
+                resume,
+                budget,
+                &self.group,
+                &self.device,
+                &mut self.rng,
+            )
+        } else {
+            doc.export_legacy_catchup_page(&heads, budget, &self.group, &self.device, &mut self.rng)
+        };
+        match page {
+            Ok((page, next)) => {
                 let (prefix, served) =
-                    match size_capped_ops(&bundle, MAX_CATCHUP_CHUNK, MAX_SIGNED_CATCHUP_BUNDLE) {
+                    match size_capped_ops(&page, MAX_CATCHUP_CHUNK, MAX_SIGNED_CATCHUP_BUNDLE) {
                         Ok(capped) => capped,
                         Err(e) => {
                             // Refusing is the honest answer: claiming to be done here would
@@ -11699,28 +13227,40 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
                             return None;
                         }
                     };
-                let more = served < bundle.len();
-                if more {
-                    tracing::debug!(
-                        served,
-                        total = bundle.len(),
-                        "incremental doc catch-up truncated; the requester is told to ask again"
-                    );
-                }
+                // The pager sized the page to the same budget, so a short encode here would mean
+                // the two disagreed. Resuming at the operation actually served keeps the reply
+                // truthful either way rather than skipping what was dropped.
+                let next = if served < page.len() {
+                    Some(resume + served)
+                } else {
+                    next
+                };
                 tracing::debug!(
                     ?doc_type,
                     doc_id,
                     ops = served,
                     heads = heads.len(),
-                    more,
+                    resume,
+                    next,
                     "serving incremental doc catch-up"
                 );
-                let mut answer = Vec::with_capacity(prefix.len() + 1);
-                answer.push(if more {
-                    CATCHUP_SINCE_MORE
-                } else {
-                    CATCHUP_SINCE_UNDERSTOOD
-                });
+                let mut answer = Vec::with_capacity(prefix.len() + 1 + CATCHUP_CURSOR_BYTES);
+                match next {
+                    // Only a paging-capable requester is sent a continuation; an older build gets
+                    // exactly the frame it has always got, and re-asks from its frontier.
+                    Some(position) if cursor.is_some() => {
+                        answer.push(CATCHUP_SINCE_PAGE);
+                        answer.extend_from_slice(
+                            &CatchupCursor {
+                                provider,
+                                position: position as u32,
+                            }
+                            .encode(),
+                        );
+                    }
+                    Some(_) => answer.push(CATCHUP_SINCE_MORE),
+                    None => answer.push(CATCHUP_SINCE_UNDERSTOOD),
+                }
                 answer.extend_from_slice(&prefix);
                 self.sign_doc_catchup_answer(&req_pubkey, &req_auth, answer)
             }
@@ -11845,6 +13385,16 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             Err(outcome) => (outcome, None),
         };
         self.record_join_attempt(&from, nonce.as_ref(), outcome);
+        if outcome == JoinOutcome::Admitted {
+            if let Ok((_, key_package)) = decode_join_req(data) {
+                if let Ok(package) = self.device.parse_key_package(&key_package) {
+                    self.note_member_finalization_candidate(
+                        from,
+                        DeviceId::from_public_key_bytes(&key_package_signature_key(&package)),
+                    );
+                }
+            }
+        }
         resp
     }
 
@@ -11873,6 +13423,9 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             tracing::warn!("join request with an inauthentic invite");
             return Err(JoinOutcome::BadSignature);
         }
+        if !self.invite_policy_matches(&invite) {
+            return Err(JoinOutcome::NotAuthorized);
+        }
         let kp_hash = *Cid::of(&kp_bytes).as_bytes();
         if let Some(cached) = self.direct_admit_results.get(&invite.invite_nonce) {
             if cached.kp_hash != Some(kp_hash) {
@@ -11887,6 +13440,8 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             ));
             return Ok((JoinOutcome::Admitted, response));
         }
+        self.policy_admission_ready()
+            .map_err(|_| JoinOutcome::NotAuthorized)?;
         let now = self.clock.now_ms();
         // The ledger's own reason is kept rather than flattened: "already used" and "expired"
         // lead the operator to completely different actions (mint a second invite vs mint a
@@ -12018,12 +13573,29 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         kp_bytes: &[u8],
         now: u64,
     ) -> Option<(Vec<u8>, Vec<u8>, [u8; 64])> {
+        // Recheck at the protected mutation, after queueing. This synchronous operation
+        // cannot interleave a demotion or removal between authorization and MLS Add.
+        if !self.is_designated_committer() || !self.inviter_is_authorized(&invite.inviter_device_id)
+        {
+            return None;
+        }
+        self.policy_admission_ready().ok()?;
+        if !self.invite_policy_matches(invite) {
+            return None;
+        }
         let key_package = self.device.parse_key_package(kp_bytes).ok()?;
         let base_authenticator = self.group.epoch_authenticator_id();
         self.snapshot_epoch_keys();
         let outcome = self
-            .group
-            .add_member_via_invite(&self.device, key_package, invite, &mut self.ledger, now)
+            .with_observed_mls_transition(|node| {
+                node.group.add_member_via_invite(
+                    &node.device,
+                    key_package,
+                    invite,
+                    &mut node.ledger,
+                    now,
+                )
+            })
             .ok()?;
         self.evict_past_keys();
         let record =
@@ -12181,12 +13753,12 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             return;
         }
         // THE ROLE RE-CHECK: the requester must BE the invite's named inviter, and that inviter
-        // must be authorized (owner/admin) RIGHT NOW per the live roles doc. The invite must also
+        // must be authorized (owner/admin) RIGHT NOW per the owner-local authority. The invite must also
         // self-authenticate + target this group.
         if requester != invite.inviter_device_id
-            || !self.inviter_is_authorized(&invite.inviter_device_id)
             || invite.group_id != self.group.group_id()
             || !invite.verify_self()
+            || !self.invite_policy_matches(&invite)
         {
             self.stats.requests_rejected += 1;
             return;
@@ -12205,6 +13777,13 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
                 &cached.owner_sig,
             );
             self.admit_result_outbox.push((from_admin, payload));
+            return;
+        }
+
+        // Exact authenticated retries above recover a completed Add even after demotion.
+        // Only fresh admissions require present-time authority; no new mutation happens above.
+        if !self.inviter_is_authorized(&requester) {
+            self.stats.requests_rejected += 1;
             return;
         }
 
@@ -12311,14 +13890,15 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
     /// Owner side: push finalized admit results to the requesting admins over RR (best-effort;
     /// the admin re-broadcasts the request if its result doesn't arrive).
     async fn drain_admit_result_outbox(&mut self) {
-        let pending = std::mem::take(&mut self.admit_result_outbox);
-        for (admin, payload) in pending {
+        while let Some((admin, payload)) = self.admit_result_outbox.first().cloned() {
             let mut req = vec![KIND_ADMIT_RESULT];
             req.extend_from_slice(&payload);
             let _ = self
                 .transport
                 .request(admin, ProtocolId(RR_PROTOCOL), Bytes::from(req))
                 .await;
+            // Existing best-effort disposition applies only after the attempt resolves.
+            self.admit_result_outbox.remove(0);
         }
     }
 
@@ -12569,6 +14149,7 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
         cert: &DeviceCertificate,
         kp_bytes: &[u8],
     ) -> Option<(Vec<u8>, Vec<u8>, [u8; 64])> {
+        self.policy_admission_ready().ok()?;
         let key_package = self.device.parse_key_package(kp_bytes).ok()?;
         let bind = device_bind_nonce(cert);
         // Re-check the leaf binding at the moment of the Add (a queued request may have waited).
@@ -12577,7 +14158,9 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
             .ok()?;
         let base_authenticator = self.group.epoch_authenticator_id();
         self.snapshot_epoch_keys();
-        let outcome = self.group.add_member(&self.device, key_package).ok()?;
+        let outcome = self
+            .with_observed_mls_transition(|node| node.group.add_member(&node.device, key_package))
+            .ok()?;
         self.evict_past_keys();
         // Burn the certificate. `check_device_add` already refused a consumed nonce, so this can
         // only fail on a re-entrant path; treat it as already-burned rather than unwinding a
@@ -12821,14 +14404,15 @@ impl<T: MeshTransport, R: CryptoRngCore> ChannelSync<T, R> {
     /// Owner side: push finalized companion admit results to the relaying members over RR
     /// (best-effort; the relay re-broadcasts if its result doesn't arrive).
     async fn drain_device_admit_outbox(&mut self) {
-        let pending = std::mem::take(&mut self.device_admit_outbox);
-        for (relay, payload) in pending {
+        while let Some((relay, payload)) = self.device_admit_outbox.first().cloned() {
             let mut req = vec![KIND_DEVICE_ADMIT_RESULT];
             req.extend_from_slice(&payload);
             let _ = self
                 .transport
                 .request(relay, ProtocolId(RR_PROTOCOL), Bytes::from(req))
                 .await;
+            // Existing best-effort disposition applies only after the attempt resolves.
+            self.device_admit_outbox.remove(0);
         }
     }
 
@@ -12993,7 +14577,7 @@ pub async fn request_join_via_helper_tracking<T: MeshTransport>(
 }
 
 enum ReplyJoinStart {
-    Ready(Box<ServerGroup>, RoutingState),
+    Ready(Box<ServerGroup>, Box<RoutingState>),
     Pending,
     Rejected,
 }
@@ -13037,7 +14621,7 @@ async fn start_reply_join<T: MeshTransport>(
                 return ReplyJoinStart::Rejected;
             };
             match finish_join(device, invite, &welcome, &signature, &sealed_routing) {
-                Ok((group, routing)) => ReplyJoinStart::Ready(Box::new(group), routing),
+                Ok((group, routing)) => ReplyJoinStart::Ready(Box::new(group), Box::new(routing)),
                 Err(_) => ReplyJoinStart::Rejected,
             }
         }
@@ -13144,7 +14728,7 @@ pub async fn request_join_from_reply_tracking<T: MeshTransport>(
             .await
             {
                 ReplyJoinStart::Ready(group, routing) => {
-                    return Ok((*group, routing, contact));
+                    return Ok((*group, *routing, contact));
                 }
                 ReplyJoinStart::Pending => {
                     pending.insert(contact);
@@ -13395,7 +14979,7 @@ pub async fn request_join_from_switchboards_tracking<T: MeshTransport>(
                                 },
                             ) {
                                 Ok((group, routing)) => {
-                                    ReplyJoinStart::Ready(Box::new(group), routing)
+                                    ReplyJoinStart::Ready(Box::new(group), Box::new(routing))
                                 }
                                 Err(_) => ReplyJoinStart::Rejected,
                             }
@@ -13408,7 +14992,7 @@ pub async fn request_join_from_switchboards_tracking<T: MeshTransport>(
             };
             match start {
                 ReplyJoinStart::Ready(group, routing) => {
-                    return Ok((*group, routing, contact));
+                    return Ok((*group, *routing, contact));
                 }
                 ReplyJoinStart::Pending => {
                     pending.insert(contact, contact_expires);
@@ -13506,6 +15090,15 @@ fn finish_join(
     // so we can open it and adopt the group's routing label/secrets. A present but
     // unopenable transfer (signature already verified) is a hard error.
     let routing = open_routing_transfer(&group, device, sealed_routing)?;
+    match (&invite.policy, &routing.policy) {
+        (None, None) => {}
+        (Some(expected), Some(actual)) if expected.digest() == actual.digest() => {
+            // The current owner's signed transfer attests the immutable body even if the
+            // invite was minted before an ownership transfer. Its issuer alone is insufficient.
+            expected.verify_pin(&group)?;
+        }
+        _ => return Err(SyncError::JoinRejected),
+    }
     tracing::info!(epoch = group.epoch(), "joined server via invite");
     Ok((group, routing))
 }
@@ -13822,6 +15415,47 @@ mod tests {
         assert_eq!(decode_catchup_req(&bytes).unwrap(), (DocType::Wiki, 99));
     }
 
+    /// The head cap is only worth raising if a frontier that large still fits the frame it has to
+    /// travel in, and is still accepted at the far end. Both halves matter: a cap the decoder
+    /// refuses, or one that overruns `MAX_CONTROL_REQUEST`, would turn a wide-frontier member into
+    /// a member that cannot catch up at all rather than one that catches up inefficiently.
+    #[test]
+    fn a_maximal_frontier_still_fits_and_is_still_accepted() {
+        let heads: Vec<[u8; 32]> = (0..MAX_CATCHUP_SINCE_HEADS)
+            .map(|i| {
+                let mut head = [0u8; 32];
+                head[..8].copy_from_slice(&(i as u64).to_be_bytes());
+                head
+            })
+            .collect();
+        let inner = encode_catchup_since_req(DocType::Channel, 1, &heads, None);
+        // The signed envelope this travels inside: kind byte, requester pubkey, timestamp, nonce,
+        // epoch and signature, plus their framing. Generous, so the assertion is about the
+        // frontier rather than about guessing the envelope to the byte.
+        let framed = 1 + inner.len() + 256;
+        assert!(
+            framed < MAX_CONTROL_REQUEST,
+            "a full frontier ({} heads, {framed} framed bytes) must fit the control request bound",
+            heads.len()
+        );
+        let (doc_type, doc_id, decoded, _) = decode_catchup_since_req(&inner).unwrap();
+        assert_eq!((doc_type, doc_id), (DocType::Channel, 1));
+        assert_eq!(decoded, heads, "and survive the round trip intact");
+
+        // One past the cap is still refused, so raising the value did not remove the bound.
+        let mut too_many = heads.clone();
+        too_many.push([0xFF; 32]);
+        assert!(matches!(
+            decode_catchup_since_req(&encode_catchup_since_req(
+                DocType::Channel,
+                1,
+                &too_many,
+                None
+            )),
+            Err(SyncError::Malformed)
+        ));
+    }
+
     #[test]
     fn add_request_and_admit_result_round_trip_through_codecs() {
         // Add-request: invite ‖ key_package ‖ requester_pubkey ‖ ts ‖ sig
@@ -14024,6 +15658,9 @@ mod tests {
         published: std::sync::Mutex<Vec<Vec<u8>>>,
         /// Peer-bound reconnect batches accepted by this fake transport.
         dialed: std::sync::Mutex<Vec<(PeerId, Vec<String>)>>,
+        /// While set, `publish` refuses instead of delivering: a transport going away underneath
+        /// a local edit that has already been applied.
+        refuse_publish: std::sync::atomic::AtomicBool,
     }
 
     impl RecordingNet {
@@ -14035,10 +15672,15 @@ mod tests {
                 denied: std::sync::Mutex::new(HashSet::new()),
                 published: std::sync::Mutex::new(Vec::new()),
                 dialed: std::sync::Mutex::new(Vec::new()),
+                refuse_publish: std::sync::atomic::AtomicBool::new(false),
             }
         }
         fn published(&self) -> Vec<Vec<u8>> {
             self.published.lock().expect("mutex").clone()
+        }
+        fn refuse_publish(&self, refuse: bool) {
+            self.refuse_publish
+                .store(refuse, std::sync::atomic::Ordering::SeqCst);
         }
         fn is_denied(&self, peer: &PeerId) -> bool {
             self.denied.lock().expect("mutex").contains(peer)
@@ -14057,6 +15699,14 @@ mod tests {
             self.inner.unsubscribe(topic).await
         }
         async fn publish(&self, topic: Topic, data: Bytes) -> Result<(), TransportError> {
+            // Recorded only once it has actually gone out, so `published()` means delivered
+            // rather than attempted.
+            if self
+                .refuse_publish
+                .load(std::sync::atomic::Ordering::SeqCst)
+            {
+                return Err(TransportError::Closed);
+            }
             self.published.lock().expect("mutex").push(data.to_vec());
             self.inner.publish(topic, data).await
         }
@@ -14297,7 +15947,7 @@ mod tests {
         node.set_local_reconnect_routes(vec![
             (bob_peer, valid.clone()),
             (bob_peer, second.clone()),
-            // The cap is applied before processing additional persisted entries.
+            // A third route for this peer cannot consume another member's retention slot.
             (bob_peer, test_peer_route(9, "/ip4/192.168.1.41/tcp/22488")),
         ]);
         assert_eq!(
@@ -14334,6 +15984,60 @@ mod tests {
         )]);
         assert_eq!(node.dial_local_reconnect_routes().await, 0);
         assert_eq!(node.transport.dialed.lock().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn mesh_reconnect_retains_three_peers_and_rotates_two_peer_dial_passes() {
+        let hub = Hub::new();
+        let device = MlsDevice::generate().unwrap();
+        let group = ServerGroup::create(&device).unwrap();
+        let owner_peer = PeerId::from_u64(1);
+        let mut node = ChannelSync::new(
+            RecordingNet::new(hub.join(owner_peer)),
+            group,
+            device,
+            ChaCha20Rng::seed_from_u64(50),
+            Box::new(ManualClock::new(1_000)),
+        );
+        node.initialize_group_policy(GroupMode::PeerToPeer).unwrap();
+        node.snapshot().unwrap();
+        node.publish_group_policy().unwrap();
+        let mut routes = Vec::new();
+        for id in 2..=4 {
+            let device = MlsDevice::generate().unwrap();
+            let invite = node.mint_invite([id; 16], 10_000, vec![]).unwrap();
+            let joining = hub.join(PeerId::from_u64(id as u64));
+            tokio::select! {
+                joined = request_join(&joining, owner_peer, &device, &invite) => { joined.unwrap(); },
+                _ = async { loop { node.run_once().await.unwrap(); } } => unreachable!(),
+            }
+            let peer = test_transport_peer(id);
+            stash_peer_record(&mut node, device.device_id(), *peer.as_bytes());
+            routes.push((
+                peer,
+                test_peer_route(id, &format!("/ip4/192.168.1.{id}/tcp/22487")),
+            ));
+        }
+        node.set_local_reconnect_routes(routes.clone());
+        assert_eq!(node.local_reconnect_routes.len(), 3);
+        assert_eq!(node.dial_local_reconnect_routes().await, 2);
+        assert_eq!(node.transport.dialed.lock().unwrap().len(), 2);
+        // A native refresh of the same sealed hints must not reset the fair work cursor.
+        node.set_local_reconnect_routes(routes);
+        assert!(node.dial_local_reconnect_routes().await <= 2);
+        let dialed = node.transport.dialed.lock().unwrap();
+        assert_eq!(
+            dialed
+                .iter()
+                .map(|(peer, _)| *peer)
+                .collect::<HashSet<_>>()
+                .len(),
+            3,
+            "the later peer gets a turn even while the first two keep failing"
+        );
+        assert!(dialed
+            .iter()
+            .all(|(_, routes)| routes.len() <= catcoms_rt::MAX_PEER_DIAL_BATCH));
     }
 
     /// **F1, check 2.** A removed member's record naming a transport peer that a *current*
@@ -14516,6 +16220,52 @@ mod tests {
             node.evicted_devices.len() <= MAX_EVICTED_DEVICES,
             "the readmission ledger must be bounded too"
         );
+    }
+
+    /// A send the transport refused is still a send.
+    ///
+    /// `post` applies the edit and only then hands the bytes over, so a publication failure
+    /// arrives once the operation exists, with a stable hash, in a document this process will go
+    /// on to serve and persist. Reporting that as a failed post told every caller above that
+    /// nothing had happened: the app layer skipped delivery tracking, the actor skipped the UI
+    /// delta and the desktop skipped its save, while the message sat in the channel regardless.
+    /// Retyping it minted a second copy under a new id, and both surfaced later.
+    #[tokio::test]
+    async fn a_refused_publication_still_accepts_the_operation_and_owes_the_delivery() {
+        use automerge::transaction::Transactable;
+        use automerge::ROOT;
+
+        let mut node = recording_node();
+        node.open_channel(DocType::Channel, 5).await.unwrap();
+        // The transport going away underneath a send: the one failure `publish` still reports to
+        // this layer, now that the swarm classifies and retries the rest itself.
+        node.transport.refuse_publish(true);
+
+        let change = node
+            .post(DocType::Channel, 5, |d| d.put(ROOT, "msg", "hello"))
+            .await
+            .expect("an applied edit is an accepted post, whatever the transport did next");
+        assert_eq!(
+            node.doc(DocType::Channel, 5).map(|d| d.op_count()),
+            Some(1),
+            "the operation is in the document either way; that is what made the error a lie"
+        );
+        assert!(
+            node.transport.published().is_empty(),
+            "and nothing went out, so the delivery is genuinely still owed"
+        );
+        assert_eq!(node.outbox.len(), 1, "owed, rather than dropped");
+
+        // The caller can now track what it was told had happened, and a later tick delivers it.
+        node.track_delivery_target(DocType::Channel, 5, change);
+        node.transport.refuse_publish(false);
+        node.drain_outbox().await;
+        assert_eq!(
+            node.transport.published().len(),
+            1,
+            "the queued operation goes out once the transport can take it"
+        );
+        assert!(node.outbox.is_empty(), "and is not sent again after that");
     }
 
     /// P6 on the **committer's own** removal path: `request_remove` must not only rotate the
@@ -14954,8 +16704,9 @@ mod tests {
         // 9h: the transfer plaintext bundles the routing state AND the group file-wrap key.
         let secrets = vec![(0u64, [3u8; 32])];
         let fwk = [7u8; 32];
-        let (label, got_secrets, got_fwk) =
-            decode_join_transfer(&encode_join_transfer(5, &secrets, &fwk)).unwrap();
+        let (label, got_secrets, got_fwk, policy) =
+            decode_join_transfer(&encode_join_transfer(5, &secrets, &fwk, None)).unwrap();
+        assert!(policy.is_none());
         assert_eq!(label, 5);
         assert_eq!(got_secrets, secrets);
         assert_eq!(got_fwk, fwk);
@@ -15007,6 +16758,7 @@ mod tests {
             label: 0,
             secrets: Vec::new(), // even with no routing secrets, the key is installed
             file_wrap_key: Some(founder_key),
+            policy: None,
             connection_handoff: PreOwnerConnectionHandoff::default(),
         });
         assert_eq!(
@@ -15323,6 +17075,247 @@ mod tests {
         );
     }
 
+    /// Ask Alice for commits from `from_epoch` and let her serve it from her real commit log.
+    ///
+    /// Serve only this explicit exchange: `run_once` also starts independent queued recovery
+    /// whose responses these fixtures do not serve. Her stream carries whatever else the fixture
+    /// left on it, so this drains to the commit request rather than assuming it is first.
+    async fn commit_catchup_between(
+        bob: &mut Member,
+        alice: &mut Member,
+        alice_peer: PeerId,
+        bob_peer: PeerId,
+        from_epoch: u64,
+    ) -> CommitCatchupOutcome {
+        let (outcome, ()) = tokio::join!(bob.do_commit_catchup(alice_peer, from_epoch), async {
+            for _ in 0..16 {
+                match alice.transport.next_event().await {
+                    Some(TransportEvent::Request {
+                        data, responder, ..
+                    }) if data.first() == Some(&KIND_COMMIT_CATCHUP) => {
+                        let served = alice
+                            .serve_commit_catchup(bob_peer, &data[1..])
+                            .expect("a member serves a member");
+                        responder.respond(Bytes::from(served));
+                        return;
+                    }
+                    Some(_) => continue,
+                    None => panic!("the transport closed before the request arrived"),
+                }
+            }
+            panic!("the commit catch-up request never arrived");
+        });
+        outcome.expect("the exchange completed")
+    }
+
+    /// One membership commit record, with opaque bytes: nothing below applies one.
+    fn stub_commit(group_id: Vec<u8>, commit_epoch: u64) -> CommitRecord {
+        CommitRecord {
+            group_id,
+            commit_epoch,
+            committer_device: [0u8; 32],
+            mls_commit: vec![7],
+            base_authenticator: [0u8; 32],
+            committer_sig: [0u8; 64],
+        }
+    }
+
+    /// A source whose retained log begins above us is reported, not read as "you are up to date".
+    ///
+    /// This is the P0 in `docs/MESSAGE-FLOW.md` section 8. A member that missed more removals than
+    /// its peers still retain is fully connected, still in the roster, and permanently unable to
+    /// advance its routing label. The exchange used to return `Verified { applied: 0 }`, which is
+    /// byte-for-byte what an honest up-to-date peer returns, so the recovery task retired itself
+    /// and nothing recorded why the node never converged.
+    ///
+    /// Both bands are covered here because only one of them left even a log line: within
+    /// `max_commit_gap` the records buffer and cannot drain, and past it they are dropped before
+    /// buffering, which produced no evidence at all.
+    #[tokio::test]
+    async fn a_source_that_cannot_chain_us_is_reported_rather_than_read_as_up_to_date() {
+        let (_hub, mut members, ids) = build_members(2).await;
+        converge_and_publish_test_routes(&mut members);
+        let mut bob = members.pop().unwrap();
+        let mut alice = members.pop().unwrap();
+        let (alice_peer, bob_peer) = (alice.local_peer(), bob.local_peer());
+        prove_live_member(&mut alice, bob_peer, ids[1]);
+        prove_live_member(&mut bob, alice_peer, ids[0]);
+        let gid = alice.group.group_id();
+        let here = bob.group.epoch();
+
+        // Beyond `max_commit_gap`, so the record is dropped before it is ever buffered. This is
+        // the band that used to produce no evidence whatsoever.
+        let far = here + bob.config.max_commit_gap + 5_000;
+        alice.commit_log.clear();
+        alice.commit_log.push_back(stub_commit(gid.clone(), far));
+        let outcome =
+            commit_catchup_between(&mut bob, &mut alice, alice_peer, bob_peer, here).await;
+        assert_eq!(
+            outcome,
+            CommitCatchupOutcome::Stranded {
+                lowest_available: far
+            },
+            "a bundle that begins above us is not an up-to-date answer"
+        );
+        assert!(
+            bob.pending_commits.is_empty(),
+            "and nothing was buffered, which is why this band was invisible"
+        );
+        let gap = bob
+            .membership_chain_gap()
+            .expect("the state is nameable now");
+        assert_eq!(gap.current_epoch, here);
+        assert_eq!(gap.lowest_available, far);
+        assert_eq!(gap.missing_commits(), far - here);
+        assert_eq!(bob.stats().commit_chain_gaps_observed, 1);
+
+        // Within the bound, where the records buffer and still cannot be chained. A nearer offer
+        // is a better chance of repair, so it replaces the further one.
+        let near = here + 40;
+        alice.commit_log.clear();
+        alice.commit_log.push_back(stub_commit(gid.clone(), near));
+        let outcome =
+            commit_catchup_between(&mut bob, &mut alice, alice_peer, bob_peer, here).await;
+        assert_eq!(
+            outcome,
+            CommitCatchupOutcome::Stranded {
+                lowest_available: near
+            }
+        );
+        assert!(
+            !bob.pending_commits.is_empty(),
+            "this band does buffer, and still cannot drain"
+        );
+        assert_eq!(
+            bob.membership_chain_gap().map(|gap| gap.lowest_available),
+            Some(near),
+            "the best offer any source could make is the one worth reporting"
+        );
+        assert_eq!(
+            bob.stats().commit_chain_gaps_observed,
+            1,
+            "counted once per epoch this node is stuck at, not once per exchange"
+        );
+
+        // Neither outcome may retire the recovery, and the source that proved it cannot help is
+        // set aside so the next drain asks somebody with a longer log.
+        assert_eq!(outcome.applied(), 0, "nothing was applied");
+        assert!(
+            outcome.answered(),
+            "the peer did answer; it just cannot help"
+        );
+
+        // Discarded on read once the epoch moves, so a repair through any route retires it
+        // without that route having to know this state exists.
+        bob.note_membership_chain_gap(here + 1, here + 9);
+        assert!(
+            bob.membership_chain_gap().is_none(),
+            "a gap recorded at another epoch says nothing about this one"
+        );
+    }
+
+    /// A stranded answer must not retire the recovery it failed to complete.
+    ///
+    /// This is the half of the P0 that costs something rather than merely failing to report it.
+    /// `Verified { applied: 0 }` with an empty buffer satisfied every term of the drain's
+    /// completion test, so the task was dropped, the source was left unmarked, and nothing tried
+    /// anybody else. A member with a longer log might have been one drain away.
+    #[tokio::test]
+    async fn a_stranded_source_is_set_aside_and_the_recovery_outlives_it() {
+        let (_hub, mut members, ids) = build_members(2).await;
+        converge_and_publish_test_routes(&mut members);
+        let mut bob = members.pop().unwrap();
+        let mut alice = members.pop().unwrap();
+        let (alice_peer, bob_peer) = (alice.local_peer(), bob.local_peer());
+        prove_live_member(&mut alice, bob_peer, ids[1]);
+        prove_live_member(&mut bob, alice_peer, ids[0]);
+        let here = bob.group.epoch();
+
+        // Deliberately the band past `max_commit_gap`, where the record is dropped before it is
+        // buffered. The nearer band leaves something in `pending_commits`, which already fails
+        // the drain's completion test on its own; only here does the outcome itself have to carry
+        // the fact, and only here did the recovery used to retire itself.
+        alice.commit_log.clear();
+        alice.commit_log.push_back(stub_commit(
+            alice.group.group_id(),
+            here + bob.config.max_commit_gap + 5_000,
+        ));
+        bob.enqueue_commit_catchup(here);
+        assert!(bob
+            .catchup_queue
+            .iter()
+            .any(|task| matches!(task, CatchupTask::Commits { .. })));
+
+        let (attempted, ()) = tokio::join!(bob.drain_catchup_queue(), async {
+            for _ in 0..16 {
+                match alice.transport.next_event().await {
+                    Some(TransportEvent::Request {
+                        data, responder, ..
+                    }) if data.first() == Some(&KIND_COMMIT_CATCHUP) => {
+                        let served = alice
+                            .serve_commit_catchup(bob_peer, &data[1..])
+                            .expect("a member serves a member");
+                        responder.respond(Bytes::from(served));
+                        return;
+                    }
+                    Some(_) => continue,
+                    None => panic!("the transport closed before the request arrived"),
+                }
+            }
+            panic!("the commit catch-up request never arrived");
+        });
+        assert!(attempted, "a source was reachable and was asked");
+        assert!(
+            bob.pending_commits.is_empty(),
+            "nothing buffered, so only the typed outcome can keep this task alive"
+        );
+
+        assert!(
+            bob.catchup_queue
+                .iter()
+                .any(|task| matches!(task, CatchupTask::Commits { .. })),
+            "the gap outlives an answer that could not fill it"
+        );
+        assert!(
+            bob.failed_catchup_peers.contains(&alice_peer),
+            "and the source that proved it cannot help is set aside for the next drain"
+        );
+        assert!(
+            bob.membership_chain_gap().is_some(),
+            "with the reason recorded rather than inferred from an absence"
+        );
+    }
+
+    /// The other half of the same claim: silence has to keep meaning silence.
+    ///
+    /// A member that is genuinely up to date answers a speculative probe with nothing, and that
+    /// must not be reported as a chain gap. A detectability signal that fires on the ordinary case
+    /// is worse than none, because the state it describes is the one nobody can act on.
+    #[tokio::test]
+    async fn an_up_to_date_source_reports_no_membership_gap() {
+        let (_hub, mut members, ids) = build_members(2).await;
+        converge_and_publish_test_routes(&mut members);
+        let mut bob = members.pop().unwrap();
+        let mut alice = members.pop().unwrap();
+        let (alice_peer, bob_peer) = (alice.local_peer(), bob.local_peer());
+        prove_live_member(&mut alice, bob_peer, ids[1]);
+        prove_live_member(&mut bob, alice_peer, ids[0]);
+        let here = bob.group.epoch();
+        assert_eq!(here, alice.group.epoch(), "they agree to begin with");
+
+        // Alice holds nothing at or above Bob's epoch, which is exactly what an up-to-date group
+        // looks like from a probe.
+        alice.commit_log.clear();
+        let outcome =
+            commit_catchup_between(&mut bob, &mut alice, alice_peer, bob_peer, here + 1).await;
+        assert_eq!(outcome, CommitCatchupOutcome::Empty);
+        assert!(
+            bob.membership_chain_gap().is_none(),
+            "an ordinary probe against an ordinary group reports nothing"
+        );
+        assert_eq!(bob.stats().commit_chain_gaps_observed, 0);
+    }
+
     #[test]
     fn known_peers_are_bounded_and_most_recent_wins() {
         let mut node = solo_node();
@@ -15541,6 +17534,8 @@ mod tests {
 
     #[tokio::test]
     async fn a_genuinely_missed_commit_heals_without_an_older_member_speaking() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+
         // The property the defect actually broke, and the test that would have caught it.
         // Alice never posts, never gossips and never subscribes to the channel; she only
         // answers the one request Bob directs at her. Before the fix Bob asked Carol on this
@@ -15561,13 +17556,42 @@ mod tests {
         assert!(bob.run_once().await.unwrap()); // sees the future-epoch op, queues the chase
         assert_eq!(bob.epoch(), 1);
 
-        // One drain. The commit chase goes to Alice, and the doc chase that follows it goes
-        // to Alice too, because serving a verified bundle is what promoted her into the
-        // proven-member pool; so she answers two requests and Carol is never asked again.
-        let (_, _) = tokio::join!(bob.run_once(), async {
-            alice.run_once().await.unwrap();
-            alice.run_once().await.unwrap();
-        });
+        // Drive both production owners until the authenticated commit has actually applied.
+        // A turn can now serve inbound work or finish a held response; no single-turn drain
+        // or fixed number of provider requests is part of that contract.
+        let healed = AtomicBool::new(false);
+        {
+            let drive = futures::future::join(
+                async {
+                    loop {
+                        assert!(bob.run_once().await.unwrap());
+                        healed.store(
+                            bob.epoch() == 2 && bob.contains_member(&ids[2]),
+                            Ordering::SeqCst,
+                        );
+                        tokio::task::yield_now().await;
+                    }
+                },
+                async {
+                    loop {
+                        assert!(alice.run_once().await.unwrap());
+                        tokio::task::yield_now().await;
+                    }
+                },
+            );
+            futures::pin_mut!(drive);
+            for _ in 0..32 {
+                assert!(futures::poll!(&mut drive).is_pending());
+                if healed.load(Ordering::SeqCst) {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+            assert!(
+                healed.load(Ordering::SeqCst),
+                "the bounded owner turns heal the gap"
+            );
+        }
 
         assert_eq!(bob.epoch(), 2, "the missed commit healed");
         assert!(
@@ -15857,7 +17881,92 @@ mod tests {
         );
     }
 
-    async fn build_members(n: u64) -> (std::sync::Arc<Hub>, Vec<Member>, Vec<DeviceId>) {
+    /// The other half of that gate: a first proof must run the sweep its connection declined.
+    ///
+    /// `member_peers` holds this session's proofs and nothing else, so a process that has just
+    /// restored reaches its first connection with an empty pool and correctly declines to aim
+    /// member-only recovery at a peer that has proved nothing. Recovery then depended on a
+    /// *second* connection edge that a stable link never produces, and every channel written to
+    /// while this node was away stayed short until something unrelated happened to notice: the
+    /// user-visible shape was "restart, and the chat stops filling in".
+    ///
+    /// Both documents, from the proof alone, with no further transport event.
+    #[tokio::test]
+    async fn a_first_member_proof_sweeps_the_docs_a_restore_left_short() {
+        let (_hub, mut members, ids) = build_members(2).await;
+        let alice = &mut members[0];
+        alice.open_channel(DocType::Channel, 1).await.unwrap();
+        alice.open_channel(DocType::Channel, 2).await.unwrap();
+        let snap = alice.snapshot().unwrap();
+
+        // The process comes back holding two channels and this session's empty proof pool.
+        let hub2 = Hub::new();
+        let mut alice = Member::restore(
+            &snap,
+            hub2.join(PeerId::from_u64(99)),
+            ChaCha20Rng::seed_from_u64(7),
+            Box::new(ManualClock::new(1_000)),
+        )
+        .unwrap();
+        assert!(
+            alice.first_proof_sweep_owed,
+            "a snapshot's documents are as old as the process that wrote them"
+        );
+        assert!(alice.member_peers.is_empty());
+        alice.catchup_queue.clear();
+
+        let queued_docs = |sync: &Member| -> BTreeSet<u128> {
+            sync.catchup_queue
+                .iter()
+                .filter_map(|task| match task {
+                    CatchupTask::Doc { doc_type, doc_id } if *doc_type == DocType::Channel => {
+                        Some(*doc_id)
+                    }
+                    _ => None,
+                })
+                .collect()
+        };
+
+        let peer = PeerId::from_u64(9_998);
+        alice.note_peer_connected(peer);
+        assert!(
+            queued_docs(&alice).is_empty(),
+            "the connection itself proves nothing, so it must not aim recovery anywhere"
+        );
+
+        // An unbound proof is PEX or commit catch-up, and a peer still mid-join answers both
+        // while being unable to serve a members-only document request. Sweeping here aims
+        // recovery at the joiner and blocks this loop on a reply it cannot give, which is the
+        // deadlock the connection-time gate exists to prevent.
+        let joiner = PeerId::from_u64(9_997);
+        alice.note_peer_connected(joiner);
+        alice.promote_member_peer(joiner, ids[1]);
+        assert!(
+            queued_docs(&alice).is_empty(),
+            "an unbound proof says a member signed something, not that it can serve a catch-up"
+        );
+
+        // A bound proof is a peer that has served this node a document catch-up, so its
+        // membership check has run and passed. No second connection edge.
+        alice.promote_member_peer_bound(peer, ids[1], true);
+        assert_eq!(
+            queued_docs(&alice),
+            BTreeSet::from([1, 2]),
+            "a first bound proof must queue every open document, not just the one being read"
+        );
+
+        // And it is owed once. A later binding is ordinary session traffic, and putting a whole
+        // node's documents in front of it costs the tick that discovery and presence need.
+        assert!(!alice.first_proof_sweep_owed);
+        alice.catchup_queue.clear();
+        alice.promote_member_peer_bound(PeerId::from_u64(9_996), ids[1], true);
+        assert!(
+            queued_docs(&alice).is_empty(),
+            "the restore's sweep is discharged, not repeated for every new source"
+        );
+    }
+
+    pub(super) async fn build_members(n: u64) -> (std::sync::Arc<Hub>, Vec<Member>, Vec<DeviceId>) {
         assert!(n >= 1);
         let hub = Hub::new();
         let founder = MlsDevice::generate().unwrap();
@@ -15902,7 +18011,7 @@ mod tests {
     /// exact signed descriptor per member. `build_members` intentionally leaves intermediate
     /// joiners behind to exercise catch-up elsewhere; repair tests need a genuinely converged
     /// roster so every helper can authenticate both ends of an A -> C -> B request.
-    fn converge_and_publish_test_routes(members: &mut [Member]) {
+    pub(super) fn converge_and_publish_test_routes(members: &mut [Member]) {
         let founder_peer = members[0].local_peer();
         let commits: Vec<_> = members[0].commit_log.iter().cloned().collect();
         let final_epoch = members[0].epoch();
@@ -16254,6 +18363,260 @@ mod tests {
                 "every post arrived"
             );
         }
+    }
+
+    /// The continuation field is additive in both directions.
+    ///
+    /// A build that predates paging sends no field at all, and that frame has to keep decoding or
+    /// a mixed group stops synchronizing entirely. A paging requester with no walk in progress
+    /// sends an empty one, which is what tells the serving peer it may answer with a cursor.
+    #[test]
+    fn a_catch_up_continuation_is_optional_and_round_trips() {
+        let heads = [[7u8; 32]];
+
+        let mut legacy = Encoder::new();
+        legacy.put_u16(DocType::Channel.tag());
+        legacy.put_u128(9);
+        legacy.put_u32(1);
+        legacy.put_bytes(&heads[0]).unwrap();
+        let (doc_type, doc_id, decoded, cursor) =
+            decode_catchup_since_req(&legacy.finish()).unwrap();
+        assert_eq!((doc_type, doc_id), (DocType::Channel, 9));
+        assert_eq!(decoded, heads);
+        assert_eq!(cursor, None, "no field at all is a peer that cannot page");
+
+        let fresh = encode_catchup_since_req(DocType::Channel, 9, &heads, None);
+        assert_eq!(
+            decode_catchup_since_req(&fresh).unwrap().3,
+            Some(None),
+            "a paging requester starting a walk says so"
+        );
+
+        let cursor = CatchupCursor {
+            provider: [3; 16],
+            position: 41,
+        };
+        let resumed = encode_catchup_since_req(DocType::Channel, 9, &heads, Some(&cursor));
+        assert_eq!(
+            decode_catchup_since_req(&resumed).unwrap().3,
+            Some(Some(cursor)),
+            "and one continuing a walk replays it exactly"
+        );
+
+        // A short continuation is refused rather than read as a smaller position, which would
+        // silently resume somewhere nobody chose.
+        let mut truncated = Encoder::new();
+        truncated.put_u16(DocType::Channel.tag());
+        truncated.put_u128(9);
+        truncated.put_u32(0);
+        truncated.put_u8(1);
+        truncated
+            .put_bytes(&[0u8; CATCHUP_CURSOR_BYTES - 1])
+            .unwrap();
+        assert!(matches!(
+            decode_catchup_since_req(&truncated.finish()),
+            Err(SyncError::Malformed)
+        ));
+    }
+
+    /// A resume position is only meaningful against the log that issued it.
+    ///
+    /// The same operation sits at a different index on every member, so honouring a cursor minted
+    /// elsewhere would skip history the requester would then never be offered again. The serving
+    /// side recognises a foreign provider stamp and starts the walk over.
+    #[tokio::test]
+    async fn a_continuation_minted_elsewhere_restarts_the_walk() {
+        use automerge::transaction::Transactable;
+        use automerge::ROOT;
+
+        let (_hub, mut members, ids) = build_members(2).await;
+        converge_and_publish_test_routes(&mut members);
+        let mut bob = members.pop().unwrap();
+        let mut alice = members.pop().unwrap();
+        let (alice_peer, bob_peer) = (alice.local_peer(), bob.local_peer());
+        prove_live_member(&mut alice, bob_peer, ids[1]);
+        prove_live_member(&mut bob, alice_peer, ids[0]);
+        alice.open_channel(DocType::Channel, 86).await.unwrap();
+
+        // More than one chunk, so every answer below is a page with a continuation rather than a
+        // completed exchange.
+        let body = "y".repeat(16_384);
+        for i in 0..40 {
+            alice
+                .post(DocType::Channel, 86, |doc| {
+                    doc.put(ROOT, format!("m{i}"), body.as_str())
+                })
+                .await
+                .unwrap();
+        }
+
+        // What the serving side answers a requester that names no continuation.
+        let position_for =
+            |alice: &mut Member, bob: &mut Member, cursor: Option<&CatchupCursor>| {
+                let (req, _) = bob
+                    .build_authed_request(
+                        KIND_CATCHUP_SINCE,
+                        &encode_catchup_since_req(DocType::Channel, 86, &[], cursor),
+                    )
+                    .unwrap();
+                let resp = alice
+                    .serve_catchup_since(bob_peer, &req[1..])
+                    .expect("a member serves a member");
+                let (_, _, answer) = decode_signed_commit_resp(&resp).unwrap();
+                assert_eq!(answer[0], CATCHUP_SINCE_PAGE, "there is more to come");
+                CatchupCursor::decode(&answer[1..1 + CATCHUP_CURSOR_BYTES]).expect("a continuation")
+            };
+
+        let first = position_for(&mut alice, &mut bob, None);
+        assert_eq!(
+            first.provider, alice.catchup_provider,
+            "the continuation is stamped with the log that produced it"
+        );
+        assert!(first.position > 0, "the first page consumed some log");
+
+        // Alice's own continuation moves the walk on, which is what makes the next assertion mean
+        // something: positions are honoured when they are hers.
+        let second = position_for(&mut alice, &mut bob, Some(&first));
+        assert!(
+            second.position > first.position,
+            "her own continuation resumes rather than restarting"
+        );
+
+        // The same position under somebody else's provider stamp is refused, and the walk begins
+        // again from the top rather than skipping to that index.
+        let foreign = CatchupCursor {
+            provider: [0xAB; 16],
+            position: second.position,
+        };
+        let restarted = position_for(&mut alice, &mut bob, Some(&foreign));
+        assert_eq!(
+            restarted.position, first.position,
+            "a continuation from another log is ignored, not obeyed"
+        );
+    }
+
+    /// The regression guard for the composition in `docs/MESSAGE-FLOW.md` section 8.
+    ///
+    /// A page of operations the requester already holds applies nothing, and before the cursor
+    /// existed that was indistinguishable from a peer answering uselessly on a timer: it counted
+    /// against the source, and eight of them deprioritised an honest member. With a continuation
+    /// the same round is real progress, because the walk consumed log and cannot repeat itself.
+    /// The old shape, which recomputes the difference every time and genuinely can repeat, must
+    /// still be counted.
+    #[tokio::test]
+    async fn a_page_of_pure_duplicates_is_progress_but_an_unpaged_repeat_is_not() {
+        use automerge::transaction::Transactable;
+        use automerge::ROOT;
+
+        let (_hub, mut members, ids) = build_members(2).await;
+        converge_and_publish_test_routes(&mut members);
+        let mut bob = members.pop().unwrap();
+        let mut alice = members.pop().unwrap();
+        let (alice_peer, bob_peer) = (alice.local_peer(), bob.local_peer());
+        prove_live_member(&mut alice, bob_peer, ids[1]);
+        prove_live_member(&mut bob, alice_peer, ids[0]);
+        alice.open_channel(DocType::Channel, 87).await.unwrap();
+        bob.open_channel(DocType::Channel, 87).await.unwrap();
+        // Bob authors it, so he holds it without a delivery step. Handing it to him with
+        // `run_once` would also drain his catch-up queue, which is a request nobody in this
+        // fixture answers and an injected clock never times out.
+        bob.post(DocType::Channel, 87, |doc| doc.put(ROOT, "only", "op"))
+            .await
+            .unwrap();
+        assert_eq!(bob.doc(DocType::Channel, 87).unwrap().op_count(), 1);
+
+        // That same operation, offered back to him: a page that applies nothing, which is exactly
+        // what a frontier too narrow to name everything produces. The channel key is derived from
+        // the group rather than the author, so a bundle sealed on either side opens on the other.
+        let duplicate = {
+            let bundle = bob
+                .docs
+                .get_mut(&(DocType::Channel, 87))
+                .unwrap()
+                .export_catchup_since(&[], &bob.group, &bob.device, &mut bob.rng)
+                .unwrap();
+            assert_eq!(bundle.len(), 1);
+            size_capped_ops(&bundle, MAX_CATCHUP_CHUNK, MAX_CONTROL_RESPONSE)
+                .unwrap()
+                .0
+        };
+
+        /// Drive one exchange in which Alice answers with exactly `body`.
+        ///
+        /// Alice's stream carries whatever else the fixture left on it, so this drains to the
+        /// catch-up request rather than assuming it is first, which is what a serve loop does
+        /// anyway.
+        async fn answer(
+            alice: &mut Member,
+            bob: &mut Member,
+            alice_peer: PeerId,
+            bob_peer: PeerId,
+            body: Vec<u8>,
+        ) {
+            let (_, ()) = tokio::join!(
+                bob.request_catchup(alice_peer, DocType::Channel, 87),
+                async {
+                    let mut body = Some(body);
+                    for _ in 0..16 {
+                        match alice.transport.next_event().await {
+                            Some(TransportEvent::Request {
+                                data, responder, ..
+                            }) if data.first() == Some(&KIND_CATCHUP_SINCE) => {
+                                let body = body.take().expect("answered once");
+                                responder.respond(Bytes::from(signed_catchup_answer(
+                                    alice, bob_peer, &data, body,
+                                )));
+                                return;
+                            }
+                            Some(_) => continue,
+                            None => panic!("the transport closed before the request arrived"),
+                        }
+                    }
+                    panic!("the catch-up request never arrived");
+                }
+            );
+        }
+
+        // Three paged rounds, each carrying only what Bob has and each naming a further position.
+        for round in 1..=3u32 {
+            let mut page = vec![CATCHUP_SINCE_PAGE];
+            page.extend_from_slice(
+                &CatchupCursor {
+                    provider: [9; 16],
+                    position: round,
+                }
+                .encode(),
+            );
+            page.extend_from_slice(&duplicate);
+            answer(&mut alice, &mut bob, alice_peer, bob_peer, page).await;
+            assert_eq!(
+                bob.catchup_stalls
+                    .get(&(DocType::Channel, 87, alice_peer))
+                    .copied(),
+                None,
+                "a page that advances the walk is progress, not a strike against the source"
+            );
+        }
+        assert_eq!(
+            bob.catchup_cursors
+                .get(&(DocType::Channel, 87, alice_peer))
+                .map(|c| c.position),
+            Some(3),
+            "and the requester replays the newest position it was given"
+        );
+
+        // The same bundle without a continuation is the old shape, which can be repeated forever,
+        // so it is still counted.
+        let mut unpaged = vec![CATCHUP_SINCE_MORE];
+        unpaged.extend_from_slice(&duplicate);
+        answer(&mut alice, &mut bob, alice_peer, bob_peer, unpaged).await;
+        assert_eq!(
+            bob.catchup_stalls
+                .get(&(DocType::Channel, 87, alice_peer))
+                .copied(),
+            Some(1),
+            "a repeat with no way to advance is exactly what the bound is for"
+        );
     }
 
     /// One operation can be larger than a whole catch-up chunk, and it must still be delivered.
@@ -16908,6 +19271,176 @@ mod tests {
         assert!(doc_queued(&bob), "and the gap is still owned");
     }
 
+    /// A stall that cannot move is reported once, not once per drain.
+    ///
+    /// The drain retries a kept task on every tick, and a document whose only source is not worth
+    /// asking stays stalled until that changes. Reporting the condition per tick rather than per
+    /// transition is what buried a real log: one document with one excluded source wrote a line a
+    /// second for half an hour, into the record a "my message never arrived" report has to be read
+    /// out of. The transition is the event; the condition is not.
+    /// A `tracing` writer that keeps what was written, so a test can count emitted lines.
+    #[derive(Clone, Default)]
+    struct CapturedLog(std::sync::Arc<std::sync::Mutex<Vec<u8>>>);
+
+    impl CapturedLog {
+        fn count(&self, needle: &str) -> usize {
+            String::from_utf8_lossy(&self.0.lock().unwrap())
+                .matches(needle)
+                .count()
+        }
+    }
+
+    impl std::io::Write for CapturedLog {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for CapturedLog {
+        type Writer = CapturedLog;
+        fn make_writer(&'a self) -> Self::Writer {
+            self.clone()
+        }
+    }
+
+    #[tokio::test]
+    async fn a_catch_up_stall_is_reported_once_until_eligibility_changes() {
+        let logs = CapturedLog::default();
+        let _log_guard = tracing::subscriber::set_default(
+            tracing_subscriber::fmt()
+                .with_writer(logs.clone())
+                .with_max_level(tracing::Level::DEBUG)
+                .finish(),
+        );
+        const STALL: &str = "no eligible source for a catch-up task";
+
+        let (_hub, mut members, ids) = build_members(2).await;
+        converge_and_publish_test_routes(&mut members);
+        let mut it = members.into_iter();
+        let alice = it.next().unwrap();
+        let mut bob = it.next().unwrap();
+        let alice_peer = alice.local_peer();
+        prove_live_member(&mut bob, alice_peer, ids[0]);
+        bob.open_channel(DocType::Channel, 92).await.unwrap();
+
+        let task = CatchupTask::Doc {
+            doc_type: DocType::Channel,
+            doc_id: 92,
+        };
+        // Opening the channel queues catch-up work of its own, and this test is about one task
+        // that cannot move rather than about that sweep.
+        bob.catchup_queue.clear();
+        // The only source is left alone about this document, so the drain can find nobody.
+        bob.cool_off_catchup_peer(alice_peer, DocType::Channel, 92);
+        bob.enqueue_doc_catchup(DocType::Channel, 92);
+
+        bob.drain_catchup_queue().await;
+        assert_eq!(
+            logs.count(STALL),
+            1,
+            "the first drain that finds nobody says so"
+        );
+
+        // Every later drain finds the same nothing, and says nothing further about it.
+        for _ in 0..5 {
+            bob.drain_catchup_queue().await;
+        }
+        assert_eq!(
+            logs.count(STALL),
+            1,
+            "a stall that has not changed is not restated on every tick"
+        );
+        assert!(
+            bob.catchup_queue.contains(&task),
+            "and staying quiet is not the same as dropping the work"
+        );
+
+        // The sweep starting again is a real change in eligibility, so the next stall is reported
+        // afresh rather than being suppressed by the record of the last one.
+        bob.clear_sources_checked(DocType::Channel, 92);
+        bob.drain_catchup_queue().await;
+        assert_eq!(
+            logs.count(STALL),
+            2,
+            "a sweep that starts again re-arms the report"
+        );
+    }
+
+    /// A commit probe nobody answered is not a probe that found nothing.
+    ///
+    /// The proactive probe a non-committer sends on every connection carries no proven gap, and a
+    /// node that has just restarted has nothing buffered either, so every term of "this search is
+    /// finished" except the answer itself was already true. A timeout therefore retired the task
+    /// exactly as an up-to-date member's reply would, and nothing re-queued it or tried another
+    /// source: a member that missed an epoch while offline could come back, fail its one probe,
+    /// and stay unable to decrypt current traffic.
+    #[tokio::test]
+    async fn an_unanswered_commit_probe_is_not_a_finished_one() {
+        let (_hub, mut members, ids) = build_members(2).await;
+        converge_and_publish_test_routes(&mut members);
+        let mut it = members.into_iter();
+        let mut alice = it.next().unwrap();
+        let mut bob = it.next().unwrap();
+        let alice_peer = alice.local_peer();
+        assert!(
+            !bob.is_designated_committer(),
+            "the proactive probe is the non-committer's recovery path"
+        );
+        prove_live_member(&mut bob, alice_peer, ids[0]);
+
+        let probing = |sync: &Member| {
+            sync.catchup_queue
+                .iter()
+                .any(|task| matches!(task, CatchupTask::Commits { gap_at: None, .. }))
+        };
+
+        bob.catchup_queue.clear();
+        bob.maybe_probe_for_missed_commits();
+        assert!(probing(&bob), "a reconnecting non-committer probes");
+
+        // Silence: a peer that accepted the request and never came back, which is what a timeout
+        // resolves to.
+        let (_, ()) = tokio::join!(bob.drain_catchup_queue(), async {
+            let Some(TransportEvent::Request { responder, .. }) =
+                alice.transport.next_event().await
+            else {
+                panic!("the drain's probe is the next event");
+            };
+            drop(responder);
+        });
+        assert!(
+            probing(&bob),
+            "nobody said this node is up to date, so the probe is still owed an answer"
+        );
+
+        // An answer does retire it, including the empty one an up-to-date member sends: without
+        // that, an ordinary connect would chase a gap that does not exist and mark every honest
+        // peer failed on the way. (The mark from the silent attempt clears the moment the peer is
+        // seen again; cleared here because this test never routes that traffic.)
+        bob.failed_catchup_peers.clear();
+        let (_, ()) = tokio::join!(bob.drain_catchup_queue(), async {
+            let Some(TransportEvent::Request {
+                from,
+                data,
+                responder,
+                ..
+            }) = alice.transport.next_event().await
+            else {
+                panic!("the drain's probe is the next event");
+            };
+            let response = alice.handle_request(from, &data);
+            responder.respond(Bytes::from(response));
+        });
+        assert!(
+            !probing(&bob),
+            "an answered probe must not be chased on every later tick"
+        );
+    }
+
     /// A successful answer that carries nothing is not the same claim as a completed document,
     /// and the difference decides whether a gap survives.
     ///
@@ -17474,7 +20007,7 @@ mod tests {
         let (req, _auth) = bob
             .build_authed_request(
                 KIND_CATCHUP_SINCE,
-                &encode_catchup_since_req(DocType::Channel, 103, &[]),
+                &encode_catchup_since_req(DocType::Channel, 103, &[], None),
             )
             .unwrap();
 
@@ -17944,9 +20477,8 @@ mod tests {
             "and the rest of the queue was never moved off it"
         );
 
-        // The next tick takes the held one back before anything else, so both gaps are owned
-        // again by the queue itself. Driven under the same bound, because with nobody answering
-        // it will go straight back to waiting on the peer it picks.
+        // The next tick resumes the same held request. Both gaps remain owned without another
+        // request or a fresh nonce, even though commands repeatedly cancel their polling turn.
         let _ = tokio::time::timeout(
             std::time::Duration::from_millis(200),
             futures::future::join(bob.drain_catchup_queue(), async {
@@ -18713,12 +21245,14 @@ mod tests {
         let request_epoch = bob.group.epoch();
         let request_ts = 1_000;
 
-        // `ChannelSync::new` draws the first 32 bytes for the file-wrap key. Reproduce that draw
-        // through the injected deterministic RNG, then bind Alice's reply to the exact nonce the
-        // following catch-up request will use.
+        // `ChannelSync::new` draws 32 bytes for the file-wrap key and then 16 for its catch-up
+        // provider id. Reproduce both draws through the injected deterministic RNG, then bind
+        // Alice's reply to the exact nonce the following catch-up request will use.
         let mut expected_rng = ChaCha20Rng::seed_from_u64(0x0BAD_51A6);
         let mut discarded_file_key = [0u8; 32];
         expected_rng.fill_bytes(&mut discarded_file_key);
+        let mut discarded_provider = [0u8; 16];
+        expected_rng.fill_bytes(&mut discarded_provider);
         let mut request_nonce = [0u8; 16];
         expected_rng.fill_bytes(&mut request_nonce);
 
@@ -19589,6 +22123,144 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn removing_admin_revokes_the_exact_grant_durably() {
+        let (_hub, mut members, ids) = build_members(2).await;
+        grant_admin(&mut members[0], &ids[1]).await;
+        let invite = members[0].mint_invite([74; 16], u64::MAX, vec![]).unwrap();
+        let kp = members[1]
+            .device
+            .key_package_for_invite(&invite.group_id, invite.invite_nonce)
+            .unwrap();
+        let kp = serialize_key_package(&kp).unwrap();
+        let owner = &mut members[0];
+        owner.request_remove(&ids[1]).await.unwrap();
+        assert!(!owner.admin_roster().contains(&ids[1]));
+        assert!(!owner.inviter_is_authorized(&ids[1]));
+        let snap = owner.snapshot().unwrap();
+        let restored = Member::restore(
+            &snap,
+            Hub::new().join(PeerId::from_u64(99)),
+            ChaCha20Rng::seed_from_u64(7),
+            Box::new(ManualClock::new(1000)),
+        )
+        .unwrap();
+        assert!(!restored.admin_roster().contains(&ids[1]));
+        owner.admit_now(&invite, &kp, 1000).unwrap();
+        assert!(owner.contains_member(&ids[1]));
+        assert!(
+            !owner.inviter_is_authorized(&ids[1]),
+            "rejoining does not restore a grant"
+        );
+    }
+
+    #[tokio::test]
+    async fn queued_admission_rechecks_demotion_and_preserves_nonce() {
+        let (_hub, mut members, ids) = build_members(2).await;
+        grant_admin(&mut members[0], &ids[1]).await;
+        let invite = members[1].mint_invite([72; 16], u64::MAX, vec![]).unwrap();
+        let joiner = MlsDevice::generate().unwrap();
+        let kp = joiner
+            .key_package_for_invite(&invite.group_id, invite.invite_nonce)
+            .unwrap();
+        let kp = serialize_key_package(&kp).unwrap();
+        let body = admin_add_request_body(&members[1], &invite, &kp);
+        let owner = &mut members[0];
+        owner.on_add_request(PeerId::from_u64(2), &body);
+        assert_eq!(owner.add_request_queue.len(), 1);
+        owner.set_admin(&ids[1], false).await.unwrap();
+        let epoch = owner.epoch();
+        owner.drain_add_request_queue();
+        assert_eq!(owner.epoch(), epoch);
+        assert!(!owner.contains_member(&joiner.device_id()));
+        assert!(owner.ledger.check(&invite, owner.clock.now_ms()).is_ok());
+        assert!(!owner.admit_results.contains_key(&invite.invite_nonce));
+        // Re-grant permits the fresh request. Later demotion cannot strand its
+        // already-committed, KeyPackage-bound Welcome recovery or trigger another Add.
+        owner.set_admin(&ids[1], true).await.unwrap();
+        owner.on_add_request(PeerId::from_u64(2), &body);
+        owner.drain_add_request_queue();
+        assert!(owner.contains_member(&joiner.device_id()));
+        owner.set_admin(&ids[1], false).await.unwrap();
+        let epoch = owner.epoch();
+        let results = owner.admit_result_outbox.len();
+        owner.on_add_request(PeerId::from_u64(2), &body);
+        assert_eq!(owner.epoch(), epoch);
+        assert_eq!(owner.admit_result_outbox.len(), results + 1);
+    }
+
+    #[tokio::test]
+    async fn authority_save_barrier_rejects_stale_completion() {
+        let (_hub, mut members, ids) = build_members(2).await;
+        grant_admin(&mut members[0], &ids[1]).await;
+        let owner = &mut members[0];
+        let old = owner.admin_generation();
+        owner.require_admin_persistence();
+        assert!(!owner.inviter_is_authorized(&ids[1]));
+        assert!(owner.inviter_is_authorized(&ids[0]));
+        owner.set_admin(&ids[1], true).await.unwrap();
+        owner.confirm_admin_persistence(old);
+        assert!(!owner.inviter_is_authorized(&ids[1]));
+        owner.confirm_admin_persistence(owner.admin_generation());
+        assert!(owner.inviter_is_authorized(&ids[1]));
+    }
+
+    #[tokio::test]
+    async fn legacy_authority_is_discarded_and_v2_tail_is_strict() {
+        let (_hub, mut members, ids) = build_members(2).await;
+        grant_admin(&mut members[0], &ids[1]).await;
+        let snap = members[0].snapshot().unwrap();
+        let marker = b"catcoms/admin-authority/v2";
+        let offset = snap
+            .windows(marker.len())
+            .rposition(|w| w == marker)
+            .unwrap()
+            - 4;
+        let legacy = &snap[..offset];
+        let restore = |bytes: &[u8]| {
+            Member::restore(
+                bytes,
+                Hub::new().join(PeerId::from_u64(99)),
+                ChaCha20Rng::seed_from_u64(7),
+                Box::new(ManualClock::new(1000)),
+            )
+        };
+        // Construct the genuine old count/string region, including a grant that matches
+        // exactly one current member. Uniqueness is not evidence of original ownership.
+        let mut d = Decoder::new(legacy);
+        for _ in 0..3 {
+            d.get_bytes().unwrap();
+        }
+        for _ in 0..3 {
+            let n = d.get_u32().unwrap();
+            for _ in 0..n {
+                d.get_bytes().unwrap();
+            }
+        }
+        d.get_bytes().unwrap(); // file key
+        d.get_u64().unwrap(); // generation
+        let count_offset = legacy.len() - d.remaining();
+        assert_eq!(d.get_u32().unwrap(), 0);
+        for label in [fingerprint(&ids[1]), "deadbeef".to_string()] {
+            let mut grant = Encoder::new();
+            grant.put_u32(1);
+            grant.put_str(&label).unwrap();
+            let mut old = legacy[..count_offset].to_vec();
+            old.extend_from_slice(&grant.finish());
+            old.extend_from_slice(&legacy[count_offset + 4..]);
+            let restored = restore(&old).unwrap();
+            assert!(restored.admin_roster().is_empty());
+            assert!(!restored.inviter_is_authorized(&ids[1]));
+        }
+        let restored = restore(legacy).unwrap();
+        assert!(!restored.inviter_is_authorized(&ids[1]));
+        assert!(restored.inviter_is_authorized(&ids[0]));
+        assert!(restore(&snap[..snap.len() - 1]).is_err());
+        let mut unsupported = snap.to_vec();
+        unsupported[offset + 4 + marker.len() - 1] = b'3';
+        assert!(restore(&unsupported).is_err());
+    }
+
+    #[tokio::test]
     async fn inviter_is_authorized_tracks_the_owners_local_roster() {
         let (_hub, mut members, ids) = build_members(3).await;
         let owner = ids[0];
@@ -19617,10 +22289,7 @@ mod tests {
         );
 
         // Revoking the admin removes it from the owner's gate.
-        members[0]
-            .set_admin(&fingerprint(&admin), false)
-            .await
-            .unwrap();
+        members[0].set_admin(&admin, false).await.unwrap();
         assert!(
             !members[0].inviter_is_authorized(&admin),
             "a revoked admin is no longer authorized"
@@ -19635,7 +22304,6 @@ mod tests {
         // re-authorize the demoted admin, and a CTRL_ADD_REQUEST from it is rejected.
         let (_hub, mut members, ids) = build_members(2).await;
         let mallory = ids[1];
-        let mallory_fp = fingerprint(&mallory);
 
         // Owner grants Mallory (gen 1); capture the gen-1 published roster value.
         grant_admin(&mut members[0], &mallory).await;
@@ -19644,7 +22312,7 @@ mod tests {
         assert!(!stale_roster.is_empty(), "a roster was published");
 
         // Owner demotes Mallory (gen 2).
-        members[0].set_admin(&mallory_fp, false).await.unwrap();
+        members[0].set_admin(&mallory, false).await.unwrap();
         assert!(!members[0].inviter_is_authorized(&mallory), "revoked");
 
         // Mallory replays the gen-1 roster value back into the CRDT (the owner's doc here, to
@@ -19667,7 +22335,7 @@ mod tests {
             .and_then(|d| read_published_roster(d.doc(), &members[0].group_id(), &ids[0]))
             .unwrap_or_default();
         assert!(
-            published.contains(&mallory_fp),
+            published.contains(&mallory),
             "the replayed CRDT copy does name Mallory (so the replay is real)"
         );
         assert!(
@@ -19738,7 +22406,7 @@ mod tests {
             .open_channel(DocType::MemberRoles, ROLES_DOC)
             .await
             .unwrap();
-        owner.set_admin(&fingerprint(target), true).await.unwrap();
+        owner.set_admin(target, true).await.unwrap();
     }
 
     /// Read the raw `roster` value bytes from a member's roles doc (for replay tests).
@@ -20165,6 +22833,44 @@ mod tests {
         // Addressing a member we hold no record for is a no-op (not delivered).
         let stranger = roles::fingerprint(&DeviceId::from_public_key_bytes(&[9u8; 32]));
         assert!(!alice.send_dm_invite(&stranger, &invite).await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn connected_admission_pex_cannot_fall_back_to_an_ordinary_request() {
+        let hub = Hub::new();
+        let local = PeerId::from_u64(71);
+        let remote = PeerId::from_u64(72);
+        let remote_transport = hub.join(remote);
+        let device = MlsDevice::generate().unwrap();
+        let group = ServerGroup::create(&device).unwrap();
+        // This transport supports ordinary requests through its inner hub, but does not claim
+        // a currently connected route. Its connected-only default must fail closed, even when
+        // an ordinary request could reach the target (as a recent-address redial could).
+        let mut node = ChannelSync::new(
+            RecordingNet::new(hub.join(local)),
+            group,
+            device,
+            ChaCha20Rng::seed_from_u64(71),
+            Box::new(ManualClock::new(1_000)),
+        );
+        tokio::select! {
+            result = node.request_pex_connected(remote) => {
+                assert!(matches!(result, Err(SyncError::Transport(TransportError::Unreachable(peer))) if peer == remote));
+            }
+            _ = remote_transport.next_event() => panic!("connected-only PEX submitted an ordinary request"),
+        }
+        assert!(node.transport.dialed.lock().unwrap().is_empty());
+        let (ordinary, ()) = tokio::join!(node.request_pex(remote), async {
+            match remote_transport.next_event().await {
+                Some(TransportEvent::Request { responder, .. }) => responder.respond(Bytes::new()),
+                event => panic!("expected the ordinary request, got {event:?}"),
+            }
+        });
+        assert_eq!(
+            ordinary.unwrap(),
+            0,
+            "the ordinary request path really is usable"
+        );
     }
 
     #[tokio::test]
@@ -21716,21 +24422,118 @@ mod tests {
             .unwrap();
         assert!(bob.ingest_peer_record(alice.self_record().unwrap().clone()));
 
-        let alice_fp = roles::fingerprint(&ids[0]);
-        let bob_fp = roles::fingerprint(&ids[1]);
         let payload = br#"{"type":"offer","sdp":"opaque-to-sync"}"#;
-        let (sent, _) = tokio::join!(bob.send_call_signal(&alice_fp, payload), alice.run_once());
+        let (sent, _) = tokio::join!(bob.send_call_signal(&ids[0], payload), alice.run_once());
 
         assert!(sent.unwrap(), "the sender had a verified route to Alice");
         assert_eq!(
             alice.take_call_signals(),
-            vec![(bob_fp, payload.to_vec())],
-            "the recipient keeps the authenticated sender and opaque payload intact"
+            vec![(ids[1], payload.to_vec())],
+            "the recipient keeps the full authenticated sender id and opaque payload intact"
         );
         assert!(
             alice.take_call_signals().is_empty(),
             "draining a call signal emits it only once"
         );
+    }
+
+    /// A device id sharing `real`'s first four bytes (its display fingerprint) and nothing else.
+    /// Grinding an actual key for this takes about 2^32 attempts; the routing and fairness code
+    /// only ever sees the id, so a crafted id exercises exactly the collision a member could buy.
+    fn prefix_twin(real: &DeviceId) -> DeviceId {
+        let mut bytes = *real.as_bytes();
+        for b in &mut bytes[4..] {
+            *b ^= 0x5a;
+        }
+        let twin = DeviceId::from_bytes(bytes);
+        assert_eq!(roles::fingerprint(&twin), roles::fingerprint(real));
+        assert_ne!(twin, *real);
+        twin
+    }
+
+    #[tokio::test]
+    async fn a_call_signal_for_a_prefix_twin_never_routes_to_the_real_member() {
+        // Design 2.18 / Gate 5: the target is the full device id. A member who presents an id
+        // sharing Alice's fingerprint must not be able to address (or receive) Alice's calls.
+        let (_hub, members, ids) = build_members(2).await;
+        let mut it = members.into_iter();
+        let mut alice = it.next().unwrap();
+        let mut bob = it.next().unwrap();
+        alice
+            .publish_self_record(vec![member_route(&alice, "/ip4/203.0.113.1/tcp/1")], 1)
+            .unwrap();
+        assert!(bob.ingest_peer_record(alice.self_record().unwrap().clone()));
+
+        let twin = prefix_twin(&ids[0]);
+        // Nothing is sent, so Alice is not driven here: there is no request for her to serve.
+        assert!(
+            !bob.send_call_signal(&twin, b"misrouted").await.unwrap(),
+            "a non-member id is never routed, even though its fingerprint matches Alice's"
+        );
+        assert!(alice.take_call_signals().is_empty());
+
+        // The exact id still routes, so the refusal above is about identity, not reachability.
+        let (sent, _) = tokio::join!(bob.send_call_signal(&ids[0], b"routed"), alice.run_once());
+        assert!(sent.unwrap());
+        assert_eq!(
+            alice.take_call_signals(),
+            vec![(ids[1], b"routed".to_vec())]
+        );
+    }
+
+    #[tokio::test]
+    async fn colliding_senders_keep_separate_fair_shares_of_the_signal_queue() {
+        // Keyed by fingerprint, a flooder and the quiet member it collides with shared one share,
+        // so the flood's eviction rule removed the quiet member's older offer. Keyed by the full
+        // id, only the flooder pays.
+        let (_hub, members, ids) = build_members(1).await;
+        let mut alice = members.into_iter().next().unwrap();
+        let quiet = DeviceId::from_public_key_bytes(&[7u8; 32]);
+        let flooder = prefix_twin(&quiet);
+        let _ = ids;
+
+        alice
+            .pending_call_signals
+            .push((quiet, b"quiet-offer".to_vec()));
+        for i in 0..MAX_PENDING_CALL_SIGNALS {
+            alice
+                .pending_call_signals
+                .push((flooder, format!("flood-{i}").into_bytes()));
+        }
+        alice.bound_call_signals();
+
+        let queued = alice.take_call_signals();
+        assert_eq!(queued.len(), MAX_PENDING_CALL_SIGNALS);
+        assert_eq!(
+            queued.first(),
+            Some(&(quiet, b"quiet-offer".to_vec())),
+            "the colliding quiet member's offer survives; the flooder lost its own oldest entry"
+        );
+        assert_eq!(
+            queued.iter().filter(|(from, _)| *from == flooder).count(),
+            MAX_PENDING_CALL_SIGNALS - 1
+        );
+    }
+
+    #[test]
+    fn the_legacy_fingerprint_route_refuses_an_ambiguous_fingerprint() {
+        let a = DeviceId::from_public_key_bytes(&[1u8; 32]);
+        let twin = prefix_twin(&a);
+        let c = DeviceId::from_public_key_bytes(&[2u8; 32]);
+        let fp_a = roles::fingerprint(&a);
+        let fp_c = roles::fingerprint(&c);
+        assert_ne!(fp_a, fp_c);
+
+        assert_eq!(unique_member_for_fingerprint([a, c], &fp_a), Some(a));
+        assert_eq!(
+            unique_member_for_fingerprint([a, twin, c], &fp_a),
+            None,
+            "two current members share the fingerprint, so neither may be guessed"
+        );
+        assert_eq!(unique_member_for_fingerprint([a, twin, c], &fp_c), Some(c));
+        assert_eq!(unique_member_for_fingerprint([a, a], &fp_a), Some(a));
+        assert_eq!(unique_member_for_fingerprint([c], &fp_a), None);
+        assert_eq!(unique_member_for_fingerprint(Vec::new(), &fp_a), None);
     }
 
     /// A transport whose `request` never answers: the peer that has gone away, without the test
@@ -21819,7 +24622,7 @@ mod tests {
 
         let sent = tokio::time::timeout(
             std::time::Duration::from_secs(5),
-            node.send_call_signal(&roles::fingerprint(&own), b"sdp-offer"),
+            node.send_call_signal(&own, b"sdp-offer"),
         )
         .await
         .expect("a call signal must return without waiting for the peer to answer")
@@ -21840,10 +24643,8 @@ mod tests {
         let mut it = members.into_iter();
         let mut alice = it.next().unwrap();
         let mut bob = it.next().unwrap();
-        let alice_fp = roles::fingerprint(&ids[0]);
-
         assert!(!bob
-            .send_call_signal(&alice_fp, b"unroutable-offer")
+            .send_call_signal(&ids[0], b"unroutable-offer")
             .await
             .unwrap());
         assert!(alice.take_call_signals().is_empty());
@@ -21858,8 +24659,8 @@ mod tests {
         let mut alice = it.next().unwrap();
         let mut bob = it.next().unwrap();
         let mut carol = it.next().unwrap();
-        let bob_fp = roles::fingerprint(&ids[1]);
-        let carol_fp = roles::fingerprint(&ids[2]);
+        let bob_id = ids[1];
+        let carol_id = ids[2];
 
         // Everyone can address Alice.
         alice
@@ -21868,18 +24669,18 @@ mod tests {
         for n in [&mut bob, &mut carol] {
             assert!(n.ingest_peer_record(alice.self_record().unwrap().clone()));
         }
-        let alice_fp = roles::fingerprint(&ids[0]);
+        let alice_id = ids[0];
 
         // Carol's offer lands first, then Bob floods far past the queue bound.
         let (sent, _) = tokio::join!(
-            carol.send_call_signal(&alice_fp, b"carol-sdp-offer"),
+            carol.send_call_signal(&alice_id, b"carol-sdp-offer"),
             alice.run_once()
         );
         assert!(sent.unwrap());
         for i in 0..(MAX_PENDING_CALL_SIGNALS + 64) {
             let payload = format!("bob-flood-{i}");
             let (_, _) = tokio::join!(
-                bob.send_call_signal(&alice_fp, payload.as_bytes()),
+                bob.send_call_signal(&alice_id, payload.as_bytes()),
                 alice.run_once()
             );
         }
@@ -21892,12 +24693,12 @@ mod tests {
         assert!(
             queued
                 .iter()
-                .any(|(from, p)| *from == carol_fp && p == b"carol-sdp-offer"),
+                .any(|(from, p)| *from == carol_id && p == b"carol-sdp-offer"),
             "the quiet member's offer survived a flood that used to evict it"
         );
         // The flooder is squeezed by its own token bucket: it cannot have banked more than one
         // burst plus whatever the (unmoving) test clock refilled, which is nothing.
-        let from_bob = queued.iter().filter(|(from, _)| *from == bob_fp).count();
+        let from_bob = queued.iter().filter(|(from, _)| *from == bob_id).count();
         assert!(
             from_bob <= CALL_SIGNAL_BURST as usize,
             "the flooder was capped at its burst, got {from_bob}"
@@ -21980,6 +24781,153 @@ mod tests {
         assert!(fetched.unwrap(), "Bob fetched the blob from a member");
         assert_eq!(bob.get_blob(&cid), Some(data));
         assert!(bob.has_blob(&cid), "and it is now held locally");
+    }
+
+    #[test]
+    fn bounded_blob_response_checks_framing_before_body_copy() {
+        let frame = encode_signed_commit_resp(&[1; 32], &[2; 64], b"pixels");
+        let (_, _, body) = decode_blob_response(&frame, 6).unwrap();
+        assert_eq!(body, b"pixels");
+        assert_eq!(
+            body.as_ptr(),
+            frame[SIGNED_BLOB_OVERHEAD..].as_ptr(),
+            "body is borrowed"
+        );
+        assert!(decode_blob_response(&frame, 5).is_err());
+        for len in 0..frame.len() {
+            assert!(decode_blob_response(&frame[..len], 6).is_err());
+        }
+        let mut trailing = frame.clone();
+        trailing.push(0);
+        assert!(decode_blob_response(&trailing, 100).is_err());
+        assert!(
+            decode_blob_response(&encode_signed_commit_resp(&[1; 31], &[2; 64], b"pixels"), 6)
+                .is_err()
+        );
+        let mut wrong_sig = Encoder::new();
+        wrong_sig.put_bytes(&[1; 32]).unwrap();
+        wrong_sig.put_bytes(&[2; 63]).unwrap();
+        wrong_sig.put_bytes(b"pixels").unwrap();
+        assert!(decode_blob_response(&wrong_sig.finish(), 6).is_err());
+    }
+
+    #[tokio::test]
+    async fn bounded_blob_fetch_rejects_before_storage_then_accepts_correct_limit() {
+        let (_hub, members, _ids) = build_members(2).await;
+        let mut members = members.into_iter();
+        let mut alice = members.next().unwrap();
+        let mut bob = members.next().unwrap();
+        let peer = alice.local_peer();
+        let cid = alice.put_blob(b"pixels").unwrap();
+        let (result, _) = tokio::join!(
+            bob.request_blob_tracked_cancellable(peer, &cid, None, Some(5)),
+            alice.run_once()
+        );
+        assert!(result.is_err());
+        assert!(
+            !bob.has_blob(&cid),
+            "signed but oversized bytes never enter storage"
+        );
+        let (result, _) = tokio::join!(
+            bob.request_blob_tracked_cancellable(peer, &cid, None, Some(6)),
+            alice.run_once()
+        );
+        assert!(
+            result.unwrap().0,
+            "an incorrect earlier declaration does not blacklist a CID"
+        );
+        assert_eq!(
+            bob.request_blob_bounded(&cid, 6, None)
+                .await
+                .unwrap()
+                .unwrap(),
+            b"pixels"
+        );
+        assert!(
+            bob.request_blob_bounded(&cid, 5, None).await.is_err(),
+            "cache hits obey the bound too"
+        );
+        assert!(bob
+            .request_blob_bounded(&cid, MAX_BOUNDED_BLOB_BYTES + 1, None)
+            .await
+            .is_err());
+        let (tx, rx) = tokio::sync::watch::channel(true);
+        assert!(bob
+            .request_blob_bounded(&cid, 6, Some(RequestCancellation::new(rx, None)))
+            .await
+            .is_err());
+        drop(tx);
+    }
+
+    #[test]
+    fn bounded_blob_publication_returns_only_held_verified_bytes() {
+        let mut node = solo_node();
+        let cid = node.publish_blob_bounded(b"pixels").unwrap();
+        assert_eq!(cid, Cid::of(b"pixels"));
+        assert_eq!(node.get_blob(&cid).unwrap(), b"pixels");
+        assert_eq!(node.clear_staged_blobs().unwrap(), 0);
+        assert_eq!(node.publish_blob_bounded(b"pixels").unwrap(), cid);
+        assert!(node
+            .publish_blob_bounded(&vec![0; MAX_BOUNDED_BLOB_BYTES + 1])
+            .is_err());
+    }
+
+    #[tokio::test]
+    async fn bounded_blob_fetch_rejects_bad_signature_wrong_cid_and_request_replay() {
+        let (_hub, members, _ids) = build_members(2).await;
+        let mut members = members.into_iter();
+        let alice = members.next().unwrap();
+        let mut bob = members.next().unwrap();
+        let peer = alice.local_peer();
+        let cid = Cid::of(b"pixels");
+        for fault in ["signature", "cid", "nonce", "outsider"] {
+            let (result, ()) = tokio::join!(
+                bob.request_blob_tracked_cancellable(peer, &cid, None, Some(6)),
+                async {
+                    let Some(TransportEvent::Request {
+                        data, responder, ..
+                    }) = alice.transport.next_event().await
+                    else {
+                        panic!("blob request must be next");
+                    };
+                    assert_eq!(data[0], KIND_BLOB_FETCH);
+                    let (_, requester, ts, mut nonce, epoch, _) =
+                        decode_authed_request(&data[1..]).unwrap();
+                    let blob = if fault == "cid" { b"wrong!" } else { b"pixels" };
+                    if fault == "nonce" {
+                        nonce[0] ^= 1;
+                    }
+                    let transcript = blob_fetch_resp_transcript(
+                        &alice.group.group_id(),
+                        &requester,
+                        ts,
+                        &nonce,
+                        epoch,
+                        blob,
+                    );
+                    let outsider = MlsDevice::generate().unwrap();
+                    let signer = if fault == "outsider" {
+                        &outsider
+                    } else {
+                        &alice.device
+                    };
+                    let mut sig = signer.sign(&transcript).unwrap();
+                    if fault == "signature" {
+                        sig[0] ^= 1;
+                    }
+                    responder.respond(Bytes::from(encode_signed_commit_resp(
+                        &signer.public_key_bytes(),
+                        &sig,
+                        blob,
+                    )));
+                }
+            );
+            assert!(result.is_err(), "{fault}");
+            assert!(
+                bob.blob_cids().is_empty(),
+                "{fault} must not store either CID"
+            );
+        }
     }
 
     #[tokio::test]

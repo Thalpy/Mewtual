@@ -1,6 +1,7 @@
 import { mockIPC, mockWindows } from "@tauri-apps/api/mocks";
 import type { InvokeArgs } from "@tauri-apps/api/core";
 import { pageOfList, type PageRequest, type UnreadProbe } from "./message-paging.ts";
+import { visualStudioFixtureResponse } from "./visual-studio-fixture.ts";
 
 export const VISUAL_FIXTURE_NOW = Date.UTC(2026, 7, 20, 12, 0, 0);
 
@@ -159,11 +160,25 @@ const BRIDGED = "LOG.TRACING.EVENT";
  * call fail loudly. That is preferable to a screenshot which looks plausible while silently
  * omitting a newly-added backend dependency.
  */
-export function visualFixtureResponse(command: string, payload: InvokeArgs = {}): unknown {
+export function visualFixtureResponse(command: string, payload: InvokeArgs = {}, studio = false): unknown {
   const args: Record<string, unknown> =
     Array.isArray(payload) || payload instanceof ArrayBuffer || payload instanceof Uint8Array
       ? {}
       : payload;
+  if (studio) {
+    const response = visualStudioFixtureResponse(command, args, VISUAL_FIXTURE_NOW);
+    if (response.handled) return response.value;
+    // Existing chat fixture ids are descriptive strings; native Studio deliberately requires
+    // canonical decimal channels. The explicit opt-in remaps the fixture, never its parser.
+    if (command === "resume_session") {
+      const servers = visualFixtureResponse(command, payload) as Array<{ server: number; channel: string; channels: { id: string; name: string }[] }>;
+      for (const server of servers) if (server.server === 1) { server.channel = "1"; server.channels = server.channels.map((channel, index) => ({ ...channel, id: String(index + 1) })); }
+      return servers;
+    }
+    if (command === "get_channels" && args.server === 1) return [{ id: "1", name: "general" }, { id: "2", name: "design" }, { id: "3", name: "field-notes" }];
+    const channel = args.channel === "1" ? "general" : args.channel === "2" ? "design" : args.channel === "3" ? "notes" : args.channel;
+    return visualFixtureResponse(command, { ...args, ...(channel === undefined ? {} : { channel }) });
+  }
   const server = Number(args.server ?? 1);
   const channel = String(args.channel ?? "general");
 
@@ -291,6 +306,12 @@ export function visualFixtureResponse(command: string, payload: InvokeArgs = {})
           },
         ],
       });
+    case "get_kept_files":
+      return { supported: true, allocated_bytes: 0, limit_bytes: 1073741824, files: [], error: null };
+    case "file_available":
+      return true;
+    case "get_file_usage":
+      return { wiki_pages: [], status_count: 0, chat_count: 0, event_count: 0, pinned: false };
     case "get_wiki_pinned_cids":
       return [];
     case "get_statuses":
@@ -300,9 +321,9 @@ export function visualFixtureResponse(command: string, payload: InvokeArgs = {})
     case "get_invite":
       return server === 1 ? "fixture-invite-not-for-pairing" : null;
     case "get_roles":
-      return server === 1 ? { [ME]: "owner", [JUNIPER]: "admin", [MOSS]: "member" } : {};
+      return server === 1 ? { [`${ME}-full-device-id`]: "owner", [`${JUNIPER}-full-device-id`]: "admin", [`${MOSS}-full-device-id`]: "member" } : {};
     case "get_livery":
-      return { preset: "", accent: "", tokens: {}, icon: "", cursor: "" };
+      return { preset: "", accent: "", tokens: {}, icon: "", cursor: "", name: "", banner: "" };
     case "get_channel_topic":
       return channel === "general" ? "A calm place to build and review Mewtual together" : "";
     case "get_delivery":
@@ -699,9 +720,12 @@ export function installVisualFixture(name: string): void {
   }
 
   mockWindows("main");
+  // The existing DEV+localhost entry point still owns availability and readiness. Nothing in
+  // production recognizes this flag, and default chat fixtures remain byte-for-byte unchanged.
+  const studio = new URLSearchParams(window.location.search).get("studio") === "1";
   mockIPC(
     (command, payload) => {
-      const response = visualFixtureResponse(command, payload);
+      const response = visualFixtureResponse(command, payload, studio);
       // `get_moderation` is the final awaited load in switchServer. Once it has returned, wait for
       // fonts and the next task so Svelte can flush its pending microtasks. Do not use
       // requestAnimationFrame here: screenshot browsers intentionally run in the background and

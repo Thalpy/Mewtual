@@ -1,0 +1,509 @@
+# Flipnote UI hook guide
+
+Current status (2026-10-14): the owner accepted the Gate 4 and Gate 5 merges. PR #43 merged
+into `Create-suite-2` at `7cbe8cbe131e1be8e672d04341c31a1d2b52a98d`. Gate 6's stacked PR #44/#45
+candidate's verified code checkpoint is `818e711641bc8193af5cde3be8e56d4817c475f9`: Score/Sound/linked Music/PIXA/GIF
+production controls and archival take playback are connected. Backend SoundRecord recovery is
+implemented and cumulatively reviewed. Complete local suites, static/build/startup/flow checks
+and affected mutation/control checks pass; hosted/Linux CI remains pending. This is not final
+Gate 6 acceptance.
+Claims/Ask/Pass remain advisory call features. [GATE6-ACCEPTANCE](GATE6-ACCEPTANCE.md) is the
+current stack/evidence ledger; dated older checkpoint statements retain their original scope.
+
+Historical Gate 4 checkpoint (2026-10-12): PR #41's reviewed runtime/UI code was
+`610c45e323bf018c2a3ffa91bbf359faaf707be3`. The dated candidate/check statements below describe
+that earlier checkpoint, not the present merge status. The Gate 4 ledger is
+[GATE4-ACCEPTANCE](GATE4-ACCEPTANCE.md); historical
+implementation and verification detail is in [HANDOVER](HANDOVER.md).
+
+The merged Gate 4 baseline promotes P5 for the reviewed local-draft lifecycle and ticketed
+awaiting-tenure Save boundary. Its lifecycle/read/export/archive/copy/dispose commands and the
+Unconfirmed Save begin/visit pair are registered, permissioned, parsed exhaustively and consumed
+by the real Studio surface. This is a bounded promotion, not general permission for direct
+Closing Save or arbitrary repair commands. Native unfinished repair commands remain unregistered.
+
+The [handoff signing checkpoint](GATE4-HANDOFF-SIGNING-REVIEW.md) has its bounded production PASS,
+and the 2026-10-10 short re-review closes its last test-coverage finding. Later integrated work now
+includes C-3 runtime adoption, structured refusal mapping, repeated-tenure product paths, bounded
+P5 exposure and the combined scenarios. That earlier bounded verdict remains evidence for its own
+scope rather than acceptance of the complete candidate.
+
+Earlier accepted scheduling/preview evidence: combined scheduling at `6b71d96` passed user
+review without required changes. That earlier block 1 is accepted. The new four-agent split above
+subdivides what remains and does not reopen that scheduling acceptance.
+Actor scheduling and native preview implementation passed review
+at `a89bde6`. The user's re-review of `a89bde6...134394e` closes NATIVE-TEST-001 with no further
+changes required, for both Index and Flipnote. The reviewer inspected source and the GitHub job
+logs: 19 native tests passed, both mutations failed at their intended assertions, and restored
+regressions passed. Execution used the PR merge checkout for `c60de4e`; `134394e` adds only docs.
+The reviewer did not independently rerun Cargo. TAIL-TEST-001 also remains closed.
+
+## Current Gate 6 hook inventory
+
+| Surface / operation | Current hook and boundary |
+|---|---|
+| Score create/read/apply | Existing `studio_create/read/apply` plus optional `objectKind:"score"`; omitted kind remains Flipnote. `studio-native.ts` checks the selected family and raw slots/readiness; `studio-session.ts` preserves kind with exact nonce/epoch/body retry identity. No parser fallback to the fixture store. |
+| Score composer | `ScoreEditor.svelte`, keyed by object, uses the session's Score operations and App's existing validated jam recipe library. Authored sixteenth-step holds, recipe readiness, overflow/conflicts/removals and cleanup remain visible. Title also updates the existing Index title path. |
+| Sound markers / Music link | `StudioSound.svelte` uses native complete sound records; `set_sfx` requires authored `duration_ms`1..600000, alongside recipe/removal and linked Score header operations. All-active paged cleanup includes orphan/overflow markers whose frames cannot be selected. Local emoji JSON import is4KiB and copies validated `len`20..1000; no shared catalog/image-author binding or chat-click feature is claimed. |
+| Resolve/play/export | `studio-resolved-export.ts` plus session preparation require exact complete native snapshots, stable native `group`, current readiness and all exact held frame bytes. Draft media requires its own rebuilt `contentEpoch/group`; an unreadable draft never substitutes the ordinary base. Linked Score must be in the same group/channel. |
+| Publish/read back PIXA | `publish_pixa({server,bytesB64})->{cid,bytes}` acknowledges durable blob custody only. A separately queued SetExport Save adds the reference. `request_blob_bounded` reads its exact CID/length and the full package is revalidated before preview/play/download/share. A Studio blob CID is not a fileshare CID. |
+| Local GIF / browser downloads / share | `export_studio_gif` returns actual `path/displayed/warning/contentValidation`; reveal failure is still a saved file. GIF is visual-only/infinite-loop with fixed safe filename. Browser download requests make no native save-path claim. Explicit Score/PIXA sharing reuses the existing File upload path; shared-deck PIXA support is not implied. |
+| Playback lifecycle | App supplies the existing patch library and scoped audio actions; Studio and existing local/shared `.jamtake` playback reuse one JamEngine/allocator and engine-minted archival capabilities. Raw live notes keep their30s watchdog. Explicit gesture/seek, bounded tick work, complete hold/tail EOF, scope/lock/membership/Deafen and pending-download cancellation are enforced. Remote heartbeats never resume a suspended synth or resurrect suppressed ownership. |
+| Score / sound recovery | Existing preview/apply/draft-Copy commands carry the pinned object family. Score choices are `scorePatch/scoreHeader/scoreCell`; frontend sound choice is `{kind:"soundRecord",value:hex64}` naming an authenticated historical operation, with exact PIXA custody before an export reference. SoundRecord backend is separately implemented/bounded-reviewed; `GATE6-SOUND-RECOVERY.md` specifies additive Restore, explicit Copy, exact linked-Score scope and held-media custody. Whole-version walks choose one effective value/removal per slot; they do not replay every losing alternative or preserve a branch. |
+| Visual fixture | `?fixture=chat&studio=1` uses decimal channel`1`, real PIX bytes and native-shaped Score/sound/conflict reads. `html[data-visual-ready="chat"]` remains the readiness marker. Writes/publication/GIF deliberately refuse: a screenshot cannot pretend that native Save succeeded. |
+
+Gate 4's lifecycle and projection-level/header-only Index Copy preservation limitation is
+unchanged. Only an archive-preservation acknowledgement proves retained branch preservation.
+Shared-deck PIXA media-kind/consensus/global viewer and native audible/two-real-client release
+acceptance remain Gate 7/UI follow-ups, not missing native permission to expose unfinished writes.
+
+## Existing UI integration guidance
+
+The existing mockup now has a native integration implementation (`0b6e870`).
+The typed adapter is [studio-native.ts](../apps/desktop/src/studio-native.ts);
+request/session/event coordination is [studio-session.ts](../apps/desktop/src/studio-session.ts).
+Continue from those files and the connected surface. The [original UI builder prompt](FLIPNOTE-UI-BUILDER-PROMPT.md)
+records the handoff scope; do not introduce a second adapter or restart the mockup.
+
+Use the command/result and event tables below as the backend contract and
+`design-creative-suite.md` for visual behavior. Preserve the separation between native views
+and the editor model in `studio-store.ts`. Reuse the existing PIX codec and canonical operation
+encoding. Earlier backend review acceptance did not independently accept the UI implementation or
+establish live two-client UI acceptance; PR #41's final review covers the combined boundary.
+Coordinate Rust/native and shared-document edits.
+
+Connect list/open/create, frame and header edits, Index edits, pixel publication/bounded fetching,
+refresh events, recovery list/read/preview/apply/backup export and eviction acknowledgement.
+Preserve unsaved editor work and same-request retry identity. Keep channel/epoch identifiers
+lossless, fence obsolete async results, and preserve conflicts/overflow/deletions in the adapter.
+
+`awaitingTenureReceipt: true` identifies a read-only history preview. `provisional: true` alone
+also appears on ordinary editable local views; it is not the read-only discriminator. Do not
+invent a phase, settlement receipt, author confirmation or publication claim for a preview.
+
+Keep direct Closing Save and unfinished native repair controls unavailable. The Gate 6 candidate
+now connects Sound/linked Music/PIXA/GIF through the hooks above; final acceptance is still pending.
+Gate 5 claims/Ask/Pass are advisory and do not grant edit authority.
+The reviewed lifecycle family and ticketed
+Unconfirmed Save are now connected to the real Studio surface; they grant only bounded local-draft
+authority. Recovery backup export is also available and uses a different format. These controls do
+not imply later-gate or release acceptance.
+
+The actor now schedules the reviewed provisional head, seed and signed-tail adapters through
+its detached job queue. A ready preview owns its shared seed reservation, releases its parser
+permit, and remains separate from installed Studio history. The two former-owner newcomer
+preview cases are enabled and pass alongside the two known-CID PIX fetch/reopen cases.
+Local native checking requires uncached dependencies. The focused
+[Studio native workflow](https://github.com/Thalpy/Mewtual/actions/runs/34767022661) passes all 17
+native Studio tests on `febbd70`; two-client acceptance also passes. Broader strict CI remains
+blocked by existing unused security-intent APIs, so these results do not mean the whole PR is green.
+See [HANDOVER](HANDOVER.md) for exact commands and current validation status.
+
+Historical scheduling checkpoint: Gate 4 was still open at this point. The combined actor regression exercises competing authoritative
+Studio/Registry installations under retained-preview, cancelled-parser and cancelled-transport
+pressure, with owner reachability returning without MLS churn. The final checkpoint `6b71d96`
+passes its 11 focused actor/preview/newcomer tests, shared native fixture, Clippy and all 19 native
+Studio tests plus native mutation checks on GitHub; the broad run on `487cb0e` passed 165 tests.
+Both scheduler changes have isolated mutation failures and restored passes. User adversarial
+review accepts this bounded checkpoint with no required corrections. One-second provisional-head
+pacing and preservation of queued retries across repeated Reads change no native commands/result shapes. Durable Closing overlays/repeated
+tenure, signed repair and full acceptance remain.
+The [Closing overlay design](GATE4-CLOSING-OVERLAY-REVIEW.md) passed user review at `d576af2`
+on 2026-09-14. Its internal core/store implementation at `b1b0ec9` also passed review, with
+source-version finding OVERLAY-TEST-001 closed by the re-review of `65db6ac`. The accepted
+[handoff design](GATE4-OVERLAY-HANDOFF-REVIEW.md) now covers transfer into shared pending intents;
+HANDOFF-001 adds a retained complete target so completed retries remain bound to their channel
+after base removal. The user closes HANDOFF-001 at `dd2fbc0`. The internal handoff now has a
+three-step store transaction and distinct local-draft/completed results. The
+[pushed implementation](GATE4-OVERLAY-HANDOFF-IMPLEMENTATION-REVIEW.md) at `bf37cc4` passes 202 local
+Studio tests and the dedicated handoff/mutation workflows. The user accepts the corrected
+bounded implementation at `62f06d4` / evidence head `aa0a81f` and closes HANDOFF-002: reference
+inventory enforces the linked source's required metadata before enabling deletion. The reviewer
+inspected 24 passing handoff tests, ten detected mutations and ten restored passes in GitHub
+run 34903404377. That historical checkpoint changed no UI command or result shape. The current
+candidate adds only the ticketed Unconfirmed Save for awaiting-tenure previews; Closing/Fault still
+cannot use ordinary Apply and there is no direct Closing Save command. Preserve editor pixels until
+the typed local-only result is returned, and never present it as installed, receipted or published.
+The accepted foundations and earlier review closures are recorded in
+[the provisional review note](GATE4-PROVISIONAL-READ-REVIEW.md) and HANDOVER.
+
+This guide describes native contracts and the current Studio consumer. Visual polish remains
+separate; command registration, typed parsing and the minimum truthful controls are part of this
+candidate.
+
+## Available now
+
+`studio_overlay_read({ server, channel, object? })` reads retained local Closing or Unconfirmed
+work, including its terminal disposal record when the bodies are gone.
+Use canonical decimal `channel` and optional 32-character lowercase hexadecimal `object`;
+omit `object` for Index. It returns a separate result, never an ordinary `StudioRead`:
+
+```ts
+type OverlayManualReason =
+  | "sourceMissing" | "sourceUnreadable" | "sourceNotClosing" | "sourceReplaced"
+  | "sourceRewound" | "successorNotPristine" | "successorMissing" | "receiptChanged"
+  | "objectMissing" | "tenureUnknown" | "tenureImported" | "preparedStuck" | "fault"
+  | "notCurrentAuthor" | "unconfirmed" | "notReplayable";
+
+type OverlayInspection =
+  | { v: 1; kind: "absent"; channel: string; object: string | null }
+  | { v: 1; kind: "local-draft"; channel: string; object: string | null;
+      eligibility: "transferable" | "manual" | null;
+      manualReason: OverlayManualReason | null;
+      unconfirmedState: "awaitingSource" | "baseConfirmed" | "baseSuperseded"
+        | "sourceUnreadable" | null;
+      basis: string | null; branch: string; contentId: string | null;
+      generation: string; accepted: number; transferState: "active" | "prepared";
+      provenance: "closing" | "unconfirmed" | null; replayable: boolean;
+      readOnly: true; content: StudioContent | null }
+  | { v: 1; kind: "disposed"; channel: string; object: string | null;
+      basis: string; branch: string; generation: string; accepted: number;
+      mode: "preserved" | "discarded"; archive: string | null; readOnly: true };
+```
+
+`StudioContent` is the existing full Index/Flipnote representation below, including conflicts and
+deletions. `branch`, non-null `basis`, non-null `contentId` and non-null `archive` are 64-character
+lowercase hex; `generation` is a lossless decimal u64 string. `basis` is a local identity, not an
+append capability. `contentId` is the structural branch-content digest; `content` is the typed
+projection. For structurally retained but non-replayable work, `basis` and `content` may be null;
+the row is still a local draft and must not be hidden or called absent. Prepared is a retained draft
+awaiting transfer resolution; reading does not resolve it. A `disposed` row is the terminal truth,
+not absence: `preserved` may name its archive, while `discarded` has none.
+
+`eligibility` / `manualReason` classify the current manual path. `unconfirmedState` is null for
+Closing and reports reconciliation for Unconfirmed work; `baseConfirmed` compares bases and is not
+an owner-tenure or publication claim. `provenance` is not a receipt or authority grant.
+Absent does not imply no pending ordinary edits, no completed transfer or settled content.
+There are no `epochId`, `epoch`, `phase`, publication, receipt or provisional-preview flags.
+Keep this separate from the editor's unsaved work and from awaiting-tenure history previews.
+The current isolated candidate registers the bounded lifecycle commands listed below. Reads and
+exports are evidence only. Copy preview cannot save; copy apply writes one exact operation through
+ordinary provisional Save. Preserve writes the archive before disposal. Discard and archive
+release require their literal confirmations. None of these calls grants source, receipt, tenure,
+handoff or publication authority, and none is a repair command.
+
+Run ordinary and overlay reads sequentially for the same target: they share the latest-view
+request fence, so starting another read supersedes the older result.
+The original native request and session span capture and detached reconstruction. Changed
+records, membership/context, actor, mount or a newer request reject delivery; refresh from
+fresh context. Capacity exhaustion returns a retryable error. The shared four preparation
+slots remain owned until actual worker/result destruction, including cancellation. Complete
+native JSON is capped at 32 MiB; overflow returns an error with no partial result. Neither
+this encoded limit nor the bounded input is a measured heap or latency guarantee. The
+frontend adapter and Studio surface consume this contract. A local draft is displayed as a
+separate local-only projection and never relabelled as the installed/awaiting-tenure base.
+
+The native entry points are [studio.rs](../apps/desktop/src-tauri/src/studio.rs),
+[studio/inspection.rs](../apps/desktop/src-tauri/src/studio/inspection.rs) (local-draft reads),
+[studio/recovery.rs](../apps/desktop/src-tauri/src/studio/recovery.rs) (all seven
+`studio_recovery_*` commands) and
+[creative_blobs.rs](../apps/desktop/src-tauri/src/creative_blobs.rs); registration and event
+forwarding are in [lib.rs](../apps/desktop/src-tauri/src/lib.rs). These are real actor/vault
+paths. The frontend adapter/session modules above implement document, recovery and local-draft
+flows, including exact retry identity, explicit re-authoring and destructive confirmations.
+
+`studio_list` and `studio_read` can now return a distinct unconfirmed-history result:
+
+```json
+{
+  "v": 1,
+  "epochId": "<32 lowercase hex>",
+  "epoch": "<decimal>",
+  "channel": "<decimal>",
+  "provisional": true,
+  "awaitingTenureReceipt": true,
+  "content": { "kind": "flipnote" }
+}
+```
+
+`content` uses the existing complete Index/Flipnote projection schema, including conflicts,
+claimed authors, frame CIDs and declared byte lengths. The example abbreviates that content.
+This result has no current `phase` or `publication` claim. Display the base as awaiting a tenure
+receipt. Its `epochId` cannot authorize ordinary Apply. The candidate editor can instead save one
+operation to a ticketed local-only Unconfirmed overlay and then re-read that separate projection.
+An installed source takes precedence. An absent Index's synthetic empty epoch zero does not hide
+a ready preview. Ordinary view fields remain unchanged; there is no new `confirmed` flag.
+
+A preview is eligible only after a finite authenticated tail finishes. That does not establish
+owner tenure, historical attribution or completeness beyond the returned provider prefix. Reads
+never create canonical sources, Registry pointers or durable intent/recovery/owner journals.
+PIX fetching still uses the existing bounded CID API and does not imply local possession.
+
+The original discovery lifetime remains 60 seconds. The receiver retries authoritative discovery
+on its existing paced schedule, with a ready preview yielding for refresh after 30 seconds.
+`studio-updated` also invalidates a preview when it becomes ready, expires or is evicted. Re-read
+and accept absence after eviction. Do not retain an undisclosed projection cache to hide it.
+Lock signals the actor to clear volatile previews; mount, server, watch and membership changes
+also invalidate use. Keep renderer request/navigation/session generations and discard stale
+results even after IPC has delivered them.
+
+Native additionally suppresses a superseded request for the same target after JSON conversion.
+For a preview it holds a cancellable, at-most-five-second actor handoff across conversion and
+final native fences, after releasing the vault lease. This keeps the checked actor state stable
+without a lease across network or cold parsing. Timeout suppresses delivery; the seed reservation
+stays charged until every actual native/worker/transport owner releases its data.
+
+Tauri invoke argument names are camelCase. `server` is the existing local numeric server id,
+not the MLS group id. `channel` is a canonical decimal string; do not convert a channel u128
+through a JavaScript Number. Object, frame and nonce ids are 32 lowercase hex characters;
+`epochId` is also 32 lowercase hex, supplied by the last read. CIDs and full author identities
+are 64 lowercase hex. A four-byte display fingerprint is never an authority key.
+
+| UI action | Native command and invoke arguments | Result |
+|---|---|---|
+| Load sidebar | `studio_list({server, channel})` | Installed Index view, awaiting-tenure preview, or an empty epoch-zero Index view if neither exists |
+| Open flipnote | `studio_read({server, channel, object})` | Installed Flipnote view, awaiting-tenure preview, or `null` if neither exists |
+| New flipnote | `studio_create({server, channel, object, nonce, title, createdAtMs})` | Flipnote view after durable local create/index work |
+| Edit art/metadata | `studio_apply({server, channel, object, epochId, nonce, body})` | Updated flipnote view |
+| Edit sidebar entry | `studio_apply_index({server, channel, epochId, nonce, body})` | Updated Index view |
+| Publish pixels | `publish_pix({server, bytesB64})` | `{cid: string, bytes: number}` after validated PIX persistence/promotion |
+| Fetch referenced blob | `request_blob_bounded({server, cid, maxBytes})` | `{bytes_b64: string, bytes: number}` or `null` if unavailable |
+| List recovery versions | `studio_recovery_list({server, channel, object?})` | Metadata for at most two retained versions plus one staged version; omit `object` for the Index |
+| Inspect one recovery version | `studio_recovery_read({server, channel, object?, snapshot})` | Historical typed content, not a current Studio view |
+| Export a recovery backup | `studio_recovery_export({server, channel, object?, snapshot})` | Bounded `{format:"p1-recovery-v1", bytes, bytesB64, snapshot}` |
+| Accept an eviction warning | `studio_recovery_acknowledge({server, channel, object?, oldestSnapshot, stagedSnapshot})` | Updated recovery listing after exact-pair durable acknowledgement |
+| Preview a recovery choice | `studio_recovery_preview({server, channel, object?, snapshot, choice, mode})` | One bounded proposed domain edit or an explicit conflict/hold; saves nothing |
+| Apply that exact choice | `studio_recovery_apply({server, channel, object?, edit})` | Ordinary provisional content Save; see the retry contract below |
+| Restore discoverability | `studio_recovery_restore_pointer({server, channel, object?})` | Separately retryable Registry pointer step for an actually saved document; no caller-supplied epoch |
+| Inspect retained local work | `studio_overlay_read({server, channel, object?})` | Absent, local-draft or disposed evidence; never authority |
+| Read lifecycle state | `studio_overlay_lifecycle({server, channel, object?})` | Branch, manual reason, handoff attempt, archive and terminal state |
+| Export the active draft | `studio_overlay_export({server, channel, object?})` | Bounded `catcoms-studio-draft-v1` bytes for local backup |
+| Preserve before disposal | `studio_overlay_archive({server, channel, object?})` | Durable, terminal, non-authoritative archive evidence |
+| Read/export preserved work | `studio_overlay_archive_read` / `studio_overlay_archive_export` with the same target | Archive projection or bounded backup bytes |
+| Release preserved archive | `studio_overlay_archive_release({server, channel, object?, archive, confirmation:"release-local-archive"})` | Reconciliation-required release result |
+| Preview copying one retained value | `studio_overlay_copy_preview({server, channel, object?, destination, choice, mode})` | Exact provisional edit or explicit disposition; saves nothing |
+| Apply that exact copy | `studio_overlay_copy_apply({server, channel, object?, edit})` | One ordinary provisional Save; an uncertain delivery retains the exact edit |
+| Dispose retained work | `studio_overlay_dispose({server, channel, object?, disposal})` | Terminal preserved/discarded result; discard requires `"destroy-local-draft"` |
+| Begin preview-local Save | `studio_unconfirmed_overlay_save_begin({server, channel, object?})` | Ticket with exact basis/branch, or typed known-no-write refusal; not authoring authority outside its visit |
+| Visit preview-local Save | `studio_unconfirmed_overlay_save({server, channel, object?, save})` | Saved/pending/busy/paused/refused/disposed/handed-off typed result; retry as directed |
+
+The lifecycle controls apply to both Flipnote targets and the channel Index (`object` omitted).
+The sidebar exposes the Index draft's export, archive, bounded copy, disposal and archive-release
+actions, so local-only Index edits cannot retain quota without a user-visible recovery path.
+`busy`, `paused` and typed refusals are shown as known not written; `pending` and native delivery
+failures remain uncertain because a detached or already-committed write may still land.
+
+`body` is a **canonical JSON string**, not an object or a full signed P1 envelope. Use
+`canonicalJson` from [studio-contract.ts](../apps/desktop/src/studio-contract.ts).
+[Shared wire vectors](../crates/catcoms-replication/tests/fixtures/studio-ops-v1.json) and
+[studio-wire.test.ts](../apps/desktop/src/studio-wire.test.ts) pin its bytes. Backend derives
+the author and operation id; the UI must not supply a purported sender's signature/identity.
+`createdAtMs` must be a non-negative, JS-safe integer timestamp.
+
+Implemented bodies:
+
+- Index: `put_object` for flipnotes, `set_title`, `set_expiry`, `tombstone_object`.
+- Flipnote: `insert_frame`, `replace_frame`, `remove_frame`, and `set_header` for `title`/`fps`.
+- Audio, linked-score and export bodies in the wider contract are **not yet accepted** by these
+  materializers. Recognized codec fields are not proof of backend support.
+
+## Save and retry
+
+1. Encode flattened PIX1 bytes. Editor layers remain local; no layer document is stored.
+2. Call `publish_pix` and keep its actual `{cid, bytes}`. A placeholder/frontend hash is not a CID.
+3. Call `studio_apply` with that exact declaration, the last view's `epochId`, a fresh random
+   nonce and the canonical insert/replace body. Publish alone does not save a frame record.
+4. Replace the displayed materialization with the returned view. Keep unsaved editor work
+   separate; do not discard it on timeout, cancellation, capacity refusal or epoch mismatch.
+
+Example for an existing frame (names such as `savedView` are caller-owned state):
+
+```ts
+const blob = await invoke<{cid: string; bytes: number}>("publish_pix", {
+  server, bytesB64: encodedPixBase64,
+});
+const body = canonicalJson({op: "replace_frame", frame: frameId, ...blob});
+const updated = await invoke("studio_apply", {
+  server, channel, object, epochId: savedView.epochId, nonce: editNonce, body,
+});
+```
+
+A retry of an uncertain operation keeps the **same complete request**, including nonce, body
+and epoch id. Do not mint a new nonce automatically after an error: the local save may already
+have committed. If the epoch changed, re-read and preserve the unsaved work; the backend's
+conservative replay and recovery controls are described below. Do not silently reauthor into a new
+epoch. A failed Create may have persisted part of the two-document work; retry the same Create
+identity/nonce rather than creating another object. For `studio_read`, `null` is local absence,
+not a deletion or proof no other member has the document. `studio_list` instead synthesizes an
+empty epoch-zero Index view without creating a file. Ordinary reads establish the bounded
+background watch.
+
+Success means durable **local, provisional** metadata, not remote delivery or owner settlement.
+Native busy/locked errors are ordinary refusal paths; do not spin or force-unlock storage.
+
+## Read model: adapt it, do not cast it to the fixture root
+
+Every non-null Studio response has the common fields below and one of two trust states.
+Check `awaitingTenureReceipt` before using `epochId` to prepare an ordinary edit:
+
+```ts
+type StudioReadResult = {
+  v: 1;
+  epochId: string; // 32 hex; only an ordinary editable view can supply a write epoch
+  epoch: string;   // u64 decimal, preserve losslessly
+  channel: string;
+  provisional: true;
+  content: {kind: "index" | "flipnote"; /* complete typed projection */};
+} & (
+  | {awaitingTenureReceipt: true; phase?: never; publication?: never}
+  | {awaitingTenureReceipt?: never; publication: "local";
+     phase: "open" | "closing" | "settled" | "fault"}
+);
+```
+
+Index content has `objects`, `overflow`, `deletedObjects`, and `tombstones`, keyed by object id.
+Each entry preserves all `creations` and selected/conflicting title/expiry values. Flipnote
+content has `title`, `fps`, `timeline`, `frames`, `declaredFrameBytes`, `overCap`, and `tombstones`.
+Use `timeline` order, not map enumeration. Registers are `{selected: {value, source}, conflicts:
+[{value, source}]}`. Sources carry `opId`, full `author`, `nonce`, and (for frame sources) `ts`.
+Frame `pixels` registers select `{cid, bytes}`; `insertions` retain ordering/provenance evidence.
+Do not silently throw away conflicts, deleted content or overflow when adapting the view.
+
+Expiry reads as `{kind:"unrecorded"}`, `{kind:"never"}`, or `{kind:"at", ms:number}`.
+They are different states; zero milliseconds is not “never”. For operation bodies use the wire
+codec's omitted / `null` / timestamp forms, not the view's discriminated object.
+
+The frame cap is 999 and selected declared frame sizes sum to at most 8 MiB for the playable
+prefix. Concurrent overflow stays visible via `overCap`; skip flagged frames during playback
+and do not label them a successful accepted local addition. Backend is the authority on caps.
+See [INTERFACES](INTERFACES.md#native-studio-saveload-gate-2-indexart-only) for the full read contract.
+
+## Fetching and event hooks
+
+Pass the frame record's **declared bytes** as `maxBytes`. Require exact returned length, then
+validate/decode PIX1 before rendering. `null` is unavailable/fetching; oversize, invalid CID and
+authentication failures reject. This command does not retry providers. If the selected CID,
+object, server, view/session or frame changes while fetching, discard the obsolete result.
+Do not start an unbounded fetch for every conflict/frame on every repaint; prioritize visible
+frames and keep the UI's pending fetches bounded. PIX input is capped at 64 KiB; the generic
+bounded fetch ceiling is 9 MiB, not permission to fetch a 9-MiB frame.
+
+| Event | Payload | UI response |
+|---|---|---|
+| `studio-updated` | `{server: number, channel: string, object: string | null}` | Invalidate/re-read the matching Index and affected open object. `null` names the Index. Coalesce refreshes; an event is not a new projection. |
+| `studio-receive-paused` | `{server: number}` | Show a receive/storage warning without claiming settlement failure or deleting local work. Successful explicit Read/Save resumes the paused receiver; Read alone may not warm unrelated large histories. |
+| `settlement-changed` | `{server: number, docType: 15 | 16, logicalKey: string, channel: string, object: string | null, state: string}` | Invalidate matching recovery/phase observations and re-read `studio_recovery_list`. This is not a receipt or a new projection. |
+
+Settlement states currently emitted are `open`, `closing`, `settled`, `fault`,
+`recoveryAvailable`, `recoveryEvictionPending`, and `refreshRequired`. Phase and recovery
+observations are independent: a recovery notification does not replace the document phase.
+`logicalKey` is 32 lowercase hex characters; `channel` is a decimal u128 string. List/read
+commands do not emit invalidations, so listening and re-reading must not create a refresh loop.
+
+Install listeners with normal component/session cleanup. Fence late reads by current server,
+channel, object and local request generation. Native already rejects stale actor/session
+results, but frontend navigation can still supersede a legitimate returned view.
+The backend handles recent-target watches, missed-edit catch-up, checkpoint discovery and
+installation; the UI should not implement a second catch-up scheduler or derive receipt proofs.
+
+## Current availability and remaining acceptance
+
+| Canonical UI surface | Backend availability / next hook |
+|---|---|
+| Settlement chip / rotation progress | `settlement-changed` invalidates the actual phase/recovery listing. `open` does **not** mean the current edits are receipted. Current responses always say `provisional:true`. Do not synthesize receipt author/time or “settled” from epoch alone. |
+| Current owner has not confirmed history | Native Read/List return the distinct `awaitingTenureReceipt: true` preview documented above. Its base is never ordinary authoring authority. The candidate UI can retain edits in the separately labelled local-only Unconfirmed overlay, with exact retry or explicit re-authoring as the typed result directs. |
+| History fault / repair progress | Actual `phase:"fault"` and `fault` invalidations are available. The detached bounded repair runtime is merged and reviewed at its stated boundary, but it has no native command or `repairing` event. Restore/Copy saves ordinary content in an Open target and cannot clear Fault. Historical Read/Export remain available. |
+| Local overlay while rotating | Closing Flow S/handoff remains automatic and Shared Apply still refuses Closing/Fault. The registered lifecycle UI can inspect, export, preserve, copy or explicitly dispose retained work; it does not expose a direct Closing Save command. |
+| Manual lifecycle and preview-local Save | Registered in the accepted Gate 4 baseline. `eligibility`, `manualReason` and `unconfirmedState` drive truthful actions; awaiting-tenure edits use the ticketed Unconfirmed Save pair. `pending`/`busy` retry the same bytes, `paused` requires explicit access before the same request, `newTicket` requires explicit re-authoring, and `none` cannot be retried as success. This does not enable direct Closing Save or transferable Unconfirmed authority. |
+| Recovery rail: Restore / Copy / Export | List/inspect/backup export, per-item Restore/Copy and conservative own-intent replay are connected. Score historical OBJECT replay stays manual; SoundRecord backend recovery is implemented and separately reviewed; final combined verification is pending. Whole-version walks choose one effective value/removal per slot, not all alternatives or branch preservation. Backup export is not PIXA; final Gate 6 evidence is in `GATE6-ACCEPTANCE.md`. |
+| Eviction warning / countdown | Use the listing's actual warning pair/deadline and `studio_recovery_acknowledge`. Refresh after the action and matching `settlement-changed` events. |
+| Claims, Ask, Pass, countdown | **Gate 5 merged and owner-accepted in PR #43.** These are frontend-only call data, not a native command. `Studio.svelte` receives `claims: StudioClaimSnapshot \| null` and `claimActions` (`select`, `claim`, `autoClaim`, `release`, `ask`, `cancelAsk`, `pass`) from the app; INTERFACES section 13 is the contract. The snapshot is non-null only while the user is in a call on the Studio's own server and the Studio is the open view. Claims are advisory and never lock a frame or gate a save. Countdowns are receiver-observed (90 s; claims refresh every 30 s; Asks are sent once per peer). A frame a transport refused is retried, so an Ask or a Pass is not lost. A peer whose connection drops is hidden until it recovers. The local fixture claim table in `studio-store.ts` is not the protocol. |
+| Sound, linked Music, `.pixa` export | Connected in the Gate 6 integration candidate: typed causal/persistent sound/Score, production controls, actual-byte publication/record/readback, same-engine authored playback and local GIF. The inventory above states the callable hooks and honest export outcomes. Cumulative code review is clear; fresh root/native/startup and hosted verification remain pending; see `GATE6-ACCEPTANCE.md`. |
+
+Implementation progress and reuse evidence live in [BACKEND-IMPLEMENTATION](BACKEND-IMPLEMENTATION.md).
+UI hooks will be marked callable here only once their actor/native path and tests exist.
+
+## Recovery read/export/ack contract (Gate 4 worktree)
+
+The backend automatically considers this device's saved intents after checkpoint changes. It
+keeps the original author/nonce, requires complete retained recovery evidence and rechecks the
+current projection before each paced edit. It does not overwrite a newer header or frame value,
+resurrect a deleted id, infer causal order from hashes, or replay another member's edits.
+Conflicting or unsafe choices can leave the pending queue only after their full envelopes are
+verified in a durably flushed recovery snapshot. Show **needs recovery**, never **settled**.
+The existing two retained snapshots, staged warning, Restore/Copy/Export and eviction limits
+apply. An intent with no such evidence remains pending. Cold large referenced documents may
+require explicit recovery. Current-log accepted edits remain pending until covered by a receipt.
+
+Snapshot ids are 64 lowercase hex characters. Listing returns `kind:"recoveryList"`, `v:1`,
+`channel`, `object`, `source`, `versions`, `evictionPending` and `pendingIntents`.
+`source` is null for local absence, otherwise `{epochId, epoch, phase, provisional:true}`.
+Each version is `{snapshot, epoch, staged, bytes, reason}`; retained entries are newest-first,
+then the optional staged entry. Reasons are `excluded`, `rewound`, `conflictOverflow`, `repair`.
+Epochs are decimal strings. A pending intent can be an ordinary provisional Save; the count is
+**not** a count of lost or excluded edits. An unreadable live source currently makes List fail;
+Read/Export of a known retained snapshot do not depend on the live source being readable.
+
+`evictionPending` is null or `{oldestSnapshot, stagedSnapshot, deadlineMs}`. The deadline is a
+lossless decimal u64 string from the persisted receiver clock, not a locally invented countdown.
+Show the warning before acknowledging. The exact pair is retryable; a changed/stale pair refuses.
+The countdown is enforced, not decorative: acknowledgement only brings the eviction forward. Once
+`deadlineMs` passes, the next ordinary owner settlement pass promotes the staged version and drops
+the named oldest one with no acknowledgement at all, so offer Export while it is still running.
+Until then no settlement pass rewrites the record, so the ids and deadline survive restarts
+unchanged rather than restarting the grace.
+Acknowledgement returns `kind:"recoveryAcknowledged"` with the same listing fields. It changes
+local recovery slots only: it neither retires intents nor installs/prunes a document. Ordinary
+background settlement must still finish its own barriers afterward.
+
+Read returns `kind:"recoveryVersion"`, `historical:true`, `version` metadata and `content` in the
+same conflict-preserving projection shape as current views. Never replace the current view's
+epoch/phase with this historical projection. Inspect and export remain usable in Closing/Fault.
+Every retained/staged slot is authenticated and type/channel checked before an action; a corrupt
+unselected slot fails rather than being quietly discarded.
+
+Export returns `kind:"recoveryExport"`, `v:1`, `snapshot`, `format:"p1-recovery-v1"`, `bytes` and
+`bytesB64`. This is the existing canonical P1 recovery envelope: private historical content and
+operation evidence, **not** playable media, a published share, an archive of PIX blobs, or an
+implemented import command. All controls reuse Save's native operation cap, actor lease and
+session/incarnation fences. Do not retry on navigation/lock as though the original session survived.
+
+## Restore / Copy choices (current worktree)
+
+Whole-version recovery is a sequence of explicit domain edits, not an atomic replacement of the
+document. Use the historical Read projection to enumerate choices, preview each, apply ready
+choices, then re-read/re-preview before the next step. A partial sequence is saved content and
+must not be labelled an all-or-nothing Restore. Caps and missing local PIX bytes can refuse Save.
+Fetch missing frames through `request_blob_bounded` before applying; never invent a CID or size.
+
+`mode` is exactly `restore` (add only) or `copy` (user-confirmed mutable replacement/deletion).
+`choice` has an exact key set:
+
+| Choice | Fields besides `kind` | Meaning |
+|---|---|---|
+| `frame` | `id`, `value` | Stable frame id and original pixel value's `source.opId` |
+| `frameDeletion` | `id` | Explicitly apply a deletion recorded on that fork; requires Copy confirmation |
+| `title`, `fps` | `value` | Original register value's `source.opId`; headers never automatically Restore |
+| `object` | `id` | Add a missing Index entry, only if its same-channel object exists locally |
+| `objectTitle`, `objectExpiry` | `id`, `value` | Copy a specific historical mutable Index value |
+| `objectDeletion` | `id` | Explicit fork deletion; requires Copy confirmation |
+
+Element ids are 32 lowercase hex; `value` and snapshot ids are 64 lowercase hex. For a whole-version
+Restore use selected pixel values, not the initial insertion blob. A missing frame's predecessor
+resolves to its recorded live predecessor, otherwise the current end. Deleted ids are not silently
+resurrected, even in Copy mode. Immutable Index kind/creator/time are never overwritten. A restored
+Index insertion is authored by the restoring member; `originalAuthor` is historical attribution,
+not an authorization claim or the new operation's signer.
+
+Preview returns `kind:"recoveryPreview"`, `snapshot`, `epochId`, `expectedProjection`,
+`disposition`, `body` and `originalAuthor`. Dispositions: `ready`, `unchanged`, `conflict`,
+`deleted`, `full`, `missingTarget`. Only Ready carries a canonical JSON body string. A preview is
+not a storage reservation. `expectedProjection` covers all current conflict/deletion/provenance
+data, not just visible pixels; Apply also rechecks every retained/staged recovery slot.
+
+Apply's `edit` is `{snapshot, choice, mode, epochId, expectedProjection, nonce, body}`. Echo the
+preview exactly and choose a fresh 32-hex nonce. Retry that *same whole payload* after uncertain
+failure. Never rewrite its predecessor/body under the same nonce. A stale preview requires a
+new preview and new nonce. An exact own operation already saved in the current Open epoch can
+still retry after later edits or snapshot eviction; a pending intent alone cannot bypass checks.
+Success is `{v:1, kind:"recoveryApplied", contentSaved:true, alreadySaved, provisional:true,
+pointerRestored:false}`. Re-read current state. No remote delivery or owner settlement is implied.
+
+After content recovery, restore the affected document's pointer separately. For an Index `object`
+choice, call pointer restoration with that object's id (not just the Index). Omit `object` to
+restore the Index's own pointer when needed. Success is `kind:"recoveryPointerRestored"` with
+`checkpointEpoch` (decimal string), `registryEpochId` (32-hex), channel/object and `provisional:true`.
+Historical Registry deletion requires this explicit action; ordinary idle refresh still refuses
+it. A current tombstone waits for Registry rotation; Closing/Fault, a full bucket, missing source
+or a pointer to a newer checkpoint refuses. Content already saved stays saved: show the pointer
+step as pending/blocked and retry it separately, not "Restore completed".

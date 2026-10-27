@@ -469,14 +469,17 @@ checksum = "8ae3f5d315924270530207e2a68396c3cc547f6dca3fbdca317cfb1a51edb593"
 name = "catcoms-app"
 version = "0.0.0"
 dependencies = [
+ "async-trait",
  "automerge",
  "base64",
  "blake3",
+ "bytes",
  "catcoms-crypto",
  "catcoms-discovery",
  "catcoms-log",
  "catcoms-mls",
  "catcoms-net",
+ "catcoms-replication",
  "catcoms-rt",
  "catcoms-storage",
  "catcoms-sync",
@@ -485,10 +488,12 @@ dependencies = [
  "libp2p",
  "rand_chacha 0.3.1",
  "rand_core 0.6.4",
+ "serde_json",
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
  "tracing",
+ "windows-sys 0.61.2",
  "zeroize",
 ]
 
@@ -594,10 +599,13 @@ dependencies = [
  "catcoms-rt",
  "catcoms-storage",
  "catcoms-wire",
+ "hmac",
  "rand_chacha 0.3.1",
  "rand_core 0.6.4",
+ "serde_json",
  "sha2 0.10.9",
  "thiserror 2.0.18",
+ "zeroize",
 ]
 
 [[package]]
@@ -652,6 +660,7 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "tracing",
+ "tracing-subscriber",
  "zeroize",
 ]
 
@@ -4180,9 +4189,9 @@ dependencies = [
 
 [[package]]
 name = "quinn-proto"
-version = "0.11.17"
+version = "0.11.18"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "04759210543be93709136e28212294a659ef5001836ff4eab4d663e4529bba83"
+checksum = "a9746dbde176634f4f2f1faf2404e30a31b2bc1e9cafb5329c95d8177a18c9fc"
 dependencies = [
  "bytes",
  "getrandom 0.4.3",
@@ -4546,9 +4555,9 @@ dependencies = [
 
 [[package]]
 name = "rustls"
-version = "0.23.40"
+version = "0.23.46"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ef86cd5876211988985292b91c96a8f2d298df24e75989a43a3c73f2d4d8168b"
+checksum = "48e13bd8c0e9365c43cfa5c9e8f9ad49d3c8444926c9aac819e0e4dc503c8fdf"
 dependencies = [
  "once_cell",
  "ring",
@@ -4570,9 +4579,9 @@ dependencies = [
 
 [[package]]
 name = "rustls-webpki"
-version = "0.103.13"
+version = "0.103.15"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "61c429a8649f110dddef65e2a5ad240f747e85f7758a6bccc7e5777bd33f756e"
+checksum = "f3c3cf1d8b1e7d4927e2d154c3fcb02979afb9939629c62cd9048d4f07b60ac2"
 dependencies = [
  "ring",
  "rustls-pki-types",
@@ -4990,7 +4999,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
 dependencies = [
  "fastrand",
- "getrandom 0.4.3",
+ "getrandom 0.3.4",
  "once_cell",
  "rustix",
  "windows-sys 0.61.2",

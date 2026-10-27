@@ -1,4 +1,4 @@
-import { JAM_HELD_PER_PEER, JAM_REMOTE_HOLD_MAX_MS, JAM_VOICES_GLOBAL } from "./jam-contract.ts";
+import { JAM_HELD_PER_PEER, JAM_REMOTE_HOLD_MAX_MS, JAM_VOICES_GLOBAL, TAKE_MAX_DURATION_MS } from "./jam-contract.ts";
 
 export type JamVoicePhase = "held" | "tail";
 export type JamVoiceEndReason = "stolen" | "source-reset" | "engine-dispose";
@@ -11,6 +11,8 @@ export type JamVoiceRequest = Readonly<{
   owner?: string;
   phase: JamVoicePhase;
   startedAtMs: number;
+  /** Receiver-computed remaining archival hold; omitted keeps the live 30-second watchdog. */
+  holdMs?: number;
   /** Must synchronously disconnect every node owned by the voice. */
   teardown: (reason: JamVoiceEndReason) => void;
 }>;
@@ -21,6 +23,7 @@ type AllocatedVoice = {
   owner: string;
   phase: JamVoicePhase;
   startedAtMs: number;
+  holdMs: number;
   releasedAtMs: number | null;
   teardown: (reason: JamVoiceEndReason) => void;
 };
@@ -47,6 +50,8 @@ export class JamVoiceAllocator {
       throw new TypeError("voice allocation needs a stable id, source, owner and monotonic start time");
     }
     if (request.phase !== "held" && request.phase !== "tail") throw new TypeError("invalid voice phase");
+    const holdMs = request.holdMs ?? JAM_REMOTE_HOLD_MAX_MS;
+    if (!Number.isFinite(holdMs) || holdMs < 0 || holdMs > TAKE_MAX_DURATION_MS) throw new TypeError("invalid bounded voice hold");
     if (request.phase === "held" && this.countOwner(owner, "held") >= JAM_HELD_PER_PEER) {
       return { ok: false, reason: "source-held" };
     }
@@ -63,6 +68,7 @@ export class JamVoiceAllocator {
     this.voices.set(request.id, {
       ...request,
       owner,
+      holdMs,
       releasedAtMs: request.phase === "tail" ? request.startedAtMs : null,
     });
     return { ok: true, stolen };
@@ -86,7 +92,7 @@ export class JamVoiceAllocator {
   expiredHeld(nowMs: number): string[] {
     if (!Number.isFinite(nowMs)) return [];
     return [...this.voices.values()]
-      .filter((voice) => voice.phase === "held" && nowMs - voice.startedAtMs >= JAM_REMOTE_HOLD_MAX_MS)
+      .filter((voice) => voice.phase === "held" && nowMs - voice.startedAtMs >= voice.holdMs)
       .sort(compareAge)
       .map((voice) => voice.id);
   }

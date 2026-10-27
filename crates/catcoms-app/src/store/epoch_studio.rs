@@ -1,0 +1,1109 @@
+//! Accounted, vault-sealed Index/art Save/Load. This adapter owns both durability barriers;
+//! it returns prepared ciphertext, never a network-send permit or proof of owner settlement.
+
+use super::epoch_budget::{
+    EpochStorageBudget, Footprint, Replacement, StorageRecord, StorageScope, WritePurpose,
+};
+use super::epoch_recovery::inventory::{is_link, regular_file};
+use super::epoch_recovery::AuthenticatedEpochFileBytes;
+use super::*;
+use catcoms_mls::{MlsDevice, ServerGroup};
+use catcoms_replication::epoch::{MAX_RECEIPT_BYTES, MAX_SIGNED_EPOCH_OP_BYTES};
+use catcoms_replication::studio::{
+    FlipnoteOp, IndexOp, ScoreOp, StudioEpoch, StudioProjection, StudioTarget,
+    MAX_STUDIO_EPOCH_SNAPSHOT_BYTES,
+};
+use catcoms_replication::{
+    Admission, DomainOp, EpochPhase, LogicalDocument, Receipt, ReceiptIngest, SealedOp,
+};
+use std::io::Read;
+use std::sync::Arc;
+
+mod adoption;
+mod discovery;
+mod handoff;
+pub(crate) use handoff::StudioHandoffStart;
+pub(in crate::store) mod copy_capture;
+mod eligibility;
+mod handoff_capture;
+pub(crate) use handoff_capture::{
+    SigningSlice, StudioHandoffCapture, StudioHandoffCommit, StudioHandoffPlan,
+    StudioHandoffPrepareFailure, StudioHandoffStamp, MAX_SIGNING_TURNS_PER_VISIT,
+    SIGNING_SLICE_BUDGET_MS,
+};
+mod overlay;
+pub(crate) use overlay::StudioOverlayStart;
+mod overlay_capture;
+pub(crate) use overlay_capture::{
+    StudioOverlayCapture, StudioOverlayMint, StudioOverlayPlan, StudioOverlayStamp,
+};
+mod preparation;
+mod recovery_disposition;
+mod registry;
+mod repair;
+pub use repair::{StudioFaultEvidence, StudioRepairOutcome, StudioRepairRequest};
+mod resolution;
+pub(crate) use resolution::{
+    StudioResolveCapture, StudioResolvePlan, StudioResolveStart, StudioResolved,
+};
+mod rotation;
+pub use adoption::StudioAdoptionOutcome;
+#[cfg(test)]
+pub(crate) use rotation::interruption::{StudioRotationBoundary, StudioRotationInterruption};
+pub use rotation::StudioRotationOutcome;
+mod receive;
+pub(crate) use preparation::{PreparedStudioSource, StudioSourceCapture};
+pub(super) mod source;
+pub use receive::StudioPageAdmission;
+
+pub(super) const RECORD_DOMAIN: &[u8] = b"catcoms/epoch-studio-store/v1";
+const MAX_RECORD_BYTES: usize = MAX_STUDIO_EPOCH_SNAPSHOT_BYTES + 1024;
+pub(super) const MAX_SEALED_BYTES: usize = MAX_RECORD_BYTES + 40;
+const MAX_INBOUND_CIPHERTEXT: usize = MAX_SIGNED_EPOCH_OP_BYTES + 4 + 16;
+
+// The detached source, its observed physical ledger entry (including actual absence), and
+// normalized restart bytes must travel together across the intent/source durability barriers.
+type CheckedStudioSource = (StudioEpoch, Option<StorageRecord>, Zeroizing<Vec<u8>>);
+
+/// Five-family coverage plus existing per-server/storage and vault-intent budgets. This is not
+/// a new budget algorithm. The caller must own the SOLE coordinator and forbid interleaved raw
+/// registry/recovery/owner writes; blobs and legacy snapshots are not covered by this inventory.
+/// A mount-local generation prevents duplicate wrappers/captured scans spending Studio bytes.
+pub struct EpochStudioBudget {
+    scope: StorageScope,
+    generation: Arc<()>,
+    storage: EpochStorageBudget,
+    intents: EpochIntentBudget,
+}
+impl std::fmt::Debug for EpochStudioBudget {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("EpochStudioBudget")
+            .field("storage", &self.storage)
+            .finish_non_exhaustive()
+    }
+}
+impl EpochStudioBudget {
+    /// Accounted physical P1 bytes for this server, excluding blobs/legacy snapshot families.
+    pub fn usage(&self) -> Footprint {
+        self.storage.usage()
+    }
+    /// Test-only: occupy design 8.3's Unconfirmed rails; see the intent budget's own hook.
+    #[cfg(test)]
+    pub(crate) fn occupy_unconfirmed_rails_for_test(
+        &mut self,
+        server: u64,
+        branches: u8,
+        room: u64,
+    ) {
+        self.intents
+            .occupy_unconfirmed_for_test(server, branches, room);
+    }
+    /// Test-only: the Unconfirmed tally this budget holds, as (server, bytes) per record.
+    #[cfg(test)]
+    pub(crate) fn unconfirmed_tally_for_test(&self) -> Vec<(u64, u64)> {
+        self.intents.unconfirmed_for_test()
+    }
+    /// Reports uncertain accounting, not whether a newer mint superseded this wrapper. Every
+    /// mutation independently checks the store's live generation before spending any bytes.
+    pub fn requires_reconciliation(&self) -> bool {
+        self.storage.requires_reconciliation()
+    }
+}
+/// Detached read-only persisted state. No mutable document/gate/book escapes the store.
+#[derive(Debug)]
+pub struct EpochStudioState {
+    unit: StudioEpoch,
+    // Exact authenticated/written wrapper, separate from the normalized restart snapshot.
+    source: Option<source::SourceVersion>,
+}
+impl EpochStudioState {
+    /// Exact current signed-log envelopes, never seed-attributed values.
+    pub(crate) fn current_operations(
+        &self,
+    ) -> Result<std::collections::BTreeMap<[u8; 32], catcoms_replication::LocalIntent>, AppError>
+    {
+        self.unit.current_operations().map_err(invalid)
+    }
+    /// Complete retained signed-envelope comparison; never use projection/marker equality to
+    /// infer a retry. This read-only evidence does not replace the store's edit/flush barriers.
+    pub fn contains_exact_operation(
+        &self,
+        author: catcoms_crypto::DeviceId,
+        operation: &DomainOp,
+    ) -> Result<bool, AppError> {
+        self.unit
+            .contains_exact_operation(author, operation)
+            .map_err(invalid)
+    }
+    pub fn doc_id(&self) -> u128 {
+        self.unit.doc_id()
+    }
+    pub fn epoch(&self) -> u64 {
+        self.unit.epoch()
+    }
+    pub fn phase(&self) -> EpochPhase {
+        self.unit.phase()
+    }
+    pub fn op_count(&self) -> usize {
+        self.unit.op_count()
+    }
+    pub fn quarantined_len(&self) -> usize {
+        self.unit.quarantined_len()
+    }
+    pub fn projection(&self) -> Result<StudioProjection, AppError> {
+        self.unit.projection().map_err(invalid)
+    }
+}
+impl ServerStore {
+    /// Use the SAME live five-family budget for a registry protocol transaction. No second
+    /// mutable accounting owner escapes; the generation and full server scope are checked first.
+    pub(crate) fn with_studio_protocol_budget<V>(
+        &mut self,
+        server: u64,
+        group: &ServerGroup,
+        budget: &mut EpochStudioBudget,
+        work: impl FnOnce(&mut Self, &mut EpochStorageBudget) -> Result<V, AppError>,
+    ) -> Result<V, AppError> {
+        self.enter_studio_budget(server, group, budget)?;
+        work(self, &mut budget.storage)
+    }
+    /// Scope-only custody adapter for callbacks that themselves borrow the live Server and
+    /// recheck membership. This grants accounting access, never group/receipt authority.
+    pub(crate) fn with_studio_protocol_scope<V>(
+        &mut self,
+        server: u64,
+        group_id: &[u8],
+        budget: &mut EpochStudioBudget,
+        work: impl FnOnce(&mut Self, &mut EpochStorageBudget) -> Result<V, AppError>,
+    ) -> Result<V, AppError> {
+        self.enter_studio_budget_scope(server, group_id, budget)?;
+        work(self, &mut budget.storage)
+    }
+    /// Mint once from a completed CURRENT five-family scan. Minting again requires a new scan
+    /// and supersedes the previous wrapper; reopening the vault invalidates all old handles.
+    ///
+    /// "Current" includes the inventory generation (C-3 runtime design, S-2): an inventory
+    /// finished before any five-family write cannot mint after it. Within one visit the finish and
+    /// the mint are adjacent, so this changes nothing there; it is what keeps a finish in one
+    /// visit and a mint in a later one from minting a budget for a vault that has since changed.
+    pub fn studio_storage_budget(
+        &mut self,
+        server: u64,
+        group: &ServerGroup,
+        inventory: &EpochStorageInventory,
+    ) -> Result<EpochStudioBudget, AppError> {
+        if inventory.coverage()
+            != EpochInventoryCoverage::RecoveryOwnerReceiptsIntentsRegistryAndStudio
+            || !Arc::ptr_eq(&inventory.studio_generation, &self.studio_generation)
+            || !Arc::ptr_eq(&inventory.intent_generation, &self.intent_generation)
+            || !Arc::ptr_eq(&inventory.inventory_generation, &self.inventory_generation)
+        {
+            return Err(invalid("fresh five-family inventory required"));
+        }
+        let scope = StorageScope::new(server, &group.group_id()).map_err(invalid)?;
+        let storage = EpochStorageBudget::from_inventory(
+            scope.clone(),
+            inventory.records_for_server(server, &group.group_id())?,
+        )
+        .map_err(invalid)?;
+        let intents = EpochIntentBudget::from_inventory(inventory)?;
+        self.studio_generation = Arc::new(());
+        Ok(EpochStudioBudget {
+            scope,
+            generation: self.studio_generation.clone(),
+            storage,
+            intents,
+        })
+    }
+    fn enter_studio_budget(
+        &mut self,
+        server: u64,
+        group: &ServerGroup,
+        budget: &mut EpochStudioBudget,
+    ) -> Result<(), AppError> {
+        self.enter_studio_budget_scope(server, &group.group_id(), budget)
+    }
+    fn enter_studio_budget_scope(
+        &mut self,
+        server: u64,
+        group_id: &[u8],
+        budget: &mut EpochStudioBudget,
+    ) -> Result<(), AppError> {
+        if budget.scope != StorageScope::new(server, group_id).map_err(invalid)?
+            || !Arc::ptr_eq(&budget.generation, &self.studio_generation)
+        {
+            budget.storage.invalidate();
+            return Err(invalid(
+                "Studio budget is stale or belongs to another mount/server",
+            ));
+        }
+        if budget.storage.requires_reconciliation() {
+            return Err(invalid("Studio inventory requires reconciliation"));
+        }
+        // Even unchanged-file flush attempts invalidate captured inventories. The active owner
+        // keeps its token; failed reservations independently require a fresh disk reconciliation.
+        self.studio_generation = Arc::new(());
+        budget.generation = self.studio_generation.clone();
+        Ok(())
+    }
+    /// Bounded read-only vault restore. Only actual absence returns None; malformed/incoherent
+    /// state is an error, never an invitation to overwrite it with a fresh epoch-zero document.
+    /// Test-only: perform the second half of an owner rotation for a source that has ALREADY
+    /// been sealed, which `rotate_studio_owner` refuses because it seals as part of its own
+    /// transaction. This is the same sequence the store's own rotation fixtures run; it exists so
+    /// tests outside `crate::store` can reach the post-seal successor state. It adds no
+    /// production surface and grants no authority.
+    #[cfg(test)]
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn install_sealed_studio_successor_for_test(
+        &mut self,
+        server: u64,
+        group: &ServerGroup,
+        target: StudioTarget,
+        device: &MlsDevice,
+        close: &catcoms_replication::CloseRecord,
+        rng: &mut impl CryptoRngCore,
+        budget: &mut EpochStudioBudget,
+    ) -> Result<EpochStudioState, AppError> {
+        let mut state = self
+            .load_studio_epoch(server, group, target, device)?
+            .ok_or_else(|| invalid("no installed source"))?;
+        let plan = state
+            .unit
+            .prepare_settlement(close, group, 0)
+            .map_err(invalid)?;
+        self.retire_studio_intents_with_io(
+            server,
+            &plan,
+            rng,
+            &mut budget.storage,
+            &mut budget.intents,
+            &mut WriteHooks::None,
+        )?;
+        let observed = state.source.as_ref().map(source::SourceVersion::record);
+        let before = state.unit.snapshot().map_err(invalid)?;
+        let next = state
+            .unit
+            .checkpoint_successor(&plan, group, 0)
+            .map_err(invalid)?;
+        self.save_studio_source(
+            server,
+            next,
+            observed,
+            &before,
+            WritePurpose::Settlement,
+            rng,
+            &mut budget.storage,
+            WriteStep::new(WriteTag::Source),
+            &mut WriteHooks::None,
+        )
+    }
+
+    /// Test-only: where `target`'s source record lives, so a test outside `crate::store` can model
+    /// an object that was cleaned up underneath a caller. The store has no deletion path for a
+    /// Studio source, and the copy probe exists precisely for one that disappeared anyway. Adds no
+    /// production surface.
+    #[cfg(test)]
+    pub(crate) fn studio_source_path_for_test(
+        &self,
+        server: u64,
+        group: &ServerGroup,
+        target: StudioTarget,
+    ) -> Result<PathBuf, AppError> {
+        let logical = target.document(&group.group_id()).map_err(invalid)?;
+        Ok(self.studio_epoch_path(&scope_bytes(server, &logical)?))
+    }
+
+    pub fn load_studio_epoch(
+        &self,
+        server: u64,
+        group: &ServerGroup,
+        target: StudioTarget,
+        device: &MlsDevice,
+    ) -> Result<Option<EpochStudioState>, AppError> {
+        let logical = target.document(&group.group_id()).map_err(invalid)?;
+        let scope = scope_bytes(server, &logical)?;
+        self.read_studio_record(&scope)?
+            .map(|bytes| {
+                self.check_studio_intent_link(server, &logical, &scope, &bytes.plain)?;
+                let (stored, snapshot) = decode_record(&bytes.plain, &scope, &logical)?;
+                if stored != target {
+                    return Err(invalid("wrong object channel"));
+                }
+                let unit = source::restore_unit(snapshot, group, target, device.device_id())?;
+                let source =
+                    self.studio_source_version(server, &unit, &bytes.plain, bytes.physical_bytes)?;
+                Ok(EpochStudioState {
+                    unit,
+                    source: Some(source),
+                })
+            })
+            .transpose()
+    }
+    /// Preserve nonce/envelope and concrete expected_doc_id across retry. This saves the intent
+    /// before the epoch and only then returns ciphertext. Reference holds precede persistence;
+    /// this does not publish, fetch, or establish that the referenced bytes are present.
+    #[allow(clippy::too_many_arguments)]
+    pub fn edit_studio_epoch(
+        &mut self,
+        server: u64,
+        group: &ServerGroup,
+        target: StudioTarget,
+        expected_doc_id: u128,
+        device: &MlsDevice,
+        operation: DomainOp,
+        ts: u64,
+        rng: &mut impl CryptoRngCore,
+        budget: &mut EpochStudioBudget,
+    ) -> Result<(SealedOp, EpochStudioState), AppError> {
+        self.edit_studio_with_io(
+            server,
+            group,
+            target,
+            expected_doc_id,
+            device,
+            operation,
+            ts,
+            rng,
+            budget,
+            WriteStep::new(WriteTag::Intents),
+            &mut WriteHooks::None,
+        )
+    }
+    #[allow(clippy::too_many_arguments)]
+    fn edit_studio_with_io(
+        &mut self,
+        server: u64,
+        group: &ServerGroup,
+        target: StudioTarget,
+        expected_doc_id: u128,
+        device: &MlsDevice,
+        operation: DomainOp,
+        ts: u64,
+        rng: &mut impl CryptoRngCore,
+        budget: &mut EpochStudioBudget,
+        intent_step: WriteStep,
+        hooks: &mut WriteHooks<'_>,
+    ) -> Result<(SealedOp, EpochStudioState), AppError> {
+        let logical = target.document(&group.group_id()).map_err(invalid)?;
+        match target {
+            StudioTarget::Index { .. } => {
+                IndexOp::decode_domain(&logical, &operation, &device.device_id())
+                    .map_err(invalid)?;
+            }
+            StudioTarget::Flipnote { .. } => {
+                FlipnoteOp::decode_domain(&logical, &operation).map_err(invalid)?;
+            }
+            StudioTarget::Score { .. } => {
+                ScoreOp::decode_domain(&logical, &operation).map_err(invalid)?;
+            }
+        }
+        current_member(group, device)?;
+        self.enter_studio_budget(server, group, budget)?;
+        // Verify observed presence OR absence before the intent barrier. A lost indexed epoch
+        // cannot silently become a fresh epoch-zero document with a newly stranded intent.
+        let (mut unit, observed, before) =
+            self.checked_studio_source(server, group, target, device, true, &mut budget.storage)?;
+        if unit.doc_id() != expected_doc_id {
+            return Err(invalid("edit belongs to a retired epoch"));
+        }
+        unit.validate_local_edit(device, group, &operation, ts)
+            .map_err(invalid)?;
+        self.prepare_epoch_intent_with_io(
+            server,
+            &logical,
+            operation.clone(),
+            device,
+            group,
+            rng,
+            &mut budget.storage,
+            &mut budget.intents,
+            intent_step,
+            hooks,
+        )?;
+        // The same exclusive store borrow retains this checked detached source across both
+        // barriers. Intent persistence cannot mutate the Studio source. Failure keeps the intent.
+        let sealed = unit
+            .edit_or_reseal(device, group, rng, &operation, ts)
+            .map_err(invalid)?;
+        let state = self.save_studio_source(
+            server,
+            unit,
+            observed,
+            &before,
+            WritePurpose::Ordinary,
+            rng,
+            &mut budget.storage,
+            WriteStep::new(WriteTag::Epoch),
+            hooks,
+        )?;
+        Ok((sealed, state))
+    }
+    /// Saved Duplicate/Late results cross a flush barrier too. Late is quarantine, not edit ack.
+    #[allow(clippy::too_many_arguments)]
+    pub fn ingest_studio_epoch(
+        &mut self,
+        server: u64,
+        group: &ServerGroup,
+        target: StudioTarget,
+        device: &MlsDevice,
+        sealed: &SealedOp,
+        rng: &mut impl CryptoRngCore,
+        budget: &mut EpochStudioBudget,
+    ) -> Result<(Admission, EpochStudioState), AppError> {
+        if sealed.blob.ciphertext.len() > MAX_INBOUND_CIPHERTEXT {
+            return Err(invalid("inbound ciphertext too large"));
+        }
+        current_member(group, device)?;
+        self.enter_studio_budget(server, group, budget)?;
+        let (mut unit, observed, before) =
+            self.checked_studio_source(server, group, target, device, true, &mut budget.storage)?;
+        let outcome = unit.ingest(sealed, group, device).map_err(invalid)?;
+        let state = self.save_studio_source(
+            server,
+            unit,
+            observed,
+            &before,
+            WritePurpose::Ordinary,
+            rng,
+            &mut budget.storage,
+            WriteStep::new(WriteTag::Source),
+            &mut WriteHooks::None,
+        )?;
+        Ok((outcome, state))
+    }
+    /// Persist receipt/book/gate together, including a typed Fault outcome, with full source
+    /// history retained. This does NOT produce receipts, settle/replace epochs, or prune anything.
+    #[allow(clippy::too_many_arguments)]
+    pub fn seal_studio_epoch(
+        &mut self,
+        server: u64,
+        group: &ServerGroup,
+        target: StudioTarget,
+        device: &MlsDevice,
+        receipt: Receipt,
+        tenure_start: u64,
+        rng: &mut impl CryptoRngCore,
+        budget: &mut EpochStudioBudget,
+    ) -> Result<(ReceiptIngest, EpochStudioState), AppError> {
+        self.seal_studio_with_io(
+            server,
+            group,
+            target,
+            device,
+            receipt,
+            tenure_start,
+            rng,
+            budget,
+            WriteStep::new(WriteTag::Source),
+            &mut WriteHooks::None,
+        )
+    }
+    #[allow(clippy::too_many_arguments)]
+    fn seal_studio_with_io(
+        &mut self,
+        server: u64,
+        group: &ServerGroup,
+        target: StudioTarget,
+        device: &MlsDevice,
+        receipt: Receipt,
+        tenure_start: u64,
+        rng: &mut impl CryptoRngCore,
+        budget: &mut EpochStudioBudget,
+        step: WriteStep,
+        hooks: &mut WriteHooks<'_>,
+    ) -> Result<(ReceiptIngest, EpochStudioState), AppError> {
+        let logical = target.document(&group.group_id()).map_err(invalid)?;
+        scope_bytes(server, &receipt.document)?;
+        if receipt.document != logical
+            || receipt.owner_public_key.len() != 32
+            || receipt.encode().len() > MAX_RECEIPT_BYTES
+        {
+            return Err(invalid("receipt exceeds scope/bounds"));
+        }
+        current_member(group, device)?;
+        // Reject forged/stale authority before expensive signed-log reconstruction or changing
+        // inventory generations. The owned unit rechecks under its gate before mutation.
+        receipt
+            .verify_current_owner(group, tenure_start)
+            .map_err(invalid)?;
+        self.enter_studio_budget(server, group, budget)?;
+        let (mut unit, observed, before) =
+            self.checked_studio_source(server, group, target, device, false, &mut budget.storage)?;
+        let outcome = unit.seal(receipt, group, tenure_start).map_err(invalid)?;
+        let state = self.save_studio_source(
+            server,
+            unit,
+            observed,
+            &before,
+            WritePurpose::Settlement,
+            rng,
+            &mut budget.storage,
+            step,
+            hooks,
+        )?;
+        Ok((outcome, state))
+    }
+    #[allow(clippy::too_many_arguments)]
+    fn checked_studio_source(
+        &self,
+        server: u64,
+        group: &ServerGroup,
+        target: StudioTarget,
+        device: &MlsDevice,
+        allow_create: bool,
+        budget: &mut EpochStorageBudget,
+    ) -> Result<CheckedStudioSource, AppError> {
+        let logical = target.document(&group.group_id()).map_err(invalid)?;
+        let scope = scope_bytes(server, &logical)?;
+        let loaded = (|| {
+            let held = self.read_studio_record(&scope)?;
+            let mut unit = match &held {
+                Some(bytes) => {
+                    self.check_studio_intent_link(server, &logical, &scope, &bytes.plain)?;
+                    let (stored, snapshot) = decode_record(&bytes.plain, &scope, &logical)?;
+                    if stored != target {
+                        return Err(invalid("wrong object channel"));
+                    }
+                    source::restore_unit(snapshot, group, target, device.device_id())?
+                }
+                None => StudioEpoch::new(group, target, device.device_id()).map_err(invalid)?,
+            };
+            let observed = held
+                .as_ref()
+                .map(|b| {
+                    storage_record(
+                        server,
+                        &logical,
+                        &scope,
+                        b.physical_bytes,
+                        unit.storage_protocol_bytes().map_err(invalid)?,
+                    )
+                })
+                .transpose()?;
+            let before = Zeroizing::new(unit.snapshot().map_err(invalid)?);
+            Ok((unit, observed, before))
+        })();
+        let (unit, observed, before) = loaded.inspect_err(|_| {
+            budget.invalidate();
+        })?;
+        budget
+            .verify_record(
+                &StorageScope::new(server, &logical.server_id).map_err(invalid)?,
+                *blake3::hash(&scope).as_bytes(),
+                observed,
+            )
+            .map_err(invalid)?;
+        if observed.is_none() && !allow_create {
+            return Err(invalid("source missing; fetch before sealing"));
+        }
+        Ok((unit, observed, before))
+    }
+    #[allow(clippy::too_many_arguments)]
+    fn save_studio_source(
+        &mut self,
+        server: u64,
+        unit: StudioEpoch,
+        observed: Option<StorageRecord>,
+        before: &[u8],
+        purpose: WritePurpose,
+        rng: &mut impl CryptoRngCore,
+        budget: &mut EpochStorageBudget,
+        step: WriteStep,
+        hooks: &mut WriteHooks<'_>,
+    ) -> Result<EpochStudioState, AppError> {
+        self.save_studio_source_reusing(
+            server, unit, observed, before, purpose, rng, budget, step, hooks, None,
+        )
+    }
+    #[allow(clippy::too_many_arguments)]
+    fn save_studio_source_reusing(
+        &mut self,
+        server: u64,
+        unit: StudioEpoch,
+        observed: Option<StorageRecord>,
+        before: &[u8],
+        purpose: WritePurpose,
+        rng: &mut impl CryptoRngCore,
+        budget: &mut EpochStorageBudget,
+        step: WriteStep,
+        hooks: &mut WriteHooks<'_>,
+        prior: Option<source::SourceVersion>,
+    ) -> Result<EpochStudioState, AppError> {
+        self.save_studio_source_checked(
+            server, unit, observed, before, purpose, rng, budget, step, hooks, prior, None,
+        )
+    }
+    #[allow(clippy::too_many_arguments)]
+    fn save_studio_source_checked(
+        &mut self,
+        server: u64,
+        mut unit: StudioEpoch,
+        observed: Option<StorageRecord>,
+        before: &[u8],
+        purpose: WritePurpose,
+        rng: &mut impl CryptoRngCore,
+        budget: &mut EpochStorageBudget,
+        step: WriteStep,
+        hooks: &mut WriteHooks<'_>,
+        prior: Option<source::SourceVersion>,
+        handoff: Option<&handoff::CheckedHandoffWrite>,
+    ) -> Result<EpochStudioState, AppError> {
+        let intent_link = self.check_studio_handoff_write(server, &mut unit, budget, handoff)?;
+        let scope = scope_bytes(server, unit.document())?;
+        // Add before either write/flush barrier, and keep holds even when persistence is uncertain.
+        self.hold_creative(
+            &unit.document().server_id,
+            unit.blob_cids().map_err(invalid),
+        );
+        let storage_scope =
+            StorageScope::new(server, &unit.document().server_id).map_err(invalid)?;
+        let snapshot = Zeroizing::new(unit.snapshot().map_err(invalid)?);
+        let path = self.studio_epoch_path(&scope);
+        let source = if let Some(record) = observed.filter(|_| before == snapshot.as_slice()) {
+            let reservation = budget
+                .reserve_sync(&storage_scope, record)
+                .map_err(invalid)?;
+            // I-4: unchanged Studio source still flushes, so it still rotates.
+            let bytes = record.footprint.total().map_err(invalid)?;
+            let mutation = self.epoch_mutation_guard();
+            hooks.before_sync(step.tag(), &path, bytes)?;
+            sync_studio(&mutation, &path, bytes)?;
+            hooks.after_sync(step.tag(), &path)?;
+            reservation.commit();
+            // Restore can normalize owner state without rewriting the file. Preserve its actual
+            // prior physical stamp, not a hash of the normalized in-memory snapshot.
+            prior
+        } else {
+            // A flush-only step reaching a replacement is a routing fault, not a write failure.
+            step.permit_replacement()?;
+            let mut e = Encoder::new();
+            e.put_bytes(&scope).map_err(invalid)?;
+            e.put_bytes(&unit.target().channel()).map_err(invalid)?;
+            e.put_bytes(&snapshot).map_err(invalid)?;
+            if intent_link {
+                e.put_u8(1);
+            }
+            // Additive sealed-wrapper family tag. Existing art/Index bytes are identical;
+            // older readers refuse scores, rather than guessing from shared title bodies.
+            if matches!(unit.target(), StudioTarget::Score { .. }) {
+                e.put_u8(2);
+            }
+            let plain = Zeroizing::new(e.finish());
+            let record = storage_record(
+                server,
+                unit.document(),
+                &scope,
+                plain.len() as u64 + 40,
+                unit.storage_protocol_bytes().map_err(invalid)?,
+            )?;
+            let reservation = budget
+                .reserve(
+                    &storage_scope,
+                    Replacement {
+                        record,
+                        scratch_bytes: 0,
+                        purpose,
+                    },
+                )
+                .map_err(invalid)?;
+            let sealed = match self.keys.db_key().and_then(|key| seal(&key, &plain, rng)) {
+                Ok(value) => value,
+                Err(error) => {
+                    reservation.cancel_before_write();
+                    return Err(error.into());
+                }
+            };
+            // I-4: rotate before the write, never after it succeeds.
+            let framed = frame(&sealed);
+            let mutation = self.epoch_mutation_guard();
+            let framed = hooks.before(step.tag(), &path, &framed)?;
+            let original_plain =
+                matches!(&framed, std::borrow::Cow::Borrowed(_)).then_some(plain.as_slice());
+            let write = mutation.write(&path, &framed);
+            self.finish_inventory_write_from_record(
+                write,
+                super::epoch_recovery::inventory::EpochRecordKind::Studio,
+                original_plain,
+                plain.len() as u64 + 40,
+                record,
+            )?;
+            hooks.after_write(step.tag(), &path)?;
+            reservation.commit();
+            Some(self.studio_source_version(server, &unit, &plain, plain.len() as u64 + 40)?)
+        };
+        Ok(EpochStudioState { unit, source })
+    }
+    fn studio_epoch_path(&self, scope: &[u8]) -> PathBuf {
+        self.dir
+            .join("servers")
+            .join(format!("{}.studio-epoch", blake3::hash(scope).to_hex()))
+    }
+    /// A local background-work refusal only. Metadata can refuse expensive target restoration,
+    /// never authorize it: the later ingest still authenticates and validates the actual source.
+    pub(crate) fn check_studio_receive_source_bound(
+        &self,
+        server: u64,
+        group: &[u8],
+        target: StudioTarget,
+    ) -> Result<(), AppError> {
+        if self.studio_receive_needs_preparation(server, group, target)? {
+            return Err(invalid(
+                "automatic Studio target source exceeds cold byte limit",
+            ));
+        }
+        Ok(())
+    }
+    /// Select detached preparation by local encoded size only. Small cold Index records keep
+    /// their existing bounded ingress path, which deliberately preserves a warm art graph.
+    /// A false result is not authority: the actual later read rechecks type, bounds and bytes.
+    pub(crate) fn studio_receive_needs_preparation(
+        &self,
+        server: u64,
+        group: &[u8],
+        target: StudioTarget,
+    ) -> Result<bool, AppError> {
+        let logical = target.document(group).map_err(invalid)?;
+        let scope = scope_bytes(server, &logical)?;
+        let parent = fs::symlink_metadata(self.dir.join("servers"))
+            .map_err(|e| AppError::Io(e.to_string()))?;
+        if !parent.is_dir() || is_link(&parent) {
+            return Err(invalid("parent is not a regular directory"));
+        }
+        let metadata = match fs::symlink_metadata(self.studio_epoch_path(&scope)) {
+            Ok(value) => value,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+            Err(e) => return Err(AppError::Io(e.to_string())),
+        };
+        if !regular_file(&metadata) {
+            return Err(invalid("automatic Studio target source is not regular"));
+        }
+        Ok(metadata.len() > super::epoch_recovery::inventory::STUDIO_RECEIVE_COLD_BYTES)
+    }
+    fn read_studio_record(
+        &self,
+        scope: &[u8],
+    ) -> Result<Option<AuthenticatedEpochFileBytes>, AppError> {
+        self.read_studio_record_bounded(scope, MAX_SEALED_BYTES)
+    }
+    fn read_studio_record_bounded(
+        &self,
+        scope: &[u8],
+        max: usize,
+    ) -> Result<Option<AuthenticatedEpochFileBytes>, AppError> {
+        let metadata = fs::symlink_metadata(self.dir.join("servers"))
+            .map_err(|e| AppError::Io(e.to_string()))?;
+        if !metadata.is_dir() || is_link(&metadata) {
+            return Err(invalid("parent is not a regular directory"));
+        }
+        self.read_epoch_studio_plain_bounded(&self.studio_epoch_path(scope), max)
+    }
+    pub(super) fn read_epoch_studio_plain(
+        &self,
+        path: &Path,
+    ) -> Result<Option<AuthenticatedEpochFileBytes>, AppError> {
+        self.read_epoch_studio_plain_bounded(path, MAX_SEALED_BYTES)
+    }
+    fn read_epoch_studio_plain_bounded(
+        &self,
+        path: &Path,
+        max: usize,
+    ) -> Result<Option<AuthenticatedEpochFileBytes>, AppError> {
+        let max = max.min(MAX_SEALED_BYTES);
+        let metadata = match fs::symlink_metadata(path) {
+            Ok(value) => value,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(e) => return Err(AppError::Io(e.to_string())),
+        };
+        if !regular_file(&metadata) || metadata.len() > max as u64 {
+            return Err(invalid("file is not bounded and regular"));
+        }
+        let file = File::open(path).map_err(|e| AppError::Io(e.to_string()))?;
+        if !regular_file(&file.metadata().map_err(|e| AppError::Io(e.to_string()))?) {
+            return Err(invalid("opened file not regular"));
+        }
+        let mut bytes = Vec::new();
+        file.take(max as u64 + 1)
+            .read_to_end(&mut bytes)
+            .map_err(|e| AppError::Io(e.to_string()))?;
+        if bytes.len() > max {
+            return Err(invalid("file exceeds bound"));
+        }
+        Ok(Some(AuthenticatedEpochFileBytes {
+            plain: Zeroizing::new(unseal(&self.keys.db_key()?, &unframe(&bytes)?)?),
+            physical_bytes: bytes.len() as u64,
+        }))
+    }
+}
+fn current_member(group: &ServerGroup, device: &MlsDevice) -> Result<(), AppError> {
+    if group.member_signature_key(&device.device_id()).as_deref()
+        != Some(device.public_key_bytes().as_slice())
+    {
+        return Err(invalid("local device is not a current member"));
+    }
+    Ok(())
+}
+fn decode_record<'a>(
+    bytes: &'a [u8],
+    scope: &[u8],
+    logical: &LogicalDocument,
+) -> Result<(StudioTarget, &'a [u8]), AppError> {
+    let (target, snapshot, _) = decode_record_link(bytes, scope, logical)?;
+    Ok((target, snapshot))
+}
+fn decode_record_link<'a>(
+    bytes: &'a [u8],
+    scope: &[u8],
+    logical: &LogicalDocument,
+) -> Result<(StudioTarget, &'a [u8], bool), AppError> {
+    if bytes.len() > MAX_RECORD_BYTES {
+        return Err(invalid("record exceeds bound"));
+    }
+    let mut d = Decoder::new(bytes);
+    if d.get_bytes().map_err(invalid)? != scope {
+        return Err(invalid("wrong sealed scope"));
+    }
+    let channel = d
+        .get_bytes()
+        .map_err(invalid)?
+        .try_into()
+        .map_err(|_| invalid("bad channel"))?;
+    let mut target = match logical.doc_type {
+        catcoms_wire::DocType::StudioIndex => StudioTarget::Index { channel },
+        catcoms_wire::DocType::StudioObject => StudioTarget::Flipnote {
+            channel,
+            object: logical
+                .logical_key
+                .as_slice()
+                .try_into()
+                .map_err(|_| invalid("bad object"))?,
+        },
+        _ => return Err(invalid("wrong type")),
+    };
+    if target.document(&logical.server_id).map_err(invalid)? != *logical {
+        return Err(invalid("wrong target"));
+    }
+    let snapshot = d.get_bytes().map_err(invalid)?;
+    let mut intent_link = false;
+    if !d.is_empty() {
+        let mut extension = d.get_u8().map_err(invalid)?;
+        if extension == 1 {
+            intent_link = true;
+            if d.is_empty() {
+                return Ok((target, snapshot, intent_link));
+            }
+            extension = d.get_u8().map_err(invalid)?;
+        }
+        if extension != 2 {
+            return Err(invalid("unknown Studio source extension"));
+        }
+        let StudioTarget::Flipnote { channel, object } = target else {
+            return Err(invalid("score family requires StudioObject"));
+        };
+        target = StudioTarget::Score { channel, object };
+    }
+    d.finish().map_err(invalid)?;
+    Ok((target, snapshot, intent_link))
+}
+/// A Studio source record's inventory key, `blake3(scope)`, for tests that count that one
+/// record's inline validations (`inline_studio_validations_for_test`) from outside the store.
+#[cfg(test)]
+pub(crate) fn studio_inventory_key_for_test(server: u64, document: &LogicalDocument) -> [u8; 32] {
+    *blake3::hash(&scope_bytes(server, document).unwrap()).as_bytes()
+}
+pub(super) fn scope_bytes(server: u64, document: &LogicalDocument) -> Result<Vec<u8>, AppError> {
+    if document.server_id.is_empty()
+        || document.server_id.len() > 256
+        || document.logical_key.len() != 16
+        || !matches!(
+            document.doc_type,
+            catcoms_wire::DocType::StudioIndex | catcoms_wire::DocType::StudioObject
+        )
+    {
+        return Err(invalid("invalid Studio scope"));
+    }
+    let mut e = Encoder::new();
+    e.put_bytes(RECORD_DOMAIN).expect("constant fits");
+    e.put_u64(server);
+    e.put_bytes(&document.server_id).map_err(invalid)?;
+    e.put_u16(document.doc_type.tag());
+    e.put_bytes(&document.logical_key).map_err(invalid)?;
+    Ok(e.finish())
+}
+pub(super) fn inventory_record(
+    bytes: &[u8],
+    server: u64,
+    document: &LogicalDocument,
+    scope: &[u8],
+    size: u64,
+) -> Result<StorageRecord, AppError> {
+    let (target, snapshot) = decode_record(bytes, scope, document)?;
+    let protocol = StudioEpoch::validate_vault_snapshot(snapshot, &document.server_id, target)
+        .map_err(invalid)?;
+    storage_record(server, document, scope, size, protocol)
+}
+pub(super) struct StudioInventoryReferences {
+    pub(super) record: StorageRecord,
+    pub(super) cids: std::collections::BTreeSet<[u8; 32]>,
+    pub(super) required_metadata: Option<StudioTarget>,
+}
+pub(super) fn inventory_references(
+    bytes: &[u8],
+    server: u64,
+    document: &LogicalDocument,
+    scope: &[u8],
+    size: u64,
+) -> Result<StudioInventoryReferences, AppError> {
+    let (target, snapshot, linked) = decode_record_link(bytes, scope, document)?;
+    let (protocol, cids) =
+        StudioEpoch::inspect_vault_references(snapshot, &document.server_id, target)
+            .map_err(invalid)?;
+    Ok(StudioInventoryReferences {
+        record: storage_record(server, document, scope, size, protocol)?,
+        cids,
+        required_metadata: linked.then_some(target),
+    })
+}
+fn storage_record(
+    server: u64,
+    document: &LogicalDocument,
+    scope: &[u8],
+    bytes: u64,
+    protocol: usize,
+) -> Result<StorageRecord, AppError> {
+    let protocol = protocol as u64;
+    Ok(StorageRecord {
+        id: *blake3::hash(scope).as_bytes(),
+        document: *blake3::hash(&super::epoch_recovery::scope_bytes(server, document)?).as_bytes(),
+        footprint: Footprint {
+            content: bytes
+                .checked_sub(protocol)
+                .ok_or_else(|| invalid("invalid protocol size"))?,
+            protocol,
+            settlement: 0,
+        },
+    })
+}
+pub(super) fn sync_studio(
+    m: &EpochMutation<'_>,
+    path: &Path,
+    expected: u64,
+) -> Result<(), AppError> {
+    let metadata = fs::symlink_metadata(path).map_err(|e| AppError::Io(e.to_string()))?;
+    if !regular_file(&metadata) || metadata.len() != expected {
+        return Err(invalid("retry file changed"));
+    }
+    let file = OpenOptions::new()
+        .write(true)
+        .open(path)
+        .map_err(|e| AppError::Io(e.to_string()))?;
+    let metadata = file.metadata().map_err(|e| AppError::Io(e.to_string()))?;
+    if !regular_file(&metadata) || metadata.len() != expected {
+        return Err(invalid("opened retry file changed"));
+    }
+    file.sync_all().map_err(|e| AppError::Io(e.to_string()))?;
+    m.sync_parent_io(path.parent().ok_or_else(|| invalid("missing parent"))?)
+        .map_err(|e| AppError::Io(e.to_string()))
+}
+fn invalid(error: impl std::fmt::Display) -> AppError {
+    AppError::Invalid(format!("epoch studio: {error}"))
+}
+
+#[cfg(test)]
+pub(crate) mod tests;
+
+impl ServerStore {
+    /// App-facing release: the same transaction with no hook injection, taking the studio budget the
+    /// caller already holds.
+    ///
+    /// The `_with_io` form stays private because `WriteHooks` is a store type and a caller outside
+    /// the store has no business naming it. Same shape as `handoff_studio_overlay` and its siblings.
+    pub(crate) fn release_studio_draft_archive(
+        &mut self,
+        server: u64,
+        document: &catcoms_replication::LogicalDocument,
+        expected_archive: [u8; 32],
+        budget: &mut EpochStudioBudget,
+    ) -> Result<(), AppError> {
+        self.release_studio_draft_archive_with_io(
+            server,
+            document,
+            expected_archive,
+            &mut budget.storage,
+            &mut budget.intents,
+            &mut WriteHooks::None,
+        )
+    }
+
+    /// App-facing disposal, likewise.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn dispose_studio_overlay(
+        &mut self,
+        server: u64,
+        document: &catcoms_replication::LogicalDocument,
+        target: StudioTarget,
+        group: &ServerGroup,
+        device: &MlsDevice,
+        request: crate::store::StudioOverlayDisposalRequest,
+        ts: u64,
+        rng: &mut impl CryptoRngCore,
+        budget: &mut EpochStudioBudget,
+    ) -> Result<catcoms_replication::studio::StudioOverlayDisposal, AppError> {
+        self.dispose_studio_overlay_with_io(
+            server,
+            document,
+            target,
+            group,
+            device,
+            request,
+            ts,
+            rng,
+            &mut budget.storage,
+            &mut budget.intents,
+            &mut WriteHooks::None,
+        )
+    }
+
+    /// App-facing archive write. The control layer holds a `StudioDraftArchive` built on the
+    /// detached worker and cannot reach `WriteHooks` or the budget halves.
+    ///
+    /// Writing is an insert or a replacement of one record, so unlike release it is an ordinary
+    /// reserving write: an exact retry after an uncertain outcome re-derives the same payload and
+    /// lands on the same record.
+    pub(crate) fn write_studio_draft_archive(
+        &mut self,
+        server: u64,
+        document: &catcoms_replication::LogicalDocument,
+        archive: &catcoms_replication::studio::StudioDraftArchive,
+        rng: &mut impl CryptoRngCore,
+        budget: &mut EpochStudioBudget,
+    ) -> Result<(), AppError> {
+        self.write_studio_draft_archive_with_io(
+            server,
+            document,
+            archive,
+            rng,
+            &mut budget.storage,
+            &mut budget.intents,
+            &mut WriteHooks::None,
+        )
+    }
+
+    /// App-facing archive read, so the control layer does not need store-private types.
+    pub(crate) fn read_studio_draft_archive_for_app(
+        &self,
+        server: u64,
+        document: &catcoms_replication::LogicalDocument,
+    ) -> Result<
+        Option<(
+            catcoms_replication::studio::StudioDraftArchive,
+            [u8; 32],
+            u64,
+        )>,
+        AppError,
+    > {
+        Ok(self
+            .read_studio_draft_archive(server, document)?
+            .map(|record| (record.archive, record.id, record.physical_bytes)))
+    }
+}

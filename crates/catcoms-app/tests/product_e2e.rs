@@ -40,6 +40,7 @@ use catcoms_app::{
     channel_id, peer_addrs_from_snapshot, spawn, AppEvent, Livery, Profile, ReconnectPolicy,
     Server, ServerActor, ServerNet, ServerStore, TracedEvent,
 };
+use catcoms_crypto::DeviceId;
 use catcoms_mls::{InviteToken, MlsDevice};
 use catcoms_rt::{Hub, ManualClock, PeerId};
 use catcoms_storage::Cid;
@@ -454,6 +455,18 @@ async fn two_members_found_invite_join_and_talk_both_ways() {
 
     assert_eq!(alice.actor.member_count().await, 2, "the roster grew");
     assert_eq!(bob.actor.member_count().await, 2);
+    assert_eq!(
+        alice.actor.group_mode().await.unwrap(),
+        catcoms_app::GroupMode::PeerToPeer
+    );
+    assert_eq!(
+        bob.actor.group_mode().await.unwrap(),
+        catcoms_app::GroupMode::PeerToPeer
+    );
+    assert_eq!(
+        invite.policy.as_ref().unwrap().mode(),
+        catcoms_app::GroupMode::PeerToPeer
+    );
 
     // Founder to joiner, live over the channel topic the joiner subscribed on open.
     alice.actor.send_message(general(), "welcome bob").await;
@@ -1620,13 +1633,29 @@ async fn owner_only_actions_are_refused_for_a_non_owner() {
         },
     )
     .await;
-    assert_eq!(roles.get(&alice.fp).map(String::as_str), Some("owner"));
-    assert_eq!(roles.get(&bob.fp).map(String::as_str), Some("member"));
+    let alice_id = alice
+        .actor
+        .members()
+        .await
+        .into_iter()
+        .find(|m| m.is_self)
+        .unwrap()
+        .identity;
+    let bob_id = bob
+        .actor
+        .members()
+        .await
+        .into_iter()
+        .find(|m| m.is_self)
+        .unwrap()
+        .identity;
+    assert_eq!(roles.get(&alice_id).map(String::as_str), Some("owner"));
+    assert_eq!(roles.get(&bob_id).map(String::as_str), Some("member"));
 
     // A plain member may not grant admin, may not kick, and may not invite.
     let err = bob
         .actor
-        .set_admin(bob.fp.clone(), true)
+        .set_admin(DeviceId::from_canonical_hex(&bob_id).unwrap(), true)
         .await
         .expect_err("a member cannot promote itself");
     assert!(err.contains("owner"), "the refusal names the reason: {err}");
@@ -1648,22 +1677,24 @@ async fn owner_only_actions_are_refused_for_a_non_owner() {
     assert_eq!(alice.actor.member_count().await, 2);
     assert_eq!(bob.actor.member_count().await, 2);
     assert_eq!(
-        bob.actor.roles().await.get(&bob.fp).map(String::as_str),
+        bob.actor.roles().await.get(&bob_id).map(String::as_str),
         Some("member")
     );
 
     // The owner can do it, and the grant reaches the member it was made about.
-    alice
+    let generation = alice
         .actor
-        .set_admin(bob.fp.clone(), true)
+        .set_admin(DeviceId::from_canonical_hex(&bob_id).unwrap(), true)
         .await
         .expect("the owner may grant admin");
+    // This harness owns an in-memory store; acknowledge its explicit authority transaction.
+    alice.actor.confirm_admin_persistence(generation).await;
     until(
         "the admin grant reaches the member it names",
         &mut bob.events,
         || async {
             let r = bob.actor.roles().await;
-            (r.get(&bob.fp).map(String::as_str) == Some("admin")).then_some(())
+            (r.get(&bob_id).map(String::as_str) == Some("admin")).then_some(())
         },
     )
     .await;

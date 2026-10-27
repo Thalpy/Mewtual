@@ -1,8 +1,28 @@
 # Releasing Mewtual
 
-Mewtual ships as an unsigned Windows NSIS installer built by
-[`.github/workflows/release.yml`](../.github/workflows/release.yml), and installed copies update
-themselves through Tauri's updater. This is the maintainer's checklist.
+Mewtual ships as an unsigned Windows NSIS installer and unsigned Linux `.AppImage` and `.deb`
+bundles, all built by [`.github/workflows/release.yml`](../.github/workflows/release.yml), and
+installed copies update themselves through Tauri's updater. This is the maintainer's checklist.
+
+The workflow is three jobs. **Build Windows installer** runs the version checks, the frontend
+tests and the checks, then creates the draft release; **Build Linux bundles** waits for it and
+adds its artifacts to that same release, addressing it by the id the first job reports; **Verify
+the release is complete** reads the finished release back and fails the run unless all seven
+assets are on it, exactly one release carries the tag, and `latest.json` announces the version
+that was just built with a signed entry for each platform. Expect roughly twice the wall-clock
+time of a Windows-only build.
+
+The build jobs are deliberately not parallel: the release has to exist before anything can be
+added to it. Passing the id from one to the other is what stops them disagreeing about which
+release that is. Given a tag instead, `tauri-action` looks for a *draft* carrying it, and a
+published release with that tag reads to it as no release at all, so it creates a second one and
+the bundles end up split across two releases with a half-complete `latest.json` on each. That is
+what happened to `v0.3.0-alpha.17`; see "Do not publish until the run is green" below.
+
+Not every bundle can update itself. The updater installs an AppImage in place, so `.AppImage`
+users are covered, but there is no Tauri updater format for `.deb`: those installs check, find a
+newer version, and cannot apply it. Point Debian and Ubuntu users at the AppImage if you want them
+to stay current without manual work.
 
 ## The updater's trust root
 
@@ -22,9 +42,12 @@ nobody produce one.
 
 ## Why the updater config is not in `tauri.conf.json`
 
-Mewtual is a public repository, so the update endpoint and public key live in
+Mewtual is a public repository, so the update endpoint, the public key and
+`bundle.createUpdaterArtifacts` live in
 [`tauri.official.conf.json`](../apps/desktop/src-tauri/tauri.official.conf.json), which only the
-release workflow merges in (`--config src-tauri/tauri.official.conf.json`). If they sat in
+release workflow merges in (`--config src-tauri/tauri.official.conf.json`). That third setting is
+the one that makes the bundlers emit a `.sig` and a `latest.json` at all, so a build without this
+config produces neither even when the signing key is present. If they sat in
 `tauri.conf.json` instead, every fork and every `cargo tauri build` from a clone would inherit
 them: those builds would poll *this* repository's release feed and offer to overwrite themselves
 with an official binary. A fork would quietly turn back into upstream on the user's machine.
@@ -78,6 +101,27 @@ new one and must be reinstalled by hand. Rotate only if the key is lost or expos
 
 ## Cutting a release
 
+Steps 1 to 4 below, and the publish command at the end of this page, are scripted:
+
+```sh
+npm --prefix apps/desktop run build-and-release
+```
+
+[`build-and-release.mjs`](../apps/desktop/scripts/build-and-release.mjs) runs `npm test` and
+`npm run check`, bumps all five version files, moves `[Unreleased]` under the new heading,
+regenerates the notices, does a local unsigned build as a fail-fast check, commits and pushes the
+bump, dispatches `release.yml`, watches the run, and prints the exact `gh api -X PATCH` command
+for the draft it leaves. It stops there on purpose: publishing stays a human step, for the reasons
+under "Do not publish until the run is green".
+
+Useful flags: `--version=X.Y.Z-alpha.N` (default: increment the current `alpha.N`),
+`--ref=<branch>` (default: the current branch), `--dry-run` (bump the files, show the diff, stop
+before committing), `--skip-tests`, `--skip-build`, `--skip-notices`, `--no-watch`, `--flows`,
+`--yes`.
+
+The checklist below is what the script does. Read it to know what to check when a step fails, and
+follow it by hand when you want to do a step yourself.
+
 1. Bump the version everywhere it is written down, so the installer, the manifest and the in-app
    version line agree. Three are authored and two are lockfiles that must be dragged along:
 
@@ -86,20 +130,33 @@ new one and must be reinstalled by hand. Rotate only if the key is lost or expos
    | `apps/desktop/src-tauri/tauri.conf.json` | names the installer and the `latest.json` version |
    | `apps/desktop/src-tauri/Cargo.toml` | the crate version |
    | `apps/desktop/package.json` | `__APP_VERSION__`, the version the **UI displays** |
-   | `apps/desktop/package-lock.json` | `npm ci` fails the build if it disagrees |
+   | `apps/desktop/package-lock.json` | its top-level `version`, which the workflow's gate reads |
    | `apps/desktop/src-tauri/Cargo.lock` | `mewtual-desktop`'s own entry |
 
-   Getting this wrong is quiet rather than loud: an installer that says one version while the
-   title bar says another still builds and still ships.
+   Getting this wrong used to be quiet rather than loud: an installer that says one version while
+   the title bar says another still builds and still ships. The workflow now checks all five
+   against `tauri.conf.json` in its first seconds and stops with `::error::Version mismatch`, and
+   checks in the same step that the version is not already published. Note that the gate reads
+   `package-lock.json`'s top-level `version` while `npm ci` compares `packages[""].version`, and
+   the gate runs before `npm ci`, so the gate is what you will see fail.
 2. Move the `[Unreleased]` entries in [`CHANGELOG.md`](../CHANGELOG.md) under the new version.
+
+   Nothing enforces this. `release.yml` has no changelog gate, and it shows: `alpha.17` and
+   `alpha.18` both shipped without the move, so both releases went out while `CHANGELOG.md`'s
+   newest version heading still read `[0.3.0-alpha.16]`; their entries were written retroactively
+   afterwards rather than at release time. The script does the move,
+   and warns rather than inventing entries when `[Unreleased]` is empty.
 3. If any dependency changed since the last release, regenerate the attribution file:
    `npm --prefix apps/desktop run notices` (needs
    `cargo install cargo-about --locked --features cli` once). It is committed rather than built
    in CI, so a stale one ships silently: regenerate whenever `Cargo.lock` or
    `package-lock.json` moved. Most licences in the tree require their text to travel with the
    binary, so this is an obligation, not paperwork. Settings → About & Licences displays it.
-4. Commit and push, then start the build. The workflow is `workflow_dispatch` only: it never runs
-   on a push, so nothing ships until you ask for it.
+4. Commit and push, then start the build. `release.yml` is `workflow_dispatch` only: it never runs
+   on a push, so nothing ships until you ask for it. Pushing the bump commit to `main` does start
+   `CI` (`build & test (ubuntu-latest)` and `(windows-latest)`, `cargo-deny (supply chain)`,
+   `Linux frontend & Tauri`); that is the run you want green before dispatching, for the reason
+   below the snippet.
 
    From the Actions tab: **Release desktop alpha** → **Run workflow** → pick the branch.
 
@@ -108,21 +165,58 @@ new one and must be reinstalled by hand. Rotate only if the key is lost or expos
    ```sh
    gh workflow run release.yml --repo Thalpy/Mewtual --ref <branch>
    gh run list --repo Thalpy/Mewtual --workflow=release.yml --limit 1   # get the run id
-   gh run watch <run-id> --repo Thalpy/Mewtual                          # ~20 minutes
+   gh run watch <run-id> --repo Thalpy/Mewtual                          # ~20 minutes, three jobs
    ```
 
    The branch does not have to be `main`. Whatever you point `--ref` at is what gets built, and
    the tag is created against that commit when the release is published.
-5. The workflow leaves a **draft** release holding the installer, its `.sig`, and `latest.json`.
-   Review it, edit the release body if needed, and publish (see below).
+
+   **`release.yml` runs no Rust gate at all.** Its only checks are the version gate, `npm ci`,
+   `npm test` and `npm run check`: no `cargo fmt`, no `clippy`, no `cargo test`, no `cargo-deny`,
+   no `check-no-ambient.sh`. Those live in `ci.yml`, which runs on pull requests and on pushes to
+   `main`. So a release cut from a side branch that was pushed directly, and never opened as a
+   pull request, has had no Rust gate whatsoever: it will build, sign and ship a commit nothing
+   ever ran the Rust tests against. Get the commit through `CI` before dispatching a release from
+   it.
+5. When the run is **green, all three jobs**, it has left a **draft** release holding the Windows
+   installer, the Linux `.AppImage` and `.deb`, a `.sig` beside each of those three, and one
+   `latest.json` covering both platforms. That is seven assets, and the verify job requires all
+   seven by name: `.deb.sig` included, even though a `.deb` cannot update itself and nothing will
+   ever read that signature. Worth knowing, because a run that reds on it gives no hint that the
+   asset it is missing is one nobody uses. The verify job prints `is complete and safe to publish`
+   when it is happy. Review the draft, edit the release body if needed, and publish (see below).
 
 If the draft has **no `.sig` and no `latest.json`**, the signing secrets or the
 `--config src-tauri/tauri.official.conf.json` argument did not take effect. Do not publish it:
 installs cannot verify an unsigned build, and a release without a manifest is invisible to the
 updater.
 
+`latest.json` is written twice, once per build job, and the second write **merges** rather than
+replaces: `tauri-action` reads the asset already on that release id and combines its `platforms`
+map with the new one. So the finished manifest should list both `windows-x86_64` and
+`linux-x86_64`. If it names only one, the other job either failed, built without the signing key,
+or wrote to a different release, and every install on the missing platform will check for updates
+and find nothing. The verify job fails the run on exactly this, so a green run has both.
+
 The release body is what users read inside the update prompt, so write it for them rather than for
 the repository.
+
+### Do not publish until the run is green
+
+Publishing the draft while **Build Linux bundles** is still running used to split the release in
+two, and it did so silently: the Linux job could not find a draft for the tag any more, so it made
+one, and that second release carried a `latest.json` naming only Linux. Publishing *that* would
+have made it `latest` and cut every Windows install off from updates.
+
+The Linux job now uploads by release id, so this no longer splits anything: publish early and the
+bundles simply land on the published release a few minutes later. Two things still argue for
+waiting for the whole run:
+
+- Between publishing and the Linux job finishing, the live `latest.json` has no `linux-x86_64`
+  entry, so AppImage installs checking in that window are told there is nothing new. It heals
+  itself, but the release is briefly wrong.
+- The verify job is the only thing that checks the release is actually complete. Publishing ahead
+  of it means shipping before anything has confirmed the bundles and signatures are all there.
 
 ### Publishing the draft
 
@@ -175,7 +269,11 @@ failed". It ignores the skip marker, so a version someone skipped is offered aga
 
 Three reasons it can correctly find nothing, in the order worth checking:
 
-1. **The release is a draft or a pre-release.** GitHub's `latest` pointer skips both.
+1. **The release is a draft or a pre-release.** GitHub's `latest` pointer skips both, so a build
+   that exists on the releases page can still be invisible. Worth ruling out first, because the
+   window between the workflow creating the draft and someone publishing it is exactly when a
+   maintainer is most likely to be testing the check. The toast naming your *current* version is
+   what "found nothing" looks like; it is not the app misreading the new release.
 2. **The `latest` redirect is still cached** on the previous version (see above). Wait a few
    minutes, or confirm against the tag-pinned URL.
 3. **The build has no update channel.** Builds from source, and the hand-uploaded `0.2.0-alpha.2`

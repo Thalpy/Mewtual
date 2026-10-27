@@ -1,7 +1,12 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { JAM_PATCH_ID_HEX_CHARS, type JamPatch } from "./jam-contract.ts";
-import { jamPatchId, legacyJamPatch, parseJamPatchJson, validateJamPatch, verifyJamPatchId } from "./jam-patch.ts";
+import {
+  JAM_PATCH_EXT, JAM_PATCH_FILE_MAX_BYTES, JAM_PATCH_ID_HEX_CHARS, JAM_PATCH_MIME, type JamPatch,
+} from "./jam-contract.ts";
+import {
+  decodeJamPatchBase64, isJamPatchFile, jamPatchFileName, jamPatchId, legacyJamPatch,
+  mayFetchJamPatch, parseJamPatchJson, validateJamPatch, verifyJamPatchId,
+} from "./jam-patch.ts";
 
 export const TEST_PATCH: JamPatch = {
   v: 1,
@@ -57,6 +62,46 @@ test("non-plain and prototype-bearing patch records fail closed", () => {
   Object.defineProperty(accessor, "x", { enumerable: true, get: () => { getterReads += 1; return TEST_PATCH.x; } });
   assert.equal(validateJamPatch(accessor).ok, false);
   assert.equal(getterReads, 0, "validation must reject accessors without executing them");
+});
+
+test("a shared patch file is recognized by declared type or by extension", () => {
+  assert.equal(isJamPatchFile("bells.jampatch", ""), true);
+  assert.equal(isJamPatchFile("BELLS.JAMPATCH", ""), true, "the extension test is case-blind");
+  assert.equal(isJamPatchFile("bells", JAM_PATCH_MIME), true, "a declared type is enough");
+  assert.equal(isJamPatchFile("bells.jamtake", "application/x-mewtual-jamtake"), false);
+  assert.equal(isJamPatchFile("holiday.jpg", "image/jpeg"), false);
+  // The name a tile shows: the stem, capped, never empty, and never a path.
+  assert.equal(jamPatchFileName(`glass-bells${JAM_PATCH_EXT}`), "GLASS-BELLS");
+  assert.equal(jamPatchFileName(`patches/deep${JAM_PATCH_EXT}`), "DEEP");
+  assert.equal(jamPatchFileName(`${"x".repeat(40)}${JAM_PATCH_EXT}`).length, 12);
+  assert.equal(jamPatchFileName(JAM_PATCH_EXT), "SHARED");
+});
+
+test("a shared patch is refused by size before and after it is decoded", () => {
+  assert.equal(mayFetchJamPatch(512), true);
+  assert.equal(mayFetchJamPatch(JAM_PATCH_FILE_MAX_BYTES), true);
+  assert.equal(mayFetchJamPatch(JAM_PATCH_FILE_MAX_BYTES + 1), false);
+  assert.equal(mayFetchJamPatch(-1), false);
+  assert.equal(mayFetchJamPatch(Number.NaN), false);
+
+  // The listed size is a claim by whoever wrote the index entry, so the decoded length is checked
+  // independently: neither an over-long transport string nor over-long bytes reach JSON.parse.
+  const canonical = JSON.stringify(TEST_PATCH);
+  const encoded = Buffer.from(canonical, "utf8").toString("base64");
+  const decode = (value: string) => Buffer.from(value, "base64").toString("binary");
+  assert.equal(decodeJamPatchBase64(encoded, decode), canonical);
+  assert.equal(parseJamPatchJson(decodeJamPatchBase64(encoded, decode) ?? "").ok, true);
+  assert.equal(decodeJamPatchBase64(123, decode), null, "a non-string transport value is refused");
+  const oversize = Buffer.from("x".repeat(JAM_PATCH_FILE_MAX_BYTES + 1), "utf8").toString("base64");
+  assert.equal(decodeJamPatchBase64(oversize, decode), null, "refused on the encoded length");
+  // A string that fits the encoded bound but decodes past the byte bound is refused too.
+  let reached = false;
+  assert.equal(
+    decodeJamPatchBase64("AAAA", () => { reached = true; return "y".repeat(JAM_PATCH_FILE_MAX_BYTES + 1); }),
+    null,
+    "refused on the decoded length",
+  );
+  assert.equal(reached, true, "the decoded-length check is the one that refused it");
 });
 
 test("legacy fallback remains a valid single-oscillator recipe", () => {
